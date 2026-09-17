@@ -79,23 +79,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from asl_workbench import details as workbench_detail_rules
+from asl_workbench.details import DetailError, Window
+
 from . import (
-    artifacts,
     control_cli,
     control_queue,
     harnesses,
     intervention,
     plans,
-    qna,
     redirect_admission,
     redirect_cli,
     redirect_recovery,
     redirect_store,
     responses,
     state,
-    tail,
     workbench,
     workbench_catalog,
+    workbench_details,
 )
 from . import (
     events as events_module,
@@ -108,13 +109,17 @@ MAX_REQUEST_BODY = 1024 * 1024  # 1 MiB cap on request body.
 AUTH_SCHEME = "Bearer "
 COMMAND_NAME = "workbench"
 
-DEFAULT_LOG_BYTES = 64 * 1024  # 64 KiB default tail/offset window.
-MAX_LOG_BYTES = 1024 * 1024  # 1 MiB hard cap on a single log read.
-DEFAULT_EVENT_LIMIT = 200
-MAX_EVENT_LIMIT = 2000
-DEFAULT_LAST_MESSAGE_BYTES = 64 * 1024
-DEFAULT_FINAL_REVIEW_BYTES = 256 * 1024
-_LOG_STREAMS = ("stdout", "stderr")
+# The read bounds are the portable package's, not this server's. Re-exported
+# under their historic names so existing callers keep working, but defined once
+# in `asl_workbench.details` so a remote connector serving the same routes
+# cannot answer with a wider window than the local server would.
+DEFAULT_LOG_BYTES = workbench_detail_rules.DEFAULT_LOG_BYTES
+MAX_LOG_BYTES = workbench_detail_rules.MAX_READ_BYTES
+DEFAULT_EVENT_LIMIT = workbench_detail_rules.DEFAULT_EVENT_LIMIT
+MAX_EVENT_LIMIT = workbench_detail_rules.MAX_EVENT_LIMIT
+DEFAULT_LAST_MESSAGE_BYTES = workbench_detail_rules.DEFAULT_LAST_MESSAGE_BYTES
+DEFAULT_FINAL_REVIEW_BYTES = workbench_detail_rules.DEFAULT_FINAL_REVIEW_BYTES
+_LOG_STREAMS = tuple(sorted(workbench_detail_rules.STREAM_ARTIFACTS))
 
 #: Bounded window on a redirect status read, matching the bridge's. The oldest
 #: corrections on a long-lived plan are the settled ones, and an operator asking
@@ -301,6 +306,13 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             self._dispatch(method)
         except _BadRequestError as error:
             self._send_error(400, error.reason, error.message, details=error.details)
+        except DetailError as error:
+            # A refused detail read. The status and reason were decided in
+            # `asl_workbench.details` rather than here, so the local server and
+            # a remote connector refuse the same request the same way.
+            self._send_error(
+                error.status, error.reason, error.message, details=error.details
+            )
         except _RedirectUnavailableError as error:
             # Retryable and unmistakably not a refusal: a journal this server
             # cannot read is a fact about the machine, and answering as though
@@ -672,73 +684,19 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         except workbench.WorkbenchError as error:
             self._send_error(500, "registry-unreadable", str(error))
             return
-        try:
-            canonical = plans.canonicalize_path(plan_dir)
-        except (OSError, ValueError) as error:
-            self._send_error(
-                400,
-                "invalid-plan",
-                f"invalid plan_dir: {error}",
-                details={"plan_dir": plan_dir},
-            )
-            return
-        pin = next((p for p in registry.pins if p.plan_dir == str(canonical)), None)
-        discovered = workbench.DiscoveredPlan(
-            plan_dir=canonical,
-            sources=("registry",) if pin is not None else (),
-            label=pin.label if pin is not None else None,
-            profile=pin.profile if pin is not None else None,
-            exists=canonical.is_dir(),
+        self._send_success(
+            reason="ok",
+            **workbench_details.read_plan(
+                plan_dir, registry=registry, state_dir=config.state_dir
+            ),
         )
-        summary = workbench_catalog.build_summary(
-            discovered, state_dir=config.state_dir
-        )
-        self._send_success(reason="ok", plan=summary.to_payload())
 
     def _handle_recovery(self, *, query: Mapping[str, list[str]]) -> None:
         plan_dir = self._require_query_value(query, "plan_dir")
         config = self._server().config
-        try:
-            canonical = plans.canonicalize_path(plan_dir)
-        except (OSError, ValueError) as error:
-            self._send_error(
-                400,
-                "invalid-plan",
-                f"invalid plan_dir: {error}",
-                details={"plan_dir": plan_dir},
-            )
-            return
-        if not canonical.is_dir():
-            self._send_error(
-                400,
-                "invalid-plan",
-                f"plan directory does not exist: {canonical}",
-                details={"plan_dir": str(canonical)},
-            )
-            return
-        try:
-            snapshot = plans.inspect_plan(canonical)
-        except plans.PlanError as error:
-            self._send_error(
-                500,
-                "malformed-plan",
-                str(error),
-                details={"plan_dir": str(canonical)},
-            )
-            return
-        discovered = workbench.DiscoveredPlan(plan_dir=snapshot.plan_dir, exists=True)
-        recovery = workbench.build_workbench_recovery(
-            discovered, state_dir=config.state_dir
-        )
         self._send_success(
             reason="ok",
-            plan_dir=str(snapshot.plan_dir),
-            recovery=recovery.to_payload(),
-            artifacts=[artifact.to_payload() for artifact in recovery.artifacts],
-            run_id=recovery.run_id,
-            session_id=recovery.session_id,
-            turn_index=recovery.turn_index,
-            commit_index=recovery.commit_index,
+            **workbench_details.read_recovery(plan_dir, state_dir=config.state_dir),
         )
 
     def _handle_registry(self, *, query: Mapping[str, list[str]]) -> None:
@@ -752,453 +710,114 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         self._send_success(reason="ok", registry=registry.to_payload())
 
     def _handle_artifacts(self, *, query: Mapping[str, list[str]]) -> None:
-        plan_dir = self._require_query_value(query, "plan_dir")
-        config = self._server().config
-        try:
-            canonical = plans.canonicalize_path(plan_dir)
-        except (OSError, ValueError) as error:
-            self._send_error(
-                400,
-                "invalid-plan",
-                f"invalid plan_dir: {error}",
-                details={"plan_dir": plan_dir},
-            )
-            return
-        discovered = workbench.DiscoveredPlan(
-            plan_dir=canonical, exists=canonical.is_dir()
-        )
-        summary = workbench_catalog.build_summary(
-            discovered, state_dir=config.state_dir
-        )
-        candidate_paths: dict[str, Path | None] = {
-            "state_path": summary.state_path,
-            "events_path": summary.events_path,
-            "progress_path": summary.progress_path,
-            "final_review_path": summary.final_review_path,
-            "final_review_artifact_path": (
-                canonical / workbench.FINAL_REVIEW_ARTIFACT_FILE_NAME
-            ),
-            "artifact_dir": summary.artifact_dir,
-            "stdout_path": summary.stdout_path,
-            "stderr_path": summary.stderr_path,
-            "last_message_path": summary.last_message_path,
-            "result_path": summary.result_path,
-        }
-        artifacts: _JSONDict = {}
-        for name, path in candidate_paths.items():
-            artifacts[name] = _artifact_descriptor(path)
-        self._send_success(
-            reason="ok",
-            plan_dir=str(canonical),
-            artifacts=artifacts,
-            run_id=summary.run_id,
-            harness=summary.harness,
-        )
+        reader = self._open_plan(query)
+        self._send_success(reason="ok", **workbench_details.read_artifacts(reader))
 
     def _handle_state(self, *, query: Mapping[str, list[str]]) -> None:
-        canonical, plan_state = self._resolve_plan_state(query)
-        state_path = plan_state / events_module.STATE_FILE_NAME
-        try:
-            snapshot = plans.inspect_plan(canonical)
-        except plans.PlanError as error:
-            self._send_error(
-                500,
-                "malformed-plan",
-                str(error),
-                details={"plan_dir": str(canonical)},
-            )
-            return
-        lock_info = state._read_lock_path(
-            plan_state / state.LOCK_FILE_NAME,
-            snapshot.plan_dir,
-        )
-        payload = state._runner_state_payload(
-            state_path,
-            lock_info=lock_info,
-        )
-        try:
-            workspace = workbench._workspace_projection(canonical, runtime=payload)
-        except plans.PlanError, OSError, ValueError:
-            workspace = {}
-        next_pending = snapshot.next_pending
-        self._send_success(
-            reason="ok",
-            plan_dir=str(canonical),
-            state_path=str(state_path),
-            state=payload,
-            sessions=[state._session_payload(session) for session in snapshot.sessions],
-            counts=state._status_counts(snapshot),
-            next_pending_id=next_pending.id if next_pending is not None else None,
-            workspace=workspace,
-            **workbench._workspace_payload(
-                workspace,
-                cwd=payload.get("cwd"),
-            ),
-        )
+        reader = self._open_plan(query)
+        self._send_success(reason="ok", **workbench_details.read_state(reader))
 
     def _handle_events(self, *, query: Mapping[str, list[str]]) -> None:
-        canonical, plan_state = self._resolve_plan_state(query)
-        events_path = plan_state / events_module.EVENTS_FILE_NAME
-        offset = self._require_non_negative_int(query, "offset", default=0)
-        limit = self._require_bounded_int(
-            query,
-            "limit",
-            default=DEFAULT_EVENT_LIMIT,
-            maximum=MAX_EVENT_LIMIT,
-        )
-        filter_run = _optional_query_value(query, "run_id")
-        try:
-            records = tail._read_event_records(events_path)
-        except tail.TailError as error:
-            self._send_error(
-                500,
-                "os-error",
-                str(error),
-                details={"plan_dir": str(canonical)},
-            )
-            return
-        state_path = plan_state / events_module.STATE_FILE_NAME
-        try:
-            state_payload = tail._read_json_file(state_path)
-        except tail.TailError:
-            state_payload = None
-        run_id = (
-            filter_run if filter_run else tail._latest_run_id(state_payload, records)
-        )
-        run_records = tail._event_records_for_run(records, run_id)
-        total = len(run_records)
-        sliced = run_records[offset : offset + limit]
-        next_offset = offset + len(sliced) if offset + len(sliced) < total else None
+        reader = self._open_plan(query)
         self._send_success(
             reason="ok",
-            plan_dir=str(canonical),
-            events_path=str(events_path),
-            run_id=run_id,
-            total=total,
-            offset=offset,
-            limit=limit,
-            next_offset=next_offset,
-            events=sliced,
+            **workbench_details.read_events(
+                reader,
+                offset=self._require_non_negative_int(query, "offset", default=0),
+                limit=self._require_bounded_int(
+                    query,
+                    "limit",
+                    default=DEFAULT_EVENT_LIMIT,
+                    maximum=MAX_EVENT_LIMIT,
+                ),
+                run_id=_optional_query_value(query, "run_id"),
+            ),
         )
 
     def _handle_logs(self, *, query: Mapping[str, list[str]]) -> None:
-        canonical, plan_state = self._resolve_plan_state(query)
-        stream = _optional_query_value(query, "stream")
-        explicit_path = _optional_query_value(query, "path")
-        if explicit_path is not None and stream is not None:
-            raise _BadRequestError(
-                "invalid-request",
-                "specify either 'stream' or 'path', not both",
-            )
-        if explicit_path is None and stream is None:
-            raise _BadRequestError(
-                "invalid-request",
-                "missing required query parameter 'stream' or 'path'",
-            )
-        if stream is not None and stream not in _LOG_STREAMS:
-            raise _BadRequestError(
-                "invalid-request",
-                f"stream must be one of {list(_LOG_STREAMS)}",
-                details={"stream": stream},
-            )
-
-        config = self._server().config
-        if explicit_path is None:
-            summary = self._build_summary(canonical, config.state_dir)
-            path = summary.stdout_path if stream == "stdout" else summary.stderr_path
-            if path is None:
-                self._send_error(
-                    404,
-                    "not-found",
-                    f"no active {stream} log for plan",
-                    details={"plan_dir": str(canonical)},
-                )
-                return
-        else:
-            path = self._validate_log_path(explicit_path, plan_state)
-
-        tail_lines = _optional_int_query(query, "tail_lines")
-        offset = _optional_int_query(query, "offset")
-        if tail_lines is not None and offset is not None:
-            raise _BadRequestError(
-                "invalid-request",
-                "specify either 'tail_lines' or 'offset', not both",
-            )
-        if tail_lines is not None and tail_lines < 0:
-            raise _BadRequestError(
-                "invalid-request",
-                "tail_lines must be non-negative",
-            )
-        if offset is not None and offset < 0:
-            raise _BadRequestError(
-                "invalid-request",
-                "offset must be non-negative",
-            )
-        max_bytes = self._require_bounded_int(
-            query,
-            "max_bytes",
-            default=DEFAULT_LOG_BYTES,
-            maximum=MAX_LOG_BYTES,
-        )
-
-        payload = _read_log_window(
-            path,
-            offset=offset,
-            tail_lines=tail_lines,
-            max_bytes=max_bytes,
-        )
-        if payload is None:
-            self._send_error(
-                404,
-                "not-found",
-                f"log file does not exist: {path}",
-                details={"path": str(path)},
-            )
-            return
+        reader = self._open_plan(query)
+        # `artifact` is the named form; `stream` is its two-value alias and
+        # `path` the compatibility form. Which of the three is acceptable, and
+        # what each resolves to, is decided by the scope rather than here --
+        # every one of them lands inside the selected plan or is refused.
         self._send_success(
             reason="ok",
-            plan_dir=str(canonical),
-            **payload,
+            **workbench_details.read_logs(
+                reader,
+                stream=_optional_query_value(query, "stream"),
+                artifact=_optional_query_value(query, "artifact"),
+                path=_optional_query_value(query, "path"),
+                window=Window(
+                    offset=_optional_int_query(query, "offset"),
+                    tail_lines=_optional_int_query(query, "tail_lines"),
+                    max_bytes=self._require_bounded_int(
+                        query,
+                        "max_bytes",
+                        default=DEFAULT_LOG_BYTES,
+                        maximum=MAX_LOG_BYTES,
+                    ),
+                ),
+            ),
         )
 
     def _handle_last_message(self, *, query: Mapping[str, list[str]]) -> None:
-        canonical, _plan_state = self._resolve_plan_state(query)
-        config = self._server().config
-        summary = self._build_summary(canonical, config.state_dir)
-        path = summary.last_message_path
-        if path is None:
-            self._send_error(
-                404,
-                "not-found",
-                "no active last-message file for plan",
-                details={"plan_dir": str(canonical)},
-            )
-            return
-        max_bytes = self._require_bounded_int(
-            query,
-            "max_bytes",
-            default=DEFAULT_LAST_MESSAGE_BYTES,
-            maximum=MAX_LOG_BYTES,
-        )
-        payload = _read_bounded_text(path, max_bytes=max_bytes)
-        if payload is None:
-            self._send_error(
-                404,
-                "not-found",
-                f"last-message file does not exist: {path}",
-                details={"path": str(path)},
-            )
-            return
+        reader = self._open_plan(query)
         self._send_success(
             reason="ok",
-            plan_dir=str(canonical),
-            **payload,
+            **workbench_details.read_last_message(
+                reader,
+                max_bytes=self._require_bounded_int(
+                    query,
+                    "max_bytes",
+                    default=DEFAULT_LAST_MESSAGE_BYTES,
+                    maximum=MAX_LOG_BYTES,
+                ),
+            ),
         )
 
     def _handle_result(self, *, query: Mapping[str, list[str]]) -> None:
-        canonical, _plan_state = self._resolve_plan_state(query)
-        config = self._server().config
-        summary = self._build_summary(canonical, config.state_dir)
-        path = summary.result_path
-        if path is None:
-            self._send_error(
-                404,
-                "not-found",
-                "no active result.json for plan",
-                details={"plan_dir": str(canonical)},
-            )
-            return
-        try:
-            text = path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            self._send_error(
-                404,
-                "not-found",
-                f"result file does not exist: {path}",
-                details={"path": str(path)},
-            )
-            return
-        except OSError as error:
-            self._send_error(
-                500,
-                "os-error",
-                str(error),
-                details={"path": str(path)},
-            )
-            return
-        try:
-            parsed = json.loads(text) if text else {}
-        except json.JSONDecodeError as error:
-            self._send_error(
-                500,
-                "os-error",
-                f"result file is not valid JSON: {error}",
-                details={"path": str(path)},
-            )
-            return
-        self._send_success(
-            reason="ok",
-            plan_dir=str(canonical),
-            path=str(path),
-            result=parsed,
-        )
+        reader = self._open_plan(query)
+        self._send_success(reason="ok", **workbench_details.read_result(reader))
 
     def _handle_verification(self, *, query: Mapping[str, list[str]]) -> None:
-        canonical, plan_state = self._resolve_plan_state(query)
-        state_path = plan_state / events_module.STATE_FILE_NAME
-        lock_info = state._read_lock_path(
-            plan_state / state.LOCK_FILE_NAME,
-            canonical,
-        )
-        runner_state = state._runner_state_payload(
-            state_path,
-            lock_info=lock_info,
-        )
-        self._send_success(
-            reason="ok",
-            plan_dir=str(canonical),
-            state_path=str(state_path),
-            active_verification=runner_state.get("active_verification"),
-            run_id=runner_state.get("run_id"),
-            harness=runner_state.get("harness"),
-        )
+        reader = self._open_plan(query)
+        self._send_success(reason="ok", **workbench_details.read_verification(reader))
 
     def _handle_commits(self, *, query: Mapping[str, list[str]]) -> None:
-        canonical, plan_state = self._resolve_plan_state(query)
-        events_path = plan_state / events_module.EVENTS_FILE_NAME
-        filter_run = _optional_query_value(query, "run_id")
-        try:
-            records = tail._read_event_records(events_path)
-        except tail.TailError as error:
-            self._send_error(
-                500,
-                "os-error",
-                str(error),
-                details={"plan_dir": str(canonical)},
-            )
-            return
-        state_path = plan_state / events_module.STATE_FILE_NAME
-        try:
-            state_payload = tail._read_json_file(state_path)
-        except tail.TailError:
-            state_payload = None
-        run_id = (
-            filter_run if filter_run else tail._latest_run_id(state_payload, records)
-        )
-        run_records = tail._event_records_for_run(records, run_id)
-        commits = _build_commit_rows(run_records)
+        reader = self._open_plan(query)
         self._send_success(
             reason="ok",
-            plan_dir=str(canonical),
-            events_path=str(events_path),
-            run_id=run_id,
-            commits=commits,
+            **workbench_details.read_commits(
+                reader, run_id=_optional_query_value(query, "run_id")
+            ),
         )
 
     def _handle_progress(self, *, query: Mapping[str, list[str]]) -> None:
-        canonical, _plan_state = self._resolve_plan_state(query)
-        path = plans.progress_path(canonical)
-        try:
-            entries = plans.read_progress_entries(canonical)
-        except plans.PlanError as error:
-            self._send_error(
-                500,
-                "malformed-plan",
-                str(error),
-                details={"plan_dir": str(canonical), "path": str(path)},
-            )
-            return
-        self._send_success(
-            reason="ok",
-            plan_dir=str(canonical),
-            path=str(path),
-            exists=path.is_file(),
-            entries=[_progress_entry_payload(entry) for entry in entries],
-        )
+        reader = self._open_plan(query)
+        self._send_success(reason="ok", **workbench_details.read_progress(reader))
 
     def _handle_final_review(self, *, query: Mapping[str, list[str]]) -> None:
-        canonical, _plan_state = self._resolve_plan_state(query)
-        config = self._server().config
-        summary = self._build_summary(canonical, config.state_dir)
-        path = summary.final_review_path
-        if path is None:
-            path = canonical / workbench.FINAL_REVIEW_FILE_NAME
-        max_bytes = self._require_bounded_int(
-            query,
-            "max_bytes",
-            default=DEFAULT_FINAL_REVIEW_BYTES,
-            maximum=MAX_LOG_BYTES,
-        )
-        payload = _read_bounded_text(path, max_bytes=max_bytes)
-        if payload is None:
-            self._send_error(
-                404,
-                "not-found",
-                f"final-review file does not exist: {path}",
-                details={"path": str(path)},
-            )
-            return
-        artifact_path = canonical / workbench.FINAL_REVIEW_ARTIFACT_FILE_NAME
-        structured_review = None
-        structured_error = None
-        try:
-            if artifact_path.is_file() and artifact_path.stat().st_size <= max_bytes:
-                decoded = json.loads(artifact_path.read_text(encoding="utf-8"))
-                if isinstance(decoded, dict):
-                    structured_review = decoded
-                else:
-                    structured_error = "final-review.json did not contain an object"
-        except (OSError, json.JSONDecodeError) as error:
-            structured_error = str(error)
-        try:
-            workspace = workbench._workspace_projection(canonical)
-        except plans.PlanError, OSError, ValueError:
-            workspace = {}
+        reader = self._open_plan(query)
         self._send_success(
             reason="ok",
-            plan_dir=str(canonical),
-            artifact_path=str(artifact_path),
-            structured_review=structured_review,
-            structured_error=structured_error,
-            review_resume=summary.review_resume,
-            workspace=workspace,
-            **workbench._workspace_payload(workspace, cwd=summary.cwd),
-            **payload,
+            **workbench_details.read_final_review(
+                reader,
+                max_bytes=self._require_bounded_int(
+                    query,
+                    "max_bytes",
+                    default=DEFAULT_FINAL_REVIEW_BYTES,
+                    maximum=MAX_LOG_BYTES,
+                ),
+            ),
         )
 
     def _handle_questions(self, *, query: Mapping[str, list[str]]) -> None:
         plan_dir = self._require_query_value(query, "plan_dir")
         config = self._server().config
-        try:
-            context = qna.load_qna_context(plan_dir, state_dir=config.state_dir)
-        except qna.QnAError as error:
-            status = 404 if error.reason == qna.REASON_NO_PAUSED_RUN else 400
-            self._send_error(
-                status,
-                error.reason,
-                error.error,
-                details={"plan_dir": plan_dir, **error.details},
-            )
-            return
-        except plans.PlanError as error:
-            self._send_error(
-                400,
-                "malformed-plan",
-                str(error),
-                details={"plan_dir": plan_dir},
-            )
-            return
-        payload = qna.questions_payload(context)
-        # ``questions_payload`` already wraps the response envelope under the
-        # ``questions`` command name. Re-emit under the workbench command name
-        # so the frontend sees a consistent ``command="workbench"`` envelope
-        # while keeping every field the resolver prompt UI needs.
-        fields = {
-            key: value
-            for key, value in payload.items()
-            if key not in {"ok", "command", "reason", "paused"}
-        }
-        self._send_success(reason="ok", **fields)
+        self._send_success(
+            reason="ok",
+            **workbench_details.read_questions(plan_dir, state_dir=config.state_dir),
+        )
 
     # -- Mutating endpoints -------------------------------------------------
 
@@ -2276,56 +1895,18 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             )
         return value
 
-    def _resolve_plan_state(self, query: Mapping[str, list[str]]) -> tuple[Path, Path]:
-        plan_dir = self._require_query_value(query, "plan_dir")
-        try:
-            canonical = plans.canonicalize_path(plan_dir)
-        except (OSError, ValueError) as error:
-            raise _BadRequestError(
-                "invalid-plan",
-                f"invalid plan_dir: {error}",
-                details={"plan_dir": plan_dir},
-            ) from error
-        config = self._server().config
-        plan_state = state.plan_state_dir(canonical, config.state_dir)
-        return canonical, plan_state
+    def _open_plan(
+        self, query: Mapping[str, list[str]]
+    ) -> workbench_details.PlanReader:
+        """Open the requested plan for one detail read, reclaiming nothing.
 
-    def _build_summary(
-        self, canonical: Path, state_dir: Path | None
-    ) -> workbench.WorkbenchSummary:
-        """Classify one plan for a read endpoint, reclaiming nothing.
-
-        Every caller is a ``GET`` that resolves an artifact path. Reclaiming a
-        stale lock while answering one would make fetching a log file a repair
-        action, which is the class of surprise ``observational-reads`` exists to
-        remove. ``POST /api/unlock`` remains the way a lock is released.
+        The single door every detail route goes through. Classification happens
+        once per request and produces the scope that decides which files that
+        request may reach, so no handler below resolves a path of its own.
         """
-        discovered = workbench.DiscoveredPlan(
-            plan_dir=canonical, exists=canonical.is_dir()
-        )
-        return workbench_catalog.build_summary(discovered, state_dir=state_dir)
-
-    def _validate_log_path(self, candidate: str, plan_state: Path) -> Path:
-        try:
-            resolved = plans.canonicalize_path(candidate)
-        except (OSError, ValueError) as error:
-            raise _BadRequestError(
-                "invalid-request",
-                f"invalid path: {error}",
-                details={"path": candidate},
-            ) from error
-        try:
-            resolved.relative_to(plan_state)
-        except ValueError as error:
-            raise _BadRequestError(
-                "invalid-request",
-                "path must be inside the plan state directory",
-                details={
-                    "path": str(resolved),
-                    "plan_state_dir": str(plan_state),
-                },
-            ) from error
-        return resolved
+        plan_dir = self._require_query_value(query, "plan_dir")
+        config = self._server().config
+        return workbench_details.open_plan(plan_dir, state_dir=config.state_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -2691,297 +2272,6 @@ def _optional_int_query(query: Mapping[str, list[str]], key: str) -> int | None:
         ) from error
 
 
-def _is_gzip_artifact(path: Path) -> bool:
-    """Return True when ``path`` names a gzip artifact written by this project.
-
-    Gzip verification artifacts always use the ``.gz`` suffix
-    (``{check}-stdout.gz`` etc.), so suffix detection is deterministic and lets
-    the bounded-window log APIs serve plain and gzip logs uniformly.
-    """
-    return path.suffix == ".gz"
-
-
-def _read_gzip_log_window(
-    path: Path,
-    *,
-    offset: int | None,
-    tail_lines: int | None,
-    max_bytes: int,
-) -> _JSONDict | None:
-    """Bounded-window read over a gzip artifact.
-
-    Gzip cannot be seeked, so the artifact is decompressed fully and the same
-    offset/tail/max_bytes windowing is applied to the decompressed bytes. The
-    payload shape matches :func:`_read_log_window` so callers are agnostic to
-    the on-disk encoding.
-    """
-    try:
-        data = artifacts.read_gzip(path)
-    except artifacts.ArtifactError as error:
-        if not path.exists():
-            return None
-        return {
-            "path": str(path),
-            "exists": True,
-            "error": str(error),
-            "size": None,
-            "offset": offset or 0,
-            "next_offset": None,
-            "truncated_head": False,
-            "truncated_tail": False,
-            "text": "",
-        }
-    size = len(data)
-    read_offset = offset if offset is not None else max(0, size - max_bytes)
-    if read_offset > size:
-        read_offset = size
-    raw = data[read_offset : read_offset + max_bytes]
-    text = raw.decode("utf-8", errors="replace")
-    truncated_head = read_offset > 0
-    next_offset = read_offset + len(raw)
-    truncated_tail = next_offset < size
-    if tail_lines is not None:
-        lines = text.splitlines()
-        if tail_lines == 0:
-            text = ""
-        elif len(lines) > tail_lines:
-            text = "\n".join(lines[-tail_lines:])
-            truncated_head = True
-    return {
-        "path": str(path),
-        "exists": True,
-        "size": size,
-        "offset": read_offset,
-        "next_offset": next_offset if truncated_tail else None,
-        "truncated_head": truncated_head,
-        "truncated_tail": truncated_tail,
-        "text": text,
-    }
-
-
-def _read_log_window(
-    path: Path,
-    *,
-    offset: int | None,
-    tail_lines: int | None,
-    max_bytes: int,
-) -> _JSONDict | None:
-    """Read a bounded slice of a log file (plain text or gzip artifact).
-
-    - ``offset`` mode: byte offset into the file; reads up to ``max_bytes``.
-    - ``tail_lines`` mode: read the trailing ``max_bytes`` and keep the last
-      ``tail_lines`` lines (the most-recent slice operators care about).
-    - When neither is set: read from the end like ``tail -c max_bytes``.
-
-    Gzip artifacts are decompressed transparently and windowed over their
-    decompressed contents.
-    """
-    if _is_gzip_artifact(path):
-        return _read_gzip_log_window(
-            path, offset=offset, tail_lines=tail_lines, max_bytes=max_bytes
-        )
-    try:
-        size = path.stat().st_size
-    except FileNotFoundError:
-        return None
-    except OSError as error:
-        return {
-            "path": str(path),
-            "exists": False,
-            "error": str(error),
-            "size": None,
-            "offset": offset or 0,
-            "next_offset": None,
-            "truncated_head": False,
-            "truncated_tail": False,
-            "text": "",
-        }
-    read_offset = offset if offset is not None else max(0, size - max_bytes)
-    if read_offset > size:
-        read_offset = size
-    try:
-        with path.open("rb") as handle:
-            handle.seek(read_offset)
-            raw = handle.read(max_bytes)
-    except FileNotFoundError:
-        # File vanished between ``stat()`` and ``open()`` — treat as a
-        # graceful 404 rather than surfacing the race as a half-filled
-        # payload.
-        return None
-    except OSError as error:
-        return {
-            "path": str(path),
-            "exists": True,
-            "error": str(error),
-            "size": size,
-            "offset": read_offset,
-            "next_offset": None,
-            "truncated_head": False,
-            "truncated_tail": False,
-            "text": "",
-        }
-    text = raw.decode("utf-8", errors="replace")
-    truncated_head = read_offset > 0
-    next_offset = read_offset + len(raw)
-    truncated_tail = next_offset < size
-    if tail_lines is not None:
-        lines = text.splitlines()
-        if tail_lines == 0:
-            text = ""
-        elif len(lines) > tail_lines:
-            text = "\n".join(lines[-tail_lines:])
-            truncated_head = True
-    return {
-        "path": str(path),
-        "exists": True,
-        "size": size,
-        "offset": read_offset,
-        "next_offset": next_offset if truncated_tail else None,
-        "truncated_head": truncated_head,
-        "truncated_tail": truncated_tail,
-        "text": text,
-    }
-
-
-def _read_bounded_text(path: Path, *, max_bytes: int) -> _JSONDict | None:
-    """Read up to ``max_bytes`` from the start of ``path`` as text.
-
-    Gzip artifacts are decompressed transparently before the byte bound is
-    applied so plain and gzip logs read through the same API.
-    """
-    if _is_gzip_artifact(path):
-        try:
-            data = artifacts.read_gzip(path)
-        except artifacts.ArtifactError as error:
-            if not path.exists():
-                return None
-            return {
-                "path": str(path),
-                "exists": True,
-                "size": None,
-                "error": str(error),
-                "truncated": False,
-                "text": "",
-            }
-        raw = data[:max_bytes]
-        return {
-            "path": str(path),
-            "exists": True,
-            "size": len(data),
-            "truncated": len(raw) < len(data),
-            "text": raw.decode("utf-8", errors="replace"),
-        }
-    try:
-        size = path.stat().st_size
-    except FileNotFoundError:
-        return None
-    except OSError as error:
-        return {
-            "path": str(path),
-            "exists": False,
-            "size": None,
-            "error": str(error),
-            "truncated": False,
-            "text": "",
-        }
-    try:
-        with path.open("rb") as handle:
-            raw = handle.read(max_bytes)
-    except FileNotFoundError:
-        # File vanished between ``stat()`` and ``open()`` — surface as a
-        # clean 404 so the operator UI does not see a fake successful
-        # zero-byte response.
-        return None
-    except OSError as error:
-        return {
-            "path": str(path),
-            "exists": True,
-            "size": size,
-            "error": str(error),
-            "truncated": False,
-            "text": "",
-        }
-    text = raw.decode("utf-8", errors="replace")
-    return {
-        "path": str(path),
-        "exists": True,
-        "size": size,
-        "truncated": len(raw) < size,
-        "text": text,
-    }
-
-
-def _progress_entry_payload(entry: plans.ProgressEntry) -> _JSONDict:
-    return {
-        "session_id": entry.session_id.value,
-        "status": entry.status,
-        "completed_at": entry.completed_at,
-        "files_modified": list(entry.files_modified),
-        "key_decisions": entry.key_decisions,
-        "discovered_facts": list(entry.discovered_facts),
-        "open_questions": list(entry.open_questions),
-        "blockers": entry.blockers,
-    }
-
-
-def _build_commit_rows(records: Sequence[Mapping[str, Any]]) -> list[_JSONDict]:
-    """Pair commit_started/commit_finished events into commit rows."""
-    started: dict[int, _JSONDict] = {}
-    rows: list[_JSONDict] = []
-    for record in records:
-        name = record.get("name")
-        payload = record.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        index = payload.get("commit_index")
-        if not isinstance(index, int):
-            continue
-        if name == events_module.COMMIT_STARTED_EVENT:
-            started[index] = {
-                "commit_index": index,
-                "scope": payload.get("scope"),
-                "session_id": payload.get("session_id") or payload.get("session"),
-                "run_id": payload.get("run_id"),
-                "started_at": record.get("created_at"),
-                "started_payload": payload,
-                "finished_at": None,
-                "status_result": None,
-                "commit_sha": None,
-                "duration_seconds": None,
-                "finished_payload": None,
-                "stdout_path": payload.get("stdout_path"),
-                "stderr_path": payload.get("stderr_path"),
-                "result_path": payload.get("result_path"),
-            }
-        elif name == events_module.COMMIT_FINISHED_EVENT:
-            row = started.pop(index, None)
-            if row is None:
-                row = {
-                    "commit_index": index,
-                    "scope": payload.get("scope"),
-                    "session_id": payload.get("session_id") or payload.get("session"),
-                    "run_id": payload.get("run_id"),
-                    "started_at": None,
-                    "started_payload": None,
-                    "stdout_path": payload.get("stdout_path"),
-                    "stderr_path": payload.get("stderr_path"),
-                    "result_path": payload.get("result_path"),
-                }
-            row["finished_at"] = record.get("created_at")
-            row["status_result"] = payload.get("status_result")
-            row["commit_sha"] = payload.get("commit_sha")
-            row["duration_seconds"] = payload.get("duration_seconds")
-            row["finished_payload"] = payload
-            row["stdout_path"] = payload.get("stdout_path") or row.get("stdout_path")
-            row["stderr_path"] = payload.get("stderr_path") or row.get("stderr_path")
-            row["result_path"] = payload.get("result_path") or row.get("result_path")
-            rows.append(row)
-    # Any started-without-finished commits still in flight surface as rows.
-    rows.extend(started.values())
-    rows.sort(key=lambda row: row.get("commit_index", 0))
-    return rows
-
-
 def _compute_etag(stat_result: os.stat_result) -> str:
     """Build a strong validator from inode-style fields.
 
@@ -3005,36 +2295,6 @@ def _parse_etag_list(header_value: str) -> tuple[str, ...]:
             token = token[2:].strip()
         tokens.append(token)
     return tuple(tokens)
-
-
-def _artifact_descriptor(path: Path | None) -> _JSONDict:
-    if path is None:
-        return {"path": None, "exists": False, "kind": None, "size": None}
-    try:
-        stat = path.stat()
-    except FileNotFoundError, NotADirectoryError:
-        return {"path": str(path), "exists": False, "kind": None, "size": None}
-    except OSError as error:
-        return {
-            "path": str(path),
-            "exists": False,
-            "kind": None,
-            "size": None,
-            "error": str(error),
-        }
-    if path.is_dir():
-        return {
-            "path": str(path),
-            "exists": True,
-            "kind": "directory",
-            "size": None,
-        }
-    return {
-        "path": str(path),
-        "exists": True,
-        "kind": "file",
-        "size": stat.st_size,
-    }
 
 
 # ---------------------------------------------------------------------------

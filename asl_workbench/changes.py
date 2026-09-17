@@ -51,17 +51,20 @@ INTENTIONAL_CHANGES: tuple[IntentionalChange, ...] = (
         key=KEY_OBSERVATIONAL_READS,
         summary="Reads observe; they do not mutate the run's records.",
         current_behavior=(
-            "Half done. The catalog scan behind GET /api/queue, GET /api/plan, "
-            "GET /api/artifacts, GET /api/logs, GET /api/last-message, "
-            "GET /api/result, and GET /api/final-review now builds every "
-            "summary with reclaim=False and runs no retention, so polling the "
-            "queue no longer reclaims a plan lock or empties an archive entry. "
-            "One automatic path remains: GET /api/archive still calls "
-            "workbench.maintain_archive, so listing the archive can "
-            "permanently empty an expired entry. Reclaim stays deliberate on "
-            "the recovery flow and POST /api/unlock, which is where it "
-            "belongs. The summary builders still default to reclaim=True for "
-            "callers that have not been moved."
+            "Every read endpoint is observational. The catalog scan behind "
+            "GET /api/queue and GET /api/plan, and every detail read behind "
+            "GET /api/artifacts, GET /api/state, GET /api/events, "
+            "GET /api/logs, GET /api/last-message, GET /api/result, "
+            "GET /api/verification, GET /api/commits, GET /api/progress, "
+            "GET /api/final-review, GET /api/questions and GET /api/recovery, "
+            "now classify with reclaim=False and run no retention: polling the "
+            "queue or opening a detail panel no longer reclaims a plan lock or "
+            "empties an archive entry. One automatic path remains: "
+            "GET /api/archive still calls workbench.maintain_archive, so "
+            "listing the archive can permanently empty an expired entry. "
+            "Reclaim now happens only where an operator asked for it, at "
+            "POST /api/unlock. The summary builders still default to "
+            "reclaim=True for callers that have not been moved."
         ),
         target_behavior=(
             "A read answers from what is on disk and changes nothing. "
@@ -93,11 +96,27 @@ INTENTIONAL_CHANGES: tuple[IntentionalChange, ...] = (
             "::test_reading_one_plan_leaves_a_reclaimable_lock_alone",
             "scripts:tests/test_workbench_catalog.py"
             "::test_repeated_catalog_reads_leave_the_whole_state_tree_unchanged",
+            # The detail half. These hold the four routes that still reclaimed
+            # after the catalog work -- state, verification, questions and the
+            # recovery card -- to the target.
+            "scripts:tests/test_workbench_details.py"
+            "::test_state_read_leaves_a_reclaimable_lock_alone",
+            "scripts:tests/test_workbench_details.py"
+            "::test_verification_read_leaves_a_reclaimable_lock_alone",
+            "scripts:tests/test_workbench_details.py"
+            "::test_recovery_read_leaves_a_reclaimable_lock_alone",
+            "scripts:tests/test_workbench_details.py"
+            "::test_questions_read_leaves_a_reclaimable_lock_alone",
+            "scripts:tests/test_workbench_details.py"
+            "::test_every_detail_read_leaves_the_whole_state_tree_unchanged",
         ),
         capability_keys=(
             "workbench-http:GET /api/queue",
             "workbench-http:GET /api/plan",
             "workbench-http:GET /api/recovery",
+            "workbench-http:GET /api/state",
+            "workbench-http:GET /api/verification",
+            "workbench-http:GET /api/questions",
             "workbench-http:GET /api/archive",
             "persistence:asl-plan-lock",
         ),

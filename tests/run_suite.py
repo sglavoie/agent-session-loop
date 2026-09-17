@@ -282,6 +282,9 @@ INTEGRATION_MODULES = (
     # Same reason: most of it is pure catalog algebra, but the reads it proves
     # are observational are proven against a live workbench server.
     "tests.test_workbench_catalog",
+    # Same again for the detail reads: containment and "a read changes
+    # nothing" are only worth asserting against the routes that serve them.
+    "tests.test_workbench_details",
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
     "tests.test_asl_overseer_e2e",

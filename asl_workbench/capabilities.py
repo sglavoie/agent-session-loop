@@ -226,6 +226,7 @@ _LAUNCH_TESTS = "scripts:tests/test_asl_workbench_launch.py"
 _STATIC_TESTS = "scripts:tests/test_asl_workbench_static.py"
 _FOUNDATION_TESTS = "scripts:tests/test_workbench_foundations.py"
 _CATALOG_TESTS = "scripts:tests/test_workbench_catalog.py"
+_DETAIL_TESTS = "scripts:tests/test_workbench_details.py"
 _HISTORY_TESTS = "scripts:tests/test_workbench_history.py"
 _BRIDGE_TESTS = "scripts:tests/test_asl_bridge_server.py"
 _DOCS_TESTS = "scripts:tests/test_asl_docs.py"
@@ -254,13 +255,13 @@ CAPABILITIES: tuple[Capability, ...] = (
     _http(
         "GET /api/plan",
         "One plan's triage summary, for detail and deep-link entry.",
-        coverage=(_SERVER_TESTS, _SUMMARY_TESTS, _CATALOG_TESTS),
+        coverage=(_SERVER_TESTS, _SUMMARY_TESTS, _CATALOG_TESTS, _DETAIL_TESTS),
         changes=("observational-reads",),
     ),
     _http(
         "GET /api/recovery",
         "Recovery center: evidence rows, artifact references, action cards.",
-        coverage=(_RECOVERY_TESTS, _SERVER_TESTS),
+        coverage=(_RECOVERY_TESTS, _SERVER_TESTS, _DETAIL_TESTS),
         changes=("observational-reads",),
     ),
     _http(
@@ -270,58 +271,69 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _http(
         "GET /api/artifacts",
-        "Artifact descriptors for a plan's turn outputs.",
-        coverage=(_SERVER_TESTS,),
+        "Artifact descriptors for a plan's turn outputs. The listing is also "
+        "the request vocabulary: a named artifact is what a detail read asks "
+        "for.",
+        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/state",
         "The plan's ASL state payload, including the session table.",
-        coverage=(_SERVER_TESTS, _DOCS_TESTS),
+        coverage=(_SERVER_TESTS, _DOCS_TESTS, _DETAIL_TESTS),
+        changes=("observational-reads",),
     ),
     _http(
         "GET /api/events",
         "Bounded window over the plan's append-only event journal.",
-        coverage=(_SERVER_TESTS,),
+        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/logs",
-        "Bounded stdout/stderr window, transparently reading gzip archives.",
-        coverage=(_SERVER_TESTS,),
+        "Bounded stdout/stderr window, transparently reading gzip archives. "
+        "Reaches only artifacts the selected plan published, or a path that "
+        "plan contains.",
+        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/last-message",
         "Truncated preview of the harness's last message.",
-        coverage=(_SERVER_TESTS,),
+        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/result",
         "The turn result artifact for the plan's latest run.",
-        coverage=(_SERVER_TESTS,),
+        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/verification",
         "Verification artifact and the active check's position.",
-        coverage=(_SERVER_TESTS,),
+        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
+        changes=("observational-reads",),
     ),
     _http(
         "GET /api/commits",
         "Commit rows recorded for the plan's sessions.",
-        coverage=(_SERVER_TESTS,),
+        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/progress",
         "Progress-journal entries parsed from the plan directory.",
-        coverage=(_SERVER_TESTS,),
+        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/final-review",
         "final-review.md and final-review.json for a completed plan.",
-        coverage=(_SERVER_TESTS,),
+        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/questions",
         "Open ASL questions awaiting an operator reply.",
-        coverage=(_SERVER_TESTS, "scripts:tests/test_asl_reply_flows.py"),
+        coverage=(
+            _SERVER_TESTS,
+            "scripts:tests/test_asl_reply_flows.py",
+            _DETAIL_TESTS,
+        ),
+        changes=("observational-reads",),
     ),
     _http(
         "GET /api/redirect-status",
@@ -516,7 +528,21 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
-        regression_coverage=(_DOCS_TESTS, _SUMMARY_TESTS),
+        regression_coverage=(_DOCS_TESTS, _SUMMARY_TESTS, _DETAIL_TESTS),
+        coverage_gap=GAP_WORKBENCH_BROWSER,
+    ),
+    Capability(
+        key=f"{SURFACE_WORKBENCH_BROWSER}:detailed-search",
+        surface=SURFACE_WORKBENCH_BROWSER,
+        summary="Free-text search over a plan's private detail -- its path, "
+        "the operator's pin label, pause prose, last-message preview. An "
+        "online read the Mac answers; none of it enters a published entry.",
+        origin=ORIGIN_WORKBENCH,
+        owner=OWNER_PORTABLE,
+        authority=AUTHORITY_NONE,
+        regression_coverage=(_DETAIL_TESTS,),
+        # The service behind it is tested; the browser that calls it is not,
+        # like every other row on this surface.
         coverage_gap=GAP_WORKBENCH_BROWSER,
     ),
     Capability(
