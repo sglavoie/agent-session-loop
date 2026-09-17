@@ -51,12 +51,17 @@ INTENTIONAL_CHANGES: tuple[IntentionalChange, ...] = (
         key=KEY_OBSERVATIONAL_READS,
         summary="Reads observe; they do not mutate the run's records.",
         current_behavior=(
-            "Polling a read route has side effects. GET /api/queue and "
-            "GET /api/archive call workbench.maintain_archive, so listing "
-            "plans can permanently empty an expired archive entry; and the "
-            "summary builders default to reclaim=True, so building a summary "
-            "can reclaim a plan lock the reader only meant to look at. The "
-            "server never overrides either default."
+            "Half done. The catalog scan behind GET /api/queue, GET /api/plan, "
+            "GET /api/artifacts, GET /api/logs, GET /api/last-message, "
+            "GET /api/result, and GET /api/final-review now builds every "
+            "summary with reclaim=False and runs no retention, so polling the "
+            "queue no longer reclaims a plan lock or empties an archive entry. "
+            "One automatic path remains: GET /api/archive still calls "
+            "workbench.maintain_archive, so listing the archive can "
+            "permanently empty an expired entry. Reclaim stays deliberate on "
+            "the recovery flow and POST /api/unlock, which is where it "
+            "belongs. The summary builders still default to reclaim=True for "
+            "callers that have not been moved."
         ),
         target_behavior=(
             "A read answers from what is on disk and changes nothing. "
@@ -78,6 +83,16 @@ INTENTIONAL_CHANGES: tuple[IntentionalChange, ...] = (
             "::test_archive_list_auto_empties_expired_entries",
             "scripts:tests/test_asl_workbench_archive.py"
             "::test_maintain_purges_expired_and_keeps_recent",
+            # The half already landed. These hold the queue and plan reads to
+            # the target so the remaining archive work cannot undo them.
+            "scripts:tests/test_workbench_catalog.py"
+            "::test_polling_the_queue_no_longer_empties_an_expired_archive_entry",
+            "scripts:tests/test_workbench_catalog.py"
+            "::test_polling_the_queue_leaves_a_reclaimable_lock_alone",
+            "scripts:tests/test_workbench_catalog.py"
+            "::test_reading_one_plan_leaves_a_reclaimable_lock_alone",
+            "scripts:tests/test_workbench_catalog.py"
+            "::test_repeated_catalog_reads_leave_the_whole_state_tree_unchanged",
         ),
         capability_keys=(
             "workbench-http:GET /api/queue",

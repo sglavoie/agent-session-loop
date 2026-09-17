@@ -1207,12 +1207,19 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual(400, status)
         self.assertEqual("invalid-request", body["reason"])
 
-    def test_queue_exposes_archivable_and_maintenance_fields(self) -> None:
+    def test_queue_exposes_archivable_and_catalog_fields(self) -> None:
         server = self._start_server(plan_roots=(str(self.tmp_path / "plans"),))
         status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
         self.assertEqual(200, status)
         self.assertIn("archive_retention_days", body)
-        self.assertIn("archive_maintenance", body)
+        # `archive_maintenance` is gone on purpose: the queue answers from one
+        # non-reclaiming catalog scan and runs no retention, so it has no
+        # maintenance result to report. See `changes.KEY_OBSERVATIONAL_READS`.
+        self.assertNotIn("archive_maintenance", body)
+        self.assertIn("catalog_generation", body)
+        self.assertTrue(body["catalog_complete"])
+        self.assertEqual(len(body["plans"]), body["catalog_total"])
+        self.assertEqual([], body["catalog_warnings"])
         plan_payload = body["plans"][0]
         self.assertIn("archivable", plan_payload)
         self.assertIn("archive_blocker", plan_payload)

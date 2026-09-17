@@ -225,6 +225,7 @@ _REDIRECT_TESTS = "scripts:tests/test_asl_workbench_redirect.py"
 _LAUNCH_TESTS = "scripts:tests/test_asl_workbench_launch.py"
 _STATIC_TESTS = "scripts:tests/test_asl_workbench_static.py"
 _FOUNDATION_TESTS = "scripts:tests/test_workbench_foundations.py"
+_CATALOG_TESTS = "scripts:tests/test_workbench_catalog.py"
 _BRIDGE_TESTS = "scripts:tests/test_asl_bridge_server.py"
 _DOCS_TESTS = "scripts:tests/test_asl_docs.py"
 _CLI_TESTS = "scripts:tests/test_asl_cli.py"
@@ -244,15 +245,15 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _http(
         "GET /api/queue",
-        "Triage queue: discovery, per-plan summaries, urgency, warnings, "
-        "state root. Also runs archive retention today.",
-        coverage=(_SERVER_TESTS, _SUMMARY_TESTS, _FOUNDATION_TESTS),
+        "Triage queue: one non-reclaiming catalog scan, per-plan summaries, "
+        "urgency, warnings, state root, catalog generation. Runs no retention.",
+        coverage=(_SERVER_TESTS, _SUMMARY_TESTS, _FOUNDATION_TESTS, _CATALOG_TESTS),
         changes=("observational-reads",),
     ),
     _http(
         "GET /api/plan",
         "One plan's triage summary, for detail and deep-link entry.",
-        coverage=(_SERVER_TESTS, _SUMMARY_TESTS),
+        coverage=(_SERVER_TESTS, _SUMMARY_TESTS, _CATALOG_TESTS),
         changes=("observational-reads",),
     ),
     _http(
@@ -1169,12 +1170,17 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         key=f"{SURFACE_PERSISTENCE}:asl-plan-lock",
         surface=SURFACE_PERSISTENCE,
-        summary="Per-plan lock files; reading one currently reclaims it when "
-        "the host proves it dead.",
+        summary="Per-plan lock files; catalog and queue reads leave them "
+        "alone, and reclaim stays on recovery and unlock.",
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_MAC,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_SUMMARY_TESTS, _RECOVERY_TESTS, _FOUNDATION_TESTS),
+        regression_coverage=(
+            _SUMMARY_TESTS,
+            _RECOVERY_TESTS,
+            _FOUNDATION_TESTS,
+            _CATALOG_TESTS,
+        ),
         intentional_changes=("observational-reads",),
     ),
     Capability(

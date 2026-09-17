@@ -38,6 +38,21 @@ from .capabilities import (
     surface_keys,
     validate_matrix,
 )
+from .catalog import (
+    CACHE_SAFE_FIELDS,
+    PRIVATE_FIELDS,
+    CatalogEntry,
+    CatalogError,
+    CatalogPage,
+    CatalogRecord,
+    PlanCatalog,
+    PlanDetail,
+    build_catalog,
+    plan_key,
+    record_from_summary,
+    run_key,
+    unclassified_summary_fields,
+)
 from .changes import INTENTIONAL_CHANGES, IntentionalChange, intentional_change
 from .companion_inventory import (
     COMPANION_MODULES,
@@ -53,22 +68,35 @@ from .compatibility import (
 )
 
 __all__ = [
+    "CACHE_SAFE_FIELDS",
     "CAPABILITIES",
     "COMPANION_MODULES",
     "COMPANION_ROUTES",
     "INTENTIONAL_CHANGES",
     "MINIMUM_PYTHON_VERSION",
+    "PRIVATE_FIELDS",
     "BoundaryReport",
     "Capability",
+    "CatalogEntry",
+    "CatalogError",
+    "CatalogPage",
+    "CatalogRecord",
     "IntentionalChange",
     "MatrixError",
+    "PlanCatalog",
+    "PlanDetail",
     "RuntimeSupport",
+    "build_catalog",
     "capability",
     "check_boundary",
     "check_runtime",
     "intentional_change",
     "locate_companion_package",
+    "plan_key",
+    "record_from_summary",
     "render_matrix",
+    "run_key",
     "surface_keys",
+    "unclassified_summary_fields",
     "validate_matrix",
 ]

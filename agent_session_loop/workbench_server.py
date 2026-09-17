@@ -95,6 +95,7 @@ from . import (
     state,
     tail,
     workbench,
+    workbench_catalog,
 )
 from . import (
     events as events_module,
@@ -631,21 +632,19 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         except workbench.WorkbenchError as error:
             self._send_error(500, "registry-unreadable", str(error))
             return
-        # Auto-empty expired archive entries on poll so retention takes effect
-        # without a dedicated maintenance daemon; surface the counts/warnings.
-        maintenance = workbench.maintain_archive(
+        # One non-reclaiming catalog scan answers the queue. Polling the queue
+        # no longer empties expired archive entries or reclaims plan locks: a
+        # read that repairs makes the answer a function of who looked and when.
+        # Retention now runs only where an operator asked for it, on the
+        # archive route; `observational-reads` in `asl_workbench.changes`
+        # records the decision.
+        scan = workbench_catalog.scan(
             state_dir=config.state_dir,
-            registry_path=config.registry_path,
-        )
-        discovery = workbench.discover_plans(
-            state_root=config.state_dir,
             registry=registry,
             plan_roots=config.plan_roots,
             include_default_dirs=config.include_default_dirs,
         )
-        summaries = workbench.build_workbench_summaries(
-            discovery.plans, state_dir=config.state_dir
-        )
+        summaries: Sequence[workbench.WorkbenchSummary] = scan.summaries
         if sort_mode == "oldest":
             summaries = _sort_summaries_oldest_first(summaries)
         plan_payloads = [
@@ -655,11 +654,14 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             reason="ok",
             plans=plan_payloads,
             registry_warnings=list(registry.warnings),
-            discovery_warnings=list(discovery.warnings),
+            discovery_warnings=list(scan.discovery.warnings),
+            catalog_warnings=list(scan.projection_warnings),
+            catalog_generation=scan.catalog.generation,
+            catalog_complete=scan.catalog.complete,
+            catalog_total=scan.catalog.total,
             state_root=str(state_root),
             state_root_exists=state_root.is_dir(),
             archive_retention_days=registry.archive_retention_days,
-            archive_maintenance=maintenance.to_payload(),
         )
 
     def _handle_plan(self, *, query: Mapping[str, list[str]]) -> None:
@@ -688,7 +690,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             profile=pin.profile if pin is not None else None,
             exists=canonical.is_dir(),
         )
-        summary = workbench.build_workbench_summary(
+        summary = workbench_catalog.build_summary(
             discovered, state_dir=config.state_dir
         )
         self._send_success(reason="ok", plan=summary.to_payload())
@@ -765,7 +767,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         discovered = workbench.DiscoveredPlan(
             plan_dir=canonical, exists=canonical.is_dir()
         )
-        summary = workbench.build_workbench_summary(
+        summary = workbench_catalog.build_summary(
             discovered, state_dir=config.state_dir
         )
         candidate_paths: dict[str, Path | None] = {
@@ -2291,10 +2293,17 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
     def _build_summary(
         self, canonical: Path, state_dir: Path | None
     ) -> workbench.WorkbenchSummary:
+        """Classify one plan for a read endpoint, reclaiming nothing.
+
+        Every caller is a ``GET`` that resolves an artifact path. Reclaiming a
+        stale lock while answering one would make fetching a log file a repair
+        action, which is the class of surprise ``observational-reads`` exists to
+        remove. ``POST /api/unlock`` remains the way a lock is released.
+        """
         discovered = workbench.DiscoveredPlan(
             plan_dir=canonical, exists=canonical.is_dir()
         )
-        return workbench.build_workbench_summary(discovered, state_dir=state_dir)
+        return workbench_catalog.build_summary(discovered, state_dir=state_dir)
 
     def _validate_log_path(self, candidate: str, plan_state: Path) -> Path:
         try:

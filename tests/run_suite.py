@@ -277,6 +277,9 @@ INTEGRATION_MODULES = (
     # Integration rather than portable: it binds a loopback server and spawns
     # a fresh interpreter to prove the portable package loads without ASL.
     "tests.test_workbench_foundations",
+    # Same reason: most of it is pure catalog algebra, but the reads it proves
+    # are observational are proven against a live workbench server.
+    "tests.test_workbench_catalog",
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
     "tests.test_asl_overseer_e2e",

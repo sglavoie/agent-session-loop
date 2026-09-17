@@ -8057,7 +8057,12 @@ lock, and any live pid all survive. `asl gc` is the one command exempt from all
 of this: it has promised to write nothing in dry-run and to touch only run
 directories under `--apply`, so it inspects locks without reclaiming them in
 either mode. `asl unlock` remains the only route out for
-a cross-host lock; the rest are taken over by the next `asl run`. Every
+a cross-host lock; the rest are taken over by the next `asl run`. The Workbench
+read endpoints are exempt too, and for the same reason `asl gc` is: they build
+every summary with `reclaim=False`, so refreshing the queue or opening a plan
+observes a stale lock and reports it without removing it. Reclaim on the
+Workbench stays where an operator asked for it — the Recovery Center flow and
+`POST /api/unlock`. Every
 mutation of `lock.json` — a read-side reclaim, a stale takeover, publishing a
 new lock, `asl unlock`, and the release at the end of a run — runs under an
 exclusive `flock` on a `lock.mutex` sidecar in the plan's state directory. The
@@ -8375,6 +8380,60 @@ Archived entries live under `<state-root>/archive/<archive_id>/`.
 Archive storage is outside normal plan-root discovery, so archived plans
 do not reappear in the queue until they are restored.
 
+### Plan catalog
+
+The catalog is the one enumeration of plans the unified Workbench reads,
+shared by the local UI and the Pi. It is split across the two halves of the
+program, because the two halves of the job are different:
+
+- `asl_workbench/catalog.py` holds the definition — the field partition,
+  identity, labels, project grouping, ordering, and pagination. It imports
+  nothing from `agent_session_loop`, so it loads on the Pi, and it takes a
+  `WorkbenchSummary.to_payload()` mapping rather than a plan directory.
+- `agent_session_loop/workbench_catalog.py` holds the filesystem half —
+  discovery, classification, and plan titles — and returns one `CatalogScan`
+  carrying both the portable catalog and the `WorkbenchSummary` objects the
+  local UI still renders, from a single pass over the discovered plans.
+
+Four properties are worth stating, because each is enforced rather than
+intended:
+
+**Every summary field is either cache-safe or private.** `CACHE_SAFE_FIELDS`
+holds the 16 fields a remote provider may retain; `PRIVATE_FIELDS` holds the
+27 it may not. The partition is total over the summary payload in both
+directions, and a field the partition does not name raises rather than being
+guessed into the cheaper half. Everything path-bearing is private, as is
+`searchable_text`, which carries the plan's prose: the pause message and the
+last-message preview are in it. A `CatalogEntry` therefore builds its own
+`search_text` from cache-safe fields only, and the private half is reachable
+only through `PlanDetail`, which refuses a cache-safe or unknown field name.
+
+**Identity is a digest, not a path.** `plan_key` is
+`sha256` over the canonical plan directory, truncated to 16 hex characters,
+and `run_key` hashes the `plan_key`/`run_id` pair rather than the directory —
+byte-identical to the Companion's `identity.py`, which is what lets the
+migration keep the rows the Pi already stores. `display_label` prefers the
+manifest's first heading, then a registry pin label, then the workspace root,
+then the plan directory's last component, and agrees with the Companion
+exactly when no title is available.
+
+**The catalog is uncapped.** The bridge projection caps interventions at 200
+rows of active work on purpose; a catalog that inherited that cap would report
+a large corpus as a small one. Enumeration is complete and paged instead:
+`PlanCatalog.page(offset=, limit=)` and `PlanCatalog.pages()` walk the whole
+catalog, and a corpus of several hundred plans retains its ready, completed,
+and paused work rather than losing the tail.
+
+**An incomplete generation says so.** `generation` is a digest over the
+ordered entry payloads and carries no wall-clock, so two scans of unchanged
+plans agree. When a plan cannot be classified, the scan records a warning and
+clears `complete` on the catalog and on every page cut from it, so an
+incomplete read is never mistaken for authoritative absence.
+
+Catalog reads are observational: summaries are built with `reclaim=False` and
+no retention runs, so repeated reads leave `state.json`, `events.jsonl`, and
+`lock.json` byte-identical. See `asl_workbench/changes.py` for what remains.
+
 ### Cleanup and archive workflow
 
 Cleanup mode is a queue review mode for old, inactive work. It switches
@@ -8431,8 +8490,11 @@ Permanent purge only applies to archive entries, not live plans. `POST
 typed `confirm_count` equal to the selected count; a mismatch returns
 `reason: "confirmation-mismatch"` and leaves every entry in place. Archive
 maintenance auto-empties entries whose age is at least
-`archive_retention_days`; it runs during queue and archive polls, so no
-separate daemon is required.
+`archive_retention_days`; it runs during archive polls, so no separate daemon
+is required. It no longer runs during a queue poll: `GET /api/queue` answers
+from one non-reclaiming catalog scan and performs no retention, so the act of
+watching the triage queue neither empties an archive entry nor reclaims a plan
+lock.
 
 ### HTTP API surface
 
@@ -8456,8 +8518,12 @@ Read endpoints (loopback-open, no token required):
   plans sort on `completed_at` and every other plan on
   `last_activity_at`, and a missing timestamp is treated as oldest.
   Queue responses also include
-  `archive_retention_days`, `archive_maintenance`, and per-plan
-  `archivable` / `archive_blocker` fields used by Cleanup mode.
+  `archive_retention_days` and per-plan `archivable` / `archive_blocker`
+  fields used by Cleanup mode. The scan behind the response is the shared
+  catalog (see [Plan catalog](#plan-catalog)), so the payload also carries
+  `catalog_generation`, `catalog_complete`, `catalog_total`, and
+  `catalog_warnings` — the last naming any plan the scan could not classify,
+  as opposed to `discovery_warnings`, which name a source it could not read.
 - `GET /api/plan?plan_dir=<path>` — single-plan detail. The payload
   carries the same additive triage fields as `/api/queue` (`urgency_rank`,
   `urgency_group`, `activity_label`, `concise_reason`, `last_activity_at`,
