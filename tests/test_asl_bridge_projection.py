@@ -663,6 +663,54 @@ class FrameBoundTests(unittest.TestCase):
 
         self.assertEqual(rows, ordered)
 
+    def test_backlog_cannot_crowd_live_work_out_of_capped_snapshot(self) -> None:
+        backlog = [
+            {
+                "primary_state": "invalid",
+                "urgency_rank": 40,
+                "plan_dir": f"/plans/{index:04d}",
+                "last_activity_at": None,
+            }
+            for index in range(bridge.MAX_ROWS + 5)
+        ]
+        live = [
+            {
+                "primary_state": status,
+                "urgency_rank": 60,
+                "plan_dir": f"/plans/{status}",
+                "last_activity_at": "2026-09-17T17:00:00+00:00",
+            }
+            for status in ("running", "verifying")
+        ]
+        recent = {
+            "primary_state": "paused-for-reply",
+            "urgency_rank": 10,
+            "plan_dir": "/plans/recent",
+            "last_activity_at": "2026-09-17T16:00:00+00:00",
+        }
+        discovered = workbench.DiscoveryResult(plans=tuple(range(len(backlog) + 3)))
+        summaries = [
+            mock.Mock(primary_state=row["primary_state"])
+            for row in [*backlog, *live, recent]
+        ]
+        with (
+            mock.patch.object(workbench, "discover_plans", return_value=discovered),
+            mock.patch.object(
+                workbench, "build_workbench_summary", side_effect=summaries
+            ),
+            mock.patch.object(
+                bridge, "project_row", side_effect=[*backlog, *live, recent]
+            ),
+        ):
+            snapshot = bridge.build_runs_snapshot()
+        self.assertTrue(snapshot["truncated"])
+        self.assertEqual(bridge.MAX_ROWS, snapshot["row_count"])
+        for row in [*live, recent]:
+            self.assertIn(row, snapshot["rows"])
+        self.assertEqual(
+            sorted(snapshot["rows"], key=bridge._row_sort_key), snapshot["rows"]
+        )
+
 
 class _PrimedProjectionWorker(bridge.ProjectionWorker):
     """A worker whose first walk has landed before the loop reads a frame.

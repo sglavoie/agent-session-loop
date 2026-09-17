@@ -599,6 +599,17 @@ def _fits_frame(payload: Mapping[str, Any]) -> bool:
     return len(encode_frame(payload)) <= MAX_FRAME_BYTES
 
 
+def _snapshot_selection_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Reserve bounded snapshot space for live work, then freshest blockers."""
+    activity = _epoch(row.get("last_activity_at")) or _epoch(row.get("run_started_at"))
+    return (
+        row.get("primary_state") not in {"running", "verifying"},
+        activity is None,
+        -(activity or 0.0),
+        *_row_sort_key(row),
+    )
+
+
 def build_runs_snapshot(
     *,
     state_dir: str | Path | None = None,
@@ -633,7 +644,10 @@ def build_runs_snapshot(
                 f"plan projection failed for {discovered.plan_dir}: {error}"
             )
 
-    rows.sort(key=_row_sort_key)
+    # Urgency ordering puts even undated invalid plans ahead of live work.
+    # Select the bounded working set separately so a backlog cannot crowd out
+    # the runs this client is supposed to observe.
+    rows.sort(key=_snapshot_selection_key)
     truncated = len(rows) > MAX_ROWS
     rows = rows[:MAX_ROWS]
     bounded_warnings = _bounded_strings(warnings, limit=MAX_WARNINGS)
@@ -660,6 +674,7 @@ def build_runs_snapshot(
         snapshot["rows"] = snapshot["rows"][:-1]
         snapshot["row_count"] = len(snapshot["rows"])
         snapshot["truncated"] = True
+    snapshot["rows"].sort(key=_row_sort_key)
     snapshot["digest"] = snapshot_digest(snapshot)
     return snapshot
 
