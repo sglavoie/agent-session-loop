@@ -226,6 +226,7 @@ _LAUNCH_TESTS = "scripts:tests/test_asl_workbench_launch.py"
 _STATIC_TESTS = "scripts:tests/test_asl_workbench_static.py"
 _FOUNDATION_TESTS = "scripts:tests/test_workbench_foundations.py"
 _CATALOG_TESTS = "scripts:tests/test_workbench_catalog.py"
+_HISTORY_TESTS = "scripts:tests/test_workbench_history.py"
 _BRIDGE_TESTS = "scripts:tests/test_asl_bridge_server.py"
 _DOCS_TESTS = "scripts:tests/test_asl_docs.py"
 _CLI_TESTS = "scripts:tests/test_asl_cli.py"
@@ -763,8 +764,9 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _companion_http(
         "GET /v1/history",
-        "Seven-day terminal-run history imported from ASL's event journals.",
-        coverage=(f"{_PI}/tests/test_companion_history.py",),
+        "Seven-day terminal-run history imported from ASL's event journals, "
+        "interpreted by the shared history service.",
+        coverage=(f"{_PI}/tests/test_companion_history.py", _HISTORY_TESTS),
     ),
     _companion_http(
         "GET /v1/questions",
@@ -866,9 +868,12 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _companion_module(
         "companion.history",
-        "Incremental import of ASL terminal runs into seven-day history.",
+        "Incremental import of ASL terminal runs into seven-day history. The "
+        "interpretation now lives in asl_workbench.history, beside ASL's own "
+        "vocabulary; the reading lives in "
+        "agent_session_loop.workbench_history.",
         owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_history.py",),
+        coverage=(f"{_PI}/tests/test_companion_history.py", _HISTORY_TESTS),
     ),
     _companion_module(
         "companion.identity",
@@ -919,9 +924,14 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _companion_module(
         "companion.observation",
-        "The one place ASL's shapes become the Companion's shapes.",
+        "The one place ASL's shapes become the Companion's shapes. Timestamp "
+        "and project/run enrichment are shared with the local view through "
+        "asl_workbench.history.",
         owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_observation.py",),
+        coverage=(
+            f"{_PI}/tests/test_companion_observation.py",
+            _HISTORY_TESTS,
+        ),
     ),
     _companion_module(
         "companion.projects",
@@ -1161,11 +1171,16 @@ CAPABILITIES: tuple[Capability, ...] = (
         key=f"{SURFACE_PERSISTENCE}:asl-event-journal",
         surface=SURFACE_PERSISTENCE,
         summary="Append-only events.jsonl per plan, read by both the Workbench "
-        "and Companion history import.",
+        "and Companion history import through one forward reader that resumes "
+        "only where a checkpoint proves the file is unchanged.",
         origin=ORIGIN_BOTH,
         owner=OWNER_MAC,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_SERVER_TESTS, f"{_PI}/tests/test_companion_history.py"),
+        regression_coverage=(
+            _SERVER_TESTS,
+            f"{_PI}/tests/test_companion_history.py",
+            _HISTORY_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_PERSISTENCE}:asl-plan-lock",
