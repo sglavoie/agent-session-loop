@@ -274,6 +274,9 @@ INTEGRATION_MODULES = (
     "tests.test_asl_worker_verification",
     "tests.test_asl_review",
     "tests.test_asl_workbench_launch",
+    # Integration rather than portable: it binds a loopback server and spawns
+    # a fresh interpreter to prove the portable package loads without ASL.
+    "tests.test_workbench_foundations",
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
     "tests.test_asl_overseer_e2e",

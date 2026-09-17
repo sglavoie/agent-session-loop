@@ -9,6 +9,16 @@ target-version = "py314"
 # globs *.py and lint.sh only claims files with a shell shebang.
 extend-include = ["bin/.local/bin/claude-lint-hook"]
 
+# The portable half of the Workbench is deployed to a Pi documented at Python
+# 3.13, while everything else here runs on the newer interpreter the repository
+# targets above. Pinning the floor in the linter is what makes the boundary
+# something a developer hits before a deployment does: a 3.14-only construct in
+# `asl_workbench` is a lint failure, not an import error on the Pi.
+# `asl_workbench.compatibility` enforces the same floor over the source, and
+# `tests/test_workbench_foundations.py` checks that this entry still exists.
+[tool.ruff.per-file-target-version]
+"asl_workbench/**/*.py" = "py313"
+
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
@@ -20,6 +30,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 [tool.mypy]
 files = [
     "agent_session_loop",
+    "asl_workbench",
     "tests",
     "skills/asl/scripts",
     "skills/session-resplit/scripts",
@@ -243,6 +254,17 @@ module = [
     "agent_session_loop.workspace_evidence",
     "agent_session_loop.workspaces",
     "agent_session_loop.write_guards",
+    # The portable package starts life on this table rather than working
+    # towards it. Its boundary rules and the extraction rules are the same
+    # rules: it may not import the runner because it may not import ASL at
+    # all, and its payloads cross a process boundary to a Pi, which is the
+    # strongest reason to name what they hold.
+    "asl_workbench",
+    "asl_workbench.__main__",
+    "asl_workbench.capabilities",
+    "asl_workbench.changes",
+    "asl_workbench.companion_inventory",
+    "asl_workbench.compatibility",
 ]
 enable_error_code = [
     "arg-type",

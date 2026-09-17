@@ -54,7 +54,14 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
-PACKAGE_ROOT = REPO_ROOT / "agent_session_loop"
+#: The package trees every module of which must be on one of the two override
+#: tables. ``asl_workbench`` joins the walk because it is a package this
+#: repository maintains and ships, so a portable module added tomorrow has to
+#: pick a table rather than inherit the untyped baseline.
+PACKAGE_ROOTS = (
+    REPO_ROOT / "agent_session_loop",
+    REPO_ROOT / "asl_workbench",
+)
 
 #: The repository-wide suppressions as of the session that added this ratchet.
 #: This set is a ceiling: a code may leave it once the tree is clean enough to
@@ -239,6 +246,16 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.workspace_evidence",
         "agent_session_loop.workspaces",
         "agent_session_loop.write_guards",
+        # The portable Workbench package. It cannot leave this table: the rule
+        # that keeps it loadable on the Pi is stricter than the one this table
+        # enforces, so a module that could not meet the boundary contract could
+        # not be in the package at all.
+        "asl_workbench",
+        "asl_workbench.__main__",
+        "asl_workbench.capabilities",
+        "asl_workbench.changes",
+        "asl_workbench.companion_inventory",
+        "asl_workbench.compatibility",
     }
 )
 
@@ -340,7 +357,7 @@ def dotted_name(path: Path) -> str:
 
 
 def package_modules() -> frozenset[str]:
-    """Every module in the package, by the dotted name mypy would match.
+    """Every module in the maintained packages, by the name mypy would match.
 
     Walked recursively so a subpackage added later is discovered rather than
     silently exempted, and filtered on ``__pycache__`` because a stale ``.pyc``
@@ -348,7 +365,8 @@ def package_modules() -> frozenset[str]:
     """
     return frozenset(
         dotted_name(path)
-        for path in PACKAGE_ROOT.rglob("*.py")
+        for root in PACKAGE_ROOTS
+        for path in root.rglob("*.py")
         if "__pycache__" not in path.parts
     )
 
@@ -483,6 +501,7 @@ class GlobalSuppressionRatchetTests(unittest.TestCase):
             config["files"],
             [
                 "agent_session_loop",
+                "asl_workbench",
                 "tests",
                 "skills/asl/scripts",
                 "skills/session-resplit/scripts",
