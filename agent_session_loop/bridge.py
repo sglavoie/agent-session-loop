@@ -51,6 +51,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, BinaryIO, TextIO
 
+from asl_workbench import actions as action_rules
+from asl_workbench import operations as operation_rules
+
 from . import (
     __version__,
     control_queue,
@@ -64,6 +67,8 @@ from . import (
     redirect_store,
     state,
     workbench,
+    workbench_actions,
+    workbench_operations,
 )
 from .agent_mux_projection import CONTRACT_SET_ID
 
@@ -774,6 +779,13 @@ class Operation:
     closure_id: str | None = None
     command_id: str | None = None
     detail: str | None = None
+    #: How far into the plan's event log this operation has already looked for
+    #: proof its reply was read. Set to the log's size *before* the mutation, so
+    #: a record already there cannot be mistaken for this one's, and advanced by
+    #: every look so a growing log is read once rather than from the top. Kept
+    #: in memory rather than persisted: a mark is meaningless to the process
+    #: that did not take it, and the durable journal reconciles by timestamp.
+    witness_offset: int = 0
 
     @property
     def terminal(self) -> bool:
@@ -1577,6 +1589,7 @@ class BridgeSession:
         question_id: str | None = None,
         closure_id: str | None = None,
         command_id: str | None = None,
+        witness_offset: int = 0,
     ) -> dict[str, Any]:
         operation = Operation(
             operation_id=operation_id,
@@ -1588,10 +1601,91 @@ class BridgeSession:
             question_id=question_id,
             closure_id=closure_id,
             command_id=command_id,
+            witness_offset=witness_offset,
         )
         self.operations[operation_id] = operation
         self._evict()
         return operation.payload()
+
+    def _events_mark(self, plan_dir: Path) -> int:
+        """Where this plan's event log ends right now, in bytes.
+
+        Taken *before* a reply is delivered, because everything already in the
+        log answers something else. A log that cannot be measured marks zero
+        and is read from the top, where the ``since``-free scan's own filters --
+        origin, question id -- are all that stand between an old record and a
+        wrong ``consumed``. That is why the mark is taken early rather than
+        defended later.
+        """
+        try:
+            return (
+                workbench_operations.events_path_for_plan(plan_dir, self.state_dir)
+                .stat()
+                .st_size
+            )
+        except OSError:
+            return 0
+
+    def _perform(
+        self,
+        facts: intervention.RunFacts,
+        params: Mapping[str, Any],
+        *,
+        action: str,
+        operation_id: str,
+        text: str,
+        question_id: str | None = None,
+    ) -> workbench_actions.ActionOutcome:
+        """Run one mutation through the shared action, in bridge vocabulary.
+
+        The bridge's own receipt table is not dropped in favour of the journal:
+        the two answer different questions. ``self.operations`` is what this
+        session tells *this* client about work it is watching; the journal is
+        what keeps a retry that outlived this session -- a reconnect to another
+        process, a supervisor resending after a lost response -- from becoming a
+        second spawn or a second answer.
+        """
+        try:
+            return workbench_actions.perform(
+                facts.plan_dir,
+                action=action,
+                operation_id=operation_id,
+                state_dir=self.state_dir,
+                reply_text=text,
+                action_token=_optional_str(params, "action_token"),
+                question_id=question_id,
+                run_id=_optional_str(params, "run_id"),
+            )
+        except intervention.InterventionError as error:
+            raise _bridge_error(error) from error
+        except workbench.LaunchError as error:
+            raise BridgeError(
+                ERROR_MUTATION_FAILED,
+                f"{action} could not be started: {error.message}",
+                details={"reason": error.reason},
+            ) from error
+        except operation_rules.OperationError as error:
+            # The journal's refusals are finer-grained than the protocol's
+            # error codes, which are pinned by the contract set. The reason
+            # rides in `details` rather than being minted as a new code a
+            # connector would not recognise.
+            raise BridgeError(
+                ERROR_MUTATION_FAILED,
+                error.message,
+                details={"reason": error.reason, **error.details},
+            ) from error
+        except workbench_actions.ActionRefused as error:
+            raise BridgeError(
+                ERROR_MUTATION_FAILED,
+                error.message,
+                details={"reason": error.reason},
+            ) from error
+        except (OSError, ValueError, mailbox.MailboxError) as error:
+            raise BridgeError(
+                ERROR_MUTATION_FAILED,
+                f"{action} could not be completed: {error}",
+                retryable=True,
+            ) from error
 
     def _expire(self) -> list[Operation]:
         """Settle operations whose outcome never arrived within the window.
@@ -1666,27 +1760,22 @@ class BridgeSession:
         facts = self._authorize(params, intervention.ACTION_REPLY)
         text = params.get("text")
         question_id = self._selected_question(params, facts)
-        try:
-            outcome = intervention.append_question_reply(
-                facts.plan_dir,
-                question_id,
-                text if isinstance(text, str) else "",
-                state_dir=self.state_dir,
-            )
-        except intervention.InterventionError as error:
-            raise _bridge_error(error) from error
-        except (OSError, ValueError, mailbox.MailboxError) as error:
-            raise BridgeError(
-                ERROR_MUTATION_FAILED,
-                f"reply could not be appended: {error}",
-                retryable=True,
-            ) from error
+        mark = self._events_mark(facts.plan_dir)
+        outcome = self._perform(
+            facts,
+            params,
+            action=action_rules.ACTION_REPLY,
+            operation_id=operation_id,
+            text=text if isinstance(text, str) else "",
+            question_id=question_id,
+        )
         return self._accept(
             operation_id,
             intervention.ACTION_REPLY,
             facts,
             question_id=question_id,
             closure_id=outcome.closure_id,
+            witness_offset=mark,
         )
 
     def question_resolve(self, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -1782,27 +1871,21 @@ class BridgeSession:
                 intervention.REASON_EMPTY_TEXT,
                 "reply text must contain non-whitespace content",
             )
-        try:
-            intervention.resume_paused_run(
-                facts.plan_dir, reply_text=text, state_dir=self.state_dir
-            )
-        except workbench.LaunchError as error:
-            raise BridgeError(
-                ERROR_MUTATION_FAILED,
-                f"resume could not be started: {error.message}",
-                details={"reason": error.reason},
-            ) from error
-        except OSError as error:
-            raise BridgeError(
-                ERROR_MUTATION_FAILED,
-                f"resume could not be started: {error}",
-                retryable=True,
-            ) from error
+        mark = self._events_mark(facts.plan_dir)
+        self._perform(
+            facts,
+            params,
+            action=action_rules.ACTION_RESUME,
+            operation_id=operation_id,
+            text=text,
+            question_id=facts.question_id,
+        )
         return self._accept(
             operation_id,
             intervention.ACTION_RESUME,
             facts,
             question_id=facts.question_id,
+            witness_offset=mark,
         )
 
     def workbench_ensure(self, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -2285,13 +2368,62 @@ class BridgeSession:
                 )
             return
         if operation.method == intervention.ACTION_RESUME:
-            facts = intervention.inspect_run(plan_dir, state_dir=self.state_dir)
-            if not facts.paused:
-                operation.settle(OPERATION_CONSUMED, "run left the paused state")
-            elif facts.run_id != operation.run_id:
-                operation.settle(
-                    OPERATION_SUPERSEDED, "a different run now holds this plan"
-                )
+            self._settle_resume(operation, plan_dir)
+
+    def _settle_resume(self, operation: Operation, plan_dir: Path) -> None:
+        """Settle a resume on the reply being read, not on the pause lifting.
+
+        This used to read "the plan is no longer paused, therefore the reply was
+        consumed". That is a fact about the plan and not about the operation:
+        any run starting on it lifts the pause -- one an operator launched from
+        the Workbench a second earlier, a retry, a scheduled run -- so the rule
+        credited this reply with whatever happened next. The Companion grew its
+        own resume witness precisely because of that answer, and this is that
+        witness, moved here so both surfaces have it.
+
+        What settles it now is run-bound: a run appended ``reply_provided``
+        naming ``stdin`` as the origin after this operation took its mark. What
+        does *not* settle it is the pause lifting, which now leaves the
+        operation ``accepted`` until the witness or the TTL says otherwise --
+        "nobody can say" rather than a claim.
+        """
+        evidence = self._witness(operation)
+        if evidence.consumed:
+            # Deliberately not required to match `operation.run_id`: a resume
+            # starts a *new* process with a new run id, so the paused run's id
+            # is the one id the consuming run cannot have.
+            operation.settle(OPERATION_CONSUMED, "a run recorded reading the reply")
+            return
+        facts = intervention.inspect_run(plan_dir, state_dir=self.state_dir)
+        if facts.paused and facts.run_id != operation.run_id:
+            operation.settle(
+                OPERATION_SUPERSEDED, "a different run now holds this plan"
+            )
+
+    def _witness(self, operation: Operation) -> action_rules.ConsumptionEvidence:
+        """Look once at the plan's event log for proof this reply was read.
+
+        Bounded and forward-only: each look reads at most one chunk from the
+        mark and advances the mark by the whole records it read, so following a
+        busy run costs the same on the hundredth poll as on the first and a
+        record still being written is never half-parsed.
+        """
+        origin = action_rules.consuming_origin(
+            action_rules.METHOD_FOR_ACTION[action_rules.ACTION_RESUME]
+        )
+        assert origin is not None  # a resume bears a reply
+        path = workbench_operations.events_path_for_plan(
+            Path(operation.plan_dir), self.state_dir
+        )
+        try:
+            with path.open("rb") as handle:
+                handle.seek(operation.witness_offset)
+                chunk = handle.read(action_rules.MAX_WITNESS_BYTES_PER_LOOK)
+        except OSError:
+            return action_rules.ConsumptionEvidence(readable=False)
+        evidence, stride = action_rules.scan_replies(chunk, origin=origin)
+        operation.witness_offset += stride
+        return evidence
 
     def _operation_event(self, operation: Operation) -> dict[str, Any]:
         self.seq += 1

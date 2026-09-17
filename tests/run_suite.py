@@ -289,6 +289,10 @@ INTEGRATION_MODULES = (
     # proving it takes real child interpreters racing a real flock, and the
     # route half needs a live server.
     "tests.test_workbench_operations",
+    # Integration because the claim is that two surfaces are one path: half of
+    # it drives the shared action directly and half drives a live workbench
+    # server, and the point is that both land in the same journal.
+    "tests.test_workbench_launch_reply",
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
     "tests.test_asl_overseer_e2e",

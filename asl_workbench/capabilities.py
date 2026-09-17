@@ -229,6 +229,7 @@ _CATALOG_TESTS = "scripts:tests/test_workbench_catalog.py"
 _DETAIL_TESTS = "scripts:tests/test_workbench_details.py"
 _HISTORY_TESTS = "scripts:tests/test_workbench_history.py"
 _OPERATION_TESTS = "scripts:tests/test_workbench_operations.py"
+_ACTION_TESTS = "scripts:tests/test_workbench_launch_reply.py"
 _BRIDGE_TESTS = "scripts:tests/test_asl_bridge_server.py"
 _DOCS_TESTS = "scripts:tests/test_asl_docs.py"
 _CLI_TESTS = "scripts:tests/test_asl_cli.py"
@@ -403,7 +404,13 @@ CAPABILITIES: tuple[Capability, ...] = (
     _http(
         "POST /api/launch",
         "Start a run for a plan under a launch profile, keyed for idempotency.",
-        coverage=(_LAUNCH_TESTS, _SERVER_TESTS, _DOCS_TESTS, _OPERATION_TESTS),
+        coverage=(
+            _LAUNCH_TESTS,
+            _SERVER_TESTS,
+            _DOCS_TESTS,
+            _OPERATION_TESTS,
+            _ACTION_TESTS,
+        ),
     ),
     _http(
         "POST /api/reply",
@@ -412,6 +419,7 @@ CAPABILITIES: tuple[Capability, ...] = (
             _SERVER_TESTS,
             "scripts:tests/test_asl_reply_flows.py",
             _OPERATION_TESTS,
+            _ACTION_TESTS,
         ),
     ),
     _http(
@@ -713,6 +721,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         authority=AUTHORITY_ASL,
         regression_coverage=(
             _BRIDGE_TESTS,
+            _ACTION_TESTS,
             f"{_PI}/tests/test_companion_live_reply.py",
         ),
     ),
@@ -724,7 +733,11 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_BOTH,
         owner=OWNER_MAC,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_BRIDGE_TESTS, f"{_PI}/tests/test_companion_resume.py"),
+        regression_coverage=(
+            _BRIDGE_TESTS,
+            _ACTION_TESTS,
+            f"{_PI}/tests/test_companion_resume.py",
+        ),
     ),
     Capability(
         key=f"{SURFACE_BRIDGE}:run.control",
@@ -991,10 +1004,12 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _companion_module(
         "companion.resume",
-        "What a resume launch proves and what it does not.",
+        "What a resume launch proves and what it does not. The interpretation "
+        "is ASL's own now, in asl_workbench.actions; this module is the "
+        "Companion's adapter onto it.",
         owner=OWNER_MAC,
         authority=AUTHORITY_ASL,
-        coverage=(f"{_PI}/tests/test_companion_resume.py",),
+        coverage=(_ACTION_TESTS, f"{_PI}/tests/test_companion_resume.py"),
     ),
     _companion_module(
         "companion.runtime",
@@ -1263,7 +1278,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_BOTH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_OPERATION_TESTS, _SERVER_TESTS),
+        regression_coverage=(_OPERATION_TESTS, _SERVER_TESTS, _ACTION_TESTS),
     ),
     Capability(
         key=f"{SURFACE_PERSISTENCE}:plan-artifacts",

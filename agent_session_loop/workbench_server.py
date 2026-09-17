@@ -84,10 +84,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from asl_workbench import actions as workbench_action_rules
 from asl_workbench import details as workbench_detail_rules
-from asl_workbench import operations as workbench_operation_rules
 from asl_workbench.details import DetailError, Window
-from asl_workbench.operations import Admission, OperationError
+from asl_workbench.operations import OperationError
 
 from . import (
     control_cli,
@@ -102,9 +102,9 @@ from . import (
     responses,
     state,
     workbench,
+    workbench_actions,
     workbench_catalog,
     workbench_details,
-    workbench_operations,
 )
 from . import (
     events as events_module,
@@ -1096,7 +1096,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         impatient second click, resending a launch that already succeeded. Four
         things stand between that and a second process, in this order:
 
-        1. Durable admission. ``workbench_operations`` records the submission in
+        1. Durable admission. ``workbench_actions`` records the submission in
            the plan's own operation journal under an exclusive lock, so a
            resent ``launch_id`` is recognised as the same submission even by a
            server that did not answer the first one -- and a submission that
@@ -1117,15 +1117,20 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         A client that supplies no ``launch_id`` gets a minted one, so its
         submission is still accounted for even though nothing can recognize a
         retry of it as a retry.
+
+        All four live in ``workbench_actions``, which is also what the bridge
+        calls. The two surfaces used to admit, spawn, and settle by their own
+        arrangements; a browser click and a supervisor's command now differ
+        only in how they arrived.
         """
         plan_dir = _require_string(body, "plan_dir")
         launch_id = _optional_launch_id(body)
         profile = _coerce_profile_payload(body.get("profile"))
         config = self._server().config
-        method = (
-            workbench_operation_rules.METHOD_LAUNCH
+        action = (
+            workbench_action_rules.ACTION_LAUNCH
             if reply_text is None
-            else workbench_operation_rules.METHOD_REPLY
+            else workbench_action_rules.ACTION_RESUME
         )
         try:
             canonical = plans.canonicalize_path(plan_dir)
@@ -1139,70 +1144,34 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             return
         with self._server().launch_guard(canonical):
             try:
-                admission = workbench_operations.admit_operation(
+                outcome = workbench_actions.perform(
                     canonical,
-                    operation_id=(
-                        launch_id
-                        if launch_id is not None
-                        else workbench_operations.new_operation_id()
-                    ),
-                    method=method,
+                    action=action,
+                    operation_id=launch_id,
+                    reply_text=reply_text,
+                    profile=profile,
                     state_dir=config.state_dir,
+                    guard=self._launch_conflict,
                 )
             except OperationError as error:
                 self._send_error(
                     error.status, error.reason, error.message, details=error.details
                 )
                 return
-            if not admission.admitted:
-                self._answer_prior_submission(admission, canonical, launch_id)
-                return
-            operation_id = admission.operation_id
-            refusal = self._launch_conflict(canonical, config)
-            if refusal is not None:
-                reason, message = refusal
-                self._settle_spawn(
-                    canonical,
-                    operation_id,
-                    config,
-                    detail_code=workbench_operation_rules.DETAIL_LAUNCH_REFUSED,
-                )
+            except intervention.InterventionError as error:
                 self._send_error(
-                    409,
-                    reason,
-                    message,
+                    409, error.reason, error.message, details=error.details
+                )
+                return
+            except workbench_actions.ActionRefused as error:
+                self._send_error(
+                    error.status,
+                    error.reason,
+                    error.message,
                     details={"plan_dir": str(canonical)},
                 )
                 return
-            try:
-                # Dispatch is recorded before the process exists, never after.
-                # Killed before this write, the journal says the run certainly
-                # did not start; killed after it, the journal says nobody can
-                # say. The second answer is worse to read and the only honest
-                # one, and the ordering is the whole reason either is available.
-                workbench_operations.mark_dispatched(
-                    canonical, operation_id, state_dir=config.state_dir
-                )
-                if reply_text is None:
-                    result = workbench.launch_plan(
-                        plan_dir,
-                        profile=profile,
-                        state_dir=config.state_dir,
-                    )
-                else:
-                    result = workbench.resume_plan_with_reply(
-                        plan_dir,
-                        reply_text=reply_text,
-                        profile=profile,
-                        state_dir=config.state_dir,
-                    )
             except workbench.LaunchError as error:
-                self._settle_spawn(
-                    canonical,
-                    operation_id,
-                    config,
-                    detail_code=workbench_operation_rules.DETAIL_LAUNCH_REFUSED,
-                )
                 self._send_error(
                     400,
                     error.reason,
@@ -1210,12 +1179,12 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
                     details={"plan_dir": plan_dir},
                 )
                 return
-            payload = result.to_payload()
-            with contextlib.suppress(OperationError, OSError):
-                workbench_operations.confirm_operation(
-                    canonical, operation_id, state_dir=config.state_dir
-                )
-            self._server().record_launch_pid(canonical, result.pid)
+            if outcome.replayed:
+                self._answer_prior_submission(outcome, canonical, launch_id)
+                return
+            assert outcome.launch is not None  # a carried-out spawn has one
+            payload = outcome.launch.to_payload()
+            self._server().record_launch_pid(canonical, outcome.launch.pid)
             if launch_id is not None:
                 self._server().record_launch(canonical, launch_id, payload)
         self._send_success(
@@ -1223,11 +1192,12 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             launch=payload,
             launch_id=launch_id,
             replayed=False,
+            operation=outcome.operation,
         )
 
     def _answer_prior_submission(
         self,
-        admission: Admission,
+        outcome: workbench_actions.ActionOutcome,
         plan_dir: Path,
         launch_id: str | None,
     ) -> None:
@@ -1240,51 +1210,23 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         submission is already recorded* instead of inventing a launch payload
         for a process it never saw.
         """
-        if admission.replayed:
-            recorded = (
-                self._server().recorded_launch(plan_dir, launch_id)
-                if launch_id is not None
-                else None
-            )
-            self._send_success(
-                reason="ok",
-                launch=recorded,
-                launch_id=launch_id,
-                replayed=True,
-                operation=admission.to_payload(),
-            )
-            return
-        error = admission.error()
-        self._send_error(
-            error.status, error.reason, error.message, details=error.details
+        recorded = (
+            self._server().recorded_launch(plan_dir, launch_id)
+            if launch_id is not None
+            else None
+        )
+        admission = outcome.admission
+        self._send_success(
+            reason="ok",
+            launch=recorded,
+            launch_id=launch_id,
+            replayed=True,
+            operation=(
+                admission.to_payload() if admission is not None else outcome.operation
+            ),
         )
 
-    def _settle_spawn(
-        self,
-        plan_dir: Path,
-        operation_id: str,
-        config: ServerConfig,
-        *,
-        detail_code: str,
-    ) -> None:
-        """Close out an operation whose mutation was refused before it ran.
-
-        Best effort on purpose: the caller is already on its way to answering
-        with the refusal that matters, and a journal that cannot be written is
-        not a reason to turn a clean refusal into a 500.
-        """
-        with contextlib.suppress(OperationError, OSError):
-            workbench_operations.settle_operation(
-                plan_dir,
-                operation_id,
-                workbench_operation_rules.OPERATION_REJECTED,
-                detail_code=detail_code,
-                state_dir=config.state_dir,
-            )
-
-    def _launch_conflict(
-        self, plan_dir: Path, config: ServerConfig
-    ) -> tuple[str, str] | None:
+    def _launch_conflict(self, facts: intervention.RunFacts) -> tuple[str, str] | None:
         """Name what already owns this plan, or ``None`` when nothing does.
 
         Two checks, because neither sees the other's window. Once a child has
@@ -1293,15 +1235,14 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         nothing durable says so yet, and the pid this server spawned is the only
         evidence a launch is already under way.
 
+        The facts are the ones the shared action already read, rather than a
+        second reading of its own: a guard that answers about a different
+        instant than the operation it guards is a guard with a gap in it.
+
         A paused run is deliberately not a conflict: resuming one is exactly
         what ``/api/reply`` is for.
         """
-        try:
-            facts = intervention.inspect_run(plan_dir, state_dir=config.state_dir)
-        except intervention.InterventionError:
-            # An unreadable plan is the launch path's refusal to make, not this
-            # check's: reporting it here would mask `LaunchError`'s own reason.
-            return None
+        plan_dir = facts.plan_dir
         if facts.run_active:
             return (
                 "run-already-active",

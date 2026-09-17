@@ -250,6 +250,7 @@ module = [
     "agent_session_loop.turn_settlement",
     "agent_session_loop.verification",
     "agent_session_loop.verification_transitions",
+    "agent_session_loop.workbench_actions",
     "agent_session_loop.workbench_catalog",
     "agent_session_loop.workbench_details",
     "agent_session_loop.workbench_history",
@@ -265,6 +266,7 @@ module = [
     # strongest reason to name what they hold.
     "asl_workbench",
     "asl_workbench.__main__",
+    "asl_workbench.actions",
     "asl_workbench.capabilities",
     "asl_workbench.catalog",
     "asl_workbench.changes",

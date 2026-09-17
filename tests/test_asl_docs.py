@@ -2705,6 +2705,52 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
                 msg=f"docs omit operation-admission marker: {marker!r}",
             )
 
+    def test_docs_describe_the_shared_launch_and_reply_path(self) -> None:
+        """One application operation behind both surfaces, and its settlement."""
+        docs = self._read("docs/agent-session-loop.md")
+        normalized = " ".join(docs.split())
+
+        for marker in (
+            "`agent_session_loop.workbench_actions.perform` is the single "
+            "application operation behind `POST /api/launch`, `POST /api/reply`, "
+            "and the bridge's `run.resume` and `question.reply`",
+            "A stale target is refused with or without an action token.",
+            "a target that has moved is refused before admission, so the "
+            "operation id the request carried is still spendable",
+            "What settles an operation depends on what it promised.",
+            "promised that an operator's words were *read*, which a `Popen` "
+            "does not establish",
+            "reach `consumed` only on a `reply_provided` record in the plan's "
+            "own `events.jsonl`",
+            "the evidence *reports* which run read the reply rather than "
+            "matching it against the id the operation named",
+            "A guard refusal closes the row `cancelled` on the way past",
+            "A launched run gets its own session.",
+            "`workbench.launch_plan` passes `start_new_session=True`, matching "
+            "the `AbandonProcessGroup` the launchd agents already set",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"docs omit shared launch/reply marker: {marker!r}",
+            )
+
+    def test_docs_refuse_the_pause_lifting_as_resume_evidence(self) -> None:
+        """The interpretation session 6 replaced, named so it cannot come back."""
+        docs = self._read("docs/agent-session-loop.md")
+        normalized = " ".join(docs.split())
+
+        self.assertIn(
+            "A resume is settled by a run's own record of reading the reply, "
+            "never by the plan leaving the paused state.",
+            normalized,
+        )
+        self.assertIn(
+            "a `reply_provided` record naming the reply a resume carried",
+            normalized,
+        )
+        self.assertNotIn("a resume's run leaving the paused state", normalized)
+
     def test_docs_describe_the_conversation_recovery_card(self) -> None:
         """The new recovery kind, and why it offers no endpoint action."""
         docs = self._read("docs/agent-session-loop.md")

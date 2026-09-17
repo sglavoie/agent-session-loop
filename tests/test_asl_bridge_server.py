@@ -219,6 +219,45 @@ class _Corpus:
         with (plan_state / events.EVENTS_FILE_NAME).open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
 
+    def record_reply_provided(
+        self,
+        plan_dir: Path,
+        *,
+        run_id: str,
+        origin: str = "stdin",
+        question_id: str | None = None,
+    ) -> None:
+        """Write the record a run appends when it reads an operator's reply.
+
+        Shaped the way ``run_loop`` writes it: the run names itself and the way
+        the text reached it, and the text itself is nowhere in the record.
+        """
+        plan_state = state.plan_state_dir(plan_dir, self.state_root)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        source: dict[str, Any] = {
+            "run_id": run_id,
+            "session_id": "1",
+            "turn_index": 2,
+            "reply_length": len(REPLY_TEXT),
+            "origin": origin,
+        }
+        if question_id is not None:
+            source["question_id"] = question_id
+        record = {
+            "created_at": "2026-06-19T15:30:00+00:00",
+            "name": events.REPLY_PROVIDED_EVENT,
+            "payload": {
+                "run_id": run_id,
+                "turn_index": 2,
+                "session_id": "1",
+                "reply_length": len(REPLY_TEXT),
+                "source": source,
+            },
+            "version": 1,
+        }
+        with (plan_state / events.EVENTS_FILE_NAME).open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+
 
 def _request(request_id: str, method: str, **params: Any) -> bytes:
     payload: dict[str, Any] = {
@@ -1137,46 +1176,139 @@ class BridgeResumeTests(unittest.TestCase):
             self.assertEqual(1, len(spawns))
             self.assertEqual(first, second)
 
-    def test_resume_settles_as_consumed_once_the_run_leaves_the_paused_state(
-        self,
-    ) -> None:
+    def _resume(
+        self, corpus: _Corpus, session: bridge.BridgeSession, plan_dir: Path
+    ) -> dict[str, Any]:
+        """Resume a paused plan without spawning anything."""
+        row = corpus.row_for(plan_dir)
+        original = workbench.launch_plan
+        workbench.launch_plan = lambda target, **kwargs: workbench.LaunchResult(  # type: ignore[assignment]
+            pid=1,
+            argv=(),
+            plan_dir=Path(target),
+            profile_payload={},
+            reply_provided=True,
+            reply_length=1,
+            reply_origin="stdin",
+            state_dir=None,
+        )
+        try:
+            return session.run_resume(
+                {
+                    "plan_dir": str(plan_dir),
+                    "operation_id": "op-resume",
+                    "action_token": row["action_token"],
+                    "text": REPLY_TEXT,
+                }
+            )
+        finally:
+            workbench.launch_plan = original  # type: ignore[assignment]
+
+    def test_a_lifted_pause_alone_does_not_settle_the_resume(self) -> None:
+        """The flipped pin.
+
+        This test previously asserted the opposite: that a plan no longer being
+        paused settled the resume as ``consumed``. That is a fact about the
+        plan, not about the operator's reply -- *any* run starting on the plan
+        lifts the pause, including one an operator launched from the Workbench a
+        second earlier -- so the old rule credited this reply with whatever
+        happened next. An unwitnessed resume now stays ``accepted`` and reaches
+        a terminal status through the witness below or through the TTL, which is
+        "nobody can say" rather than a claim.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))
             plan_dir = corpus.paused_plan()
-            row = corpus.row_for(plan_dir)
             session = corpus.session()
-
-            original = workbench.launch_plan
-            workbench.launch_plan = lambda target, **kwargs: workbench.LaunchResult(  # type: ignore[assignment]
-                pid=1,
-                argv=(),
-                plan_dir=Path(target),
-                profile_payload={},
-                reply_provided=True,
-                reply_length=1,
-                reply_origin="stdin",
-                state_dir=None,
-            )
-            try:
-                session.run_resume(
-                    {
-                        "plan_dir": str(plan_dir),
-                        "operation_id": "op-resume",
-                        "action_token": row["action_token"],
-                        "text": REPLY_TEXT,
-                    }
-                )
-            finally:
-                workbench.launch_plan = original  # type: ignore[assignment]
+            self._resume(corpus, session, plan_dir)
 
             self.assertEqual([], session.poll_operations())
             corpus.write_state(
                 plan_dir,
                 {"ok": None, "paused": False, "run_id": "20260619T140000Z-1"},
             )
+
+            self.assertEqual([], session.poll_operations())
+            self.assertEqual(
+                bridge.OPERATION_ACCEPTED,
+                session.operations["op-resume"].status,
+            )
+
+    def test_resume_settles_as_consumed_when_a_run_records_reading_the_reply(
+        self,
+    ) -> None:
+        """The only evidence that is about the reply rather than about the plan.
+
+        The consuming run is deliberately a *different* run id than the paused
+        one the operation named: ``asl run --resume`` mints a new run id, so
+        requiring a match would refuse every successful resume there is.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir = corpus.paused_plan()
+            session = corpus.session()
+            self._resume(corpus, session, plan_dir)
+
+            self.assertEqual([], session.poll_operations())
+            corpus.record_reply_provided(plan_dir, run_id="20260619T150000Z-2")
             updates = session.poll_operations()
 
             self.assertEqual(bridge.OPERATION_CONSUMED, updates[0]["data"]["status"])
+            self.assertEqual("20260619T140000Z-1", updates[0]["data"]["run_id"])
+
+    def test_a_reply_recorded_before_the_resume_settles_nothing(self) -> None:
+        """A log is not evidence of everything that is in it.
+
+        The previous run read a reply too, and its record sits in the same log.
+        The mark taken before this resume is what keeps that record from
+        settling this operation.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir = corpus.paused_plan()
+            corpus.record_reply_provided(plan_dir, run_id="20260619T130000Z-0")
+            session = corpus.session()
+            self._resume(corpus, session, plan_dir)
+
+            self.assertEqual([], session.poll_operations())
+            self.assertEqual(
+                bridge.OPERATION_ACCEPTED,
+                session.operations["op-resume"].status,
+            )
+
+    def test_a_mailbox_reply_does_not_settle_a_resume(self) -> None:
+        """Two deliveries, two operations, and neither settles the other."""
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir = corpus.paused_plan()
+            session = corpus.session()
+            self._resume(corpus, session, plan_dir)
+
+            corpus.record_reply_provided(
+                plan_dir, run_id="20260619T150000Z-2", origin="mailbox"
+            )
+
+            self.assertEqual([], session.poll_operations())
+            self.assertEqual(
+                bridge.OPERATION_ACCEPTED,
+                session.operations["op-resume"].status,
+            )
+
+    def test_a_resume_still_superseded_by_another_run_holding_the_plan(self) -> None:
+        """Still paused under someone else's run id is somebody else's plan now."""
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir = corpus.paused_plan()
+            session = corpus.session()
+            self._resume(corpus, session, plan_dir)
+
+            corpus.write_state(
+                plan_dir,
+                {"ok": False, "paused": True, "run_id": "20260619T160000Z-3"},
+            )
+            updates = session.poll_operations()
+
+            self.assertEqual(bridge.OPERATION_SUPERSEDED, updates[0]["data"]["status"])
 
 
 class BridgeOperationWindowTests(unittest.TestCase):

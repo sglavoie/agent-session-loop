@@ -118,6 +118,14 @@ RUN_STARTING_METHODS: frozenset[str] = frozenset({METHOD_LAUNCH, METHOD_REPLY})
 
 SCOPE_RUN_START = "run-start"
 
+#: The methods that carry an operator's words. What they promise is that those
+#: words were *read*, which is a strictly stronger claim than the one a launch
+#: makes -- a launch promises a process, and a process is what starting it
+#: produces. So these two reach ``consumed`` only on run-bound evidence that a
+#: run took the reply into a turn; see :mod:`asl_workbench.actions`, which owns
+#: what that evidence looks like.
+REPLY_BEARING_METHODS: frozenset[str] = frozenset({METHOD_REPLY, METHOD_QUESTION_REPLY})
+
 #: The longest operation id this gate will store, matching the ceiling the
 #: redirect journal puts on the same kind of client-chosen key. An idempotency
 #: key is an identifier a client picks, and an unbounded one is an unbounded
@@ -247,6 +255,12 @@ DETAIL_LAUNCH_REFUSED = "launch-refused"
 #: only thing anyone can honestly say about it.
 DETAIL_REPLACED_UNCERTAIN = "replaced-uncertain"
 
+#: A run recorded reading the reply this operation carried. The only detail
+#: code that settles a reply-bearing mutation as ``consumed``, and the reason
+#: "the plan is no longer paused" no longer does: that one is a fact about the
+#: plan, this one is a fact about the operator's answer.
+DETAIL_REPLY_WITNESSED = "reply-witnessed"
+
 OPERATION_DETAIL_CODES: tuple[str, ...] = (
     DETAIL_DEADLINE_PASSED,
     DETAIL_OWNER_CANCELLED,
@@ -257,6 +271,7 @@ OPERATION_DETAIL_CODES: tuple[str, ...] = (
     DETAIL_RECONCILED,
     DETAIL_LAUNCH_REFUSED,
     DETAIL_REPLACED_UNCERTAIN,
+    DETAIL_REPLY_WITNESSED,
 )
 
 # -- Privacy ----------------------------------------------------------------
@@ -886,6 +901,15 @@ class Evidence:
     run_id: str | None = None
     receipt_status: str | None = None
     receipt_detail_code: str | None = None
+    #: A run recorded reading the reply this operation carried. Gathered from
+    #: the plan's own event log by the provider, because that log is the only
+    #: place the claim exists -- the plan lock says a run is there, and a run
+    #: being there is not the same as an operator's words having been read.
+    reply_consumed: bool = False
+    #: Which run read it. A resumed run is a *new* process with a new id, so
+    #: this is reported rather than matched against the id the operation named:
+    #: requiring a match would refuse every successful resume.
+    consuming_run_id: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -894,6 +918,8 @@ class Evidence:
             "run_id": self.run_id,
             "receipt_status": self.receipt_status,
             "receipt_detail_code": self.receipt_detail_code,
+            "reply_consumed": self.reply_consumed,
+            "consuming_run_id": self.consuming_run_id,
         }
 
 
@@ -931,7 +957,13 @@ def reconcile(
       settled is carried through unchanged when the transition is legal.
     * An operation whose owning process is still alive is left alone. That
       process is mid-attempt, and settling under it would publish an answer
-      about work still in progress.
+      about work still in progress. A *witnessed* reply is the one exception,
+      because it is not an inference about the owner's progress: the run
+      recorded reading the operator's words, which is the whole of what the
+      operation promised, and the owner is in no position to contradict it.
+      Without the exception a long-lived surface -- a Workbench server that
+      answers a question and then goes back to serving pages -- would leave
+      every reply it delivered sitting at ``accepted`` for its own lifetime.
     * ``pending`` from a dead owner settles as ``expired``: intent was recorded
       and nothing was attempted, so the mutation demonstrably did not run.
       This is the good case, and it is why dispatch is a separate write.
@@ -944,6 +976,13 @@ def reconcile(
       ``unconfirmed`` when the run it names is gone. Success is inferred from
       presence, never from absence: a run that has vanished may have finished,
       crashed, or been killed, and only its own records tell those apart.
+    * A :data:`REPLY_BEARING_METHODS` operation is the exception to the two
+      rules above, and in the strict direction. What it promised is that an
+      operator's words were read, so a run being *there* does not settle it --
+      only :attr:`Evidence.reply_consumed`, which is a run's own record of
+      taking that reply into a turn, does. A resumed run is a new process with
+      a new id, so the presence test those rules use cannot apply to it
+      anyway: it would call every successful resume somebody else's run.
 
     ``superseding`` is what a *new* submission passes, and it does one thing:
     an ``unconfirmed`` operation whose target is demonstrably idle stops
@@ -967,14 +1006,24 @@ def reconcile(
             receipt, evidence.receipt_detail_code or DETAIL_RECONCILED
         )
 
-    if evidence.owner_alive:
-        return None
-
     deliver_by = record.get("deliver_by")
     overdue = isinstance(deliver_by, int | float) and now >= float(deliver_by)
     recorded_run = record.get("run_id")
+    bears_reply = str(record.get("method", "")) in REPLY_BEARING_METHODS
+    #: Only a row that was actually dispatched can have been read, so a
+    #: ``pending`` row is never witnessed however loud the evidence is.
+    witnessed = (
+        bears_reply
+        and evidence.reply_consumed
+        and status in (OPERATION_DISPATCHED, OPERATION_ACCEPTED)
+    )
+
+    if evidence.owner_alive and not witnessed:
+        return None
+
     identified = (
-        evidence.run_active
+        not bears_reply
+        and evidence.run_active
         and evidence.run_id is not None
         and recorded_run == evidence.run_id
     )
@@ -986,16 +1035,27 @@ def reconcile(
         )
 
     if status == OPERATION_DISPATCHED:
+        if witnessed:
+            return Reconciliation(OPERATION_ACCEPTED, DETAIL_REPLY_WITNESSED)
         if identified:
             return Reconciliation(OPERATION_ACCEPTED, DETAIL_RECONCILED)
+        if bears_reply and evidence.run_active and not overdue:
+            # Something is running on this plan and has not said it read the
+            # reply. It may be about to, so waiting is what a look this early
+            # is for, and the deadline is what ends the wait.
+            return None
         return Reconciliation(
             OPERATION_UNCONFIRMED,
             DETAIL_NO_RESULT if overdue else DETAIL_CONNECTOR_RESTARTED,
         )
 
     if status == OPERATION_ACCEPTED:
+        if witnessed:
+            return Reconciliation(OPERATION_CONSUMED, DETAIL_REPLY_WITNESSED)
         if identified:
             return Reconciliation(OPERATION_CONSUMED, DETAIL_RECONCILED)
+        if bears_reply and evidence.run_active and not overdue:
+            return None
         if evidence.run_active and recorded_run is None:
             # Something holds the plan and this row cannot say whether it is
             # the thing it started. Waiting costs nothing; guessing costs the

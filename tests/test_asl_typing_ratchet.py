@@ -242,6 +242,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.turn_settlement",
         "agent_session_loop.verification",
         "agent_session_loop.verification_transitions",
+        "agent_session_loop.workbench_actions",
         "agent_session_loop.workbench_catalog",
         "agent_session_loop.workbench_details",
         "agent_session_loop.workbench_history",
@@ -256,6 +257,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         # not be in the package at all.
         "asl_workbench",
         "asl_workbench.__main__",
+        "asl_workbench.actions",
         "asl_workbench.capabilities",
         "asl_workbench.catalog",
         "asl_workbench.changes",

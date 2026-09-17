@@ -8776,6 +8776,60 @@ allowlist, and `FORBIDDEN_PERSISTED_KEYS` is checked against every nested
 value before a row is written, so reply text and action tokens cannot
 reach the file even under a key the allowlist keeps.
 
+### One path for a launch, a reply, and a paused resume
+
+`agent_session_loop.workbench_actions.perform` is the single application
+operation behind `POST /api/launch`, `POST /api/reply`, and the bridge's
+`run.resume` and `question.reply`. It runs the same six steps every time:
+inspect the run through `intervention.inspect_run`, check freshness,
+admit through the journal, consult the caller's guard, record dispatch,
+carry the mutation out, and settle the row. Surface-specific code is
+reduced to translating a refusal into that surface's error shape, so the
+local Workbench and the connector cannot drift into answering the same
+request differently. `asl_workbench.actions` holds the portable half —
+the action/method table, the launch-refusal classification, and the
+reading of the plan's event log — so the Pi interprets an imported log
+exactly as the Mac interprets a live one.
+
+**A stale target is refused with or without an action token.** A request
+that names a `run_id` or a `question_id` is making a claim about that run
+or that question, and the claim is checked against what
+`intervention.inspect_run` reports regardless of which surface asked. A
+bridge caller must additionally carry a fresh `action_token`; a browser
+caller that names nothing beyond the plan is held to the run-ownership
+checks alone. Either way, a target that has moved is refused before
+admission, so the operation id the request carried is still spendable.
+
+**What settles an operation depends on what it promised.** A launch
+promised a process, so the spawn is the whole of it and the row goes
+straight to `consumed`. A reply-bearing operation — `question.reply` and
+the `run.resume` that streams a reply into a new run's stdin — promised
+that an operator's words were *read*, which a `Popen` does not establish.
+Those rows settle `accepted`, and reach `consumed` only on a
+`reply_provided` record in the plan's own `events.jsonl` whose `source`
+carries the matching origin (`mailbox` or `stdin`) and, for a mailbox
+reply, the matching `question_id`. A resumed run mints a new run id, so
+the evidence *reports* which run read the reply rather than matching it
+against the id the operation named — requiring a match would refuse every
+successful resume. A witness settles a reply-bearing row even while the
+process that submitted it is still alive, because the run's record is not
+a claim about that process's progress.
+
+**A launch refused before the spawn is `rejected`; a child killed after
+it is `unconfirmed`.** `asl_workbench.actions.launch_closure` draws that
+line from the refusal reason plus whether a process was created, which is
+the same distinction `expired` and `unconfirmed` draw one step earlier. A
+guard refusal closes the row `cancelled` on the way past, so a withdrawn
+submission stops holding the plan's run-start scope instead of blocking
+every later one.
+
+**A launched run gets its own session.** `workbench.launch_plan` passes
+`start_new_session=True`, matching the `AbandonProcessGroup` the launchd
+agents already set. A Ctrl-C in the terminal running `asl workbench
+serve`, a connector going away, or a closing terminal each signals a
+process *group*; without its own session the worker would be killed
+mid-turn by an event that has nothing to do with the plan.
+
 All responses use the `responses.success_payload`/`error_payload`
 envelopes with `command: "workbench"`. Stable error reasons reused
 verbatim from the underlying helpers include `invalid-plan`,
@@ -9837,10 +9891,15 @@ The bridge then watches ASL's records and emits a body-free
 
 | Status | Settled by |
 | --- | --- |
-| `consumed` | A mailbox receipt for the closure, a `run_control` command-observed event, or a resume's run leaving the paused state. |
+| `consumed` | A mailbox receipt for the closure, a `run_control` command-observed event, or a `reply_provided` record naming the reply a resume carried. |
 | `rejected` | A control command left the queue with no delivery receipt and the run is gone. |
 | `expired` | No outcome was observed within the 15-minute receipt window. |
 | `superseded` | A resume's plan is still paused under a different run. |
+
+A resume is settled by a run's own record of reading the reply, never by
+the plan leaving the paused state. The pause lifting is a fact about the
+plan and not about the operator's words: a run that resumes, reads
+nothing, and pauses again on its next question would look identical.
 
 The window holds at most 64 operations. Count-based eviction only ever
 drops already-settled operations, so a burst of requests cannot evict an

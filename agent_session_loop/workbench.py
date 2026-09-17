@@ -5706,12 +5706,22 @@ def build_workbench_summaries(
 
 
 class LaunchError(Exception):
-    """Raised when a Workbench launch request cannot be honored."""
+    """Raised when a Workbench launch request cannot be honored.
 
-    def __init__(self, reason: str, message: str) -> None:
+    ``spawned`` answers the question a durable journal has to ask about every
+    failure: was there a child? ``process-failed`` is raised from both sides of
+    the spawn, and only the far side has a process that existed, ran, and may
+    have written to the plan before it was killed. A caller that records
+    "certainly did not run" for that case is recording something it cannot
+    know, so the flag travels with the refusal rather than being guessed from
+    the reason.
+    """
+
+    def __init__(self, reason: str, message: str, *, spawned: bool = False) -> None:
         super().__init__(message)
         self.reason = reason
         self.message = message
+        self.spawned = spawned
 
 
 LAUNCH_REASON_INVALID_PLAN = "invalid-plan"
@@ -5985,6 +5995,13 @@ def launch_plan(
             env=popen_env,
             cwd=str(child_cwd) if child_cwd is not None else None,
             text=bool(reply_via_stdin),
+            # The run outlives whoever started it. A Workbench server stopped
+            # with Ctrl-C, a bridge whose connector went away, a terminal
+            # closing -- each delivers its signal to a process *group*, and a
+            # child in the launcher's group would be killed mid-turn by an
+            # event that has nothing to do with the plan. Its own session is
+            # what makes an operator's run survive the operator's tooling.
+            start_new_session=True,
         )
     except (OSError, ValueError) as error:
         raise LaunchError(
@@ -6008,6 +6025,9 @@ def launch_plan(
             raise LaunchError(
                 LAUNCH_REASON_PROCESS_FAILED,
                 f"failed to stream reply text to child stdin: {error}",
+                # A child existed here, and killing it is not the same as never
+                # having started it: it may have reached the plan first.
+                spawned=True,
             ) from error
 
     return LaunchResult(
