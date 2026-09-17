@@ -228,6 +228,7 @@ _FOUNDATION_TESTS = "scripts:tests/test_workbench_foundations.py"
 _CATALOG_TESTS = "scripts:tests/test_workbench_catalog.py"
 _DETAIL_TESTS = "scripts:tests/test_workbench_details.py"
 _HISTORY_TESTS = "scripts:tests/test_workbench_history.py"
+_OPERATION_TESTS = "scripts:tests/test_workbench_operations.py"
 _BRIDGE_TESTS = "scripts:tests/test_asl_bridge_server.py"
 _DOCS_TESTS = "scripts:tests/test_asl_docs.py"
 _CLI_TESTS = "scripts:tests/test_asl_cli.py"
@@ -402,12 +403,16 @@ CAPABILITIES: tuple[Capability, ...] = (
     _http(
         "POST /api/launch",
         "Start a run for a plan under a launch profile, keyed for idempotency.",
-        coverage=(_LAUNCH_TESTS, _SERVER_TESTS, _DOCS_TESTS),
+        coverage=(_LAUNCH_TESTS, _SERVER_TESTS, _DOCS_TESTS, _OPERATION_TESTS),
     ),
     _http(
         "POST /api/reply",
         "Answer an open ASL question with reply_text, streamed to the child.",
-        coverage=(_SERVER_TESTS, "scripts:tests/test_asl_reply_flows.py"),
+        coverage=(
+            _SERVER_TESTS,
+            "scripts:tests/test_asl_reply_flows.py",
+            _OPERATION_TESTS,
+        ),
     ),
     _http(
         "POST /api/control/stop-after-current",
@@ -1249,6 +1254,18 @@ CAPABILITIES: tuple[Capability, ...] = (
         ),
     ),
     Capability(
+        key=f"{SURFACE_PERSISTENCE}:plan-operation-journal",
+        surface=SURFACE_PERSISTENCE,
+        summary="operations.jsonl beside the redirect journal: which mutation "
+        "was admitted, that it was dispatched before anything ran, and how it "
+        "was accounted for afterwards. Identifiers only -- no reply text and "
+        "no action token.",
+        origin=ORIGIN_BOTH,
+        owner=OWNER_PORTABLE,
+        authority=AUTHORITY_ASL,
+        regression_coverage=(_OPERATION_TESTS, _SERVER_TESTS),
+    ),
+    Capability(
         key=f"{SURFACE_PERSISTENCE}:plan-artifacts",
         surface=SURFACE_PERSISTENCE,
         summary="Turn artifacts and final-review.md/json in the plan "
@@ -1299,7 +1316,10 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_COMPANION,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_ASL,
-        regression_coverage=(f"{_PI}/tests/test_companion_transport.py",),
+        regression_coverage=(
+            f"{_PI}/tests/test_companion_transport.py",
+            _OPERATION_TESTS,
+        ),
     ),
 )
 

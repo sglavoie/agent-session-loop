@@ -8719,10 +8719,13 @@ records to appeal to:
 - `POST /api/launch` and `POST /api/reply` accept an optional `launch_id`
   bounded by `redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS`, and return
   the original launch result with `replayed: true` for a repeat of an id
-  this server already spawned for. Nothing durable records a launch, so
-  the receipt table is this server's own memory: it makes a *retry to the
-  same process* idempotent, and what stops two runs across two Workbench
-  processes remains the plan lock.
+  already admitted for the plan. The receipt is durable: both routes admit
+  through the plan's operation journal, so a resend is idempotent across
+  Workbench processes and across a restart, not only within the process
+  that spawned. An id resubmitted for a different action or a different
+  plan is refused `409 operation-conflict` rather than quietly reused, and
+  a second submission while one is still outstanding is refused `409
+  operation-outstanding`.
 - Both spawning endpoints also refuse outright, with `409` and
   `reason: "run-already-active"`, while `intervention.inspect_run`
   reports a run holding the plan, and with
@@ -8731,6 +8734,47 @@ records to appeal to:
   a reconnecting browser actually lands in — spawned, but not yet holding
   the lock — where nothing durable says a launch is under way. A paused
   run is not a conflict: resuming one is what `/api/reply` is for.
+
+### Durable operation admission
+
+Every mutation the Workbench and the connector can both submit passes one
+gate first. `agent_session_loop.workbench_operations` keeps a per-plan
+journal at `<state-dir>/<plan-hash>/operations.jsonl`, beside the redirect
+journal, and holds an exclusive `flock` across read, decide, and append —
+so two Workbench processes, or a Workbench and the connector, submitting
+at the same moment serialize there and exactly one is admitted. The rules
+themselves live in `asl_workbench.operations`, which is stdlib-only and
+shares its status vocabulary with the Companion's `protocol.py`.
+
+An operation id names one action against one target. Identity is the
+sha256 fingerprint of the method and the target, so `launch_id` "abc" for
+one plan and `launch_id` "abc" for another are different operations, and
+the same id aimed at a different method is a conflict rather than a
+replay.
+
+Dispatch is recorded before the side effect, never after. An admitted
+operation is written `pending`; the row moves to `dispatched` immediately
+before the process is spawned. That ordering is what makes an interruption
+answerable: **a killed process leaves `expired` when the mutation
+certainly did not run, and `unconfirmed` when it may have and nobody can
+say.** Reconciliation draws its evidence from ASL — the plan lock through
+`intervention.inspect_run`, the owning pid through `state.is_pid_running`
+— and never infers success from absence: an accepted operation whose run
+has vanished becomes `unconfirmed`, not `consumed`. An `unconfirmed`
+operation is never retried automatically. A person submitting a new
+operation in its place, against a target that is demonstrably idle,
+settles the old row `superseded` with detail `replaced-uncertain` — which
+records that it was replaced, not that it did not run.
+
+Admission is a gate in front of the plan lock, not a replacement for it.
+ASL's lock remains the execution authority: admission stops a second
+attempt from being *started*, and the lock is what stops a second run from
+*executing*. Reconciliation classifies a lock without reclaiming it.
+
+The journal holds identifiers only. `OPERATION_PERSIST_FIELDS` is an
+allowlist, and `FORBIDDEN_PERSISTED_KEYS` is checked against every nested
+value before a row is written, so reply text and action tokens cannot
+reach the file even under a key the allowlist keeps.
 
 All responses use the `responses.success_payload`/`error_payload`
 envelopes with `command: "workbench"`. Stable error reasons reused

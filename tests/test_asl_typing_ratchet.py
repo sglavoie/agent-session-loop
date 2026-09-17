@@ -245,6 +245,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.workbench_catalog",
         "agent_session_loop.workbench_details",
         "agent_session_loop.workbench_history",
+        "agent_session_loop.workbench_operations",
         "agent_session_loop.workbench_server",
         "agent_session_loop.workspace_evidence",
         "agent_session_loop.workspaces",
@@ -262,6 +263,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "asl_workbench.compatibility",
         "asl_workbench.details",
         "asl_workbench.history",
+        "asl_workbench.operations",
     }
 )
 

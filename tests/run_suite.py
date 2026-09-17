@@ -285,6 +285,10 @@ INTEGRATION_MODULES = (
     # Same again for the detail reads: containment and "a read changes
     # nothing" are only worth asserting against the routes that serve them.
     "tests.test_workbench_details",
+    # Integration for a third reason: the guarantee is cross-process, so
+    # proving it takes real child interpreters racing a real flock, and the
+    # route half needs a live server.
+    "tests.test_workbench_operations",
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
     "tests.test_asl_overseer_e2e",

@@ -2661,16 +2661,16 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             )
 
     def test_docs_describe_the_workbench_launch_idempotency_key(self) -> None:
-        """``launch_id`` and the limits of an in-process receipt table."""
+        """``launch_id``, and the durable journal the receipt now comes from."""
         docs = self._read("docs/agent-session-loop.md")
         normalized = " ".join(docs.split())
 
         for marker in (
             "accept an optional `launch_id` bounded by "
             "`redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS`",
-            "it makes a *retry to the same process* idempotent, and what "
-            "stops two runs across two Workbench processes remains the plan "
-            "lock",
+            "both routes admit through the plan's operation journal, so a "
+            "resend is idempotent across Workbench processes and across a "
+            "restart, not only within the process that spawned",
             '`reason: "launch-already-in-flight"` while a process this '
             "server started for the plan is still alive",
             "A paused run is not a conflict: resuming one is what `/api/reply` is for.",
@@ -2679,6 +2679,30 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
                 marker,
                 normalized,
                 msg=f"docs omit launch idempotency marker: {marker!r}",
+            )
+
+    def test_docs_describe_durable_operation_admission(self) -> None:
+        """The two answers an interruption can leave, and who stays authority."""
+        docs = self._read("docs/agent-session-loop.md")
+        normalized = " ".join(docs.split())
+
+        for marker in (
+            "keeps a per-plan journal at `<state-dir>/<plan-hash>/operations.jsonl`",
+            "holds an exclusive `flock` across read, decide, and append",
+            "Dispatch is recorded before the side effect, never after.",
+            "a killed process leaves `expired` when the mutation certainly "
+            "did not run, and `unconfirmed` when it may have and nobody can "
+            "say",
+            "never infers success from absence",
+            "An `unconfirmed` operation is never retried automatically.",
+            "settles the old row `superseded` with detail `replaced-uncertain`",
+            "Admission is a gate in front of the plan lock, not a replacement for it.",
+            "The journal holds identifiers only.",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"docs omit operation-admission marker: {marker!r}",
             )
 
     def test_docs_describe_the_conversation_recovery_card(self) -> None:
