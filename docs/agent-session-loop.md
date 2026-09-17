@@ -2943,8 +2943,9 @@ For a registered plan, `--cwd` is the non-Git-capable common workspace root.
 Preflight resolves the ordered registry once; validates child existence,
 directory type, exact Git top-level, origin, disjointness, scope, and contract
 locations; captures every registered repository fail-closed; and reuses the
-resolved repository context for command and baseline checks. Commit mode
-requires every registered tree to be clean. Registered JSON adds
+resolved repository context for command and baseline checks. Per-session commit
+mode requires the current session’s needed trees to be clean; at-end commits
+require every registered tree to be clean. Registered JSON adds
 `workspace_root`, `registry_digest`, and ordered `repositories` summaries;
 text output prints the same ordered summaries. Legacy plans retain `Repo root`
 text and omit those additive JSON fields.
@@ -10451,3 +10452,41 @@ replaying the correction or fabricating acknowledgment. `not-submitted` releases
 the correction for the next prompt, but is refused if delivery is already
 recorded. The command requires a reason and refuses a live runner; the decision
 is durable before any release. There is no timed or default resolution.
+
+For a registered `--commit-per-session` run paused after independent repository
+changes, the operator can acknowledge the historical incident and explicitly
+checkpoint retained owned work:
+
+```sh
+asl acknowledge-external-changes PLAN_DIR --session SESSION_ID --repository ALIAS --json
+asl acknowledge-external-changes PLAN_DIR --session SESSION_ID --repository ALIAS --accept DIGEST --reason 'Independent changes authorized by operator' --checkpoint-retained --json
+```
+
+Repeat `--repository` for each independent alias. Preview never establishes
+authorship or changes Git contents, indexes, refs, or session status. Acceptance
+requires explicit operator authorization, a reason, the exact reviewed digest,
+complete evidence, unchanged original roots/origins, binding, registry, scope,
+plan content and guard policy, and no active runner. External changes cannot be
+acknowledged in a writable repository. Dirty read-only repositories needed by
+the current session block recovery. The retained writable paths must match the
+rejected turn's original file and index fingerprints; unrelated staged files,
+new dirt or content drift block checkpoints. Linked worktrees remain under their
+owning alias and use their own staging root.
+
+Recovery persists progress before committing and records checkpoint SHAs. A
+partial failure prints `resume_argv`; rerun that exact command after repairing
+the failure. Recorded successes are never recommitted, and interrupted commits
+require exact parent, message, paths and content proof. Acknowledgement is
+recorded only after checkpoint targets are clean and unrelated evidence remains
+unchanged. The rejected turn and assurance issues remain intact. Checkpoints
+retain unverified work and leave the session pending; verification and review
+still run on resumption.
+
+Only the current session's read/write union needs clean repositories before a
+registered per-session worker launch. This check repeats before each worker, so
+a previously unused dirty repository blocks when a later session needs it.
+Missing or malformed scope fails closed. Complete workspace mutation guards
+remain active: new changes in unused repositories still reject the turn and
+require a fresh acknowledgement. Legacy and `--commit-at-end` checks retain
+their existing behavior. `asl status --json` exposes preview commands and durable
+recovery progress for operator inspection and supervisor audit.

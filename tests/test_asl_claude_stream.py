@@ -311,6 +311,104 @@ class StreamSessionPromptTests(TempDirTestCase):
         self.assertTrue(session.stdin_closed)
         self.assertTrue(stdin.closed_by_asl)
 
+    def test_background_reviews_require_a_followup_result_before_eof(self) -> None:
+        session, stdin = session_with()
+        session.send_prompt()
+        processor = harnesses._ClaudeStreamJsonOutputProcessor(session)
+
+        def emit(record: dict[str, Any]) -> None:
+            processor.process_chunk("stdout", json.dumps(record) + "\n")
+
+        for task_id in ("code", "tests", "docs"):
+            emit(dict(type="system", subtype="task_started", task_id=task_id))
+        emit(dict(type="result", subtype="success", result="reviews running"))
+        self.assertFalse(stdin.closed_by_asl)
+        self.assertFalse(processor.final_result_seen)
+        for task_id in ("code", "tests"):
+            emit(dict(type="system", subtype="task_notification", task_id=task_id))
+            emit(dict(type="result", origin={"kind": "task-notification"}))
+            self.assertFalse(stdin.closed_by_asl)
+            self.assertFalse(processor.final_result_seen)
+        emit(dict(type="system", subtype="task_notification", task_id="docs"))
+        self.assertFalse(stdin.closed_by_asl)
+        emit(dict(type="result", origin={"kind": "task-notification"}))
+        self.assertTrue(stdin.closed_by_asl)
+        self.assertTrue(processor.final_result_seen)
+
+    def test_task_followup_does_not_answer_queued_guidance(self) -> None:
+        session, stdin = session_with()
+        session.send_prompt()
+        session.note_background_task("review", finished=False)
+        session.steer(request_for())
+        session.note_result()
+        session.note_background_task("review", finished=True)
+        self.assertFalse(session.note_result(background_followup=True))
+        self.assertFalse(stdin.closed_by_asl)
+        self.assertTrue(session.note_result())
+
+    def test_main_turn_can_consume_task_results_inline(self) -> None:
+        session, stdin = session_with()
+        session.send_prompt()
+        session.note_background_task("review", finished=False)
+        session.note_background_task("review", finished=True)
+        self.assertFalse(stdin.closed_by_asl)
+        self.assertTrue(session.note_result())
+        self.assertTrue(stdin.closed_by_asl)
+
+    def test_error_and_interruption_end_a_background_conversation(self) -> None:
+        for error in (True, False):
+            with self.subTest(error=error):
+                session, stdin = session_with()
+                session.send_prompt()
+                session.note_background_task("review", finished=False)
+                if not error:
+                    session._interrupt_requested = True
+                self.assertTrue(session.note_result(is_error=error))
+                self.assertTrue(stdin.closed_by_asl)
+
+    def test_real_process_waits_for_background_review_followup(self) -> None:
+        for origin in ({"kind": "task-notification"}, None):
+            with self.subTest(origin=origin):
+                self._run_background_process(origin)
+
+    def _run_background_process(self, origin: dict[str, str] | None) -> None:
+        script = self.tmp / "fake-claude"
+        script.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import json, select, sys",
+                    "json.loads(sys.stdin.readline())",
+                    "def emit(**record): print(json.dumps(record), flush=True)",
+                    "emit(type='system', subtype='task_started', task_id='review')",
+                    "emit(type='result', subtype='success', result='review running')",
+                    "if select.select([sys.stdin], [], [], 0.1)[0]: sys.exit(71)",
+                    "emit(type='system', subtype='task_notification',",
+                    "     task_id='review')",
+                    "if select.select([sys.stdin], [], [], 0.1)[0]: sys.exit(72)",
+                    "emit(type='result', subtype='success', result='review finished',",
+                    f"     origin={origin!r})",
+                    "assert sys.stdin.read() == ''",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        fired: list[bool] = []
+        message = self.tmp / "last-message.txt"
+        result = harnesses.ClaudeAdapter(executable=str(script)).run(
+            cwd=self.tmp,
+            plan_dir=self.tmp,
+            prompt="review the work",
+            timeout=5,
+            on_final_result=lambda: fired.append(True),
+            last_message_path=message,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertFalse(result.timed_out)
+        self.assertEqual([True], fired)
+        self.assertEqual("review finished\n", result.last_message)
+
 
 class StreamSessionSteerTests(TempDirTestCase):
     """A write is not a delivery; evidence is."""

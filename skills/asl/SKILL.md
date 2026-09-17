@@ -646,7 +646,13 @@ not generic retry candidates:
   read-only or out-of-scope registered repositories and for added/removed
   registered repositories. A repository the plan never registered cannot raise
   it. Do not revert or adopt that delta; the operator must restore it or
-  durably repair scope and refresh preparation evidence.
+  durably repair scope and refresh preparation evidence. Independent changes
+  have an explicit operator-authorized recovery: preview with
+  `asl acknowledge-external-changes PLAN_DIR --session SESSION_ID --repository ALIAS --json`,
+  review the evidence, then accept its digest with a reason.
+  `--checkpoint-retained` separately authorizes verified retained-path commits.
+  Never infer independent authorship, acknowledge a writable alias, or recommit
+  recorded checkpoint successes. Checkpoints leave the session pending.
 - `workspace-write-guard-unavailable` means complete Git evidence could not be
   captured for a registered repository. Treat it fail-closed and surface the
   affected aliases/topology. The failing node always sits inside the registry,

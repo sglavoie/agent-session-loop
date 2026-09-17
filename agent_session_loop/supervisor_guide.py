@@ -244,6 +244,20 @@ def _operations_payload() -> list[dict[str, str]]:
             "command": f"asl control recover-conversation {PLAN_DIR} --json",
         },
         {
+            "name": "acknowledge-external-changes",
+            "description": (
+                "Preview a retained workspace incident. Acceptance requires explicit "
+                "operator authorization of independent changes, a reviewed digest and "
+                "reason; --checkpoint-retained separately authorizes "
+                "retained-work commits. "
+                "Never infer authorship or acknowledge a writable repository."
+            ),
+            "command": (
+                f"asl acknowledge-external-changes {PLAN_DIR} --session {SESSION_ID} "
+                "--repository ALIAS --json"
+            ),
+        },
+        {
             "name": "status",
             "description": (
                 "Recover run state after DONE outcome=error or LOST, and "

@@ -96,6 +96,7 @@ from . import (
     run_persistence,
     run_prompts,
     run_selection,
+    scope_recovery,
     turn_execution,
     turn_preparation,
     verification,
@@ -537,6 +538,11 @@ def capture_turn_baselines(
                     details={
                         **session_details,
                         "workspace_write_guard": repair_record,
+                        "external_change_recovery": scope_recovery.recovery_diagnostics(
+                            snapshot.plan_dir,
+                            session_id,
+                            repair_record,
+                        ),
                     },
                 )
                 return refused()

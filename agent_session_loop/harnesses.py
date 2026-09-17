@@ -1104,7 +1104,14 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
         if record_type == "result":
             self._final_result_seen = True
             if self._session is not None:
-                self._session.note_result()
+                origin = record.get("origin")
+                self._final_result_seen = self._session.note_result(
+                    background_followup=(
+                        isinstance(origin, dict)
+                        and origin.get("kind") == "task-notification"
+                    ),
+                    is_error=record.get("is_error") is True,
+                )
             result = record.get("result")
             if isinstance(result, str):
                 self._final_result = result
@@ -1124,6 +1131,17 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
 
     def _render_system(self, record: dict[str, object]) -> list[str]:
         subtype = record.get("subtype")
+        if subtype in ("task_started", "task_notification", "task_progress"):
+            task_id = record.get("task_id")
+            if isinstance(task_id, str) and task_id:
+                self._final_result_seen = False
+                if self._session is not None and subtype != "task_progress":
+                    self._session.note_background_task(
+                        task_id, finished=subtype == "task_notification"
+                    )
+                # Also invalidates a prior result in the heartbeat sentinel.
+                # Do not render task output paths, summaries, or identifiers.
+                return ["claude status: requesting"]
         if subtype == "init":
             # A long-lived CLI can emit another initialization after an early
             # result. From this point that result belongs to the prior request,

@@ -403,6 +403,7 @@ class ClaudeStreamSession:
         self._control_seq = 0
         self._interrupt_requested = False
         self._turn_interrupted = False
+        self._background_tasks: set[str] = set()
 
     # -- state a caller reads ----------------------------------------------
 
@@ -491,7 +492,23 @@ class ClaudeStreamSession:
 
     # -- observations from the output processor -----------------------------
 
-    def note_result(self) -> None:
+    def note_background_task(self, task_id: str, *, finished: bool) -> None:
+        """Keep EOF behind task completion and a subsequent result boundary.
+
+        A task notification is not a turn boundary: the CLI still needs stdin
+        for further control responses. Only a subsequent result may close it.
+        That result may belong to the main turn when it consumes task outcomes
+        inline, or to a synthetic follow-up. Identifiers keep tasks separate.
+        """
+        with self._state_lock:
+            if finished:
+                self._background_tasks.discard(task_id)
+            else:
+                self._background_tasks.add(task_id)
+
+    def note_result(
+        self, *, background_followup: bool = False, is_error: bool = False
+    ) -> bool:
         """Record one terminal ``result`` record and close stdin when idle.
 
         The CLI in streaming-input mode runs until its stdin reaches EOF, so
@@ -499,7 +516,9 @@ class ClaudeStreamSession:
         every written message has been answered. A result covers all messages
         echoed before it, including guidance taken up in the active tool loop.
         Without a new echo it covers one message, preserving the older CLI
-        behavior. Unacknowledged queued guidance keeps stdin open.
+        behavior. Unacknowledged queued guidance and background tasks keep
+        stdin open. Synthetic task results do not answer queued user messages.
+        Returns whether this result ends the conversation.
         """
         # Serialize the decision and close with writes: a guidance write must
         # either be counted before the decision or observe the closed pipe.
@@ -515,6 +534,8 @@ class ClaudeStreamSession:
                     # either way, so stdin closes regardless of the queue.
                     self._turn_interrupted = True
                     idle = True
+                elif is_error:
+                    idle = True
                 else:
                     echoed_through = max(
                         (
@@ -524,12 +545,17 @@ class ClaudeStreamSession:
                         ),
                         default=0,
                     )
-                    self._messages_answered = max(
-                        self._messages_answered + 1, echoed_through
+                    if not background_followup:
+                        self._messages_answered = max(
+                            self._messages_answered + 1, echoed_through
+                        )
+                    idle = (
+                        self._messages_answered >= self._messages_written
+                        and not self._background_tasks
                     )
-                    idle = self._messages_answered >= self._messages_written
             if idle:
                 self._close_stdin_locked()
+            return idle
 
     def note_user_echo(self, text: str) -> None:
         """Record the CLI echoing a user message it has taken up.

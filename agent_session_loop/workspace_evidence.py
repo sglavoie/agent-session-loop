@@ -563,7 +563,10 @@ def _latest_workspace_scope_repair_requirement(
             continue
         if record.get("name") == events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT:
             return None
-        if record.get("name") == events.WORKSPACE_REF_UPDATES_ACCEPTED_EVENT:
+        if record.get("name") in (
+            events.WORKSPACE_REF_UPDATES_ACCEPTED_EVENT,
+            events.WORKSPACE_EXTERNAL_CHANGES_ACKNOWLEDGED_EVENT,
+        ):
             acceptance = details.get("acceptance")
             if (
                 isinstance(acceptance, dict)

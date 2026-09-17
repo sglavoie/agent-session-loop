@@ -1494,6 +1494,22 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     commit_parser.set_defaults(handler_ref="commit_message:commit_from_args")
 
+    external_parser = subparsers.add_parser(
+        "acknowledge-external-changes",
+        help="Preview or acknowledge independent changes and checkpoint retained work.",
+    )
+    external_parser.add_argument("plan_dir")
+    external_parser.add_argument("--session", required=True)
+    external_parser.add_argument("--repository", action="append", required=True)
+    external_parser.add_argument("--state-dir")
+    external_parser.add_argument("--json", action="store_true")
+    external_parser.add_argument("--accept", metavar="DIGEST")
+    external_parser.add_argument("--reason")
+    external_parser.add_argument("--checkpoint-retained", action="store_true")
+    external_parser.set_defaults(
+        handler_ref="scope_recovery:acknowledge_external_changes_from_args"
+    )
+
     accept_refs_parser = subparsers.add_parser(
         "accept-ref-updates",
         help="Preview or explicitly accept a paused session's remote-ref-only changes.",

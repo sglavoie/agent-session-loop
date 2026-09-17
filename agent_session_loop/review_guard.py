@@ -292,6 +292,7 @@ def _validate_commit_preflight(
     cwd: Path,
     *,
     verification_context: verification.VerificationContext | None = None,
+    needed_aliases: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     context = verification_context or verification.VerificationContext.legacy(cwd)
     if context.workspace is None:
@@ -301,6 +302,8 @@ def _validate_commit_preflight(
 
     repositories: list[dict[str, Any]] = []
     for repository in context.workspace.repositories:
+        if needed_aliases is not None and repository.alias not in needed_aliases:
+            continue
         _validate_git_worktree(repository.root)
         try:
             clean = _git_status_is_clean(repository.root)
@@ -308,6 +311,22 @@ def _validate_commit_preflight(
             raise RunError(
                 f"could not inspect repository {repository.alias}: {error}"
             ) from error
+        if needed_aliases is not None:
+            try:
+                linked_roots = repository_evidence.linked_worktrees(repository.root)
+            except repository_evidence.RepositoryEvidenceError as error:
+                raise RunError(str(error)) from error
+            registered_roots = {r.root for r in context.workspace.repositories}
+            for linked in linked_roots:
+                if linked in registered_roots:
+                    continue
+                try:
+                    _validate_clean_git_status(linked)
+                except RunError as error:
+                    raise RunError(
+                        f"needed repository {repository.alias} linked tree {linked}: "
+                        f"{error}"
+                    ) from error
         repositories.append(
             {
                 "alias": repository.alias,

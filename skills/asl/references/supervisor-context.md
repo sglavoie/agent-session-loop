@@ -65,6 +65,8 @@ Supervise and answer
     asl control redirect-status PLAN_DIR --wait-acknowledged --json
   recover-conversation: Read why a run paused conversation-recovery-required and print the one-use relaunch that authorizes a fresh conversation. A read only: discarding an agent's saved reasoning is the user's decision, so run the printed asl run ... --fresh-conversation yourself only when the user says to. Supervision never resumes this pause on its own, and the autopilot helper refuses a command carrying --fresh-conversation outright.
     asl control recover-conversation PLAN_DIR --json
+  acknowledge-external-changes: Preview a retained workspace incident. Acceptance requires explicit operator authorization of independent changes, a reviewed digest and reason; --checkpoint-retained separately authorizes retained-work commits. Never infer authorship or acknowledge a writable repository.
+    asl acknowledge-external-changes PLAN_DIR --session SESSION_ID --repository ALIAS --json
   status: Recover run state after DONE outcome=error or LOST, and before treating a plan as idle.
     asl status PLAN_DIR --json
   read-result: Read the detached helper's verdict from the handshake's result_path once DONE ends the loop; fall back to asl status when the outcome was error.

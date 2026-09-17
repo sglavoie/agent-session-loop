@@ -72,6 +72,9 @@ REVIEW_SCOPE_EVENT = "review_scope_selected"
 REVIEW_CYCLE_EVENT = "review_cycle"
 REVIEW_REPAIR_REOPENED_EVENT = "review_repair_reopened"
 WORKSPACE_WRITE_SCOPE_REPAIR_EVENT = "workspace_write_scope_repair"
+WORKSPACE_EXTERNAL_CHANGES_ACKNOWLEDGED_EVENT = (
+    "workspace_external_changes_acknowledged"
+)
 WORKSPACE_REF_UPDATES_ACCEPTED_EVENT = "workspace_ref_updates_accepted"
 # Appended when a review turn produced a verdict that failed validation and the
 # runner re-ran the same review session in-run instead of pausing. The

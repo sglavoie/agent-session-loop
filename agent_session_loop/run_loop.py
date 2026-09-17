@@ -108,6 +108,7 @@ from . import (
     run_reporting,
     run_selection,
     run_termination,
+    scope_recovery,
     session_verification,
     spark_status,
     state,
@@ -1827,6 +1828,12 @@ def run_locked(
             "readiness_gate": ctx.gate_payload,
             "workspace_write_guard": initial_workspace_scope_repair,
         }
+        details["external_change_recovery"] = scope_recovery.recovery_diagnostics(
+            snapshot.plan_dir,
+            session_id,
+            initial_workspace_scope_repair,
+            state_dir=args.state_dir,
+        )
         ctx.record_final_snapshot(snapshot)
         ctx.pause(
             reason=events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
@@ -1907,6 +1914,14 @@ def run_locked(
             commit_preflight = review_guard._validate_commit_preflight(
                 cwd,
                 verification_context=ctx.verification_context,
+                needed_aliases=(
+                    plans.needed_repository_aliases(
+                        snapshot, ctx.verification_context.workspace.registry
+                    )
+                    if commit_mode == run_selection.COMMIT_MODE_PER_SESSION
+                    and ctx.verification_context.workspace is not None
+                    else None
+                ),
             )
             with ctx.persistence.lock:
                 ctx.payload["commit_preflight"] = commit_preflight
@@ -2297,6 +2312,28 @@ def run_locked(
             regenerated_write_scope = repair_resumption.regenerated_write_scope
             if repair_resumption.paused:
                 break
+            if (
+                commit_mode == run_selection.COMMIT_MODE_PER_SESSION
+                and workspace is not None
+            ):
+                try:
+                    if session_scope is None:
+                        raise RunError("current session scope is unavailable")
+                    review_guard._validate_commit_preflight(
+                        cwd,
+                        verification_context=ctx.verification_context,
+                        needed_aliases=frozenset(
+                            (*session_scope.reads, *session_scope.writes)
+                        ),
+                    )
+                except RunError as error:
+                    ctx.record_final_snapshot(before)
+                    ctx.pause(
+                        reason="commit-preflight",
+                        message=str(error),
+                        details=session_details,
+                    )
+                    break
             turn_reply = pending_reply
             turn_resolution = pending_resolution
             use_reply_prompt = turn_reply is not None

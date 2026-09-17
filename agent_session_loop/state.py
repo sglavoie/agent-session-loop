@@ -1967,7 +1967,12 @@ def status_payload(
     # its mutating materializer, and the assurance ledger depends on state for
     # its root, while this status path only uses their read-only projections
     # after state has finished importing. Neither can launch an audit.
-    from . import assurance_report, review_continuation
+    from . import (
+        assurance_report,
+        review_continuation,
+        scope_recovery,
+        workspace_evidence,
+    )
 
     plan_state = plan_state_dir(snapshot.plan_dir, state_dir)
     state_path = plan_state / events.STATE_FILE_NAME
@@ -2034,6 +2039,27 @@ def status_payload(
                 ],
             }
     cwd_fields = {"cwd": workspace_fields["workspace_root"]} if workspace_fields else {}
+    retained = (
+        workspace_evidence._latest_workspace_scope_repair_requirement(
+            event_path, next_pending.id
+        )
+        if next_pending is not None and workspace_fields
+        else None
+    )
+    recovery = (
+        scope_recovery.recovery_diagnostics(
+            snapshot.plan_dir, next_pending.id, retained, state_dir=state_dir
+        )
+        if retained is not None and next_pending is not None
+        else None
+    )
+    if recovery is None:
+        recovery_path = plan_state / scope_recovery.RECOVERY_FILE_NAME
+        if recovery_path.exists():
+            try:
+                recovery = {"progress": json.loads(recovery_path.read_text())}
+            except ValueError, OSError:
+                recovery = {"progress": {"error": "recovery journal is unreadable"}}
     return responses.success_payload(
         "status",
         plan_dir=str(snapshot.plan_dir),
@@ -2047,6 +2073,7 @@ def status_payload(
         state_path=str(state_path),
         events_path=str(event_path),
         runner_state=runner_state,
+        external_change_recovery=recovery,
         spark=runner_state.get("spark"),
         active_turn=runner_state.get("active_turn"),
         active_verification=runner_state.get("active_verification"),
@@ -2080,6 +2107,9 @@ def _print_text_status(payload: dict[str, Any]) -> None:
     print(f"State dir: {payload['state_dir']}")
     print(f"State file: {payload['state_path']}")
     print(f"Events: {payload['events_path']}")
+    recovery = payload.get("external_change_recovery")
+    if isinstance(recovery, dict) and recovery.get("preview_command"):
+        print(f"External-change recovery preview: {recovery['preview_command']}")
     spark = payload.get("spark")
     if isinstance(spark, dict):
         enabled = "enabled" if spark.get("enabled") else "disabled"

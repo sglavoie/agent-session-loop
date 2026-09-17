@@ -2310,12 +2310,10 @@ class CommitFailureProgressTests(unittest.TestCase):
 
 
 class CommitFailureSoftFailTests(unittest.TestCase):
-    """A refused commit costs a run its commits, not its remaining sessions.
+    """Commit recovery precedes the required-tree check for the next worker.
 
-    Every assertion here is about a full two-session run, because the promise
-    is about what happens *after* the failure: the next session still runs, the
-    owed group is retried before it does, and a run that never recovers ends by
-    saying so instead of by stopping.
+    A transient failure recovers and continues. A persistent failure leaving a
+    needed tree dirty pauses before another worker can launch.
     """
 
     def setUp(self) -> None:
@@ -2380,7 +2378,13 @@ class CommitFailureSoftFailTests(unittest.TestCase):
             name="codex", argv=["fake"], returncode=0, stdout="ok\n", stderr=""
         )
 
-    def _run(self, run_id: str, *, fail_limit: int | None = None) -> dict[str, Any]:
+    def _run(
+        self,
+        run_id: str,
+        *,
+        fail_limit: int | None = None,
+        max_sessions: int | None = None,
+    ) -> dict[str, Any]:
         env = fake_commit_harness_env(self.tmp_path, log_path=self.commit_log)
         env["FAKE_CODEX_COMMIT_MODE"] = "failure"
         if fail_limit is not None:
@@ -2394,11 +2398,12 @@ class CommitFailureSoftFailTests(unittest.TestCase):
             dry_run=False,
             unsafe_bypass=True,
             timeout=None,
-            max_sessions=None,
+            max_sessions=max_sessions,
             commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
             model=None,
             effort=None,
             note=None,
+            max_pending_sessions=30,
             allow_not_loop_ready=True,
         )
         lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
@@ -2411,7 +2416,7 @@ class CommitFailureSoftFailTests(unittest.TestCase):
                     args=args,
                     cwd=self.workspace_root,
                     timeout=None,
-                    max_sessions=None,
+                    max_sessions=max_sessions,
                     commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
                     lock_info=lock_info,
                     run_id=run_id,
@@ -2429,20 +2434,20 @@ class CommitFailureSoftFailTests(unittest.TestCase):
         )
         return read_jsonl(event_path)
 
-    def test_a_refused_commit_advances_to_the_next_session(self) -> None:
+    def test_a_refused_commit_blocks_the_next_needed_dirty_session(self) -> None:
         payload = self._run("soft-fail-run")
 
-        self.assertEqual(0, self.exit_code)
-        self.assertFalse(payload["paused"])
-        self.assertEqual("all-complete", payload["reason"])
-        self.assertEqual([1, 2], payload["completed_sessions"])
+        self.assertEqual(1, self.exit_code)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("commit-preflight", payload["reason"])
+        self.assertEqual([1], payload["completed_sessions"])
         self.assertEqual(
-            ["complete", "complete"],
+            ["complete", "pending"],
             [session.status for session in plans.inspect_plan(self.plan_dir).sessions],
         )
         names = [record["name"] for record in self._records()]
-        self.assertEqual(2, names.count(events.TURN_FINISHED_EVENT))
-        self.assertNotIn("run_paused", names)
+        self.assertEqual(1, names.count(events.TURN_FINISHED_EVENT))
+        self.assertIn("run_paused", names)
         # The turn executed, verified, and completed its session; only the
         # commit of its changes failed, so no guard rejected it.
         self.assertNotIn(events.TURN_REJECTED_EVENT, names)
@@ -2452,7 +2457,7 @@ class CommitFailureSoftFailTests(unittest.TestCase):
 
         failures = payload["commit_failures"]
         self.assertEqual({"session"}, {record["scope"] for record in failures})
-        self.assertEqual({"1", "2"}, {record["session_id"] for record in failures})
+        self.assertEqual({"1"}, {record["session_id"] for record in failures})
         first = failures[0]
         self.assertIn("auto-commit failed after session 1", first["message"])
         self.assertFalse(first["commit"]["success"])
@@ -2467,7 +2472,7 @@ class CommitFailureSoftFailTests(unittest.TestCase):
         payload = self._run("soft-fail-report-run")
 
         summaries = payload["unresolved_commit_groups"]
-        self.assertEqual({"1", "2"}, {str(row["session_id"]) for row in summaries})
+        self.assertEqual({"1"}, {str(row["session_id"]) for row in summaries})
         self.assertEqual({"session"}, {row["scope"] for row in summaries})
         self.assertEqual({"SVC"}, {row["failed_alias"] for row in summaries})
         # The same record reaches the state file the supervisor audit reads.
@@ -2527,6 +2532,86 @@ class CommitFailureSoftFailTests(unittest.TestCase):
             self.assertLessEqual(
                 attempts, commit_settlement.MAX_COMMIT_GROUP_RETRIES + 1
             )
+
+    def test_unused_dirty_repository_does_not_block_worker_launch(self):
+        unused = next(alias for alias in self.repositories if alias != "SVC")
+        for session in plans.inspect_plan(self.plan_dir).sessions:
+            text = session.path.read_text()
+            registry = plans.read_repository_registry(self.plan_dir)
+            scope = plans.parse_session_scope(text, registry.aliases)
+            text = text.replace(
+                plans.render_session_scope(scope).strip(),
+                plans.render_session_scope(
+                    plans.SessionScope(reads=("SVC",), writes=("SVC",))
+                ).strip(),
+            )
+            session.path.write_text(text)
+        path = self.repositories[unused] / "independent.txt"
+        path.write_text("pre-existing independent work\n")
+        payload = self._run("unused-dirt", fail_limit=0)
+        self.assertEqual(0, self.exit_code, payload.get("message"))
+        self.assertEqual([1, 2], payload["completed_sessions"])
+        self.assertEqual("pre-existing independent work\n", path.read_text())
+
+    def test_seventeen_session_budget_stops_before_session_twenty_one(self):
+        write_multi_repo_plan(
+            self.plan_dir, ("complete",) * 3 + ("pending",) * 18, specs=SPECS
+        )
+        payload = self._run("seventeen-session-budget", fail_limit=0, max_sessions=17)
+        self.assertEqual(0, self.exit_code, payload.get("message"))
+        self.assertEqual("max-sessions", payload["reason"])
+        self.assertEqual(list(range(4, 21)), payload["completed_sessions"])
+        self.assertEqual("21", plans.inspect_plan(self.plan_dir).next_pending.id)
+
+    def test_later_scope_blocks_preexisting_dirty_repository(self):
+        unused = next(alias for alias in self.repositories if alias != "SVC")
+        registry = plans.read_repository_registry(self.plan_dir)
+        first = self.plan_dir / "session-1.md"
+        text = first.read_text()
+        scope = plans.parse_session_scope(text, registry.aliases)
+        first.write_text(
+            text.replace(
+                plans.render_session_scope(scope).strip(),
+                plans.render_session_scope(
+                    plans.SessionScope(reads=("SVC",), writes=("SVC",))
+                ).strip(),
+            )
+        )
+        (self.repositories[unused] / "independent.txt").write_text("existing dirt\n")
+        payload = self._run("later-needed-dirt", fail_limit=0)
+        self.assertEqual(1, self.exit_code)
+        self.assertEqual("commit-preflight", payload["reason"])
+        self.assertEqual([1], payload["completed_sessions"])
+        self.assertEqual("2", plans.inspect_plan(self.plan_dir).next_pending.id)
+
+    def test_new_unused_repository_mutation_still_rejects_worker(self):
+        unused = next(alias for alias in self.repositories if alias != "SVC")
+        registry = plans.read_repository_registry(self.plan_dir)
+        first = self.plan_dir / "session-1.md"
+        text = first.read_text()
+        scope = plans.parse_session_scope(text, registry.aliases)
+        first.write_text(
+            text.replace(
+                plans.render_session_scope(scope).strip(),
+                plans.render_session_scope(
+                    plans.SessionScope(reads=("SVC",), writes=("SVC",))
+                ).strip(),
+            )
+        )
+        original = self._harness
+
+        def mutating(*args, **kwargs):
+            result = original(*args, **kwargs)
+            (self.repositories[unused] / "new-dirt.txt").write_text("new mutation\n")
+            return result
+
+        with mock.patch.object(self, "_harness", side_effect=mutating):
+            payload = self._run("new-unused-mutation", fail_limit=0)
+        self.assertEqual(1, self.exit_code)
+        self.assertEqual("workspace-write-scope-violation", payload["reason"])
+        self.assertEqual([], payload["completed_sessions"])
+        self.assertEqual("1", plans.inspect_plan(self.plan_dir).next_pending.id)
+        self.assertTrue((self.repositories[unused] / "new-dirt.txt").exists())
 
 
 class UnregisteredCommitTargetTests(unittest.TestCase):

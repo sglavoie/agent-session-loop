@@ -57,6 +57,7 @@ from . import (
     baseline,
     harness_compatibility,
     harnesses,
+    plans,
     progress_repair,
     repository_evidence,
     repository_intent,
@@ -2880,11 +2881,49 @@ def _check_env_git(
 def _check_registered_env_git(
     context: VerificationContext,
     commit_mode: CommitMode | None,
+    snapshot: PlanSnapshot | None = None,
 ) -> tuple[PreflightFinding, ...]:
     if context.workspace is None or commit_mode not in COMMIT_MODES:
         return ()
     findings: list[PreflightFinding] = []
+    needed = None
+    if commit_mode == "per-session":
+        try:
+            if snapshot is None:
+                raise PlanError("current session scope is unavailable")
+            needed = plans.needed_repository_aliases(
+                snapshot, context.workspace.registry
+            )
+        except (PlanError, ValueError, OSError) as error:
+            return (_finding("red", "env-git", str(error)),)
     for repository in context.workspace.repositories:
+        if needed is not None and repository.alias not in needed:
+            continue
+        if needed is not None:
+            try:
+                linked_roots = repository_evidence.linked_worktrees(repository.root)
+                registered_roots = {r.root for r in context.workspace.repositories}
+                for linked in linked_roots:
+                    if linked in registered_roots:
+                        continue
+                    linked_status = _run_git(linked, ["status", "--porcelain"])
+                    if (
+                        linked_status is None
+                        or linked_status.returncode != 0
+                        or linked_status.stdout
+                    ):
+                        findings.append(
+                            _finding(
+                                "yellow",
+                                "env-git",
+                                f"needed repository {repository.alias} linked tree "
+                                "is dirty or unavailable",
+                                path=str(linked),
+                                detail=f"commit-mode: {commit_mode}",
+                            )
+                        )
+            except repository_evidence.RepositoryEvidenceError as error:
+                findings.append(_finding("red", "env-git", str(error)))
         status = _run_git(repository.root, ["status", "--porcelain"])
         if status is None or status.returncode != 0:
             detail = ""
@@ -2906,7 +2945,7 @@ def _check_registered_env_git(
                     "env-git",
                     (
                         f"repository {repository.alias} is dirty; commit-mode "
-                        "runs require every registered tree to be clean"
+                        "runs require needed registered trees to be clean"
                     ),
                     path=str(repository.root),
                     detail=f"commit-mode: {commit_mode}",
@@ -3140,7 +3179,7 @@ def _run_environment_checks(
                 findings.extend(_check_env_git(canonical_cwd, commit_mode))
         elif verification_context is not None:
             findings.extend(
-                _check_registered_env_git(verification_context, commit_mode)
+                _check_registered_env_git(verification_context, commit_mode, snapshot)
             )
 
     if harness is not None:

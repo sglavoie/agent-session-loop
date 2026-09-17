@@ -508,6 +508,19 @@ def parse_session_scope(
     return parse_session_scope_lines(text.splitlines(), registry_aliases)
 
 
+def needed_repository_aliases(
+    snapshot: PlanSnapshot, registry: RepositoryRegistry
+) -> frozenset[str]:
+    """Fail closed on the next session's scope; no pending session needs no tree."""
+    session = snapshot.next_pending
+    if session is None:
+        return frozenset()
+    scope = parse_session_scope(
+        session.path.read_text(encoding="utf-8"), registry.aliases
+    )
+    return frozenset((*scope.reads, *scope.writes))
+
+
 def render_session_scope(scope: SessionScope) -> str:
     """Render scope metadata in its canonical two-line form."""
     writes = ", ".join(scope.writes) if scope.writes else "(none)"

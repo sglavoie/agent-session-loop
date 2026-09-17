@@ -108,6 +108,7 @@ from . import (
     run_persistence,
     run_prompts,
     run_termination,
+    scope_recovery,
     turn_execution,
     workspace_evidence,
     workspaces,
@@ -374,6 +375,12 @@ def _enforce_workspace_write_guard(
         details={
             **session_details,
             "workspace_write_guard": guard_record,
+            "external_change_recovery": scope_recovery.recovery_diagnostics(
+                before.plan_dir,
+                session_id,
+                guard_record,
+                state_dir=state_dir_arg,
+            ),
         },
         persistence=persistence,
     )
