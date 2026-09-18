@@ -243,6 +243,10 @@ _CONNECTOR_TESTS = "scripts:tests/test_workbench_connector.py"
 _REMOTE_READ_TESTS = "scripts:tests/test_workbench_remote_reads.py"
 _REMOTE_ACTION_TESTS = "scripts:tests/test_workbench_remote_actions.py"
 _HTTP_TESTS = "scripts:tests/test_workbench_http.py"
+#: The owned host resources and the publisher that writes to one topic. One
+#: module covers both because they are one question: which resources on a
+#: shared host belong to this application, and what may they be used for.
+_INTEGRATION_TESTS = "scripts:tests/test_workbench_integrations.py"
 #: The one front end, asserted from Python and from a real browser. The Python
 #: half proves both deployments serve the same assets over one plan corpus; the
 #: Playwright half drives that shell at desktop and phone widths against both
@@ -1151,17 +1155,28 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _companion_module(
         "companion.integrations",
-        "Scoped Pi integrations: read-only preview, receipt before each mutation.",
-        owner=OWNER_PI_REPO,
+        "Scoped Pi integrations: read-only preview, receipt before each "
+        "mutation. Migrated to asl_workbench.integrations, where the host's "
+        "names became IntegrationSite data; the Pi module is the frozen "
+        "baseline until the Companion imports the portable package.",
+        owner=OWNER_PORTABLE,
         authority=AUTHORITY_HOST,
-        coverage=(f"{_PI}/tests/test_companion_integrations.py",),
+        coverage=(
+            f"{_PI}/tests/test_companion_integrations.py",
+            _INTEGRATION_TESTS,
+        ),
     ),
     _companion_module(
         "companion.integrations_kuma",
-        "Private stdin-only Kuma adapter for the one service-health monitor.",
-        owner=OWNER_PI_REPO,
+        "Private stdin-only Kuma adapter for the one service-health monitor. "
+        "Migrated to asl_workbench.integrations.KUMA_SCRIPT, which takes the "
+        "monitor name and endpoint from the payload rather than the script.",
+        owner=OWNER_PORTABLE,
         authority=AUTHORITY_HOST,
-        coverage=(f"{_PI}/tests/test_companion_integrations.py",),
+        coverage=(
+            f"{_PI}/tests/test_companion_integrations.py",
+            _INTEGRATION_TESTS,
+        ),
     ),
     _companion_module(
         "companion.lifecycle",
@@ -1180,9 +1195,16 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _companion_module(
         "companion.ntfy",
-        "Receipt-aware ntfy publisher over the standard library only.",
+        "Receipt-aware ntfy publisher over the standard library only. "
+        "Migrated to asl_workbench.notifications, which adds the deployment "
+        "guard that keeps a local or staging run from becoming a second "
+        "publisher; the Pi module is the frozen baseline until the Companion "
+        "imports the portable package.",
         owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_incidents.py",),
+        coverage=(
+            f"{_PI}/tests/test_companion_incidents.py",
+            _INTEGRATION_TESTS,
+        ),
     ),
     _companion_module(
         "companion.observation",
@@ -1374,8 +1396,14 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_COMPANION,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_PI_SERVICE,
-        compatibility_adapters=("existing notification links must keep resolving",),
-        regression_coverage=(f"{_PI}/tests/test_companion_incidents.py",),
+        compatibility_adapters=(
+            "existing notification links must keep resolving",
+            "only a production deployment may hold the production publisher",
+        ),
+        regression_coverage=(
+            f"{_PI}/tests/test_companion_incidents.py",
+            _INTEGRATION_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_INTEGRATION}:uptime-kuma-monitor",
@@ -1383,30 +1411,47 @@ CAPABILITIES: tuple[Capability, ...] = (
         summary="The single fixed service-health monitor, provisioned over a "
         "stdin-only adapter.",
         origin=ORIGIN_COMPANION,
-        owner=OWNER_PI_REPO,
+        owner=OWNER_PORTABLE,
         authority=AUTHORITY_HOST,
-        regression_coverage=(f"{_PI}/tests/test_companion_integrations.py",),
+        compatibility_adapters=(
+            "a monitor installed under the Companion's name is renamed in "
+            "place rather than duplicated",
+        ),
+        regression_coverage=(
+            f"{_PI}/tests/test_companion_integrations.py",
+            _INTEGRATION_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_INTEGRATION}:tailscale-serve-route",
         surface=SURFACE_INTEGRATION,
         summary="The private URL: one owned route on port 9443 pointing at the "
-        "companion service.",
+        "unified service.",
         origin=ORIGIN_COMPANION,
-        owner=OWNER_PI_REPO,
+        owner=OWNER_PORTABLE,
         authority=AUTHORITY_HOST,
         compatibility_adapters=("the existing private URL must not change",),
-        regression_coverage=(f"{_PI}/tests/test_companion_integrations.py",),
+        regression_coverage=(
+            f"{_PI}/tests/test_companion_integrations.py",
+            _INTEGRATION_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_INTEGRATION}:homepage-documents",
         surface=SURFACE_INTEGRATION,
-        summary="Homepage service entries describing the companion for the "
-        "host's own dashboard.",
+        summary="Homepage service entries describing the Workbench for the "
+        "host's own dashboard, carrying a summary-only credential.",
         origin=ORIGIN_COMPANION,
-        owner=OWNER_PI_REPO,
+        owner=OWNER_PORTABLE,
         authority=AUTHORITY_HOST,
-        regression_coverage=(f"{_PI}/tests/test_companion_integrations.py",),
+        compatibility_adapters=(
+            "an installed card is recognised by its receipt and its former "
+            "group heading, so the visible name can change without orphaning it",
+        ),
+        regression_coverage=(
+            f"{_PI}/tests/test_companion_integrations.py",
+            _INTEGRATION_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_INTEGRATION}:agentmux-bridge",
