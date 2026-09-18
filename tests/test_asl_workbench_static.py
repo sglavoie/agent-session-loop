@@ -2490,8 +2490,12 @@ class WorkbenchHardeningTests(ShellSourceMixin, unittest.TestCase):
             return previous
 
         try:
+            # Patched where the behaviour lives rather than where it is named:
+            # the installer moved to the shared transport so the Pi's runtime
+            # gets the same SIGTERM, and `workbench_server` keeps the historic
+            # private name pointing at it.
             with mock.patch(
-                "agent_session_loop.workbench_server.signal.signal",
+                "asl_workbench.server.signal.signal",
                 side_effect=recording_signal,
             ):
                 restore = workbench_server._install_shutdown_handlers(server)
@@ -2514,7 +2518,7 @@ class WorkbenchHardeningTests(ShellSourceMixin, unittest.TestCase):
                 server.shutdown = original_shutdown  # type: ignore[assignment]
             # restore() should return the original handlers without raising.
             with mock.patch(
-                "agent_session_loop.workbench_server.signal.signal",
+                "asl_workbench.server.signal.signal",
                 side_effect=original_signal,
             ):
                 restore()

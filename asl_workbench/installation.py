@@ -58,6 +58,65 @@ PRIVATE_FILE_MODE = 0o600
 #: The bits that must be clear on anything under the prefix.
 SHARED_MODE_BITS = 0o077
 
+#: Where a service's own files sit under the installation prefix. These are
+#: paths an *already installed* prefix carries, so they are facts rather than
+#: choices: changing one orphans a file a deployed installation is still
+#: reading. They live here rather than with either caller because provisioning
+#: writes them and packaging reads them, and a layout described twice is a
+#: layout that will eventually be described differently.
+CONFIG_PATH = "config/runtime.json"
+SECRETS_PATH = "credentials/secrets.json"
+CONNECTOR_TOKEN_PATH = "credentials/connector-issued.json"
+SUMMARY_TOKEN_PATH = "credentials/summary.token"
+RECEIPTS_DIRECTORY = "integrations"
+
+#: What the lifecycle owns: the deployment record, the interrupted-transaction
+#: marker, and the four directories a content-addressed installation fills.
+DEPLOYMENT_PATH = "deployment.json"
+TRANSACTION_PATH = "transaction.json"
+RELEASES_DIRECTORY = "releases"
+DEFINITIONS_DIRECTORY = "definitions"
+BACKUPS_DIRECTORY = "backups"
+LOGS_DIRECTORY = "logs"
+
+#: What lives in the state directory, by bare name. The runtime is handed a
+#: *copy* of the state during an upgrade check, so it addresses these relative
+#: to whichever directory it was given rather than to the prefix.
+STATE_DIRECTORY = "state"
+DATABASE_FILE = "workbench.db"
+READY_FILE = "ready.json"
+RUNTIME_LOCK_FILE = "runtime.lock"
+
+#: The same three under the prefix, for callers holding a prefix.
+DATABASE_PATH = f"{STATE_DIRECTORY}/{DATABASE_FILE}"
+READY_PATH = f"{STATE_DIRECTORY}/{READY_FILE}"
+
+#: The locks, each naming what it serializes. They are separate files because
+#: they are separate questions: ``lifecycle.lock`` is "one installer", while
+#: ``state/runtime.lock`` is "one process touching the state", and an upgrade
+#: holds the first while briefly taking the second from the runtime it stopped.
+PROVISION_LOCK = "provision.lock"
+LIFECYCLE_LOCK = "lifecycle.lock"
+RUNTIME_LOCK = f"{STATE_DIRECTORY}/{RUNTIME_LOCK_FILE}"
+INTEGRATION_LOCK = "integration.lock"
+
+#: The directories a provisioned prefix carries, and the ones an installed
+#: prefix adds on top. Provisioning does not create the second set: a prefix
+#: that holds credentials but has never been installed into is a normal state.
+PREFIX_DIRECTORIES: tuple[str, ...] = (
+    "config",
+    "credentials",
+    STATE_DIRECTORY,
+    RECEIPTS_DIRECTORY,
+)
+INSTALLED_DIRECTORIES: tuple[str, ...] = (
+    *PREFIX_DIRECTORIES,
+    RELEASES_DIRECTORY,
+    DEFINITIONS_DIRECTORY,
+    BACKUPS_DIRECTORY,
+    LOGS_DIRECTORY,
+)
+
 
 class InstallationError(ValueError):
     """A prefix, or a path under it, was refused rather than used."""
@@ -170,10 +229,33 @@ def safe_prefix(prefix: Path) -> None:
 
 
 __all__ = [
+    "BACKUPS_DIRECTORY",
+    "CONFIG_PATH",
+    "CONNECTOR_TOKEN_PATH",
+    "DATABASE_FILE",
+    "DATABASE_PATH",
+    "DEFINITIONS_DIRECTORY",
+    "DEPLOYMENT_PATH",
+    "INSTALLED_DIRECTORIES",
+    "INTEGRATION_LOCK",
+    "LIFECYCLE_LOCK",
+    "LOGS_DIRECTORY",
     "MINIMUM_PREFIX_PARTS",
+    "PREFIX_DIRECTORIES",
     "PRIVATE_DIRECTORY_MODE",
     "PRIVATE_FILE_MODE",
+    "PROVISION_LOCK",
+    "READY_FILE",
+    "READY_PATH",
+    "RECEIPTS_DIRECTORY",
+    "RELEASES_DIRECTORY",
+    "RUNTIME_LOCK",
+    "RUNTIME_LOCK_FILE",
+    "SECRETS_PATH",
     "SHARED_MODE_BITS",
+    "STATE_DIRECTORY",
+    "SUMMARY_TOKEN_PATH",
+    "TRANSACTION_PATH",
     "InstallationError",
     "atomic",
     "document",

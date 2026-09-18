@@ -293,6 +293,15 @@ INTEGRATION_MODULES = (
     # Integration rather than portable: it binds a loopback server and spawns
     # a fresh interpreter to prove the portable package loads without ASL.
     "tests.test_workbench_foundations",
+    # Same shape, one step further out: the production artifact is unpacked and
+    # the packaged application is started as a release, so this lane needs a
+    # socket and child interpreters. It is also the one module the Pi's own
+    # interpreter runs -- `python3.13 -m unittest -q tests.test_workbench_portable`
+    # -- which is a separate lane from either of the two lists above.
+    "tests.test_workbench_portable",
+    # Integration for the plainest reason: git, `plutil`, the installed `asl`
+    # executable, and a service release that is genuinely started and stopped.
+    "tests.test_workbench_lifecycle",
     # Same reason: most of it is pure catalog algebra, but the reads it proves
     # are observational are proven against a live workbench server.
     "tests.test_workbench_catalog",

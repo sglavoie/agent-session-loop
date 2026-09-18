@@ -18,6 +18,13 @@ extend-include = ["bin/.local/bin/claude-lint-hook"]
 # `tests/test_workbench_foundations.py` checks that this entry still exists.
 [tool.ruff.per-file-target-version]
 "asl_workbench/**/*.py" = "py313"
+# The portable test lane runs under the Pi's interpreter too -- the contract
+# invokes `python3.13 -m unittest -q tests.test_workbench_portable` -- so the
+# module and the `tests` package initializer it loads through are pinned to the
+# same floor. Without this the formatter rewrites their `except` groups into
+# 3.14 grammar and the lane fails to import before a single test runs.
+"tests/__init__.py" = "py313"
+"tests/test_workbench_portable.py" = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
@@ -289,12 +296,15 @@ module = [
     "asl_workbench.incidents",
     "asl_workbench.installation",
     "asl_workbench.integrations",
+    "asl_workbench.lifecycle",
     "asl_workbench.notifications",
     "asl_workbench.observation",
     "asl_workbench.operations",
     "asl_workbench.overview",
     "asl_workbench.remote_actions",
     "asl_workbench.remote_reads",
+    "asl_workbench.runtime",
+    "asl_workbench.server",
     "asl_workbench.service",
     "asl_workbench.store",
     "asl_workbench.transport",

@@ -72,6 +72,16 @@ from .credentials import (
     issue,
 )
 from .installation import (
+    CONFIG_PATH,
+    CONNECTOR_TOKEN_PATH,
+    INTEGRATION_LOCK,
+    LIFECYCLE_LOCK,
+    PREFIX_DIRECTORIES,
+    PROVISION_LOCK,
+    RECEIPTS_DIRECTORY,
+    RUNTIME_LOCK,
+    SECRETS_PATH,
+    SUMMARY_TOKEN_PATH,
     InstallationError,
     atomic,
     document,
@@ -122,25 +132,6 @@ COMMAND_TIMEOUT_SECONDS = 60
 PHASE_CREATING = "creating"
 PHASE_TOKEN_INTENT = "token-intent"
 PHASE_COMPLETE = "complete"
-
-#: Where a service's own files sit under the installation prefix.
-CONFIG_PATH = "config/runtime.json"
-SECRETS_PATH = "credentials/secrets.json"
-CONNECTOR_TOKEN_PATH = "credentials/connector-issued.json"
-SUMMARY_TOKEN_PATH = "credentials/summary.token"
-RECEIPTS_DIRECTORY = "integrations"
-PROVISION_LOCK = "provision.lock"
-LIFECYCLE_LOCK = "lifecycle.lock"
-RUNTIME_LOCK = "state/runtime.lock"
-INTEGRATION_LOCK = "integration.lock"
-
-#: The directories a provisioned prefix carries.
-PREFIX_DIRECTORIES: tuple[str, ...] = (
-    "config",
-    "credentials",
-    "state",
-    RECEIPTS_DIRECTORY,
-)
 
 #: The key the publisher credential is stored under inside the secrets file.
 NTFY_TOKEN_KEY = "ntfy_token"
@@ -620,6 +611,12 @@ class ServiceEndpoint:
     bind_host: str
     bind_port: int
     public_origin: str
+    #: Whether this deployment serves reads and accepts no mutation. Read here
+    #: rather than by a second reader of the same file: the installed runtime
+    #: needs it to build its policy, and a service whose configuration says
+    #: "observe only" while its policy permits mutation is the one disagreement
+    #: this file exists to prevent.
+    observation_only: bool = True
 
 
 def service_endpoint(path: Path, site: IntegrationSite) -> ServiceEndpoint:
@@ -636,11 +633,15 @@ def service_endpoint(path: Path, site: IntegrationSite) -> ServiceEndpoint:
     if not isinstance(raw, dict):
         raise IntegrationError("service configuration has no settings object")
     owner = raw.get("owner_identity")
+    observation_only = raw.get("observation_only", True)
+    if not isinstance(observation_only, bool):
+        raise IntegrationError("observation_only must be a flag")
     endpoint = ServiceEndpoint(
         owner_identity=owner if isinstance(owner, str) else "",
         bind_host=raw.get("bind_host", site.bind_host),
         bind_port=raw.get("bind_port", site.bind_port),
         public_origin=raw.get("public_origin", site.public_origin),
+        observation_only=observation_only,
     )
     if (
         not endpoint.owner_identity

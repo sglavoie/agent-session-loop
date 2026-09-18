@@ -243,6 +243,13 @@ _CONNECTOR_TESTS = "scripts:tests/test_workbench_connector.py"
 _REMOTE_READ_TESTS = "scripts:tests/test_workbench_remote_reads.py"
 _REMOTE_ACTION_TESTS = "scripts:tests/test_workbench_remote_actions.py"
 _HTTP_TESTS = "scripts:tests/test_workbench_http.py"
+#: Packaging and the native lifecycle, split by what each half can prove. The
+#: Mac module drives install, upgrade, rollback, recovery and removal against a
+#: release that is genuinely started; the portable module runs under the Pi's
+#: own interpreter and holds the artifact to portable code and static assets.
+#: Both are named wherever a row is about how the application is deployed.
+_LIFECYCLE_TESTS = "scripts:tests/test_workbench_lifecycle.py"
+_PORTABLE_TESTS = "scripts:tests/test_workbench_portable.py"
 #: The owned host resources and the publisher that writes to one topic. One
 #: module covers both because they are one question: which resources on a
 #: shared host belong to this application, and what may they be used for.
@@ -1181,10 +1188,18 @@ CAPABILITIES: tuple[Capability, ...] = (
     _companion_module(
         "companion.lifecycle",
         "Content-addressed per-user installation and the fixed native unit "
-        "identifiers.",
-        owner=OWNER_PI_REPO,
+        "identifiers. Migrated to asl_workbench.lifecycle, which installs both "
+        "roles: a pinned artifact of the portable package for the service, and "
+        "a recorded attachment to the existing ASL installation for the Mac "
+        "connector. The prefixes, the launchd label and the unit name are "
+        "unchanged, because a deployed host already owns them.",
+        owner=OWNER_PORTABLE,
         authority=AUTHORITY_HOST,
-        coverage=(f"{_PI}/tests/test_companion_lifecycle.py",),
+        coverage=(
+            f"{_PI}/tests/test_companion_lifecycle.py",
+            _LIFECYCLE_TESTS,
+            _PORTABLE_TESTS,
+        ),
     ),
     _companion_module(
         "companion.live",
@@ -1243,10 +1258,15 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _companion_module(
         "companion.recovery",
-        "Companion-only consistent snapshots and offline restore staging.",
-        owner=OWNER_PI_REPO,
+        "Companion-only consistent snapshots and offline restore staging. "
+        "Migrated to asl_workbench.lifecycle: every switch snapshots the state "
+        "through SQLite before it happens, an interrupted install leaves a "
+        "transaction record that blocks the next one until it is recovered, "
+        "and a rollback reinstalls the previous release from its retained "
+        "artifact rather than from files something may have edited.",
+        owner=OWNER_PORTABLE,
         authority=AUTHORITY_HOST,
-        coverage=(f"{_PI}/tests/test_companion_rollout.py",),
+        coverage=(f"{_PI}/tests/test_companion_rollout.py", _LIFECYCLE_TESTS),
     ),
     _companion_module(
         "companion.resume",
@@ -1259,10 +1279,18 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _companion_module(
         "companion.runtime",
-        "Installed entry points; secrets and reply bodies stay out of diagnostics.",
-        owner=OWNER_PI_REPO,
+        "Installed entry points; secrets and reply bodies stay out of "
+        "diagnostics. Migrated to asl_workbench.runtime, which the unit starts "
+        "from the release directory as a module of the packaged application, "
+        "under a runtime lock that makes a second service refuse rather than "
+        "share the state.",
+        owner=OWNER_PORTABLE,
         authority=AUTHORITY_HOST,
-        coverage=(f"{_PI}/tests/test_companion_lifecycle.py",),
+        coverage=(
+            f"{_PI}/tests/test_companion_lifecycle.py",
+            _PORTABLE_TESTS,
+            _LIFECYCLE_TESTS,
+        ),
     ),
     _companion_module(
         "companion.service",
@@ -1474,14 +1502,22 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         key=f"{SURFACE_INTEGRATION}:native-service-units",
         surface=SURFACE_INTEGRATION,
-        summary="The fixed launchd label and systemd unit names the installation owns.",
+        summary="The fixed launchd label and systemd unit names the "
+        "installation owns, and the two lines that keep the worker "
+        "independent: AbandonProcessGroup on the launch agent, so stopping the "
+        "connector never kills the runs an operator launched through it, and "
+        "KillMode=control-group on the unit, so stopping the service takes its "
+        "own threads with it.",
         origin=ORIGIN_COMPANION,
-        owner=OWNER_PI_REPO,
+        owner=OWNER_PORTABLE,
         authority=AUTHORITY_HOST,
         compatibility_adapters=(
             "existing installation prefixes and unit identifiers are preserved",
         ),
-        regression_coverage=(f"{_PI}/tests/test_companion_lifecycle.py",),
+        regression_coverage=(
+            f"{_PI}/tests/test_companion_lifecycle.py",
+            _LIFECYCLE_TESTS,
+        ),
     ),
     # -- Persistence boundaries --------------------------------------------
     Capability(
@@ -1607,24 +1643,33 @@ CAPABILITIES: tuple[Capability, ...] = (
         key=f"{SURFACE_PERSISTENCE}:companion-credentials",
         surface=SURFACE_PERSISTENCE,
         summary="credentials/secrets.json: the connector, summary, and owner "
-        "credentials that must survive the migration unchanged.",
+        "credentials that must survive the migration unchanged. Minted once by "
+        "provisioning and never by packaging; removal keeps them, and the "
+        "separate reset that discards observations keeps them too.",
         origin=ORIGIN_COMPANION,
-        owner=OWNER_PI_REPO,
+        owner=OWNER_PORTABLE,
         authority=AUTHORITY_HOST,
         compatibility_adapters=("existing credentials are preserved, not reissued",),
         regression_coverage=(
             f"{_PI}/tests/test_companion_lifecycle.py",
             _TRANSPORT_TESTS,
+            _LIFECYCLE_TESTS,
         ),
     ),
     Capability(
         key=f"{SURFACE_PERSISTENCE}:companion-runtime-document",
         surface=SURFACE_PERSISTENCE,
-        summary="config/runtime.json: the installed service's configuration and role.",
+        summary="config/runtime.json: the installed service's configuration "
+        "and role. The role is what decides which half of the deployment a "
+        "prefix is, so the lifecycle reads it closed -- an unexpected field is "
+        "a configuration written for something else.",
         origin=ORIGIN_COMPANION,
-        owner=OWNER_PI_REPO,
+        owner=OWNER_PORTABLE,
         authority=AUTHORITY_HOST,
-        regression_coverage=(f"{_PI}/tests/test_companion_lifecycle.py",),
+        regression_coverage=(
+            f"{_PI}/tests/test_companion_lifecycle.py",
+            _LIFECYCLE_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_PERSISTENCE}:connector-operation-journal",

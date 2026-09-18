@@ -1,20 +1,21 @@
-"""Workbench HTTP server: the stdlib transport, and nothing else.
+"""Workbench HTTP server: the Mac's provider, on the shared transport.
 
 This module used to *be* the Workbench API -- routing, authentication, request
 policy, envelopes, static assets, and thirty-four handlers, all of them local
 and none of them reachable from the Pi. The application moved to
-:mod:`asl_workbench.http`, which the Pi serves too, and the execution moved to
-:mod:`agent_session_loop.workbench_local`, which is the Mac's provider. What is
-left here is the compatibility adapter the consolidation promised: it binds a
-socket, mints the operator's token, turns a stdlib request into an
-:class:`asl_workbench.http.Request` and a :class:`asl_workbench.http.Response`
-back into bytes, and keeps every name the CLI, the bridge, and the existing
-tests already import.
+:mod:`asl_workbench.http`, which the Pi serves too; the execution moved to
+:mod:`agent_session_loop.workbench_local`, which is the Mac's provider; and the
+transport underneath moved to :mod:`asl_workbench.server`, which the installed
+service runs. What is left here is the Mac's half of the adapter: it mints the
+operator's token, builds the local provider, and keeps every name the CLI, the
+bridge, and the existing tests already import.
 
 It translates. It does not decide. Which routes exist, which role each needs,
 how a body is bounded, what a refusal says, and how a static asset is cached
-are all answered in the shared application, so the local server and the Pi
-cannot drift apart by one of them being edited.
+are all answered in the shared application; how a request line becomes a
+:class:`asl_workbench.http.Request` and a response becomes bytes is answered in
+the shared transport. Neither can drift from the Pi by one of them being
+edited, because there is no second copy to edit.
 
 Authentication
 --------------
@@ -60,16 +61,13 @@ submission, and a server killed mid-launch leaves a record that says either
 
 from __future__ import annotations
 
-import contextlib
-import http.server
 import secrets
-import signal
 import threading
 import webbrowser
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from asl_workbench import controls as portable_controls
 from asl_workbench import details as workbench_detail_rules
@@ -84,9 +82,12 @@ from asl_workbench.http import (
     STATIC_URL_PREFIX,
     Application,
     LocalTokenAuthenticator,
-    Request,
-    Response,
     shell_bundle,
+)
+from asl_workbench.server import (
+    ApplicationRequestHandler,
+    ApplicationServer,
+    install_shutdown_handlers,
 )
 
 from . import responses, workbench_local
@@ -175,18 +176,8 @@ class ServerConfig:
     include_default_dirs: bool = True
 
 
-class WorkbenchHTTPServer(http.server.ThreadingHTTPServer):
-    """Threaded HTTP server holding one token and one shared application."""
-
-    allow_reuse_address = True
-    daemon_threads = True
-    # The shell is native ES modules, so one page load is one document plus a
-    # stylesheet plus every module in the import graph, and a browser opens
-    # them all at once. `socketserver`'s default backlog of five means the
-    # accept queue overflows mid-burst and the kernel resets the connections
-    # that did not fit -- which a browser reports as a module that failed to
-    # load, and a failed module is a blank page rather than a slow one.
-    request_queue_size = 64
+class WorkbenchHTTPServer(ApplicationServer):
+    """The shared transport, carrying one token and the Mac's local provider."""
 
     def __init__(
         self,
@@ -194,7 +185,6 @@ class WorkbenchHTTPServer(http.server.ThreadingHTTPServer):
         *,
         token: str | None = None,
     ) -> None:
-        super().__init__((config.host, config.port), WorkbenchRequestHandler)
         self.config = config
         self.token = token if token is not None else secrets.token_urlsafe(TOKEN_BYTES)
         # Launch bookkeeping. Deliberately in memory and deliberately per
@@ -205,11 +195,15 @@ class WorkbenchHTTPServer(http.server.ThreadingHTTPServer):
         # covering anything the lock does not already cover once it is held.
         self.launches = LaunchBook()
         self.provider = LocalProvider(config, launches=self.launches)
-        self.application = Application(
-            self.provider,
-            LocalTokenAuthenticator(lambda: self.token),
-            policy=LOCAL_POLICY,
-            static=shell_bundle(),
+        super().__init__(
+            (config.host, config.port),
+            Application(
+                self.provider,
+                LocalTokenAuthenticator(lambda: self.token),
+                policy=LOCAL_POLICY,
+                static=shell_bundle(),
+            ),
+            handler=WorkbenchRequestHandler,
         )
 
     # -- Launch bookkeeping, kept under its historic names -----------------
@@ -240,16 +234,6 @@ class WorkbenchHTTPServer(http.server.ThreadingHTTPServer):
         """Drop the recorded pid for a plan whose process has exited."""
         self.launches.forget_pid(plan_dir)
 
-    @property
-    def bound_host(self) -> str:
-        # AF_INET keeps server_address a (str, int) pair; the stdlib annotation
-        # widens it to cover the Unix-socket case this server never uses.
-        return cast(str, self.server_address[0])
-
-    @property
-    def bound_port(self) -> int:
-        return self.server_address[1]
-
 
 def create_server(
     *,
@@ -277,154 +261,26 @@ def create_server(
 # Request handler
 
 
-class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
-    """Carry stdlib requests to the shared application and its answers back.
+class WorkbenchRequestHandler(ApplicationRequestHandler):
+    """The shared transport, under the name the Mac's callers already import.
 
-    Every method below is transport: reading a request line, writing headers,
-    surviving a client that hung up. The one decision it makes is how many
-    bytes to hand :meth:`Application.handle` when it asks for the body, and
-    even that number was decided by the shared request policy.
+    Everything it did is now in :class:`asl_workbench.server.ApplicationRequestHandler`,
+    unchanged: the same silence in the access log, the same fixed envelope for
+    a request the stdlib itself refused, the same tolerance for a client that
+    hung up mid-response. Kept as a name because the CLI, the bridge, and the
+    existing tests construct servers through it.
     """
-
-    server_version = "ASLWorkbench/1"
-    sys_version = ""
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
-        # Silence the default per-request access log so the operator-facing
-        # console only carries deliberate startup output. Run-control events
-        # remain the canonical audit trail for mutating actions.
-        return
-
-    # -- HTTP method entry points ------------------------------------------
-
-    def do_GET(self) -> None:
-        self._serve("GET")
-
-    def do_POST(self) -> None:
-        self._serve("POST")
-
-    def _serve(self, method: str) -> None:
-        request = Request.build(
-            method,
-            self.path,
-            # `.items()` rather than the message itself: `http.client` hands
-            # over an `email.message.Message`, which answers like a mapping
-            # without being one, and the application takes pairs.
-            self.headers.items(),
-            read=self._read_exactly,
-        )
-        self._write(self._server().application.handle(request))
-
-    def _read_exactly(self, length: int) -> bytes:
-        """Read the body the application already decided may exist."""
-        return self.rfile.read(length)
-
-    def send_error(
-        self,
-        code: int,
-        message: str | None = None,
-        explain: str | None = None,
-    ) -> None:
-        """Answer the stdlib's own refusals in this API's envelope.
-
-        The default implementation renders an HTML page that quotes the
-        request line back, so a malformed request line becomes a reflected
-        copy of whatever was sent. Nothing this server answers with should be
-        chosen by the client, so the body is the envelope and the text is
-        fixed.
-        """
-        del message, explain
-        self.close_connection = True
-        self._write(
-            Response.json(
-                code,
-                workbench_http.error_payload(
-                    COMMAND_NAME,
-                    reason="invalid-request",
-                    error="the request could not be understood",
-                    paused=False,
-                ),
-                close=True,
-            )
-        )
-
-    def _write(self, response: Response) -> None:
-        try:
-            self.send_response(response.status)
-            if response.content_type is not None:
-                self.send_header("Content-Type", response.content_type)
-            if response.sends_content_length:
-                self.send_header("Content-Length", str(len(response.body)))
-            for name, value in response.headers.items():
-                self.send_header(name, value)
-            if response.close:
-                # The body was refused before it was read, so whatever the
-                # client is still sending has nowhere to go but the next
-                # request's parser.
-                self.close_connection = True
-                self.send_header("Connection", "close")
-            self.end_headers()
-            if self.command != "HEAD" and response.has_body:
-                self.wfile.write(response.body)
-        except BrokenPipeError, ConnectionResetError:
-            # Client disconnected before the response could be flushed; the
-            # server keeps running for the next request.
-            return
-
-    def _server(self) -> WorkbenchHTTPServer:
-        # `BaseRequestHandler.server` is declared as the base class, and this
-        # handler is only ever constructed by `WorkbenchHTTPServer`. Asserting
-        # it is what carries the concrete type without an inline suppression.
-        server = self.server
-        assert isinstance(server, WorkbenchHTTPServer)
-        return server
 
 
 # ---------------------------------------------------------------------------
 # CLI entry points
 
 
-def _install_shutdown_handlers(
-    server: WorkbenchHTTPServer,
-) -> Callable[[], None]:
-    """Wire SIGINT / SIGTERM to ``server.shutdown()``.
-
-    ``server.serve_forever()`` ordinarily breaks on ``KeyboardInterrupt``
-    raised by SIGINT, but SIGTERM and tests that do not run on the main
-    thread bypass that path. This helper schedules ``shutdown()`` from a
-    daemon thread so the listening socket is released cleanly in both
-    cases. The returned callable restores the previous signal handlers
-    once the server has stopped.
-    """
-
-    def _trigger_shutdown(signum: int, _frame: Any) -> None:
-        del signum
-
-        def runner() -> None:
-            # Shutdown must not crash here.
-            with contextlib.suppress(Exception):
-                server.shutdown()
-
-        threading.Thread(target=runner, name="workbench-shutdown", daemon=True).start()
-
-    previous: dict[int, Any] = {}
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        try:
-            previous[signum] = signal.signal(signum, _trigger_shutdown)
-        except ValueError, OSError:
-            # signal() raises ValueError when called outside the main
-            # thread (notably in test threads); skip silently — tests
-            # call ``server.shutdown()`` directly.
-            continue
-
-    def restore() -> None:
-        for signum, handler in previous.items():
-            try:
-                signal.signal(signum, handler)
-            except ValueError, OSError:
-                continue
-
-    return restore
+#: The portable transport's handler installer, under this module's historic
+#: private name. The behaviour is identical -- SIGINT and SIGTERM schedule
+#: ``shutdown()`` from a daemon thread -- and it is shared because the Pi's
+#: installed runtime needs exactly the same thing from SIGTERM.
+_install_shutdown_handlers = install_shutdown_handlers
 
 
 def _default_open_in_browser(url: str) -> bool:

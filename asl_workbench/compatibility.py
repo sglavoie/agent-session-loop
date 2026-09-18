@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import ast
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -222,63 +222,107 @@ def _imported_roots(tree: ast.Module) -> Iterator[tuple[int, str, str]]:
             yield node.lineno, node.module, node.module.split(".")[0]
 
 
-def external_imports(root: Path | None = None) -> tuple[ImportFinding, ...]:
-    """Every import that is neither standard library nor this package.
+def package_sources(root: Path | None = None) -> dict[str, str]:
+    """Every module in the package as ``dotted name -> source text``.
 
-    Findings carry their kind so a layering violation is not reported as a
-    missing wheel: a ``agent_session_loop`` import is
-    :data:`KIND_FORBIDDEN`, anything else unknown is
-    :data:`KIND_THIRD_PARTY`.
+    The scans below take sources rather than paths so the same three rules can
+    be applied to a packaged artifact, whose members are bytes in a zip and
+    have no directory to walk. Reading the files is the only part that differs
+    between "the checkout" and "what was built from it", and it is this
+    function.
     """
     base = PACKAGE_ROOT if root is None else Path(root)
-    allowed = set(sys.stdlib_module_names) | {base.name}
+    return {
+        dotted_name(path, base): path.read_text(encoding="utf-8")
+        for path in package_module_paths(base)
+    }
+
+
+def source_imports(
+    module: str, source: str, *, package: str = PACKAGE_NAME
+) -> tuple[ImportFinding, ...]:
+    """Every import in one module that the portable package may not make.
+
+    Findings carry their kind so a layering violation is not reported as a
+    missing wheel: an ``agent_session_loop`` import is :data:`KIND_FORBIDDEN`,
+    anything else unknown is :data:`KIND_THIRD_PARTY`.
+    """
+    allowed = set(sys.stdlib_module_names) | {package}
+    tree = ast.parse(source, filename=module)
     findings: list[ImportFinding] = []
-    for path in package_module_paths(base):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        module = dotted_name(path, base)
-        for line, imported, package_root in _imported_roots(tree):
-            if package_root in FORBIDDEN_IMPORT_ROOTS:
-                findings.append(ImportFinding(module, line, imported, KIND_FORBIDDEN))
-            elif package_root not in allowed:
-                findings.append(ImportFinding(module, line, imported, KIND_THIRD_PARTY))
+    for line, imported, package_root in _imported_roots(tree):
+        if package_root in FORBIDDEN_IMPORT_ROOTS:
+            findings.append(ImportFinding(module, line, imported, KIND_FORBIDDEN))
+        elif package_root not in allowed:
+            findings.append(ImportFinding(module, line, imported, KIND_THIRD_PARTY))
     return tuple(findings)
 
 
-def unsupported_syntax(root: Path | None = None) -> tuple[SyntaxFinding, ...]:
-    """Every module that needs a newer interpreter than the floor allows.
+def source_syntax(module: str, source: str) -> tuple[SyntaxFinding, ...]:
+    """Whether one module needs a newer interpreter than the floor allows.
 
     ``ast.parse`` with ``feature_version`` is the only mechanism that answers
     this without a second interpreter on the machine. It rejects grammar the
     named version could not parse, which is the class of breakage that reaches
     the Pi as an import failure rather than as a test failure here.
     """
-    findings: list[SyntaxFinding] = []
-    for path in package_module_paths(root):
-        source = path.read_text(encoding="utf-8")
-        try:
-            ast.parse(
-                source,
-                filename=str(path),
-                feature_version=MINIMUM_PYTHON_VERSION,
-            )
-        except SyntaxError as error:
-            findings.append(
-                SyntaxFinding(
-                    dotted_name(path, root),
-                    error.lineno or 0,
-                    error.msg,
-                )
-            )
-    return tuple(findings)
+    try:
+        ast.parse(source, filename=module, feature_version=MINIMUM_PYTHON_VERSION)
+    except SyntaxError as error:
+        return (SyntaxFinding(module, error.lineno or 0, error.msg),)
+    return ()
 
 
-def check_boundary(
-    root: Path | None = None,
+def external_imports(root: Path | None = None) -> tuple[ImportFinding, ...]:
+    """Every import in the package that is neither stdlib nor this package."""
+    base = PACKAGE_ROOT if root is None else Path(root)
+    return tuple(
+        finding
+        for module, source in package_sources(base).items()
+        for finding in source_imports(module, source, package=base.name)
+    )
+
+
+def unsupported_syntax(root: Path | None = None) -> tuple[SyntaxFinding, ...]:
+    """Every module in the package that needs a newer interpreter."""
+    return tuple(
+        finding
+        for module, source in package_sources(root).items()
+        for finding in source_syntax(module, source)
+    )
+
+
+def check_sources(
+    sources: Mapping[str, str],
     *,
+    package: str = PACKAGE_NAME,
     version: Sequence[int] | None = None,
 ) -> BoundaryReport:
-    """Run the version, dependency, and import checks and report all three."""
-    imports = external_imports(root)
+    """Judge a set of modules against all three boundaries.
+
+    This is the check itself, separated from where the source came from. The
+    packaging path hands it the members of an artifact, so what is verified is
+    what will be installed rather than what happens to be in the working tree
+    beside it.
+
+    Syntax is decided first, and a module that fails it is not scanned for
+    imports. Import scanning parses with *this* interpreter, so a module the
+    running Python cannot read at all would raise out of the report instead of
+    appearing in it -- which is precisely the case the Pi's interpreter hits
+    when it checks an artifact built on the Mac.
+    """
+    syntax = tuple(
+        finding
+        for module in sorted(sources)
+        for finding in source_syntax(module, sources[module])
+    )
+    unreadable = {finding.module for finding in syntax}
+    imports = tuple(
+        finding
+        for module in sorted(sources)
+        if module not in unreadable
+        for finding in source_imports(module, sources[module], package=package)
+    )
     return BoundaryReport(
         runtime=check_runtime(version),
         forbidden_imports=tuple(
@@ -287,8 +331,18 @@ def check_boundary(
         third_party_imports=tuple(
             finding for finding in imports if finding.kind == KIND_THIRD_PARTY
         ),
-        unsupported_syntax=unsupported_syntax(root),
+        unsupported_syntax=syntax,
     )
+
+
+def check_boundary(
+    root: Path | None = None,
+    *,
+    version: Sequence[int] | None = None,
+) -> BoundaryReport:
+    """Run the version, dependency, and import checks and report all three."""
+    base = PACKAGE_ROOT if root is None else Path(root)
+    return check_sources(package_sources(base), package=base.name, version=version)
 
 
 def blocking_meta_path_source(roots: Sequence[str] | None = None) -> str:

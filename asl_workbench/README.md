@@ -5,9 +5,11 @@ provider and a Pi remote provider. This package is the half that has to run in
 both places; `agent_session_loop` keeps the Mac-only worker runtime and stays
 the authority on permission and outcome.
 
-As of session 1 the package holds the inventory and the boundaries, not yet the
-application. Later sessions add the HTTP application, the assets, and the Pi
-persistence into this package.
+The package is now a deployable application as well as an inventory: it is
+packaged as a pinned artifact and started on the Pi by a systemd user unit, and
+its modules are loaded in-process on the Mac. The table below names only the
+modules this file has been kept current for; `python3 -m asl_workbench` renders
+the full matrix, which is the inventory that does not go stale.
 
 ## What is here
 
@@ -17,6 +19,9 @@ persistence into this package.
 | `changes.py` | The two behaviors the consolidation changes on purpose, with the tests currently pinning the old behavior. |
 | `compatibility.py` | The three portability boundaries — Python version, stdlib-only dependencies, no ASL import — in executable form. |
 | `companion_inventory.py` | The Companion's pinned module list and route table, plus readers that cross-check the pin against a real Pi checkout. |
+| `lifecycle.py` | Packaging and both native lifecycles: a content-addressed artifact of this package for the Pi service, a recorded attachment to the installed ASL for the Mac connector, and the install, upgrade, rollback, recover and remove operations over a single prefix. |
+| `runtime.py` | The service entry point the unit starts: one prefix, one runtime lock, one readiness note, and a `--check` that asks whether a release can read a state before it is allowed to serve it. |
+| `server.py` | The HTTP server the runtime binds, and the shutdown handling that lets a service manager stop it without leaving the state locked. |
 
 `python3 -m asl_workbench` renders the matrix as Markdown, and
 `python3 -m asl_workbench --json` prints the row counts and the declared
