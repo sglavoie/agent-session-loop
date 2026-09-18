@@ -2330,7 +2330,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Human-readable label for the pin",
     )
     workbench_pin_parser.set_defaults(
-        handler_ref="workbench:workbench_pin_from_args",
+        handler_ref="workbench_archive:workbench_pin_from_args",
     )
 
     workbench_unpin_parser = workbench_sub.add_parser(
@@ -2342,7 +2342,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Plan directory to unpin",
     )
     workbench_unpin_parser.set_defaults(
-        handler_ref="workbench:workbench_unpin_from_args",
+        handler_ref="workbench_archive:workbench_unpin_from_args",
     )
 
     workbench_registry_parser = workbench_sub.add_parser(

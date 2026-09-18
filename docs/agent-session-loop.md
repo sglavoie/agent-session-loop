@@ -8465,8 +8465,11 @@ archives each entry independently and returns per-entry results plus
 not prevent the rest from being archived.
 
 The Archive view reads `GET /api/archive`, which returns archived
-entries, `archive_retention_days`, each entry's `expires_at`, and recent
-auto-empty results under `archive_maintenance`. `POST
+entries, `archive_retention_days`, each entry's `expires_at` and
+`cleanup_state`, and the cleanup summary under `archive_cleanup`. The read
+removes nothing: `archive_cleanup` reports `candidate_count`,
+`candidate_ids` and `undated_count`, and every entry it names is still on
+disk afterwards. `POST
 /api/archive/restore` restores the archived plan and state back to their
 original paths and restores pin/profile metadata when present. Restore
 fails with `409` and `reason: "restore-conflict"` if either destination
@@ -8488,13 +8491,18 @@ the current selection without restoring or purging any entry.
 Permanent purge only applies to archive entries, not live plans. `POST
 /api/archive/delete` accepts one or more `archive_ids` and requires a
 typed `confirm_count` equal to the selected count; a mismatch returns
-`reason: "confirmation-mismatch"` and leaves every entry in place. Archive
-maintenance auto-empties entries whose age is at least
-`archive_retention_days`; it runs during archive polls, so no separate daemon
-is required. It no longer runs during a queue poll: `GET /api/queue` answers
-from one non-reclaiming catalog scan and performs no retention, so the act of
-watching the triage queue neither empties an archive entry nor reclaims a plan
-lock.
+`reason: "confirmation-mismatch"` and leaves every entry in place. That route
+is the only way an archive entry is emptied. Retention is a threshold rather
+than a deadline: an entry whose age is at least `archive_retention_days` is
+reported with `cleanup_state: "eligible"` and listed in
+`archive_cleanup.candidate_ids`, and shortening the window marks more
+candidates rather than destroying anything. An entry whose `archived_at`
+cannot be read is `cleanup_state: "undated"` and is never a candidate, because
+"I cannot tell how old this is" must not resolve to "old enough". No read
+performs retention: neither `GET /api/archive` nor `GET /api/queue` empties an
+archive entry or reclaims a plan lock, so the act of watching either view
+changes nothing. Reclaim remains available where an operator asks for it, at
+`POST /api/unlock`.
 
 ### HTTP API surface
 
@@ -8591,8 +8599,9 @@ Read endpoints (loopback-open, no token required):
 - `GET /api/artifacts?plan_dir=<path>` — artifact paths and metadata
   for the latest run.
 - `GET /api/archive` — archive entries plus the current
-  `archive_retention_days`, computed `expires_at` values, and the latest
-  archive-maintenance auto-empty result.
+  `archive_retention_days`, computed `expires_at` values, each entry's
+  `cleanup_state`, and the `archive_cleanup` summary of which entries
+  retention has marked as cleanup candidates. The read removes nothing.
 
 Mutating endpoints (bearer-token required):
 

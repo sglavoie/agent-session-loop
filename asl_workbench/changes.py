@@ -8,11 +8,15 @@ tests currently pinning them will have to be rewritten rather than satisfied.
 Writing that down here, as data, separates the two failure modes that look
 identical from inside a test run. A pinned test that breaks is either a
 regression -- stop -- or one of these -- proceed, and update the pin in the
-same change. A later session that hits
-``test_archive_list_auto_empties_expired_entries`` failing has no way to tell
-which, unless the intent was recorded before the work started. So it is
-recorded now, in session 1, with the current behavior, the target behavior, and
-the exact tests that encode the current one.
+same change. A session that watched ``test_archive_list_auto_empties_expired_entries``
+fail had no way to tell which, unless the intent was recorded before the work
+started. So it was recorded in session 1, with the current behavior, the target
+behavior, and the exact tests that encoded the current one.
+
+Both records have since landed, and ``pinned_coverage`` moved with them: it now
+names the tests that hold each behavior to its *target*. That is the same job
+in the other direction -- the pins stopped being what a refactor has to break
+and became what a regression would.
 
 Each record also names the capability rows it touches, and
 ``tests/test_workbench_foundations.py`` checks the link both ways: no record
@@ -59,9 +63,9 @@ INTENTIONAL_CHANGES: tuple[IntentionalChange, ...] = (
             "GET /api/final-review, GET /api/questions and GET /api/recovery, "
             "now classify with reclaim=False and run no retention: polling the "
             "queue or opening a detail panel no longer reclaims a plan lock or "
-            "empties an archive entry. One automatic path remains: "
-            "GET /api/archive still calls workbench.maintain_archive, so "
-            "listing the archive can permanently empty an expired entry. "
+            "empties an archive entry. The last automatic path is closed too: "
+            "GET /api/archive reports each entry's cleanup_state and removes "
+            "nothing, and workbench.maintain_archive no longer exists. "
             "Reclaim now happens only where an operator asked for it, at "
             "POST /api/unlock. The summary builders still default to "
             "reclaim=True for callers that have not been moved."
@@ -82,10 +86,13 @@ INTENTIONAL_CHANGES: tuple[IntentionalChange, ...] = (
             "the authority for."
         ),
         pinned_coverage=(
+            # The archive half, landed. These replace the two tests that used
+            # to pin the deleting read; they hold the same scenario to the
+            # opposite outcome, so a reintroduced maintenance pass fails here.
             "scripts:tests/test_asl_workbench_server.py"
-            "::test_archive_list_auto_empties_expired_entries",
+            "::test_archive_list_leaves_expired_entries_in_place",
             "scripts:tests/test_asl_workbench_archive.py"
-            "::test_maintain_purges_expired_and_keeps_recent",
+            "::test_retention_marks_expired_entries_without_removing_them",
             # The half already landed. These hold the queue and plan reads to
             # the target so the remaining archive work cannot undo them.
             "scripts:tests/test_workbench_catalog.py"
@@ -125,11 +132,13 @@ INTENTIONAL_CHANGES: tuple[IntentionalChange, ...] = (
         key=KEY_EXPLICIT_ARCHIVE_CLEANUP,
         summary="Archives are emptied when someone says so, not when they age.",
         current_behavior=(
-            "Two paths empty an archive entry. One is explicit and confirmed: "
-            "POST /api/archive/delete requires confirm_count to equal the "
-            "number of archive_ids supplied. The other is automatic: the "
-            "retention window in the registry expires entries during "
-            "maintenance, which today runs on read."
+            "One path empties an archive entry, and it is explicit and "
+            "confirmed: POST /api/archive/delete requires confirm_count to "
+            "equal the number of archive_ids supplied. The automatic path is "
+            "gone -- the retention window now marks entries as cleanup "
+            "candidates (cleanup_state on each entry, archive_cleanup in the "
+            "listing) and removes none of them, and shortening the window "
+            "marks more candidates rather than deleting anything."
         ),
         target_behavior=(
             "Permanent deletion keeps its explicit confirmation contract, and "
@@ -148,9 +157,16 @@ INTENTIONAL_CHANGES: tuple[IntentionalChange, ...] = (
         ),
         pinned_coverage=(
             "scripts:tests/test_asl_workbench_archive.py"
-            "::test_maintain_purges_expired_and_keeps_recent",
+            "::test_retention_marks_expired_entries_without_removing_them",
+            "scripts:tests/test_asl_workbench_archive.py"
+            "::test_shortening_retention_marks_more_candidates_only",
             "scripts:tests/test_asl_workbench_server.py"
-            "::test_archive_list_auto_empties_expired_entries",
+            "::test_archive_list_leaves_expired_entries_in_place",
+            # The confirmation contract is the half that did not change, so it
+            # is pinned alongside: a later session reading this record must not
+            # read "retention stopped deleting" as "deletion got easier".
+            "scripts:tests/test_workbench_archive.py"
+            "::test_purging_without_a_matching_count_removes_nothing",
         ),
         capability_keys=(
             "workbench-http:GET /api/archive",

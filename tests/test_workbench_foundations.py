@@ -627,12 +627,18 @@ class LocalAPICharacterizationTests(WorkbenchAPIFixture, unittest.TestCase):
         self.assertIn("text/html", headers.get("Content-Type", ""))
         self.assertIn(b"<html", body.lower())
 
-    def test_reading_the_archive_currently_empties_expired_entries(self) -> None:
-        # Characterization of a behavior this program intends to change: the
-        # read is what deletes. Registered as an intentional change so a later
-        # session can tell this failing from a regression.
+    def test_reading_the_archive_reports_an_expired_entry_and_keeps_it(
+        self,
+    ) -> None:
+        # This test used to assert the opposite, as characterization of the
+        # behavior the program intended to change: the read was what deleted.
+        # Session 8 landed the change, so the scenario is unchanged and the
+        # outcome is inverted -- which is exactly what the register said would
+        # happen, and why a session watching it flip could tell it from a
+        # regression.
         record = changes.intentional_change(changes.KEY_OBSERVATIONAL_READS)
-        self.assertIn("maintain_archive", record.current_behavior)
+        self.assertIn("cleanup_state", record.current_behavior)
+        self.assertIn("no longer exists", record.current_behavior)
         result = workbench.archive_plan(
             self.canonical_plan_dir,
             state_dir=self.state_dir,
@@ -650,8 +656,14 @@ class LocalAPICharacterizationTests(WorkbenchAPIFixture, unittest.TestCase):
         server = self.start_workbench_server()
         status, body, _ = _http_request(f"{self.base_url(server)}/api/archive")
         self.assertEqual(200, status)
-        self.assertEqual(1, body["archive_maintenance"]["removed_count"])
-        self.assertEqual([], body["entries"])
+        self.assertEqual([result.archive_id], body["archive_cleanup"]["candidate_ids"])
+        self.assertEqual(
+            [result.archive_id], [entry["archive_id"] for entry in body["entries"]]
+        )
+        self.assertEqual("eligible", body["entries"][0]["cleanup_state"])
+        self.assertTrue(
+            workbench.archive_entry_dir(result.archive_id, self.state_dir).exists()
+        )
 
     def test_permanently_emptying_the_archive_requires_a_matching_count(
         self,

@@ -36,7 +36,7 @@ GET  ``/api/final-review?plan_dir=<path>`` - bounded final-review.md content.
 GET  ``/api/questions?plan_dir=<path>``  - paused-run resolver prompt and Q&A context.
 GET  ``/api/redirect-status?plan_dir=<path>`` - durable redirect operations and stages.
 GET  ``/api/conversation-recovery?plan_dir=<path>`` - recovery decision and commands.
-GET  ``/api/archive``                    - archived entries, retention, auto-empty.
+GET  ``/api/archive``                    - archived entries and cleanup candidates.
 POST ``/api/registry/pin``               - upsert a registry pin.
 POST ``/api/registry/unpin``             - remove a registry pin.
 POST ``/api/plan/archive``               - archive one plan (plan + ASL state).
@@ -52,6 +52,14 @@ POST ``/api/control/abort``              - enqueue abort of the in-flight turn.
 POST ``/api/control/select-harness``     - enqueue harness selection.
 POST ``/api/control/redirect``           - submit an urgent correction to the live turn.
 POST ``/api/unlock``                     - remove a stale operational lock.
+
+Retention
+---------
+``archive_retention_days`` marks archive entries as cleanup *candidates*; it no
+longer empties them. ``GET /api/archive`` reports each entry's ``cleanup_state``
+and a summary under ``archive_cleanup``, and removes nothing -- reading the
+archive is a read. ``POST /api/archive/delete`` is the only route that empties
+an entry, and it requires a typed count matching the selection.
 
 Idempotency
 -----------
@@ -100,6 +108,7 @@ from . import (
     state,
     workbench,
     workbench_actions,
+    workbench_archive,
     workbench_catalog,
     workbench_controls,
     workbench_details,
@@ -840,6 +849,18 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
 
     # -- Mutating endpoints -------------------------------------------------
 
+    def _send_refusal(self, error: workbench_archive.ArchiveRefused) -> None:
+        """Render one archive refusal as HTTP. The whole translation layer.
+
+        The status comes from the refusal rather than from a table kept here, so
+        a surface without status codes -- the CLI, the connector -- translates
+        the same refusal through its own vocabulary without this server having
+        to agree with it first.
+        """
+        self._send_error(
+            error.status, error.reason, error.message, details=error.details
+        )
+
     def _handle_registry_pin(self, *, query: Mapping[str, list[str]]) -> None:
         del query
         body = self._read_json_body()
@@ -848,22 +869,16 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         profile = _coerce_profile_payload(body.get("profile"))
         config = self._server().config
         try:
-            updated, written_path = workbench.mutate_registry(
-                config.registry_path,
-                lambda current: workbench.upsert_pin(
-                    current, plan_dir, label=label, profile=profile
-                ),
+            update = workbench_archive.pin_plan(
+                plan_dir,
+                registry_path=config.registry_path,
+                label=label,
+                profile=profile,
             )
-        except workbench.WorkbenchError as error:
-            self._send_error(
-                400, "invalid-plan", str(error), details={"plan_dir": plan_dir}
-            )
+        except workbench_archive.ArchiveRefused as error:
+            self._send_refusal(error)
             return
-        self._send_success(
-            reason="ok",
-            registry_path=str(written_path),
-            registry=updated.to_payload(),
-        )
+        self._send_success(reason="ok", **update.to_payload())
 
     def _handle_registry_unpin(self, *, query: Mapping[str, list[str]]) -> None:
         del query
@@ -871,148 +886,70 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         plan_dir = _require_string(body, "plan_dir")
         config = self._server().config
         try:
-            updated, written_path = workbench.mutate_registry(
-                config.registry_path,
-                lambda current: workbench.remove_pin(current, plan_dir),
+            update = workbench_archive.unpin_plan(
+                plan_dir, registry_path=config.registry_path
             )
-        except workbench.WorkbenchError as error:
-            self._send_error(
-                400, "invalid-plan", str(error), details={"plan_dir": plan_dir}
-            )
+        except workbench_archive.ArchiveRefused as error:
+            self._send_refusal(error)
             return
-        self._send_success(
-            reason="ok",
-            registry_path=str(written_path),
-            registry=updated.to_payload(),
-        )
+        self._send_success(reason="ok", **update.to_payload())
 
     def _handle_plan_archive(self, *, query: Mapping[str, list[str]]) -> None:
         del query
         body = self._read_json_body()
         plan_dir = _require_string(body, "plan_dir")
         confirm_plan_dir = _require_string(body, "confirm_plan_dir")
-        try:
-            canonical = plans.canonicalize_path(plan_dir)
-            confirmed = plans.canonicalize_path(confirm_plan_dir)
-        except (OSError, ValueError) as error:
-            self._send_error(
-                400,
-                "invalid-plan",
-                f"invalid plan_dir: {error}",
-                details={
-                    "plan_dir": plan_dir,
-                    "confirm_plan_dir": confirm_plan_dir,
-                },
-            )
-            return
-        if canonical != confirmed:
-            self._send_error(
-                400,
-                "confirmation-mismatch",
-                "confirm_plan_dir must match plan_dir after canonicalization",
-                details={
-                    "plan_dir": str(canonical),
-                    "confirm_plan_dir": str(confirmed),
-                },
-            )
-            return
         config = self._server().config
         try:
-            result = workbench.archive_plan(
-                canonical,
+            result = workbench_archive.archive_one(
+                plan_dir,
+                confirm_plan_dir,
                 state_dir=config.state_dir,
                 registry_path=config.registry_path,
                 plan_roots=config.plan_roots,
                 include_default_dirs=config.include_default_dirs,
             )
-        except workbench.ArchiveError as error:
-            self._send_error(
-                error.status,
-                error.reason,
-                error.message,
-                details={"plan_dir": str(canonical)},
-            )
+        except workbench_archive.ArchiveRefused as error:
+            self._send_refusal(error)
             return
         self._send_success(reason="ok", **result.to_payload())
 
     def _handle_plans_archive(self, *, query: Mapping[str, list[str]]) -> None:
         del query
         body = self._read_json_body()
-        plan_dirs = _require_string_list(body, "plan_dirs")
         config = self._server().config
-        results: list[_JSONDict] = []
-        archived_count = 0
-        failed_count = 0
-        for raw_plan_dir in plan_dirs:
-            try:
-                canonical = plans.canonicalize_path(raw_plan_dir)
-            except (OSError, ValueError) as error:
-                results.append(
-                    {
-                        "plan_dir": raw_plan_dir,
-                        "archived": False,
-                        "reason": "invalid-plan",
-                        "error": f"invalid plan_dir: {error}",
-                    }
-                )
-                failed_count += 1
-                continue
-            try:
-                result = workbench.archive_plan(
-                    canonical,
-                    state_dir=config.state_dir,
-                    registry_path=config.registry_path,
-                    plan_roots=config.plan_roots,
-                    include_default_dirs=config.include_default_dirs,
-                )
-            except workbench.ArchiveError as error:
-                results.append(
-                    {
-                        "plan_dir": str(canonical),
-                        "archived": False,
-                        "reason": error.reason,
-                        "error": error.message,
-                    }
-                )
-                failed_count += 1
-                continue
-            results.append(
-                {
-                    "plan_dir": str(canonical),
-                    "archived": True,
-                    "reason": "ok",
-                    "error": None,
-                    "result": result.to_payload(),
-                }
+        try:
+            bulk = workbench_archive.archive_many(
+                body.get("plan_dirs"),
+                state_dir=config.state_dir,
+                registry_path=config.registry_path,
+                plan_roots=config.plan_roots,
+                include_default_dirs=config.include_default_dirs,
             )
-            archived_count += 1
-        self._send_success(
-            reason="ok",
-            results=results,
-            archived_count=archived_count,
-            failed_count=failed_count,
-        )
+        except workbench_archive.ArchiveRefused as error:
+            self._send_refusal(error)
+            return
+        self._send_success(reason="ok", **bulk.to_payload())
 
     def _handle_archive_list(self, *, query: Mapping[str, list[str]]) -> None:
+        """Report the archive and what retention makes of it. Delete nothing.
+
+        This route used to run a maintenance pass first, so opening the archive
+        tab was the act that permanently emptied expired entries -- an operator
+        who went looking for something old destroyed it by looking. Now the
+        retention window only marks candidates, and emptying them is
+        ``POST /api/archive/delete`` with a typed count.
+        """
         del query
         config = self._server().config
         try:
-            registry = workbench.load_registry(config.registry_path)
-        except workbench.WorkbenchError as error:
-            self._send_error(500, "registry-unreadable", str(error))
+            view = workbench_archive.review_archive(
+                state_dir=config.state_dir, registry_path=config.registry_path
+            )
+        except workbench_archive.ArchiveRefused as error:
+            self._send_refusal(error)
             return
-        maintenance = workbench.maintain_archive(
-            state_dir=config.state_dir,
-            registry_path=config.registry_path,
-        )
-        listing = workbench.list_archive_entries(config.state_dir)
-        self._send_success(
-            reason="ok",
-            entries=[entry.to_payload() for entry in listing.entries],
-            warnings=list(listing.warnings),
-            archive_retention_days=registry.archive_retention_days,
-            archive_maintenance=maintenance.to_payload(),
-        )
+        self._send_success(reason="ok", **view.to_payload())
 
     def _handle_archive_restore(self, *, query: Mapping[str, list[str]]) -> None:
         del query
@@ -1020,71 +957,48 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         archive_id = _require_string(body, "archive_id")
         config = self._server().config
         try:
-            result = workbench.restore_archive(
+            result = workbench_archive.restore_entry(
                 archive_id,
                 state_dir=config.state_dir,
                 registry_path=config.registry_path,
             )
-        except workbench.ArchiveError as error:
-            self._send_error(
-                error.status,
-                error.reason,
-                error.message,
-                details={"archive_id": archive_id},
-            )
+        except workbench_archive.ArchiveRefused as error:
+            self._send_refusal(error)
             return
         self._send_success(reason="ok", **result.to_payload())
 
     def _handle_archive_delete(self, *, query: Mapping[str, list[str]]) -> None:
+        """The one route that destroys, and the only one that ever did."""
         del query
         body = self._read_json_body()
-        archive_ids = _require_string_list(body, "archive_ids")
-        confirm_count = _require_int(body, "confirm_count")
-        if confirm_count != len(archive_ids):
-            self._send_error(
-                400,
-                "confirmation-mismatch",
-                "confirm_count must match the number of archive_ids",
-                details={
-                    "confirm_count": confirm_count,
-                    "archive_ids": len(archive_ids),
-                },
-            )
-            return
         config = self._server().config
-        result = workbench.purge_archive_entries(
-            archive_ids, state_dir=config.state_dir
-        )
+        try:
+            result = workbench_archive.purge_entries(
+                body.get("archive_ids"),
+                body.get("confirm_count"),
+                state_dir=config.state_dir,
+            )
+        except workbench_archive.ArchiveRefused as error:
+            self._send_refusal(error)
+            return
         self._send_success(reason="ok", **result.to_payload())
 
     def _handle_archive_settings(self, *, query: Mapping[str, list[str]]) -> None:
         del query
         body = self._read_json_body()
-        retention_days = _require_int(body, "archive_retention_days")
-        if retention_days < 1:
-            self._send_error(
-                400,
-                "invalid-request",
-                "archive_retention_days must be a positive integer",
-                details={"archive_retention_days": retention_days},
-            )
-            return
         config = self._server().config
         try:
-            updated, written_path = workbench.mutate_registry(
-                config.registry_path,
-                lambda current: workbench.set_archive_retention_days(
-                    current, retention_days
-                ),
+            update = workbench_archive.set_retention(
+                body.get("archive_retention_days"),
+                registry_path=config.registry_path,
             )
-        except workbench.WorkbenchError as error:
-            self._send_error(400, "invalid-request", str(error))
+        except workbench_archive.ArchiveRefused as error:
+            self._send_refusal(error)
             return
         self._send_success(
             reason="ok",
-            registry_path=str(written_path),
-            registry=updated.to_payload(),
-            archive_retention_days=updated.archive_retention_days,
+            **update.to_payload(),
+            archive_retention_days=update.registry.archive_retention_days,
         )
 
     def _handle_launch(self, *, query: Mapping[str, list[str]]) -> None:
@@ -1573,48 +1487,14 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         force = bool(body.get("force", False))
         config = self._server().config
         try:
-            result = state.unlock_plan(plan_dir, config.state_dir, force=force)
-        except plans.PlanError as error:
-            self._send_error(
-                400,
-                "malformed-plan",
-                str(error),
-                details={"plan_dir": plan_dir},
+            result = workbench_archive.unlock(
+                plan_dir, state_dir=config.state_dir, force=force
             )
-            return
-        except state.StateError as error:
-            if "active lock" in str(error).lower():
-                self._send_error(
-                    409,
-                    "active-lock",
-                    str(error),
-                    details={"plan_dir": plan_dir},
-                )
-            else:
-                self._send_error(
-                    400,
-                    "state-error",
-                    str(error),
-                    details={"plan_dir": plan_dir},
-                )
-            return
-        except OSError as error:
-            self._send_error(
-                500,
-                "os-error",
-                str(error),
-                details={"plan_dir": plan_dir},
-            )
+        except workbench_archive.ArchiveRefused as error:
+            self._send_refusal(error)
             return
         self._send_success(
-            reason="ok",
-            plan_dir=str(plans.canonicalize_path(plan_dir)),
-            lock_path=str(result.path),
-            had_lock=result.had_lock,
-            removed=result.removed,
-            active=result.was_active,
-            stale=result.was_stale,
-            message=result.message,
+            reason="ok", **workbench_archive.unlock_payload(plan_dir, result)
         )
 
     # -- Helpers ------------------------------------------------------------
@@ -1717,39 +1597,6 @@ def _require_string(body: Mapping[str, Any], key: str) -> str:
             f"field {key!r} must not be empty",
         )
     return value
-
-
-def _require_int(body: Mapping[str, Any], key: str) -> int:
-    value = body.get(key)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise _BadRequestError(
-            "invalid-request",
-            f"missing required integer field {key!r}",
-        )
-    return value
-
-
-def _require_string_list(body: Mapping[str, Any], key: str) -> list[str]:
-    value = body.get(key)
-    if not isinstance(value, list):
-        raise _BadRequestError(
-            "invalid-request",
-            f"missing required list field {key!r}",
-        )
-    if not value:
-        raise _BadRequestError(
-            "invalid-request",
-            f"field {key!r} must not be empty",
-        )
-    items: list[str] = []
-    for entry in value:
-        if not isinstance(entry, str) or not entry:
-            raise _BadRequestError(
-                "invalid-request",
-                f"field {key!r} must contain non-empty strings",
-            )
-        items.append(entry)
-    return items
 
 
 # Plan states that hold an active operational lock; archiving one is blocked

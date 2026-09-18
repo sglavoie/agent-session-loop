@@ -1853,7 +1853,7 @@ a:hover {
   padding: 3px 6px;
 }
 
-.wb-archive__maintenance {
+.wb-archive__cleanup {
   margin: 8px 0 0;
   color: var(--wb-text-dim);
   font-size: 12px;
@@ -1933,9 +1933,17 @@ a:hover {
 }
 
 .wb-archive-row__archived,
-.wb-archive-row__expires {
+.wb-archive-row__expires,
+.wb-archive-row__cleanup {
   color: var(--wb-text-faint);
   font-size: 11px;
+}
+
+/* A candidate is flagged, not doomed: warning-coloured rather than danger,
+   because nothing removes it until an operator confirms a purge. */
+.wb-archive-row[data-cleanup="eligible"] .wb-archive-row__cleanup,
+.wb-archive-row[data-cleanup="undated"] .wb-archive-row__cleanup {
+  color: var(--wb-warning);
 }
 
 .wb-archive-row__actions {

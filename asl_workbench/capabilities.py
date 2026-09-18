@@ -219,6 +219,7 @@ def _companion_http(
 # Coverage references used often enough to name once.
 _SERVER_TESTS = "scripts:tests/test_asl_workbench_server.py"
 _ARCHIVE_TESTS = "scripts:tests/test_asl_workbench_archive.py"
+_ARCHIVE_SERVICE_TESTS = "scripts:tests/test_workbench_archive.py"
 _SUMMARY_TESTS = "scripts:tests/test_asl_workbench_summary.py"
 _RECOVERY_TESTS = "scripts:tests/test_asl_workbench_recovery.py"
 _REDIRECT_TESTS = "scripts:tests/test_asl_workbench_redirect.py"
@@ -350,56 +351,69 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _http(
         "GET /api/archive",
-        "Archive listing, retention setting, and maintenance counts. Runs "
-        "archive retention on read today.",
-        coverage=(_ARCHIVE_TESTS, _SERVER_TESTS, _FOUNDATION_TESTS),
-        # Both changes land here: the read stops mutating, and what retention
-        # does when an entry expires stops being a deletion.
+        "Archive listing, retention setting, and which entries retention has "
+        "marked as cleanup candidates. Removes nothing.",
+        coverage=(
+            _ARCHIVE_TESTS,
+            _ARCHIVE_SERVICE_TESTS,
+            _SERVER_TESTS,
+            _FOUNDATION_TESTS,
+        ),
+        # Both changes landed here: the read stopped mutating, and what
+        # retention does when an entry expires stopped being a deletion.
         changes=("observational-reads", "explicit-archive-cleanup"),
     ),
     _http(
         "POST /api/registry/pin",
-        "Pin a plan with an optional label and launch profile.",
-        coverage=(_SERVER_TESTS, _CLI_TESTS),
+        "Pin a plan with an optional label and launch profile. Serialized "
+        "against every other registry writer by the registry lock.",
+        coverage=(_ARCHIVE_SERVICE_TESTS, _SERVER_TESTS, _CLI_TESTS),
     ),
     _http(
         "POST /api/registry/unpin",
         "Remove a registry pin without touching the plan.",
-        coverage=(_SERVER_TESTS, _CLI_TESTS),
+        coverage=(_ARCHIVE_SERVICE_TESTS, _SERVER_TESTS, _CLI_TESTS),
     ),
     _http(
         "POST /api/plan/archive",
         "Archive one plan; requires confirm_plan_dir to match after canonicalization.",
-        coverage=(_ARCHIVE_TESTS, _SERVER_TESTS),
+        coverage=(_ARCHIVE_TESTS, _ARCHIVE_SERVICE_TESTS, _SERVER_TESTS),
     ),
     _http(
         "POST /api/plans/archive",
         "Bulk archive from the cleanup review bar, reporting per-plan results.",
-        coverage=(_ARCHIVE_TESTS, _SERVER_TESTS),
+        coverage=(_ARCHIVE_TESTS, _ARCHIVE_SERVICE_TESTS, _SERVER_TESTS),
     ),
     _http(
         "POST /api/plan/delete",
         "Historic delete route, kept as an archive alias with its original "
         "confirmation contract.",
-        coverage=(_ARCHIVE_TESTS, _SERVER_TESTS),
+        coverage=(_ARCHIVE_TESTS, _ARCHIVE_SERVICE_TESTS, _SERVER_TESTS),
         adapters=("route alias onto POST /api/plan/archive",),
     ),
     _http(
         "POST /api/archive/restore",
-        "Restore an archived plan and its state back into place.",
-        coverage=(_ARCHIVE_TESTS, _SERVER_TESTS),
+        "Restore an archived plan and its state back into place; refuses "
+        "rather than overwriting an occupied destination.",
+        coverage=(_ARCHIVE_TESTS, _ARCHIVE_SERVICE_TESTS, _SERVER_TESTS),
     ),
     _http(
         "POST /api/archive/delete",
         "Permanently empty archive entries; requires confirm_count to match "
-        "the archive_ids supplied.",
-        coverage=(_ARCHIVE_TESTS, _SERVER_TESTS, _FOUNDATION_TESTS),
+        "the archive_ids supplied. The only route that destroys one.",
+        coverage=(
+            _ARCHIVE_TESTS,
+            _ARCHIVE_SERVICE_TESTS,
+            _SERVER_TESTS,
+            _FOUNDATION_TESTS,
+        ),
         changes=("explicit-archive-cleanup",),
     ),
     _http(
         "POST /api/archive/settings",
-        "Set the archive retention window in the registry.",
-        coverage=(_ARCHIVE_TESTS, _SERVER_TESTS),
+        "Set the archive retention window: the age at which an entry "
+        "becomes a cleanup candidate, not the age at which it is removed.",
+        coverage=(_ARCHIVE_TESTS, _ARCHIVE_SERVICE_TESTS, _SERVER_TESTS),
         changes=("explicit-archive-cleanup",),
     ),
     _http(
@@ -445,8 +459,9 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _http(
         "POST /api/unlock",
-        "Release a plan lock the operator has proven dead.",
-        coverage=(_SERVER_TESTS, _RECOVERY_TESTS),
+        "Release a plan lock the operator has proven dead. The one place "
+        "reclaim is still deliberate, now that no read does it.",
+        coverage=(_ARCHIVE_SERVICE_TESTS, _SERVER_TESTS, _RECOVERY_TESTS),
     ),
     # -- Workbench static assets -------------------------------------------
     Capability(
@@ -499,11 +514,13 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         key=f"{SURFACE_WORKBENCH_CLI}:asl workbench pin",
         surface=SURFACE_WORKBENCH_CLI,
-        summary="Pin a plan into the registry with a label and launch profile.",
+        summary="Pin a plan into the registry with a label and launch "
+        "profile. Same service as POST /api/registry/pin, so the two refuse "
+        "the same inputs for the same reason.",
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_MAC,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_CLI_TESTS, _DOCS_TESTS),
+        regression_coverage=(_ARCHIVE_SERVICE_TESTS, _CLI_TESTS, _DOCS_TESTS),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_CLI}:asl workbench unpin",
@@ -512,7 +529,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_MAC,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_CLI_TESTS, _DOCS_TESTS),
+        regression_coverage=(_ARCHIVE_SERVICE_TESTS, _CLI_TESTS, _DOCS_TESTS),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_CLI}:asl workbench registry",
@@ -618,11 +635,12 @@ CAPABILITIES: tuple[Capability, ...] = (
         key=f"{SURFACE_WORKBENCH_BROWSER}:archive-browser",
         surface=SURFACE_WORKBENCH_BROWSER,
         summary="Archive listing with bulk select, restore, permanent empty, "
-        "and the retention control.",
+        "the retention control, and per-entry cleanup candidacy. Opening it "
+        "deletes nothing.",
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_DOCS_TESTS, _ARCHIVE_TESTS),
+        regression_coverage=(_DOCS_TESTS, _ARCHIVE_TESTS, _STATIC_TESTS),
         coverage_gap=GAP_WORKBENCH_BROWSER,
         intentional_changes=("explicit-archive-cleanup",),
     ),
@@ -1254,11 +1272,16 @@ CAPABILITIES: tuple[Capability, ...] = (
         key=f"{SURFACE_PERSISTENCE}:workbench-archive",
         surface=SURFACE_PERSISTENCE,
         summary="archive/<id>/ holding archive.json plus the plan and state "
-        "copies, with a retention window.",
+        "copies. The retention window marks entries for cleanup; only a "
+        "confirmed purge removes one.",
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_MAC,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_ARCHIVE_TESTS, _FOUNDATION_TESTS),
+        regression_coverage=(
+            _ARCHIVE_TESTS,
+            _ARCHIVE_SERVICE_TESTS,
+            _FOUNDATION_TESTS,
+        ),
         intentional_changes=("explicit-archive-cleanup",),
     ),
     Capability(

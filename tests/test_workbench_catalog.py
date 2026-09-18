@@ -911,13 +911,18 @@ class IncompleteGenerationTests(unittest.TestCase):
 class ChangeRegisterTests(unittest.TestCase):
     """The intentional-change record tracks what actually landed."""
 
-    def test_the_observational_reads_record_names_the_remaining_path(self) -> None:
+    def test_the_observational_reads_record_names_no_remaining_path(self) -> None:
         from asl_workbench import changes
 
         record = changes.intentional_change(changes.KEY_OBSERVATIONAL_READS)
-        # Still the one automatic retention path, and the record has to keep
-        # saying so while it exists.
-        self.assertIn("maintain_archive", record.current_behavior)
+        # This asserted the opposite until session 8: the record had to keep
+        # naming the one automatic retention path while it existed. It does not
+        # exist, so the record now has to say that instead -- a record that
+        # still advertised a deleting read would send the next session looking
+        # for code to remove.
+        self.assertIn(
+            "workbench.maintain_archive no longer exists", record.current_behavior
+        )
         self.assertIn("GET /api/archive", record.current_behavior)
         self.assertIn("reclaim=False", record.current_behavior)
 

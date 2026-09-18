@@ -3110,7 +3110,14 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "`confirm_count`",
             "confirmation-mismatch",
             "`archive_retention_days`, default 30 days",
-            "auto-empties entries",
+            # Session 8: retention marks; it does not empty. The marker used to
+            # be "auto-empties entries" -- it is inverted here rather than
+            # dropped so the docs cannot quietly lose the distinction.
+            "Retention is a threshold rather\nthan a deadline",
+            "the only way an archive entry is emptied",
+            '`cleanup_state: "eligible"`',
+            "`archive_cleanup.candidate_ids`",
+            '`cleanup_state: "undated"` and is never a candidate',
             # Session 4: completed-plan cleanup workflow.
             "`completed_at`",
             "ages complete plans off their",

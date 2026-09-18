@@ -857,9 +857,9 @@
       <section class="wb-panel wb-archive__settings">
         <h2 class="wb-panel__title">Retention</h2>
         <p class="wb-archive__hint">
-          Archived plans are permanently emptied once they are older than the
-          retention window. Auto-empty runs whenever the queue or archive is
-          polled.
+          Archived plans past the retention window are flagged as cleanup
+          candidates and kept. Nothing is emptied by browsing; permanently
+          emptying an entry takes an explicit, confirmed purge.
         </p>
         <div class="wb-archive__retention">
           <label>
@@ -881,11 +881,7 @@
             save retention
           </button>
         </div>
-        <p
-          id="wb-archive-maintenance"
-          class="wb-archive__maintenance"
-          hidden
-        ></p>
+        <p id="wb-archive-cleanup" class="wb-archive__cleanup" hidden></p>
         <div
           id="wb-archive-feedback"
           class="wb-archive__feedback"
@@ -911,6 +907,14 @@
             data-action="archive-select-all"
           >
             select all
+          </button>
+          <button
+            class="wb-button wb-button--ghost"
+            id="wb-archive-select-candidates"
+            type="button"
+            data-action="archive-select-candidates"
+          >
+            select candidates
           </button>
           <button
             class="wb-button wb-button--primary"
@@ -952,6 +956,7 @@
           <code class="wb-archive-row__path" data-field="path"></code>
           <span class="wb-archive-row__archived" data-field="archived"></span>
           <span class="wb-archive-row__expires" data-field="expires"></span>
+          <span class="wb-archive-row__cleanup" data-field="cleanup"></span>
         </div>
         <div class="wb-archive-row__actions">
           <button

@@ -24,6 +24,7 @@ from agent_session_loop import (
     plans,
     state,
     workbench,
+    workbench_archive,
     workbench_server,
 )
 from tests.support import (
@@ -2060,11 +2061,12 @@ class WorkbenchHardeningTests(unittest.TestCase):
             'id="wb-archive-back"',
             'id="wb-archive-retention"',
             'id="wb-archive-retention-save"',
-            'id="wb-archive-maintenance"',
+            'id="wb-archive-cleanup"',
             'id="wb-archive-entries"',
             'id="wb-archive-bulk"',
             'id="wb-archive-count"',
             'id="wb-archive-select-all"',
+            'id="wb-archive-select-candidates"',
             'id="wb-archive-restore-selected"',
             'id="wb-archive-purge-selected"',
             'id="wb-archive-clear"',
@@ -2759,7 +2761,9 @@ class WorkbenchServeCliTests(unittest.TestCase):
         self.assertEqual("/tmp/plan", args.plan_dir)
         self.assertEqual("/repo", args.cwd)
         self.assertEqual("Alpha", args.label)
-        self.assertIs(workbench.workbench_pin_from_args, cli.resolve_handler(args))
+        self.assertIs(
+            workbench_archive.workbench_pin_from_args, cli.resolve_handler(args)
+        )
 
     def test_parser_pin_supports_minimal_invocation(self) -> None:
         parser = cli.build_parser()
@@ -2773,7 +2777,9 @@ class WorkbenchServeCliTests(unittest.TestCase):
         args = parser.parse_args(["workbench", "unpin", "/tmp/plan"])
         self.assertEqual("unpin", args.workbench_command)
         self.assertEqual("/tmp/plan", args.plan_dir)
-        self.assertIs(workbench.workbench_unpin_from_args, cli.resolve_handler(args))
+        self.assertIs(
+            workbench_archive.workbench_unpin_from_args, cli.resolve_handler(args)
+        )
 
     def test_parser_registers_workbench_registry_subcommand(self) -> None:
         parser = cli.build_parser()
@@ -2801,7 +2807,7 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
             with patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))):
                 stdout = io.StringIO()
                 with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
-                    rc = workbench.workbench_pin_from_args(args)
+                    rc = workbench_archive.workbench_pin_from_args(args)
                 self.assertEqual(0, rc)
                 registry_path = workbench.default_registry_path()
                 self.assertTrue(registry_path.is_file())
@@ -2827,8 +2833,9 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
                     label="Second",
                 )
                 with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                    self.assertEqual(0, workbench.workbench_pin_from_args(first))
-                    self.assertEqual(0, workbench.workbench_pin_from_args(second))
+                    pin_handler = workbench_archive.workbench_pin_from_args
+                    self.assertEqual(0, pin_handler(first))
+                    self.assertEqual(0, pin_handler(second))
                 reloaded = workbench.load_registry()
             self.assertEqual(1, len(reloaded.pins))
             pin = reloaded.pins[0]
@@ -2843,7 +2850,7 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
             args = argparse.Namespace(plan_dir="   ", cwd=None, label=None)
             stderr = io.StringIO()
             with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
-                rc = workbench.workbench_pin_from_args(args)
+                rc = workbench_archive.workbench_pin_from_args(args)
             self.assertEqual(1, rc)
             self.assertIn("workbench pin", stderr.getvalue())
 
@@ -2860,7 +2867,7 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
                 workbench.save_registry(seeded)
                 args = argparse.Namespace(plan_dir=str(plan_dir))
                 with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                    rc = workbench.workbench_unpin_from_args(args)
+                    rc = workbench_archive.workbench_unpin_from_args(args)
                 self.assertEqual(0, rc)
                 reloaded = workbench.load_registry()
             self.assertEqual((), reloaded.pins)
@@ -2872,7 +2879,7 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
         ):
             args = argparse.Namespace(plan_dir=str(Path(tmp) / "nothing"))
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                rc = workbench.workbench_unpin_from_args(args)
+                rc = workbench_archive.workbench_unpin_from_args(args)
             self.assertEqual(0, rc)
 
     def test_registry_handler_text_output_lists_pins_and_roots(self) -> None:

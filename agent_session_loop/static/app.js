@@ -213,7 +213,9 @@
     archiveEntries: [],
     archiveSelection: new Set(),
     archiveRetentionDays: null,
-    archiveMeta: null,
+    // What retention makes of the loaded entries, never what it did to them:
+    // the archive read no longer deletes, so this is a count of candidates.
+    archiveCleanup: null,
     previewPlan: null,
     lastVisiblePlans: [],
     rowsByPlan: new Map(),
@@ -2125,6 +2127,12 @@
     if (selectAll) {
       selectAll.addEventListener("click", selectAllArchiveEntries);
     }
+    const selectCandidates = document.getElementById(
+      "wb-archive-select-candidates"
+    );
+    if (selectCandidates) {
+      selectCandidates.addEventListener("click", selectArchiveCleanupCandidates);
+    }
     const restoreSelected = document.getElementById(
       "wb-archive-restore-selected"
     );
@@ -2163,7 +2171,7 @@
         typeof body.archive_retention_days === "number"
           ? body.archive_retention_days
           : null;
-      state.archiveMeta = body.archive_maintenance || null;
+      state.archiveCleanup = body.archive_cleanup || null;
       reconcileArchiveSelection();
       renderArchiveView(body);
       setRefreshStatus("idle", "updated " + new Date().toLocaleTimeString());
@@ -2215,37 +2223,68 @@
     if (retentionInput && typeof payload.archive_retention_days === "number") {
       retentionInput.value = String(payload.archive_retention_days);
     }
-    renderArchiveMaintenance(payload.archive_maintenance || null);
+    renderArchiveCleanup(state.archiveCleanup);
     renderArchiveWarnings(payload.warnings || []);
     renderArchiveEntries(state.archiveEntries);
     updateArchiveBulk();
   }
 
-  function renderArchiveMaintenance(maintenance) {
-    const el = document.getElementById("wb-archive-maintenance");
+  function renderArchiveCleanup(cleanup) {
+    // Reports what retention has *marked*, not what it removed. The line used
+    // to read "auto-empty: N purged" and was the operator's first notice that
+    // opening this tab had destroyed something; now it names candidates that
+    // are all still on disk, and "select candidates" is how they act on it.
+    const el = document.getElementById("wb-archive-cleanup");
     if (!el) return;
-    const removed =
-      maintenance && typeof maintenance.removed_count === "number"
-        ? maintenance.removed_count
+    const candidates =
+      cleanup && typeof cleanup.candidate_count === "number"
+        ? cleanup.candidate_count
         : 0;
-    const failed =
-      maintenance && typeof maintenance.failed_count === "number"
-        ? maintenance.failed_count
+    const undated =
+      cleanup && typeof cleanup.undated_count === "number"
+        ? cleanup.undated_count
         : 0;
-    const warnings =
-      maintenance && Array.isArray(maintenance.warnings)
-        ? maintenance.warnings
-        : [];
-    if (removed === 0 && failed === 0 && warnings.length === 0) {
+    if (candidates === 0 && undated === 0) {
       el.hidden = true;
       el.textContent = "";
       return;
     }
     el.hidden = false;
-    const parts = ["auto-empty: " + removed + " purged"];
-    if (failed) parts.push(failed + " failed");
-    if (warnings.length) parts.push(warnings.join("; "));
+    const parts = [];
+    if (candidates) {
+      const days =
+        cleanup && typeof cleanup.retention_days === "number"
+          ? cleanup.retention_days
+          : state.archiveRetentionDays;
+      const suffix = days ? " (older than " + days + "d)" : "";
+      parts.push(
+        candidates +
+          (candidates === 1 ? " entry" : " entries") +
+          " past retention" +
+          suffix +
+          " — still kept until you empty them"
+      );
+    }
+    if (undated) {
+      parts.push(undated + " with an unreadable archive date");
+    }
     el.textContent = parts.join(" | ");
+  }
+
+  function selectArchiveCleanupCandidates() {
+    // Selects exactly what retention marked, so emptying the candidates is one
+    // deliberate act rather than a checkbox hunt. The purge confirmation still
+    // applies: this only fills the selection.
+    const ids =
+      state.archiveCleanup && Array.isArray(state.archiveCleanup.candidate_ids)
+        ? state.archiveCleanup.candidate_ids
+        : [];
+    state.archiveSelection.clear();
+    ids.forEach((id) => {
+      if (id) state.archiveSelection.add(String(id));
+    });
+    renderArchiveEntries(state.archiveEntries);
+    updateArchiveBulk();
   }
 
   function renderArchiveWarnings(warnings) {
@@ -2267,6 +2306,13 @@
       li.textContent = w;
       ul.appendChild(li);
     });
+  }
+
+  function describeCleanupState(value) {
+    if (value === "eligible") return "cleanup: candidate";
+    if (value === "undated") return "cleanup: unknown age";
+    if (value === "retained") return "cleanup: within retention";
+    return "";
   }
 
   function renderArchiveEntries(entries) {
@@ -2303,6 +2349,13 @@
         "expires",
         "expires: " + formatLastActivity(entry.expires_at)
       );
+      // `expires_at` is when the entry becomes a candidate, not when it goes
+      // away; this line says which side of that it is on so the two are not
+      // read as the same thing.
+      const cleanupState =
+        typeof entry.cleanup_state === "string" ? entry.cleanup_state : "";
+      li.setAttribute("data-cleanup", cleanupState);
+      setField(li, "cleanup", describeCleanupState(cleanupState));
       const box = li.querySelector('[data-field="archive-select"] input');
       if (box) {
         box.checked = state.archiveSelection.has(archiveId);
@@ -2340,6 +2393,17 @@
     }
     const selectAllBtn = document.getElementById("wb-archive-select-all");
     if (selectAllBtn) selectAllBtn.disabled = loaded === 0 || count >= loaded;
+    const candidatesBtn = document.getElementById(
+      "wb-archive-select-candidates"
+    );
+    if (candidatesBtn) {
+      const candidates =
+        state.archiveCleanup &&
+        typeof state.archiveCleanup.candidate_count === "number"
+          ? state.archiveCleanup.candidate_count
+          : 0;
+      candidatesBtn.disabled = candidates === 0;
+    }
     const restoreBtn = document.getElementById("wb-archive-restore-selected");
     if (restoreBtn) restoreBtn.disabled = count === 0;
     const purgeBtn = document.getElementById("wb-archive-purge-selected");

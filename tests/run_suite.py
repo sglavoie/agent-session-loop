@@ -298,6 +298,10 @@ INTEGRATION_MODULES = (
     # through both surfaces that call it, so a divergence shows up as a failure
     # rather than as two passing suites.
     "tests.test_workbench_controls",
+    # And once more for the archive: "browsing never deletes" is a claim about
+    # what a real GET does to a real archive tree, so it is asserted against a
+    # live server reading real entries rather than against a stub listing.
+    "tests.test_workbench_archive",
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
     "tests.test_asl_overseer_e2e",
