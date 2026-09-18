@@ -43,6 +43,11 @@ import {
   restoreShowOlderRuns,
   restoreSortMode,
 } from "./modules/prefs.js";
+import {
+  applyActionAvailability,
+  loadCapabilities,
+  renderOperationReceipts,
+} from "./modules/operations.js";
 import { wirePreviewOpen } from "./modules/preview.js";
 import { wireProfileForm } from "./modules/profile.js";
 import { refresh } from "./modules/queue.js";
@@ -96,7 +101,16 @@ export function init() {
   wireEmptyStateActions();
   hydrateQueueControls();
   applyChipPressedState();
+  // Anything this tab already knows is outstanding is on screen before the
+  // first read answers: an operation nobody confirmed is the thing a reload
+  // most needs to show, and waiting for the network to say so would hide it
+  // exactly when the network is the problem.
+  renderOperationReceipts();
   applyRoute();
+  // Asked once, not awaited: every control works on the assumption that an
+  // operation is available until the deployment says otherwise, so the answer
+  // narrows the interface rather than unlocking it.
+  loadCapabilities().then(() => applyActionAvailability());
   window.addEventListener("hashchange", applyRoute);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") return;

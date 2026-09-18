@@ -323,6 +323,11 @@ INTEGRATION_MODULES = (
     # only a claim about two providers answering the same questions, so both
     # are bound to loopback sockets over one corpus here too.
     "tests.test_workbench_overview",
+    # And once more for the mutations: what a mode will carry out, whether its
+    # advance warning matches its refusal, and what a recorded-but-unconfirmed
+    # operation is allowed to claim are all questions about two live providers
+    # answering the same request, so both are bound here too.
+    "tests.test_workbench_interactions",
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
     "tests.test_asl_overseer_e2e",

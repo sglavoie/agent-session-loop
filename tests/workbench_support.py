@@ -299,6 +299,36 @@ SHELL_HISTORY_RUNS: tuple[Mapping[str, Any], ...] = (
     },
 )
 
+#: Two archived plans, so the archive browser has both verdicts to draw.
+#:
+#: The archive is part of this corpus rather than of a fixture of its own
+#: because the expired half of it is the one place the interface asks for a
+#: deliberate acknowledgement before a destructive action: a purge offered over
+#: an archive with nothing expired in it would never reach that gate, and a
+#: purge offered over an archive where *everything* is expired would never
+#: reach the case where the gate has to stay out of the way.
+#:
+#: ``archived_ago`` is measured against ``time.time()`` for the same reason the
+#: history events are: the retention verdict is computed from the real clock,
+#: so an entry pinned to :data:`SHELL_FROZEN_NOW` would quietly change verdict
+#: as the fixture aged.
+SHELL_ARCHIVE_ENTRIES: tuple[Mapping[str, Any], ...] = (
+    {
+        "archive_id": "20260731T090000Z-delta",
+        "plan_name": "delta",
+        "archived_ago": 45 * 24 * 60 * 60,
+        "retention_days": workbench.DEFAULT_ARCHIVE_RETENTION_DAYS,
+        "summary": "delta: archived long enough ago to have expired",
+    },
+    {
+        "archive_id": "20260916T090000Z-echo",
+        "plan_name": "echo",
+        "archived_ago": 2 * 24 * 60 * 60,
+        "retention_days": workbench.DEFAULT_ARCHIVE_RETENTION_DAYS,
+        "summary": "echo: archived recently and still inside the window",
+    },
+)
+
 #: The freshness proof ASL issued with ``alpha``'s paused state. The remote
 #: mode redeems it on a mutation; without it a submission is refused as
 #: unauthorized, which is the behaviour, not a fixture shortcut.
@@ -491,6 +521,48 @@ def _seed_shell_history_events(plan_state: Path, plan_dir: Path) -> None:
     )
 
 
+def _seed_shell_archive(state_dir: Path, plans_root: Path) -> None:
+    """Write the archive entries the archive browser reads back.
+
+    Real entry directories under the real archive root, each with the
+    ``archive.json`` the Workbench writes, because the listing is produced by
+    enumerating that root: a hand-built listing would test the fixture's idea
+    of an archive rather than the reader's.
+
+    ``expires_at`` is stored, but it is *not* what decides the verdict -- the
+    retention window in the registry is, applied to ``archived_at`` at read
+    time. Both are written here so an entry that disagrees with itself would be
+    a fixture bug rather than a silent pass.
+    """
+    now = time.time()
+    for entry in SHELL_ARCHIVE_ENTRIES:
+        archived_at = now - float(entry["archived_ago"])
+        expires_at = archived_at + float(entry["retention_days"]) * 24 * 60 * 60
+        entry_dir = workbench.archive_root(state_dir) / str(entry["archive_id"])
+        (entry_dir / workbench.ARCHIVE_PLAN_DIR_NAME).mkdir(parents=True, exist_ok=True)
+        (entry_dir / workbench.ARCHIVE_PLAN_DIR_NAME / "manifest.md").write_text(
+            f"# {str(entry['plan_name']).title()}\n\nOne archived plan.\n",
+            encoding="utf-8",
+        )
+        (entry_dir / workbench.ARCHIVE_METADATA_FILE_NAME).write_text(
+            json.dumps(
+                {
+                    "archive_id": entry["archive_id"],
+                    "original_plan_dir": str(plans_root / str(entry["plan_name"])),
+                    "archived_at": shell_iso(archived_at),
+                    "expires_at": shell_iso(expires_at),
+                    "summary": entry["summary"],
+                    "pin": None,
+                    "plan_archived": True,
+                    "state_archived": False,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+
 def seed_shell_plans(root: Path) -> ShellCorpus:
     """Write the plan corpus both modes read, under ``root``.
 
@@ -540,6 +612,7 @@ def seed_shell_plans(root: Path) -> ShellCorpus:
         canonical = plans.canonicalize_path(plan_dir)
         _seed_shell_runner_state(canonical, state_dir, name, SHELL_RUN_IDS.get(name))
         written.append(canonical)
+    _seed_shell_archive(state_dir, plans.canonicalize_path(plans_root))
     return ShellCorpus(
         root=root,
         state_dir=state_dir,

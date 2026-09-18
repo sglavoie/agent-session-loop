@@ -5,6 +5,13 @@
  * accurate a moment later. Conversation recovery is reported and never
  * performed: it renders the decision and the commands, and offers no button
  * that carries either out.
+ *
+ * The action cards are a second door onto controls the bar already offers, so
+ * they are labelled with the same action names and put through the same
+ * availability pass. A recovery card is read by someone who has just been told
+ * something went wrong; offering them a button that this deployment cannot
+ * carry out, and only saying so after they press it, is the worst place in the
+ * interface to make that mistake.
  */
 
 import { apiRequest, describeError } from "./api.js";
@@ -16,9 +23,30 @@ import {
 } from "./constants.js";
 import { handleLaunchClick, handleUnlockClick } from "./controls.js";
 import { planUrl, routePlanId } from "./identity.js";
+import { applyActionAvailability } from "./operations.js";
 import { hideReplyPanel, loadAndRenderReply } from "./panels.js";
 import { redirectStageLine } from "./redirect.js";
 import { state } from "./state.js";
+
+/** The action name a recovery card's button is, when it is a mutation.
+ *
+ * Only the two that act. Everything else a card offers is navigation -- it
+ * scrolls a pane into view and focuses it -- and navigation is available in
+ * every mode, so naming it here would mean disabling a button that works. */
+const RECOVERY_CARD_ACTIONS = {
+  "/api/unlock": "unlock",
+  "/api/launch": "launch",
+  unlock: "unlock",
+  launch: "launch",
+  "retry-run": "launch",
+};
+
+function recoveryCardAction(action) {
+  if (!action) return null;
+  const endpoint = action.endpoint ? String(action.endpoint) : "";
+  const id = action.id ? String(action.id) : "";
+  return RECOVERY_CARD_ACTIONS[endpoint] || RECOVERY_CARD_ACTIONS[id] || null;
+}
 
 export async function loadAndRenderRecovery(plan) {
   const planId = routePlanId();
@@ -340,6 +368,10 @@ export function renderRecoveryActions(actions) {
   cards.forEach((action, index) => {
     host.appendChild(createRecoveryActionCard(action, index === 0));
   });
+  // Asked after the cards are in the document, because the pass reads the
+  // nodes: a card the deployment cannot act on is shut here with the same
+  // sentence the controls bar would have shown for it.
+  applyActionAvailability(host);
 }
 
 export function renderRecoveryPrimaryAction(action) {
@@ -370,6 +402,19 @@ export function createRecoveryActionCard(action, primary) {
   button.className = "wb-button wb-button--primary";
   button.type = "button";
   button.textContent = recoveryActionButtonLabel(action, target);
+  const name = recoveryCardAction(action);
+  if (name) {
+    button.setAttribute("data-operation-action", name);
+    // The card's own verdict is written as a reason rather than as `disabled`,
+    // so the availability pass keeps it instead of re-enabling a card the
+    // diagnosis itself said not to offer.
+    if (action.disabled || !recoveryActionCanRun(action, target)) {
+      button.setAttribute(
+        "data-blocked-reason",
+        action.disabled_reason || "this recovery step is not offered right now"
+      );
+    }
+  }
   button.disabled = Boolean(
     action.disabled || !recoveryActionCanRun(action, target)
   );

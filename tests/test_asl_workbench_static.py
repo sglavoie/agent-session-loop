@@ -361,7 +361,11 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn("handleRecoveryAction", decoded)
         self.assertIn('endpoint === "/api/unlock"', decoded)
         self.assertIn('endpoint === "/api/launch"', decoded)
-        self.assertIn('apiRequest("/api/plan/archive"', decoded)
+        # Session 17 moved every mutation onto the shared `runMutation` path,
+        # so the archive names its action and its endpoint rather than calling
+        # `apiRequest` and reading success off `body.ok`.
+        self.assertIn('action: "archive-plan"', decoded)
+        self.assertIn('path: "/api/plan/archive"', decoded)
         self.assertIn("await handleUnlockClick()", decoded)
         self.assertIn("await handleLaunchClick()", decoded)
         self.assertIn("handleArchiveClick", decoded)
@@ -380,11 +384,11 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn("--unsafe-bypass", decoded)
         self.assertIn("Force-unlock this plan?", decoded)
         self.assertIn("Abort the in-flight turn?", decoded)
-        self.assertIn('apiRequest("/api/control/abort"', decoded)
+        self.assertIn('path: "/api/control/abort"', decoded)
         # The confirmation must gate the POST, not follow it.
         self.assertLess(
             decoded.find("Abort the in-flight turn?"),
-            decoded.find('apiRequest("/api/control/abort"'),
+            decoded.find('path: "/api/control/abort"'),
         )
         self.assertIn("Archive this plan?", decoded)
         self.assertIn("Type the full plan path to confirm", decoded)
@@ -2156,10 +2160,15 @@ class WorkbenchHardeningTests(ShellSourceMixin, unittest.TestCase):
             'restoreSelected.addEventListener("click", handleArchiveRestoreSelected)',
             decoded,
         )
+        # Session 17 split the tally three ways: a restore the far side only
+        # recorded is neither a success nor a failure, and reporting it as
+        # either would be the overclaim the four outcomes exist to prevent.
+        self.assertIn('const parts = ["restored " + restored];', decoded)
         self.assertIn(
-            '"restored " + restored + (failed ? ", " + failed + " failed" : "")',
+            'if (unsettled) parts.push(unsettled + " recorded but not yet run");',
             decoded,
         )
+        self.assertIn('if (failed) parts.push(failed + " failed");', decoded)
         # Both row-level and bulk restore keep posting the single-entry payload.
         self.assertIn("archive_id: archiveId", decoded)
         # oldest-activity sort mode + comparator that treats missing

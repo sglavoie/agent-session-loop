@@ -2,10 +2,19 @@
  *
  * Every one of these changes something, so every one of them confirms first
  * where the change is hard to undo, and none of them reports success from a
- * status code alone.
+ * status code alone. The second half of that sentence is what `operations.js`
+ * now carries: all six go through `runMutation`, which is the only place that
+ * knows a `202` is not a success, that an unanswered request still has an
+ * identity worth keeping, and that a control already waiting for an answer
+ * must not be pressed twice.
+ *
+ * It matters in both modes, not just the remote one. `stop-after-current`,
+ * `select-harness` and `abort` are queued rather than performed even on the
+ * laptop -- `workbench_local._queued` answers `202` -- so "queued" was being
+ * drawn from `body.ok` in exactly the case where `ok` does not mean done.
  */
 
-import { apiRequest, describeError } from "./api.js";
+import { OUTCOME_RESULT } from "./api.js";
 import {
   ABORT_DEFAULT_GRACE_SECONDS,
   ABORT_MAX_GRACE_SECONDS,
@@ -13,6 +22,7 @@ import {
   HARNESS_NAMES,
 } from "./constants.js";
 import { planBody, routePlanId } from "./identity.js";
+import { captureFocus, runMutation } from "./operations.js";
 import { clearSelectedPlan } from "./prefs.js";
 import {
   clearFormErrors,
@@ -88,52 +98,43 @@ export async function handleLaunchClick() {
     return;
   }
   if (payload.profile.unsafe_bypass) {
+    // The dialog takes the keyboard whichever way it is answered, so the
+    // control that opened it gets it back either way.
+    const restore = captureFocus();
     const confirmed = window.confirm(
       "Launch with --unsafe-bypass? This skips the loop-ready safety gate."
     );
+    restore();
     if (!confirmed) return;
   }
-  try {
-    const body = await apiRequest("/api/launch", {
-      method: "POST",
-      body: planBody({ profile: payload.profile }),
-    });
-    if (body && body.ok) {
-      const pid = body.launch && body.launch.pid;
-      showControlsFeedback(
-        "info",
-        "launched" + (pid ? " (pid " + pid + ")" : "")
-      );
-    } else {
-      showControlsFeedback(
-        "error",
-        (body && body.error) || "launch failed"
-      );
-    }
-  } catch (err) {
-    showControlsFeedback("error", describeError(err));
-  }
+  await runMutation({
+    action: "launch",
+    path: "/api/launch",
+    body: planBody({ profile: payload.profile }),
+    feedback: showControlsFeedback,
+    describe: (answer) => {
+      if (answer.outcome !== OUTCOME_RESULT) return null;
+      const launch = answer.payload && answer.payload.launch;
+      const pid = launch && launch.pid;
+      const replayed = answer.payload && answer.payload.replayed === true;
+      if (replayed) {
+        return "this launch was already recorded; nothing was started twice";
+      }
+      return "launched" + (pid ? " (pid " + pid + ")" : "");
+    },
+  });
 }
 
 export async function handleStopClick() {
   if (!routePlanId()) return;
   showControlsFeedback("", "");
-  try {
-    const body = await apiRequest(
-      "/api/control/stop-after-current",
-      { method: "POST", body: planBody() }
-    );
-    if (body && body.ok) {
-      showControlsFeedback("info", "stop queued; applies at next checkpoint");
-    } else {
-      showControlsFeedback(
-        "error",
-        (body && body.error) || "failed to enqueue stop"
-      );
-    }
-  } catch (err) {
-    showControlsFeedback("error", describeError(err));
-  }
+  await runMutation({
+    action: "stop",
+    path: "/api/control/stop-after-current",
+    body: planBody(),
+    subject: "stop-after-current",
+    feedback: showControlsFeedback,
+  });
 }
 
 export async function handleAbortClick() {
@@ -155,35 +156,32 @@ export async function handleAbortClick() {
     );
     return;
   }
+  const restore = captureFocus();
   const confirmed = window.confirm(
     "Abort the in-flight turn? The worker gets " +
       grace +
       "s to wind down, then the harness is killed and the session is left pending."
   );
+  restore();
   if (!confirmed) return;
   showControlsFeedback("", "");
-  try {
-    const body = await apiRequest("/api/control/abort", {
-      method: "POST",
-      body: planBody({ grace_seconds: grace }),
-    });
-    if (body && body.ok) {
-      showControlsFeedback(
-        "info",
-        "abort queued with " +
-          grace +
-          "s grace; " +
-          ((body && body.note) || "applies at the next drain")
+  await runMutation({
+    action: "abort",
+    path: "/api/control/abort",
+    body: planBody({ grace_seconds: grace }),
+    subject: "the abort",
+    feedback: showControlsFeedback,
+    describe: (answer) => {
+      if (!answer.ok) return null;
+      const note = (answer.payload && answer.payload.note) || "applies at the next drain";
+      return (
+        "abort recorded with " +
+        grace +
+        "s grace and has not run yet; " +
+        note
       );
-    } else {
-      showControlsFeedback(
-        "error",
-        (body && body.error) || "failed to enqueue abort"
-      );
-    }
-  } catch (err) {
-    showControlsFeedback("error", describeError(err));
-  }
+    },
+  });
 }
 
 export async function handleHarnessSelectClick() {
@@ -200,54 +198,38 @@ export async function handleHarnessSelectClick() {
     return;
   }
   showControlsFeedback("", "");
-  try {
-    const body = await apiRequest(
-      "/api/control/select-harness",
-      {
-        method: "POST",
-        body: planBody({ harness: harness }),
-      }
-    );
-    if (body && body.ok) {
-      showControlsFeedback(
-        "info",
-        "harness " + harness + " queued for next session"
-      );
-    } else {
-      showControlsFeedback(
-        "error",
-        (body && body.error) || "failed to enqueue harness select"
-      );
-    }
-  } catch (err) {
-    showControlsFeedback("error", describeError(err));
-  }
+  await runMutation({
+    action: "harness",
+    path: "/api/control/select-harness",
+    body: planBody({ harness: harness }),
+    subject: "harness " + harness,
+    feedback: showControlsFeedback,
+  });
 }
 
 export async function handleUnlockClick() {
   if (!routePlanId()) return;
+  const restore = captureFocus();
   const confirmed = window.confirm(
     "Force-unlock this plan? Only do this when you are sure no runner is active; mid-run unlock can corrupt state."
   );
+  restore();
   if (!confirmed) return;
   showControlsFeedback("", "");
-  try {
-    const body = await apiRequest("/api/unlock", {
-      method: "POST",
-      body: planBody({ force: true }),
-    });
-    if (body && body.ok) {
-      const removed = body.removed ? "removed" : "no lock present";
-      showControlsFeedback("info", "unlock: " + removed);
-    } else {
-      showControlsFeedback(
-        "error",
-        (body && body.error) || "unlock failed"
+  await runMutation({
+    action: "unlock",
+    path: "/api/unlock",
+    body: planBody({ force: true }),
+    subject: "the unlock",
+    feedback: showControlsFeedback,
+    describe: (answer) => {
+      if (answer.outcome !== OUTCOME_RESULT) return null;
+      return (
+        "unlock: " +
+        (answer.payload && answer.payload.removed ? "removed" : "no lock present")
       );
-    }
-  } catch (err) {
-    showControlsFeedback("error", describeError(err));
-  }
+    },
+  });
 }
 
 export async function handleArchiveClick() {
@@ -257,11 +239,13 @@ export async function handleArchiveClick() {
   const planDir =
     (state.detailPlan && state.detailPlan.plan_dir) || state.route.planDir;
   if (!planDir || !routePlanId()) return;
+  const restore = captureFocus();
   const typed = window.prompt(
     "Archive this plan? This moves the plan directory, Workbench pin, and ASL state into the archive, where it can be restored until retention expires. Type the full plan path to confirm:\n\n" +
       planDir,
     ""
   );
+  restore();
   if (typed === null) return;
   const confirmPlanDir = (typed || "").trim();
   if (!confirmPlanDir) {
@@ -273,25 +257,22 @@ export async function handleArchiveClick() {
     return;
   }
   showControlsFeedback("", "");
-  try {
-    const body = await apiRequest("/api/plan/archive", {
-      method: "POST",
-      body: planBody({ confirm_plan_dir: confirmPlanDir }),
-    });
-    if (body && body.ok) {
-      state.detailPlan = null;
-      state.detailRegistry = null;
-      state.detailReplyContext = null;
-      clearSelectedPlan();
-      navigateToQueue();
-      refresh();
-    } else {
-      showControlsFeedback(
-        "error",
-        (body && body.error) || "archive failed"
-      );
-    }
-  } catch (err) {
-    showControlsFeedback("error", describeError(err));
+  const answer = await runMutation({
+    action: "archive-plan",
+    path: "/api/plan/archive",
+    body: planBody({ confirm_plan_dir: confirmPlanDir }),
+    subject: "the archive",
+    feedback: showControlsFeedback,
+  });
+  // Leaving the detail view is only right once the plan is actually gone. A
+  // recorded-but-not-run archive leaves the plan where it is, and navigating
+  // away from it would be the success claim this whole path exists to avoid.
+  if (answer && answer.outcome === OUTCOME_RESULT) {
+    state.detailPlan = null;
+    state.detailRegistry = null;
+    state.detailReplyContext = null;
+    clearSelectedPlan();
+    navigateToQueue();
+    refresh();
   }
 }

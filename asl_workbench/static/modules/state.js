@@ -112,6 +112,34 @@ export const state = {
     status: null,
   },
   conversationRecovery: null,
+  // The live reply's retry identity, held on exactly the terms the correction
+  // draft is: minted at the first submit, kept through every answer that did
+  // not settle, and dropped the moment the draft it names is gone. The reply
+  // text itself is not here for the same reason it is not in storage.
+  reply: {
+    operationId: null,
+    submittedIds: [],
+  },
+  // What `GET /api/capabilities` said this deployment can carry out, and the
+  // read that is finding out. `null` means nobody has asked yet, which every
+  // reader treats as "available": a capability read that has not answered is
+  // not evidence that an operation is refused.
+  capabilities: null,
+  capabilitiesInFlight: null,
+  // The mutations this tab has sent and not heard back about, by action name.
+  // A guard rather than a record: what outlives the answer is the receipt.
+  operationsInFlight: new Set(),
+  // The operation the *server* still holds for the plan on screen, as the
+  // remote mode reports it on every plan read. The authority on what is
+  // outstanding, since it survives this tab entirely.
+  detailOutstanding: null,
+  // Archive ids whose expiry the operator has read and acknowledged. Purge
+  // refuses until an expired selection has been through that review.
+  archiveReviewed: new Set(),
+  // The purge that is waiting on that review: the exact ids the operator asked
+  // for, held so acknowledging resumes *that* request rather than whatever the
+  // selection happens to be by then.
+  archiveReviewPending: null,
   detailHistoryByPlan: new Map(),
   shellMediaQuery: null,
   searchDebounceTimer: null,

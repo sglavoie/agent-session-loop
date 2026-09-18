@@ -23,6 +23,10 @@ import {
   loadAndRenderProgress,
   loadAndRenderState,
 } from "./panels.js";
+import {
+  applyActionAvailability,
+  renderOperationReceipts,
+} from "./operations.js";
 import { describeAction, formatRepositoryAliases } from "./preview.js";
 import { renderProfileForm } from "./profile.js";
 import { setRefreshStatus } from "./queue.js";
@@ -71,6 +75,12 @@ export async function refreshDetail() {
     state.detailRegistry = registryBody && registryBody.registry
       ? registryBody.registry
       : null;
+    // What the service itself still holds for this plan. The remote provider
+    // publishes it on every plan read and it is the authority on outstanding
+    // work: it survives this tab, so it is how a mutation sent from a phone
+    // that has since been closed is still visible from a laptop.
+    state.detailOutstanding = detailBody.outstanding_operation || null;
+    renderOperationReceipts(state.detailOutstanding);
     renderDetailHeader(state.detailPlan);
     renderProfileForm(state.detailPlan, state.detailRegistry);
     const tasks = [
@@ -167,7 +177,13 @@ export function renderDetailHeader(plan) {
   }
   const unpinButton = document.getElementById("wb-profile-unpin");
   if (unpinButton) {
-    unpinButton.disabled = !isPinned(plan.plan_dir);
+    // Written as a reason rather than as `disabled`, so the capability pass
+    // below leaves it alone instead of re-enabling an unpin with no pin.
+    if (isPinned(plan.plan_dir)) {
+      unpinButton.removeAttribute("data-blocked-reason");
+    } else {
+      unpinButton.setAttribute("data-blocked-reason", "this plan is not pinned");
+    }
   }
   const harnessSelect = document.getElementById("wb-control-harness");
   if (harnessSelect && plan.harness) {
@@ -175,4 +191,8 @@ export function renderDetailHeader(plan) {
       harnessSelect.value = plan.harness;
     }
   }
+  // The plan's own state is half of what decides whether a control can do
+  // anything, so every header render re-asks. A stop offered against a plan
+  // that finished during the last poll is a button with nothing behind it.
+  applyActionAvailability(document.getElementById("wb-detail"));
 }

@@ -183,6 +183,7 @@
           id="wb-cleanup-archive"
           type="button"
           data-action="bulk-archive"
+          data-operation-action="archive-plans"
         >
           archive selected
         </button>
@@ -351,6 +352,7 @@
                 class="wb-button wb-button--primary"
                 type="submit"
                 data-action="reply-submit"
+                data-operation-action="reply"
               >
                 submit reply
               </button>
@@ -522,6 +524,27 @@
         </div>
       </section>
 
+      <!--
+        Work this tab sent and nobody has confirmed finished. Hidden when
+        there is none, which is the ordinary case. The ids survive a reload
+        because they are the only part of a mutation a reload cannot
+        reconstruct; no draft and no message is kept with them.
+      -->
+      <section
+        class="wb-panel wb-operations"
+        id="wb-operations-panel"
+        aria-label="Unconfirmed operations"
+        hidden
+      >
+        <h2 class="wb-panel__title">Unconfirmed operations</h2>
+        <p class="wb-operations__hint">
+          Recorded and not yet confirmed as run. Retrying the same control
+          reuses the operation id below, so a retry is the same request rather
+          than a second one.
+        </p>
+        <ul class="wb-operations__list" id="wb-operations-list"></ul>
+      </section>
+
       <section class="wb-panel">
         <h2 class="wb-panel__title">Controls</h2>
         <div id="wb-controls-feedback" class="wb-controls__feedback" hidden></div>
@@ -531,6 +554,7 @@
             id="wb-control-launch"
             type="button"
             data-action="launch"
+            data-operation-action="launch"
           >
             launch
           </button>
@@ -539,6 +563,7 @@
             id="wb-control-stop"
             type="button"
             data-action="stop"
+            data-operation-action="stop"
           >
             stop after current
           </button>
@@ -557,6 +582,8 @@
               id="wb-control-abort"
               type="button"
               data-action="abort"
+              data-operation-action="abort"
+              data-enabled-title="Ends the in-flight turn after the grace window, then leaves the session pending. Confirms first."
               title="Ends the in-flight turn after the grace window, then leaves the session pending. Confirms first."
             >
               abort turn
@@ -575,6 +602,7 @@
               id="wb-control-harness-apply"
               type="button"
               data-action="harness-apply"
+              data-operation-action="harness"
             >
               apply
             </button>
@@ -592,6 +620,8 @@
             id="wb-control-unlock"
             type="button"
             data-action="unlock"
+            data-operation-action="unlock"
+            data-enabled-title="Removes the operational lock. Confirms first."
             title="Removes the operational lock. Confirms first."
           >
             unlock stale
@@ -601,6 +631,8 @@
             id="wb-control-archive"
             type="button"
             data-action="archive-plan"
+            data-operation-action="archive-plan"
+            data-enabled-title="Archives the plan directory and ASL state. Restorable. Confirms first."
             title="Archives the plan directory and ASL state. Restorable. Confirms first."
           >
             archive plan
@@ -735,6 +767,7 @@
               class="wb-button wb-button--primary"
               type="submit"
               data-action="save-profile"
+              data-operation-action="pin"
             >
               save profile
             </button>
@@ -743,6 +776,7 @@
               id="wb-profile-unpin"
               type="button"
               data-action="unpin"
+              data-operation-action="unpin"
             >
               unpin
             </button>
@@ -950,6 +984,7 @@
             id="wb-archive-retention-save"
             type="button"
             data-action="archive-retention-save"
+            data-operation-action="archive-settings"
           >
             save retention
           </button>
@@ -969,6 +1004,44 @@
         aria-live="polite"
         hidden
       ></section>
+
+      <!--
+        The expired-archive review. A typed count proves the operator meant to
+        press the button; it proves nothing about whether they know which
+        plans are behind the number. Purging an entry retention has marked
+        opens this first and names every one of them.
+      -->
+      <section
+        class="wb-panel wb-archive-review"
+        id="wb-archive-review"
+        aria-label="Review expired archive entries"
+        hidden
+      >
+        <h2 class="wb-panel__title">Review expired entries</h2>
+        <p class="wb-archive-review__message" id="wb-archive-review-message"></p>
+        <ul
+          class="wb-archive-review__list"
+          id="wb-archive-review-list"
+        ></ul>
+        <div class="wb-archive-review__actions">
+          <button
+            class="wb-button wb-button--danger"
+            id="wb-archive-review-ack"
+            type="button"
+            data-action="archive-review-ack"
+          >
+            I have reviewed these — continue
+          </button>
+          <button
+            class="wb-button wb-button--ghost"
+            id="wb-archive-review-cancel"
+            type="button"
+            data-action="archive-review-cancel"
+          >
+            cancel
+          </button>
+        </div>
+      </section>
 
       <section class="wb-panel">
         <div class="wb-archive__bulk" id="wb-archive-bulk">
@@ -994,6 +1067,7 @@
             id="wb-archive-restore-selected"
             type="button"
             data-action="archive-restore-selected"
+            data-operation-action="archive-restore"
           >
             restore selected
           </button>
@@ -1002,6 +1076,7 @@
             id="wb-archive-purge-selected"
             type="button"
             data-action="archive-purge-selected"
+            data-operation-action="archive-purge"
           >
             purge selected
           </button>
@@ -1036,6 +1111,7 @@
             class="wb-button wb-button--primary"
             type="button"
             data-action="archive-restore"
+            data-operation-action="archive-restore"
           >
             restore
           </button>
@@ -1043,6 +1119,7 @@
             class="wb-button wb-button--danger"
             type="button"
             data-action="archive-purge"
+            data-operation-action="archive-purge"
           >
             purge
           </button>

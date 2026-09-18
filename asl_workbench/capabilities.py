@@ -258,6 +258,15 @@ _SHELL_BROWSER_TESTS = "scripts:tests/workbench_browser/shell.spec.js"
 #: because that spec now describes an implementation this one replaced.
 _OVERVIEW_TESTS = "scripts:tests/test_workbench_overview.py"
 _OVERVIEW_BROWSER_TESTS = "scripts:tests/workbench_browser/overview.spec.js"
+#: The mutating half of the matrix, asserted the same two ways again. The
+#: Python half asks both providers what they will carry out and holds their
+#: advance warning against their refusal word for word; the Playwright half is
+#: where the sentence reaching the operator, the keyboard surviving a confirm
+#: dialog, a recorded-but-unrun operation surviving a reload, and the
+#: expired-archive review are actually exercised -- none of which is visible
+#: from a request.
+_INTERACTION_TESTS = "scripts:tests/test_workbench_interactions.py"
+_INTERACTION_BROWSER_TESTS = "scripts:tests/workbench_browser/interactions.spec.js"
 _PI = "sglavoie_raspberry_pi:services/pi-monitoring"
 
 
@@ -744,8 +753,20 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_DOCS_TESTS, _SERVER_TESTS),
-        coverage_gap=GAP_WORKBENCH_BROWSER,
+        # Every control on the bar is now driven through one guarded path and
+        # asserted from both ends: what each mode will carry out, that the
+        # sentence under a shut control is the refusal it would have given,
+        # that a run that has moved on is named as the reason rather than the
+        # mode, and that a recorded-but-unconfirmed submission is never drawn
+        # as done. Launch is asserted through its disabled state rather than by
+        # pressing it -- a browser suite that started a real run would leave
+        # one behind.
+        regression_coverage=(
+            _DOCS_TESTS,
+            _SERVER_TESTS,
+            _INTERACTION_TESTS,
+            _INTERACTION_BROWSER_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_BROWSER}:recovery-center",
@@ -755,7 +776,13 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_DOCS_TESTS, _RECOVERY_TESTS),
+        # One of the boundaries is now asserted: a recovery card that acts is
+        # the same action as the controls bar, so it is shut by the same
+        # capability pass rather than refused after the press. The cards
+        # themselves are still only reached by the smoke checklist -- the shell
+        # fixture's plans diagnose to a card that navigates, so no browser test
+        # here can put a mutating card on screen.
+        regression_coverage=(_DOCS_TESTS, _RECOVERY_TESTS, _INTERACTION_TESTS),
         coverage_gap=GAP_WORKBENCH_BROWSER,
     ),
     Capability(
@@ -767,8 +794,19 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_DOCS_TESTS, _ARCHIVE_TESTS, _STATIC_TESTS),
-        coverage_gap=GAP_WORKBENCH_BROWSER,
+        # Browsing-deletes-nothing and the two confirmations are asserted
+        # against a live archive, and the browser half drives the listing, the
+        # bulk bar's two distinct reasons for being shut, and the expired-entry
+        # review that now stands in front of the typed count. The purge itself
+        # is driven up to that gate and no further: a spec that got past it
+        # would be emptying the archive the other specs read.
+        regression_coverage=(
+            _DOCS_TESTS,
+            _ARCHIVE_TESTS,
+            _STATIC_TESTS,
+            _INTERACTION_TESTS,
+            _INTERACTION_BROWSER_TESTS,
+        ),
         intentional_changes=("explicit-archive-cleanup",),
     ),
     Capability(
@@ -779,8 +817,15 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_DOCS_TESTS, _ARCHIVE_TESTS),
-        coverage_gap=GAP_WORKBENCH_BROWSER,
+        # The review is the capability, so the browser half drives the bar to
+        # the edge of the archive and stops: the button starts shut, selecting
+        # is a read that arms nothing, and on the Pi the mode's reason replaces
+        # the selection's rather than the selection unlocking it.
+        regression_coverage=(
+            _DOCS_TESTS,
+            _ARCHIVE_TESTS,
+            _INTERACTION_BROWSER_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_BROWSER}:conversation-recovery-card",

@@ -7,6 +7,7 @@
 import { apiRequest, describeError, request, submit } from "./api.js";
 import { REPLY_CONTEXT_ERROR_HINTS } from "./constants.js";
 import { planUrl } from "./identity.js";
+import { applyActionAvailability } from "./operations.js";
 import { clearFormErrors, showFormError } from "./profile.js";
 import { state } from "./state.js";
 
@@ -360,7 +361,6 @@ export async function loadAndRenderReply() {
 
 export function renderReplyContextError(payload) {
   state.detailReplyContext = null;
-  setReplyFormDisabled(true);
   const reason = payload && payload.reason ? String(payload.reason) : null;
   const error =
     payload && payload.error
@@ -370,6 +370,10 @@ export function renderReplyContextError(payload) {
   const message = reason
     ? reason + ": " + (hint ? hint + " " + error : error)
     : error;
+  // The same sentence goes under the shut button and into the form error. The
+  // prompt box it used to live in alone is inside a collapsed `<details>`, so
+  // an operator could otherwise meet a dead "submit reply" with nothing on it.
+  setReplyFormDisabled(true, message);
   const promptEl = document.getElementById("wb-reply-prompt");
   if (promptEl) promptEl.textContent = message;
   const lastEl = document.getElementById("wb-reply-last-message");
@@ -384,11 +388,31 @@ export function hideReplyPanel() {
   setReplyFormDisabled(false);
 }
 
-export function setReplyFormDisabled(disabled) {
+/**
+ * Shut or reopen the reply form, saying why on the button when it is shut.
+ *
+ * The reason is written as `data-blocked-reason` rather than left as a bare
+ * `disabled`, for two reasons: the capability pass would otherwise re-enable
+ * the button on its next sweep, and a greyed-out control with no sentence on
+ * it is the thing this view exists not to show.
+ */
+export function setReplyFormDisabled(disabled, reason) {
   const form = document.getElementById("wb-reply-form");
   if (!form) return;
   const controls = form.querySelectorAll("textarea, button[type=\"submit\"]");
   controls.forEach((control) => {
     control.disabled = Boolean(disabled);
   });
+  const button = form.querySelector("button[type=\"submit\"]");
+  if (button) {
+    if (disabled) {
+      button.setAttribute(
+        "data-blocked-reason",
+        reason || "there is no paused question on this plan to answer"
+      );
+    } else {
+      button.removeAttribute("data-blocked-reason");
+    }
+  }
+  applyActionAvailability(form);
 }

@@ -31,7 +31,13 @@
 // draft to be sendable — so it is the operator who moves it, through the
 // conflict panel below, and never this code on their behalf.
 
-import { apiRequest, describeError, mintOperationId, submit } from "./api.js";
+import {
+  OUTCOME_PENDING,
+  OUTCOME_UNREACHABLE,
+  apiRequest,
+  describeError,
+  mintOperationId,
+} from "./api.js";
 import {
   REDIRECT_ACTION,
   REDIRECT_CONFIRM,
@@ -46,6 +52,7 @@ import {
 } from "./constants.js";
 import { showControlsFeedback } from "./controls.js";
 import { planBody, planUrl, routePlanId } from "./identity.js";
+import { rememberReceipt, renderOperationReceipts } from "./operations.js";
 import { clearFormErrors, showFormError } from "./profile.js";
 import { refresh } from "./queue.js";
 import { emptyListItem } from "./recovery.js";
@@ -518,6 +525,18 @@ export async function handleRedirectSubmit(event) {
       // the attribution has to outlive it or the operator loses their own
       // correction in the progress list.
       rememberSubmittedRedirect(operationId);
+      // A recorded correction is still work nobody has watched finish, so it
+      // joins the outstanding list the rest of the matrix writes to. Only the
+      // id goes in; the words never leave this tab.
+      rememberReceipt({
+        operation_id: operationId,
+        action: "redirect",
+        plan: routePlanId(),
+        outcome: OUTCOME_PENDING,
+        status: "accepted",
+        reason: null,
+        settled: false,
+      });
       resetRedirectComposer();
       showControlsFeedback(
         "info",
@@ -535,6 +554,17 @@ export async function handleRedirectSubmit(event) {
       );
     }
   } catch (err) {
+    // Nobody knows whether this arrived. The id is written down for exactly
+    // that reason: a reload has to be able to show that the question is open.
+    rememberReceipt({
+      operation_id: operationId,
+      action: "redirect",
+      plan: routePlanId(),
+      outcome: OUTCOME_UNREACHABLE,
+      status: null,
+      reason: "unreachable",
+      settled: false,
+    });
     showFormError(
       "wb-redirect-form-errors",
       "submission failed: " +
@@ -545,6 +575,7 @@ export async function handleRedirectSubmit(event) {
   } finally {
     state.redirect.inFlight = false;
     setRedirectSubmitDisabled(!state.redirect.permitted);
+    renderOperationReceipts(state.detailOutstanding);
   }
   await loadAndRenderRedirect();
 }

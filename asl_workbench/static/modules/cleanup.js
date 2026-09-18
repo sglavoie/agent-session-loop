@@ -5,9 +5,14 @@
  * never a way around the per-plan refusal.
  */
 
-import { apiRequest, describeError } from "./api.js";
+import { OUTCOME_RESULT } from "./api.js";
 import { DAY_MS } from "./constants.js";
 import { planIdOf } from "./identity.js";
+import {
+  applyActionAvailability,
+  captureFocus,
+  runMutation,
+} from "./operations.js";
 import {
   normalizeThresholdDays,
   persistCleanupMode,
@@ -165,46 +170,65 @@ export function updateCleanupReview() {
       count === 1 ? "1 plan selected" : count + " plans selected";
   }
   const archiveBtn = document.getElementById("wb-cleanup-archive");
-  if (archiveBtn) archiveBtn.disabled = count === 0;
+  if (archiveBtn) {
+    // An empty selection and a mode that cannot archive are two different
+    // reasons to be shut, and the operator can only act on one of them.
+    if (count === 0) {
+      archiveBtn.setAttribute("data-blocked-reason", "no plans are selected");
+    } else {
+      archiveBtn.removeAttribute("data-blocked-reason");
+    }
+  }
   const clearBtn = document.getElementById("wb-cleanup-clear");
   if (clearBtn) clearBtn.disabled = count === 0;
+  applyActionAvailability(document.getElementById("wb-cleanup-bar"));
 }
 
 export async function handleBulkArchive() {
   const planDirs = Array.from(state.cleanupSelection);
   if (planDirs.length === 0) return;
+  const restoreFocus = captureFocus();
   const confirmed = window.confirm(
     "Archive " +
       planDirs.length +
       " selected plan(s)? Archived plans move to the Workbench archive and can be restored until retention expires."
   );
+  restoreFocus();
   if (!confirmed) return;
   showCleanupFeedback("", "");
-  try {
-    const body = await apiRequest("/api/plans/archive", {
-      method: "POST",
-      body: { plan_dirs: planDirs },
-    });
-    if (body && body.ok) {
+  const answer = await runMutation({
+    action: "archive-plans",
+    path: "/api/plans/archive",
+    body: { plan_dirs: planDirs },
+    subject: "the bulk archive",
+    feedback: showCleanupFeedback,
+    // A bulk archive that completed can still have lost entries on the way, so
+    // the tone is the count's rather than the outcome's.
+    kindFor: (result) =>
+      result.outcome === OUTCOME_RESULT &&
+      (result.payload && result.payload.failed_count) > 0
+        ? "warning"
+        : null,
+    describe: (result) => {
+      if (result.outcome !== OUTCOME_RESULT) return null;
       const archived =
-        typeof body.archived_count === "number" ? body.archived_count : 0;
+        typeof result.payload.archived_count === "number"
+          ? result.payload.archived_count
+          : 0;
       const failed =
-        typeof body.failed_count === "number" ? body.failed_count : 0;
-      state.cleanupSelection.clear();
-      updateCleanupReview();
-      showCleanupFeedback(
-        failed > 0 ? "warning" : "info",
-        "archived " + archived + (failed ? ", " + failed + " failed" : "")
-      );
-      refresh();
-    } else {
-      showCleanupFeedback(
-        "error",
-        (body && body.error) || "bulk archive failed"
-      );
-    }
-  } catch (err) {
-    showCleanupFeedback("error", describeError(err));
+        typeof result.payload.failed_count === "number"
+          ? result.payload.failed_count
+          : 0;
+      return "archived " + archived + (failed ? ", " + failed + " failed" : "");
+    },
+  });
+  // The selection is only emptied once the plans have actually moved: clearing
+  // it on a recorded-but-not-run answer would take away the list the operator
+  // would need to retry with.
+  if (answer && answer.outcome === OUTCOME_RESULT) {
+    state.cleanupSelection.clear();
+    updateCleanupReview();
+    refresh();
   }
 }
 

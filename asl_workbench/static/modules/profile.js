@@ -5,11 +5,12 @@
  * run with a flag nobody asked for.
  */
 
-import { apiRequest, describeError, submit } from "./api.js";
+import { OUTCOME_RESULT } from "./api.js";
 import { COMMIT_MODES, HARNESS_NAMES } from "./constants.js";
 import { showControlsFeedback } from "./controls.js";
 import { renderDetailHeader } from "./detail.js";
 import { planBody, routePlanId } from "./identity.js";
+import { runMutation } from "./operations.js";
 import { findPin } from "./panels.js";
 import { state } from "./state.js";
 
@@ -200,29 +201,26 @@ export function wireProfileForm() {
       showFormError("wb-profile-form-errors", errors.join("; "));
       return;
     }
-    try {
-      const body = await apiRequest("/api/registry/pin", {
-        method: "POST",
-        body: planBody({
-          label: payload.label,
-          profile: payload.profile,
-        }),
-      });
-      if (body && body.ok) {
-        if (body.registry) state.detailRegistry = body.registry;
-        showControlsFeedback("info", "profile saved");
-        renderDetailHeader(state.detailPlan);
-      } else {
-        showFormError(
-          "wb-profile-form-errors",
-          (body && body.error) || "failed to save profile"
-        );
-      }
-    } catch (err) {
-      showFormError(
-        "wb-profile-form-errors",
-        "save failed: " + describeError(err)
-      );
+    const answer = await runMutation({
+      action: "pin",
+      path: "/api/registry/pin",
+      body: planBody({
+        label: payload.label,
+        profile: payload.profile,
+      }),
+      subject: "the pin",
+      feedback: (kind, message) => {
+        // The form is still on screen and a refusal belongs against it; the
+        // rest belongs with the operation feedback beside the controls.
+        if (kind === "error") showFormError("wb-profile-form-errors", message);
+        else showControlsFeedback(kind, message);
+      },
+      describe: (result) =>
+        result.outcome === OUTCOME_RESULT ? "profile saved" : null,
+    });
+    if (answer && answer.outcome === OUTCOME_RESULT) {
+      if (answer.payload.registry) state.detailRegistry = answer.payload.registry;
+      renderDetailHeader(state.detailPlan);
     }
   });
 
@@ -230,23 +228,20 @@ export function wireProfileForm() {
   if (unpinButton) {
     unpinButton.addEventListener("click", async () => {
       if (!routePlanId()) return;
-      try {
-        const body = await apiRequest("/api/registry/unpin", {
-          method: "POST",
-          body: planBody(),
-        });
-        if (body && body.ok) {
-          if (body.registry) state.detailRegistry = body.registry;
-          showControlsFeedback("info", "pin removed");
-          renderDetailHeader(state.detailPlan);
-        } else {
-          showControlsFeedback(
-            "error",
-            (body && body.error) || "failed to unpin"
-          );
+      const answer = await runMutation({
+        action: "unpin",
+        path: "/api/registry/unpin",
+        body: planBody(),
+        subject: "the unpin",
+        feedback: showControlsFeedback,
+        describe: (result) =>
+          result.outcome === OUTCOME_RESULT ? "pin removed" : null,
+      });
+      if (answer && answer.outcome === OUTCOME_RESULT) {
+        if (answer.payload.registry) {
+          state.detailRegistry = answer.payload.registry;
         }
-      } catch (err) {
-        showControlsFeedback("error", describeError(err));
+        renderDetailHeader(state.detailPlan);
       }
     });
   }

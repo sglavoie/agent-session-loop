@@ -37,6 +37,21 @@
     "comment": "Which section of the overview each seeded plan belongs in, so a spec asserts placement against the fixture's intent rather than against a copy of the rule it is testing. Named per plan rather than defaulted: a default would let a plan that silently moved sections keep passing.",
     "hidden": ["older"]
   },
+  "archive": {
+    "comment": "The two archived plans tests/workbench_support.py seeds, one on each side of the default thirty-day retention window. Two rather than one because the purge review has to name the expired entries and leave the rest alone: an archive where everything had expired could not show the second half.",
+    "entry_count": 2,
+    "expired_count": 1,
+    "expired": {
+      "archive_id": "20260731T090000Z-delta",
+      "cleanup_state": "eligible",
+      "description": "Archived forty-five days ago: past retention, so a purge that includes it has to be reviewed entry by entry first."
+    },
+    "retained": {
+      "archive_id": "20260916T090000Z-echo",
+      "cleanup_state": "retained",
+      "description": "Archived two days ago: inside the window, so it is never a cleanup candidate and never forces a review."
+    }
+  },
   "history": {
     "comment": "charlie's two endings, oldest first, as tests/workbench_support.py seeds them.",
     "outcomes": ["failed", "stopped"]

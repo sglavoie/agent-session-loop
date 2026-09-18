@@ -2,14 +2,30 @@
  *
  * The text is streamed verbatim to the paused agent and is not retrievable
  * from the UI afterwards, so it is confirmed before it is sent and cleared
- * from the DOM as soon as it is.
+ * from the DOM as soon as it is. "As soon as it is" is the whole difficulty:
+ * the draft is the only copy, so clearing it on an answer that did not settle
+ * would destroy the operator's words on the strength of a `202` — and keeping
+ * it after one that did would invite the same reply twice.
+ *
+ * The four header rules are the redirect composer's, for the same reasons:
+ *
+ *   the draft is memory only — never storage, never the hash;
+ *   the operation id outlives the answer, so a retry is the same reply;
+ *   only a durable answer clears the textarea;
+ *   an answer that settled ends the identity, because there is nothing left
+ *   to retry under it.
+ *
+ * A recorded reply counts as durable. The far side has the words; resending
+ * them would be a second reply to a question that already has one.
  */
 
-import { apiRequest, describeError, submit } from "./api.js";
+import { OUTCOME_PENDING, OUTCOME_RESULT } from "./api.js";
 import { showControlsFeedback } from "./controls.js";
 import { planBody, routePlanId } from "./identity.js";
+import { captureFocus, runMutation } from "./operations.js";
 import { hideReplyPanel } from "./panels.js";
 import { clearFormErrors, showFormError } from "./profile.js";
+import { state } from "./state.js";
 
 export function wireReplyForm() {
   const form = document.getElementById("wb-reply-form");
@@ -18,6 +34,8 @@ export function wireReplyForm() {
   const clearBtn = document.getElementById("wb-reply-clear");
   if (clearBtn) {
     clearBtn.addEventListener("click", () => {
+      // Discarding the words discards the request they belonged to: an id kept
+      // past its draft would quietly attach the next reply to this one.
       clearReplyTextarea();
       clearFormErrors("wb-reply-form-errors");
     });
@@ -27,6 +45,27 @@ export function wireReplyForm() {
 export function clearReplyTextarea() {
   const textarea = document.getElementById("wb-reply-text");
   if (textarea) textarea.value = "";
+  state.reply.operationId = null;
+}
+
+/** The identity this draft retries under, minted once and kept until it goes. */
+export function currentReplyOperationId() {
+  return state.reply.operationId;
+}
+
+export function rememberSubmittedReply(operationId) {
+  if (!operationId) return;
+  if (state.reply.submittedIds.indexOf(operationId) === -1) {
+    state.reply.submittedIds.push(operationId);
+  }
+}
+
+export function isOwnReply(operationId) {
+  if (!operationId) return false;
+  return (
+    operationId === state.reply.operationId ||
+    state.reply.submittedIds.indexOf(operationId) !== -1
+  );
 }
 
 export async function handleReplySubmit(event) {
@@ -40,29 +79,45 @@ export async function handleReplySubmit(event) {
     showFormError("wb-reply-form-errors", "reply must not be empty");
     return;
   }
+  const restore = captureFocus();
   const confirmed = window.confirm(
     "Submit this reply to resume the paused session? The text below will be streamed verbatim to the paused agent and is not retrievable from the UI afterward."
   );
+  restore();
   if (!confirmed) return;
-  try {
-    const body = await apiRequest("/api/reply", {
-      method: "POST",
-      body: planBody({ reply_text: replyText }),
-    });
-    if (body && body.ok) {
-      clearReplyTextarea();
-      showControlsFeedback("info", "reply submitted; runner resumed");
-      hideReplyPanel();
-    } else {
-      showFormError(
-        "wb-reply-form-errors",
-        (body && body.error) || "reply submission failed"
-      );
-    }
-  } catch (err) {
-    showFormError(
-      "wb-reply-form-errors",
-      "submission failed: " + describeError(err)
-    );
+  const body = planBody({ reply_text: replyText });
+  // A retry carries the id the first attempt used, which is what makes the
+  // local runner answer `replayed` instead of streaming the words twice.
+  if (state.reply.operationId) body.operation_id = state.reply.operationId;
+  const answer = await runMutation({
+    action: "reply",
+    path: "/api/reply",
+    body: body,
+    subject: "the reply",
+    feedback: (kind, message) => {
+      // A refusal belongs beside the draft that is still on screen; anything
+      // else belongs with the rest of the operation feedback.
+      if (kind === "error") showFormError("wb-reply-form-errors", message);
+      else showControlsFeedback(kind, message);
+    },
+  });
+  if (!answer) return;
+  if (answer.operation && answer.operation.id) {
+    state.reply.operationId = answer.operation.id;
+    rememberSubmittedReply(answer.operation.id);
+  }
+  const durable =
+    answer.outcome === OUTCOME_RESULT || answer.outcome === OUTCOME_PENDING;
+  if (!durable) {
+    // The words are still the operator's and still the only copy. What is kept
+    // with them is the identity, so pressing submit again is this reply rather
+    // than another one.
+    return;
+  }
+  clearReplyTextarea();
+  if (answer.outcome === OUTCOME_RESULT) {
+    // Only a run that actually resumed gets the panel taken away; a recorded
+    // reply leaves the question open until the Mac reads it.
+    hideReplyPanel();
   }
 }

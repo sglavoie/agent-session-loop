@@ -24,6 +24,13 @@ export const PROJECT_STORAGE_KEY = "wb.project";
 export const HARNESS_STORAGE_KEY = "wb.harness";
 export const OLDER_STORAGE_KEY = "wb.older";
 export const HISTORY_STORAGE_KEY = "wb.history";
+// Operation receipts outlive a reload, so unlike every other storage key here
+// this one is session-scoped: what it holds is the identity of work that may
+// still be running, which stops mattering when the tab does. It holds ids and
+// outcome words only -- never a draft, a reply, or a server message -- so the
+// promise that prose is never persisted survives it.
+export const OPERATION_RECEIPTS_STORAGE_KEY = "wb.operations";
+export const OPERATION_RECEIPT_LIMIT = 24;
 export const DAY_MS = 24 * 60 * 60 * 1000;
 export const HARNESS_NAMES = ["codex", "claude", "copilot"];
 // Mirrors control_queue.{DEFAULT,MIN,MAX}_ABORT_GRACE_SECONDS so the button
@@ -43,6 +50,16 @@ export const PRIMARY_STATES = [
   "recent",
   "ready",
 ];
+// Which primary states mean a run is actually in flight, and which mean it is
+// waiting on an operator. Both providers publish `primary_state` on a plan, so
+// deriving staleness from it says the same thing in either mode -- and unlike
+// the per-run `actions` list, it is a field the summary allowlists carry.
+export const PLAN_LIVE_RUN_STATES = [
+  "running",
+  "verifying",
+  "paused-for-reply",
+];
+export const PLAN_REPLY_STATES = ["paused-for-reply"];
 export const FILTER_GROUPS = {
   all: PRIMARY_STATES.slice(),
   running: ["running", "verifying"],
