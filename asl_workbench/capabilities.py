@@ -250,6 +250,13 @@ _HTTP_TESTS = "scripts:tests/test_workbench_http.py"
 #: Both are named wherever a row is about how the application is deployed.
 _LIFECYCLE_TESTS = "scripts:tests/test_workbench_lifecycle.py"
 _PORTABLE_TESTS = "scripts:tests/test_workbench_portable.py"
+#: The one-way trip onto this package, and the one way back. Named separately
+#: from the lifecycle module because it is the only coverage that starts from
+#: an installation this package did not create: what it holds is that existing
+#: state arrives intact, that identities somebody has already been shown do not
+#: change, and that neither a half-finished migration nor a rollback repeats an
+#: action or reinstates a credential.
+_MIGRATION_TESTS = "scripts:tests/test_workbench_migration.py"
 #: The owned host resources and the publisher that writes to one topic. One
 #: module covers both because they are one question: which resources on a
 #: shared host belong to this application, and what may they be used for.
@@ -1094,9 +1101,13 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _companion_module(
         "companion.commands",
-        "The Pi's command queue and the Mac's durable operation journal.",
+        "The Pi's command queue and the Mac's durable operation journal. A "
+        "journal carried across the upgrade is reconciled rather than "
+        "replayed: what was admitted but never attempted expires, what was "
+        "attempted becomes unconfirmed, and no record keeps a body anything "
+        "could resend.",
         owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_transport.py",),
+        coverage=(f"{_PI}/tests/test_companion_transport.py", _MIGRATION_TESTS),
     ),
     _companion_module(
         "companion.config",
@@ -1192,12 +1203,17 @@ CAPABILITIES: tuple[Capability, ...] = (
         "roles: a pinned artifact of the portable package for the service, and "
         "a recorded attachment to the existing ASL installation for the Mac "
         "connector. The prefixes, the launchd label and the unit name are "
-        "unchanged, because a deployed host already owns them.",
+        "unchanged, because a deployed host already owns them, and an existing "
+        "installation is carried across by asl_workbench.migration rather than "
+        "re-provisioned: the state moves to the names this package opens, the "
+        "configuration is translated, and nothing an operator has already been "
+        "shown changes identity.",
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_HOST,
         coverage=(
             f"{_PI}/tests/test_companion_lifecycle.py",
             _LIFECYCLE_TESTS,
+            _MIGRATION_TESTS,
             _PORTABLE_TESTS,
         ),
     ),
@@ -1263,10 +1279,19 @@ CAPABILITIES: tuple[Capability, ...] = (
         "through SQLite before it happens, an interrupted install leaves a "
         "transaction record that blocks the next one until it is recovered, "
         "and a rollback reinstalls the previous release from its retained "
-        "artifact rather than from files something may have edited.",
+        "artifact rather than from files something may have edited -- together "
+        "with the state that release was running on, while the data written "
+        "since the upgrade is kept separately rather than discarded. An "
+        "interrupted migration recovers the same way an interrupted install "
+        "does, and neither a recovery nor a rollback reinstates a credential "
+        "somebody has since revoked.",
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_HOST,
-        coverage=(f"{_PI}/tests/test_companion_rollout.py", _LIFECYCLE_TESTS),
+        coverage=(
+            f"{_PI}/tests/test_companion_rollout.py",
+            _LIFECYCLE_TESTS,
+            _MIGRATION_TESTS,
+        ),
     ),
     _companion_module(
         "companion.resume",
@@ -1304,11 +1329,14 @@ CAPABILITIES: tuple[Capability, ...] = (
         "The Pi's SQLite store: migrations, ordered ingestion, retention, "
         "reads. Migrated to asl_workbench.store, which owns catalog storage "
         "the Pi module never had; the Pi module is the frozen baseline until "
-        "the Companion imports the portable package.",
+        "the Companion imports the portable package. An existing database is "
+        "carried onto it in place, keeping the run keys, entry ids and "
+        "incident ids it already holds.",
         owner=OWNER_PORTABLE,
         coverage=(
             f"{_PI}/tests/test_companion_api.py",
             f"{_PI}/tests/test_companion_history.py",
+            _MIGRATION_TESTS,
             _STORE_TESTS,
         ),
     ),

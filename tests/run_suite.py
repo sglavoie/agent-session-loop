@@ -302,6 +302,10 @@ INTEGRATION_MODULES = (
     # Integration for the plainest reason: git, `plutil`, the installed `asl`
     # executable, and a service release that is genuinely started and stopped.
     "tests.test_workbench_lifecycle",
+    # Half of it is pure translation, but the rollback half installs two real
+    # releases and starts them, because "the data a release is handed is the
+    # data it ran on" cannot be proven against a switch that was faked.
+    "tests.test_workbench_migration",
     # Same reason: most of it is pure catalog algebra, but the reads it proves
     # are observational are proven against a live workbench server.
     "tests.test_workbench_catalog",

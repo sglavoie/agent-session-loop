@@ -20,6 +20,7 @@ the full matrix, which is the inventory that does not go stale.
 | `compatibility.py` | The three portability boundaries — Python version, stdlib-only dependencies, no ASL import — in executable form. |
 | `companion_inventory.py` | The Companion's pinned module list and route table, plus readers that cross-check the pin against a real Pi checkout. |
 | `lifecycle.py` | Packaging and both native lifecycles: a content-addressed artifact of this package for the Pi service, a recorded attachment to the installed ASL for the Mac connector, and the install, upgrade, rollback, recover and remove operations over a single prefix. |
+| `migration.py` | The one-way trip from an installed Companion onto this package, and the backup half of the trip back: the state, configuration, checkpoints, journal, credentials and receipts an existing prefix already holds, moved to the names this package opens without changing an identity, repeating an action, or reinstating a revoked credential. |
 | `runtime.py` | The service entry point the unit starts: one prefix, one runtime lock, one readiness note, and a `--check` that asks whether a release can read a state before it is allowed to serve it. |
 | `server.py` | The HTTP server the runtime binds, and the shutdown handling that lets a service manager stop it without leaving the state locked. |
 

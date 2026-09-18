@@ -297,6 +297,7 @@ module = [
     "asl_workbench.installation",
     "asl_workbench.integrations",
     "asl_workbench.lifecycle",
+    "asl_workbench.migration",
     "asl_workbench.notifications",
     "asl_workbench.observation",
     "asl_workbench.operations",

@@ -98,6 +98,13 @@ from .installation import (
     write_json,
 )
 from .integrations import PI_SITE, IntegrationSite, service_endpoint, service_secrets
+from .migration import (
+    MIGRATION_PATH,
+    Migration,
+    paired_backup,
+    restore_state,
+    retained_name,
+)
 from .observation import ObservationPolicy
 from .transport import TransportCompatibility, evaluate_hello
 
@@ -926,9 +933,14 @@ class Installation:
     def status(self) -> dict[str, Any]:
         safe_prefix(self.prefix)
         pending = (self.prefix / TRANSACTION_PATH).exists()
+        migrating = (self.prefix / MIGRATION_PATH).exists()
         meta = self.metadata()
         if not meta:
-            return {"installed": False, "transaction_pending": pending}
+            return {
+                "installed": False,
+                "transaction_pending": pending,
+                "migration_pending": migrating,
+            }
         return {
             "installed": not meta.get("removed", False),
             "artifact": meta.get("artifact"),
@@ -939,6 +951,7 @@ class Installation:
             if meta["active"]
             else False,
             "transaction_pending": pending,
+            "migration_pending": migrating,
         }
 
     # -- Installing --------------------------------------------------------
@@ -952,6 +965,7 @@ class Installation:
         activate: bool = False,
         upgrade: bool = False,
         dry_run: bool = False,
+        restore: Path | None = None,
     ) -> dict[str, Any]:
         """Put one release, or one attachment, in place -- or change nothing.
 
@@ -959,6 +973,12 @@ class Installation:
         everything after the transaction record is written is either completed
         or undone by :meth:`_restore`. There is no state in between that a
         later operation cannot name.
+
+        ``restore`` names the state snapshot this release should run against
+        instead of whatever is in the prefix now, and only :meth:`rollback`
+        passes it: reinstalling an older application over data a newer one
+        migrated is the one way an installation can end up with a pair that was
+        never tested together.
         """
         safe_prefix(self.prefix)
         role = deployment_role(self.prefix)
@@ -970,6 +990,11 @@ class Installation:
             )
         if upgrade and (not old or old.get("removed")):
             raise LifecycleError("upgrade requires an installed release")
+        if restore is not None and (role != ROLE_SERVICE or dry_run):
+            # A connector holds no state to pair with, and a rehearsal runs
+            # against a copy -- restoring into one would prove nothing and
+            # would leave the real prefix's post-upgrade data unretained.
+            raise LifecycleError("only a service install can restore paired state")
         if old and old["role"] != role:
             raise LifecycleError("role cannot change during lifecycle")
         if (
@@ -1012,7 +1037,15 @@ class Installation:
             try:
                 if old and old["active"]:
                     manager.stop()
-                self._switch(old, candidate, release, python, definition_path, content)
+                retained = self._switch(
+                    old,
+                    candidate,
+                    release,
+                    python,
+                    definition_path,
+                    content,
+                    restore=restore,
+                )
                 if active:
                     manager.start(definition_path)
                     self.wait_ready(candidate)
@@ -1020,7 +1053,8 @@ class Installation:
                 self._restore(old, candidate, manager)
                 raise
             (self.prefix / TRANSACTION_PATH).unlink()
-            return self.status()
+            status = self.status()
+            return {**status, "retained": retained.name} if retained else status
 
     def _candidate_bytes(
         self, role: str, artifact: Path | None, digest: str | None
@@ -1123,15 +1157,40 @@ class Installation:
         python: str,
         definition_path: Path,
         content: bytes,
-    ) -> None:
-        """Back the state up, prove both releases can read it, then commit."""
+        *,
+        restore: Path | None = None,
+    ) -> Path | None:
+        """Back the state up, prove both releases can read it, then commit.
+
+        Returns where the post-upgrade data was set aside, when a ``restore``
+        displaced it. That snapshot is kept under a name
+        :func:`~asl_workbench.migration.paired_backup` will never offer as the
+        state a release was paired with: it is evidence from a version this
+        installation is no longer running, and it is retained rather than
+        discarded because a rollback is often the first half of diagnosing why
+        the upgrade went wrong.
+
+        The restore happens here, under the runtime lock and after the caller
+        has stopped the service, because it is the only moment at which no
+        release is reading the state directory.
+        """
         state = self.prefix / STATE_DIRECTORY
+        retained: Path | None = None
         with lock(self.prefix / RUNTIME_LOCK):
             if candidate["role"] == ROLE_SERVICE:
+                stamp = time.time_ns()
+                if restore is not None:
+                    retained = (
+                        self.prefix
+                        / BACKUPS_DIRECTORY
+                        / retained_name(stamp, str((old or {}).get("artifact") or ""))
+                    )
+                    snapshot(state, retained)
+                    restore_state(state, restore)
                 backup = (
                     self.prefix
                     / BACKUPS_DIRECTORY
-                    / f"{time.time_ns()}-{str(candidate['artifact'])[:12]}"
+                    / f"{stamp}-{str(candidate['artifact'])[:12]}"
                 )
                 snapshot(state, backup)
                 with tempfile.TemporaryDirectory(dir=self.prefix) as temp:
@@ -1153,6 +1212,7 @@ class Installation:
             atomic(definition_path, content)
             (state / READY_FILE).unlink(missing_ok=True)
             write_json(self.prefix / DEPLOYMENT_PATH, candidate)
+        return retained
 
     def _rehearse(
         self,
@@ -1262,8 +1322,17 @@ class Installation:
         (self.prefix / TRANSACTION_PATH).unlink(missing_ok=True)
 
     def recover(self) -> dict[str, Any]:
-        """Finish undoing an interrupted transaction. Safe to repeat."""
+        """Finish undoing an interrupted transaction. Safe to repeat.
+
+        An interrupted migration is undone first, and outside the lifecycle
+        lock because :meth:`~asl_workbench.migration.Migration.recover` takes
+        that lock itself. The order is the one the writes happened in: a
+        migration that stopped halfway left a prefix no release can be
+        installed over, so restoring an application before restoring the layout
+        it reads would put a release back on top of a half-moved installation.
+        """
         safe_prefix(self.prefix)
+        Migration(self.prefix, site=self.site).recover()
         with lock(self.prefix / LIFECYCLE_LOCK):
             path = self.prefix / TRANSACTION_PATH
             if not path.exists():
@@ -1274,19 +1343,40 @@ class Installation:
             self._restore(transaction["old"], transaction["candidate"], manager)
         return self.status()
 
-    def rollback(self) -> dict[str, Any]:
-        """Reinstall the previous release from its retained artifact."""
+    def rollback(self, *, data: bool = True) -> dict[str, Any]:
+        """Reinstall the previous release, against the state it ran on.
+
+        A release and the data it ran against are one pair. Putting the
+        application back on its own would hand an older release a database a
+        newer one has migrated, which is the case the store is written to
+        refuse -- so by default the snapshot taken just before the current
+        artifact was installed goes back with it, and the data written since is
+        retained under a separate name rather than discarded.
+
+        ``data`` set aside is the escape hatch for the case where that trade is
+        wrong: an operator who would rather keep the newer observations and
+        risk the older application says so explicitly. It is also what happens
+        on its own when no paired snapshot exists, because an installation that
+        predates this is an installation nobody snapshotted.
+
+        Credentials are not part of the pair and never move here. Revocation is
+        a decision about who may connect *now*, and an application going back a
+        version is not a reason to reinstate anybody.
+        """
         safe_prefix(self.prefix)
         meta = self.metadata()
         if not meta or not meta.get("previous") or meta.get("removed"):
             raise LifecycleError("no previous release")
         previous = str(meta["previous"])
-        return self.install(
+        source = paired_backup(self.prefix, str(meta["artifact"])) if data else None
+        result = self.install(
             artifact=self.prefix / RELEASES_DIRECTORY / (previous + ".zip"),
             digest=previous,
             python=str(meta["previous_python"]),
             upgrade=True,
+            restore=source,
         )
+        return {**result, "restored": source.name if source else None}
 
     # -- Removing ----------------------------------------------------------
 
@@ -1354,6 +1444,7 @@ def build_parser() -> argparse.ArgumentParser:
             "pack",
             "install",
             "upgrade",
+            "migrate",
             "rollback",
             "status",
             "remove",
@@ -1366,7 +1457,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sha256")
     parser.add_argument("--python")
     parser.add_argument("--revision")
+    parser.add_argument("--target-id")
     parser.add_argument("--activate", action="store_true")
+    parser.add_argument("--application-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--confirm")
     return parser
@@ -1402,14 +1495,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return installation.remove(
             reset=args.action == "reset", confirm=args.confirm, dry_run=args.dry_run
         )
+    if args.action == "migrate":
+        # The dry run here is the plan itself, which is the whole reason a
+        # migration is a separate action: an operator gets to read what would
+        # happen to an installation nobody can reprovision before it happens.
+        migration = Migration(args.prefix, target_id=args.target_id)
+        return migration.plan() if args.dry_run else migration.apply()
     if args.dry_run:
         raise LifecycleError(
-            "dry-run is supported for install, upgrade, remove and reset"
+            "dry-run is supported for install, upgrade, migrate, remove and reset"
         )
     if args.action == "status":
         return installation.status()
     if args.action == "rollback":
-        return installation.rollback()
+        return installation.rollback(data=not args.application_only)
     return installation.recover()
 
 
