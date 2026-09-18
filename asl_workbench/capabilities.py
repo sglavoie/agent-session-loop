@@ -233,6 +233,7 @@ _ACTION_TESTS = "scripts:tests/test_workbench_launch_reply.py"
 _BRIDGE_TESTS = "scripts:tests/test_asl_bridge_server.py"
 _DOCS_TESTS = "scripts:tests/test_asl_docs.py"
 _CLI_TESTS = "scripts:tests/test_asl_cli.py"
+_CONTROL_TESTS = "scripts:tests/test_workbench_controls.py"
 _PI = "sglavoie_raspberry_pi:services/pi-monitoring"
 
 
@@ -340,12 +341,12 @@ CAPABILITIES: tuple[Capability, ...] = (
     _http(
         "GET /api/redirect-status",
         "Redirect journal projection: accepted, pending, stranded corrections.",
-        coverage=(_REDIRECT_TESTS,),
+        coverage=(_REDIRECT_TESTS, _CONTROL_TESTS),
     ),
     _http(
         "GET /api/conversation-recovery",
         "Conversation recovery card: retained facts and the commands to run.",
-        coverage=(_SERVER_TESTS, _DOCS_TESTS),
+        coverage=(_SERVER_TESTS, _DOCS_TESTS, _CONTROL_TESTS),
     ),
     _http(
         "GET /api/archive",
@@ -425,22 +426,22 @@ CAPABILITIES: tuple[Capability, ...] = (
     _http(
         "POST /api/control/stop-after-current",
         "Queue a stop that lands after the in-flight turn settles.",
-        coverage=(_SERVER_TESTS, "scripts:tests/test_asl_control.py"),
+        coverage=(_SERVER_TESTS, "scripts:tests/test_asl_control.py", _CONTROL_TESTS),
     ),
     _http(
         "POST /api/control/abort",
         "Abort the in-flight turn under ASL's default grace.",
-        coverage=(_SERVER_TESTS, "scripts:tests/test_asl_control.py"),
+        coverage=(_SERVER_TESTS, "scripts:tests/test_asl_control.py", _CONTROL_TESTS),
     ),
     _http(
         "POST /api/control/select-harness",
         "Choose the harness a paused run resumes under.",
-        coverage=(_SERVER_TESTS, "scripts:tests/test_asl_control.py"),
+        coverage=(_SERVER_TESTS, "scripts:tests/test_asl_control.py", _CONTROL_TESTS),
     ),
     _http(
         "POST /api/control/redirect",
         "Submit a mid-run correction and wait a bounded time for its verdict.",
-        coverage=(_REDIRECT_TESTS, _DOCS_TESTS),
+        coverage=(_REDIRECT_TESTS, _DOCS_TESTS, _CONTROL_TESTS),
     ),
     _http(
         "POST /api/unlock",
@@ -747,7 +748,11 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_BOTH,
         owner=OWNER_MAC,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_BRIDGE_TESTS, "scripts:tests/test_asl_control.py"),
+        regression_coverage=(
+            _BRIDGE_TESTS,
+            "scripts:tests/test_asl_control.py",
+            _CONTROL_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_BRIDGE}:redirect",
@@ -760,6 +765,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         regression_coverage=(
             "scripts:tests/test_asl_bridge_redirect.py",
             _REDIRECT_TESTS,
+            _CONTROL_TESTS,
         ),
     ),
     # -- Companion Pi service routes ---------------------------------------

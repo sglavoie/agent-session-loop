@@ -85,29 +85,24 @@ from pathlib import Path
 from typing import Any, cast
 
 from asl_workbench import actions as workbench_action_rules
+from asl_workbench import controls as portable_controls
 from asl_workbench import details as workbench_detail_rules
 from asl_workbench.details import DetailError, Window
 from asl_workbench.operations import OperationError
 
 from . import (
-    control_cli,
-    control_queue,
-    harnesses,
     intervention,
     plans,
     redirect_admission,
     redirect_cli,
-    redirect_recovery,
     redirect_store,
     responses,
     state,
     workbench,
     workbench_actions,
     workbench_catalog,
+    workbench_controls,
     workbench_details,
-)
-from . import (
-    events as events_module,
 )
 
 TOKEN_BYTES = 32
@@ -129,10 +124,10 @@ DEFAULT_LAST_MESSAGE_BYTES = workbench_detail_rules.DEFAULT_LAST_MESSAGE_BYTES
 DEFAULT_FINAL_REVIEW_BYTES = workbench_detail_rules.DEFAULT_FINAL_REVIEW_BYTES
 _LOG_STREAMS = tuple(sorted(workbench_detail_rules.STREAM_ARTIFACTS))
 
-#: Bounded window on a redirect status read, matching the bridge's. The oldest
-#: corrections on a long-lived plan are the settled ones, and an operator asking
-#: where a correction got to is asking about a recent one.
-MAX_REDIRECT_OPERATIONS = 64
+#: Bounded window on a redirect status read. Re-exported from the portable rules
+#: rather than restated: two surfaces with different windows would disagree about
+#: which corrections exist, which is the one thing a bounded view must not do.
+MAX_REDIRECT_OPERATIONS = portable_controls.MAX_REDIRECT_OPERATIONS
 #: How many launch receipts one server remembers. A receipt exists so a browser
 #: that reconnected and resent its launch gets its own answer back instead of a
 #: second process; nothing needs it once the operator has moved on.
@@ -321,16 +316,32 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_error(
                 error.status, error.reason, error.message, details=error.details
             )
-        except _RedirectUnavailableError as error:
-            # Retryable and unmistakably not a refusal: a journal this server
-            # cannot read is a fact about the machine, and answering as though
-            # the plan had no corrections would be the wrong kind of wrong.
+        except workbench_controls.ControlRefused as error:
+            # A control or correction refused by the service both surfaces
+            # share. The status is derived from the refusal's own scope, so this
+            # server and the bridge send a client after the same thing in their
+            # two vocabularies rather than disagreeing about whose problem it is.
             self._send_error(
-                503,
-                "redirect-unavailable",
+                _refusal_status(error),
+                error.reason,
                 error.message,
-                details=error.details,
-                retryable=True,
+                details=(
+                    {"plan_dir": str(error.plan_dir), **error.details}
+                    if error.plan_dir is not None
+                    else dict(error.details)
+                ),
+                retryable=error.retryable,
+            )
+        except intervention.InterventionError as error:
+            # Reached only where a handler did not want to name the plan in the
+            # refusal; `inspect_run` refuses an unreadable plan directory and
+            # nothing else, which is a fact about the request.
+            self._send_error(
+                _intervention_status(error.reason),
+                error.reason,
+                error.message,
+                details=dict(error.details),
+                retryable=error.retryable,
             )
         except Exception as error:  # noqa: BLE001 - want one safety net
             self._send_error(500, "internal-error", str(error))
@@ -1263,291 +1274,123 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             self._server().forget_launch_pid(plan_dir)
         return None
 
+    def _dispatch_control(
+        self, kind: str, body: Mapping[str, Any], **kwargs: Any
+    ) -> workbench_controls.ControlOutcome:
+        """Queue one control through the service both surfaces share.
+
+        The service carries the same best-effort wakeup the CLI producer sends,
+        so this surface is not the slower way to reach a live runner, and it
+        reads the run the same way every other reader does, so the activity an
+        abort reports here is not a second parse of the lock.
+        """
+        return workbench_controls.dispatch_control(
+            _require_string(body, "plan_dir"),
+            kind,
+            state_dir=self._server().config.state_dir,
+            command_id=_optional_string(body, "command_id"),
+            **kwargs,
+        )
+
     def _handle_control_stop_after_current(
         self, *, query: Mapping[str, list[str]]
     ) -> None:
         del query
         body = self._read_json_body()
-        plan_dir = _require_string(body, "plan_dir")
-        command_id = _optional_string(body, "command_id")
-        config = self._server().config
-        try:
-            # The shared service carries the same best-effort wakeup the CLI
-            # producer sends, so the HTTP surface is not the slower way to
-            # reach a live runner.
-            dispatch = intervention.dispatch_control_command(
-                plan_dir,
-                control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
-                state_dir=config.state_dir,
-                command_id=command_id,
-            )
-        except control_queue.ControlQueueError as error:
-            self._send_error(400, "invalid-command", str(error))
-            return
-        self._send_json(
-            202,
-            responses.success_payload(
-                COMMAND_NAME,
-                reason="accepted",
-                accepted=True,
-                queued_command=dispatch.command.to_payload(),
-                signal=dispatch.signal.to_payload(),
-            ),
+        outcome = self._dispatch_control(
+            portable_controls.CONTROL_STOP_AFTER_CURRENT, body
         )
+        self._send_queued_control(outcome)
 
     def _handle_control_abort(self, *, query: Mapping[str, list[str]]) -> None:
         del query
         body = self._read_json_body()
-        plan_dir = _require_string(body, "plan_dir")
-        command_id = _optional_string(body, "command_id")
-        # Passed through untouched: ``append_command`` is the only validator of
-        # grace and reason, so the HTTP surface cannot accept a window the CLI
-        # would reject or reject one it would accept.
-        raw_grace: Any = body.get("grace_seconds")
-        raw_reason: Any = body.get("reason")
-        config = self._server().config
-        run_active, turn_active = self._abort_run_activity(plan_dir, config)
-        try:
-            dispatch = intervention.dispatch_control_command(
-                plan_dir,
-                control_queue.COMMAND_REQUEST_ABORT_TURN,
-                state_dir=config.state_dir,
-                grace_seconds=raw_grace,
-                reason=raw_reason,
-                command_id=command_id,
-            )
-        except control_queue.ControlQueueError as error:
-            code = str(error)
-            if code == control_queue.REJECT_INVALID_GRACE:
-                message = (
-                    "grace_seconds must be a whole number of seconds between "
-                    f"{control_queue.MIN_ABORT_GRACE_SECONDS} and "
-                    f"{control_queue.MAX_ABORT_GRACE_SECONDS}"
-                )
-            elif code == control_queue.REJECT_INVALID_REASON:
-                message = "reason must be non-empty text when provided"
-            else:
-                code = "invalid-command"
-                message = str(error)
-            self._send_error(
-                400,
-                code,
-                message,
-                details={
-                    "grace_seconds": repr(raw_grace),
-                    "reason": repr(raw_reason),
-                },
-            )
-            return
-        queued = dispatch.command
-        notified = dispatch.signal
-        if not run_active:
-            note = control_cli.NO_ACTIVE_RUN_NOTE
-        elif turn_active:
-            note = control_cli.ABORT_WILL_APPLY_NOTE
-        else:
-            note = control_cli.ABORT_DEGRADES_NOTE
+        outcome = self._dispatch_control(
+            portable_controls.CONTROL_ABORT,
+            body,
+            # Passed through untouched: ``append_command`` is the only validator
+            # of grace and reason, so this surface cannot accept a window the
+            # CLI would reject or reject one it would accept.
+            grace_seconds=body.get("grace_seconds"),
+            reason=body.get("reason"),
+        )
+        queued = outcome.command
+        activity = outcome.activity
         self._send_json(
             202,
             responses.success_payload(
                 COMMAND_NAME,
                 reason="accepted",
                 accepted=True,
-                run_active=run_active,
-                turn_active=turn_active,
+                run_active=activity.runner_present,
+                turn_active=activity.turn_active,
                 grace_seconds=queued.grace_seconds,
                 # The CLI calls this field `reason`; here the top-level
                 # `reason` is the HTTP response status, so the abort's own
                 # reason keeps a distinct name.
                 abort_reason=queued.reason,
-                note=note,
+                note=activity.note,
                 queued_command=queued.to_payload(),
-                signal=notified.to_payload(),
+                signal=outcome.dispatch.signal.to_payload(),
             ),
         )
-
-    def _abort_run_activity(
-        self, plan_dir: str, config: ServerConfig
-    ) -> tuple[bool, bool]:
-        """Whether a runner holds the plan and whether a turn is in flight."""
-        try:
-            # The lock records the canonical plan directory, so comparing
-            # against the raw request path would call every lock stale on a
-            # host where the plan sits behind a symlink.
-            canonical = plans.canonicalize_path(plan_dir)
-            plan_state = state.plan_state_dir(canonical, config.state_dir)
-        except OSError, ValueError:
-            return False, False
-        lock_info = state._read_lock_path(plan_state / state.LOCK_FILE_NAME, canonical)
-        run_active = lock_info is not None and lock_info.active
-        if not run_active:
-            return False, False
-        runtime = state._runner_state_payload(
-            plan_state / events_module.STATE_FILE_NAME, lock_info=lock_info
-        )
-        return True, runtime.get("active_turn") is not None
 
     def _handle_control_select_harness(self, *, query: Mapping[str, list[str]]) -> None:
         del query
         body = self._read_json_body()
-        plan_dir = _require_string(body, "plan_dir")
-        harness = _require_string(body, "harness")
-        command_id = _optional_string(body, "command_id")
-        if harness not in harnesses.HARNESS_NAMES:
-            self._send_error(
-                400,
-                "invalid-harness",
-                f"unsupported harness {harness!r}",
-                details={"harness": harness},
-            )
-            return
-        config = self._server().config
-        try:
-            dispatch = intervention.dispatch_control_command(
-                plan_dir,
-                control_queue.COMMAND_SELECT_FUTURE_HARNESS,
-                state_dir=config.state_dir,
-                harness=harness,
-                command_id=command_id,
-            )
-        except control_queue.ControlQueueError as error:
-            self._send_error(400, "invalid-command", str(error))
-            return
+        outcome = self._dispatch_control(
+            portable_controls.CONTROL_SELECT_HARNESS,
+            body,
+            harness=_require_string(body, "harness"),
+        )
+        self._send_queued_control(outcome)
+
+    def _send_queued_control(self, outcome: workbench_controls.ControlOutcome) -> None:
+        """Answer a control whose only promise is that it was written down."""
         self._send_json(
             202,
             responses.success_payload(
                 COMMAND_NAME,
                 reason="accepted",
                 accepted=True,
-                queued_command=dispatch.command.to_payload(),
-                signal=dispatch.signal.to_payload(),
+                queued_command=outcome.command.to_payload(),
+                signal=outcome.dispatch.signal.to_payload(),
             ),
         )
 
     # -- Redirect -----------------------------------------------------------
 
-    def _redirect_state_dir(self) -> str | None:
-        state_dir = self._server().config.state_dir
-        return str(state_dir) if state_dir is not None else None
-
-    def _run_facts(self, plan_dir: str) -> intervention.RunFacts:
-        """Read the shared intervention facts, or refuse the request."""
-        try:
-            return intervention.inspect_run(
-                plan_dir, state_dir=self._server().config.state_dir
-            )
-        except intervention.InterventionError as error:
-            raise _BadRequestError(
-                error.reason, error.message, details=dict(error.details)
-            ) from error
-
-    def _redirect_report(self, plan_dir: Path) -> redirect_recovery.RecoveryReport:
-        """Read this plan's durable redirect state, or refuse retryably.
-
-        The read every redirect handler starts from, including the mutating one.
-        It is what makes this server's answer survive its own restart: the
-        journal, not anything held in this process, is where a correction's fate
-        lives, so a browser that reconnects to a *restarted* server still learns
-        what became of what it submitted.
-        """
-        try:
-            return redirect_recovery.inspect_plan_recovery(
-                plan_dir, state_dir=self._server().config.state_dir
-            )
-        except redirect_store.RedirectStoreError as error:
-            raise _RedirectUnavailableError(
-                f"redirect journal could not be read: {error.message}",
-                details={"reason": error.reason},
-            ) from error
-        except (OSError, ValueError) as error:
-            raise _RedirectUnavailableError(
-                f"redirect journal could not be read: {error}"
-            ) from error
-
-    def _recorded_redirect(
-        self, plan_dir: Path, operation_id: str
-    ) -> redirect_recovery.OperationOutcome | None:
-        """Read the request this ``operation_id`` already names, if there is one.
-
-        Separate from :meth:`_redirect_receipt` because a replay has to be
-        *judged* before it is rendered, and the judgement needs the record's own
-        identity rather than its projection. The two reads cannot disagree about
-        what they read: an operation's target and feedback digest are written by
-        its submission and no later line revises them, so anything that moves
-        between them moves the request's stage, which is what the receipt is
-        re-read to report anyway.
-        """
-        report = self._redirect_report(plan_dir)
-        return next(
-            (
-                operation
-                for operation in report.operations
-                if operation.operation_id == operation_id
-            ),
-            None,
-        )
-
-    def _live_redirect_target(
-        self, plan_dir: Path
-    ) -> redirect_store.RedirectTarget | None:
-        """Read the turn this run is on now, or ``None`` when it is not on one.
-
-        Reported even where a redirect would be refused: a terminal audit or a
-        target that already moved still tells a reader which turn an earlier
-        correction is being measured against.
-        """
-        try:
-            facts = redirect_admission.inspect_target(
-                plan_dir, state_dir=self._server().config.state_dir
-            )
-        except redirect_admission.RedirectAdmissionError, OSError:
-            return None
-        return facts.target
-
-    def _redirect_receipt(
-        self,
-        *,
-        facts: intervention.RunFacts,
-        operation_id: str | None,
-        outcome: str | None,
-        reason: str | None,
-        target: Mapping[str, Any] | None,
-        waited_seconds: float,
-        replayed: bool,
+    @staticmethod
+    def _redirect_payload(
+        submission: workbench_controls.RedirectSubmission,
     ) -> _JSONDict:
-        """Answer a redirect request from the journal rather than from memory.
+        """Name the shared submission's facts the way this API already does.
 
-        ``operation`` is re-read after the submission instead of being built from
-        the ``SubmissionOutcome`` in hand, so the status a browser is told and
-        the status ``asl control redirect-status`` computes next are the same
-        projection of the same bytes.
+        Every field comes from the service, which re-read the journal after the
+        submission rather than building an answer from the outcome in hand, so
+        the status a browser renders and the status
+        ``asl control redirect-status`` computes next are one projection of the
+        same bytes.
         """
-        report = self._redirect_report(facts.plan_dir)
-        live_target = self._live_redirect_target(facts.plan_dir)
-        operation = next(
-            (
-                redirect_cli.operation_payload(item, live_target=live_target)
-                for item in report.operations
-                if item.operation_id == operation_id
-            ),
-            None,
-        )
         return {
             # Null exactly when nothing was persisted. Echoing the client's own
             # id for a refusal that never reached the journal would invite it to
             # ask after a correction that does not exist.
-            "operation_id": operation_id if operation is not None else None,
-            "plan_dir": str(facts.plan_dir),
-            "run_id": facts.run_id,
-            # Null on a replay: this call submitted nothing, so it has no
+            "operation_id": submission.operation_id,
+            "plan_dir": str(submission.facts.plan_dir),
+            "run_id": submission.facts.run_id,
+            # Null on a replay: that call submitted nothing, so it has no
             # submission outcome to report and `operation` carries the truth.
-            "outcome": outcome,
-            "refusal": reason,
-            "target": dict(target) if target is not None else None,
-            "waited_seconds": round(waited_seconds, 3),
-            "replayed": replayed,
-            "operation": operation,
-            "journal_complete": report.complete,
+            "outcome": submission.outcome,
+            # The CLI and the bridge both call this `reason`; here the top-level
+            # `reason` is the HTTP response status, so a refusal keeps its own
+            # name.
+            "refusal": submission.reason,
+            "target": submission.target,
+            "waited_seconds": round(submission.waited_seconds, 3),
+            "replayed": submission.replayed,
+            "operation": submission.operation_payload(),
+            "journal_complete": submission.journal_complete,
         }
 
     def _handle_control_redirect(self, *, query: Mapping[str, list[str]]) -> None:
@@ -1569,148 +1412,54 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         """
         del query
         body = self._read_json_body()
-        plan_dir = _require_string(body, "plan_dir")
-        operation_id = _require_string(body, "operation_id")
-        facts = self._run_facts(plan_dir)
-
-        text = body.get("text")
-        if not isinstance(text, str) or not text.strip():
-            self._send_error(
-                400,
-                intervention.REASON_EMPTY_TEXT,
-                "redirect text must contain non-whitespace content",
-                details={"plan_dir": str(facts.plan_dir)},
-            )
-            return
-        expected_target = _expected_redirect_target(body)
-
-        recorded = self._recorded_redirect(facts.plan_dir, operation_id)
-        if recorded is not None:
-            replay = self._redirect_receipt(
-                facts=facts,
-                operation_id=operation_id,
-                outcome=None,
-                reason=None,
-                target=None,
-                waited_seconds=0.0,
-                replayed=True,
-            )
-            conflict = redirect_store.replay_conflict(
-                recorded.feedback_digest,
-                recorded.target,
-                feedback=text,
-                expected_target=expected_target,
-            )
-            if conflict is not None:
-                # Nothing was written, and nothing about the recorded request
-                # changed. 409 rather than 400 because the body is well formed:
-                # what it contradicts is a durable record, and the client
-                # resolves that by reconciling the id, not by fixing a field.
-                self._send_error(
-                    409,
-                    redirect_store.ERROR_REPLAY_CONFLICT,
-                    (
-                        "operation id already names a different correction; "
-                        "the recorded one was left untouched"
-                    ),
-                    details={
-                        "plan_dir": str(facts.plan_dir),
-                        "operation_id": operation_id,
-                        "conflict": conflict,
-                        "redirect": replay,
-                    },
-                    retryable=False,
-                )
-                return
-            # 200 rather than 202: this call accepted nothing, it recognized a
-            # request that was already accepted once.
-            self._send_success(reason="ok", redirect=replay)
-            return
-
-        token = _require_string(body, "action_token")
         try:
-            intervention.validate_action(
-                facts,
-                intervention.ACTION_REDIRECT,
-                token=token,
+            submission = workbench_controls.submit_correction(
+                _require_string(body, "plan_dir"),
+                operation_id=_require_string(body, "operation_id"),
+                text=body.get("text"),
+                state_dir=self._server().config.state_dir,
+                expected_target_raw=body.get("expected_target"),
+                wait_seconds_raw=body.get("wait_seconds"),
+                action_token=_optional_string(body, "action_token"),
                 run_id=_optional_string(body, "run_id"),
             )
-        except intervention.InterventionError as error:
+        except workbench_controls.RedirectConflict as error:
+            # Nothing was written, and nothing about the recorded request
+            # changed. 409 rather than 400 because the body is well formed:
+            # what it contradicts is a durable record, and the client resolves
+            # that by reconciling the id, not by fixing a field.
             self._send_error(
-                _intervention_status(error.reason),
+                409,
                 error.reason,
                 error.message,
-                details={"plan_dir": str(facts.plan_dir), **error.details},
-                retryable=error.retryable,
+                details={
+                    "plan_dir": str(error.plan_dir),
+                    "operation_id": error.operation_id,
+                    "conflict": error.conflict,
+                    "redirect": self._redirect_payload(error.submission),
+                },
+                retryable=False,
             )
             return
-
-        wait_seconds = _redirect_wait_seconds(body)
-        try:
-            outcome = redirect_admission.submit_redirect(
-                facts.plan_dir,
-                text,
-                state_dir=self._server().config.state_dir,
-                operation_id=operation_id,
-                expected_target=expected_target,
-                wait_seconds=wait_seconds,
-            )
-        except redirect_admission.RedirectAdmissionError as error:
-            self._send_error(
-                400,
-                error.reason,
-                f"redirect could not be submitted: {error.message}",
-                details={"plan_dir": str(facts.plan_dir), **error.details},
-            )
+        receipt = self._redirect_payload(submission)
+        if submission.replayed:
+            # 200 rather than 202: this call accepted nothing, it recognized a
+            # request that was already accepted once.
+            self._send_success(reason="ok", redirect=receipt)
             return
-        except redirect_store.RedirectStoreError as error:
-            # Split on the journal's own reason rather than on the exception
-            # type, because one exception covers both "this body is not a
-            # correction" and "this journal cannot be written". Calling an
-            # oversized correction a retryable server fault would send a client
-            # back to resend the one thing that cannot succeed.
-            request_shaped = error.reason in _REDIRECT_REQUEST_REASONS
-            self._send_error(
-                400 if request_shaped else 500,
-                error.reason,
-                (
-                    f"redirect could not be submitted: {error.message}"
-                    if request_shaped
-                    else f"redirect could not be persisted: {error.message}"
-                ),
-                details={"plan_dir": str(facts.plan_dir), **error.details},
-                retryable=not request_shaped,
-            )
-            return
-        except OSError as error:
-            self._send_error(
-                500,
-                "os-error",
-                f"redirect could not be persisted: {error}",
-                details={"plan_dir": str(facts.plan_dir)},
-                retryable=True,
-            )
-            return
-
-        receipt = self._redirect_receipt(
-            facts=facts,
-            operation_id=outcome.operation_id,
-            outcome=outcome.outcome,
-            reason=outcome.reason,
-            target=outcome.target.to_payload() if outcome.target is not None else None,
-            waited_seconds=outcome.waited_seconds,
-            replayed=False,
-        )
-        if not outcome.persisted:
+        if not submission.persisted:
             # Nothing reached the journal, so there is nothing to ask after
             # later. Reporting this as accepted is the one falsehood the whole
             # redirect path is built to avoid.
             self._send_error(
                 409,
-                outcome.reason or redirect_admission.REFUSE_NO_ACTIVE_TURN,
-                f"redirect was refused: {outcome.reason}",
-                details={"plan_dir": str(facts.plan_dir), "redirect": receipt},
-                retryable=(outcome.reason in redirect_admission.UNAVAILABLE_REASONS),
+                submission.reason or redirect_admission.REFUSE_NO_ACTIVE_TURN,
+                f"redirect was refused: {submission.reason}",
+                details={
+                    "plan_dir": str(submission.facts.plan_dir),
+                    "redirect": receipt,
+                },
+                retryable=(submission.reason in redirect_admission.UNAVAILABLE_REASONS),
             )
             return
         self._send_json(
@@ -1721,7 +1470,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
                 # Persisted, which is what this surface can promise. Whether the
                 # runner took it is `redirect.operation.stage`, and an
                 # `unavailable` or `uncertain` outcome says so there.
-                accepted=outcome.accepted,
+                accepted=submission.accepted,
                 redirect=receipt,
             ),
         )
@@ -1735,24 +1484,15 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         stage a browser renders and the stage an operator reads out of
         ``asl control redirect-status`` are one derivation of the same facts.
         """
-        plan_dir = self._require_query_value(query, "plan_dir")
-        facts = self._run_facts(plan_dir)
-        wanted = frozenset(
-            value for value in query.get("operation_id", ()) if value.strip()
+        view = workbench_controls.status_view(
+            self._require_query_value(query, "plan_dir"),
+            state_dir=self._server().config.state_dir,
+            operation_ids=query.get("operation_id", ()),
         )
-        report = self._redirect_report(facts.plan_dir)
-        live_target = self._live_redirect_target(facts.plan_dir)
-        selected = [
-            operation
-            for operation in report.operations
-            if not wanted or operation.operation_id in wanted
-        ]
-        operations = [
-            redirect_cli.operation_payload(operation, live_target=live_target)
-            # Truncated from the front: the oldest corrections on a long-lived
-            # plan are the settled ones.
-            for operation in selected[-MAX_REDIRECT_OPERATIONS:]
-        ]
+        facts = view.facts
+        report = view.report
+        live_target = view.live_target
+        operations = view.operation_payloads()
         self._send_success(
             reason="ok",
             plan_dir=str(facts.plan_dir),
@@ -1773,7 +1513,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             journal_complete=report.complete,
             torn_tail=report.torn_tail,
             unreadable_lines=report.unreadable_lines,
-            truncated=len(selected) > len(operations),
+            truncated=view.truncated,
             checked_at=report.checked_at,
             conversations=report.conversations.to_payload(),
             # The freshness proof a redirect must carry back. Handed out by the
@@ -1794,25 +1534,15 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         ``asl control recover-conversation`` cannot hand an operator three
         different answers about the same pause.
         """
-        plan_dir = self._require_query_value(query, "plan_dir")
-        facts = self._run_facts(plan_dir)
-        pause_reason = facts.runner_state.get("reason")
-        classified = intervention.recovery_decision(
-            pause_reason if isinstance(pause_reason, str) else None,
-            paused=facts.paused,
+        view = workbench_controls.recovery_view(
+            self._require_query_value(query, "plan_dir"),
+            state_dir=self._server().config.state_dir,
         )
-        commands = redirect_cli.recovery_commands(
-            facts.plan_dir,
-            self._redirect_state_dir(),
-            decision=classified.decision,
-        )
-        authorization = commands["authorization_command"]
-        report = self._redirect_report(facts.plan_dir)
-        live_target = self._live_redirect_target(facts.plan_dir)
+        classified = view.decision
         self._send_success(
             reason="ok",
-            plan_dir=str(facts.plan_dir),
-            run_id=facts.run_id,
+            plan_dir=str(view.facts.plan_dir),
+            run_id=view.facts.run_id,
             recovery_required=classified.required,
             # Reported whether or not it maps to a decision: "paused, and no
             # manual recovery is what it is waiting on" is an answer, while an
@@ -1821,28 +1551,19 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             decision=classified.decision,
             auto_resume=classified.auto_resume,
             authorized_by=classified.authorized_by,
-            inspect_command=commands["inspect_command"],
-            authorization_command=authorization,
+            inspect_command=view.inspect_command,
+            authorization_command=view.authorization_command,
             # Both describe the authorization command, so both are false and
             # null where there is none. `predecessor-not-stopped` has no
             # authorization at all, and telling an operator its absent
             # authorization is one-use would read as an invitation to find it.
-            one_use=authorization is not None,
-            note=(
-                redirect_cli.FRESH_CONVERSATION_NOTE
-                if authorization is not None
-                else None
-            ),
-            conversations=report.conversations.to_payload(),
+            one_use=view.one_use,
+            note=view.note,
+            conversations=view.report.conversations.to_payload(),
             # The corrections a fresh start would still carry. Reported here so
             # an operator authorizing one sees what it inherits rather than
             # discovering it in the successor's first prompt.
-            retained_operations=[
-                redirect_cli.operation_payload(operation, live_target=live_target)
-                for operation in (*report.unfinished, *report.uncertain)[
-                    -MAX_REDIRECT_OPERATIONS:
-                ]
-            ],
+            retained_operations=view.retained_payloads(),
         )
 
     def _handle_unlock(self, *, query: Mapping[str, list[str]]) -> None:
@@ -2069,13 +1790,34 @@ def _augment_archivable(
     return payload
 
 
-class _RedirectUnavailableError(Exception):
-    """The redirect journal could not be read, so no answer would be truthful."""
+#: The status each shared refusal scope answers with. Written as a table so the
+#: mapping is a statement rather than a chain of conditionals: a control refused
+#: by the shared service is refused for exactly one of these reasons, and each
+#: reason has exactly one thing the client should do next.
+_REFUSAL_STATUS: Mapping[str, int] = {
+    # The body is wrong, and resending it unchanged cannot succeed.
+    portable_controls.SCOPE_REQUEST: 400,
+    # A durable record contradicts the request. Well formed, so not a 400: what
+    # resolves it is reconciling the id, not fixing a field.
+    portable_controls.SCOPE_CONFLICT: 409,
+    # Retryable and unmistakably not a refusal: a journal this server cannot
+    # read is a fact about the machine, and answering as though the plan held no
+    # corrections would be the wrong kind of wrong.
+    portable_controls.SCOPE_UNAVAILABLE: 503,
+}
 
-    def __init__(self, message: str, *, details: _JSONDict | None = None) -> None:
-        super().__init__(message)
-        self.message = message
-        self.details = details or {}
+
+def _refusal_status(error: workbench_controls.ControlRefused) -> int:
+    """Map a shared refusal to the status that says whose problem it is."""
+    fixed = _REFUSAL_STATUS.get(error.scope)
+    if fixed is not None:
+        return fixed
+    if error.scope == portable_controls.SCOPE_INTERVENTION:
+        return _intervention_status(error.reason)
+    # A submission that was refused describes the correction; one that failed
+    # describes this machine, and `retryable` is the service's own word for
+    # which happened.
+    return 500 if error.retryable else 400
 
 
 #: Service refusals that are facts about the request rather than about the run.
@@ -2099,86 +1841,6 @@ def _intervention_status(reason: str) -> int:
     thing that cannot help.
     """
     return 400 if reason in _INTERVENTION_REQUEST_REASONS else 409
-
-
-#: Journal refusals that describe the submitted correction rather than the
-#: journal. Enumerated by reason because one exception type carries both, and
-#: the two answers a client needs are opposite: rewrite the body, or retry.
-#: The caps behind them compose rather than compete -- this server's 1 MiB
-#: request cap bounds what it will read, and the journal's own field caps bound
-#: what it will carry, which are the smaller of the two.
-_REDIRECT_REQUEST_REASONS = frozenset(
-    {
-        redirect_store.ERROR_INVALID_TARGET,
-        redirect_store.ERROR_INVALID_FEEDBACK,
-        redirect_store.ERROR_INVALID_TTL,
-        redirect_store.ERROR_INVALID_OPERATION_ID,
-        redirect_store.ERROR_INVALID_REASON,
-    }
-)
-
-
-def _expected_redirect_target(
-    body: Mapping[str, Any],
-) -> redirect_store.RedirectTarget | None:
-    """Build the turn a client believes it is correcting, if it named one.
-
-    Optional, and load-bearing when supplied: a browser that rendered a turn and
-    then waited for a person to finish typing is exactly the client whose turn
-    may have ended in between, and naming the turn is what turns that race into a
-    ``stale-target`` refusal instead of a correction delivered to whatever the
-    runner moved on to.
-    """
-    raw = body.get("expected_target")
-    if raw is None:
-        return None
-    if not isinstance(raw, Mapping):
-        raise _BadRequestError(
-            "invalid-request", "field 'expected_target' must be an object"
-        )
-    turn_index = raw.get("turn_index")
-    if isinstance(turn_index, bool) or not isinstance(turn_index, int):
-        raise _BadRequestError(
-            "invalid-request",
-            "field 'expected_target.turn_index' must be an integer",
-        )
-    target = redirect_store.RedirectTarget(
-        run_id=_require_string(raw, "run_id"),
-        session_id=_require_string(raw, "session_id"),
-        turn_index=turn_index,
-        harness=_optional_string(raw, "harness"),
-    )
-    try:
-        redirect_store.validate_target(target)
-    except redirect_store.RedirectStoreError as error:
-        raise _BadRequestError(
-            "invalid-request",
-            f"field 'expected_target' is not a valid turn: {error.message}",
-            details={"reason": error.reason},
-        ) from error
-    return target
-
-
-def _redirect_wait_seconds(body: Mapping[str, Any]) -> float:
-    """Bound how long one redirect request may hold a server thread.
-
-    Admission's own ceiling is reused rather than restated: it is the same
-    promise measured from the other end.
-    """
-    raw = body.get("wait_seconds")
-    if raw is None:
-        return redirect_admission.ACCEPTANCE_WAIT_SECONDS
-    if isinstance(raw, bool) or not isinstance(raw, int | float):
-        raise _BadRequestError(
-            "invalid-request", "field 'wait_seconds' must be a number"
-        )
-    if raw < 0 or raw > redirect_admission.MAX_ACCEPTANCE_WAIT_SECONDS:
-        raise _BadRequestError(
-            "invalid-request",
-            "field 'wait_seconds' is outside the permitted range",
-            details={"maximum": redirect_admission.MAX_ACCEPTANCE_WAIT_SECONDS},
-        )
-    return float(raw)
 
 
 def _optional_launch_id(body: Mapping[str, Any]) -> str | None:

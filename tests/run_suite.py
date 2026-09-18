@@ -293,6 +293,11 @@ INTEGRATION_MODULES = (
     # it drives the shared action directly and half drives a live workbench
     # server, and the point is that both land in the same journal.
     "tests.test_workbench_launch_reply",
+    # And for the same reason once more, for the controls: the run controls and
+    # the redirect journal are driven here through the shared service and
+    # through both surfaces that call it, so a divergence shows up as a failure
+    # rather than as two passing suites.
+    "tests.test_workbench_controls",
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
     "tests.test_asl_overseer_e2e",

@@ -8838,6 +8838,55 @@ the `control_queue`/`workbench` reason codes. Control endpoints surface
 the enqueued record under `queued_command` (not `command`) so the
 top-level envelope key is not overwritten.
 
+### One path for a stop, an abort, and a correction
+
+`agent_session_loop.workbench_controls` is the single application service
+behind the Workbench's `POST /api/control/*`, `GET /api/redirect-status`
+and `GET /api/conversation-recovery`, and behind the connector's
+`run.stop-after-current`, `run.abort`, `redirect`, `redirect-status`, and
+`recover-conversation`. Every control is checked, queued, and followed by
+the same best-effort wakeup the CLI producer sends, through
+`intervention.dispatch_control_command`; every correction is judged
+against the redirect journal in one order. `asl_workbench.controls` holds
+the portable half — the control-to-queue-command table, what an abort is
+about to mean, the projection window, and the narrowing every
+client-chosen field goes through — so the Pi and the Mac cannot be given
+two spellings of one rule.
+
+**How hard a surface checks is a parameter, not a second
+implementation.** `AUTHORIZATION_OPEN` queues a control for a plan whose
+runner has not started yet, which is what a local operator with no
+snapshot has always been able to do and what the CLI still does;
+`AUTHORIZATION_STRICT`, which the connector uses, refuses anything that is
+not about the run the caller was shown. Both are correct for their caller.
+A correction is the exception on both surfaces: it interrupts a turn, so
+it is always held to a fresh `action_token` — a request without one is
+refused `stale-action-token` rather than as a malformed body.
+
+**Replay is judged before freshness.** The journal is asked what an
+`operation_id` already names before the token is checked, on both
+surfaces, because a correction that landed moves the plan, which moves the
+token, which would make the retry of a lost response look like a stale
+second correction. What is not short-circuited is the request itself: an
+edited retry is `redirect-replay-conflict` with the conflicting field
+named, because reporting an operator's edited words as a successful replay
+of the words the worker actually got is the falsehood this path exists to
+avoid.
+
+**The seven interruption boundaries keep their distinctions.** A
+correction persisted and unanswered reads `unanswered`; one handed to an
+attempt that never receipted it reads `uncertain`, and neither is resolved
+by guessing on either surface. Both reads are read-only by construction —
+`recover-conversation` reports the relaunch and the corrections it would
+inherit, and never performs it, because performing it would persist an
+operator's one-use authorization inside a request that can be replayed.
+
+**A refusal keeps its vocabulary per surface.** The service raises what
+happened and how retryable it is; the HTTP surface turns that into a
+status code and the bridge into one of its versioned `ERROR_CODES`, with
+any reason outside that closed enum travelling as `ERROR_INVALID_REQUEST`
+carrying the durable reason in `details.reason`.
+
 ### Triage queue payload
 
 Each plan summary in `/api/queue` (and `/api/plan`) carries additive

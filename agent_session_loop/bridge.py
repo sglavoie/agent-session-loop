@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, TextIO
 
 from asl_workbench import actions as action_rules
+from asl_workbench import controls as control_rules
 from asl_workbench import operations as operation_rules
 
 from . import (
@@ -68,6 +69,7 @@ from . import (
     state,
     workbench,
     workbench_actions,
+    workbench_controls,
     workbench_operations,
 )
 from .agent_mux_projection import CONTRACT_SET_ID
@@ -292,9 +294,11 @@ REDIRECT_REASONS: tuple[str, ...] = tuple(
 )
 
 # How many durable redirect operations one projection may carry. The journal is
-# append-only and unbounded, so the projection needs a ceiling of its own or a
-# long-lived plan eventually produces a frame no client can read.
-MAX_REDIRECT_OPERATIONS = 64
+# append-only and unbounded, so the projection needs a ceiling or a long-lived
+# plan eventually produces a frame no client can read. Aliased rather than
+# restated: two surfaces with two windows would disagree about which
+# corrections exist.
+MAX_REDIRECT_OPERATIONS = control_rules.MAX_REDIRECT_OPERATIONS
 
 # Deep-link focus keys the Workbench front end recognizes. A request may name
 # any of them; the default lands on the panel the operator is about to act in.
@@ -1130,20 +1134,15 @@ def _redirect_target(value: Any) -> dict[str, Any] | None:
     }
 
 
-def project_redirect_operation(
-    operation: redirect_recovery.OperationOutcome,
-    *,
-    live_target: redirect_store.RedirectTarget | None,
-) -> dict[str, Any]:
-    """Project one durable redirect operation into a body-free frame field.
+def bound_redirect_operation(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Bound one already-projected redirect operation into a frame field.
 
-    Derived through :func:`redirect_cli.operation_payload` rather than from the
-    journal record directly, so the stage a bridge client renders and the stage
-    an operator reads out of ``asl control redirect-status`` are the same
+    Takes the projection every reader of this journal shares rather than the
+    journal record, so the stage a bridge client renders and the stage an
+    operator reads out of ``asl control redirect-status`` are the same
     derivation of the same facts rather than two implementations of one rule.
     Only the bounds and the closed key set below are the protocol's own.
     """
-    payload = redirect_cli.operation_payload(operation, live_target=live_target)
     return {
         "operation_id": _bounded_id(payload["operation_id"]),
         "status": payload["status"],
@@ -1164,22 +1163,28 @@ def project_redirect_operation(
     }
 
 
-def _project_redirect_operations(
-    operations: Iterable[redirect_recovery.OperationOutcome],
+def project_redirect_operation(
+    operation: redirect_recovery.OperationOutcome,
     *,
     live_target: redirect_store.RedirectTarget | None,
-) -> list[dict[str, Any]]:
-    """Project a bounded window of operations, newest last.
+) -> dict[str, Any]:
+    """Project one journal record the way every other reader of it does."""
+    return bound_redirect_operation(
+        redirect_cli.operation_payload(operation, live_target=live_target)
+    )
 
-    Truncated from the *front* when the journal outgrows the window: the oldest
-    corrections on a long-lived plan are the settled ones, and an operator
-    asking where a correction got to is asking about a recent one.
+
+def _project_redirect_operations(
+    payloads: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bound a window of already-projected operations, newest last.
+
+    The window itself is the shared service's, truncated from the *front* when
+    the journal outgrows it: the oldest corrections on a long-lived plan are the
+    settled ones, and an operator asking where a correction got to is asking
+    about a recent one.
     """
-    selected = list(operations)[-MAX_REDIRECT_OPERATIONS:]
-    return [
-        project_redirect_operation(operation, live_target=live_target)
-        for operation in selected
-    ]
+    return [bound_redirect_operation(payload) for payload in payloads]
 
 
 def _conversation_evidence(
@@ -1210,6 +1215,85 @@ def _bridge_error(error: intervention.InterventionError) -> BridgeError:
         error.message,
         retryable=error.retryable,
         details=error.details,
+    )
+
+
+def _control_details(details: Mapping[str, Any]) -> dict[str, Any]:
+    """Bound a refusal's details to values a versioned frame can carry.
+
+    Numbers travel as text because a client renders these rather than computing
+    with them, and because the shared service states a bound once for every
+    caller: a ceiling reads the same here as it does in a browser, where a raw
+    float and a string of one would not.
+    """
+    bounded: dict[str, Any] = {}
+    for key, value in details.items():
+        if value is None or isinstance(value, bool):
+            bounded[key] = value
+        else:
+            text = value if isinstance(value, str) else str(value)
+            bounded[key] = _bounded_text(text)
+    return bounded
+
+
+def _control_error(error: workbench_controls.ControlRefused) -> BridgeError:
+    """Re-raise a shared control refusal in the protocol's own vocabulary.
+
+    The service refuses in terms of what a client should *do* -- rewrite the
+    request, retry it, or reconcile an id it already holds -- and this is where
+    that becomes one of the protocol's codes. The mapping is deliberately
+    lossless in one direction only: a durable reason the closed enum has no name
+    for travels in ``details.reason``, so a client keeps the specific answer
+    without this surface widening a versioned contract to carry it.
+    """
+    if isinstance(error, workbench_controls.ControlQueueRefused):
+        return BridgeError(
+            ERROR_MUTATION_FAILED,
+            f"control command could not be queued: {error.queue_error}",
+            retryable=True,
+        )
+    if isinstance(error, workbench_controls.RedirectSubmitFailed):
+        # Split on which layer refused rather than on whether the body was at
+        # fault: "submitted" and "persisted" are this protocol's two sentences
+        # for a correction that did not land, and admission is the only layer
+        # that refuses one before the journal is ever opened.
+        if error.source == control_rules.SOURCE_ADMISSION:
+            return BridgeError(
+                ERROR_INVALID_REQUEST,
+                error.submitted_message,
+                details={"reason": error.reason},
+            )
+        return BridgeError(
+            ERROR_MUTATION_FAILED,
+            error.persisted_message,
+            retryable=True,
+            details=(
+                {"reason": error.reason}
+                if error.source == control_rules.SOURCE_JOURNAL
+                else {}
+            ),
+        )
+    if error.scope == control_rules.SCOPE_UNAVAILABLE:
+        # A fact about this machine rather than about the request: an unreadable
+        # plan or an unreadable journal. Retryable, and never answered as though
+        # the plan simply held nothing.
+        return BridgeError(
+            ERROR_INTERNAL,
+            error.message,
+            retryable=True,
+            details=_control_details(error.details),
+        )
+    code = error.reason if error.reason in ERROR_CODES else ERROR_INVALID_REQUEST
+    details = dict(error.details)
+    if code != error.reason:
+        details = {"reason": error.reason, **details}
+    if error.plan_dir is not None:
+        details = {"plan_dir": _bounded_path(error.plan_dir), **details}
+    return BridgeError(
+        code,
+        error.message,
+        retryable=error.retryable,
+        details=_control_details(details),
     )
 
 
@@ -1812,48 +1896,55 @@ class BridgeSession:
         )
 
     def _control(
-        self,
-        params: Mapping[str, Any],
-        action: str,
-        command: control_queue.CommandName,
-        **kwargs: Any,
+        self, params: Mapping[str, Any], kind: str, **kwargs: Any
     ) -> dict[str, Any]:
+        """Queue one control through the service the Workbench also goes through.
+
+        Only the ledger around it is this protocol's: replay out of
+        ``self.operations``, and the acceptance row a client settles against.
+        The authorization, the read, the append, and the wakeup are the shared
+        ones, held to ``AUTHORIZATION_STRICT`` because a supervision client acts
+        on a row it was shown.
+        """
         operation_id, replay = self._replay(params)
         if replay is not None:
             return replay
-        facts = self._authorize(params, action)
         try:
-            intervention.dispatch_control_command(
-                facts.plan_dir,
-                command,
+            outcome = workbench_controls.dispatch_control(
+                _require_str(params, "plan_dir"),
+                kind,
                 state_dir=self.state_dir,
                 command_id=operation_id,
+                authorization=control_rules.AUTHORIZATION_STRICT,
+                action_token=params.get("action_token"),
+                run_id=_optional_str(params, "run_id"),
                 **kwargs,
             )
-        except (control_queue.ControlQueueError, OSError, ValueError) as error:
+        except workbench_controls.ControlRefused as error:
+            raise _control_error(error) from error
+        except (OSError, ValueError) as error:
             raise BridgeError(
                 ERROR_MUTATION_FAILED,
                 f"control command could not be queued: {error}",
                 retryable=True,
             ) from error
+        facts = outcome.activity.facts
+        assert facts is not None  # a strict dispatch refuses an unreadable plan
+        action = control_rules.asl_action_for(kind)
+        assert action is not None  # and refuses a control with no action
         # The operation id *is* the command id, so the runner's own delivery
         # receipt settles this operation without any bridge-side bookkeeping.
         return self._accept(operation_id, action, facts, command_id=operation_id)
 
     def run_stop_after_current(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """Ask the runner to finish the current session and then stop."""
-        return self._control(
-            params,
-            intervention.ACTION_STOP_AFTER_CURRENT,
-            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
-        )
+        return self._control(params, control_rules.CONTROL_STOP_AFTER_CURRENT)
 
     def run_abort(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """Ask the runner to abort the in-flight turn under ASL's default grace."""
         return self._control(
             params,
-            intervention.ACTION_ABORT,
-            control_queue.COMMAND_REQUEST_ABORT_TURN,
+            control_rules.CONTROL_ABORT,
             grace_seconds=control_queue.DEFAULT_ABORT_GRACE_SECONDS,
         )
 
@@ -1920,200 +2011,66 @@ class BridgeSession:
     # ----------------------------------------------------------------
     # Redirect
 
-    def _redirect_state_dir(self) -> str | None:
-        return str(self.state_dir) if self.state_dir is not None else None
-
-    def _redirect_report(self, plan_dir: Path) -> redirect_recovery.RecoveryReport:
-        """Read this plan's durable redirect state, or refuse retryably.
-
-        The one read every redirect method starts from, including the mutating
-        one. It is what makes the bridge's answer survive its own restart: the
-        journal, not ``self.operations``, is where a correction's fate lives, so
-        a client that reconnects to a *different* bridge process still learns
-        what became of what it submitted.
-        """
-        try:
-            return redirect_recovery.inspect_plan_recovery(
-                plan_dir, state_dir=self.state_dir
-            )
-        except redirect_store.RedirectStoreError as error:
-            raise BridgeError(
-                ERROR_INTERNAL,
-                f"redirect journal could not be read: {error.message}",
-                retryable=True,
-                details={"reason": error.reason},
-            ) from error
-        except (OSError, ValueError) as error:
-            raise BridgeError(
-                ERROR_INTERNAL,
-                f"redirect journal could not be read: {error}",
-                retryable=True,
-            ) from error
-
-    def _recorded_redirect(
-        self, plan_dir: Path, operation_id: str
-    ) -> redirect_recovery.OperationOutcome | None:
-        """Read the request this ``operation_id`` already names, if there is one.
-
-        Separate from :meth:`_redirect_receipt` because a replay has to be
-        *judged* before it is rendered, and the judgement needs the record's own
-        identity rather than its projection. The two reads cannot disagree about
-        what they read: an operation's target and feedback digest are written by
-        its submission and no later line revises them, so anything that moves
-        between them moves the request's stage, which is what the receipt is
-        re-read to report anyway.
-        """
-        report = self._redirect_report(plan_dir)
-        return next(
-            (
-                operation
-                for operation in report.operations
-                if operation.operation_id == operation_id
-            ),
-            None,
-        )
-
-    def _live_redirect_target(
-        self, plan_dir: Path
-    ) -> redirect_store.RedirectTarget | None:
-        """Read the turn this run is on now, or ``None`` when it is not on one.
-
-        Reported even where a redirect would be refused: a terminal audit or a
-        target that already moved still tells a reader which turn an earlier
-        correction is being measured against.
-        """
-        try:
-            facts = redirect_admission.inspect_target(
-                plan_dir, state_dir=self.state_dir
-            )
-        except redirect_admission.RedirectAdmissionError, OSError:
-            return None
-        return facts.target
-
-    @staticmethod
-    def _expected_target(
-        params: Mapping[str, Any],
-    ) -> redirect_store.RedirectTarget | None:
-        """Build the turn a client believes it is correcting, if it named one.
-
-        Optional, and load-bearing when supplied: a client that read a row,
-        rendered it, and waited for a human is exactly the client whose turn may
-        have finished in between, and naming the turn is what turns that race
-        into a ``stale-target`` refusal instead of a correction delivered to
-        whatever the runner moved on to.
-        """
-        raw = params.get("expected_target")
-        if raw is None:
-            return None
-        if not isinstance(raw, Mapping):
-            raise BridgeError(
-                ERROR_INVALID_REQUEST, "params.expected_target must be an object"
-            )
-        turn_index = raw.get("turn_index")
-        if isinstance(turn_index, bool) or not isinstance(turn_index, int):
-            raise BridgeError(
-                ERROR_INVALID_REQUEST,
-                "params.expected_target.turn_index must be an integer",
-            )
-        target = redirect_store.RedirectTarget(
-            run_id=_require_str(raw, "run_id"),
-            session_id=_require_str(raw, "session_id"),
-            turn_index=turn_index,
-            harness=_optional_str(raw, "harness"),
-        )
-        try:
-            redirect_store.validate_target(target)
-        except redirect_store.RedirectStoreError as error:
-            raise BridgeError(
-                ERROR_INVALID_REQUEST,
-                f"params.expected_target is not a valid turn: {error.message}",
-                details={"reason": error.reason},
-            ) from error
-        return target
-
     def _redirect_wait_seconds(self, params: Mapping[str, Any]) -> float:
         """Bound how long one request may hold the protocol loop.
 
         The bridge answers one frame at a time, so a wait a client chooses is a
-        wait every other client on this session pays. Admission's own ceiling is
-        reused rather than restated: it is the same promise measured from the
+        wait every other client on this session pays. Both the default and the
+        ceiling come from the shared service, which takes them from admission
+        rather than restating them: they are the same promise measured from the
         other end.
         """
-        raw = params.get("wait_seconds")
-        if raw is None:
-            return redirect_admission.ACCEPTANCE_WAIT_SECONDS
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-            raise BridgeError(
-                ERROR_INVALID_REQUEST, "params.wait_seconds must be a number"
+        try:
+            return workbench_controls.wait_seconds(
+                params.get("wait_seconds"), label="params.wait_seconds"
             )
-        if raw < 0 or raw > redirect_admission.MAX_ACCEPTANCE_WAIT_SECONDS:
-            raise BridgeError(
-                ERROR_INVALID_REQUEST,
-                "params.wait_seconds is outside the permitted range",
-                details={
-                    "maximum": str(redirect_admission.MAX_ACCEPTANCE_WAIT_SECONDS)
-                },
-            )
-        return float(raw)
+        except workbench_controls.ControlRefused as error:
+            raise _control_error(error) from error
 
-    def _redirect_receipt(
-        self,
-        *,
-        facts: intervention.RunFacts,
-        operation_id: str | None,
-        outcome: str | None,
-        reason: str | None,
-        target: Mapping[str, Any] | None,
-        waited_seconds: float,
-        replayed: bool,
+    @staticmethod
+    def _redirect_payload(
+        submission: workbench_controls.RedirectSubmission,
     ) -> dict[str, Any]:
         """Answer a redirect request from the journal rather than from memory.
 
-        ``operation`` is re-read after the submission instead of being built
-        from the ``SubmissionOutcome`` in hand, so the status a client is told
-        and the status the next reader of this journal computes are the same
-        projection of the same bytes.
+        Every field here is read back out of the durable record by the shared
+        service, so the status a client is told and the status the next reader
+        of this journal computes are one projection of the same bytes. What
+        stays the protocol's own is the naming and the bounds.
         """
-        report = self._redirect_report(facts.plan_dir)
-        live_target = self._live_redirect_target(facts.plan_dir)
-        operation = next(
-            (
-                project_redirect_operation(item, live_target=live_target)
-                for item in report.operations
-                if item.operation_id == operation_id
-            ),
-            None,
-        )
+        facts = submission.facts
+        operation = submission.operation_payload()
         return {
             # Null exactly when nothing was persisted. Echoing the client's own
             # id for a refusal that never reached the journal would invite it to
             # ask after a correction that does not exist.
-            "operation_id": (
-                _bounded_id(operation_id) if operation is not None else None
-            ),
+            "operation_id": _bounded_id(submission.operation_id),
             "plan_dir": _bounded_path(facts.plan_dir),
             "row_id": row_id(str(facts.plan_dir), facts.run_id),
             "run_id": _bounded_id(facts.run_id),
             # Null on a replay: this call submitted nothing, so it has no
             # submission outcome to report and `operation` carries the truth.
-            "outcome": outcome,
-            "reason": reason,
-            "target": _redirect_target(target),
-            "waited_seconds": _round_seconds(waited_seconds),
-            "replayed": replayed,
-            "operation": operation,
-            "journal_complete": report.complete,
+            "outcome": submission.outcome,
+            "reason": submission.reason,
+            "target": _redirect_target(submission.target),
+            "waited_seconds": _round_seconds(submission.waited_seconds),
+            "replayed": submission.replayed,
+            "operation": (
+                bound_redirect_operation(operation) if operation is not None else None
+            ),
+            "journal_complete": submission.journal_complete,
         }
 
     def run_redirect(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """Submit one urgent correction against the turn this run is on now.
 
-        Replay is served out of the redirect journal before the freshness proof
-        is checked, and that ordering is the whole reason this method can be
-        retried. A correction that landed moves the plan, which moves the action
-        token, which would make the retry of a request whose answer was lost in
-        transit look like a stale second correction. Asking the journal first
-        makes the id the client already holds the answer.
+        The submission itself is the one both surfaces make. Replay is served
+        out of the redirect journal before the freshness proof is checked, and
+        that ordering is the whole reason this method can be retried: a
+        correction that landed moves the plan, which moves the action token,
+        which would make the retry of a request whose answer was lost in transit
+        look like a stale second correction. Asking the journal first makes the
+        id the client already holds the answer.
 
         What is *not* short-circuited is the request itself. ``text`` and any
         ``expected_target`` are compared against the record that id already
@@ -2121,92 +2078,29 @@ class BridgeSession:
         correction. Reporting different words as a successful replay would tell
         a client its second correction landed when the worker was handed the
         first.
+
+        Held to ``AUTHORIZATION_STRICT``, which is what distinguishes this
+        caller from a local operator: the plan is re-read immediately before the
+        append, so the fingerprint the correction is checked against is the one
+        the journal is about to be written under.
         """
-        operation_id = _require_str(params, "operation_id")
-        facts = self._facts(params)
-        text = params.get("text")
-        if not isinstance(text, str) or not text.strip():
-            raise BridgeError(
-                intervention.REASON_EMPTY_TEXT,
-                "redirect text must contain non-whitespace content",
-            )
-        expected_target = self._expected_target(params)
-
-        recorded = self._recorded_redirect(facts.plan_dir, operation_id)
-        if recorded is not None:
-            conflict = redirect_store.replay_conflict(
-                recorded.feedback_digest,
-                recorded.target,
-                feedback=text,
-                expected_target=expected_target,
-            )
-            if conflict is not None:
-                # `invalid-request` rather than a refusal code of its own: the
-                # protocol's error space is a closed, versioned enum, and the
-                # durable reason travels in `details` where a client can act on
-                # it without this surface widening the contract. Nothing was
-                # written, and the recorded request is unchanged.
-                raise BridgeError(
-                    ERROR_INVALID_REQUEST,
-                    (
-                        "operation id already names a different correction; "
-                        "the recorded one was left untouched"
-                    ),
-                    details={
-                        "reason": redirect_store.ERROR_REPLAY_CONFLICT,
-                        "conflict": conflict,
-                        "operation_id": operation_id,
-                    },
-                )
-            return self._redirect_receipt(
-                facts=facts,
-                operation_id=operation_id,
-                outcome=None,
-                reason=None,
-                target=None,
-                waited_seconds=0.0,
-                replayed=True,
-            )
-
-        facts = self._authorize(params, intervention.ACTION_REDIRECT)
-        wait_seconds = self._redirect_wait_seconds(params)
         try:
-            outcome = redirect_admission.submit_redirect(
-                facts.plan_dir,
-                text,
+            submission = workbench_controls.submit_correction(
+                _require_str(params, "plan_dir"),
+                operation_id=_require_str(params, "operation_id"),
+                text=params.get("text"),
                 state_dir=self.state_dir,
-                operation_id=operation_id,
-                expected_target=expected_target,
-                wait_seconds=wait_seconds,
+                expected_target_raw=params.get("expected_target"),
+                wait_seconds_raw=params.get("wait_seconds"),
+                authorization=control_rules.AUTHORIZATION_STRICT,
+                action_token=params.get("action_token"),
+                run_id=_optional_str(params, "run_id"),
+                target_label="params.expected_target",
+                wait_label="params.wait_seconds",
             )
-        except redirect_admission.RedirectAdmissionError as error:
-            raise BridgeError(
-                ERROR_INVALID_REQUEST,
-                f"redirect could not be submitted: {error.message}",
-                details={"reason": error.reason},
-            ) from error
-        except redirect_store.RedirectStoreError as error:
-            raise BridgeError(
-                ERROR_MUTATION_FAILED,
-                f"redirect could not be persisted: {error.message}",
-                retryable=True,
-                details={"reason": error.reason},
-            ) from error
-        except OSError as error:
-            raise BridgeError(
-                ERROR_MUTATION_FAILED,
-                f"redirect could not be persisted: {error}",
-                retryable=True,
-            ) from error
-        return self._redirect_receipt(
-            facts=facts,
-            operation_id=outcome.operation_id,
-            outcome=outcome.outcome,
-            reason=outcome.reason,
-            target=outcome.target.to_payload() if outcome.target is not None else None,
-            waited_seconds=outcome.waited_seconds,
-            replayed=False,
-        )
+        except workbench_controls.ControlRefused as error:
+            raise _control_error(error) from error
+        return self._redirect_payload(submission)
 
     def run_redirect_status(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """Project this plan's durable redirect state, writing nothing.
@@ -2215,16 +2109,19 @@ class BridgeSession:
         need of it is the one that just lost its own record of what it
         submitted — including a client whose contract set no longer matches.
         """
-        facts = self._facts(params)
         wanted = _optional_id_list(params, "operation_ids")
-        report = self._redirect_report(facts.plan_dir)
-        live_target = self._live_redirect_target(facts.plan_dir)
-        selected = [
-            operation
-            for operation in report.operations
-            if not wanted or operation.operation_id in wanted
-        ]
-        operations = _project_redirect_operations(selected, live_target=live_target)
+        try:
+            view = workbench_controls.status_view(
+                _require_str(params, "plan_dir"),
+                state_dir=self.state_dir,
+                operation_ids=tuple(wanted),
+            )
+        except workbench_controls.ControlRefused as error:
+            raise _control_error(error) from error
+        facts = view.facts
+        report = view.report
+        live_target = view.live_target
+        operations = _project_redirect_operations(view.operation_payloads())
         return {
             "plan_dir": _bounded_path(facts.plan_dir),
             "row_id": row_id(str(facts.plan_dir), facts.run_id),
@@ -2247,7 +2144,7 @@ class BridgeSession:
             "journal_complete": report.complete,
             "torn_tail": report.torn_tail,
             "unreadable_lines": report.unreadable_lines,
-            "truncated": len(selected) > len(operations),
+            "truncated": view.truncated,
             "checked_at": _bounded_text(report.checked_at),
             "conversations": _conversation_evidence(report.conversations),
             "action_token": intervention.action_token(facts),
@@ -2262,24 +2159,20 @@ class BridgeSession:
 
         The pause-to-decision mapping and both commands are derived from
         :mod:`.intervention` and :mod:`.redirect_cli` rather than re-assembled,
-        so this projection and ``asl control recover-conversation`` cannot hand
-        an operator two different answers about the same pause.
+        so this projection, a recovery card in the Workbench, and ``asl control
+        recover-conversation`` cannot hand an operator three different answers
+        about the same pause.
         """
-        facts = self._facts(params)
-        runner_state = facts.runner_state
-        pause_reason = runner_state.get("reason")
-        classified = intervention.recovery_decision(
-            pause_reason if isinstance(pause_reason, str) else None,
-            paused=facts.paused,
-        )
-        commands = redirect_cli.recovery_commands(
-            facts.plan_dir,
-            self._redirect_state_dir(),
-            decision=classified.decision,
-        )
-        authorization = _bounded_text(commands["authorization_command"])
-        report = self._redirect_report(facts.plan_dir)
-        live_target = self._live_redirect_target(facts.plan_dir)
+        try:
+            view = workbench_controls.recovery_view(
+                _require_str(params, "plan_dir"), state_dir=self.state_dir
+            )
+        except workbench_controls.ControlRefused as error:
+            raise _control_error(error) from error
+        facts = view.facts
+        classified = view.decision
+        authorization = _bounded_text(view.authorization_command)
+        report = view.report
         return {
             "plan_dir": _bounded_path(facts.plan_dir),
             "row_id": row_id(str(facts.plan_dir), facts.run_id),
@@ -2292,24 +2185,20 @@ class BridgeSession:
             "decision": classified.decision,
             "auto_resume": classified.auto_resume,
             "authorized_by": classified.authorized_by,
-            "inspect_command": _bounded_text(commands["inspect_command"]),
+            "inspect_command": _bounded_text(view.inspect_command),
             "authorization_command": authorization,
             # Both describe the authorization command, so both are false and
             # null where there is none. `predecessor-not-stopped` has no
             # authorization at all, and telling an operator its (absent)
             # authorization is one-use would read as an invitation to find it.
-            "one_use": authorization is not None,
-            "note": (
-                _bounded_text(redirect_cli.FRESH_CONVERSATION_NOTE)
-                if authorization is not None
-                else None
-            ),
+            "one_use": view.one_use,
+            "note": _bounded_text(view.note),
             "conversations": _conversation_evidence(report.conversations),
             # The corrections a fresh start would still carry. Reported here so
             # an operator authorizing one can see what it inherits rather than
             # discovering it in the successor's first prompt.
             "retained_operations": _project_redirect_operations(
-                (*report.unfinished, *report.uncertain), live_target=live_target
+                view.retained_payloads()
             ),
         }
 
