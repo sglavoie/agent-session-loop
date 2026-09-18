@@ -9525,8 +9525,37 @@ Representative mappings:
 
 ### Frontend behavior
 
-The bundled UI lives at `agent_session_loop/static/` and ships with
-the Python package (no build tooling, no third-party JS). Pages:
+The bundled UI lives at `asl_workbench/static/` and ships with the
+portable package (no build tooling, no third-party JS). There is one
+copy of it: the laptop's `LocalProvider` and the Pi's `RemoteProvider`
+are two front doors onto the same `asl_workbench.http.Application`,
+and `shell_bundle()` serves both of them the same `index.html`,
+`app.js`, `styles.css`, and `static/modules/` tree. A fix made once is
+therefore a fix in both places, which is the point of having moved it.
+
+`app.js` is an entry point rather than the program: it imports the
+modules under `static/modules/` as native ES modules, which the browser
+resolves itself. Nothing is bundled, minified, or transpiled, so no
+deployment needs a Node runtime or a build step — the Pi in particular
+serves the files exactly as they sit in the package. The cost is that
+one page load opens one connection per module, which is why both
+`WorkbenchHTTPServer` and the test fixture raise `request_queue_size`
+well above `socketserver`'s default backlog of five: an overflowed
+accept queue is a reset connection, and a reset module request is a
+blank page rather than a slow one.
+
+The two deployments publish the same plans under different field
+names, because each names what it actually knows: the laptop reads the
+plan on disk and derives `label`, `searchable_text`, and
+`next_action_hint`, while the Pi carries `display_label`/`title` and
+`search_text` from the observation the connector sent and has no hint
+at all. `static/modules/identity.js` reconciles the two vocabularies in
+one place (`planLabel`, `planSearchText`, `planHint`), alongside the
+addressing duality it already held (`plan_dir` on the laptop,
+`plan_key` on the Pi), so no rendering module reads a provider-specific
+field name directly.
+
+Pages:
 
 - **Queue (`#queue`)** — the operator home, framed as a triage inbox.
   Filter chips collapse `verifying` under `running` and `invalid` under
@@ -9599,6 +9628,20 @@ the Python package (no build tooling, no third-party JS). Pages:
   navigation, then clears `state.route.focus` so subsequent 5 s polls
   do not keep snapping the viewport (the param itself stays in the URL,
   so a manual reload will re-focus once).
+
+  One router handles both link formats the two halves left behind, so
+  links already sent out keep working. The Workbench's own form names a
+  plan directly — `#plan?dir=<encoded>` from the laptop, `#plan?key=<plan_key>`
+  from the Pi, either optionally with `&focus=`. The Companion's form
+  names a run instead (`#run=<run_key>`, minted by
+  `catalog.run_key(plan_key, run_id)` and still emitted by the ntfy
+  notifications the Pi sends), which the shell cannot resolve on its own
+  because a run key says nothing about which plan owns it. So
+  `resolveRouteFromPlans` waits for a catalog page, finds the plan whose
+  run matches, and `replaceHash` rewrites the URL to the canonical
+  `#plan?…` form; until that resolves, the detail header reads
+  `(opening run)`. A run key with no plan in the catalog leaves the hash
+  alone and says so, rather than rendering an empty plan.
 
   The Recovery Center renders compact queue/detail `plan.recovery`
   immediately and then replaces it with full `/api/recovery` evidence
@@ -10552,6 +10595,31 @@ real tools — the Git-backed repository evidence, the shell helpers, the launch
 maintenance definitions, the harness adapters — is left to the macOS job, which
 runs `just test-all` on the platform the pair is actually released against, so
 the portable lane never reports a pass it did not earn.
+
+The Workbench shell is checked from two directions, because the claim being made
+is that one front end serves two deployments and half of that claim is only
+observable in a browser. `tests/test_workbench_shell.py` runs in the integration
+lane: it seeds one plan corpus, binds both providers to real loopback sockets
+over it, and asserts that the two serve byte-identical assets and answer the
+same questions about the same plans. `tests/workbench_browser/shell.spec.js`
+drives that shell with Playwright at desktop and phone widths against both
+deployments in turn — the queue, the responsive collapse, every detail pane,
+keyboard navigation, and both historic link formats. It runs as
+`npm --prefix tests/workbench_browser test`, against a fixture server the
+Playwright config starts itself (`fixture_server.py`, which binds the two
+deployments on the fixed ports recorded in `scenarios.json` so the config and
+the fixture cannot disagree about where they are).
+
+That harness is development-only and deliberately sealed off from what ships:
+`tests/workbench_browser/package.json` declares an empty `dependencies` and
+carries `@playwright/test` as a dev dependency alone, which
+`tests/test_workbench_shell.py` asserts rather than trusts. Neither deployment
+needs Node — the shell is native ES modules served by Python — and the Pi
+especially must not acquire a JavaScript toolchain because a test harness drifted
+into the runtime. `npm --prefix tests/workbench_browser run test:install` fetches
+the browser engines on a machine that has none; nothing else in the repository
+depends on them being there, so a checkout without Playwright still runs every
+Python lane.
 
 `just reliability-stress` is a fourth lane, and it judges what the other three
 cannot: whether a result still holds when the machine is hostile. It keeps three

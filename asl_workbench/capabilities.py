@@ -114,12 +114,14 @@ COVERAGE_ALIASES: tuple[str, ...] = ("scripts", "sglavoie_raspberry_pi")
 #: the filesystem; the prefix below is how they are recognised.
 LOCAL_COVERAGE_ALIAS = "scripts"
 
-#: The Workbench front end has no automated browser coverage in ``scripts``:
-#: its only live gate is the documented smoke checklist that
-#: ``tests/test_asl_docs.py`` keeps in step with the payloads. Every browser
-#: row records that with this reason rather than claiming coverage it lacks.
+#: Browser rows the Playwright shell suite does not reach. It drives the
+#: queue, the responsive shell, the detail panes and both deep-link formats
+#: against both deployments; everything else on this surface is still gated by
+#: the documented smoke checklist that ``tests/test_asl_docs.py`` keeps in step
+#: with the payloads. A row carrying this reason is saying which of the two it
+#: is, rather than claiming coverage it lacks.
 GAP_WORKBENCH_BROWSER = (
-    "no automated browser test in scripts; only the documented smoke checklist"
+    "not covered by the Playwright shell suite; only the documented smoke checklist"
 )
 GAP_DEPLOYED_HOST = "verified on the deployed host only; no automated gate"
 
@@ -241,6 +243,13 @@ _CONNECTOR_TESTS = "scripts:tests/test_workbench_connector.py"
 _REMOTE_READ_TESTS = "scripts:tests/test_workbench_remote_reads.py"
 _REMOTE_ACTION_TESTS = "scripts:tests/test_workbench_remote_actions.py"
 _HTTP_TESTS = "scripts:tests/test_workbench_http.py"
+#: The one front end, asserted from Python and from a real browser. The Python
+#: half proves both deployments serve the same assets over one plan corpus; the
+#: Playwright half drives that shell at desktop and phone widths against both
+#: of them, which is the only place the responsive layout and the keyboard are
+#: actually exercised.
+_SHELL_TESTS = "scripts:tests/test_workbench_shell.py"
+_SHELL_BROWSER_TESTS = "scripts:tests/workbench_browser/shell.spec.js"
 _PI = "sglavoie_raspberry_pi:services/pi-monitoring"
 
 
@@ -645,8 +654,10 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
-        regression_coverage=(_DOCS_TESTS,),
-        coverage_gap=GAP_WORKBENCH_BROWSER,
+        # Both shapes are asserted at both widths against both deployments, so
+        # the collapse is a tested behaviour rather than a CSS rule nobody has
+        # opened a phone to check.
+        regression_coverage=(_DOCS_TESTS, _SHELL_BROWSER_TESTS),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_BROWSER}:row-action-focus",
@@ -656,8 +667,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
-        regression_coverage=(_DOCS_TESTS,),
-        coverage_gap=GAP_WORKBENCH_BROWSER,
+        regression_coverage=(_DOCS_TESTS, _SHELL_BROWSER_TESTS),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_BROWSER}:plan-detail",
@@ -667,8 +677,16 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
-        regression_coverage=(_DOCS_TESTS, _SERVER_TESTS),
-        coverage_gap=GAP_WORKBENCH_BROWSER,
+        # Every pane is asserted to render either its material or its own empty
+        # sentence, for a plan that has been run and one that never has, in
+        # both deployments -- a pane that failed silently is the failure mode
+        # this replaces.
+        regression_coverage=(
+            _DOCS_TESTS,
+            _SERVER_TESTS,
+            _SHELL_TESTS,
+            _SHELL_BROWSER_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_BROWSER}:controls-bar",
@@ -751,13 +769,18 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         key=f"{SURFACE_WORKBENCH_BROWSER}:fragment-deep-link-routing",
         surface=SURFACE_WORKBENCH_BROWSER,
-        summary="The front end routes on '#plan?dir=&focus=' so a bridge link "
-        "opens one plan at one panel.",
+        summary="One router over both link formats history left behind: the "
+        "Workbench's '#plan?dir=|key=&focus=' and the Companion's '#run=', "
+        "which is resolved against the catalog and rewritten to the canonical "
+        "form.",
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
-        regression_coverage=(_BRIDGE_TESTS, _FOUNDATION_TESTS),
-        coverage_gap=GAP_WORKBENCH_BROWSER,
+        regression_coverage=(
+            _BRIDGE_TESTS,
+            _FOUNDATION_TESTS,
+            _SHELL_BROWSER_TESTS,
+        ),
     ),
     # -- AgentMux bridge ----------------------------------------------------
     Capability(

@@ -1981,6 +1981,7 @@ class WorkbenchStore:
         *,
         now: float,
         project: str | None = None,
+        plan_key: str | None = None,
         limit: int = DEFAULT_READ_LIMIT,
         include_absent: bool = False,
         search: str | None = None,
@@ -1992,12 +1993,20 @@ class WorkbenchStore:
         A row the projection dropped is not a row that finished, so it leaves
         the live view and its ending -- if it has one -- arrives through
         history.
+
+        ``plan_key`` narrows to one plan's runs, and has to be applied here
+        rather than by the caller: the plan key is a storage column and not an
+        exported field, so a row that has left this method no longer says which
+        plan it belongs to.
         """
         cutoff = now - self._policy.summary_retention_seconds
         clauses = ["observed_at >= ?"]
         parameters: list[Any] = [cutoff]
         if not include_absent:
             clauses.append("present = 1")
+        if plan_key is not None:
+            clauses.append("r.plan_key = ?")
+            parameters.append(plan_key)
         with self.reading() as connection:
             labels = self._plan_labels()
             if search and search.strip():

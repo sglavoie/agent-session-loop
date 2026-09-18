@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from asl_workbench import actions as workbench_action_rules
+from asl_workbench import catalog
 from asl_workbench import controls as portable_controls
 from asl_workbench import details as detail_rules
 from asl_workbench.details import Window
@@ -256,6 +257,24 @@ def _augment_archivable(
     blocked = summary.primary_state in _ARCHIVE_BLOCKING_STATES
     payload["archivable"] = not blocked
     payload["archive_blocker"] = "active-lock" if blocked else None
+    return payload
+
+
+def _augment_catalog_keys(
+    payload: _JSONDict, summary: workbench.WorkbenchSummary
+) -> _JSONDict:
+    """Add the catalog identities a row carries in either mode.
+
+    The local queue addresses plans by path and does not need these to work.
+    They are published anyway because the *links* do: an ntfy notification the
+    Pi sent carries ``#run=<run_key>``, and opening one on the laptop has to
+    land on the same plan it opens on a phone. Computing them here -- with the
+    catalog's own functions, from the same inputs -- is what makes that one
+    link instead of two that happen to look alike.
+    """
+    key = catalog.plan_key(str(summary.plan_dir))
+    payload["plan_key"] = key
+    payload["run_key"] = catalog.run_key(key, summary.run_id)
     return payload
 
 
@@ -497,7 +516,9 @@ class LocalProvider:
         return Response.success(
             reason="ok",
             plans=[
-                _augment_archivable(summary.to_payload(), summary)
+                _augment_catalog_keys(
+                    _augment_archivable(summary.to_payload(), summary), summary
+                )
                 for summary in summaries
             ],
             registry_warnings=list(registry.warnings),

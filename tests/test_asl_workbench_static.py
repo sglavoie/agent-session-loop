@@ -36,7 +36,32 @@ from tests.support import (
 )
 
 
-class WorkbenchStaticAssetTests(unittest.TestCase):
+class ShellSourceMixin:
+    """Read back the whole front end the server hands a browser.
+
+    The shell is native ES modules: the entry is ``/static/app.js`` and the
+    behavior is in ``/static/modules/``. Fetching them over HTTP rather than
+    reading them off disk keeps these assertions about what a browser
+    receives, and concatenating them keeps each assertion about the front end
+    as a whole rather than about which file a function ended up in.
+    """
+
+    def _shell_source(self, server: workbench_server.WorkbenchHTTPServer) -> str:
+        base = self._base_url(server)  # type: ignore[attr-defined]
+        assert_equal = self.assertEqual  # type: ignore[attr-defined]
+        status, body, _ = _http_request_raw(base + "/static/app.js")
+        assert_equal(200, status)
+        sources = [body.decode("utf-8")]
+        module_dir = workbench_server.STATIC_DIR / "modules"
+        self.assertTrue(module_dir.is_dir(), str(module_dir))  # type: ignore[attr-defined]
+        for module in sorted(module_dir.glob("*.js")):
+            status, body, _ = _http_request_raw(f"{base}/static/modules/{module.name}")
+            assert_equal(200, status, module.name)
+            sources.append(body.decode("utf-8"))
+        return "\n".join(sources)
+
+
+class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
     """Cover the bundled vanilla frontend served at ``/`` and ``/static/*``."""
 
     def setUp(self) -> None:
@@ -132,20 +157,31 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
             self._base_url(server) + "/static/app.js"
         )
         self.assertEqual(200, status)
-        decoded = body.decode("utf-8")
-        self.assertIn("renderQueue", decoded)
-        self.assertIn("FILTER_GROUPS", decoded)
+        self.assertIn("./modules/", body.decode("utf-8"))
         content_type = headers.get("Content-Type") or headers.get("content-type")
         self.assertIsNotNone(content_type)
         self.assertIn("javascript", content_type)
+        # A module the entry imports is served the same way; the mime matters
+        # more here than on the entry, because a browser refuses to execute a
+        # module script served as anything else.
+        status, module_body, module_headers = _http_request_raw(
+            self._base_url(server) + "/static/modules/queue.js"
+        )
+        self.assertEqual(200, status)
+        module_source = module_body.decode("utf-8")
+        self.assertIn("renderQueue", module_source)
+        module_type = module_headers.get("Content-Type") or module_headers.get(
+            "content-type"
+        )
+        self.assertIsNotNone(module_type)
+        self.assertIn("javascript", module_type)
+        decoded = self._shell_source(server)
+        self.assertIn("renderQueue", decoded)
+        self.assertIn("FILTER_GROUPS", decoded)
 
     def test_static_events_highlight_agent_mux_delivery_health(self) -> None:
         server = self._start_server()
-        status, js_body, _ = _http_request_raw(
-            self._base_url(server) + "/static/app.js"
-        )
-        self.assertEqual(200, status)
-        script = js_body.decode("utf-8")
+        script = self._shell_source(server)
         self.assertIn('event.name === "agent_mux_delivery"', script)
         self.assertIn("wb-event-row--delivery-failure", script)
         self.assertIn("wb-event-row--delivery-degraded", script)
@@ -307,8 +343,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # before issuing the POST. These strings are load-bearing — the
         # reply textarea must also never be persisted to browser storage.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         # Hash routing wiring + detail-view scaffolding.
         self.assertIn("parseHashRoute", decoded)
         self.assertIn("refreshDetail", decoded)
@@ -378,8 +413,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # detail refresh. Actions may focus existing panels or delegate to
         # launch/unlock handlers, but reply text still never reaches storage.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         for section in (
             "Recovery Center loading",
             "Recovery Center panel rendering",
@@ -407,12 +441,12 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
             "legacyRecoveryActionTarget",
         ):
             self.assertIn(helper, decoded, msg=f"missing helper: {helper}")
-        self.assertIn("loadAndRenderRecovery(planDir, state.detailPlan)", decoded)
-        self.assertIn('"/api/recovery?plan_dir="', decoded)
+        self.assertIn("loadAndRenderRecovery(state.detailPlan)", decoded)
+        self.assertIn('planUrl("/api/recovery")', decoded)
         self.assertIn("renderRecoveryPanel(compact)", decoded)
         self.assertIn("renderRecoveryPanel(body.recovery)", decoded)
         self.assertIn('renderedRecovery.kind === "reply-needed"', decoded)
-        self.assertIn("await loadAndRenderReply(planDir)", decoded)
+        self.assertIn("await loadAndRenderReply()", decoded)
         self.assertIn("hideReplyPanel()", decoded)
         self.assertIn("RECOVERY_ACTION_TARGETS", decoded)
         self.assertIn("RECOVERY_ACTION_TARGETS_BY_ID", decoded)
@@ -516,8 +550,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # blank/default option must serialize as null so a fresh profile
         # does not emit --no-unsafe-bypass at launch.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         self.assertIn("readTriStateValue", decoded)
         self.assertIn("setTriStateValue", decoded)
         self.assertIn('readTriStateValue(form, "unsafe_bypass")', decoded)
@@ -526,7 +559,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # null/true/false instead of toggling a checkbox.
         self.assertIn('setTriStateValue(form, "unsafe_bypass"', decoded)
         self.assertIn(
-            'setTriStateValue(\n      form,\n      "allow_not_loop_ready"',
+            'setTriStateValue(\n    form,\n    "allow_not_loop_ready"',
             decoded,
         )
         # The reader must distinguish the three string values and fall
@@ -541,8 +574,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # ``2.1``) literally instead of looping over ``total_sessions``
         # and inferring status with ``parseInt(next_pending_session_id)``.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         # The new implementation must consume the sessions array and
         # use string equality against active_turn.session_id.
         self.assertIn("renderSessionsFromState", decoded)
@@ -579,8 +611,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # key. The reply textarea is still excluded from any persistence
         # path (see the privacy assertions below).
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         for key_decl in (
             'SEARCH_STORAGE_KEY = "wb.search"',
             'SORT_STORAGE_KEY = "wb.sort"',
@@ -625,8 +656,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # last_activity_at tiebreaker) added in session 1 instead of the
         # legacy hard-coded ranking map.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         self.assertIn("urgencyRankFor", decoded)
         self.assertIn("plan.urgency_rank", decoded)
         self.assertIn("compareByUrgencyRank", decoded)
@@ -680,8 +710,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # dedicated formatter, and the oldest client comparator keys complete
         # plans on completed_at while other states keep last_activity_at.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         # Dedicated completion formatter with the documented empty states.
         self.assertIn("function formatCompletedAt", decoded)
         self.assertIn('return "not recorded";', decoded)
@@ -708,8 +737,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # "complete" chip. Search text must also gate visibility via the
         # server-supplied searchable_text field.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         self.assertIn("matchesFilter", decoded)
         self.assertIn("matchesCompletedVisibility", decoded)
         self.assertIn("matchesSearchText", decoded)
@@ -731,8 +759,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # accidentally include reply text, and the reply textarea must
         # still never reach sessionStorage or localStorage.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         for key in (
             '"wb.search"',
             '"wb.sort"',
@@ -834,8 +861,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # breakpoint must match the CSS so the JS and CSS agree on what
         # "desktop" means.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         import re as _re
 
         self.assertIn("applyShellLayout", decoded)
@@ -855,7 +881,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
             r"function shouldPollQueue\(\)\s*\{.*?"
             r'state\.route\.name === "queue".*?'
             r'state\.route\.name === "detail" && isDesktopShell\(\).*?'
-            r"\n  \}",
+            r"\n\}",
             decoded,
             flags=_re.DOTALL,
         )
@@ -872,7 +898,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # must start on desktop and stop on mobile so the two-pane lifecycle
         # follows the currently visible panes.
         viewport_match = _re.search(
-            r"function wireShellViewport\(\)\s*\{.*?\n  \}",
+            r"function wireShellViewport\(\)\s*\{.*?\n\}",
             decoded,
             flags=_re.DOTALL,
         )
@@ -987,8 +1013,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # shell's data-preview attribute through applyShellLayout. Clicks
         # on the row body select the plan without leaving the queue route.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         # State + helpers.
         self.assertIn("previewPlan:", decoded)
         self.assertIn("lastVisiblePlans:", decoded)
@@ -1059,25 +1084,26 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # detail route without calling navigateToDetail(), so applyRoute must
         # derive the selected plan from the parsed route before rendering.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         import re as _re
 
         route_match = _re.search(
-            r"function applyRoute\(\)\s*\{.*?\n  \}",
+            r"function applyRoute\(\)\s*\{.*?\n\}",
             decoded,
             flags=_re.DOTALL,
         )
         self.assertIsNotNone(route_match, msg="applyRoute body not found")
         route_body = route_match.group(0)
         detail_match = _re.search(
-            r'if \(next\.name === "detail"\) \{(?P<body>.*?)\n    \} else \{',
+            r'if \(next\.name === "detail"\) \{(?P<body>.*?)\n  \} else \{',
             route_body,
             flags=_re.DOTALL,
         )
         self.assertIsNotNone(detail_match, msg="detail route branch not found")
         detail_body = detail_match.group("body")
-        select_idx = detail_body.find("setSelectedPlan(next.planDir);")
+        select_idx = detail_body.find(
+            "setSelectedPlan(address ? address.value : null);"
+        )
         refresh_idx = detail_body.find("refreshDetail();")
         self.assertNotEqual(-1, select_idx)
         self.assertNotEqual(-1, refresh_idx)
@@ -1176,8 +1202,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # and "no actionable plans" with stable kinds the action buttons
         # branch on.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         # New control wiring functions.
         for helper in (
             "wireSearchControl",
@@ -1261,8 +1286,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # DETAIL_FOCUS_TARGETS resolves each focus key to elements that
         # exist in the rendered shell.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         # Dispatcher + maps are defined.
         self.assertIn("function handleRowAction(plan, event)", decoded)
         self.assertIn("ROW_ACTION_FOCUS", decoded)
@@ -1347,8 +1371,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # before triggering a fetch so fast typing does not pile up
         # /api/queue requests.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         for helper in (
             "captureQueueScroll",
             "restoreQueueScroll",
@@ -1377,7 +1400,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # one-shot focus path and the scroll-restore fallback must be
         # wired so polling never strands the operator's viewport.
         refresh_block_match = _re.search(
-            r"async function refreshDetail\(\).*?\n  \}\n",
+            r"async function refreshDetail\(\).*?\n\}\n",
             decoded,
             flags=_re.DOTALL,
         )
@@ -1398,7 +1421,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # applyDetailFocus must clear state.route.focus so subsequent
         # polls do not keep re-scrolling.
         focus_func_match = _re.search(
-            r"function applyDetailFocus\(\)\s*\{.*?\n  \}",
+            r"function applyDetailFocus\(\)\s*\{.*?\n\}",
             decoded,
             flags=_re.DOTALL,
         )
@@ -1412,8 +1435,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # ``#wb-reply-text.value`` are the explicit clear button and the
         # successful submit path.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         import re as _re
 
         # Every assignment to a wb-reply-text textarea value must be inside
@@ -1430,7 +1452,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # textarea.value = "" must appear ONCE in clearReplyTextarea and
         # nowhere inside loadAndRenderReply / refreshDetail.
         load_match = _re.search(
-            r"async function loadAndRenderReply\(planDir\)\s*\{.*?\n  \}",
+            r"async function loadAndRenderReply\(\)\s*\{.*?\n\}",
             decoded,
             flags=_re.DOTALL,
         )
@@ -1438,7 +1460,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         load_body = load_match.group(0)
         self.assertNotIn("wb-reply-text", load_body)
         refresh_match = _re.search(
-            r"async function refreshDetail\(\)\s*\{.*?\n  \}",
+            r"async function refreshDetail\(\)\s*\{.*?\n\}",
             decoded,
             flags=_re.DOTALL,
         )
@@ -1447,7 +1469,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # Reply submit path remains confirmation-gated and clears the
         # textarea only on success.
         submit_match = _re.search(
-            r"async function handleReplySubmit\(event\)\s*\{.*?\n  \}",
+            r"async function handleReplySubmit\(event\)\s*\{.*?\n\}",
             decoded,
             flags=_re.DOTALL,
         )
@@ -1472,8 +1494,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # bounds drift from control_queue the UI either rejects a window the
         # runner would honor or posts one the server rejects.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         expected = {
             "ABORT_DEFAULT_GRACE_SECONDS": (control_queue.DEFAULT_ABORT_GRACE_SECONDS),
             "ABORT_MIN_GRACE_SECONDS": control_queue.MIN_ABORT_GRACE_SECONDS,
@@ -1498,8 +1519,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # entry on either side fails this regression instead of
         # shipping a mismatched UI.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         # ACTIVITY_SOURCE_LABELS keys must cover every Python
         # LAST_ACTIVITY_SOURCES value so the preview badge falls back
         # to a friendly label rather than the raw enum value.
@@ -1537,8 +1557,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         from typing import get_args
 
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         targets_match = _re.search(
             r"const RECOVERY_ACTION_TARGETS = \[(.*?)\];",
             decoded,
@@ -1627,11 +1646,10 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         from agent_session_loop import intervention, redirect_cli, redirect_store
 
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
 
         stage_match = _re.search(
-            r"const REDIRECT_STAGE_PHASES = \{(.*?)\n  \};",
+            r"const REDIRECT_STAGE_PHASES = \{(.*?)\n\};",
             decoded,
             flags=_re.DOTALL,
         )
@@ -1653,7 +1671,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn("resuming", js_phases)
 
         labels_match = _re.search(
-            r"const REDIRECT_PHASE_LABELS = \{(.*?)\n  \};",
+            r"const REDIRECT_PHASE_LABELS = \{(.*?)\n\};",
             decoded,
             flags=_re.DOTALL,
         )
@@ -1697,8 +1715,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         from agent_session_loop import redirect_cli
 
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         hint_match = _re.search(
             r"const REDIRECT_RECONCILE_HINT =(.*?);\n", decoded, flags=_re.DOTALL
         )
@@ -1714,15 +1731,14 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         import re as _re
 
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
 
         self.assertIn("function currentRedirectOperationId()", decoded)
         self.assertIn("function mintRedirectOperationId()", decoded)
         self.assertIn("async function handleRedirectSubmit(event)", decoded)
 
         handler = _re.search(
-            r"async function handleRedirectSubmit\(event\) \{(.*?)\n  \}\n",
+            r"async function handleRedirectSubmit\(event\) \{(.*?)\n\}\n",
             decoded,
             flags=_re.DOTALL,
         )
@@ -1758,11 +1774,10 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         import re as _re
 
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
 
         handler = _re.search(
-            r"async function handleRedirectSubmit\(event\) \{(.*?)\n  \}\n",
+            r"async function handleRedirectSubmit\(event\) \{(.*?)\n\}\n",
             decoded,
             flags=_re.DOTALL,
         )
@@ -1778,7 +1793,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertNotIn("mintRedirectOperationId()", refused)
 
         conflict = _re.search(
-            r"function showRedirectConflict\(body, operationId\) \{(.*?)\n  \}\n",
+            r"function showRedirectConflict\(body, operationId\) \{(.*?)\n\}\n",
             decoded,
             flags=_re.DOTALL,
         )
@@ -1798,7 +1813,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertEqual({"feedback_digest"}, set(_re.findall(r"feedback\w*", shown)))
 
         adopt = _re.search(
-            r"function adoptNewRedirectIdentity\(\) \{(.*?)\n  \}\n",
+            r"function adoptNewRedirectIdentity\(\) \{(.*?)\n\}\n",
             decoded,
             flags=_re.DOTALL,
         )
@@ -1822,9 +1837,8 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # browser. The composer reads permitted_actions/disabled_reasons rather
         # than inferring availability from the queue row it was opened from.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
-        self.assertIn("/api/redirect-status?plan_dir=", decoded)
+        decoded = self._shell_source(server)
+        self.assertIn('planUrl("/api/redirect-status")', decoded)
         self.assertIn("body.permitted_actions", decoded)
         self.assertIn("body.disabled_reasons", decoded)
         self.assertIn(
@@ -1832,7 +1846,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         )
         self.assertIn("function setRedirectSubmitDisabled(disabled)", decoded)
         self.assertIn("/api/control/redirect", decoded)
-        self.assertIn("/api/conversation-recovery?plan_dir=", decoded)
+        self.assertIn('planUrl("/api/conversation-recovery")', decoded)
         # And the reason is read back to the operator in the line that
         # otherwise says what a submission would do. Leaving it in the badge's
         # tooltip would hide the one fact a disabled button raises.
@@ -1847,8 +1861,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         from agent_session_loop import redirect_cli
 
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         unresolved_match = _re.search(
             r"const REDIRECT_UNRESOLVED_STAGES = \[(.*?)\];", decoded, flags=_re.DOTALL
         )
@@ -1864,7 +1877,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # A failed poll must not erase a correction from the panel: it leaves
         # the operation lists alone and only closes the action.
         unavailable = _re.search(
-            r"function renderRedirectUnavailable\(message\) \{(.*?)\n  \}\n",
+            r"function renderRedirectUnavailable\(message\) \{(.*?)\n\}\n",
             decoded,
             flags=_re.DOTALL,
         )
@@ -1878,7 +1891,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn("function resetRedirectComposer()", decoded)
         self.assertIn("function resetRedirectForPlan()", decoded)
         route = _re.search(
-            r"function applyRoute\(\) \{(.*?)\n  \}\n", decoded, flags=_re.DOTALL
+            r"function applyRoute\(\) \{(.*?)\n\}\n", decoded, flags=_re.DOTALL
         )
         self.assertIsNotNone(route)
         assert route is not None
@@ -1890,11 +1903,8 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         import re as _re
 
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
-        self.assertIn(
-            "async function loadAndRenderConversationRecovery(planDir)", decoded
-        )
+        decoded = self._shell_source(server)
+        self.assertIn("async function loadAndRenderConversationRecovery()", decoded)
         self.assertIn("function renderConversationRecovery(payload)", decoded)
         self.assertIn("function renderConversationRetained(operations)", decoded)
         self.assertIn("payload.authorization_command", decoded)
@@ -1902,8 +1912,8 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn("payload.one_use === true", decoded)
         self.assertIn("payload.retained_operations", decoded)
         loader = _re.search(
-            r"async function loadAndRenderConversationRecovery\(planDir\) \{"
-            r"(.*?)\n  \}\n",
+            r"async function loadAndRenderConversationRecovery\(\) \{"
+            r"(.*?)\n\}\n",
             decoded,
             flags=_re.DOTALL,
         )
@@ -1911,7 +1921,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         assert loader is not None
         self.assertNotIn('method: "POST"', loader.group(1))
         renderer = _re.search(
-            r"function renderConversationRecovery\(payload\) \{(.*?)\n  \}\n",
+            r"function renderConversationRecovery\(payload\) \{(.*?)\n\}\n",
             decoded,
             flags=_re.DOTALL,
         )
@@ -1926,8 +1936,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         import re as _re
 
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         self.assertNotIn('"wb.redirect"', decoded)
         leak_patterns = (
             r"sessionStorage\.setItem\([^)]*redirect",
@@ -1962,7 +1971,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn("@media (max-width: 720px)", decoded)
 
 
-class WorkbenchHardeningTests(unittest.TestCase):
+class WorkbenchHardeningTests(ShellSourceMixin, unittest.TestCase):
     """Disappearing-file, concurrency, caching, and shutdown hardening."""
 
     def setUp(self) -> None:
@@ -2110,8 +2119,7 @@ class WorkbenchHardeningTests(unittest.TestCase):
         # "delete" control is renamed to an archive alias that keeps the
         # full-path confirmation gate.
         server = self._start_server()
-        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
-        decoded = body.decode("utf-8")
+        decoded = self._shell_source(server)
         for helper in (
             "setCleanupMode",
             "applyCleanupMode",

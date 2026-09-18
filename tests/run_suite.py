@@ -314,6 +314,10 @@ INTEGRATION_MODULES = (
     # what a real GET does to a real archive tree, so it is asserted against a
     # live server reading real entries rather than against a stub listing.
     "tests.test_workbench_archive",
+    # Integration because there is no other way to ask the question: the claim
+    # is that one front end serves two deployments, so both providers are bound
+    # to real loopback sockets over one plan corpus and asked the same things.
+    "tests.test_workbench_shell",
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
     "tests.test_asl_overseer_e2e",

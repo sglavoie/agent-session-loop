@@ -500,13 +500,13 @@ class RemoteProvider:
                 "no observation of this plan has been retained",
                 details={"plan_key": plan_key},
             )
-        runs = [
-            row
-            for row in self._store.runs(
-                now=now, limit=MAX_READ_LIMIT, include_absent=True
-            )
-            if str(row.get("plan_key")) == plan_key
-        ]
+        # Narrowed by the store rather than here: `plan_key` is a storage
+        # column the cockpit export deliberately drops, so a row that has
+        # reached this scope no longer says which plan it belongs to and any
+        # filter written over it would match nothing.
+        runs = self._store.runs(
+            now=now, plan_key=plan_key, limit=MAX_READ_LIMIT, include_absent=True
+        )
         return Response.success(
             reason="ok",
             plan=entries[0],

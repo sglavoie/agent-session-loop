@@ -86,7 +86,7 @@ from asl_workbench.http import (
     LocalTokenAuthenticator,
     Request,
     Response,
-    StaticBundle,
+    shell_bundle,
 )
 
 from . import responses, workbench_local
@@ -126,7 +126,11 @@ MAX_LAUNCH_ID_CHARS = workbench_local.MAX_LAUNCH_ID_CHARS
 #: while the rule itself lives with the provider that applies it.
 _sort_summaries_oldest_first = workbench_local.sort_summaries_oldest_first
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+#: This server no longer carries its own copy of the front end. The assets are
+#: the portable package's, so "does the Pi serve the same shell as the laptop?"
+#: is not a question about two directories staying in sync -- there is one.
+#: Kept under its historic name because it was part of this module's surface.
+STATIC_DIR = workbench_http.STATIC_ROOT
 
 __all__ = [
     "AUTH_SCHEME",
@@ -176,6 +180,13 @@ class WorkbenchHTTPServer(http.server.ThreadingHTTPServer):
 
     allow_reuse_address = True
     daemon_threads = True
+    # The shell is native ES modules, so one page load is one document plus a
+    # stylesheet plus every module in the import graph, and a browser opens
+    # them all at once. `socketserver`'s default backlog of five means the
+    # accept queue overflows mid-burst and the kernel resets the connections
+    # that did not fit -- which a browser reports as a module that failed to
+    # load, and a failed module is a blank page rather than a slow one.
+    request_queue_size = 64
 
     def __init__(
         self,
@@ -198,7 +209,7 @@ class WorkbenchHTTPServer(http.server.ThreadingHTTPServer):
             self.provider,
             LocalTokenAuthenticator(lambda: self.token),
             policy=LOCAL_POLICY,
-            static=StaticBundle(STATIC_DIR),
+            static=shell_bundle(),
         )
 
     # -- Launch bookkeeping, kept under its historic names -----------------

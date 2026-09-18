@@ -150,23 +150,38 @@ class CapabilityMatrixTests(unittest.TestCase):
                     "assurance nothing provides",
                 )
 
-    def test_workbench_browser_rows_declare_the_missing_browser_coverage(
+    def test_workbench_browser_rows_say_which_kind_of_coverage_they_have(
         self,
     ) -> None:
-        # This repository has no browser test runner: the Workbench front end
-        # is held by payload tests and a documented smoke checklist. Recording
-        # that per row is what makes "regression coverage is identified" true
-        # rather than optimistic.
+        # There is a browser runner here now, but it drives one shell rather
+        # than every surface, so this row-by-row claim is no longer uniform: a
+        # row either names the spec that exercises it or declares that it is
+        # still held by the documented smoke checklist. What must not happen is
+        # a row doing both, which reads as covered while excusing itself, or
+        # neither, which claims an assurance nothing provides.
         browser_rows = capabilities.by_surface(capabilities.SURFACE_WORKBENCH_BROWSER)
         self.assertTrue(browser_rows)
+        driven_by_a_browser = False
         for row in browser_rows:
             with self.subTest(capability=row.key):
-                self.assertEqual(capabilities.GAP_WORKBENCH_BROWSER, row.coverage_gap)
-        self.assertEqual(
-            [],
-            sorted(REPO_ROOT.glob("tests/**/*.spec.js")),
-            "a browser runner now exists here, so the Workbench browser rows "
-            "should name real specs instead of the smoke checklist",
+                specs = [
+                    reference
+                    for reference in row.regression_coverage
+                    if reference.endswith(".spec.js")
+                ]
+                if specs:
+                    driven_by_a_browser = True
+                    self.assertIsNone(
+                        row.coverage_gap,
+                        "a row naming a spec cannot also claim the browser gap",
+                    )
+                else:
+                    self.assertEqual(
+                        capabilities.GAP_WORKBENCH_BROWSER, row.coverage_gap
+                    )
+        self.assertTrue(
+            driven_by_a_browser,
+            "the shell suite exists, so at least one row must name it",
         )
 
     def test_companion_browser_rows_name_their_real_specs(self) -> None:

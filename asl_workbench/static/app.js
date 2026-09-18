@@ -1,0 +1,107 @@
+/* ASL Workbench — the one front end, served by both deployments.
+ *
+ * This file is the entry point and nothing else: it restores the preferences
+ * the last visit left behind, wires every control, and hands the first render
+ * to the router. The behavior lives in `modules/`, split by what it is
+ * responsible for rather than by when it happens to run.
+ *
+ * Native ES modules, no build step and no runtime dependency — the same
+ * assets the loopback server serves off a laptop are the assets the Pi serves
+ * over Tailscale, because there is only one copy of them and no step in
+ * between that could make the two differ.
+ *
+ * Two things are deliberately never persisted: the reply textarea and the
+ * urgent-correction draft. Both are cleared from memory on submission and
+ * neither is written to sessionStorage or localStorage, so closing the tab is
+ * the end of them.
+ */
+
+import {
+  wireArchiveControls,
+  wireEmptyStateActions,
+} from "./modules/archive.js";
+import { wireCleanupControls } from "./modules/cleanup.js";
+import { DESKTOP_SHELL_MEDIA_QUERY } from "./modules/constants.js";
+import { wireControls } from "./modules/controls.js";
+import { refreshDetail } from "./modules/detail.js";
+import {
+  applyChipPressedState,
+  wireFilterChips,
+  wireRefreshButton,
+} from "./modules/filters.js";
+import {
+  resolveToken,
+  restoreCleanupMode,
+  restoreCleanupThreshold,
+  restoreFilter,
+  restoreSearchText,
+  restoreSelectedPlan,
+  restoreShowCompleted,
+  restoreSortMode,
+} from "./modules/prefs.js";
+import { wirePreviewOpen } from "./modules/preview.js";
+import { wireProfileForm } from "./modules/profile.js";
+import { refresh } from "./modules/queue.js";
+import {
+  hydrateQueueControls,
+  wireSearchControl,
+  wireShowCompletedControl,
+  wireSortControl,
+} from "./modules/queue_controls.js";
+import { wireRedirectForm } from "./modules/redirect.js";
+import { wireReplyForm } from "./modules/reply.js";
+import { applyRoute, wireDetailBack } from "./modules/router.js";
+import { isDesktopShell, wireShellViewport } from "./modules/shell.js";
+import { state } from "./modules/state.js";
+
+export function init() {
+  state.token = resolveToken();
+  state.activeFilter = restoreFilter();
+  state.searchText = restoreSearchText();
+  state.sortMode = restoreSortMode();
+  state.showCompleted = restoreShowCompleted();
+  state.selectedPlan = restoreSelectedPlan();
+  state.cleanupMode = restoreCleanupMode();
+  state.cleanupThresholdDays = restoreCleanupThreshold();
+  state.shellMediaQuery =
+    typeof window.matchMedia === "function"
+      ? window.matchMedia(DESKTOP_SHELL_MEDIA_QUERY)
+      : null;
+  wireFilterChips();
+  wireRefreshButton();
+  wireDetailBack();
+  wireControls();
+  wireProfileForm();
+  wireReplyForm();
+  wireRedirectForm();
+  wireShellViewport();
+  wirePreviewOpen();
+  wireSearchControl();
+  wireSortControl();
+  wireShowCompletedControl();
+  wireCleanupControls();
+  wireArchiveControls();
+  wireEmptyStateActions();
+  hydrateQueueControls();
+  applyChipPressedState();
+  applyRoute();
+  window.addEventListener("hashchange", applyRoute);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    if (state.route.name === "detail") {
+      refreshDetail();
+      if (isDesktopShell()) refresh();
+    } else {
+      refresh();
+    }
+  });
+}
+
+// A module script is deferred, so the document may already be parsed by the
+// time this runs; waiting for an event that has been and gone would leave a
+// blank page.
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", init);
+} else {
+  init();
+}

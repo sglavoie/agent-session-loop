@@ -1,0 +1,14 @@
+{
+  "name": "asl-workbench-browser-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Development-only browser test harness for the ASL Workbench shell. Nothing here is a dependency of the shell: both deployments serve native ES modules from Python, so neither a laptop nor the Pi needs a Node runtime or a build step. The empty `dependencies` below is load-bearing — tests/test_workbench_shell.py asserts it.",
+  "scripts": {
+    "test": "playwright test",
+    "test:install": "playwright install chromium webkit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

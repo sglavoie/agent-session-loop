@@ -1,0 +1,29 @@
+{
+  "comment": "The two deployments of one shell, each on its own loopback port. Read by fixture_server.py, playwright.config.js and shell.spec.js, so the port map has exactly one source of truth. Ports sit above the Workbench's own 8765 and clear of the companion harness's 8791-8803.",
+  "host": "127.0.0.1",
+  "owner_identity": "owner@example.ts.net",
+  "token": "shell-fixture-token",
+  "desktop_min_width": 960,
+  "deployments": {
+    "local": {
+      "port": 8821,
+      "address": "plan_dir",
+      "description": "The laptop: LocalProvider over the plan corpus on disk, addressed by path, reads open and a token held for writes."
+    },
+    "remote": {
+      "port": 8822,
+      "address": "plan_key",
+      "description": "The Pi: RemoteProvider over an observation of the same corpus, addressed by digest, every route behind the identity Tailscale Serve stamped."
+    }
+  },
+  "plans": {
+    "alpha": {
+      "primary_state": "paused-for-reply",
+      "description": "Paused mid-run waiting for an operator, with events, progress and artifacts on disk."
+    },
+    "bravo": {
+      "primary_state": "ready",
+      "description": "Never run: every detail pane has to say it has nothing rather than fail."
+    }
+  }
+}

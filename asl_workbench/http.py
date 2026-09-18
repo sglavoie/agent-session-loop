@@ -78,6 +78,7 @@ __all__ = [
     "STATIC_INDEX_CACHE_CONTROL",
     "STATIC_INDEX_FILE",
     "STATIC_MIME_TYPES",
+    "STATIC_ROOT",
     "STATIC_URL_PREFIX",
     "Application",
     "Authenticator",
@@ -98,6 +99,7 @@ __all__ = [
     "operation_role",
     "parse_etag_list",
     "role_satisfies",
+    "shell_bundle",
     "success_payload",
 ]
 
@@ -963,6 +965,12 @@ class OwnerIdentityAuthenticator:
 
 STATIC_INDEX_FILE = "index.html"
 STATIC_URL_PREFIX = "/static/"
+#: The one copy of the front end. Both deployments serve *this* directory --
+#: the loopback server on a laptop and the Pi over Tailscale -- because a
+#: second copy is a second thing to keep in step, and the only way to be sure
+#: the two modes run the same shell is for there to be nothing to keep in
+#: step. The entry is a native ES module; `modules/` holds the rest.
+STATIC_ROOT = Path(__file__).resolve().parent / "static"
 STATIC_MIME_TYPES: Mapping[str, str] = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -1132,6 +1140,17 @@ class StaticBundle:
 # ---------------------------------------------------------------------------
 # The application
 # ---------------------------------------------------------------------------
+
+
+def shell_bundle() -> StaticBundle:
+    """The front end, for whichever deployment is asking.
+
+    There is one right answer and it is the same one in both modes, so it is
+    given here instead of at each construction site. An application built
+    without it serves no assets at all, which is the correct behavior for a
+    caller that only wants the API.
+    """
+    return StaticBundle(STATIC_ROOT)
 
 
 class Application:
