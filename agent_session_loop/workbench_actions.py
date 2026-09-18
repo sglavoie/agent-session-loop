@@ -111,6 +111,8 @@ def perform(
     run_id: str | None = None,
     require_active_run: bool = False,
     guard: Guard | None = None,
+    deliver_by: float | None = None,
+    command_id: str | None = None,
 ) -> ActionOutcome:
     """Admit, check, carry out, and settle one mutation on one plan.
 
@@ -161,6 +163,13 @@ def perform(
         # reply-bearing operation is never settled by a run merely being there.
         run_id=facts.run_id,
         question_id=selected,
+        # Both are ``None`` for a local surface and set for a delivered one.
+        # ``deliver_by`` records the window the action was submitted inside, so
+        # a row outliving it is knowable rather than merely old; ``command_id``
+        # marks the row as one a connector admitted, which is what lets a
+        # restart settle it without touching a launch the browser is running.
+        deliver_by=deliver_by,
+        command_id=command_id,
     )
     if not admission.admitted:
         if admission.replayed and admission.record is not None:
@@ -249,6 +258,8 @@ def launch_run(
     profile: workbench.LaunchProfile | None = None,
     state_dir: str | Path | None = None,
     guard: Guard | None = None,
+    deliver_by: float | None = None,
+    command_id: str | None = None,
 ) -> ActionOutcome:
     """Start a run for a plan that is not running one."""
     return perform(
@@ -258,6 +269,8 @@ def launch_run(
         profile=profile,
         state_dir=state_dir,
         guard=guard,
+        deliver_by=deliver_by,
+        command_id=command_id,
     )
 
 
@@ -272,6 +285,8 @@ def resume_with_reply(
     question_id: str | None = None,
     run_id: str | None = None,
     guard: Guard | None = None,
+    deliver_by: float | None = None,
+    command_id: str | None = None,
 ) -> ActionOutcome:
     """Answer a paused plan, spawning the resumed run that reads the reply."""
     return perform(
@@ -285,6 +300,8 @@ def resume_with_reply(
         question_id=question_id,
         run_id=run_id,
         guard=guard,
+        deliver_by=deliver_by,
+        command_id=command_id,
     )
 
 
@@ -297,6 +314,8 @@ def reply_to_question(
     action_token: str | None = None,
     question_id: str | None = None,
     run_id: str | None = None,
+    deliver_by: float | None = None,
+    command_id: str | None = None,
 ) -> ActionOutcome:
     """Answer the live question of a run that is already there."""
     return perform(
@@ -309,6 +328,8 @@ def reply_to_question(
         question_id=question_id,
         run_id=run_id,
         require_active_run=True,
+        deliver_by=deliver_by,
+        command_id=command_id,
     )
 
 

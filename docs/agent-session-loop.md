@@ -8497,9 +8497,58 @@ second refuses with `reason: connector-locked` rather than publishing a
 second, competing view. `SIGTERM` and `SIGINT` stop the loop, drop the
 in-flight pass, and release the lock.
 
-The command holds `observe`, `catalog`, and `history` capabilities and
-declares itself observation-only, so the service refuses a mutating frame
-from it by construction.
+**Capabilities are derived, not declared.** The connector announces exactly
+what it was wired with: `observe`, `catalog`, and `history` always;
+`detail` because a detail responder is wired by default, scoped to the same
+corpus the observations publish; and `mutate` only when
+`--allow-remote-actions` was passed. Without that flag the hello says
+`observation_only`, and the service refuses a mutating frame from this
+connector by construction rather than by configuration.
+
+```bash
+asl workbench connect --target-id pi-1 --origin https://workbench.example \
+  --token-file ~/.config/asl/workbench-connector.json --allow-remote-actions
+```
+
+With the flag, the same downward channel that carries a correlated detail
+read may also carry a command, and the connector performs it through the
+same services `asl workbench serve` uses — launch, resume, reply, question
+reply, stop-after-current, abort, harness selection, redirect, unlock, and
+archive — against the plan *key*, never a path. Everything decided against a
+live turn goes under `STRICT` authorization; selecting a *future* harness is
+the one control with no live turn for a proof to be about, so it goes the open
+way the browser and the CLI already send it. Five refusals bound the lane, and
+each is structural:
+
+* **A command has a window.** Submission carries a deadline, capped at five
+  minutes, and at most four may wait at once. A command whose window closes
+  before it is attempted settles `expired` and is reported as never having
+  run.
+* **Cancellation is only possible before the attempt.** A pending command
+  can be withdrawn; one that has been handed to ASL cannot, because the
+  point at which it could be is already past.
+* **The body is fetched at the moment of use.** A reply's prose has no
+  envelope field — the contract set is pinned byte-for-byte — so the service
+  announces a `reply_ref` and the connector redeems it over
+  `POST <origin>/v1/commands/redeem` with the operation's single-use action
+  token, immediately before handing it to ASL and never before. Reply text
+  is never persisted, never journalled, and never held by a waiting command.
+* **A restart settles; it never retries.** The journal is written *before*
+  the side effect, so recovery can tell apart a command that certainly did
+  not run (`expired`) from one that may have (`unconfirmed`). Both are
+  reported as outcomes. Carrying a pending command across a restart and
+  running it later — against state that has moved, for an operator who has
+  stopped waiting — is the one thing the durable journal exists to prevent.
+* **Only shared words go out.** Outcomes are reported in the transport's
+  closed status and detail-code vocabulary; ASL's own refusal prose stays on
+  this machine.
+
+A remote action that ASL would refuse locally is refused identically here:
+the same freshness check, the same observation-only setting, the same
+current-capability list, and the same authoritative target state decide it,
+because it is the same code deciding. A bulk archive is decomposed into one
+operation per plan and reassembled into the same per-entry result the local
+route returns, so a partial success reads the same from either side.
 
 ### Cleanup and archive workflow
 
@@ -8933,8 +8982,9 @@ two spellings of one rule.
 implementation.** `AUTHORIZATION_OPEN` queues a control for a plan whose
 runner has not started yet, which is what a local operator with no
 snapshot has always been able to do and what the CLI still does;
-`AUTHORIZATION_STRICT`, which the connector uses, refuses anything that is
-not about the run the caller was shown. Both are correct for their caller.
+`AUTHORIZATION_STRICT`, which the connector uses for every control decided
+against a live turn, refuses anything that is not about the run the caller was
+shown. Both are correct for their caller.
 A correction is the exception on both surfaces: it interrupts a turn, so
 it is always held to a fresh `action_token` — a request without one is
 refused `stale-action-token` rather than as a malformed body.

@@ -446,6 +446,17 @@ def open_operations(
 # ---------------------------------------------------------------------------
 
 
+def owner_alive(record: Mapping[str, Any]) -> bool:
+    """Whether the process that recorded this operation is still running.
+
+    Public for the one caller outside this module that needs the same rule: a
+    connector deciding, on the way up, which open rows are its predecessor's to
+    close out. Settling a row whose owner is still going would report an
+    outcome for a mutation that is currently happening.
+    """
+    return _owner_alive(record)
+
+
 def _owner_alive(record: Mapping[str, Any]) -> bool:
     """Whether the process that recorded this operation is still running.
 

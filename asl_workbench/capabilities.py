@@ -239,6 +239,7 @@ _STORE_TESTS = "scripts:tests/test_workbench_store.py"
 _TRANSPORT_TESTS = "scripts:tests/test_workbench_transport_contract.py"
 _CONNECTOR_TESTS = "scripts:tests/test_workbench_connector.py"
 _REMOTE_READ_TESTS = "scripts:tests/test_workbench_remote_reads.py"
+_REMOTE_ACTION_TESTS = "scripts:tests/test_workbench_remote_actions.py"
 _PI = "sglavoie_raspberry_pi:services/pi-monitoring"
 
 
@@ -519,10 +520,13 @@ CAPABILITIES: tuple[Capability, ...] = (
         key=f"{SURFACE_WORKBENCH_CLI}:asl workbench connect",
         surface=SURFACE_WORKBENCH_CLI,
         summary="Publish heartbeats, the complete catalog, active runs, and "
-        "incremental history to a remote service, and answer that service's "
-        "correlated detail reads on the same outward link. Calls the shared "
-        "catalog, observation, history, and detail services in process; no "
-        "bridge subprocess and no disk spooling.",
+        "incremental history to a remote service, answer that service's "
+        "correlated detail reads, and -- only under --allow-remote-actions -- "
+        "perform its mutating commands, all on the same outward link. Calls "
+        "the shared catalog, observation, history, detail, action, control, "
+        "and archive services in process; no bridge subprocess and no disk "
+        "spooling. Capabilities are derived from what was wired, so the "
+        "default invocation announces itself observation-only.",
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_MAC,
         authority=AUTHORITY_ASL,
@@ -536,10 +540,20 @@ CAPABILITIES: tuple[Capability, ...] = (
             "workbench_remote_reads.AslDetailResponder demotes a reader's "
             "undeclared refusal word onto 'not-found' and carries the "
             "original as a warning, so an unknown reason is never silence",
+            "remote_actions.reportable_status folds a queue-only status onto "
+            "the three the transport lets a connector report, so 'cancelled' "
+            "reaches the service as 'rejected' rather than as a refused frame",
+            "workbench_remote_actions.bulk_archive_result reassembles the "
+            "per-plan outcomes of one-operation-per-plan remote archives into "
+            "the same bulk result shape the local route returns",
+            "workbench_connector.HttpsBodySource redeems a reply's prose over "
+            "a second route because the contract set is pinned and no "
+            "envelope may carry it",
         ),
         regression_coverage=(
             _CONNECTOR_TESTS,
             _REMOTE_READ_TESTS,
+            _REMOTE_ACTION_TESTS,
             _CLI_TESTS,
             _DOCS_TESTS,
         ),

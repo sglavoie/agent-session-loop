@@ -2364,6 +2364,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="How often to walk the corpus (default: 30)",
     )
     workbench_connect_parser.add_argument(
+        "--allow-remote-actions",
+        action="store_true",
+        help=("Accept mutating commands from the service (default: observation-only)"),
+    )
+    workbench_connect_parser.add_argument(
         "--json",
         action="store_true",
         help="Print machine-readable JSON startup output",

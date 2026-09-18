@@ -69,11 +69,17 @@ from asl_workbench.connector import (
     SingleInstanceLock,
 )
 from asl_workbench.operations import (
+    DETAIL_ACTION_TOKEN_REFUSED,
     METHOD_ABORT,
     METHOD_QUESTION_REPLY,
     METHOD_REDIRECT,
     METHOD_REPLY,
     METHOD_STOP_AFTER_CURRENT,
+)
+from asl_workbench.remote_actions import (
+    MAX_BODY_CHARS,
+    BodyUnavailable,
+    MutationRequest,
 )
 from asl_workbench.transport import MAX_FRAME_BYTES
 
@@ -83,6 +89,7 @@ from . import (
     state,
     workbench_catalog,
     workbench_history,
+    workbench_remote_actions,
     workbench_remote_reads,
 )
 
@@ -92,6 +99,12 @@ COMMAND_NAME = "workbench connect"
 #: envelope kinds: the kind is inside the envelope, and a service that routed
 #: by URL would have two places to keep the vocabulary.
 INGEST_PATH = "/v1/ingest"
+
+#: The route that exchanges an operation's single-use action token for the
+#: prose it names. Separate from ``/v1/ingest`` because the contract set is
+#: pinned byte-for-byte: a reply's body has no envelope field to ride in, and
+#: inventing one would break every participant's contract check at once.
+REDEEM_PATH = "/v1/commands/redeem"
 
 #: How long one request may take. Short on purpose -- a connector that blocks
 #: for a minute on a dead link stops heartbeating, which is the failure this
@@ -521,6 +534,118 @@ class HttpsChannel:
         return body or None
 
 
+class HttpsBodySource:
+    """Redeems one command body over the same link, at the moment of use.
+
+    The transport's envelope set is pinned, so a reply's prose has no field to
+    ride in: the service announces a ``reply_ref`` and the body is fetched out
+    of band here, exchanging the operation's single-use ``action_token`` for
+    the text. That is why this is a separate route rather than a bigger frame
+    -- a wire shape change would break the contract set every participant is
+    pinned to.
+
+    Redeeming *late* is the point. The body is asked for after the window has
+    been checked and immediately before ASL is handed it, so a command that
+    waits in the queue and then expires never had its prose on this machine at
+    all, and a restart has nothing to carry forward.
+
+    Every failure is :class:`~asl_workbench.remote_actions.BodyUnavailable`,
+    which settles the operation without attempting it. A refused redemption is
+    ``action-token-refused`` and an unreachable service is
+    ``bridge-unavailable``: the first is an answer, the second is a link.
+    """
+
+    def __init__(
+        self,
+        *,
+        origin: str,
+        token: str,
+        path: str = REDEEM_PATH,
+        timeout: float = REQUEST_TIMEOUT_SECONDS,
+        connect: Callable[[], http.client.HTTPConnection] | None = None,
+    ) -> None:
+        parsed = urllib.parse.urlsplit(origin)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ConnectorSetupError(
+                "the connector origin must be an https URL naming a host"
+            )
+        self.origin = origin
+        self.host = parsed.hostname
+        self.port = parsed.port or 443
+        self.path = path
+        self.timeout = float(timeout)
+        self._token = token
+        self._connect = connect or self._default_connect
+
+    def _default_connect(self) -> http.client.HTTPConnection:
+        return http.client.HTTPSConnection(
+            self.host,
+            self.port,
+            timeout=self.timeout,
+            context=ssl.create_default_context(),
+        )
+
+    def fetch(self, request: MutationRequest, *, now: float) -> str:
+        """Exchange this operation's action token for the prose it names."""
+        if not request.reply_ref or not request.action_token:
+            raise BodyUnavailable(
+                "the operation names no redeemable body",
+                detail_code=DETAIL_ACTION_TOKEN_REFUSED,
+            )
+        body = json.dumps(
+            {
+                "operation_id": request.operation_id,
+                "action_token": request.action_token,
+                "reply_ref": request.reply_ref,
+            }
+        ).encode("utf-8")
+        try:
+            connection = self._connect()
+        except (OSError, ValueError) as error:
+            raise BodyUnavailable(f"could not reach {self.origin}: {error}") from error
+        try:
+            connection.request(
+                "POST",
+                self.path,
+                body=body,
+                headers={
+                    "Authorization": f"Bearer {self._token}",
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                },
+            )
+            response = connection.getresponse()
+            raw = response.read(MAX_BODY_CHARS + 1)
+        except (OSError, http.client.HTTPException, ValueError) as error:
+            raise BodyUnavailable(f"redemption failed: {error}") from error
+        finally:
+            with contextlib.suppress(OSError, http.client.HTTPException):
+                connection.close()
+        if response.status not in ACCEPTED_STATUSES:
+            # A status, not a link failure: the service considered the token
+            # and declined it. Reported as the token's refusal so the operator
+            # can tell a spent token from a Pi that is down.
+            raise BodyUnavailable(
+                f"{self.origin} refused the redemption with status {response.status}",
+                detail_code=DETAIL_ACTION_TOKEN_REFUSED,
+            )
+        if len(raw) > MAX_BODY_CHARS:
+            raise BodyUnavailable(f"{self.origin} answered with an oversized body")
+        try:
+            document = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as error:
+            raise BodyUnavailable(f"the redemption was undecodable: {error}") from error
+        if not isinstance(document, dict):
+            raise BodyUnavailable("the redemption was not an object")
+        text = document.get("reply_text")
+        if not isinstance(text, str) or not text.strip():
+            raise BodyUnavailable(
+                "the redemption carried no reply_text",
+                detail_code=DETAIL_ACTION_TOKEN_REFUSED,
+            )
+        return text
+
+
 # --------------------------------------------------------------------------
 # The loop
 # --------------------------------------------------------------------------
@@ -583,8 +708,16 @@ def publish_forever(
     interval: what decides when a frame goes out is the connector's schedule,
     and what decides how fast a shutdown is noticed is this interval. Keeping
     them separate is why a slow observation pass cannot delay either.
+
+    Recovery runs once, before the first step, and from inside the same
+    ``try`` as the loop so that a connector is shut down even if it never got
+    as far as stepping. Any operation a previous connector journalled and did
+    not finish is settled and reported here -- never re-attempted -- so the
+    service learns the outcome of a command it stopped hearing about instead of
+    waiting on a process that is gone.
     """
     try:
+        connector.recover(clock())
         while not stop.is_set():
             connector.step(clock())
             stop.wait(interval)
@@ -598,28 +731,42 @@ def build_connector(
     channel: portable_connector.Channel | None = None,
     source: portable_connector.ObservationSource | None = None,
     responder: portable_connector.DetailResponder | None = None,
+    performer: portable_connector.MutationPerformer | None = None,
+    body_source: portable_connector.MutationBodySource | None = None,
 ) -> ObservationConnector:
     """Assemble the connector this invocation asked for.
 
     Raises :class:`ConnectorSetupError` for anything the operator can fix, so
     the caller has one exception type to turn into one refusal payload.
+
+    Observation and detail are wired by default; acting is not. A performer is
+    built only when ``--allow-remote-actions`` was passed, and the connector
+    derives its announced capabilities from what it was given -- so the default
+    invocation announces itself observation-only and the service refuses a
+    mutating frame from it by construction rather than by configuration.
     """
     target_id = getattr(args, "target_id", None)
     if not target_id:
         raise ConnectorSetupError("a connector needs --target-id")
     connector_id = getattr(args, "connector_id", None) or default_connector_id()
+    allow_actions = bool(getattr(args, "allow_remote_actions", False))
     resolved_channel = channel
-    if resolved_channel is None:
+    resolved_body_source = body_source
+    # One token read for both routes. The body route carries the same bearer
+    # as the frame route because it is the same trust relationship; what makes
+    # a redemption single-use is the operation's action token, not this one.
+    if resolved_channel is None or (allow_actions and resolved_body_source is None):
         origin = getattr(args, "origin", None)
         token_file = getattr(args, "token_file", None)
         if not origin:
             raise ConnectorSetupError("a connector needs --origin")
         if not token_file:
             raise ConnectorSetupError("a connector needs --token-file")
-        resolved_channel = HttpsChannel(
-            origin=origin,
-            token=read_connector_token(token_file),
-        )
+        token = read_connector_token(token_file)
+        if resolved_channel is None:
+            resolved_channel = HttpsChannel(origin=origin, token=token)
+        if allow_actions and resolved_body_source is None:
+            resolved_body_source = HttpsBodySource(origin=origin, token=token)
     state_dir = getattr(args, "state_dir", None)
     plan_roots = tuple(getattr(args, "plan_root", None) or ())
     resolved_source = source
@@ -635,6 +782,16 @@ def build_connector(
         # a question about one of them is a cockpit that lists a run and then
         # says nothing about it.
         resolved_responder = workbench_remote_reads.AslDetailResponder(
+            state_dir=state_dir,
+            plan_roots=plan_roots,
+            registry_path=getattr(args, "registry_path", None),
+        )
+    resolved_performer = performer
+    if resolved_performer is None and allow_actions:
+        # Opt-in, and scoped to the same corpus as the reads. A performer that
+        # could reach a plan the connector never publishes would let a remote
+        # act on something it was never shown.
+        resolved_performer = workbench_remote_actions.AslMutationPerformer(
             state_dir=state_dir,
             plan_roots=plan_roots,
             registry_path=getattr(args, "registry_path", None),
@@ -658,6 +815,8 @@ def build_connector(
             backoff=Backoff(),
             asl_version=_asl_version(),
             responder=resolved_responder,
+            performer=resolved_performer,
+            body_source=resolved_body_source,
         )
     except ConnectorError as error:
         raise ConnectorSetupError(str(error)) from error

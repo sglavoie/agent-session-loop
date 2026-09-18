@@ -62,18 +62,35 @@ from typing import Any, Protocol
 from .catalog import CatalogEntry, CatalogPage, digest_of
 from .history import PAUSE_REASON_OTHER, PAUSE_REASONS, HistoryBatch, HistoryEntry
 from .observation import MAX_LABEL_CHARS, MAX_WARNINGS, SUPPORTED_CONTRACT_SET_IDS
-from .operations import DETAIL_BRIDGE_UNAVAILABLE
+from .operations import (
+    DETAIL_BRIDGE_UNAVAILABLE,
+    DETAIL_DEADLINE_PASSED,
+    DETAIL_NO_RESULT,
+    OPERATION_EXPIRED,
+    OPERATION_UNCONFIRMED,
+)
+from .remote_actions import (
+    BodyUnavailable,
+    MutationQueue,
+    MutationRequest,
+    MutationResult,
+    RemoteActionError,
+    operation_payload,
+    parse_submission,
+)
 from .transport import (
     CAPABILITY_BY_REQUEST,
     CAPABILITY_CATALOG,
     CAPABILITY_DETAIL,
     CAPABILITY_HISTORY,
+    CAPABILITY_MUTATE,
     CAPABILITY_OBSERVE,
     DIRECTION_DOWN,
     ERROR_DEADLINE,
     ERROR_FORBIDDEN_METHOD,
     ERROR_UNSUPPORTED_CAPABILITY,
     KIND_DETAIL,
+    KIND_OPERATION,
     KIND_RECEIPT,
     MAX_CATALOG_ENTRIES_PER_PAGE,
     MAX_RUNS_PER_SNAPSHOT,
@@ -81,6 +98,7 @@ from .transport import (
     RECEIPT_EXPIRED,
     RECEIPT_REFUSED,
     REQUEST_DETAIL,
+    REQUEST_MUTATE,
     TRANSPORT_PROTOCOL_VERSION,
     VIEW_CATALOG_PAGE,
     VIEW_HEARTBEAT,
@@ -90,6 +108,7 @@ from .transport import (
     detail_envelope,
     encode_frame,
     observation_envelope,
+    operation_envelope,
     receipt_envelope,
     validate_frame,
     validate_hello,
@@ -109,6 +128,7 @@ __all__ = [
     "MAX_PENDING_REQUESTS",
     "MAX_PUBLISHED_RUNS",
     "MAX_QUEUED_ANSWERS",
+    "MUTATION_CAPABILITIES",
     "OBSERVATION_CAPABILITIES",
     "STATE_BACKOFF",
     "STATE_READY",
@@ -119,6 +139,8 @@ __all__ = [
     "ChannelError",
     "ConnectorError",
     "DetailResponder",
+    "MutationBodySource",
+    "MutationPerformer",
     "ObservationConnector",
     "ObservationCycle",
     "ObservationSource",
@@ -184,10 +206,11 @@ OBSERVATION_CAPABILITIES: tuple[str, ...] = (
     CAPABILITY_HISTORY,
 )
 
-#: What this connector offers a service. ``detail`` is here because a
-#: :class:`DetailResponder` can answer a correlated read; ``mutate`` is still
-#: absent because nothing here performs one, and a hello claiming it would have
-#: the service route traffic to a capability this build does not implement.
+#: What this connector offers a service by default: the three views plus
+#: ``detail``, because a :class:`DetailResponder` can answer a correlated read.
+#: ``mutate`` is absent from the *default* rather than from the build -- see
+#: :data:`MUTATION_CAPABILITIES` -- so a deployment that did not ask to be acted
+#: on remotely stays observation-only whatever the far end would like to send.
 #:
 #: Declared is not the same as offered: an instance built without a responder
 #: drops ``detail`` from its own hello rather than advertising a capability it
@@ -196,6 +219,17 @@ OBSERVATION_CAPABILITIES: tuple[str, ...] = (
 CONNECTOR_CAPABILITIES: tuple[str, ...] = (
     *OBSERVATION_CAPABILITIES,
     CAPABILITY_DETAIL,
+)
+
+#: What a connector offers once somebody has wired a :class:`MutationPerformer`
+#: into it. Reaching this set is an act of configuration on the Mac, never a
+#: request from the far end: ``mutate`` is what makes the hello stop saying
+#: ``observation_only``, and the service refuses a mutating frame from an
+#: observation-only pairing by construction. A connector that advertised it
+#: without a performer would be inviting exactly the traffic it must refuse.
+MUTATION_CAPABILITIES: tuple[str, ...] = (
+    *CONNECTOR_CAPABILITIES,
+    CAPABILITY_MUTATE,
 )
 
 #: How often a heartbeat is published when nothing else is. Kept well inside
@@ -225,6 +259,11 @@ ACTIVE_READ_WINDOW_SECONDS = 30.0
 #: queue is not reading a plan, it is looping.
 MAX_PENDING_REQUESTS = 8
 MAX_QUEUED_ANSWERS = 8
+
+#: The frame kinds that share the answer lane, as opposed to the four views the
+#: connector publishes on its own schedule. All three are things somebody is
+#: owed rather than things this Mac decided to say.
+_ANSWER_KINDS = (KIND_DETAIL, KIND_OPERATION, KIND_RECEIPT)
 
 #: The first retry delay, and the ceiling it doubles towards.
 BACKOFF_BASE_SECONDS = 1.0
@@ -496,6 +535,58 @@ class DetailResponder(Protocol):
 
     def answer(self, request: Mapping[str, Any], *, now: float) -> Mapping[str, Any]:
         """The detail payload answering one ``detail.read`` request."""
+        ...
+
+
+class MutationPerformer(Protocol):
+    """Carries out one submitted mutation, off the delivery thread.
+
+    The second and last opening for ASL-aware code, and a deliberately narrower
+    one than :class:`DetailResponder`: it is handed a parsed
+    :class:`~asl_workbench.remote_actions.MutationRequest` and the body that was
+    redeemed for it, and it answers with the status ASL reached. It decides
+    nothing about the transport and the transport decides nothing about ASL.
+
+    The implementation is responsible for journalling *before* the side effect,
+    which is what makes :func:`~asl_workbench.remote_actions.restart_settlement`
+    able to tell a mutation that certainly did not run from one that may have.
+
+    An exception escaping :meth:`perform` is caught and reported ``unconfirmed``
+    rather than failed, because a performer that raised part-way through is
+    exactly the case nobody can say the outcome of.
+    """
+
+    def perform(
+        self, request: MutationRequest, *, body: str | None, now: float
+    ) -> MutationResult:
+        """Carry out one mutation and report what ASL settled it as."""
+        ...
+
+    def recover(self, *, now: float) -> Sequence[Mapping[str, Any]]:
+        """Close out what a previous connector left open, and report it.
+
+        Returns ``operation`` payloads for rows this process settled on the way
+        up. Nothing is re-attempted: a mutation whose outcome is unknown is
+        reported unknown.
+        """
+        ...
+
+
+class MutationBodySource(Protocol):
+    """Redeems the prose a mutation needs, at the moment it is needed.
+
+    Kept off :class:`MutationPerformer` on purpose. The body lives at the far
+    end and is fetched over the link; the performer is ASL and knows nothing
+    about links. Splitting them is also what keeps the body inside a single
+    stack frame -- fetched here, passed to ``perform``, gone when it returns --
+    so no pending command ever holds prose that a restart could carry forward.
+
+    Raises :class:`~asl_workbench.remote_actions.BodyUnavailable` when the body
+    cannot be had, which settles the mutation without attempting it.
+    """
+
+    def fetch(self, request: MutationRequest, *, now: float) -> str:
+        """The prose ``request.reply_ref`` names, redeemed once."""
         ...
 
 
@@ -974,16 +1065,25 @@ class _Request:
 class _Answer:
     """One finished answer waiting for the channel.
 
-    ``kind`` is either a detail envelope carrying material or a receipt
-    declining to. Both are correlated by ``request_id`` and both settle the read
-    -- a request that produced neither would leave the far end waiting out a
-    deadline for an answer this end already decided not to send.
+    ``kind`` is a detail envelope carrying material, a receipt declining to, or
+    an operation reporting what became of a mutation. The first two are
+    correlated by ``request_id`` and both settle a read -- a request that
+    produced neither would leave the far end waiting out a deadline for an
+    answer this end already decided not to send.
+
+    An operation has no ``request_id``: a mutation is correlated by its
+    ``operation_id``, which is the only identifier that still means anything
+    after the connector that took the submission in has been restarted.
     """
 
-    request_id: str
+    request_id: str | None
     kind: str
     payload: dict[str, Any]
     deadline: float | None = None
+    #: Which capability a receipt is declining on behalf of. A refused read and
+    #: a refused mutation are different refusals and the far end routes them
+    #: differently, so the word is carried rather than assumed.
+    capability: str = CAPABILITY_DETAIL
 
     def forget(self) -> None:
         """Drop whatever body this answer is holding.
@@ -1030,6 +1130,25 @@ class _Queue:
             answer.forget()
         self.answers.clear()
 
+    def drop_correlated(self) -> None:
+        """Drop the answers a lost link made pointless, and keep the rest.
+
+        A detail or a receipt answers a question whose asker has already been
+        told the link went down, so delivering one after the reconnect would
+        hand a service material it reported as offline. An operation is not an
+        answer to a waiter: it is the only record this end has of what ASL did
+        to somebody's plan, and the far end can still absorb it late -- an
+        ``unconfirmed`` command settling once the link returns is precisely the
+        reconciliation its state machine keeps a door open for.
+        """
+        live: list[_Answer] = []
+        for answer in self.answers:
+            if answer.kind == KIND_OPERATION:
+                live.append(answer)
+                continue
+            answer.forget()
+        self.answers = live
+
 
 class ObservationConnector:
     """Publishes one Mac's observations, on a schedule it can be held to.
@@ -1053,10 +1172,15 @@ class ObservationConnector:
         backoff: Backoff | None = None,
         asl_version: str | None = None,
         responder: DetailResponder | None = None,
+        performer: MutationPerformer | None = None,
+        body_source: MutationBodySource | None = None,
         run_observation: (
             Callable[[Callable[[], None]], threading.Thread | None] | None
         ) = None,
         run_answer: (
+            Callable[[Callable[[], None]], threading.Thread | None] | None
+        ) = None,
+        run_mutation: (
             Callable[[Callable[[], None]], threading.Thread | None] | None
         ) = None,
     ) -> None:
@@ -1068,13 +1192,17 @@ class ObservationConnector:
         self._source = source
         self._channel = channel
         self._responder = responder
+        self._performer = performer
+        self._body_source = body_source
         # Derived rather than declared: a connector with nothing to read from
-        # says so in its hello instead of accepting reads it would refuse.
-        self.capabilities: tuple[str, ...] = (
-            CONNECTOR_CAPABILITIES
-            if responder is not None
-            else OBSERVATION_CAPABILITIES
-        )
+        # says so in its hello instead of accepting reads it would refuse, and
+        # one with nothing that performs a mutation stays observation-only.
+        offered: list[str] = list(OBSERVATION_CAPABILITIES)
+        if responder is not None:
+            offered.append(CAPABILITY_DETAIL)
+        if performer is not None:
+            offered.append(CAPABILITY_MUTATE)
+        self.capabilities: tuple[str, ...] = tuple(offered)
         self._heartbeat_interval = float(heartbeat_interval)
         self._observation_interval = float(observation_interval)
         self._backoff = backoff if backoff is not None else Backoff()
@@ -1110,6 +1238,18 @@ class ObservationConnector:
         # Which lane went last, so a busy reader and a busy corpus take turns
         # instead of one of them never being reached.
         self._answered_last = False
+        # -- the mutation half --------------------------------------------
+        # Its own queue and its own worker, never the read ones. A mutation
+        # waits on ASL taking an action and a read waits on a disk, and putting
+        # them in one lane would let a slow archive hold up a cockpit's refresh
+        # -- or, worse, let a flood of reads run a command's window out.
+        self._run_mutation = run_mutation or _spawn_mutation
+        self._mutations = MutationQueue()
+        self._mutating: MutationRequest | None = None
+        self._mutation_result: _Answer | None = None
+        self._mutation_thread: threading.Thread | None = None
+        self._mutation_fault: str | None = None
+        self._recovered = False
 
     # -- introspection ---------------------------------------------------
     @property
@@ -1174,14 +1314,73 @@ class ObservationConnector:
             in_flight = 1 if self._answering is not None else 0
         return len(self._requests) + in_flight + len(self._queue.answers)
 
+    def pending_mutations(self) -> int:
+        """How many submitted mutations are in hand and not yet settled."""
+        return self._mutations.pending + self._mutations.attempting
+
+    @property
+    def mutation_fault(self) -> str | None:
+        """Why the last mutation could not be carried out, or ``None``.
+
+        Separate from :attr:`answer_fault` for the same reason that one is
+        separate from ``degraded_reason``: a performer that raised says nothing
+        about whether reads work or the corpus was walked.
+        """
+        return self._mutation_fault
+
+    @property
+    def observation_only(self) -> bool:
+        """Whether this connector will act on anything the far end sends."""
+        return CAPABILITY_MUTATE not in self.capabilities
+
     def hello(self) -> dict[str, Any]:
-        """This connector's announcement."""
+        """This connector's announcement.
+
+        ``observation_only`` is read off the capabilities rather than passed in:
+        the two are the same claim said twice, and a hello that offered
+        ``mutate`` while calling itself observation-only would be asking the
+        service to refuse every frame it then sent.
+        """
         return connector_hello(
             connector_id=self.connector_id,
             target_id=self.target_id,
             asl_version=self.asl_version,
+            observation_only=self.observation_only,
             capabilities=self.capabilities,
         )
+
+    def recover(self, now: float) -> int:
+        """Settle and report what a previous connector left open.
+
+        Called once, before the loop starts, because that is the only moment at
+        which "every open row belongs to a process that is gone" is something
+        this connector can act on. Returns how many rows were closed out.
+
+        Nothing is re-attempted. A row that was journalled and never dispatched
+        is reported ``expired``; one that got further is reported
+        ``unconfirmed``. Carrying a pending command forward and running it now
+        -- against state that has moved, on behalf of somebody who has stopped
+        waiting -- is the single failure the durable journal exists to make
+        impossible.
+        """
+        if self._performer is None or self._recovered:
+            return 0
+        self._recovered = True
+        try:
+            settled = self._performer.recover(now=now)
+        except Exception as error:  # a performer is arbitrary provider code
+            self._mutation_fault = f"{type(error).__name__}: {error}"[:MAX_LABEL_CHARS]
+            return 0
+        for payload in settled:
+            self._enqueue(
+                _Answer(
+                    request_id=None,
+                    kind=KIND_OPERATION,
+                    payload=dict(payload),
+                    capability=CAPABILITY_MUTATE,
+                )
+            )
+        return len(settled)
 
     # -- the loop --------------------------------------------------------
     def step(self, now: float) -> str | None:
@@ -1208,9 +1407,11 @@ class ObservationConnector:
         selected = self._select()
         if selected is None:
             return None
-        lane, payload, request_id = selected
+        lane, payload, request_id, capability = selected
         try:
-            frame = encode_frame(self._envelope(lane, payload, request_id, now))
+            frame = encode_frame(
+                self._envelope(lane, payload, request_id, now, capability)
+            )
         except TransportError as error:
             self._unpublishable(lane, error)
             return None
@@ -1224,7 +1425,12 @@ class ObservationConnector:
         return lane
 
     def _envelope(
-        self, lane: str, payload: Mapping[str, Any], request_id: str | None, now: float
+        self,
+        lane: str,
+        payload: Mapping[str, Any],
+        request_id: str | None,
+        now: float,
+        capability: str = CAPABILITY_DETAIL,
     ) -> dict[str, Any]:
         """The envelope for one selected frame, built by its own lane's rules."""
         if lane == KIND_DETAIL:
@@ -1236,11 +1442,19 @@ class ObservationConnector:
                 sent_at=now,
                 request_id=request_id,
             )
+        if lane == KIND_OPERATION:
+            return operation_envelope(
+                payload=payload,
+                connector_id=self.connector_id,
+                target_id=self.target_id,
+                sent_at=now,
+                request_id=request_id,
+            )
         if lane == KIND_RECEIPT:
             assert request_id is not None
             return receipt_envelope(
                 payload=payload,
-                capability=CAPABILITY_DETAIL,
+                capability=capability,
                 connector_id=self.connector_id,
                 target_id=self.target_id,
                 sent_at=now,
@@ -1267,7 +1481,7 @@ class ObservationConnector:
         already waiting to report it.
         """
         self._release(lane)
-        if lane in (KIND_DETAIL, KIND_RECEIPT):
+        if lane in _ANSWER_KINDS:
             self._answer_fault = f"unsendable {lane}: {error}"[:MAX_LABEL_CHARS]
             return
         self._discard(f"unpublishable {lane}: {error}")
@@ -1290,13 +1504,19 @@ class ObservationConnector:
         # far end's deadline is for.
         self._queue.clear_answers()
         self._forget_reads()
+        # Every command still in hand goes with them, body references and
+        # redemption tokens first. A stopped connector holds no authority to
+        # act, so the only mutation that can still be running is the one already
+        # handed to a worker -- and nothing restarts it.
+        self._mutations.clear()
         self._queue = _Queue()
         self._cycle = None
-        for thread in (self._thread, self._answer_thread):
+        for thread in (self._thread, self._answer_thread, self._mutation_thread):
             if thread is not None and thread.is_alive():
                 thread.join(WORKER_JOIN_TIMEOUT_SECONDS)
         self._thread = None
         self._answer_thread = None
+        self._mutation_thread = None
         # After the join rather than in ``_forget_reads``: everywhere else that
         # abandons reads, the worker is still running and clearing this slot
         # would let a second read start beside it. Here there is no second read
@@ -1305,16 +1525,21 @@ class ObservationConnector:
         with self._lock:
             self._answering = None
             self._answer_result = None
+            self._mutating = None
+            self._mutation_result = None
 
     # -- scheduling ------------------------------------------------------
     def _service(self, now: float) -> None:
         """Collect what the workers finished, start what is due, keep liveness."""
         self._collect(now)
         self._collect_answer()
+        self._collect_mutation()
         self._expire_reads(now)
+        self._expire_mutations(now)
         if now >= self._next_observation and not self.observing:
             self._start_observation(now)
         self._start_answer(now)
+        self._start_mutation(now)
         if now >= self._next_heartbeat:
             self._queue.heartbeat = self._heartbeat(now)
             self._next_heartbeat = now + self._carrier_interval(now)
@@ -1466,6 +1691,9 @@ class ObservationConnector:
         if refusal is not None:
             self._enqueue(refusal)
             return
+        if request.payload.get("request") == REQUEST_MUTATE:
+            self._submit(request, now)
+            return
         if len(self._requests) >= MAX_PENDING_REQUESTS:
             self._enqueue(
                 self._receipt(request, RECEIPT_REFUSED, DETAIL_BRIDGE_UNAVAILABLE, now)
@@ -1492,34 +1720,68 @@ class ObservationConnector:
         )
 
     def _decline(self, request: _Request, now: float) -> _Answer | None:
-        """The receipt refusing this request outright, or ``None`` to do it.
+        """The receipt refusing this request outright, or ``None`` to take it.
 
-        This is where detail traffic is kept apart from mutation delivery.
-        ``operation.submit`` is not queued behind the reads and it is not
-        half-performed: the capability was never offered, so it is refused on
-        arrival with the word that says which capability is missing, and the
-        answering worker only ever sees a ``detail.read``.
+        This is where detail traffic is kept apart from mutation delivery. The
+        two are told apart here and never meet again: a ``detail.read`` goes to
+        the read queue and the answering worker, an ``operation.submit`` goes to
+        the mutation queue and its own worker, and neither can be starved or
+        delayed by a backlog of the other.
+
+        A capability this connector did not offer is refused on arrival with the
+        word that says which one is missing, so a service that ignored the hello
+        gets an answer it can route rather than silence.
         """
         method = request.payload.get("request")
         capability = CAPABILITY_BY_REQUEST.get(str(method))
         if capability is None or capability not in self.capabilities:
             return self._receipt(
-                request, RECEIPT_REFUSED, ERROR_UNSUPPORTED_CAPABILITY, now
+                request,
+                RECEIPT_REFUSED,
+                ERROR_UNSUPPORTED_CAPABILITY,
+                now,
+                capability=capability or CAPABILITY_DETAIL,
             )
-        if method != REQUEST_DETAIL:
-            return self._receipt(request, RECEIPT_REFUSED, ERROR_FORBIDDEN_METHOD, now)
-        if self._responder is None:
-            return self._receipt(
-                request, RECEIPT_REFUSED, ERROR_UNSUPPORTED_CAPABILITY, now
-            )
-        if request.deadline is not None and now >= request.deadline:
-            # Answered expired without the read being performed. The material
-            # would be built for a caller that has already given up.
-            return self._receipt(request, RECEIPT_EXPIRED, ERROR_DEADLINE, now)
-        return None
+        if method == REQUEST_DETAIL:
+            if self._responder is None:
+                return self._receipt(
+                    request, RECEIPT_REFUSED, ERROR_UNSUPPORTED_CAPABILITY, now
+                )
+            if request.deadline is not None and now >= request.deadline:
+                # Answered expired without the read being performed. The
+                # material would be built for a caller that has already given up.
+                return self._receipt(request, RECEIPT_EXPIRED, ERROR_DEADLINE, now)
+            return None
+        if method == REQUEST_MUTATE:
+            if self._performer is None:
+                return self._receipt(
+                    request,
+                    RECEIPT_REFUSED,
+                    ERROR_UNSUPPORTED_CAPABILITY,
+                    now,
+                    capability=CAPABILITY_MUTATE,
+                )
+            if request.deadline is not None and now >= request.deadline:
+                # The window closed in flight. Refused without being journalled,
+                # which is what makes ``expired`` here mean *it did not run*.
+                return self._receipt(
+                    request,
+                    RECEIPT_EXPIRED,
+                    ERROR_DEADLINE,
+                    now,
+                    capability=CAPABILITY_MUTATE,
+                )
+            return None
+        return self._receipt(request, RECEIPT_REFUSED, ERROR_FORBIDDEN_METHOD, now)
 
     def _receipt(
-        self, request: _Request, outcome: str, detail_code: str, now: float
+        self,
+        request: _Request,
+        outcome: str,
+        detail_code: str,
+        now: float,
+        *,
+        capability: str = CAPABILITY_DETAIL,
     ) -> _Answer:
         """One correlated refusal, in the shape a receipt declares."""
         return _Answer(
@@ -1531,7 +1793,168 @@ class ObservationConnector:
                 "detail_code": detail_code,
             },
             deadline=request.deadline,
+            capability=capability,
         )
+
+    # -- mutation delivery -----------------------------------------------
+    def _submit(self, request: _Request, now: float) -> None:
+        """Take one ``operation.submit`` into the mutation queue, or refuse it.
+
+        Refusals here are the ones that can still be made honestly, because
+        nothing has been journalled and nothing has been attempted: a method
+        this connector will not carry, a submission missing the authority its
+        method needs, a window that has already closed, a queue that is full.
+        Every one of them is a receipt the service can act on immediately.
+
+        A resubmission of a command already in hand is dropped without a
+        receipt. The answer the service is waiting for is the operation's
+        outcome, correlated by ``operation_id``, and it is coming; a second copy
+        would only mean carrying the same mutation out twice.
+        """
+        try:
+            submission = parse_submission(
+                request.payload, now=now, deadline=request.deadline
+            )
+        except RemoteActionError as error:
+            self._enqueue(
+                self._receipt(
+                    request,
+                    error.outcome,
+                    error.detail_code,
+                    now,
+                    capability=CAPABILITY_MUTATE,
+                )
+            )
+            return
+        try:
+            accepted = self._mutations.accept(submission, now=now)
+        except RemoteActionError as error:
+            self._enqueue(
+                self._receipt(
+                    request,
+                    error.outcome,
+                    error.detail_code,
+                    now,
+                    capability=CAPABILITY_MUTATE,
+                )
+            )
+            return
+        if not accepted:
+            return
+        # Pull the carrier in: the operation frame reporting this command rides
+        # the same outbound schedule every other answer does, and a service that
+        # has just asked for an action is the one least willing to wait.
+        self._next_heartbeat = min(
+            self._next_heartbeat, now + self._carrier_interval(now)
+        )
+
+    def _cancel(self, operation_id: str) -> bool:
+        """Withdraw a submitted mutation that has not been attempted yet.
+
+        ``False`` when there was nothing to withdraw, including when the command
+        is already being carried out -- which is not cancellable, because the
+        attempt is running and its result is the only honest answer left.
+        """
+        return self._mutations.cancel(operation_id) is not None
+
+    def _start_mutation(self, now: float) -> None:
+        """Carry out the oldest submitted mutation, on a worker, one at a time.
+
+        One at a time for a stronger reason than reads are: two mutations
+        running together are two actions on plans whose state each was decided
+        against, and serialising them is what keeps "the remote action behaves
+        like the local one" true of a burst as well as of a single command.
+        """
+        if self._performer is None:
+            return
+        if len(self._queue.answers) >= MAX_QUEUED_ANSWERS:
+            return
+        with self._lock:
+            if self._mutating is not None:
+                return
+        request = self._mutations.next_attempt(now)
+        if request is None:
+            return
+        with self._lock:
+            self._mutating = request
+        performer = self._performer
+        source = self._body_source
+
+        def attempt() -> None:
+            fault: str | None = None
+            body: str | None = None
+            try:
+                if request.bears_body:
+                    if source is None:
+                        raise BodyUnavailable("no way to redeem this command's body")
+                    body = source.fetch(request, now=now)
+                result = performer.perform(request, body=body, now=now)
+            except BodyUnavailable as error:
+                # Nothing was attempted, so the one word that is certainly true
+                # is that it did not run.
+                result = MutationResult(
+                    status=OPERATION_EXPIRED, detail_code=error.detail_code
+                )
+                fault = error.message[:MAX_LABEL_CHARS]
+            except Exception as error:  # a performer is arbitrary provider code
+                # It may have acted before it raised, and nobody can say which.
+                # ``unconfirmed`` is the only answer that is not a guess.
+                result = MutationResult(
+                    status=OPERATION_UNCONFIRMED, detail_code=DETAIL_NO_RESULT
+                )
+                fault = f"{type(error).__name__}: {error}"[:MAX_LABEL_CHARS]
+            finally:
+                # The body dies with the frame that used it, delivered or not.
+                body = None
+            answer = _Answer(
+                request_id=None,
+                kind=KIND_OPERATION,
+                payload=operation_payload(request, result, observed_at=now),
+                capability=CAPABILITY_MUTATE,
+            )
+            with self._lock:
+                self._mutation_result = answer
+                self._mutating = None
+                if fault is not None:
+                    self._mutation_fault = fault
+
+        self._mutation_thread = self._run_mutation(attempt)
+
+    def _collect_mutation(self) -> None:
+        """Take a finished mutation's report into the outbound lane."""
+        with self._lock:
+            answer = self._mutation_result
+            self._mutation_result = None
+        if answer is None:
+            return
+        operation_id = answer.payload.get("operation_id")
+        if isinstance(operation_id, str):
+            self._mutations.settle(operation_id)
+        self._enqueue(answer)
+
+    def _expire_mutations(self, now: float) -> None:
+        """Report every waiting command whose delivery window has closed.
+
+        Only waiting ones. A command being carried out is past the point where
+        ``expired`` could still be true, and saying it anyway would tell an
+        owner their action did not happen while it was happening.
+        """
+        for request in self._mutations.expire(now):
+            self._enqueue(
+                _Answer(
+                    request_id=None,
+                    kind=KIND_OPERATION,
+                    payload=operation_payload(
+                        request,
+                        MutationResult(
+                            status=OPERATION_EXPIRED,
+                            detail_code=DETAIL_DEADLINE_PASSED,
+                        ),
+                        observed_at=now,
+                    ),
+                    capability=CAPABILITY_MUTATE,
+                )
+            )
 
     def _enqueue(self, answer: _Answer) -> None:
         """Put one finished answer in the lane, or drop it if the lane is full."""
@@ -1630,7 +2053,7 @@ class ObservationConnector:
             self._answer_result = None
 
     # -- delivery --------------------------------------------------------
-    def _select(self) -> tuple[str, dict[str, Any], str | None] | None:
+    def _select(self) -> tuple[str, dict[str, Any], str | None, str] | None:
         """The next frame, in the order liveness outranks everything.
 
         The heartbeat goes first because a connector the receiver has written
@@ -1641,25 +2064,25 @@ class ObservationConnector:
         are the kind nobody notices until a plan is missing from a cockpit.
         """
         if self._queue.heartbeat is not None:
-            return VIEW_HEARTBEAT, self._queue.heartbeat, None
+            return VIEW_HEARTBEAT, self._queue.heartbeat, None, CAPABILITY_OBSERVE
         answer_ready = bool(self._queue.answers)
         if answer_ready and not (self._answered_last and self._queue.cycle_waiting()):
             answer = self._queue.answers[0]
-            return answer.kind, answer.payload, answer.request_id
+            return answer.kind, answer.payload, answer.request_id, answer.capability
         if self._queue.snapshot is not None:
-            return VIEW_SNAPSHOT, self._queue.snapshot, None
+            return VIEW_SNAPSHOT, self._queue.snapshot, None, CAPABILITY_OBSERVE
         if self._queue.pages:
-            return VIEW_CATALOG_PAGE, self._queue.pages[0], None
+            return VIEW_CATALOG_PAGE, self._queue.pages[0], None, CAPABILITY_CATALOG
         if self._queue.batches:
-            return VIEW_HISTORY_BATCH, self._queue.batches[0], None
+            return VIEW_HISTORY_BATCH, self._queue.batches[0], None, CAPABILITY_HISTORY
         if answer_ready:
             answer = self._queue.answers[0]
-            return answer.kind, answer.payload, answer.request_id
+            return answer.kind, answer.payload, answer.request_id, answer.capability
         return None
 
     def _release(self, view: str) -> None:
         """Take the frame :meth:`_select` returned off the queue."""
-        if view in (KIND_DETAIL, KIND_RECEIPT):
+        if view in _ANSWER_KINDS:
             if self._queue.answers:
                 # Forgotten on the way out, delivered or not: the frame has
                 # already been encoded, so nothing here needs the body any more
@@ -1678,7 +2101,7 @@ class ObservationConnector:
 
     def _delivered(self, view: str) -> None:
         self._release(view)
-        if view in (KIND_DETAIL, KIND_RECEIPT):
+        if view in _ANSWER_KINDS:
             self._answered_last = True
         elif view != VIEW_HEARTBEAT:
             self._answered_last = False
@@ -1711,10 +2134,33 @@ class ObservationConnector:
         question nobody is waiting on any more -- and delivering one after the
         reconnect would hand a service material it had already reported as
         offline.
+
+        Mutations are the exception, in both directions. A command that has not
+        been attempted is dropped with its body reference and its tokens: its
+        window is running out against a link that is down, and the far end will
+        resubmit if it still wants the action. A *report* of one that was
+        carried out is kept, because it is the only record this end has of what
+        ASL did and the far end can still absorb it late.
         """
         self._queue.clear_cycle()
-        self._queue.clear_answers()
+        self._queue.drop_correlated()
         self._forget_reads()
+        for abandoned in self._mutations.abandon():
+            self._enqueue(
+                _Answer(
+                    request_id=None,
+                    kind=KIND_OPERATION,
+                    payload=operation_payload(
+                        abandoned,
+                        MutationResult(
+                            status=OPERATION_EXPIRED,
+                            detail_code=DETAIL_BRIDGE_UNAVAILABLE,
+                        ),
+                        observed_at=now,
+                    ),
+                    capability=CAPABILITY_MUTATE,
+                )
+            )
         self._cycle = None
         self._state = STATE_BACKOFF
         self._retry_at = now + self._backoff.delay()
@@ -1745,5 +2191,20 @@ def _spawn_answer(attempt: Callable[[], None]) -> threading.Thread:
     caller will time out on and nothing else.
     """
     thread = threading.Thread(target=attempt, name="workbench-detail", daemon=True)
+    thread.start()
+    return thread
+
+
+def _spawn_mutation(attempt: Callable[[], None]) -> threading.Thread:
+    """Carry out one submitted mutation off the delivery thread.
+
+    A daemon thread like the other two, and the only one where that costs
+    something: an interpreter exiting mid-attempt loses the report of an action
+    that may already have happened. It is still the right trade, because the
+    durable row was written before the side effect -- so the next connector
+    reads it, calls it ``unconfirmed`` rather than re-running it, and the far
+    end learns the truth one restart late instead of never.
+    """
+    thread = threading.Thread(target=attempt, name="workbench-mutation", daemon=True)
     thread.start()
     return thread

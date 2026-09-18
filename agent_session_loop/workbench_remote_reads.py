@@ -221,6 +221,18 @@ class PlanIndex:
             )
         return found
 
+    def items(self, *, now: float) -> list[tuple[str, Path]]:
+        """Every indexed plan as ``(plan_key, directory)``, refreshed if stale.
+
+        For the caller that has to visit the whole corpus rather than resolve
+        one key -- settling what a restart left open is the case -- and it walks
+        the same table a read resolves against, so it can never reach a
+        directory the wire could not have named.
+        """
+        if self._stale(now):
+            self.refresh(now)
+        return sorted(self._plans.items())
+
     def _stale(self, now: float) -> bool:
         return self._scanned_at is None or now - self._scanned_at >= self._ttl
 
