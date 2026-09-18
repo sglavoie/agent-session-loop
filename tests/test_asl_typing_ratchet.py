@@ -250,6 +250,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.workbench_details",
         "agent_session_loop.workbench_history",
         "agent_session_loop.workbench_operations",
+        "agent_session_loop.workbench_remote_reads",
         "agent_session_loop.workbench_server",
         "agent_session_loop.workspace_evidence",
         "agent_session_loop.workspaces",
@@ -276,6 +277,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "asl_workbench.incidents",
         "asl_workbench.observation",
         "asl_workbench.operations",
+        "asl_workbench.remote_reads",
         "asl_workbench.store",
         "asl_workbench.transport",
     }

@@ -77,7 +77,14 @@ from asl_workbench.operations import (
 )
 from asl_workbench.transport import MAX_FRAME_BYTES
 
-from . import bridge, responses, state, workbench_catalog, workbench_history
+from . import (
+    bridge,
+    responses,
+    state,
+    workbench_catalog,
+    workbench_history,
+    workbench_remote_reads,
+)
 
 COMMAND_NAME = "workbench connect"
 
@@ -473,8 +480,16 @@ class HttpsChannel:
             context=ssl.create_default_context(),
         )
 
-    def send(self, frame: bytes) -> None:
-        """Deliver one encoded envelope, or raise :class:`ChannelError`."""
+    def send(self, frame: bytes) -> bytes | None:
+        """Deliver one encoded envelope and return any frame carried back.
+
+        The response body is the downward half of the link. A service with a
+        correlated read to ask puts a ``request`` frame in the acknowledgement
+        of this upload; anything else -- an empty body, a status line, a JSON
+        ``{"ok": true}`` -- comes back as itself and the connector refuses it as
+        undecodable without treating the delivery as failed. The frame landed;
+        that is what this method's success means.
+        """
         try:
             connection = self._connect()
         except (OSError, ValueError) as error:
@@ -503,6 +518,7 @@ class HttpsChannel:
             )
         if len(body) > MAX_FRAME_BYTES:
             raise ChannelError(f"{self.origin} answered with an oversized body")
+        return body or None
 
 
 # --------------------------------------------------------------------------
@@ -581,6 +597,7 @@ def build_connector(
     *,
     channel: portable_connector.Channel | None = None,
     source: portable_connector.ObservationSource | None = None,
+    responder: portable_connector.DetailResponder | None = None,
 ) -> ObservationConnector:
     """Assemble the connector this invocation asked for.
 
@@ -603,11 +620,24 @@ def build_connector(
             origin=origin,
             token=read_connector_token(token_file),
         )
+    state_dir = getattr(args, "state_dir", None)
+    plan_roots = tuple(getattr(args, "plan_root", None) or ())
     resolved_source = source
     if resolved_source is None:
         resolved_source = AslObservationSource(
-            state_dir=getattr(args, "state_dir", None),
-            plan_roots=tuple(getattr(args, "plan_root", None) or ()),
+            state_dir=state_dir,
+            plan_roots=plan_roots,
+        )
+    resolved_responder = responder
+    if resolved_responder is None:
+        # Wired by default, and scoped to exactly the corpus the source
+        # publishes. A connector that observes a set of plans and cannot answer
+        # a question about one of them is a cockpit that lists a run and then
+        # says nothing about it.
+        resolved_responder = workbench_remote_reads.AslDetailResponder(
+            state_dir=state_dir,
+            plan_roots=plan_roots,
+            registry_path=getattr(args, "registry_path", None),
         )
     heartbeat = float(
         getattr(args, "heartbeat_interval", None)
@@ -627,6 +657,7 @@ def build_connector(
             observation_interval=observation,
             backoff=Backoff(),
             asl_version=_asl_version(),
+            responder=resolved_responder,
         )
     except ConnectorError as error:
         raise ConnectorSetupError(str(error)) from error
@@ -703,7 +734,11 @@ def workbench_connect_from_args(
                     reason="connecting",
                     connector_id=connector.connector_id,
                     target_id=connector.target_id,
-                    capabilities=list(portable_connector.CONNECTOR_CAPABILITIES),
+                    # The instance's own list, not the module default: a
+                    # connector built without a responder offers less, and the
+                    # line an operator reads has to say what was actually
+                    # announced.
+                    capabilities=list(connector.capabilities),
                     lock=str(lock.path),
                 )
             )

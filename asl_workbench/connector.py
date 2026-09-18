@@ -21,6 +21,16 @@ material comes from. It owns four things and nothing else:
   :meth:`ObservationConnector.step` schedules the heartbeat from the clock
   rather than from the pass. A Mac whose disk has gone slow reports that it is
   alive and degraded, instead of going silent and being read as lost.
+* **Answers to questions, on the same outward link.** A service with something
+  to ask puts a ``request`` frame in the body of the acknowledgement of an
+  upload; :class:`Channel` returns it, and the connector answers it later with
+  a correlated ``detail`` or a ``receipt`` saying why not. The read itself runs
+  on a worker and the answer waits in a lane of its own, which is what keeps
+  three failure modes apart: a slow disk cannot silence the heartbeat, a corpus
+  being paged out cannot bury a read somebody is waiting on, and a service
+  reading continuously cannot stop the corpus from ever being published. Every
+  correlated body is dropped the moment it is sent, expires, or the link goes,
+  and none of it is ever written down.
 
 What it does *not* own is equally deliberate. It never reads a plan, never
 spawns a subprocess, and never names a path: the corpus reaches it through
@@ -52,25 +62,42 @@ from typing import Any, Protocol
 from .catalog import CatalogEntry, CatalogPage, digest_of
 from .history import PAUSE_REASON_OTHER, PAUSE_REASONS, HistoryBatch, HistoryEntry
 from .observation import MAX_LABEL_CHARS, MAX_WARNINGS, SUPPORTED_CONTRACT_SET_IDS
+from .operations import DETAIL_BRIDGE_UNAVAILABLE
 from .transport import (
+    CAPABILITY_BY_REQUEST,
     CAPABILITY_CATALOG,
+    CAPABILITY_DETAIL,
     CAPABILITY_HISTORY,
     CAPABILITY_OBSERVE,
+    DIRECTION_DOWN,
+    ERROR_DEADLINE,
+    ERROR_FORBIDDEN_METHOD,
+    ERROR_UNSUPPORTED_CAPABILITY,
+    KIND_DETAIL,
+    KIND_RECEIPT,
     MAX_CATALOG_ENTRIES_PER_PAGE,
     MAX_RUNS_PER_SNAPSHOT,
     MAX_WARNING_CHARS,
+    RECEIPT_EXPIRED,
+    RECEIPT_REFUSED,
+    REQUEST_DETAIL,
     TRANSPORT_PROTOCOL_VERSION,
     VIEW_CATALOG_PAGE,
     VIEW_HEARTBEAT,
     VIEW_HISTORY_BATCH,
     VIEW_SNAPSHOT,
     TransportError,
+    detail_envelope,
     encode_frame,
     observation_envelope,
+    receipt_envelope,
+    validate_frame,
     validate_hello,
 )
 
 __all__ = [
+    "ACTIVE_READ_INTERVAL_SECONDS",
+    "ACTIVE_READ_WINDOW_SECONDS",
     "BACKOFF_BASE_SECONDS",
     "BACKOFF_CAP_SECONDS",
     "CATALOG_PAGE_LIMIT",
@@ -79,7 +106,10 @@ __all__ = [
     "DEFAULT_HEARTBEAT_INTERVAL_SECONDS",
     "DEFAULT_OBSERVATION_INTERVAL_SECONDS",
     "LOCK_FILE_NAME",
+    "MAX_PENDING_REQUESTS",
     "MAX_PUBLISHED_RUNS",
+    "MAX_QUEUED_ANSWERS",
+    "OBSERVATION_CAPABILITIES",
     "STATE_BACKOFF",
     "STATE_READY",
     "STATE_STARTING",
@@ -88,6 +118,7 @@ __all__ = [
     "Channel",
     "ChannelError",
     "ConnectorError",
+    "DetailResponder",
     "ObservationConnector",
     "ObservationCycle",
     "ObservationSource",
@@ -145,14 +176,26 @@ CONNECTOR_STATES: tuple[str, ...] = (
     STATE_STOPPED,
 )
 
-#: What this connector offers a service. ``detail`` and ``mutate`` are absent
-#: because nothing here answers a correlated read or performs a mutation yet,
-#: and a hello claiming them would have the service route traffic to a
-#: capability this build does not implement.
-CONNECTOR_CAPABILITIES: tuple[str, ...] = (
+#: What a connector offers before anything correlated is wired up: the three
+#: views it publishes on its own schedule, and nothing that answers a question.
+OBSERVATION_CAPABILITIES: tuple[str, ...] = (
     CAPABILITY_OBSERVE,
     CAPABILITY_CATALOG,
     CAPABILITY_HISTORY,
+)
+
+#: What this connector offers a service. ``detail`` is here because a
+#: :class:`DetailResponder` can answer a correlated read; ``mutate`` is still
+#: absent because nothing here performs one, and a hello claiming it would have
+#: the service route traffic to a capability this build does not implement.
+#:
+#: Declared is not the same as offered: an instance built without a responder
+#: drops ``detail`` from its own hello rather than advertising a capability it
+#: would have to refuse on arrival. A service reads
+#: :attr:`ObservationConnector.capabilities`, never this tuple.
+CONNECTOR_CAPABILITIES: tuple[str, ...] = (
+    *OBSERVATION_CAPABILITIES,
+    CAPABILITY_DETAIL,
 )
 
 #: How often a heartbeat is published when nothing else is. Kept well inside
@@ -163,6 +206,25 @@ DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 15.0
 #: How often the corpus is walked. Slower than the heartbeat on purpose: the
 #: walk is the expensive half, and the cheap half is what liveness is made of.
 DEFAULT_OBSERVATION_INTERVAL_SECONDS = 30.0
+
+#: The cadence the connector offers frames at while a service is reading, and
+#: how long after the last request it keeps offering them.
+#:
+#: There is one channel and it points outward, so a request travels back on the
+#: acknowledgement of a frame this connector sent: no frame, no question. At the
+#: ordinary heartbeat cadence that would put a quarter of a minute in front of
+#: every read, which is not a cockpit. So the link goes conversational while
+#: somebody is using it and idles again when they stop -- the fast cadence costs
+#: a small frame a second, and only for as long as it is being answered.
+ACTIVE_READ_INTERVAL_SECONDS = 1.0
+ACTIVE_READ_WINDOW_SECONDS = 30.0
+
+#: How many requests may be waiting for the answering worker, and how many
+#: finished answers may be waiting for the channel. Both are small: a request
+#: arrives at most one per delivered frame, and a service that has filled either
+#: queue is not reading a plan, it is looping.
+MAX_PENDING_REQUESTS = 8
+MAX_QUEUED_ANSWERS = 8
 
 #: The first retry delay, and the ceiling it doubles towards.
 BACKOFF_BASE_SECONDS = 1.0
@@ -392,10 +454,48 @@ class ObservationSource(Protocol):
 
 
 class Channel(Protocol):
-    """One frame out. Raises :class:`ChannelError` and nothing else."""
+    """One frame out, and whatever the acknowledgement carried back.
 
-    def send(self, frame: bytes) -> None:
-        """Deliver one encoded envelope, or raise :class:`ChannelError`."""
+    Raises :class:`ChannelError` and nothing else.
+
+    The return value is what makes a correlated read possible over an outbound
+    link: a service with something to ask puts a ``request`` frame in the body
+    of the response to an upload, and the connector answers it on a later step.
+    Returning ``None`` -- an acknowledgement with nothing in it -- is the
+    ordinary case and the only thing a channel written before this existed ever
+    did, so the widening costs no implementation anything.
+
+    A second inbound socket would have been the alternative, and it is the one
+    thing the deployment cannot have: the Mac is behind a router nobody
+    administers, which is why the link points outward in the first place.
+    """
+
+    def send(self, frame: bytes) -> bytes | None:
+        """Deliver one encoded envelope and return any frame carried back.
+
+        Raises :class:`ChannelError` if the frame did not land.
+        """
+        ...
+
+
+class DetailResponder(Protocol):
+    """Answers one correlated detail read, off the delivery thread.
+
+    The only opening in this module for ASL-aware code. A responder is handed
+    the request payload the far end sent -- never a path, never a handle it
+    could use to reach anything else -- and returns a payload in the shape
+    :data:`asl_workbench.transport.DETAIL_SHAPE` declares, including for a read
+    that found nothing: a refusal carries ``reason``, and a refusal is still an
+    answer.
+
+    :meth:`answer` runs on a worker, so it may block on a disk without the
+    heartbeat going quiet behind it. An exception escaping it is caught and
+    turned into a receipt, because a provider bug must cost the caller one read
+    rather than the whole connector.
+    """
+
+    def answer(self, request: Mapping[str, Any], *, now: float) -> Mapping[str, Any]:
+        """The detail payload answering one ``detail.read`` request."""
         ...
 
 
@@ -858,26 +958,77 @@ class _Pass:
 
 
 @dataclass
+class _Request:
+    """One correlated read this connector has taken in but not yet answered."""
+
+    request_id: str
+    payload: dict[str, Any]
+    #: The far end's own deadline. A request found past it is answered
+    #: ``expired`` *without the read being performed*: the material would be
+    #: built for a caller that has already stopped waiting, and building it
+    #: would spend the disk on nobody.
+    deadline: float | None = None
+
+
+@dataclass
+class _Answer:
+    """One finished answer waiting for the channel.
+
+    ``kind`` is either a detail envelope carrying material or a receipt
+    declining to. Both are correlated by ``request_id`` and both settle the read
+    -- a request that produced neither would leave the far end waiting out a
+    deadline for an answer this end already decided not to send.
+    """
+
+    request_id: str
+    kind: str
+    payload: dict[str, Any]
+    deadline: float | None = None
+
+    def forget(self) -> None:
+        """Drop whatever body this answer is holding.
+
+        Called wherever an answer stops being deliverable. The payload is this
+        connector's own dict, so emptying it releases the only reference to the
+        text that was read -- which is the whole of "clear bodies after expiry
+        or disconnect" on this end of the link.
+        """
+        self.payload.clear()
+
+
+@dataclass
 class _Queue:
     """What is waiting to go out, in the order it goes.
 
     Heartbeat and snapshot are single slots rather than lists: a newer one
     replaces an older one because the older one described a moment nobody needs
     any more. Pages and batches are queues because each carries material the
-    next one does not.
+    next one does not. Answers are a queue of their own rather than a fifth
+    observation view: they are correlated to a question somebody is waiting on,
+    and burying one behind a hundred catalog pages is the starvation this lane
+    exists to prevent.
     """
 
     heartbeat: dict[str, Any] | None = None
     snapshot: dict[str, Any] | None = None
     pages: list[dict[str, Any]] = field(default_factory=list)
     batches: list[dict[str, Any]] = field(default_factory=list)
+    answers: list[_Answer] = field(default_factory=list)
 
     def cycle_drained(self) -> bool:
         return not self.pages and not self.batches
 
+    def cycle_waiting(self) -> bool:
+        return self.snapshot is not None or bool(self.pages) or bool(self.batches)
+
     def clear_cycle(self) -> None:
         self.pages.clear()
         self.batches.clear()
+
+    def clear_answers(self) -> None:
+        for answer in self.answers:
+            answer.forget()
+        self.answers.clear()
 
 
 class ObservationConnector:
@@ -901,7 +1052,11 @@ class ObservationConnector:
         observation_interval: float = DEFAULT_OBSERVATION_INTERVAL_SECONDS,
         backoff: Backoff | None = None,
         asl_version: str | None = None,
+        responder: DetailResponder | None = None,
         run_observation: (
+            Callable[[Callable[[], None]], threading.Thread | None] | None
+        ) = None,
+        run_answer: (
             Callable[[Callable[[], None]], threading.Thread | None] | None
         ) = None,
     ) -> None:
@@ -912,6 +1067,14 @@ class ObservationConnector:
         self.asl_version = asl_version
         self._source = source
         self._channel = channel
+        self._responder = responder
+        # Derived rather than declared: a connector with nothing to read from
+        # says so in its hello instead of accepting reads it would refuse.
+        self.capabilities: tuple[str, ...] = (
+            CONNECTOR_CAPABILITIES
+            if responder is not None
+            else OBSERVATION_CAPABILITIES
+        )
         self._heartbeat_interval = float(heartbeat_interval)
         self._observation_interval = float(observation_interval)
         self._backoff = backoff if backoff is not None else Backoff()
@@ -935,6 +1098,18 @@ class ObservationConnector:
         self._result: _Pass | None = None
         self._observing = False
         self._thread: threading.Thread | None = None
+        # -- the correlated half ------------------------------------------
+        self._run_answer = run_answer or _spawn_answer
+        self._requests: list[_Request] = []
+        self._answering: _Request | None = None
+        self._answer_result: _Answer | None = None
+        self._answer_thread: threading.Thread | None = None
+        self._answer_fault: str | None = None
+        self._request_fault: str | None = None
+        self._last_request_at: float | None = None
+        # Which lane went last, so a busy reader and a busy corpus take turns
+        # instead of one of them never being reached.
+        self._answered_last = False
 
     # -- introspection ---------------------------------------------------
     @property
@@ -960,14 +1135,44 @@ class ObservationConnector:
         """When the next delivery may be attempted. Meaningful in backoff."""
         return self._retry_at
 
+    @property
+    def answer_fault(self) -> str | None:
+        """Why the last answer was dropped, or ``None``.
+
+        Deliberately not ``degraded_reason``: that word describes the
+        observation the heartbeat is carrying, and an unsendable answer says
+        nothing about whether the corpus was read. Reporting one as the other
+        would have a single malformed read make a healthy Mac look degraded, and
+        the far end's own deadline is already the recovery path.
+        """
+        return self._answer_fault
+
+    @property
+    def request_fault(self) -> str | None:
+        """Why the last carried request was not taken in, or ``None``."""
+        return self._request_fault
+
+    @property
+    def answering(self) -> bool:
+        """Whether a read is being performed right now."""
+        with self._lock:
+            return self._answering is not None
+
     def pending(self) -> int:
         """How many frames are waiting to be delivered."""
         queued = len(self._queue.pages) + len(self._queue.batches)
+        queued += len(self._queue.answers)
         if self._queue.heartbeat is not None:
             queued += 1
         if self._queue.snapshot is not None:
             queued += 1
         return queued
+
+    def pending_reads(self) -> int:
+        """How many correlated reads are taken in and not yet answered."""
+        with self._lock:
+            in_flight = 1 if self._answering is not None else 0
+        return len(self._requests) + in_flight + len(self._queue.answers)
 
     def hello(self) -> dict[str, Any]:
         """This connector's announcement."""
@@ -975,16 +1180,25 @@ class ObservationConnector:
             connector_id=self.connector_id,
             target_id=self.target_id,
             asl_version=self.asl_version,
+            capabilities=self.capabilities,
         )
 
     # -- the loop --------------------------------------------------------
     def step(self, now: float) -> str | None:
         """Service the schedules and deliver at most one frame.
 
-        Returns the view that was sent, or ``None`` when nothing was: an empty
-        queue, a backoff that has not elapsed, or a delivery that failed. One
-        frame per step is what keeps a recovered link from turning a built-up
-        queue into an unbounded burst.
+        Returns the lane that was sent -- an observation view, ``detail`` or
+        ``receipt`` -- or ``None`` when nothing was: an empty queue, a backoff
+        that has not elapsed, or a delivery that failed. One frame per step is
+        what keeps a recovered link from turning a built-up queue into an
+        unbounded burst.
+
+        Whatever the acknowledgement carried back is taken in here, which is the
+        only way a question reaches this process. It is taken in *after* the
+        delivery succeeded, so a request riding a response this connector never
+        managed to read is simply never seen -- the far end's deadline covers
+        it, and guessing would mean answering a question that may not have been
+        asked.
         """
         if self._state == STATE_STOPPED:
             return None
@@ -994,33 +1208,69 @@ class ObservationConnector:
         selected = self._select()
         if selected is None:
             return None
-        view, payload = selected
+        lane, payload, request_id = selected
         try:
-            frame = encode_frame(
-                observation_envelope(
-                    payload=payload,
-                    connector_id=self.connector_id,
-                    target_id=self.target_id,
-                    sent_at=now,
-                )
-            )
+            frame = encode_frame(self._envelope(lane, payload, request_id, now))
         except TransportError as error:
-            # A frame this connector built is one its own receiver would
-            # refuse. The frame is dropped as well as the cycle: a refusal is a
-            # property of the payload, so leaving it queued would refuse it
-            # again on every step and the connector would never heartbeat
-            # again. Nothing is committed, so the next pass reads the same
-            # window.
-            self._release(view)
-            self._discard(f"unpublishable {view}: {error}")
+            self._unpublishable(lane, error)
             return None
         try:
-            self._channel.send(frame)
+            carried = self._channel.send(frame)
         except ChannelError:
             self._fail(now)
             return None
-        self._delivered(view)
-        return view
+        self._delivered(lane)
+        self._receive(carried, now)
+        return lane
+
+    def _envelope(
+        self, lane: str, payload: Mapping[str, Any], request_id: str | None, now: float
+    ) -> dict[str, Any]:
+        """The envelope for one selected frame, built by its own lane's rules."""
+        if lane == KIND_DETAIL:
+            assert request_id is not None
+            return detail_envelope(
+                payload=payload,
+                connector_id=self.connector_id,
+                target_id=self.target_id,
+                sent_at=now,
+                request_id=request_id,
+            )
+        if lane == KIND_RECEIPT:
+            assert request_id is not None
+            return receipt_envelope(
+                payload=payload,
+                capability=CAPABILITY_DETAIL,
+                connector_id=self.connector_id,
+                target_id=self.target_id,
+                sent_at=now,
+                request_id=request_id,
+            )
+        return observation_envelope(
+            payload=payload,
+            connector_id=self.connector_id,
+            target_id=self.target_id,
+            sent_at=now,
+        )
+
+    def _unpublishable(self, lane: str, error: TransportError) -> None:
+        """A frame this connector built is one its own receiver would refuse.
+
+        An observation takes the cycle down with it: a refusal is a property of
+        the payload, so leaving it queued would refuse it again on every step
+        and the connector would never heartbeat again. Nothing is committed, so
+        the next pass reads the same window.
+
+        An answer takes only itself. The cycle is untouched and the heartbeat
+        keeps claiming what is true, because one unencodable read says nothing
+        about whether the corpus was walked -- and the caller's deadline is
+        already waiting to report it.
+        """
+        self._release(lane)
+        if lane in (KIND_DETAIL, KIND_RECEIPT):
+            self._answer_fault = f"unsendable {lane}: {error}"[:MAX_LABEL_CHARS]
+            return
+        self._discard(f"unpublishable {lane}: {error}")
 
     def stop(self) -> None:
         """Stop publishing and let an in-flight observation pass go.
@@ -1034,22 +1284,52 @@ class ObservationConnector:
         if self._state == STATE_STOPPED:
             return
         self._state = STATE_STOPPED
+        # Bodies first, then the queue: a stopped connector holds no material,
+        # and the process that replaces it starts with nothing to leak. Every
+        # read this one had taken in is simply never answered, which is what the
+        # far end's deadline is for.
+        self._queue.clear_answers()
+        self._forget_reads()
         self._queue = _Queue()
         self._cycle = None
-        thread = self._thread
-        if thread is not None and thread.is_alive():
-            thread.join(WORKER_JOIN_TIMEOUT_SECONDS)
+        for thread in (self._thread, self._answer_thread):
+            if thread is not None and thread.is_alive():
+                thread.join(WORKER_JOIN_TIMEOUT_SECONDS)
         self._thread = None
+        self._answer_thread = None
+        # After the join rather than in ``_forget_reads``: everywhere else that
+        # abandons reads, the worker is still running and clearing this slot
+        # would let a second read start beside it. Here there is no second read
+        # and no next step, so the last thing a stopped connector is holding
+        # goes too.
+        with self._lock:
+            self._answering = None
+            self._answer_result = None
 
     # -- scheduling ------------------------------------------------------
     def _service(self, now: float) -> None:
-        """Collect a finished pass, start one if due, and schedule a heartbeat."""
+        """Collect what the workers finished, start what is due, keep liveness."""
         self._collect(now)
+        self._collect_answer()
+        self._expire_reads(now)
         if now >= self._next_observation and not self.observing:
             self._start_observation(now)
+        self._start_answer(now)
         if now >= self._next_heartbeat:
             self._queue.heartbeat = self._heartbeat(now)
-            self._next_heartbeat = now + self._heartbeat_interval
+            self._next_heartbeat = now + self._carrier_interval(now)
+
+    def _carrier_interval(self, now: float) -> float:
+        """How long until the next heartbeat, given whether anyone is reading.
+
+        The heartbeat is also the carrier a request rides back on, so its
+        cadence is the floor on read latency. It tightens while a service is
+        asking and relaxes once it stops.
+        """
+        asked = self._last_request_at
+        if asked is not None and now - asked <= ACTIVE_READ_WINDOW_SECONDS:
+            return min(self._heartbeat_interval, ACTIVE_READ_INTERVAL_SECONDS)
+        return self._heartbeat_interval
 
     def _start_observation(self, now: float) -> None:
         with self._lock:
@@ -1137,21 +1417,255 @@ class ObservationConnector:
             ),
         )
 
+    # -- correlated reads ------------------------------------------------
+    def _receive(self, carried: bytes | None, now: float) -> None:
+        """Take in whatever the acknowledgement carried back.
+
+        Everything is checked before anything is believed: the frame against the
+        transport, its direction against ``down``, its target against this
+        deployment, and its connector id against this connector. A service that
+        is paired with somebody else does not get to queue work here.
+        """
+        if not carried:
+            return
+        try:
+            envelope = validate_frame(
+                carried, direction=DIRECTION_DOWN, target_id=self.target_id
+            )
+        except TransportError as error:
+            self._request_fault = f"undecodable request: {error}"[:MAX_LABEL_CHARS]
+            return
+        if envelope.get("connector_id") != self.connector_id:
+            self._request_fault = "request addressed to another connector"
+            return
+        request_id = envelope.get("request_id")
+        if not isinstance(request_id, str):
+            self._request_fault = "request without a correlation id"
+            return
+        self._request_fault = None
+        self._last_request_at = now
+        # Pull the next carrier in. The heartbeat that brought this request was
+        # scheduled before anybody was asking, so leaving its successor where
+        # the idle cadence put it would make the *first* read of a quiet period
+        # wait out a whole heartbeat interval -- which is exactly the read a
+        # person is sitting in front of.
+        self._next_heartbeat = min(
+            self._next_heartbeat, now + self._carrier_interval(now)
+        )
+        if self._known(request_id):
+            # A resend of something already in hand. Dropped rather than
+            # queued twice: the answer is correlated, so one is all the far end
+            # can match, and a second would be a body built for nobody.
+            return
+        request = _Request(
+            request_id=request_id,
+            payload=dict(envelope["payload"]),
+            deadline=envelope.get("deadline"),
+        )
+        refusal = self._decline(request, now)
+        if refusal is not None:
+            self._enqueue(refusal)
+            return
+        if len(self._requests) >= MAX_PENDING_REQUESTS:
+            self._enqueue(
+                self._receipt(request, RECEIPT_REFUSED, DETAIL_BRIDGE_UNAVAILABLE, now)
+            )
+            return
+        self._requests.append(request)
+
+    def _known(self, request_id: str) -> bool:
+        """Whether this correlation id is already somewhere in the pipeline.
+
+        All four places it can be, including the finished-but-not-yet-collected
+        slot: a worker hands its answer back between two steps, and a resend
+        arriving in that gap would otherwise be read as a new question and the
+        disk walked a second time for a caller who is about to be answered.
+        """
+        with self._lock:
+            in_flight = self._answering
+            finished = self._answer_result
+        return (
+            any(pending.request_id == request_id for pending in self._requests)
+            or (in_flight is not None and in_flight.request_id == request_id)
+            or (finished is not None and finished.request_id == request_id)
+            or any(done.request_id == request_id for done in self._queue.answers)
+        )
+
+    def _decline(self, request: _Request, now: float) -> _Answer | None:
+        """The receipt refusing this request outright, or ``None`` to do it.
+
+        This is where detail traffic is kept apart from mutation delivery.
+        ``operation.submit`` is not queued behind the reads and it is not
+        half-performed: the capability was never offered, so it is refused on
+        arrival with the word that says which capability is missing, and the
+        answering worker only ever sees a ``detail.read``.
+        """
+        method = request.payload.get("request")
+        capability = CAPABILITY_BY_REQUEST.get(str(method))
+        if capability is None or capability not in self.capabilities:
+            return self._receipt(
+                request, RECEIPT_REFUSED, ERROR_UNSUPPORTED_CAPABILITY, now
+            )
+        if method != REQUEST_DETAIL:
+            return self._receipt(request, RECEIPT_REFUSED, ERROR_FORBIDDEN_METHOD, now)
+        if self._responder is None:
+            return self._receipt(
+                request, RECEIPT_REFUSED, ERROR_UNSUPPORTED_CAPABILITY, now
+            )
+        if request.deadline is not None and now >= request.deadline:
+            # Answered expired without the read being performed. The material
+            # would be built for a caller that has already given up.
+            return self._receipt(request, RECEIPT_EXPIRED, ERROR_DEADLINE, now)
+        return None
+
+    def _receipt(
+        self, request: _Request, outcome: str, detail_code: str, now: float
+    ) -> _Answer:
+        """One correlated refusal, in the shape a receipt declares."""
+        return _Answer(
+            request_id=request.request_id,
+            kind=KIND_RECEIPT,
+            payload={
+                "outcome": outcome,
+                "observed_at": now,
+                "detail_code": detail_code,
+            },
+            deadline=request.deadline,
+        )
+
+    def _enqueue(self, answer: _Answer) -> None:
+        """Put one finished answer in the lane, or drop it if the lane is full."""
+        if len(self._queue.answers) >= MAX_QUEUED_ANSWERS:
+            answer.forget()
+            self._answer_fault = "the answer queue is full"
+            return
+        self._queue.answers.append(answer)
+
+    def _start_answer(self, now: float) -> None:
+        """Perform the oldest taken-in read, on a worker, one at a time.
+
+        One at a time because the worker is reading a disk and a fan-out of
+        them is how a cockpit turns a slow mount into a stalled Mac. Off the
+        delivery thread for the reason observation is: a read that blocks must
+        not take the heartbeat down with it.
+        """
+        if not self._requests or self._responder is None:
+            return
+        if len(self._queue.answers) >= MAX_QUEUED_ANSWERS:
+            return
+        with self._lock:
+            if self._answering is not None:
+                return
+            request = self._requests.pop(0)
+            self._answering = request
+        responder = self._responder
+
+        def attempt() -> None:
+            answer: _Answer
+            try:
+                payload = responder.answer(request.payload, now=now)
+                answer = _Answer(
+                    request_id=request.request_id,
+                    kind=KIND_DETAIL,
+                    payload=dict(payload),
+                    deadline=request.deadline,
+                )
+            except Exception as error:  # a responder is arbitrary provider code
+                # Still an answer. A provider bug costs the caller one read
+                # rather than a deadline's worth of silence, and the code says
+                # the connector could not reach what it was asked for.
+                answer = self._receipt(
+                    request, RECEIPT_REFUSED, DETAIL_BRIDGE_UNAVAILABLE, now
+                )
+                fault: str | None = f"{type(error).__name__}: {error}"[:MAX_LABEL_CHARS]
+            else:
+                fault = None
+            with self._lock:
+                self._answer_result = answer
+                self._answering = None
+                if fault is not None:
+                    self._answer_fault = fault
+
+        self._answer_thread = self._run_answer(attempt)
+
+    def _collect_answer(self) -> None:
+        """Take the finished answer, if there is one, into the outbound lane."""
+        with self._lock:
+            answer = self._answer_result
+            self._answer_result = None
+        if answer is not None:
+            self._enqueue(answer)
+
+    def _expire_reads(self, now: float) -> None:
+        """Drop everything correlated whose deadline has passed.
+
+        A pending request goes: its deadline passed before the disk was walked,
+        so walking it now would build material for somebody who has stopped
+        listening.
+
+        A queued *detail* goes for the same reason, and its body goes with it.
+        A queued *receipt* stays. It carries no body, it is the frame that
+        settles the read, and the two ends do not share a clock -- a caller
+        whose deadline this Mac thinks has passed may still be waiting, and one
+        small frame ends that wait immediately instead of leaving it to run out.
+        """
+        self._requests = [
+            request
+            for request in self._requests
+            if request.deadline is None or now < request.deadline
+        ]
+        live: list[_Answer] = []
+        for answer in self._queue.answers:
+            expired = answer.deadline is not None and now >= answer.deadline
+            if expired and answer.kind == KIND_DETAIL:
+                answer.forget()
+                continue
+            live.append(answer)
+        self._queue.answers = live
+
+    def _forget_reads(self) -> None:
+        """Abandon every correlated read that has not been answered."""
+        self._requests.clear()
+        with self._lock:
+            self._answer_result = None
+
     # -- delivery --------------------------------------------------------
-    def _select(self) -> tuple[str, dict[str, Any]] | None:
-        """The next frame, in the order liveness outranks detail."""
+    def _select(self) -> tuple[str, dict[str, Any], str | None] | None:
+        """The next frame, in the order liveness outranks everything.
+
+        The heartbeat goes first because a connector the receiver has written
+        off cannot answer anything anyway. After that the two lanes take turns:
+        a correlated read is not buried behind a corpus being paged out, and a
+        service asking continuously cannot keep the corpus from ever going. A
+        strict priority either way starves one of them, and both starvations
+        are the kind nobody notices until a plan is missing from a cockpit.
+        """
         if self._queue.heartbeat is not None:
-            return VIEW_HEARTBEAT, self._queue.heartbeat
+            return VIEW_HEARTBEAT, self._queue.heartbeat, None
+        answer_ready = bool(self._queue.answers)
+        if answer_ready and not (self._answered_last and self._queue.cycle_waiting()):
+            answer = self._queue.answers[0]
+            return answer.kind, answer.payload, answer.request_id
         if self._queue.snapshot is not None:
-            return VIEW_SNAPSHOT, self._queue.snapshot
+            return VIEW_SNAPSHOT, self._queue.snapshot, None
         if self._queue.pages:
-            return VIEW_CATALOG_PAGE, self._queue.pages[0]
+            return VIEW_CATALOG_PAGE, self._queue.pages[0], None
         if self._queue.batches:
-            return VIEW_HISTORY_BATCH, self._queue.batches[0]
+            return VIEW_HISTORY_BATCH, self._queue.batches[0], None
+        if answer_ready:
+            answer = self._queue.answers[0]
+            return answer.kind, answer.payload, answer.request_id
         return None
 
     def _release(self, view: str) -> None:
         """Take the frame :meth:`_select` returned off the queue."""
+        if view in (KIND_DETAIL, KIND_RECEIPT):
+            if self._queue.answers:
+                # Forgotten on the way out, delivered or not: the frame has
+                # already been encoded, so nothing here needs the body any more
+                # and holding it would be holding a plan's text for no reason.
+                self._queue.answers.pop(0).forget()
+            return
         if view == VIEW_HEARTBEAT:
             self._queue.heartbeat = None
         elif view == VIEW_SNAPSHOT:
@@ -1164,6 +1678,10 @@ class ObservationConnector:
 
     def _delivered(self, view: str) -> None:
         self._release(view)
+        if view in (KIND_DETAIL, KIND_RECEIPT):
+            self._answered_last = True
+        elif view != VIEW_HEARTBEAT:
+            self._answered_last = False
         if self._state == STATE_BACKOFF:
             # A link that just came back is a new session as far as the
             # receiver is concerned, and it has to be able to tell one from a
@@ -1187,8 +1705,16 @@ class ObservationConnector:
         field travels on a heartbeat, and a heartbeat describing a link failure
         can only be sent once the link works again, by which point it would be
         describing something that is no longer true.
+
+        The correlated half goes too, bodies and all. The far end abandons its
+        waiters when the link drops, so every answer held here is an answer to a
+        question nobody is waiting on any more -- and delivering one after the
+        reconnect would hand a service material it had already reported as
+        offline.
         """
         self._queue.clear_cycle()
+        self._queue.clear_answers()
+        self._forget_reads()
         self._cycle = None
         self._state = STATE_BACKOFF
         self._retry_at = now + self._backoff.delay()
@@ -1207,5 +1733,17 @@ def _spawn_observation(attempt: Callable[[], None]) -> threading.Thread:
     while one is in flight loses a walk and nothing else.
     """
     thread = threading.Thread(target=attempt, name="workbench-observation", daemon=True)
+    thread.start()
+    return thread
+
+
+def _spawn_answer(attempt: Callable[[], None]) -> threading.Thread:
+    """Perform one correlated read off the delivery thread.
+
+    A daemon thread for the same reason the observation pass is one: the read
+    writes nothing, so an interpreter exiting mid-read loses an answer the
+    caller will time out on and nothing else.
+    """
+    thread = threading.Thread(target=attempt, name="workbench-detail", daemon=True)
     thread.start()
     return thread

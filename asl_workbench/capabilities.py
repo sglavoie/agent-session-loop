@@ -238,6 +238,7 @@ _CONTROL_TESTS = "scripts:tests/test_workbench_controls.py"
 _STORE_TESTS = "scripts:tests/test_workbench_store.py"
 _TRANSPORT_TESTS = "scripts:tests/test_workbench_transport_contract.py"
 _CONNECTOR_TESTS = "scripts:tests/test_workbench_connector.py"
+_REMOTE_READ_TESTS = "scripts:tests/test_workbench_remote_reads.py"
 _PI = "sglavoie_raspberry_pi:services/pi-monitoring"
 
 
@@ -518,8 +519,10 @@ CAPABILITIES: tuple[Capability, ...] = (
         key=f"{SURFACE_WORKBENCH_CLI}:asl workbench connect",
         surface=SURFACE_WORKBENCH_CLI,
         summary="Publish heartbeats, the complete catalog, active runs, and "
-        "incremental history to a remote service. Calls the shared catalog, "
-        "observation, and history services in process; no bridge subprocess.",
+        "incremental history to a remote service, and answer that service's "
+        "correlated detail reads on the same outward link. Calls the shared "
+        "catalog, observation, history, and detail services in process; no "
+        "bridge subprocess and no disk spooling.",
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_MAC,
         authority=AUTHORITY_ASL,
@@ -530,8 +533,16 @@ CAPABILITIES: tuple[Capability, ...] = (
             "action names onto operations' mutation methods",
             "connector.pause_reason_word folds an unknown pause slug onto "
             "'other', as the Companion's own row projection does",
+            "workbench_remote_reads.AslDetailResponder demotes a reader's "
+            "undeclared refusal word onto 'not-found' and carries the "
+            "original as a warning, so an unknown reason is never silence",
         ),
-        regression_coverage=(_CONNECTOR_TESTS, _CLI_TESTS, _DOCS_TESTS),
+        regression_coverage=(
+            _CONNECTOR_TESTS,
+            _REMOTE_READ_TESTS,
+            _CLI_TESTS,
+            _DOCS_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_CLI}:asl workbench pin",

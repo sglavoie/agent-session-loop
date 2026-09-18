@@ -1022,14 +1022,29 @@ class PayloadTests(unittest.TestCase):
             observation.SUPPORTED_CONTRACT_SET_IDS[0], published["contract_set_id"]
         )
 
-    def test_the_hello_declares_observation_only_and_three_capabilities(self) -> None:
+    def test_the_hello_declares_observation_only_and_reads_but_never_mutation(
+        self,
+    ) -> None:
         hello = portable.connector_hello(
             connector_id=CONNECTOR_ID, target_id=TARGET_ID, asl_version="1.2.3"
         )
         self.assertTrue(hello["observation_only"])
         self.assertEqual(list(portable.CONNECTOR_CAPABILITIES), hello["capabilities"])
+        self.assertIn("detail", hello["capabilities"])
+        # Reading on request is not mutating on request. The connector answers a
+        # correlated read and still performs nothing, so ``observation_only``
+        # stays true and ``mutate`` stays absent.
         self.assertNotIn("mutate", hello["capabilities"])
-        self.assertNotIn("detail", hello["capabilities"])
+
+    def test_a_connector_without_a_responder_does_not_offer_detail(self) -> None:
+        connector = portable.ObservationConnector(
+            connector_id=CONNECTOR_ID,
+            target_id=TARGET_ID,
+            source=StubSource(),
+            channel=FakeChannel(),
+        )
+        self.assertEqual(portable.OBSERVATION_CAPABILITIES, connector.capabilities)
+        self.assertNotIn("detail", connector.hello()["capabilities"])
 
     def test_a_hello_the_service_would_refuse_is_refused_before_anything_is_sent(
         self,
