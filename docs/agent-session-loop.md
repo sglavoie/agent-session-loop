@@ -8434,6 +8434,73 @@ Catalog reads are observational: summaries are built with `reclaim=False` and
 no retention runs, so repeated reads leave `state.json`, `events.jsonl`, and
 `lock.json` byte-identical. See `asl_workbench/changes.py` for what remains.
 
+### Remote observation
+
+`asl workbench connect` publishes what this Mac can see to a remote
+Workbench service. It is the outbound half of the unified Workbench: the
+local `serve` command renders the corpus into a loopback browser, and
+`connect` sends the same corpus — as bounded, body-free observation frames —
+to a service that is not on this machine.
+
+```bash
+asl workbench connect --target-id pi-1 \
+  --origin https://workbench.example \
+  --token-file ~/.config/asl/workbench-connector.json
+asl workbench connect --target-id pi-1 --origin https://workbench.example \
+  --token-file ~/.config/asl/workbench-connector.json \
+  --heartbeat-interval 10 --observation-interval 60 --json
+```
+
+`--target-id` names the service being published to and is echoed in every
+envelope, so a frame addressed to one service is refused by another.
+`--connector-id` defaults to a sanitized hostname. `--token-file` is a JSON
+document holding a `connector_token`; the file must be a regular file owned
+by the invoking user with no group or other permission bits, which is the
+same rule the service applies to its own secrets. The token travels only as
+an `Authorization: Bearer` header over HTTPS to `POST <origin>/v1/ingest`.
+
+Four properties are enforced rather than intended:
+
+**It reads the shared services in process.** One `workbench_catalog.scan()`
+yields the complete catalog and the summaries that back the run rows, and
+`workbench_history.project_history()` supplies the checkpointed history
+window. There is no bridge subprocess, no NDJSON hop, and no second
+projection to drift: the command spawns nothing and the connector module
+itself (`asl_workbench/connector.py`) never reads a plan or names a path.
+
+**Observation cannot modify what it observes.** Summaries are built with
+`reclaim=False`, lock files are inspected rather than read for recovery, and
+no retention or cleanup runs, so publishing leaves `state.json`,
+`events.jsonl`, and `lock.json` byte-identical. The published run shape
+carries no filesystem path at all — `plan_dir`, `workspace_root`, the
+display label, and the question body are dropped before a frame is built —
+so a remote service can hold the whole catalog without learning this
+machine's disk layout.
+
+**A checkpoint moves only after delivery.** A pass publishes a heartbeat,
+the current runs, every catalog page, and the history batches, and the
+history window is committed only once every frame cut from that pass has
+been accepted. A link failure or a shutdown mid-pass discards the pass
+uncommitted, so the next pass re-reads the same window; ingest is idempotent
+on `batch_id`, `entry_id`, and the catalog `generation`, so a reconnect
+repeats rather than duplicates. Retry is deterministic exponential backoff
+from 1s to a 60s cap, and a recovered link advertises a new generation,
+because a restarted source is not a replay.
+
+**Heartbeats do not wait for observation.** The observation pass runs off the
+delivery path, so a slow scan delays the corpus and not the liveness signal.
+A pass that fails or reports degraded discovery is published as a heartbeat
+with `bridge_alive` false and a bounded `degraded_reason`, which is how a
+remote service distinguishes "this Mac has nothing to report" from "this Mac
+stopped reporting". Only one connector may run per state directory; the
+second refuses with `reason: connector-locked` rather than publishing a
+second, competing view. `SIGTERM` and `SIGINT` stop the loop, drop the
+in-flight pass, and release the lock.
+
+The command holds `observe`, `catalog`, and `history` capabilities and
+declares itself observation-only, so the service refuses a mutating frame
+from it by construction.
+
 ### Cleanup and archive workflow
 
 Cleanup mode is a queue review mode for old, inactive work. It switches

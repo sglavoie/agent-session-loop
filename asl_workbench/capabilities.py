@@ -237,6 +237,7 @@ _CLI_TESTS = "scripts:tests/test_asl_cli.py"
 _CONTROL_TESTS = "scripts:tests/test_workbench_controls.py"
 _STORE_TESTS = "scripts:tests/test_workbench_store.py"
 _TRANSPORT_TESTS = "scripts:tests/test_workbench_transport_contract.py"
+_CONNECTOR_TESTS = "scripts:tests/test_workbench_connector.py"
 _PI = "sglavoie_raspberry_pi:services/pi-monitoring"
 
 
@@ -512,6 +513,25 @@ CAPABILITIES: tuple[Capability, ...] = (
             "the local provider wires asl_workbench to the Mac services",
         ),
         regression_coverage=(_CLI_TESTS, _SERVER_TESTS, _DOCS_TESTS),
+    ),
+    Capability(
+        key=f"{SURFACE_WORKBENCH_CLI}:asl workbench connect",
+        surface=SURFACE_WORKBENCH_CLI,
+        summary="Publish heartbeats, the complete catalog, active runs, and "
+        "incremental history to a remote service. Calls the shared catalog, "
+        "observation, and history services in process; no bridge subprocess.",
+        origin=ORIGIN_WORKBENCH,
+        owner=OWNER_MAC,
+        authority=AUTHORITY_ASL,
+        compatibility_adapters=(
+            "workbench_connector.project_run narrows a bridge snapshot row "
+            "onto the transport's closed run shape",
+            "workbench_connector.REMOTE_ACTIONS maps intervention's local "
+            "action names onto operations' mutation methods",
+            "connector.pause_reason_word folds an unknown pause slug onto "
+            "'other', as the Companion's own row projection does",
+        ),
+        regression_coverage=(_CONNECTOR_TESTS, _CLI_TESTS, _DOCS_TESTS),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_CLI}:asl workbench pin",
@@ -915,10 +935,14 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _companion_module(
         "companion.connector",
-        "Owns the ASL bridge subprocess on the Mac and turns frames into observations.",
+        "Owns the ASL bridge subprocess on the Mac and turns frames into "
+        "observations. Superseded by asl_workbench.connector and "
+        "'asl workbench connect', which read the shared services in process; "
+        "the Pi module is the frozen baseline for the single-instance lock and "
+        "the bounded backoff, which were copied rather than reinvented.",
         owner=OWNER_MAC,
         authority=AUTHORITY_ASL,
-        coverage=(f"{_PI}/tests/test_companion_observation.py",),
+        coverage=(f"{_PI}/tests/test_companion_observation.py", _CONNECTOR_TESTS),
     ),
     _companion_module(
         "companion.dashboard",

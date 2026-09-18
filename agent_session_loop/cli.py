@@ -2308,6 +2308,70 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="workbench_server:workbench_serve_from_args",
     )
 
+    workbench_connect_parser = workbench_sub.add_parser(
+        "connect",
+        help="Publish observations to a remote Workbench service.",
+    )
+    workbench_connect_parser.add_argument(
+        "--target-id",
+        required=True,
+        metavar="ID",
+        help="Identity of the service being published to",
+    )
+    workbench_connect_parser.add_argument(
+        "--origin",
+        required=True,
+        metavar="URL",
+        help="https origin of the service (frames POST to /v1/ingest)",
+    )
+    workbench_connect_parser.add_argument(
+        "--token-file",
+        required=True,
+        metavar="FILE",
+        help=('JSON file holding {"connector_token": ...}, readable only by its owner'),
+    )
+    workbench_connect_parser.add_argument(
+        "--connector-id",
+        default=None,
+        metavar="ID",
+        help="Identity this Mac publishes under (default: derived from hostname)",
+    )
+    workbench_connect_parser.add_argument(
+        "--state-dir",
+        default=None,
+        metavar="DIR",
+        help="Override operational state directory",
+    )
+    workbench_connect_parser.add_argument(
+        "--plan-root",
+        action="append",
+        default=None,
+        metavar="DIR",
+        help="Extra plan root directory to observe (may be repeated)",
+    )
+    workbench_connect_parser.add_argument(
+        "--heartbeat-interval",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="How often to publish liveness (default: 15)",
+    )
+    workbench_connect_parser.add_argument(
+        "--observation-interval",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="How often to walk the corpus (default: 30)",
+    )
+    workbench_connect_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON startup output",
+    )
+    workbench_connect_parser.set_defaults(
+        handler_ref="workbench_connector:workbench_connect_from_args",
+    )
+
     workbench_pin_parser = workbench_sub.add_parser(
         "pin",
         help="Pin a plan directory in the Workbench registry.",
