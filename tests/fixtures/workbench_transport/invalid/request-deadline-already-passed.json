@@ -1,0 +1,21 @@
+{
+  "direction": "down",
+  "envelope": {
+    "capability": "catalog",
+    "connector_id": "mac-studio",
+    "deadline": 1769999999.0,
+    "kind": "request",
+    "payload": {
+      "generation": "gen-0042",
+      "limit": 100,
+      "offset": 0,
+      "request": "catalog.publish"
+    },
+    "protocol": 1,
+    "request_id": "req-0001",
+    "sent_at": 1770000000.0,
+    "target_id": "pi-companion"
+  },
+  "error": "deadline",
+  "why": "A deadline behind the moment of sending describes work nobody could ever have attempted."
+}

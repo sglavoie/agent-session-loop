@@ -1,0 +1,48 @@
+{
+  "direction": "up",
+  "envelope": {
+    "capability": "history",
+    "connector_id": "mac-studio",
+    "kind": "observation",
+    "payload": {
+      "batch_id": "batch-0007",
+      "complete": true,
+      "entries": [
+        {
+          "completed_session_count": 9,
+          "completed_session_ids": [
+            "1",
+            "2",
+            "3"
+          ],
+          "duration_seconds": 4820.5,
+          "entry_id": "entry-0001",
+          "harness": "claude",
+          "outcome": "completed",
+          "pending_session_count": 15,
+          "plan_key": "0123456789abcdef",
+          "project": "asl-workbench",
+          "reconstructed": false,
+          "recorded_at": 1769913600.0,
+          "review_completed": true,
+          "review_outcome": "all-clear",
+          "run_id": "run-2026-03-13-07",
+          "run_key": "fedcba9876543210",
+          "source_key": "events-2026-03-13",
+          "turn_count": 31
+        }
+      ],
+      "entry_count": 9,
+      "generated_at": 1770000000.0,
+      "more": false,
+      "view": "history_batch",
+      "window_end": 1770000000.0,
+      "window_start": 1769395200.0
+    },
+    "protocol": 1,
+    "sent_at": 1770000000.0,
+    "target_id": "pi-companion"
+  },
+  "error": "invalid-field",
+  "why": "Same integrity check on the history batch."
+}

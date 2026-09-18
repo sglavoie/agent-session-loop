@@ -267,6 +267,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "asl_workbench.companion_inventory",
         "asl_workbench.compatibility",
         "asl_workbench.controls",
+        "asl_workbench.credentials",
         "asl_workbench.details",
         "asl_workbench.freshness",
         "asl_workbench.history",
@@ -274,6 +275,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "asl_workbench.observation",
         "asl_workbench.operations",
         "asl_workbench.store",
+        "asl_workbench.transport",
     }
 )
 

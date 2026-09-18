@@ -1,0 +1,6 @@
+{
+  "direction": "up",
+  "error": "invalid-field",
+  "frame": "{\"protocol\": 1, \"kind\": \"observation\", \"capability\": \"observe\", \"connector_id\": \"mac-studio\", \"target_id\": \"pi-companion\", \"sent_at\": NaN, \"payload\": {\"view\": \"heartbeat\", \"observed_at\": 1770000000.0, \"bridge_alive\": true}}",
+  "why": "NaN survives neither storage nor a browser, so it is refused while the frame is being decoded rather than when a row fails."
+}

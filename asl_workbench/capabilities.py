@@ -236,6 +236,7 @@ _DOCS_TESTS = "scripts:tests/test_asl_docs.py"
 _CLI_TESTS = "scripts:tests/test_asl_cli.py"
 _CONTROL_TESTS = "scripts:tests/test_workbench_controls.py"
 _STORE_TESTS = "scripts:tests/test_workbench_store.py"
+_TRANSPORT_TESTS = "scripts:tests/test_workbench_transport_contract.py"
 _PI = "sglavoie_raspberry_pi:services/pi-monitoring"
 
 
@@ -892,9 +893,13 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _companion_module(
         "companion.auth",
-        "Three caller roles with three different proofs: connector, summary, owner.",
+        "Three caller roles with three different proofs: connector, summary, "
+        "owner. Migrated to asl_workbench.credentials, which binds each role "
+        "to the envelope kinds and transport capabilities it may exercise; the "
+        "Pi module is the frozen baseline until the Companion imports the "
+        "portable package.",
         owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_api.py",),
+        coverage=(f"{_PI}/tests/test_companion_api.py", _TRANSPORT_TESTS),
     ),
     _companion_module(
         "companion.commands",
@@ -1015,9 +1020,14 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _companion_module(
         "companion.protocol",
-        "Protocol v1: envelope validation, operation states, allowlists.",
+        "Protocol v1: envelope validation, operation states, allowlists. The "
+        "Workbench's own five envelopes are versioned separately in "
+        "asl_workbench.transport, which reuses this module's bounded frames "
+        "and closed shapes without inheriting its version number; the Pi "
+        "module is the frozen baseline until the Companion imports the "
+        "portable package.",
         owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_protocol.py",),
+        coverage=(f"{_PI}/tests/test_companion_protocol.py", _TRANSPORT_TESTS),
     ),
     _companion_module(
         "companion.questions",
@@ -1209,6 +1219,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         regression_coverage=(
             "scripts:tests/test_asl_agent_mux_contract.py",
             "scripts:tests/test_asl_agent_mux_projection.py",
+            _TRANSPORT_TESTS,
         ),
     ),
     Capability(
@@ -1352,7 +1363,10 @@ CAPABILITIES: tuple[Capability, ...] = (
         owner=OWNER_PI_REPO,
         authority=AUTHORITY_HOST,
         compatibility_adapters=("existing credentials are preserved, not reissued",),
-        regression_coverage=(f"{_PI}/tests/test_companion_lifecycle.py",),
+        regression_coverage=(
+            f"{_PI}/tests/test_companion_lifecycle.py",
+            _TRANSPORT_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_PERSISTENCE}:companion-runtime-document",

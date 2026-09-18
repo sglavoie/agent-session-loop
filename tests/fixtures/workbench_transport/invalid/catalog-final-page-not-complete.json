@@ -1,0 +1,58 @@
+{
+  "direction": "up",
+  "envelope": {
+    "capability": "catalog",
+    "connector_id": "mac-studio",
+    "kind": "observation",
+    "payload": {
+      "complete": false,
+      "entries": [
+        {
+          "activity_label": "Active turn",
+          "counts": {
+            "complete": 9,
+            "empty": 0,
+            "pending": 14,
+            "unknown": 1
+          },
+          "display_label": "asl-workbench / session 10",
+          "exists": true,
+          "harness": "claude",
+          "last_activity_at": "2026-03-14T09:20:00Z",
+          "last_activity_source": "active-turn",
+          "multi_repository": true,
+          "next_pending_session_id": "11",
+          "plan_key": "0123456789abcdef",
+          "primary_state": "running",
+          "projects": [
+            "asl-workbench"
+          ],
+          "recommended_action": "watch",
+          "repository_count": 2,
+          "run_key": "fedcba9876543210",
+          "search_text": "versioned transport and authentication asl-workbench",
+          "sources": [
+            "registry"
+          ],
+          "title": "Versioned transport and authentication",
+          "urgency_group": "in-progress",
+          "urgency_rank": 2,
+          "warning_count": 0
+        }
+      ],
+      "entry_count": 1,
+      "final": true,
+      "generation": "gen-0042",
+      "observed_at": 1770000000.0,
+      "offset": 0,
+      "source_generation": 42,
+      "total": 1,
+      "view": "catalog_page"
+    },
+    "protocol": 1,
+    "sent_at": 1770000000.0,
+    "target_id": "pi-companion"
+  },
+  "error": "invalid-field",
+  "why": "Retirement is decided from complete and final together; final alone would retire rows a partial publication never saw."
+}
