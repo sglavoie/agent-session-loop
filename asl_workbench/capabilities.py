@@ -235,6 +235,7 @@ _BRIDGE_TESTS = "scripts:tests/test_asl_bridge_server.py"
 _DOCS_TESTS = "scripts:tests/test_asl_docs.py"
 _CLI_TESTS = "scripts:tests/test_asl_cli.py"
 _CONTROL_TESTS = "scripts:tests/test_workbench_controls.py"
+_STORE_TESTS = "scripts:tests/test_workbench_store.py"
 _PI = "sglavoie_raspberry_pi:services/pi-monitoring"
 
 
@@ -930,9 +931,11 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _companion_module(
         "companion.freshness",
-        "Three independent staleness questions: liveness, age, completeness.",
+        "Three independent staleness questions: liveness, age, completeness. "
+        "Migrated to asl_workbench.freshness; the Pi module is the frozen "
+        "baseline until the Companion imports the portable package.",
         owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_observation.py",),
+        coverage=(f"{_PI}/tests/test_companion_observation.py", _STORE_TESTS),
     ),
     _companion_module(
         "companion.history",
@@ -951,9 +954,11 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _companion_module(
         "companion.incidents",
-        "Durable incident policy with persist-before-publish delivery.",
+        "Durable incident policy with persist-before-publish delivery. "
+        "Migrated to asl_workbench.incidents; the Pi module is the frozen "
+        "baseline until the Companion imports the portable package.",
         owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_incidents.py",),
+        coverage=(f"{_PI}/tests/test_companion_incidents.py", _STORE_TESTS),
     ),
     _companion_module(
         "companion.integrations",
@@ -999,6 +1004,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         coverage=(
             f"{_PI}/tests/test_companion_observation.py",
             _HISTORY_TESTS,
+            _STORE_TESTS,
         ),
     ),
     _companion_module(
@@ -1051,11 +1057,15 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     _companion_module(
         "companion.store",
-        "The Pi's SQLite store: migrations, ordered ingestion, retention, reads.",
+        "The Pi's SQLite store: migrations, ordered ingestion, retention, "
+        "reads. Migrated to asl_workbench.store, which owns catalog storage "
+        "the Pi module never had; the Pi module is the frozen baseline until "
+        "the Companion imports the portable package.",
         owner=OWNER_PORTABLE,
         coverage=(
             f"{_PI}/tests/test_companion_api.py",
             f"{_PI}/tests/test_companion_history.py",
+            _STORE_TESTS,
         ),
     ),
     # -- Companion browser workflows ---------------------------------------
@@ -1330,6 +1340,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         regression_coverage=(
             f"{_PI}/tests/test_companion_api.py",
             f"{_PI}/tests/test_companion_transport.py",
+            _STORE_TESTS,
         ),
     ),
     Capability(
@@ -1363,6 +1374,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         regression_coverage=(
             f"{_PI}/tests/test_companion_transport.py",
             _OPERATION_TESTS,
+            _STORE_TESTS,
         ),
     ),
 )

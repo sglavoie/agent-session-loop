@@ -158,6 +158,7 @@ FAST_MODULES = (
     "tests.test_asl_overseer_resume",
     "tests.test_asl_overseer_watch",
     "tests.test_workbench_history",
+    "tests.test_workbench_store",
     "tests.test_asl_literals",
 )
 
@@ -249,6 +250,7 @@ PORTABLE_MODULES = (
     "tests.test_asl_overseer_resume",
     "tests.test_asl_overseer_watch",
     "tests.test_workbench_history",
+    "tests.test_workbench_store",
     "tests.test_asl_literals",
 )
 
