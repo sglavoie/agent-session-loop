@@ -240,6 +240,7 @@ _TRANSPORT_TESTS = "scripts:tests/test_workbench_transport_contract.py"
 _CONNECTOR_TESTS = "scripts:tests/test_workbench_connector.py"
 _REMOTE_READ_TESTS = "scripts:tests/test_workbench_remote_reads.py"
 _REMOTE_ACTION_TESTS = "scripts:tests/test_workbench_remote_actions.py"
+_HTTP_TESTS = "scripts:tests/test_workbench_http.py"
 _PI = "sglavoie_raspberry_pi:services/pi-monitoring"
 
 
@@ -252,7 +253,20 @@ CAPABILITIES: tuple[Capability, ...] = (
     _http(
         "GET /api/health",
         "Liveness probe; the one route that needs no bearer token.",
-        coverage=(_SERVER_TESTS, _FOUNDATION_TESTS),
+        coverage=(_SERVER_TESTS, _FOUNDATION_TESTS, _HTTP_TESTS),
+    ),
+    _http(
+        "GET /api/capabilities",
+        "What this deployment can do: every operation with its role and, when "
+        "the provider cannot serve it, the reason -- so the front end can "
+        "explain an unavailable action instead of failing at the click.",
+        coverage=(_HTTP_TESTS, _FOUNDATION_TESTS),
+    ),
+    _http(
+        "GET /api/summary",
+        "Counts and health only, readable by a summary-scoped caller: the "
+        "narrow read a status pane needs without owner-scoped plan detail.",
+        coverage=(_HTTP_TESTS, _FOUNDATION_TESTS),
     ),
     _http(
         "GET /api/queue",

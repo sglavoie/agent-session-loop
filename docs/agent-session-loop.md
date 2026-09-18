@@ -8620,6 +8620,43 @@ archive entry or reclaims a plan lock, so the act of watching either view
 changes nothing. Reclaim remains available where an operator asks for it, at
 `POST /api/unlock`.
 
+### One application, two modes
+
+There is one HTTP application. `asl_workbench.http` declares the route
+table, the role each route requires, the request policy, the static
+bundle, and the pipeline that turns a request into an answer; it is
+stdlib-only and imports nothing from `agent_session_loop`. A deployment
+supplies three things and nothing else:
+
+- a **provider**, which carries the operation out —
+  `agent_session_loop.workbench_local.LocalProvider` on the Mac, where an
+  operation reads the filesystem and spawns processes, and
+  `asl_workbench.service.RemoteProvider` on the Pi, where the same
+  operation is answered from retained observations, turned into a bounded
+  read over the link, or journalled and handed down as a mutation;
+- an **authenticator**, which decides what a caller proved:
+  `LocalTokenAuthenticator` for the loopback server (see the bearer-token
+  boundary below) and `OwnerIdentityAuthenticator` for the private
+  network, where the owner is proved by the proxy's identity header and
+  scoped credentials carry summary or connector roles;
+- a **request policy** — `LOCAL_POLICY` or `REMOTE_POLICY` — which is the
+  whole of the rest of the difference: whether a mutation must prove its
+  origin, whether a body must declare its length, how large a body may
+  be, and whether an unexpected failure is allowed to say what it was.
+
+`agent_session_loop.workbench_server` is a compatibility adapter over that
+application: it still resolves the CLI's roots, mints the loopback token,
+serves the bundle, and prints the URL AgentMux opens, and the request
+handler now translates a `BaseHTTPRequestHandler` request into a
+`Request` and writes the `Response` back. Routing precedes
+authentication, deliberately: a wrong method on a real path has always
+answered `405`, and it still does whether or not a token came with it.
+
+The routes are declared once, with a role each, so the two modes cannot
+drift into disagreeing about who may read what. What they legitimately
+differ on is what a given deployment can *do*, and that is reported
+rather than discovered at the click — see `GET /api/capabilities`.
+
 ### HTTP API surface
 
 Read endpoints (loopback-open, no token required):
@@ -8629,7 +8666,20 @@ Read endpoints (loopback-open, no token required):
   (`Cache-Control: no-cache, must-revalidate` plus strong-validator
   `ETag` from `st_mtime_ns` + `st_size`; the server replies `304 Not
   Modified` to a matching `If-None-Match`).
-- `GET /api/health` — liveness probe.
+- `GET /api/health` — liveness probe. The one route that requires no role
+  at all, in either mode.
+- `GET /api/capabilities` — what this deployment can do. Returns `mode`
+  (`local` or `remote`), one entry per operation with its `role`,
+  whether it is `available`, and — when it is not — the provider's own
+  `reason` in the words to show whoever is looking at the greyed-out
+  control, plus `unavailable_operations` and the declared `routes`. The
+  application answers this itself rather than asking the provider, so a
+  deployment that can do very little can still say so. Attempting an
+  unavailable operation returns `503` with
+  `reason: "operation-unavailable"` and that same sentence as `error`.
+- `GET /api/summary` — counts and health only, readable by a
+  summary-scoped caller. The narrow read a status pane needs without
+  owner-scoped plan detail; every other read requires the owner.
 - `GET /api/queue` — every discovered plan summarized via
   `WorkbenchSummary` (counts, primary state, recommended action,
   warnings, last-message preview, artifact paths, compact Recovery

@@ -15,17 +15,18 @@ needs an inventory that cannot quietly go stale.
   so a route or subcommand added without a matrix row fails a test instead of
   being absent from an inventory nobody rereads.
 
-The CLI reader imports and inspects ``cli.build_parser()`` -- the parser is the
-surface. The route reader parses ``workbench_server.py`` instead, because the
-route table is a local inside ``_dispatch``: it exists only during a request, so
-there is nothing to introspect without serving one. Parsing the dict literal is
-the honest alternative, and it still reads the live file rather than a copy.
+Both readers now import the surface rather than parse it. ``cli.build_parser()``
+is the CLI surface, and :data:`asl_workbench.http.ROUTES` is the HTTP one: the
+route table used to be a local inside ``WorkbenchRequestHandler._dispatch``,
+existing only during a request, so the only honest reader was an AST parse of
+the server file. The unified application declares its routes at module scope --
+one table, serving both the local server and the Pi -- so the inventory check
+now reads the same object the application routes with.
 """
 
 from __future__ import annotations
 
 import argparse
-import ast
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_session_loop import cli, workbench_server
+from asl_workbench import http as workbench_http
 
 #: The method/path pairs the front end reaches without the ``/api`` prefix. Kept
 #: apart from the API routes because they are served before the route table is
@@ -80,53 +82,25 @@ def workbench_cli_entry_points() -> tuple[str, ...]:
     return tuple(sorted(entry_points))
 
 
-def _routes_dict_node(tree: ast.Module) -> ast.Dict:
-    """The ``routes = {...}`` literal inside ``_dispatch``."""
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef) or node.name != "_dispatch":
-            continue
-        for statement in ast.walk(node):
-            targets: list[ast.expr] = []
-            if isinstance(statement, ast.AnnAssign):
-                targets = [statement.target]
-            elif isinstance(statement, ast.Assign):
-                targets = list(statement.targets)
-            else:
-                continue
-            named = any(
-                isinstance(target, ast.Name) and target.id == "routes"
-                for target in targets
-            )
-            if named and isinstance(statement.value, ast.Dict):
-                return statement.value
-        raise SurfaceReadError("_dispatch has no routes dict literal")
-    raise SurfaceReadError("workbench_server.py has no _dispatch function")
-
-
 def workbench_api_routes() -> tuple[str, ...]:
-    """Every local API route as ``"<METHOD> <path>"``, sorted.
+    """Every API route as ``"<METHOD> <path>"``, sorted.
 
-    Read by parsing the route table's keys. A malformed key raises rather than
-    being skipped: a route this reader cannot understand is a route the
-    completeness check would silently stop covering, which is the one outcome
-    worse than a missing row.
+    Read straight off :data:`asl_workbench.http.ROUTES`, which is what the
+    application dispatches with in both modes, so a route cannot exist without
+    appearing here. A malformed entry raises rather than being skipped: a route
+    this reader cannot understand is a route the completeness check would
+    silently stop covering, which is the one outcome worse than a missing row.
     """
-    source = Path(workbench_server.__file__).read_text(encoding="utf-8")
-    node = _routes_dict_node(ast.parse(source))
     routes: list[str] = []
-    for key in node.keys:
-        if not isinstance(key, ast.Tuple) or len(key.elts) != 2:
-            raise SurfaceReadError("route key is not a (method, path) tuple")
-        parts: list[str] = []
-        for element in key.elts:
-            if not isinstance(element, ast.Constant) or not isinstance(
-                element.value, str
-            ):
-                raise SurfaceReadError("route key holds a non-literal component")
-            parts.append(element.value)
-        routes.append(f"{parts[0]} {parts[1]}")
+    for route in workbench_http.ROUTES:
+        if not route.method or not route.path.startswith("/"):
+            raise SurfaceReadError(f"route {route!r} has no usable method/path")
+        routes.append(f"{route.method} {route.path}")
     if not routes:
-        raise SurfaceReadError("route table parsed as empty")
+        raise SurfaceReadError("route table read as empty")
+    duplicates = sorted({key for key in routes if routes.count(key) > 1})
+    if duplicates:
+        raise SurfaceReadError(f"route table declares {duplicates} twice")
     return tuple(sorted(routes))
 
 
