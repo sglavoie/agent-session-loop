@@ -29,14 +29,18 @@ import {
   wireFilterChips,
   wireRefreshButton,
 } from "./modules/filters.js";
+import { wireHistoryControls } from "./modules/history.js";
 import {
   resolveToken,
   restoreCleanupMode,
   restoreCleanupThreshold,
   restoreFilter,
+  restoreHarnessFilter,
+  restoreProjectFilter,
   restoreSearchText,
   restoreSelectedPlan,
   restoreShowCompleted,
+  restoreShowOlderRuns,
   restoreSortMode,
 } from "./modules/prefs.js";
 import { wirePreviewOpen } from "./modules/preview.js";
@@ -44,6 +48,8 @@ import { wireProfileForm } from "./modules/profile.js";
 import { refresh } from "./modules/queue.js";
 import {
   hydrateQueueControls,
+  wireFacetControls,
+  wireOlderRunsControl,
   wireSearchControl,
   wireShowCompletedControl,
   wireSortControl,
@@ -60,6 +66,9 @@ export function init() {
   state.searchText = restoreSearchText();
   state.sortMode = restoreSortMode();
   state.showCompleted = restoreShowCompleted();
+  state.projectFilter = restoreProjectFilter();
+  state.harnessFilter = restoreHarnessFilter();
+  state.showOlderRuns = restoreShowOlderRuns();
   state.selectedPlan = restoreSelectedPlan();
   state.cleanupMode = restoreCleanupMode();
   state.cleanupThresholdDays = restoreCleanupThreshold();
@@ -79,6 +88,9 @@ export function init() {
   wireSearchControl();
   wireSortControl();
   wireShowCompletedControl();
+  wireFacetControls();
+  wireOlderRunsControl();
+  wireHistoryControls();
   wireCleanupControls();
   wireArchiveControls();
   wireEmptyStateActions();

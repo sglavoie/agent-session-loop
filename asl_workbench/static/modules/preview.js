@@ -223,8 +223,48 @@ export function wirePreviewOpen() {
   });
 }
 
+/** The facet narrowings in force, worded for the operator. */
+function activeFacets() {
+  const active = [];
+  if (state.projectFilter) active.push("project: " + state.projectFilter);
+  if (state.harnessFilter) active.push("harness: " + state.harnessFilter);
+  return active;
+}
+
 export function classifyEmptyState(plansList) {
+  const facets = activeFacets();
   if (!Array.isArray(plansList) || plansList.length === 0) {
+    // An empty list is no longer evidence that the machine is empty. Since the
+    // narrowing moved to the server, every filter that matches nothing arrives
+    // here as zero rows -- the ones that did not match were never sent. Saying
+    // "no plans discovered" under a project filter would tell an operator
+    // their corpus is gone when they have merely filtered it away, and it
+    // would say so with no button to undo.
+    if (facets.length || state.searchText || state.activeFilter !== "all") {
+      const tail = facets.slice();
+      if (state.activeFilter !== "all") {
+        tail.push("filter: " + state.activeFilter);
+      }
+      return {
+        kind: state.searchText ? "no-search-results" : "no-filter-matches",
+        primary: state.searchText
+          ? 'no plans match search "' + state.searchText + '"'
+          : "no plans match the current filters",
+        secondary: tail.length ? "active: " + tail.join(" | ") : "",
+        searchText: state.searchText,
+        activeFilter: state.activeFilter,
+        showCompleted: state.showCompleted,
+        // Unknowable from here for the same reason: a completed plan hidden by
+        // this request was never sent, so the page cannot say whether one
+        // exists. Offering the toggle is the honest move -- it widens the
+        // question rather than claiming an answer.
+        completedHidden: false,
+        canClearSearch: !!state.searchText,
+        canShowCompleted:
+          !state.showCompleted && state.activeFilter !== "complete",
+        canResetFilter: facets.length > 0 || state.activeFilter !== "all",
+      };
+    }
     return {
       kind: "no-plans",
       primary: "no plans discovered",
@@ -252,7 +292,7 @@ export function classifyEmptyState(plansList) {
 
   if (state.searchText) {
     const primary = 'no plans match search "' + state.searchText + '"';
-    const tail = [];
+    const tail = facets.slice();
     if (state.activeFilter !== "all") {
       tail.push("filter: " + state.activeFilter);
     }
@@ -267,12 +307,12 @@ export function classifyEmptyState(plansList) {
       completedHidden: completedHidden,
       canClearSearch: true,
       canShowCompleted: completedHidden,
-      canResetFilter: state.activeFilter !== "all",
+      canResetFilter: facets.length > 0 || state.activeFilter !== "all",
     };
   }
 
   if (!filterMatchedAtAll && state.activeFilter !== "all") {
-    const tail = [];
+    const tail = facets.slice();
     if (completedHidden) tail.push("completed hidden");
     return {
       kind: "no-filter-matches",
@@ -299,7 +339,7 @@ export function classifyEmptyState(plansList) {
       completedHidden: true,
       canClearSearch: false,
       canShowCompleted: true,
-      canResetFilter: state.activeFilter !== "all",
+      canResetFilter: facets.length > 0 || state.activeFilter !== "all",
     };
   }
 

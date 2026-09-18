@@ -171,6 +171,7 @@ OP_HEALTH = "health"
 OP_CAPABILITIES = "capabilities"
 OP_SUMMARY = "summary"
 OP_QUEUE = "queue"
+OP_HISTORY = "history"
 OP_PLAN = "plan"
 OP_RECOVERY = "recovery"
 OP_REGISTRY = "registry"
@@ -259,6 +260,13 @@ ROUTES: tuple[Route, ...] = (
         "plan counts and observation freshness, carrying no prose",
     ),
     Route("GET", "/api/queue", OP_QUEUE, ROLE_OWNER, "Workbench queue summaries"),
+    Route(
+        "GET",
+        "/api/history",
+        OP_HISTORY,
+        ROLE_OWNER,
+        "runs that ended inside the retention window, newest first",
+    ),
     Route("GET", "/api/plan", OP_PLAN, ROLE_OWNER, "one plan detail summary"),
     Route(
         "GET", "/api/recovery", OP_RECOVERY, ROLE_OWNER, "recovery diagnosis for a plan"

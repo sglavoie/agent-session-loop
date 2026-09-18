@@ -20,6 +20,10 @@ export const SELECTED_STORAGE_KEY = "wb.selected";
 export const CLEANUP_MODE_STORAGE_KEY = "wb.cleanup";
 export const CLEANUP_THRESHOLD_STORAGE_KEY = "wb.cleanupDays";
 export const CLEANUP_DEFAULT_THRESHOLD_DAYS = 30;
+export const PROJECT_STORAGE_KEY = "wb.project";
+export const HARNESS_STORAGE_KEY = "wb.harness";
+export const OLDER_STORAGE_KEY = "wb.older";
+export const HISTORY_STORAGE_KEY = "wb.history";
 export const DAY_MS = 24 * 60 * 60 * 1000;
 export const HARNESS_NAMES = ["codex", "claude", "copilot"];
 // Mirrors control_queue.{DEFAULT,MIN,MAX}_ABORT_GRACE_SECONDS so the button
@@ -58,6 +62,92 @@ export const SORT_MODE_LABELS = {
   oldest: "oldest activity",
 };
 export const DEFAULT_SORT_MODE = "urgency";
+
+// Mirrors overview.DEFAULT_PAGE_LIMIT / overview.MAX_PAGE_LIMIT. The page is
+// the server's now: it filters, counts and cuts before the read limit, so what
+// arrives here is a page of the matched set rather than the first N rows of
+// the corpus with the filter still to come.
+export const QUEUE_PAGE_LIMIT = 200;
+export const HISTORY_PAGE_LIMIT = 200;
+
+// Mirrors overview.ACTIVE_WINDOW_SECONDS. Eight hours is about a working day,
+// so work that stopped moving before the operator went to bed is not still
+// competing for attention in the morning. It is moved, never dropped.
+export const ACTIVE_WINDOW_SECONDS = 8 * 60 * 60;
+
+// Mirrors overview.OVERVIEW_SECTIONS, in render order, and the headings the
+// shell draws for them.
+export const SECTION_NEEDS_ATTENTION = "needs-attention";
+export const SECTION_IN_PROGRESS = "in-progress";
+export const SECTION_UNCONFIRMED = "unconfirmed";
+export const SECTION_RECENT = "recent";
+export const SECTION_OLDER_LINKED = "older-linked";
+export const SECTION_OLDER = "older";
+export const OVERVIEW_SECTIONS = [
+  SECTION_NEEDS_ATTENTION,
+  SECTION_IN_PROGRESS,
+  SECTION_UNCONFIRMED,
+  SECTION_RECENT,
+  SECTION_OLDER_LINKED,
+  SECTION_OLDER,
+];
+export const SECTION_LABELS = {
+  "needs-attention": "needs attention",
+  "in-progress": "in progress",
+  unconfirmed: "unconfirmed",
+  recent: "recent",
+  "older-linked": "older linked run",
+  older: "older",
+};
+export const SECTION_EMPTY_TEXT = {
+  "needs-attention": "nothing is waiting on you",
+  "in-progress": "no run is moving right now",
+  unconfirmed: "every row here was confirmed by the newest observation",
+  recent: "nothing has moved in the last eight hours",
+  "older-linked": "the linked run is still current work",
+  older: "no older plans",
+};
+// Mirrors overview.UNGROUPED_PROJECT.
+export const UNGROUPED_PROJECT = "(no project)";
+
+// Mirrors overview.OBSERVATION_{CURRENT,UNCONFIRMED,ABSENT}. `current` is what
+// the newest observation still carries, `unconfirmed` is retained and not
+// re-observed, and `absent` is a row the newest observation dropped. The local
+// mode reads a filesystem and is therefore always `current`; it says so
+// anyway, because a shell that had to guess would guess in only one of the two
+// deployments.
+export const OBSERVATION_CURRENT = "current";
+export const OBSERVATION_UNCONFIRMED = "unconfirmed";
+export const OBSERVATION_ABSENT = "absent";
+export const OBSERVATION_LABELS = {
+  current: "live",
+  unconfirmed: "retained, not re-observed",
+  absent: "dropped by the newest observation",
+};
+// Mirrors freshness.FRESHNESS_ORDER. `live` is the only one that needs no
+// sentence, so it has none.
+export const FRESHNESS_NOTES = {
+  stale: "The newest observation is older than the connector's heartbeat.",
+  lost: "The connector has stopped reporting; everything below is retained.",
+  incompatible:
+    "The connector published a payload this deployment cannot read; " +
+    "everything below is retained.",
+};
+// Mirrors observation.COMPLETENESS_ORDER: what a page says about its own
+// coverage. `complete` is silent for the same reason `live` is.
+export const COMPLETENESS_NOTES = {
+  partial: "This observation covered only part of the catalog.",
+  unknown: "This observation did not say how much of the catalog it covered.",
+};
+// Mirrors history.HISTORY_OUTCOMES.
+export const HISTORY_OUTCOMES = [
+  "completed",
+  "stopped",
+  "paused",
+  "failed",
+  "abandoned",
+  "unknown",
+];
 
 // Row action button intent → detail-view focus target. Reply jumps the
 // operator into the textarea so they can answer immediately; unlock and

@@ -30,12 +30,13 @@ which has already decided the caller is the owner.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Mapping
+import time
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
 from asl_workbench import actions as workbench_action_rules
-from asl_workbench import catalog
+from asl_workbench import catalog, freshness, observation, overview
 from asl_workbench import controls as portable_controls
 from asl_workbench import details as detail_rules
 from asl_workbench.details import Window
@@ -63,6 +64,7 @@ from . import (
     workbench_catalog,
     workbench_controls,
     workbench_details,
+    workbench_history,
 )
 
 _JSONDict = dict[str, Any]
@@ -258,6 +260,90 @@ def _augment_archivable(
     payload["archivable"] = not blocked
     payload["archive_blocker"] = "active-lock" if blocked else None
     return payload
+
+
+def _augment_catalog_labels(
+    payload: _JSONDict, entry: catalog.CatalogEntry
+) -> _JSONDict:
+    """Add the naming a row is grouped and searched by in either mode.
+
+    ``WorkbenchSummary`` has never carried a manifest title or a project, and
+    the catalog projection has carried both since the consolidation began. The
+    local queue publishes them here rather than growing a second derivation:
+    project headings, multi-project membership and title search are supposed to
+    read the same on a laptop and on a phone, and they only can if both rows
+    were named by the same code.
+    """
+    payload["title"] = entry.title
+    payload["projects"] = list(entry.projects)
+    payload["project_group"] = entry.project_group
+    payload["search_text"] = entry.search_text
+    payload["activity_label"] = entry.activity_label
+    return payload
+
+
+def _queue_rows(scan: workbench_catalog.CatalogScan) -> list[_JSONDict]:
+    """Every scanned plan as one queue row, named by the catalog projection.
+
+    ``scan.summaries`` and ``scan.catalog.records`` come out of the same pass
+    in the same order, which is what lets the Mac-side detail and the portable
+    naming be joined without a second lookup keyed on something that could
+    drift.
+    """
+    rows: list[_JSONDict] = []
+    for summary, record in zip(scan.summaries, scan.catalog.records, strict=True):
+        payload = _augment_catalog_keys(
+            _augment_archivable(summary.to_payload(), summary), summary
+        )
+        rows.append(_augment_catalog_labels(payload, record.entry))
+    return rows
+
+
+def _plan_labels(scan: workbench_catalog.CatalogScan) -> dict[str, _JSONDict]:
+    """Each plan key mapped to what a history row should call that plan."""
+    return {
+        record.entry.plan_key: {
+            "plan_label": record.entry.display_label,
+            "plan_title": record.entry.title,
+            "projects": list(record.entry.projects),
+        }
+        for record in scan.catalog.records
+    }
+
+
+def _history_newest_first(entries: Sequence[Any]) -> list[Any]:
+    """History entries in the order the remote store returns them.
+
+    ``recorded_at DESC, entry_id ASC`` is the store's ``ORDER BY``; sorting the
+    same way here is what lets one pane page either provider identically.
+    """
+    ordered = sorted(entries, key=lambda entry: str(entry.entry_id))
+    ordered.sort(key=lambda entry: float(entry.recorded_at), reverse=True)
+    return ordered
+
+
+def _history_record(entry: Any, labels: Mapping[str, _JSONDict]) -> _JSONDict:
+    """One ending, named the way the store names the same ending remotely.
+
+    The portable entry knows its plan by digest and never by path, so the label
+    and the title are joined on here from the catalog -- exactly as
+    :meth:`asl_workbench.store.WorkbenchStore.history` joins them on from
+    ``catalog_entry``. A plan the scan no longer sees keeps its ending and
+    loses only its title, which is the right way round: the run happened.
+    """
+    record: _JSONDict = dict(entry.to_payload())
+    naming = labels.get(str(record.get("plan_key")))
+    if naming is None:
+        return record
+    record["plan_label"] = naming["plan_label"]
+    record["plan_title"] = naming["plan_title"]
+    projects = naming["projects"]
+    if projects:
+        # Joined rather than listed, because ``project`` is the one field the
+        # history export carries and the store joins multi-project membership
+        # into it the same way. One separator, so one reader can split it.
+        record["project"] = " + ".join(projects)[: observation.MAX_LABEL_CHARS]
+    return record
 
 
 def _augment_catalog_keys(
@@ -504,32 +590,99 @@ class LocalProvider:
         )
 
     def _handle_queue(self, call: Call) -> Response:
-        sort_mode = call.optional_query("sort")
-        if sort_mode is not None and sort_mode != "oldest":
-            raise invalid_request("sort must be 'oldest' when provided", sort=sort_mode)
+        """Every visible plan, narrowed and counted before it is paged.
+
+        The Mac used to answer with the whole corpus and let the browser hide
+        what did not match. That reads correctly right up until the catalog
+        outgrows one page, at which point the browser is filtering a page and
+        counting a page while describing a corpus. So the narrowing happens
+        here now, in the same order the Pi's SQL does it --
+        :func:`~asl_workbench.overview.select` is that order, shared -- and the
+        page carries the size of the set it was cut from.
+        """
         registry = self._registry()
         state_root = state.state_root(self.config.state_dir)
         scan = self._scan(registry)
-        summaries = list(scan.summaries)
-        if sort_mode == "oldest":
-            summaries = sort_summaries_oldest_first(summaries)
+        filters = overview.parse_filters(call)
+        # The moment this answer describes, published because the eight-hour
+        # window is measured against it. A browser reading its own clock would
+        # measure a phone's idea of now against a laptop's idea of when a run
+        # last moved, and the two are not the same number.
+        observed_at = time.time()
+        try:
+            page = overview.select(_queue_rows(scan), filters)
+        except overview.OverviewError as error:
+            raise invalid_request(str(error)) from error
         return Response.success(
             reason="ok",
-            plans=[
-                _augment_catalog_keys(
-                    _augment_archivable(summary.to_payload(), summary), summary
-                )
-                for summary in summaries
-            ],
+            plans=list(page.rows),
+            observed_at=observed_at,
             registry_warnings=list(registry.warnings),
             discovery_warnings=list(scan.discovery.warnings),
             catalog_warnings=list(scan.projection_warnings),
             catalog_generation=scan.catalog.generation,
             catalog_complete=scan.catalog.complete,
-            catalog_total=scan.catalog.total,
+            # The same fact in the shared vocabulary. A scan that did not cover
+            # every root covered part of the catalog; the Mac is never in the
+            # third case, because a filesystem it can read is a filesystem that
+            # answers how much of itself it just showed.
+            catalog_completeness=(
+                observation.COMPLETENESS_COMPLETE
+                if scan.catalog.complete
+                else observation.COMPLETENESS_PARTIAL
+            ),
+            filters=filters.as_document(),
+            # The Mac is standing on the plans it is describing, so every row
+            # it publishes is current by construction. Saying so explicitly is
+            # what lets one front end mark a *retained* row as retained
+            # without having to know which provider answered.
+            observation_status=overview.OBSERVATION_CURRENT,
+            freshness=freshness.FRESHNESS_LIVE,
+            # No connector, no incident engine: these two are the Pi's record
+            # of what it could not confirm, and the honest local answer is
+            # "there is no such thing here" rather than a missing key.
+            connectors=[],
+            incidents=[],
             state_root=str(state_root),
             state_root_exists=state_root.is_dir(),
             archive_retention_days=registry.archive_retention_days,
+            **page.as_document(),
+        )
+
+    def _handle_history(self, call: Call) -> Response:
+        """Runs that ended inside the retention window, newest first.
+
+        Read from the event files themselves rather than from the publication
+        the connector uploads, and read without advancing the connector's
+        checkpoint: a pane that consumed endings would be a pane that stopped
+        the Pi from ever seeing them.
+        """
+        filters = overview.parse_filters(call)
+        outcome = call.optional_query("outcome")
+        view = workbench_history.read_window(
+            now=time.time(), state_dir=self.config.state_dir
+        )
+        labels = _plan_labels(self._scan(self._registry()))
+        entries: list[_JSONDict] = []
+        # ``view.entries`` arrives in the order the event files were read, so
+        # the newest-first promise is this provider's to keep. Sorted before
+        # the limit, or the limit would keep the oldest tail of the window.
+        for entry in _history_newest_first(view.entries):
+            record = _history_record(entry, labels)
+            if outcome is not None and record.get("outcome") != outcome:
+                continue
+            if not overview.matches(record, filters, states=False):
+                continue
+            entries.append(observation.export_history_entry(record))
+            if len(entries) >= filters.limit:
+                break
+        return Response.success(
+            reason="ok",
+            entries=entries,
+            observed_at=view.window_end,
+            complete=view.complete,
+            incidents=[],
+            warnings=list(view.warnings),
         )
 
     def _handle_plan(self, call: Call) -> Response:
@@ -1212,6 +1365,7 @@ _HANDLERS: Mapping[str, Callable[[LocalProvider, Call], Response]] = {
     "health": LocalProvider._handle_health,
     "summary": LocalProvider._handle_summary,
     "queue": LocalProvider._handle_queue,
+    "history": LocalProvider._handle_history,
     "plan": LocalProvider._handle_plan,
     "recovery": LocalProvider._handle_recovery,
     "registry": LocalProvider._handle_registry,

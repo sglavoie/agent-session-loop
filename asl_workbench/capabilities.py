@@ -250,6 +250,14 @@ _HTTP_TESTS = "scripts:tests/test_workbench_http.py"
 #: actually exercised.
 _SHELL_TESTS = "scripts:tests/test_workbench_shell.py"
 _SHELL_BROWSER_TESTS = "scripts:tests/workbench_browser/shell.spec.js"
+#: The overview -- sections, the inactive-work window, grouping, the facets and
+#: the history pane -- asserted the same two ways, and for the same reason the
+#: shell is: the Python half proves both providers answer one set of questions
+#: identically, and the Playwright half proves one page draws both answers.
+#: Rows that used to point only at the Pi's dashboard spec name these as well,
+#: because that spec now describes an implementation this one replaced.
+_OVERVIEW_TESTS = "scripts:tests/test_workbench_overview.py"
+_OVERVIEW_BROWSER_TESTS = "scripts:tests/workbench_browser/overview.spec.js"
 _PI = "sglavoie_raspberry_pi:services/pi-monitoring"
 
 
@@ -280,9 +288,40 @@ CAPABILITIES: tuple[Capability, ...] = (
     _http(
         "GET /api/queue",
         "Triage queue: one non-reclaiming catalog scan, per-plan summaries, "
-        "urgency, warnings, state root, catalog generation. Runs no retention.",
-        coverage=(_SERVER_TESTS, _SUMMARY_TESTS, _FOUNDATION_TESTS, _CATALOG_TESTS),
+        "urgency, warnings, state root, catalog generation. Runs no retention. "
+        "Narrows by title, project, harness and state before it pages, and "
+        "answers with the counts, facets and matched total of the whole "
+        "filtered set rather than of the page -- so '12 of 340' is a fact the "
+        "server knows and the browser could not compute.",
+        coverage=(
+            _SERVER_TESTS,
+            _SUMMARY_TESTS,
+            _FOUNDATION_TESTS,
+            _CATALOG_TESTS,
+            _OVERVIEW_TESTS,
+        ),
         changes=("observational-reads",),
+    ),
+    Capability(
+        key=f"{SURFACE_WORKBENCH_HTTP}:GET /api/history",
+        surface=SURFACE_WORKBENCH_HTTP,
+        summary="Runs that ended inside the retention window, newest first, "
+        "narrowed by the same words and outcomes the queue is. The Companion's "
+        "/v1/history answered from one machine's store; this answers from "
+        "whichever provider is mounted, over the same interpretation of ASL's "
+        "event journals.",
+        # Companion-origin, unlike every other route on this surface: the
+        # Workbench never had a history pane. Recording it as Workbench-origin
+        # would lose the fact that there is a Pi implementation this one has to
+        # stay compatible with.
+        origin=ORIGIN_COMPANION,
+        owner=OWNER_PORTABLE,
+        authority=AUTHORITY_ASL,
+        regression_coverage=(
+            _HISTORY_TESTS,
+            _OVERVIEW_TESTS,
+            _OVERVIEW_BROWSER_TESTS,
+        ),
     ),
     _http(
         "GET /api/plan",
@@ -629,8 +668,17 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
-        regression_coverage=(_DOCS_TESTS, _SUMMARY_TESTS, _DETAIL_TESTS),
-        coverage_gap=GAP_WORKBENCH_BROWSER,
+        # The inbox is now the overview, and the overview suite drives it: the
+        # sections it groups into, the chips and facets that narrow it, the
+        # search, and the request that hides completed work -- against both
+        # deployments, so "the inbox" is one behaviour rather than two.
+        regression_coverage=(
+            _DOCS_TESTS,
+            _SUMMARY_TESTS,
+            _DETAIL_TESTS,
+            _OVERVIEW_TESTS,
+            _OVERVIEW_BROWSER_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_BROWSER}:detailed-search",
@@ -748,23 +796,28 @@ CAPABILITIES: tuple[Capability, ...] = (
         key=f"{SURFACE_WORKBENCH_BROWSER}:session-preferences",
         surface=SURFACE_WORKBENCH_BROWSER,
         summary="Filter, sort, and pane preferences held in session storage "
-        "rather than on the server.",
+        "and mirrored into the URL, so a view can be sent as a link.",
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
-        regression_coverage=(_DOCS_TESTS,),
-        coverage_gap=GAP_WORKBENCH_BROWSER,
+        # Asserted in both directions, which is the whole claim: a choice made
+        # in the controls lands in the address bar, and a link carrying one
+        # opens the view it describes rather than the default.
+        regression_coverage=(_DOCS_TESTS, _OVERVIEW_BROWSER_TESTS),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_BROWSER}:empty-state-actions",
         surface=SURFACE_WORKBENCH_BROWSER,
         summary="Empty states offer the action that would end them: clear "
-        "search, reset filter, show completed.",
+        "search, reset filter and its facets, show completed.",
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
-        regression_coverage=(_DOCS_TESTS,),
-        coverage_gap=GAP_WORKBENCH_BROWSER,
+        # Driven through the case that matters now that the narrowing happens
+        # on the server: a facet that matches nothing arrives as zero rows, and
+        # the page has to say which filter emptied it rather than report an
+        # empty machine with nothing to undo.
+        regression_coverage=(_DOCS_TESTS, _OVERVIEW_BROWSER_TESTS),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_BROWSER}:fragment-deep-link-routing",
@@ -1173,7 +1226,14 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_COMPANION,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
-        regression_coverage=(f"{_PI}/tests/browser/dashboard.spec.js",),
+        # The Pi's spec is kept because it is what the behaviour was proven by;
+        # the two new references are what proves it survived the move, section
+        # by section and in both deployments rather than only on the phone.
+        regression_coverage=(
+            f"{_PI}/tests/browser/dashboard.spec.js",
+            _OVERVIEW_TESTS,
+            _OVERVIEW_BROWSER_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_COMPANION_BROWSER}:filters-and-sort",
@@ -1183,7 +1243,15 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_COMPANION,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
-        regression_coverage=(f"{_PI}/tests/browser/dashboard.spec.js",),
+        # Folded into the Workbench's sort modes and URL persistence rather
+        # than kept as a second filter bar, so the references cover both
+        # halves: the narrowing is applied before the page and counted over the
+        # whole match, and every mode the select offers is one a server takes.
+        regression_coverage=(
+            f"{_PI}/tests/browser/dashboard.spec.js",
+            _OVERVIEW_TESTS,
+            _OVERVIEW_BROWSER_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_COMPANION_BROWSER}:freshness-chip",
@@ -1196,6 +1264,11 @@ CAPABILITIES: tuple[Capability, ...] = (
         regression_coverage=(
             f"{_PI}/tests/browser/dashboard.spec.js",
             f"{_PI}/tests/test_companion_observation.py",
+            # Including the case the chip exists for: a partial generation
+            # leaves rows the newest observation never confirmed, and the page
+            # has to say so instead of drawing them as live.
+            _OVERVIEW_TESTS,
+            _OVERVIEW_BROWSER_TESTS,
         ),
     ),
     Capability(

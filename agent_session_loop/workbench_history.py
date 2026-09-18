@@ -187,6 +187,56 @@ def default_store(state_dir: str | Path | None = None) -> CheckpointStore:
     return CheckpointStore(state.state_root(state_dir) / CHECKPOINT_FILE_NAME)
 
 
+class NoCheckpoints(CheckpointStore):
+    """A store that remembers nothing, for a reader that consumes nothing.
+
+    The importer is incremental by design: it resumes where the connector left
+    off, so a second caller running it against the real checkpoint would get
+    whatever has happened since the last upload -- which is the right answer
+    for a publisher and very nearly the wrong one for a history pane, where the
+    operator asked for the window rather than for the delta.
+
+    So a *display* read starts from nothing and refuses to persist. Refusing is
+    the point: a pane that advanced the connector's checkpoint would consume
+    endings the Pi had not received, and they would never be published.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(Path(os.devnull))
+
+    def load(self) -> dict[str, SourceCheckpoint]:
+        return {}
+
+    def save(self, checkpoints: tuple[SourceCheckpoint, ...]) -> None:
+        raise HistoryError(
+            "a display read of history may not advance the import checkpoint"
+        )
+
+
+def read_window(
+    *,
+    now: float,
+    state_dir: str | Path | None = None,
+    retention_seconds: float = DEFAULT_RETENTION_SECONDS,
+    max_read_bytes: int = portable_history.MAX_READ_BYTES_PER_PASS,
+    max_pass_bytes: int = portable_history.MAX_READ_BYTES_PER_PASS,
+) -> HistoryView:
+    """The whole retention window, for display, advancing no checkpoint.
+
+    What ``GET /api/history`` answers with on the Mac. The same projection the
+    publisher builds, over the same entries, read from the beginning of the
+    window rather than from wherever the last upload stopped.
+    """
+    return project_history(
+        now=now,
+        store=NoCheckpoints(),
+        state_dir=state_dir,
+        retention_seconds=retention_seconds,
+        max_read_bytes=max_read_bytes,
+        max_pass_bytes=max_pass_bytes,
+    ).view
+
+
 def read_source(
     source: HistorySource,
     checkpoint: SourceCheckpoint,

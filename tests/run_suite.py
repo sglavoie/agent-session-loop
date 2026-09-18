@@ -318,6 +318,11 @@ INTEGRATION_MODULES = (
     # is that one front end serves two deployments, so both providers are bound
     # to real loopback sockets over one plan corpus and asked the same things.
     "tests.test_workbench_shell",
+    # And once more for the overview: the vocabulary halves and the selection
+    # algebra would run anywhere, but "both modes present one body of work" is
+    # only a claim about two providers answering the same questions, so both
+    # are bound to loopback sockets over one corpus here too.
+    "tests.test_workbench_overview",
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
     "tests.test_asl_overseer_e2e",

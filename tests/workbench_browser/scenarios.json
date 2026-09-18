@@ -19,11 +19,26 @@
   "plans": {
     "alpha": {
       "primary_state": "paused-for-reply",
+      "section": "needs-attention",
       "description": "Paused mid-run waiting for an operator, with events, progress and artifacts on disk."
     },
     "bravo": {
       "primary_state": "ready",
+      "section": "recent",
       "description": "Never run: every detail pane has to say it has nothing rather than fail."
+    },
+    "charlie": {
+      "primary_state": "recent",
+      "section": "older",
+      "description": "Finished a run thirty hours ago and went quiet, with two endings in the history window: the one row that has to fall outside the eight-hour inactive-work window in both modes."
     }
+  },
+  "sections": {
+    "comment": "Which section of the overview each seeded plan belongs in, so a spec asserts placement against the fixture's intent rather than against a copy of the rule it is testing. Named per plan rather than defaulted: a default would let a plan that silently moved sections keep passing.",
+    "hidden": ["older"]
+  },
+  "history": {
+    "comment": "charlie's two endings, oldest first, as tests/workbench_support.py seeds them.",
+    "outcomes": ["failed", "stopped"]
   }
 }

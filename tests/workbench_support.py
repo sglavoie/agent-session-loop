@@ -30,8 +30,10 @@ import argparse
 import http.server
 import json
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -42,6 +44,7 @@ from agent_session_loop import (
     plans,
     state,
     workbench,
+    workbench_history,
     workbench_remote_reads,
     workbench_server,
 )
@@ -253,16 +256,48 @@ SHELL_CONTRACT_SET_ID = observation.SUPPORTED_CONTRACT_SET_IDS[0]
 
 #: The plans both modes carry, in the order they are seeded. The names are the
 #: same on both sides so a scenario reads the same whichever provider answers.
-SHELL_PLAN_NAMES: tuple[str, ...] = ("alpha", "bravo")
+SHELL_PLAN_NAMES: tuple[str, ...] = ("alpha", "bravo", "charlie")
 
-#: ``alpha`` is paused waiting for an operator, and ``bravo`` has never run.
-#: Two states rather than one because the shell's two hardest jobs are telling
-#: them apart in the queue and offering only the actions the run actually
-#: permits -- neither of which a corpus of identical plans can exercise.
+#: ``alpha`` is paused waiting for an operator, ``bravo`` has never run, and
+#: ``charlie`` finished a run and went quiet. Three states rather than one
+#: because the shell's hardest jobs are telling them apart in the queue,
+#: offering only the actions the run actually permits, and filing work that has
+#: gone quiet behind the inactive-work window -- none of which a corpus of
+#: identical plans can exercise.
 SHELL_RUN_IDS: Mapping[str, str | None] = {
     "alpha": "20260918T080000Z-alpha",
     "bravo": None,
+    "charlie": "20260915T100000Z-charlie",
 }
+
+#: How long ago ``charlie``'s run stopped moving. Comfortably past the
+#: eight-hour window, so the row lands behind the older-runs toggle in both
+#: modes rather than near the boundary where a slow test run could tip it.
+SHELL_QUIET_SECONDS = 30 * 60 * 60
+
+#: ``charlie``'s two finished runs, oldest first, as ASL would have recorded
+#: them. One failure and one clean early stop, because the history pane's job
+#: is to tell those apart and a corpus of one outcome cannot show it.
+SHELL_HISTORY_RUNS: tuple[Mapping[str, Any], ...] = (
+    {
+        "run_id": "20260913T090000Z-charlie",
+        "started_ago": 52 * 60 * 60,
+        "duration": 900.0,
+        "ok": False,
+        "reason": "harness-error",
+        "completed_sessions": ["1"],
+        "pending": 1,
+    },
+    {
+        "run_id": "20260915T100000Z-charlie",
+        "started_ago": SHELL_QUIET_SECONDS + 1800,
+        "duration": 1800.0,
+        "ok": True,
+        "reason": "max-sessions",
+        "completed_sessions": ["1"],
+        "pending": 1,
+    },
+)
 
 #: The freshness proof ASL issued with ``alpha``'s paused state. The remote
 #: mode redeems it on a mutation; without it a submission is refused as
@@ -330,8 +365,19 @@ class ShellCorpus:
         raise KeyError(name)
 
 
+def shell_iso(epoch: float) -> str:
+    """One moment in the spelling ASL writes into ``state.json``.
+
+    The runner records ISO-8601 and the Pi records epoch seconds; both are read
+    by the same window arithmetic. Writing the local side in ASL's own spelling
+    is what makes that equivalence something the fixture proves rather than
+    something it arranges around.
+    """
+    return datetime.fromtimestamp(epoch, UTC).isoformat().replace("+00:00", "Z")
+
+
 def _seed_shell_runner_state(
-    plan_dir: Path, state_dir: Path, run_id: str | None
+    plan_dir: Path, state_dir: Path, name: str, run_id: str | None
 ) -> None:
     """Give a plan the runner state its published state claims it has.
 
@@ -339,21 +385,107 @@ def _seed_shell_runner_state(
     so the local mode *derives* "paused for a reply" from the same file ASL
     would have written, rather than being told. A plan with no run id is left
     with no state at all, which is how a plan that has never run looks.
+
+    ``charlie`` gets a *finished* state instead, because "this run ended and
+    sessions remain" is a different row from "this run is waiting for you", and
+    only the finished one can age out of the eight-hour window: a state with no
+    ``run_finished_at`` and no live lock reads as stale, not as quiet.
     """
     if run_id is None:
         return
     plan_state = state.plan_state_dir(plan_dir, state_dir)
     plan_state.mkdir(parents=True, exist_ok=True)
+    if name == "charlie":
+        last = SHELL_HISTORY_RUNS[-1]
+        started = time.time() - float(last["started_ago"])
+        payload: dict[str, Any] = {
+            "plan_dir": str(plan_dir),
+            "run_id": run_id,
+            "session_id": "1",
+            "ok": True,
+            "paused": False,
+            "reason": str(last["reason"]),
+            "run_started_at": shell_iso(started),
+            "run_finished_at": shell_iso(started + float(last["duration"])),
+            "updated_at": started + float(last["duration"]),
+        }
+    else:
+        payload = {
+            "plan_dir": str(plan_dir),
+            "run_id": run_id,
+            "session_id": "2",
+            "paused": True,
+            "updated_at": SHELL_FROZEN_NOW - 60.0,
+        }
     (plan_state / events.STATE_FILE_NAME).write_text(
-        json.dumps(
-            {
-                "plan_dir": str(plan_dir),
-                "run_id": run_id,
-                "session_id": "2",
-                "paused": True,
-                "updated_at": SHELL_FROZEN_NOW - 60.0,
-            },
-            sort_keys=True,
+        json.dumps(payload, sort_keys=True),
+        encoding="utf-8",
+    )
+    if name == "charlie":
+        _seed_shell_history_events(plan_state, plan_dir)
+
+
+def _seed_shell_history_events(plan_state: Path, plan_dir: Path) -> None:
+    """Write the endings ``charlie``'s history pane reads back.
+
+    Real ``events.jsonl`` records rather than pre-built entries, so the local
+    provider *interprets* them with the same importer the connector publishes
+    from. The remote store is then seeded from that interpretation rather than
+    from a second hand-written copy, which is what makes the two panes unable to
+    disagree about what a run did.
+
+    Timestamps are relative to the real clock and not to
+    :data:`SHELL_FROZEN_NOW`, because the local read applies a seven-day
+    retention measured against ``time.time()``: entries pinned to a fixed epoch
+    would silently fall out of the window as the fixture ages.
+    """
+    now = time.time()
+    records: list[events.Event] = []
+    for run in SHELL_HISTORY_RUNS:
+        started = now - float(run["started_ago"])
+        finished = started + float(run["duration"])
+        records.append(
+            events.Event(
+                name="run_started",
+                created_at=shell_iso(started),
+                payload={
+                    "run_id": run["run_id"],
+                    "plan_dir": str(plan_dir),
+                    "harness": "claude",
+                    "model": "opus",
+                    "run_started_at": shell_iso(started),
+                },
+            )
+        )
+        records.append(
+            events.Event(
+                name="run_finished",
+                created_at=shell_iso(finished),
+                payload={
+                    "run_id": run["run_id"],
+                    "plan_dir": str(plan_dir),
+                    # Both flags, always. ``classify_outcome`` refuses to name an
+                    # outcome unless ``ok`` and ``paused`` are both real
+                    # booleans, so a record that merely omits ``paused`` imports
+                    # as ``unknown`` -- which would make the pane's whole job
+                    # untestable.
+                    "ok": run["ok"],
+                    "paused": False,
+                    "reason": run["reason"],
+                    "run_started_at": shell_iso(started),
+                    "run_finished_at": shell_iso(finished),
+                    "duration_seconds": run["duration"],
+                    "completed_session_ids": list(run["completed_sessions"]),
+                    "counts": {
+                        "complete": len(run["completed_sessions"]),
+                        "pending": run["pending"],
+                    },
+                },
+            )
+        )
+    (plan_state / events.EVENTS_FILE_NAME).write_text(
+        "".join(
+            json.dumps(record.to_dict(), sort_keys=True) + "\n" for record in records
         ),
         encoding="utf-8",
     )
@@ -380,7 +512,11 @@ def seed_shell_plans(root: Path) -> ShellCorpus:
         (plan_dir / "manifest.md").write_text(
             f"# {name.title()}\n\nOne plan, for the shell fixture.\n", encoding="utf-8"
         )
-        statuses = ("complete", "pending") if index == 0 else ("pending", "pending")
+        # ``alpha`` and ``charlie`` are part-done; ``bravo`` has not started.
+        # A plan with no pending session would be ``complete``, which the
+        # default queue hides -- and a hidden row proves nothing about the
+        # section it was meant to land in.
+        statuses = ("pending", "pending") if index == 1 else ("complete", "pending")
         for number, status_value in enumerate(statuses, start=1):
             (plan_dir / f"session-{number}.md").write_text(
                 "\n".join(
@@ -402,7 +538,7 @@ def seed_shell_plans(root: Path) -> ShellCorpus:
                 encoding="utf-8",
             )
         canonical = plans.canonicalize_path(plan_dir)
-        _seed_shell_runner_state(canonical, state_dir, SHELL_RUN_IDS.get(name))
+        _seed_shell_runner_state(canonical, state_dir, name, SHELL_RUN_IDS.get(name))
         written.append(canonical)
     return ShellCorpus(
         root=root,
@@ -464,38 +600,100 @@ def shell_catalog_entries(corpus: ShellCorpus) -> list[dict[str, Any]]:
     entries = []
     for index, name in enumerate(SHELL_PLAN_NAMES):
         plan_key = plan_keys[name]
-        paused = SHELL_RUN_IDS.get(name) is not None
-        entries.append(
-            {
-                "plan_key": plan_key,
-                "run_key": run_keys[name],
-                "title": f"{name.title()} step 1",
-                "display_label": name.title(),
-                # What the Mac derived from this plan's state, repeated. The
-                # local mode derives the same words from the same file, so the
-                # two queues describe one plan rather than agreeing by luck.
-                "primary_state": "paused-for-reply" if paused else "ready",
-                "recommended_action": "reply" if paused else "run",
-                "urgency_rank": index,
-                "urgency_group": "needs-action" if paused else "ready",
-                "activity_label": "Reply needed" if paused else "Ready to run",
-                "projects": ["scripts"],
-                "project_group": "scripts",
-                "counts": {"sessions": 2},
-                "sources": ["manifest"],
-                "exists": True,
-                "pinned": False,
-                "repository_count": 1,
-                "warning_count": 0,
-                "search_text": f"{name} step 1".casefold(),
-                "registry_digest": "9d2e59249fe21a3c",
-            }
-        )
+        quiet = name == "charlie"
+        paused = SHELL_RUN_IDS.get(name) is not None and not quiet
+        if quiet:
+            state_name, action, group = "recent", "run", "ready"
+            activity = "Run finished, sessions remain"
+        elif paused:
+            state_name, action, group = "paused-for-reply", "reply", "needs-action"
+            activity = "Reply needed"
+        else:
+            state_name, action, group = "ready", "run", "ready"
+            activity = "Ready to run"
+        entry: dict[str, Any] = {
+            "plan_key": plan_key,
+            "run_key": run_keys[name],
+            # The words the Mac derived, not words invented for the Pi. These
+            # plans register no repositories, so the catalog names their project
+            # ``Unknown project`` and titles them from the manifest's ``# H1``;
+            # publishing anything else here would put two different names for
+            # one plan on the two deployments and make a cross-mode assertion
+            # impossible to write honestly.
+            "title": name.title(),
+            "display_label": name.title(),
+            # What the Mac derived from this plan's state, repeated. The
+            # local mode derives the same words from the same file, so the
+            # two queues describe one plan rather than agreeing by luck.
+            "primary_state": state_name,
+            "recommended_action": action,
+            "urgency_rank": index,
+            "urgency_group": group,
+            "activity_label": activity,
+            "projects": [catalog.UNKNOWN_PROJECT],
+            "project_group": catalog.UNKNOWN_PROJECT,
+            "counts": {"sessions": 2},
+            "sources": ["manifest"],
+            "exists": True,
+            "pinned": False,
+            "repository_count": 0,
+            "warning_count": 0,
+            "search_text": name.casefold(),
+            "registry_digest": "9d2e59249fe21a3c",
+        }
+        if quiet:
+            # Epoch seconds, which is how the Pi publishes a moment; the local
+            # mode publishes ISO-8601 for the same plan. Both are read by one
+            # window, and seeding them differently is what proves that.
+            entry["last_activity_at"] = SHELL_FROZEN_NOW - SHELL_QUIET_SECONDS
+            entry["last_activity_source"] = "run-finished"
+        entries.append(entry)
     return entries
 
 
-def seed_shell_store(store: WorkbenchStore, entries: list[dict[str, Any]]) -> None:
-    """Give the Pi something to have observed: a heartbeat and one catalog."""
+def seed_shell_history(store: WorkbenchStore, corpus: ShellCorpus) -> None:
+    """Publish the endings the Mac imported, exactly as the connector would.
+
+    The entries are not written by hand: they are the objects
+    :func:`agent_session_loop.workbench_history.read_window` builds from the
+    corpus's own ``events.jsonl``, which is the same projection the local
+    history route answers with. Seeding the store from that projection is what
+    makes "both modes present consistent history" a property of the code rather
+    than of two hand-maintained copies agreeing.
+
+    The window is read against the real clock for the same reason it is written
+    against it -- a seven-day retention measured from ``time.time()`` would drop
+    entries pinned to :data:`SHELL_FROZEN_NOW` as the fixture ages -- while the
+    batch is *received* at the frozen moment, because that is when the Pi is
+    pretending to have heard from the Mac.
+    """
+    view = workbench_history.read_window(now=time.time(), state_dir=corpus.state_dir)
+    store.ingest_history(
+        _shell_envelope(
+            "history_batch",
+            {
+                "observed_at": SHELL_FROZEN_NOW,
+                "batch_id": "shell-fixture-history-1",
+                "generated_at": SHELL_FROZEN_NOW,
+                "window_start": view.window_start,
+                "window_end": view.window_end,
+                "complete": view.complete,
+                "more": False,
+                "entries": [entry.to_payload() for entry in view.entries],
+                "questions": [],
+            },
+        ),
+        received_at=SHELL_FROZEN_NOW,
+    )
+
+
+def seed_shell_store(
+    store: WorkbenchStore,
+    entries: list[dict[str, Any]],
+    *,
+    corpus: ShellCorpus | None = None,
+) -> None:
+    """Give the Pi something to have observed: a heartbeat, a catalog, history."""
     store.ingest_heartbeat(
         _shell_envelope(
             "heartbeat",
@@ -513,9 +711,10 @@ def seed_shell_store(store: WorkbenchStore, entries: list[dict[str, Any]]) -> No
     runs = []
     for name, entry in zip(SHELL_PLAN_NAMES, entries, strict=True):
         run_id = SHELL_RUN_IDS.get(name)
+        live = run_id is not None and name != "charlie"
         run: dict[str, Any] = {
             "run_key": entry["run_key"],
-            "project": "scripts",
+            "project": catalog.UNKNOWN_PROJECT,
             "plan_key": entry["plan_key"],
             # ``None`` where no run has started, which is the component the run
             # key above digests. Naming an id here would contradict it.
@@ -526,11 +725,12 @@ def seed_shell_store(store: WorkbenchStore, entries: list[dict[str, Any]]) -> No
             # Only a live run permits anything, and only the Mac decides what.
             # The Pi repeats the list and the token that redeems it; a
             # submission naming an action not in this list is refused before it
-            # is carried anywhere.
-            "actions": list(SHELL_PERMITTED_ACTIONS) if run_id else [],
-            "last_activity_at": SHELL_FROZEN_NOW - 30.0,
+            # is carried anywhere. A finished run permits nothing, which is why
+            # ``charlie`` carries an id and an empty list rather than both.
+            "actions": list(SHELL_PERMITTED_ACTIONS) if live else [],
+            "last_activity_at": entry.get("last_activity_at", SHELL_FROZEN_NOW - 30.0),
         }
-        if run_id:
+        if live:
             run["action_token"] = SHELL_ACTION_TOKEN
             run["session_id"] = "2"
         runs.append(run)
@@ -568,6 +768,8 @@ def seed_shell_store(store: WorkbenchStore, entries: list[dict[str, Any]]) -> No
         ),
         received_at=SHELL_FROZEN_NOW,
     )
+    if corpus is not None:
+        seed_shell_history(store, corpus)
 
 
 @dataclass
@@ -701,7 +903,7 @@ def start_remote_shell_server(
         policy=ObservationPolicy(),
         created_at=SHELL_FROZEN_NOW,
     )
-    seed_shell_store(store, shell_catalog_entries(corpus))
+    seed_shell_store(store, shell_catalog_entries(corpus), corpus=corpus)
     responder = workbench_remote_reads.AslDetailResponder(
         plan_roots=corpus.plan_roots,
         state_dir=corpus.state_dir,

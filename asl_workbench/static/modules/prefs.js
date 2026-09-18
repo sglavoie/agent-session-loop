@@ -14,6 +14,9 @@ import {
   DEFAULT_SORT_MODE,
   FILTER_GROUPS,
   FILTER_STORAGE_KEY,
+  HARNESS_STORAGE_KEY,
+  OLDER_STORAGE_KEY,
+  PROJECT_STORAGE_KEY,
   SEARCH_STORAGE_KEY,
   SELECTED_STORAGE_KEY,
   SORT_MODES,
@@ -164,6 +167,83 @@ export function setShowCompleted(value) {
   if (state.showCompleted === next) return false;
   state.showCompleted = next;
   persistShowCompleted(next);
+  return true;
+}
+
+// Project and harness are facets rather than fixed vocabularies: what exists
+// is whatever the catalog holds, so neither is validated against a list here.
+// A remembered value the catalog no longer contains is kept and offered as an
+// option anyway — see `renderFacets` — because a filter that silently widened
+// itself would show an operator more than they asked to see.
+
+function restoreFacet(key) {
+  try {
+    const stored = window.sessionStorage.getItem(key);
+    return typeof stored === "string" && stored ? stored : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function persistFacet(key, value) {
+  try {
+    if (value) {
+      window.sessionStorage.setItem(key, value);
+    } else {
+      window.sessionStorage.removeItem(key);
+    }
+  } catch (err) {
+    // ignore
+  }
+}
+
+export function normalizeFacet(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+export function restoreProjectFilter() {
+  return restoreFacet(PROJECT_STORAGE_KEY);
+}
+
+export function setProjectFilter(value) {
+  const next = normalizeFacet(value);
+  if (state.projectFilter === next) return false;
+  state.projectFilter = next;
+  persistFacet(PROJECT_STORAGE_KEY, next);
+  return true;
+}
+
+export function restoreHarnessFilter() {
+  return restoreFacet(HARNESS_STORAGE_KEY);
+}
+
+export function setHarnessFilter(value) {
+  const next = normalizeFacet(value);
+  if (state.harnessFilter === next) return false;
+  state.harnessFilter = next;
+  persistFacet(HARNESS_STORAGE_KEY, next);
+  return true;
+}
+
+export function restoreShowOlderRuns() {
+  try {
+    return window.sessionStorage.getItem(OLDER_STORAGE_KEY) === "true";
+  } catch (err) {
+    return false;
+  }
+}
+
+export function setShowOlderRuns(value) {
+  const next = value === true;
+  if (state.showOlderRuns === next) return false;
+  state.showOlderRuns = next;
+  try {
+    window.sessionStorage.setItem(OLDER_STORAGE_KEY, next ? "true" : "false");
+  } catch (err) {
+    // ignore
+  }
   return true;
 }
 

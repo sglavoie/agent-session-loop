@@ -9,6 +9,7 @@ import { FILTER_GROUPS } from "./constants.js";
 import { refreshDetail } from "./detail.js";
 import { persistFilter } from "./prefs.js";
 import { refresh } from "./queue.js";
+import { syncFilterHash } from "./router.js";
 import { state } from "./state.js";
 
 export function wireFilterChips() {
@@ -22,6 +23,10 @@ export function wireFilterChips() {
       state.activeFilter = name;
       persistFilter(name);
       applyChipPressedState();
+      // The chip is part of the view, so it is part of the link. Same order as
+      // every other control: preference, address, then the fetch that applies
+      // it server-side.
+      syncFilterHash();
       refresh();
     });
   });

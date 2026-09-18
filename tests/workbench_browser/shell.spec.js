@@ -244,10 +244,13 @@ for (const deployment of DEPLOYMENTS) {
       );
       // The link is rewritten to the canonical form on the way, so the back
       // button and a bookmark both behave as if the operator had arrived that
-      // way. This is also the moment the run key became an address.
+      // way. This is also the moment the run key became an address -- and the
+      // key rides along afterwards, because which run the notification named
+      // is what lets the overview file an old one under its own heading
+      // instead of at the top of today's work.
       await expect
         .poll(() => new URL(page.url()).hash)
-        .toBe(detailHash(alpha));
+        .toBe(`${detailHash(alpha)}&run=${encodeURIComponent(alpha.run_key)}`);
       await expect(page.locator("#wb-detail-label")).toHaveText(viaPlan.label);
       await expect(page.locator("#wb-refresh-status")).toHaveAttribute(
         "data-state",

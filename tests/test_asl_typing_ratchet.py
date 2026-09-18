@@ -280,6 +280,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "asl_workbench.incidents",
         "asl_workbench.observation",
         "asl_workbench.operations",
+        "asl_workbench.overview",
         "asl_workbench.remote_actions",
         "asl_workbench.remote_reads",
         "asl_workbench.service",

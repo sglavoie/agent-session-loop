@@ -8,11 +8,20 @@
 import { apiRequest, describeError } from "./api.js";
 import { applyChipPressedState } from "./filters.js";
 import { setField } from "./panels.js";
-import { persistFilter, setSearchText, setShowCompleted } from "./prefs.js";
+import {
+  persistFilter,
+  setHarnessFilter,
+  setProjectFilter,
+  setSearchText,
+  setShowCompleted,
+} from "./prefs.js";
 import { displayName, formatLastActivity } from "./preview.js";
 import { refresh, setRefreshStatus } from "./queue.js";
-import { updateSearchClearVisibility } from "./queue_controls.js";
-import { navigateToQueue } from "./router.js";
+import {
+  hydrateQueueControls,
+  updateSearchClearVisibility,
+} from "./queue_controls.js";
+import { navigateToQueue, syncFilterHash } from "./router.js";
 import { state } from "./state.js";
 
 export function wireArchiveControls() {
@@ -493,10 +502,22 @@ export function wireEmptyStateActions() {
   const resetFilter = document.getElementById("wb-empty-reset-filter");
   if (resetFilter) {
     resetFilter.addEventListener("click", () => {
-      if (state.activeFilter === "all") return;
-      state.activeFilter = "all";
-      persistFilter("all");
-      applyChipPressedState();
+      // Everything the button offers to undo, not just the chip. The project
+      // and harness facets narrow the same queue and are the reason it can be
+      // empty, so a reset that left them set would be a reset that changed
+      // nothing and an operator with no way back.
+      let changed = false;
+      if (state.activeFilter !== "all") {
+        state.activeFilter = "all";
+        persistFilter("all");
+        applyChipPressedState();
+        changed = true;
+      }
+      if (setProjectFilter("")) changed = true;
+      if (setHarnessFilter("")) changed = true;
+      if (!changed) return;
+      hydrateQueueControls();
+      syncFilterHash();
       refresh();
     });
   }

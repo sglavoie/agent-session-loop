@@ -52,6 +52,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
+from . import overview
 from .freshness import aggregate_completeness, aggregate_freshness
 from .http import (
     COMMAND_NAME,
@@ -70,6 +71,7 @@ from .http import (
     OP_EVENTS,
     OP_FINAL_REVIEW,
     OP_HEALTH,
+    OP_HISTORY,
     OP_LAST_MESSAGE,
     OP_LAUNCH,
     OP_LOGS,
@@ -446,19 +448,35 @@ class RemoteProvider:
         catalog this page is a part of.
         """
         now = self._clock()
+        filters = overview.parse_filters(call, default_limit=DEFAULT_READ_LIMIT)
+        connector_id = call.optional_query("connector_id")
+        include_absent = call.optional_query("include_absent") == "1"
+        narrowing: dict[str, Any] = {
+            "connector_id": connector_id,
+            "project": filters.project,
+            "search": filters.search,
+            "harness": filters.harness,
+            "include_absent": include_absent,
+        }
         entries = self._store.catalog(
             now=now,
-            connector_id=call.optional_query("connector_id"),
-            project=call.optional_query("project"),
-            search=call.optional_query("q"),
-            include_absent=call.optional_query("include_absent") == "1",
-            offset=call.non_negative_int("offset", default=0),
-            limit=call.bounded_int(
-                "limit", default=DEFAULT_READ_LIMIT, maximum=MAX_READ_LIMIT
-            ),
+            states=filters.states,
+            offset=filters.offset,
+            limit=filters.limit,
+            **narrowing,
         )
+        # Three reads of one narrowing, and the order is the contract: the
+        # page is cut from the filtered set, the total counts that same set,
+        # and the chip histogram counts it with the chip left out. None of the
+        # three is derived from ``entries``, because a page cannot say how
+        # large the set it came from was.
+        matched = self._store.catalog_matched(states=filters.states, **narrowing)
+        counts = overview.counts_from_states(self._store.catalog_states(**narrowing))
         statuses = self._store.connector_statuses(now=now)
-        counts = self._store.counts(now=now)
+        totals = self._store.counts(now=now)
+        catalog_completeness = aggregate_completeness(
+            [status.catalog.completeness for status in statuses]
+        )
         return Response.success(
             reason="ok",
             plans=entries,
@@ -466,20 +484,64 @@ class RemoteProvider:
             freshness=aggregate_freshness(
                 [status.freshness.label for status in statuses]
             ),
-            catalog_complete=(
-                aggregate_completeness(
-                    [status.catalog.completeness for status in statuses]
-                )
-                == COMPLETENESS_COMPLETE
-            ),
-            catalog_total=counts.plans,
+            # Two answers to one question, because they are asked by different
+            # readers: ``catalog_complete`` is the yes/no this route has always
+            # published, and ``catalog_completeness`` is the word that
+            # distinguishes "this observation covered part of the catalog" from
+            # "this observation did not say". A banner cannot write the second
+            # sentence from a boolean.
+            catalog_complete=(catalog_completeness == COMPLETENESS_COMPLETE),
+            catalog_completeness=catalog_completeness,
+            catalog_matched=matched,
+            catalog_total=totals.plans,
+            counts=counts,
+            filters=filters.as_document(),
+            truncated=filters.offset + len(entries) < matched,
+            projects=self._store.catalog_projects(include_absent=include_absent),
+            harnesses=self._store.catalog_harnesses(include_absent=include_absent),
             connectors=[status.as_document() for status in statuses],
+            incidents=self._store.incident_diagnostics(),
             # Two fields the local mode answers with that have no remote
             # meaning, reported as absent rather than omitted: a frontend
             # reading them should see "there is no such thing here", not a
             # missing key it has to guess about.
             registry_warnings=[],
             state_root=None,
+        )
+
+    def _handle_history(self, call: Call) -> Response:
+        """Runs that ended inside the retention window, newest first.
+
+        The Companion's history pane, answered from the endings the connector
+        published. It is narrowed by the same words the queue is, so switching
+        a project filter does not silently leave the history describing a
+        different project than the plan list above it.
+        """
+        now = self._clock()
+        filters = overview.parse_filters(call, default_limit=DEFAULT_READ_LIMIT)
+        entries = self._store.history(
+            now=now,
+            project=filters.project,
+            search=filters.search,
+            harness=filters.harness,
+            outcome=call.optional_query("outcome"),
+            limit=filters.limit,
+        )
+        statuses = self._store.connector_statuses(now=now)
+        return Response.success(
+            reason="ok",
+            entries=entries,
+            observed_at=now,
+            # History on the Pi is a retained import, so it carries the same
+            # completeness the observation it arrived with did. The Mac reads
+            # its own event files and answers ``complete`` from the window it
+            # actually walked; the field means the same thing in both.
+            complete=(
+                aggregate_completeness([status.completeness for status in statuses])
+                == COMPLETENESS_COMPLETE
+            ),
+            incidents=self._store.incident_diagnostics(),
+            warnings=[],
         )
 
     def _handle_plan(self, call: Call) -> Response:
@@ -662,6 +724,7 @@ _STORE_OPERATIONS: Mapping[str, Callable[[RemoteProvider, Call], Response]] = {
     OP_HEALTH: RemoteProvider._handle_health,
     OP_SUMMARY: RemoteProvider._handle_summary,
     OP_QUEUE: RemoteProvider._handle_queue,
+    OP_HISTORY: RemoteProvider._handle_history,
     OP_PLAN: RemoteProvider._handle_plan,
 }
 

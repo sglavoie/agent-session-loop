@@ -17,6 +17,40 @@ export const state = {
   searchText: "",
   sortMode: DEFAULT_SORT_MODE,
   showCompleted: false,
+  // The narrowing the server does, rather than the browser: project and
+  // harness go out as query parameters and come back applied, so the counts
+  // and the page describe the catalog instead of describing the first 200
+  // rows of it. `null` is "every project" / "every harness".
+  projectFilter: null,
+  harnessFilter: null,
+  // Whether the inactive-work window's overflow is drawn. Off by default,
+  // because the window exists to get quiet work out of the way; the rows are
+  // moved rather than dropped, and this is how they are reached.
+  showOlderRuns: false,
+  // What the last queue answer said about itself, as opposed to about plans:
+  // the chip counts over the complete matched set, the facets to offer, how
+  // much of the catalog the page covered, and how live the observation behind
+  // it is. Held so a render that did not refetch still renders the truth.
+  // The last answer, kept whole so a control that only changes where rows are
+  // drawn can redraw without asking the server the same question again.
+  lastQueuePayload: null,
+  lastQueuePayloadAt: null,
+  queueFilters: null,
+  queueCounts: null,
+  queueFacets: { projects: [], harnesses: [] },
+  queuePage: null,
+  queueFreshness: null,
+  queueConnectors: [],
+  queueIncidents: [],
+  queueObservedAt: null,
+  queueCompleteness: null,
+  // Finished runs inside the retention window, newest first, and what the
+  // read said about itself. Separate from the queue because history is a
+  // different question with a different retention.
+  historyEntries: [],
+  historyMeta: null,
+  historyInFlight: false,
+  historyOutcome: null,
   selectedPlan: null,
   cleanupMode: false,
   cleanupThresholdDays: CLEANUP_DEFAULT_THRESHOLD_DAYS,
@@ -37,11 +71,15 @@ export const state = {
   // Both historic link formats land here: `planDir` is the Mac's address,
   // `planKey` the Pi's, and `runKey` is an unresolved Companion notification
   // link waiting for a catalog page to name the plan it belongs to.
+  // `entryId` is the Companion's third link format: a notification about a run
+  // that has already finished names a history entry, not a plan, and there is
+  // nothing live left to open.
   route: {
     name: "queue",
     planDir: null,
     planKey: null,
     runKey: null,
+    entryId: null,
     focus: null,
   },
   detailTimer: null,

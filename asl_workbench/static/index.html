@@ -93,10 +93,31 @@
           <option value="oldest">oldest activity</option>
         </select>
       </label>
+      <label class="wb-controls-bar__facet">
+        <span class="wb-controls-bar__label">project</span>
+        <select id="wb-project-filter" name="project" aria-label="project filter">
+          <option value="">all projects</option>
+        </select>
+      </label>
+      <label class="wb-controls-bar__facet">
+        <span class="wb-controls-bar__label">harness</span>
+        <select id="wb-harness-filter" name="harness" aria-label="harness filter">
+          <option value="">all harnesses</option>
+        </select>
+      </label>
       <label class="wb-controls-bar__completed">
         <input type="checkbox" id="wb-show-completed" />
         <span>show completed</span>
       </label>
+      <button
+        class="wb-button wb-button--ghost"
+        id="wb-older-toggle"
+        type="button"
+        aria-pressed="false"
+        title="Show work that has not moved in the last eight hours"
+      >
+        show older (0)
+      </button>
       <button
         class="wb-button wb-button--ghost"
         id="wb-cleanup-toggle"
@@ -178,6 +199,16 @@
       id="wb-warnings"
       class="wb-warnings"
       aria-live="polite"
+      hidden
+    ></section>
+
+    <!-- What the observation behind this page could not see. Separate from
+         wb-warnings, which is about the plans; this is about the page. -->
+    <section
+      id="wb-observation"
+      class="wb-observation"
+      aria-live="polite"
+      data-count="0"
       hidden
     ></section>
 
@@ -835,6 +866,48 @@
       </aside>
     </div>
 
+    <!-- What has already finished. ASL stops projecting a run when it ends, so
+         without this a run that finished while the operator was away leaves no
+         trace on the screen at all. Narrowed by the same filters as the queue
+         above it, and collapsed by default because it is not current work. -->
+    <section
+      class="wb-history"
+      id="wb-history"
+      data-open="false"
+      aria-label="Finished runs"
+    >
+      <div class="wb-history__head">
+        <button
+          class="wb-button wb-button--ghost"
+          id="wb-history-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="wb-history-list"
+        >
+          show history
+        </button>
+        <h2 class="wb-history__title">
+          history <span class="wb-history__count" id="wb-history-count">0</span>
+        </h2>
+        <label class="wb-controls-bar__facet">
+          <span class="wb-controls-bar__label">outcome</span>
+          <select id="wb-history-outcome" aria-label="history outcome filter">
+            <option value="">all outcomes</option>
+            <option value="completed">completed</option>
+            <option value="stopped">stopped</option>
+            <option value="paused">paused</option>
+            <option value="failed">failed</option>
+            <option value="abandoned">abandoned</option>
+            <option value="unknown">unknown</option>
+          </select>
+        </label>
+      </div>
+      <p class="wb-history__status" id="wb-history-status" role="status" hidden></p>
+      <p class="wb-history__missing" id="wb-history-missing" role="status" hidden></p>
+      <p class="wb-empty" id="wb-history-empty">no finished runs in this window</p>
+      <ul class="wb-history__list" id="wb-history-list"></ul>
+    </section>
+
     <main class="wb-archive" id="wb-archive" hidden aria-label="Archived plans">
       <div class="wb-archive__head">
         <button
@@ -974,6 +1047,43 @@
             purge
           </button>
         </div>
+      </li>
+    </template>
+
+    <template id="wb-section-template">
+      <section class="wb-section" data-section="" data-count="0">
+        <header class="wb-section__head">
+          <h2 class="wb-section__title" data-section-heading></h2>
+          <span class="wb-section__count" data-section-count>0</span>
+        </header>
+        <p class="wb-section__empty" data-section-empty hidden></p>
+        <div class="wb-section__list" data-section-list></div>
+      </section>
+    </template>
+
+    <template id="wb-project-group-template">
+      <div class="wb-project-group" data-project="">
+        <h3 class="wb-project-group__heading" data-group-heading></h3>
+        <div class="wb-project-group__rows" data-group-rows></div>
+      </div>
+    </template>
+
+    <template id="wb-history-row-template">
+      <li class="wb-history-row" data-entry-id="" data-outcome="unknown">
+        <header class="wb-history-row__head">
+          <span class="wb-badge" data-field="outcome">unknown</span>
+          <span class="wb-history-row__label" data-field="label"></span>
+          <a class="wb-history-row__link" href="#" data-field="link">link</a>
+        </header>
+        <dl class="wb-history-row__facts">
+          <div><dt>project</dt><dd data-field="project">-</dd></div>
+          <div><dt>harness</dt><dd data-field="harness">-</dd></div>
+          <div><dt>finished</dt><dd data-field="finished">-</dd></div>
+          <div><dt>duration</dt><dd data-field="duration">-</dd></div>
+          <div><dt>sessions</dt><dd data-field="sessions">-</dd></div>
+          <div><dt>run id</dt><dd data-field="run">-</dd></div>
+        </dl>
+        <p class="wb-history-row__note" data-field="note" hidden></p>
       </li>
     </template>
 

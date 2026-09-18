@@ -667,6 +667,27 @@ def prune(
     return max(removed, 0)
 
 
+# -- Reading ----------------------------------------------------------------
+
+
+def diagnostics(
+    connection: sqlite3.Connection, *, limit: int = DEFAULT_DIAGNOSTICS_LIMIT
+) -> list[dict[str, Any]]:
+    """Recent incidents and their delivery states, newest first.
+
+    A free function rather than only an engine method because a cockpit read
+    has no business constructing an engine: doing so rewrites every row a dead
+    process left ``publishing``, which is recovery and not a GET.
+    """
+    bound = min(max(int(limit), 1), MAX_DIAGNOSTICS_LIMIT)
+    rows = connection.execute(
+        f"SELECT {', '.join(DIAGNOSTIC_FIELDS)} FROM incident "
+        "ORDER BY detected_at DESC, incident_id LIMIT ?",
+        (bound,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 # -- Engine -----------------------------------------------------------------
 
 
@@ -920,14 +941,8 @@ class IncidentEngine:
         self, *, limit: int = DEFAULT_DIAGNOSTICS_LIMIT
     ) -> list[dict[str, Any]]:
         """Recent incidents and their delivery states, newest first."""
-        bound = min(max(int(limit), 1), MAX_DIAGNOSTICS_LIMIT)
         with self.store.reading() as connection:
-            rows = connection.execute(
-                f"SELECT {', '.join(DIAGNOSTIC_FIELDS)} FROM incident "
-                "ORDER BY detected_at DESC, incident_id LIMIT ?",
-                (bound,),
-            ).fetchall()
-        return [dict(row) for row in rows]
+            return diagnostics(connection, limit=limit)
 
 
 __all__ = [
@@ -954,6 +969,7 @@ __all__ = [
     "PublishResult",
     "Publisher",
     "backoff_seconds",
+    "diagnostics",
     "epoch",
     "identity",
     "observe_history",

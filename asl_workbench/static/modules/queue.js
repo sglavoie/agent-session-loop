@@ -7,8 +7,18 @@
  */
 
 import { apiRequest, describeError } from "./api.js";
-import { FILTER_GROUPS, REFRESH_INTERVAL_MS } from "./constants.js";
+import {
+  FILTER_GROUPS,
+  QUEUE_PAGE_LIMIT,
+  REFRESH_INTERVAL_MS,
+} from "./constants.js";
+import { refreshHistory } from "./history.js";
 import { planHint, planIdOf, planSearchText } from "./identity.js";
+import {
+  renderFacets,
+  renderObservationBanners,
+  renderSections,
+} from "./overview.js";
 import { setSelectedPlan } from "./prefs.js";
 import {
   buildRow,
@@ -47,12 +57,44 @@ export function stopQueueTimer() {
   }
 }
 
+/**
+ * The narrowing the queue read carries, as query parameters.
+ *
+ * Every one of these used to be applied in the browser, against whatever the
+ * server happened to send. That is only correct while the catalog fits in one
+ * answer: past the read limit, a browser-side filter describes the first page
+ * rather than the catalog, and a count taken from it is a count of what was
+ * fetched. So the narrowing goes to the server, which applies it before the
+ * limit and counts over what matched.
+ */
+export function queueQuery() {
+  const params = new URLSearchParams();
+  if (state.activeFilter && state.activeFilter !== "all") {
+    params.set("group", state.activeFilter);
+  }
+  if (state.projectFilter) params.set("project", state.projectFilter);
+  if (state.searchText) params.set("q", state.searchText);
+  if (state.harnessFilter) params.set("harness", state.harnessFilter);
+  if (state.sortMode) params.set("sort", state.sortMode);
+  // Always sent, because the API's default is "narrow nothing": hiding
+  // completed work is this view's opinion, so this view is what asks for it.
+  // Cleanup mode reviews completed plans without changing the operator's
+  // persisted preference, exactly as it did when the filter ran here.
+  params.set(
+    "include_completed",
+    state.showCompleted || state.cleanupMode ? "1" : "0"
+  );
+  params.set("limit", String(QUEUE_PAGE_LIMIT));
+  const query = params.toString();
+  return query ? "/api/queue?" + query : "/api/queue";
+}
+
 export async function refresh() {
   if (state.fetchInFlight) return;
   state.fetchInFlight = true;
   setRefreshStatus("loading", "refreshing…");
   try {
-    const body = await apiRequest("/api/queue");
+    const body = await apiRequest(queueQuery());
     if (!body || body.ok !== true) {
       const reason = body && body.reason ? body.reason : "unknown";
       setRefreshStatus("error", "error: " + reason);
@@ -62,6 +104,11 @@ export async function refresh() {
     const ts = new Date();
     renderQueue(body, ts);
     setRefreshStatus("idle", "updated " + ts.toLocaleTimeString());
+    // History has its own retention and its own read; it is refreshed from
+    // here so the two panes on one screen never describe two different
+    // moments, and it is not awaited so a slow history read cannot hold up
+    // the work an operator is actually watching.
+    refreshHistory();
   } catch (err) {
     setRefreshStatus("error", "error: " + describeError(err));
     markQueueStale(describeError(err));
@@ -77,9 +124,27 @@ export function setRefreshStatus(stateName, text) {
   el.textContent = text;
 }
 
+/**
+ * Draw the answer already in hand again.
+ *
+ * For the controls that change where a row goes rather than which rows there
+ * are — the inactive-work toggle is the only one today. Refetching for those
+ * would ask the server a question it has just answered, and would replace a
+ * layout change with a network round trip the operator can see.
+ */
+export function rerenderQueue() {
+  if (!state.lastQueuePayload) {
+    refresh();
+    return;
+  }
+  renderQueue(state.lastQueuePayload, state.lastQueuePayloadAt);
+}
+
 export function renderQueue(payload, updatedAt) {
   const queueEl = document.getElementById("wb-queue");
   if (!queueEl) return;
+  state.lastQueuePayload = payload;
+  state.lastQueuePayloadAt = updatedAt instanceof Date ? updatedAt : new Date();
   const scrollSnapshot = captureQueueScroll();
   const previewBody = document.getElementById("wb-preview-last-message-body");
   if (previewBody) scrollSnapshot.preview = previewBody.scrollTop;
@@ -87,15 +152,28 @@ export function renderQueue(payload, updatedAt) {
   // A `#run=` deep link has no address until a catalog page names the run it
   // was minted for. This is where those pages arrive, so this is where such a
   // link becomes one the rest of the shell can read a plan with.
-  if (resolveRouteFromPlans(plansList)) return;
+  //
+  // Drawn from the page already in hand rather than left to the next poll: on
+  // a phone the queue timer is stopped while a detail route is open, so
+  // returning here would leave the sections as they were before the link
+  // resolved -- and the heading that says "this run is old news" is precisely
+  // what the operator opened the notification to find out.
+  if (resolveRouteFromPlans(plansList)) {
+    renderQueue(payload, state.lastQueuePayloadAt);
+    return;
+  }
   reconcileSelectedPlan(plansList);
+  adoptQueuePayload(payload);
   const sorted = plansList.slice().sort(comparePlanRows);
-  const counts = computeCounts(sorted);
-  renderCounts(counts);
+  renderCounts(state.queueCounts || computeCounts(sorted));
+  renderFacets(state.queueFacets);
   renderGlobalWarnings(payload);
+  renderObservationBanners(payload);
   renderQueueMeta(payload, sorted.length, updatedAt);
 
-  const seen = new Set();
+  // The page arrived already narrowed, so this is not the filter a second
+  // time: it is the one rule the server cannot apply, because cleanup mode is
+  // a state of this browser rather than of the request.
   const visible = sorted.filter((plan) => isVisible(plan, state.activeFilter));
 
   const emptyEl = document.getElementById("wb-empty");
@@ -105,30 +183,68 @@ export function renderQueue(payload, updatedAt) {
     emptyEl.hidden = true;
   }
 
-  let previous = emptyEl;
-  visible.forEach((plan) => {
-    const row = upsertRow(plan);
-    seen.add(planIdOf(plan));
-    if (row.parentNode !== queueEl) {
-      queueEl.appendChild(row);
-    }
-    if (previous && previous.nextSibling !== row) {
-      queueEl.insertBefore(row, previous.nextSibling);
-    }
-    previous = row;
-  });
-
+  const seen = renderSections(queueEl, emptyEl, visible);
   state.rowsByPlan.forEach((row, planId) => {
-    if (!seen.has(planId)) {
-      if (row.parentNode === queueEl) {
-        queueEl.removeChild(row);
-      }
+    if (!seen.has(planId) && row.parentNode) {
+      row.parentNode.removeChild(row);
     }
   });
 
   state.lastVisiblePlans = visible;
   updatePreview(visible);
   restoreQueueScroll(scrollSnapshot);
+}
+
+/**
+ * Remember what the answer said about itself, as opposed to about plans.
+ *
+ * The counts, the facets and the matched total are the server's now, taken
+ * over the complete result set rather than over the page, so they are kept
+ * rather than recomputed: recomputing them here would be recomputing them from
+ * 200 rows and calling the result a property of the catalog.
+ */
+export function adoptQueuePayload(payload) {
+  state.queueFilters =
+    payload.filters && typeof payload.filters === "object"
+      ? payload.filters
+      : null;
+  state.queueCounts = isCountMap(payload.counts) ? payload.counts : null;
+  state.queueFacets = {
+    projects: Array.isArray(payload.projects) ? payload.projects : [],
+    harnesses: Array.isArray(payload.harnesses) ? payload.harnesses : [],
+  };
+  state.queuePage = {
+    matched:
+      typeof payload.catalog_matched === "number"
+        ? payload.catalog_matched
+        : null,
+    total:
+      typeof payload.catalog_total === "number" ? payload.catalog_total : null,
+    offset: typeof payload.offset === "number" ? payload.offset : 0,
+    limit: typeof payload.limit === "number" ? payload.limit : QUEUE_PAGE_LIMIT,
+    truncated: payload.truncated === true,
+  };
+  state.queueFreshness =
+    typeof payload.freshness === "string" ? payload.freshness : null;
+  state.queueConnectors = Array.isArray(payload.connectors)
+    ? payload.connectors
+    : [];
+  state.queueIncidents = Array.isArray(payload.incidents)
+    ? payload.incidents
+    : [];
+  state.queueObservedAt =
+    typeof payload.observed_at === "number" ? payload.observed_at : null;
+  state.queueCompleteness =
+    typeof payload.catalog_completeness === "string"
+      ? payload.catalog_completeness
+      : null;
+}
+
+function isCountMap(value) {
+  if (!value || typeof value !== "object") return false;
+  return Object.keys(FILTER_GROUPS).every(
+    (name) => typeof value[name] === "number"
+  );
 }
 
 export function renderQueueMeta(payload, planCount, updatedAt) {
@@ -142,10 +258,17 @@ export function renderQueueMeta(payload, planCount, updatedAt) {
     updatedAt instanceof Date
       ? updatedAt.toLocaleTimeString()
       : new Date().toLocaleTimeString();
+  const page = state.queuePage || {};
   state.lastQueueMeta = {
     stateRoot: stateRoot,
     stateRootExists: payload.state_root_exists !== false,
     planCount: planCount,
+    // What the page is a page *of*. Without these two an operator reading
+    // "plans: 200" cannot tell a catalog of 200 from the first fifth of one.
+    matched: typeof page.matched === "number" ? page.matched : null,
+    catalogTotal: typeof page.total === "number" ? page.total : null,
+    truncated: page.truncated === true,
+    narrowed: isNarrowed(),
     updatedText: updatedText,
   };
   el.hidden = false;
@@ -166,6 +289,16 @@ export function markQueueStale(reason) {
   el.textContent = message + " | stale " + formatQueueMeta(state.lastQueueMeta);
 }
 
+/** True when this view is narrower than the whole catalog. */
+export function isNarrowed() {
+  return !!(
+    state.projectFilter ||
+    state.harnessFilter ||
+    state.searchText ||
+    (state.activeFilter && state.activeFilter !== "all")
+  );
+}
+
 export function formatQueueMeta(meta) {
   const parts = [];
   if (meta.stateRoot) {
@@ -174,6 +307,20 @@ export function formatQueueMeta(meta) {
   }
   if (typeof meta.planCount === "number") {
     parts.push("plans: " + meta.planCount);
+  }
+  if (typeof meta.matched === "number") {
+    // "matching" rather than "matched": the number is about the catalog as it
+    // is now, and it is the number the chips were counted over.
+    const suffix =
+      typeof meta.catalogTotal === "number" && meta.narrowed
+        ? " of " + meta.catalogTotal
+        : "";
+    parts.push("matching: " + meta.matched + suffix);
+  } else if (typeof meta.catalogTotal === "number") {
+    parts.push("catalog: " + meta.catalogTotal);
+  }
+  if (meta.truncated) {
+    parts.push("showing the first page — narrow the filters to see the rest");
   }
   if (meta.updatedText) {
     parts.push("updated: " + meta.updatedText);
@@ -362,8 +509,25 @@ export function isVisible(plan, activeFilter) {
   if (!matchesCompletedVisibility(plan, activeFilter, state.showCompleted)) {
     return false;
   }
-  if (!matchesSearchText(plan, state.searchText)) return false;
+  // Only when the answer in hand did not already do it. A provider that
+  // searched before its read limit searched the catalog; repeating it here
+  // against the row's folded haystack can only subtract, and what it would
+  // subtract is the rows the server matched on a title this row does not
+  // carry. The echo is how the two are told apart, so a payload predating the
+  // parameter still gets a working search box.
+  if (!serverApplied("search", state.searchText)) {
+    if (!matchesSearchText(plan, state.searchText)) return false;
+  }
   return true;
+}
+
+/** True when the last answer says the server applied this filter itself. */
+export function serverApplied(name, value) {
+  const echoed = state.queueFilters;
+  if (!echoed || typeof echoed !== "object") return false;
+  const sent = value === undefined || value === null || value === "" ? null : value;
+  const back = echoed[name] === undefined ? null : echoed[name];
+  return back === sent;
 }
 
 export function matchesFilter(plan, activeFilter) {

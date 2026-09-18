@@ -2096,22 +2096,23 @@ class WorkbenchStore:
             exported.append(export_history_entry(record))
         return exported
 
-    def catalog(
-        self,
+    @staticmethod
+    def _catalog_clauses(
         *,
-        now: float,
-        connector_id: str | None = None,
-        project: str | None = None,
-        search: str | None = None,
-        include_absent: bool = False,
-        offset: int = 0,
-        limit: int = DEFAULT_READ_LIMIT,
-    ) -> list[dict[str, Any]]:
-        """Stored catalog entries, newest generation first, one page at a time.
+        connector_id: str | None,
+        project: str | None,
+        search: str | None,
+        harness: str | None,
+        states: Sequence[str] | None,
+        include_absent: bool,
+    ) -> tuple[list[str], list[Any]]:
+        """The ``WHERE`` half of a catalog read, built once for three callers.
 
-        Carried-over Companion labels are never returned here. They belong to
-        :data:`LEGACY_GENERATION`, which is not a generation anybody observed:
-        they can label a retained run and they cannot claim a plan exists.
+        Every narrowing the cockpit can ask for is expressed here, which is
+        what makes "filter before the read limit" a property of the statement
+        rather than a rule three methods have to remember. The page, the
+        matched total and the state histogram all start from this, so a page
+        and the number above it cannot describe different sets.
         """
         clauses = ["e.generation != ?"]
         parameters: list[Any] = [LEGACY_GENERATION]
@@ -2124,8 +2125,49 @@ class WorkbenchStore:
             clauses.append("e.search_text LIKE ?")
             parameters.append(f"%{search.strip().casefold()}%")
         if project is not None:
+            # ``projects`` is a JSON array, so the needle is the encoded name
+            # rather than the bare one: matching ``"scripts"`` with quotes is
+            # what stops a search for ``script`` from claiming membership.
             clauses.append("e.projects LIKE ?")
             parameters.append(f"%{json.dumps(project)}%")
+        if harness:
+            clauses.append("e.harness = ?")
+            parameters.append(harness)
+        if states is not None:
+            # An empty set is not "no filter": it is a chip that covers nothing
+            # once completed plans are hidden, and it must match nothing.
+            placeholders = ", ".join("?" for _ in states)
+            clauses.append(f"e.primary_state IN ({placeholders})" if states else "0")
+            parameters.extend(states)
+        return clauses, parameters
+
+    def catalog(
+        self,
+        *,
+        now: float,
+        connector_id: str | None = None,
+        project: str | None = None,
+        search: str | None = None,
+        harness: str | None = None,
+        states: Sequence[str] | None = None,
+        include_absent: bool = False,
+        offset: int = 0,
+        limit: int = DEFAULT_READ_LIMIT,
+    ) -> list[dict[str, Any]]:
+        """Stored catalog entries, newest generation first, one page at a time.
+
+        Carried-over Companion labels are never returned here. They belong to
+        :data:`LEGACY_GENERATION`, which is not a generation anybody observed:
+        they can label a retained run and they cannot claim a plan exists.
+        """
+        clauses, parameters = self._catalog_clauses(
+            connector_id=connector_id,
+            project=project,
+            search=search,
+            harness=harness,
+            states=states,
+            include_absent=include_absent,
+        )
         parameters.extend([_clamp_limit(limit), max(0, int(offset))])
         with self.reading() as connection:
             rows = connection.execute(
@@ -2141,6 +2183,135 @@ class WorkbenchStore:
         for row in rows:
             exported.append(export_catalog_entry(self._catalog_record(row)))
         return exported
+
+    def catalog_matched(
+        self,
+        *,
+        connector_id: str | None = None,
+        project: str | None = None,
+        search: str | None = None,
+        harness: str | None = None,
+        states: Sequence[str] | None = None,
+        include_absent: bool = False,
+    ) -> int:
+        """How many entries the same narrowing matches, page or no page.
+
+        The number an operator is shown next to a page. Counted by the database
+        over the whole filtered set rather than by the caller over the rows it
+        received, which is the difference between "12 of 340" and "12".
+        """
+        clauses, parameters = self._catalog_clauses(
+            connector_id=connector_id,
+            project=project,
+            search=search,
+            harness=harness,
+            states=states,
+            include_absent=include_absent,
+        )
+        with self.reading() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total FROM catalog_entry e "
+                "JOIN connector c ON c.connector_id = e.connector_id "
+                f"WHERE {' AND '.join(clauses)}",
+                parameters,
+            ).fetchone()
+        return int(row["total"])
+
+    def catalog_states(
+        self,
+        *,
+        connector_id: str | None = None,
+        project: str | None = None,
+        search: str | None = None,
+        harness: str | None = None,
+        include_absent: bool = False,
+    ) -> dict[str, int]:
+        """A primary-state histogram of everything the narrowing matches.
+
+        Deliberately takes no ``states``: this is what the filter chips count
+        from, and a chip narrowed by the chip already pressed would report its
+        own page back to itself. Project, title and harness do apply, because
+        those are narrowings the chips sit inside.
+        """
+        clauses, parameters = self._catalog_clauses(
+            connector_id=connector_id,
+            project=project,
+            search=search,
+            harness=harness,
+            states=None,
+            include_absent=include_absent,
+        )
+        with self.reading() as connection:
+            rows = connection.execute(
+                "SELECT e.primary_state AS primary_state, COUNT(*) AS total "
+                "FROM catalog_entry e "
+                "JOIN connector c ON c.connector_id = e.connector_id "
+                f"WHERE {' AND '.join(clauses)} GROUP BY e.primary_state",
+                parameters,
+            ).fetchall()
+        return {str(row["primary_state"]): int(row["total"]) for row in rows}
+
+    def catalog_projects(self, *, include_absent: bool = False) -> list[str]:
+        """Every project the catalog names, sorted, each named once.
+
+        Read from the catalog rather than from :meth:`projects`, which walks
+        retained runs and endings: the filter an operator picks from has to
+        offer the projects the plan list can actually be narrowed to.
+        """
+        clauses, parameters = self._catalog_clauses(
+            connector_id=None,
+            project=None,
+            search=None,
+            harness=None,
+            states=None,
+            include_absent=include_absent,
+        )
+        names: set[str] = set()
+        with self.reading() as connection:
+            rows = connection.execute(
+                "SELECT e.projects AS projects FROM catalog_entry e "
+                "JOIN connector c ON c.connector_id = e.connector_id "
+                f"WHERE {' AND '.join(clauses)}",
+                parameters,
+            ).fetchall()
+        for row in rows:
+            for name in _decoded_list(row["projects"]) or []:
+                text = str(name).strip()
+                if text:
+                    names.add(text)
+        return sorted(names)
+
+    def catalog_harnesses(self, *, include_absent: bool = False) -> list[str]:
+        """Every harness the catalog names, sorted."""
+        clauses, parameters = self._catalog_clauses(
+            connector_id=None,
+            project=None,
+            search=None,
+            harness=None,
+            states=None,
+            include_absent=include_absent,
+        )
+        with self.reading() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT e.harness AS harness FROM catalog_entry e "
+                "JOIN connector c ON c.connector_id = e.connector_id "
+                f"WHERE {' AND '.join(clauses)} ORDER BY e.harness",
+                parameters,
+            ).fetchall()
+        return [str(row["harness"]) for row in rows if row["harness"]]
+
+    def incident_diagnostics(
+        self, *, limit: int = incidents.DEFAULT_DIAGNOSTICS_LIMIT
+    ) -> list[dict[str, Any]]:
+        """Recent incidents and their delivery states, newest first.
+
+        A read, and only a read. :class:`~asl_workbench.incidents.IncidentEngine`
+        also exposes these, but constructing one is a recovery step that rewrites
+        whatever a dead process left publishing -- which is exactly right when a
+        deployment starts and exactly wrong inside a GET.
+        """
+        with self.reading() as connection:
+            return incidents.diagnostics(connection, limit=limit)
 
     @staticmethod
     def _catalog_record(row: sqlite3.Row) -> dict[str, Any]:
