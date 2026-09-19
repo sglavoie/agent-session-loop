@@ -128,14 +128,16 @@ def _ephemeral_roots() -> tuple[Path, ...]:
     test. Resolving through symlinks matters on macOS, where ``/tmp`` and the
     per-user ``TMPDIR`` both live under ``/private``.
 
-    ``/tmp`` is listed explicitly because it is not implied by the other two:
+    ``/tmp`` and ``/var/tmp`` are listed explicitly because neither is implied
+    by the other two:
     :func:`tempfile.gettempdir` honours ``TMPDIR``, which on macOS is the
     per-user ``/var/folders/.../T`` directory, so ``/tmp`` -- canonically
     ``/private/tmp`` -- would otherwise reach the classifier unclassified and
     fail the write guard closed the moment a turn named a scratch file there.
+    The same applies to ``/var/tmp`` (``/private/var/tmp`` on macOS).
     """
     roots: dict[Path, None] = {}
-    for value in (tempfile.gettempdir(), os.environ.get("TMPDIR"), "/tmp"):
+    for value in (tempfile.gettempdir(), os.environ.get("TMPDIR"), "/tmp", "/var/tmp"):
         if not value:
             continue
         roots[workspaces.canonicalize_filesystem_path(value)] = None

@@ -148,17 +148,40 @@ class ExternalWriteEvidenceBoundaryTests(unittest.TestCase):
 
 
 class EphemeralRootTests(unittest.TestCase):
-    def test_slash_tmp_is_listed_even_when_tmpdir_points_elsewhere(self) -> None:
+    def test_standard_temp_roots_are_listed_with_other_tmpdir(self) -> None:
         # `tempfile.gettempdir` honours TMPDIR, which on macOS is the per-user
-        # `/var/folders/.../T`; without the explicit entry `/tmp` would reach
-        # the classifier unclassified and fail a scratch file closed.
+        # `/var/folders/.../T`; without explicit entries, `/tmp` and `/var/tmp`
+        # would reach the classifier unclassified and fail scratch files closed.
         roots = external_write_evidence._ephemeral_roots()
 
         self.assertIn(workspaces.canonicalize_filesystem_path("/tmp"), roots)
+        self.assertIn(workspaces.canonicalize_filesystem_path("/var/tmp"), roots)
         self.assertIn(
             workspaces.canonicalize_filesystem_path(tempfile.gettempdir()), roots
         )
         self.assertEqual(len(set(roots)), len(roots))
+
+        var_tmp = workspaces.canonicalize_filesystem_path("/var/tmp")
+        options = {
+            "control_plane_roots": (),
+            "repository_roots": (),
+            "workspace_root": Path("/unrelated-workspace"),
+            "ephemeral_roots": roots,
+        }
+        self.assertEqual(
+            "ephemeral-path",
+            external_write_evidence._classify_external_path(
+                _resolved(var_tmp), **options
+            ),
+        )
+        repository = var_tmp / "registered-repository"
+        self.assertEqual(
+            "workspace-repository",
+            external_write_evidence._classify_external_path(
+                _resolved(repository / "file", git_root=repository),
+                **{**options, "repository_roots": (repository,)},
+            ),
+        )
 
 
 class ExternalPathDigestTests(unittest.TestCase):
