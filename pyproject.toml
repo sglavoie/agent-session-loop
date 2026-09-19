@@ -27,8 +27,11 @@ extend-include = ["bin/.local/bin/claude-lint-hook"]
 "tests/test_workbench_portable.py" = "py313"
 # The staging harness is copied to the Pi and run there beside the unpacked
 # release, so it is held to the Pi's interpreter for the same reason and by the
-# same mechanism.
+# same mechanism. The cutover harness is copied there for the same purpose, and
+# on the day it runs the Pi is mid-migration, which is the worst moment to
+# discover a syntax error.
 "tests/workbench_staging.py" = "py313"
+"tests/workbench_cutover.py" = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]

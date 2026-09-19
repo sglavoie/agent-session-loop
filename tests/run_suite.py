@@ -353,6 +353,11 @@ INTEGRATION_MODULES = (
     # same reason: it builds the release's own native definitions and restages
     # them, so it exercises the packaging code rather than a description of it.
     "tests.test_workbench_staging",
+    # The harness that drives the cutover the rehearsal above was a rehearsal
+    # for. Integration for the same reason again, and one of its own: it writes
+    # real prefixes and takes real SQLite backups of them, because a backup
+    # proved against a fake database is a claim about the fake.
+    "tests.test_workbench_cutover",
     # Integration in the fullest sense the repository has: one plan corpus, the
     # real observation source, a connector, a link that can be made to fail, the
     # Pi's store, and the remote provider behind a loopback socket, with the
