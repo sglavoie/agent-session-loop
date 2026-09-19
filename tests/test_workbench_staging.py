@@ -344,6 +344,83 @@ class RestagedLaunchAgent(TemporaryCase):
         with self.assertRaises(staging.StagingError):
             staging.restage_plist(self.plist(), label=lifecycle.LABEL)
 
+    def fixtures(self) -> Path:
+        """The rehearsal's own state, with everything the environment names."""
+        root = self.root / staging.STAGING_FIXTURE_NAME
+        (root / "tls").mkdir(parents=True, exist_ok=True)
+        (root / "tls" / "bundle.pem").write_bytes(b"-- never read here --\n")
+        (root / "xdg").mkdir(exist_ok=True)
+        (root / "tmp").mkdir(exist_ok=True)
+        return root
+
+    def test_the_environment_is_extended_and_nothing_else_moves(self) -> None:
+        """Extended rather than replaced, and the rest of the file is the release's.
+
+        The connector is started with no inherited environment at all, so
+        anything dropped here is a variable the release decided it needed and
+        the rehearsal quietly took away.
+        """
+        added = staging.staging_environment(self.fixtures())
+        shipped = plistlib.loads(self.plist())
+        staged = plistlib.loads(staging.restage_plist(self.plist(), environment=added))
+
+        self.assertEqual(
+            staged["EnvironmentVariables"],
+            {**shipped["EnvironmentVariables"], **added},
+        )
+        staged.pop("EnvironmentVariables")
+        shipped.pop("EnvironmentVariables")
+        self.assertEqual(staged.pop("Label"), staging.STAGING_LABEL)
+        shipped.pop("Label")
+        self.assertEqual(staged, shipped)
+
+    def test_the_rehearsal_names_a_trust_store_and_both_default_plan_roots(
+        self,
+    ) -> None:
+        """Whichever of the three is missing is a resource production owns.
+
+        The plan roots are the sharper one: the connector scans its named roots
+        *and* the defaults, and the defaults on this Mac are where the
+        operator's real plans live -- so a rehearsal that left them alone would
+        publish them to a staging store and have no fixture corpus at all.
+        """
+        added = staging.staging_environment(self.fixtures())
+
+        self.assertEqual(
+            set(added), {staging.TRUST_VARIABLE, "XDG_DATA_HOME", "TMPDIR"}
+        )
+        for name, value in added.items():
+            with self.subTest(variable=name):
+                self.assertIn(staging.STAGING_FIXTURE_NAME, Path(value).parts)
+                self.assertTrue(Path(value).exists(), value)
+
+    def test_a_variable_the_release_already_sets_is_not_overwritten(self) -> None:
+        """At that point the rehearsal would be changing the release's mind."""
+        parsed = plistlib.loads(self.plist())
+        parsed["EnvironmentVariables"] = {
+            **parsed["EnvironmentVariables"],
+            staging.TRUST_VARIABLE: "/etc/ssl/cert.pem",
+        }
+        with self.assertRaises(staging.StagingError):
+            staging.restage_plist(
+                plistlib.dumps(parsed),
+                environment=staging.staging_environment(self.fixtures()),
+            )
+
+    def test_a_value_outside_the_rehearsals_own_state_is_refused(self) -> None:
+        """A path somewhere else is one the cleanup step would leave behind."""
+        root = self.fixtures()
+        stray = self.root / "cert.pem"
+        stray.write_bytes(b"-- stray --\n")
+        for value in (str(stray), "relative.pem", str(root / "absent")):
+            with (
+                self.subTest(value=value),
+                self.assertRaises(staging.StagingError),
+            ):
+                staging.restage_plist(
+                    self.plist(), environment={staging.TRUST_VARIABLE: value}
+                )
+
 
 class StagingManager(TemporaryCase):
     """The release's manager, pointed at names production is not using."""

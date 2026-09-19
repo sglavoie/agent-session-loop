@@ -38,8 +38,8 @@ The rewrite is verified against what the release itself would have written --
 recognise -- so a definition that changed shape upstream fails here instead of
 being silently re-emitted from memory.
 
-The ``ExecStart`` rewrite is the one substantive deviation this rehearsal
-makes, and it is recorded rather than hidden: ``asl_workbench.runtime``'s
+The ``ExecStart`` rewrite is the first of the two substantive deviations this
+rehearsal makes, and it is recorded rather than hidden: ``asl_workbench.runtime``'s
 ``main`` binds :data:`~asl_workbench.integrations.PI_SITE`'s fixed
 ``127.0.0.1:8766``, which the production service is already holding, so the
 staging unit starts the same ``runtime.run`` with the staging site passed as
@@ -47,6 +47,18 @@ the keyword argument it already accepts. Everything the started process then
 does -- the prefix it reads, the release it reports, the lock it takes, the
 store it opens, the application it serves, the readiness note the installer
 waits on -- is the candidate release's own code.
+
+The second is the staged connector's environment. The release fixes it -- no
+inherited variables at all, which is right, because a launch agent starts from
+a session nobody chose -- and two facts about a *rehearsal* cannot be spelled
+anywhere the release would read them: which certificate terminates a staging
+origin that Serve is not allowed to publish, and where the default plan roots
+are, given that the real ones hold the operator's actual plans and a rehearsal
+that published one of them would not have a fixture corpus.
+:func:`staging_environment` names the three variables and
+:func:`restage_plist` adds them, refusing any the release already set and any
+whose value is not a path under the rehearsal's own state. Nothing about what
+the connector does with a frame changes.
 
 **A report that cannot be written by hand.** :class:`Journal` is append-only
 and timestamped, and :meth:`Journal.render` refuses to produce a document
@@ -107,6 +119,13 @@ PRODUCTION_PREFIX_NAME = "asl-companion"
 #: Outside every prefix, because they are the rehearsal's rather than any
 #: installation's, and removing an installation must not remove the evidence.
 STAGING_FIXTURE_NAME = "asl-workbench-staging-fixtures"
+
+#: The environment variable that names a trust store to the connector's
+#: ``ssl`` module. The rehearsal's staging origin is terminated by a
+#: certificate no public CA signed, so this is how the staged connector is
+#: told to trust exactly it -- and, because it replaces the default store
+#: rather than adding to it, exactly nothing else.
+TRUST_VARIABLE = "SSL_CERT_FILE"
 
 #: The checks session 22 owes, restated here so the Pi half can be driven
 #: without this repository. ``tests/test_workbench_staging.py`` pins this to
@@ -337,13 +356,59 @@ def staging_service_arguments(
     return [python, "-E", "-s", "-B", "-c", staging_serve_program(site), str(prefix)]
 
 
-def restage_plist(content: bytes, *, label: str = STAGING_LABEL) -> bytes:
+def staging_environment(fixtures: Path) -> dict[str, str]:
+    """The variables the staged connector needs and the release cannot name.
+
+    Three, and each one is a resource the rehearsal must not share:
+
+    * :data:`TRUST_VARIABLE` -- the rehearsal terminates its own TLS, so the
+      staging origin is presented by a certificate no public CA signed and the
+      connector, which builds ``ssl.create_default_context()``, has to be told
+      which one to trust.
+    * ``XDG_DATA_HOME`` and ``TMPDIR`` -- the connector's observation source
+      scans its named plan roots *and* the default ones, which is right for a
+      deployment that is meant to see everything on the machine and wrong for a
+      rehearsal: those defaults are where the operator's real plans are, and
+      publishing one of them to a staging store would make the fixture corpus
+      not a fixture. Pointed at directories that exist and are empty, so the
+      scan runs and finds nothing rather than being skipped.
+
+    The release cannot name any of the three, because all three are facts about
+    a rehearsal rather than about a deployment. They are still checked the way
+    a prefix is: every value lives under the rehearsal's own state, so cleanup
+    that removes that directory removes these too.
+    """
+    root = Path(fixtures)
+    return {
+        TRUST_VARIABLE: str(root / "tls" / "bundle.pem"),
+        "XDG_DATA_HOME": str(root / "xdg"),
+        "TMPDIR": str(root / "tmp"),
+    }
+
+
+def restage_plist(
+    content: bytes,
+    *,
+    label: str = STAGING_LABEL,
+    environment: Mapping[str, str] | None = None,
+) -> bytes:
     """The launch agent the release wrote, under a name launchd has free.
 
-    Only the ``Label`` moves. It is the one field that is an identity rather
+    Only the ``Label`` and, when the rehearsal has variables of its own, the
+    environment move. The label is the one field that is an identity rather
     than a description, and launchd keys the service on the value inside the
     file rather than on the file's name -- so renaming the file alone would
     bootstrap a second definition of the running Companion.
+
+    ``environment`` is the second staging deviation, and it exists for the same
+    reason the ``ExecStart`` override exists on the Pi side: the rehearsal has
+    to move something the release fixes, and the release is not the thing under
+    rehearsal's control. It *extends* the environment the release wrote and
+    never replaces it -- a variable the release already sets is refused rather
+    than overwritten, because at that point the rehearsal would be changing a
+    decision the release made -- and every value has to be a path under the
+    rehearsal's own state, so nothing it names outlives cleanup. See
+    :func:`staging_environment` for what is passed and why.
     """
     parsed = plistlib.loads(content)
     if parsed.get("Label") != lifecycle.LABEL:
@@ -353,7 +418,25 @@ def restage_plist(content: bytes, *, label: str = STAGING_LABEL) -> bytes:
         )
     if label == lifecycle.LABEL:
         raise StagingError("the staging label may not be the production label")
-    return plistlib.dumps({**parsed, "Label": label}, sort_keys=True)
+    staged: dict[str, Any] = {**parsed, "Label": label}
+    if environment:
+        shipped = dict(parsed.get("EnvironmentVariables") or {})
+        for name, value in sorted(environment.items()):
+            if name in shipped:
+                raise StagingError(
+                    f"the release sets {name} itself; a rehearsal extends the "
+                    "environment it was given and replaces nothing in it"
+                )
+            path = Path(value)
+            if not path.is_absolute() or STAGING_FIXTURE_NAME not in path.parts:
+                raise StagingError(
+                    f"{name} must name a path under {STAGING_FIXTURE_NAME}, "
+                    "which is what cleanup removes"
+                )
+            if not path.exists():
+                raise StagingError(f"{name} names {path}, which does not exist")
+        staged["EnvironmentVariables"] = {**shipped, **environment}
+    return plistlib.dumps(staged, sort_keys=True)
 
 
 #: The escapes :func:`~asl_workbench.lifecycle.quote_unit` writes, read back.
@@ -442,11 +525,17 @@ class StagingNativeManager(lifecycle.NativeManager):
     """
 
     def __init__(
-        self, role: str, *, prefix: Path, site: IntegrationSite | None = None
+        self,
+        role: str,
+        *,
+        prefix: Path,
+        site: IntegrationSite | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         self.role = role
         self.prefix = Path(prefix)
         self.site = site or staging_site()
+        self.environment = dict(environment) if environment else None
         self.label, self.unit = staging_names(self.prefix)
         self.domain = f"gui/{os.getuid()}"
         self.destination = Path.home() / (
@@ -522,7 +611,9 @@ class StagingNativeManager(lifecycle.NativeManager):
         """The definition the installation produced, under staging names."""
         content = definition_path.read_bytes()
         if self.role == lifecycle.ROLE_CONNECTOR:
-            return restage_plist(content, label=self.label)
+            return restage_plist(
+                content, label=self.label, environment=self.environment
+            )
         return restage_unit(content, site=self.site)
 
     def stop(self) -> None:
@@ -554,12 +645,18 @@ class StagingNativeManager(lifecycle.NativeManager):
             raise StagingError("staging service did not come back")
 
 
-def staging_manager_factory(prefix: Path, site: IntegrationSite | None = None) -> Any:
+def staging_manager_factory(
+    prefix: Path,
+    site: IntegrationSite | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> Any:
     """A ``manager_factory`` for :class:`~asl_workbench.lifecycle.Installation`."""
     resolved = site or staging_site()
 
     def factory(role: str) -> StagingNativeManager:
-        return StagingNativeManager(role, prefix=prefix, site=resolved)
+        return StagingNativeManager(
+            role, prefix=prefix, site=resolved, environment=environment
+        )
 
     return factory
 
@@ -783,10 +880,16 @@ def _window(value: Any, floor: float, ceiling: float, where: str) -> float:
 # rehearsal makes to the other host is a line somebody can read back.
 
 
-def _installation(prefix: Path, site: IntegrationSite) -> lifecycle.Installation:
+def _installation(
+    prefix: Path,
+    site: IntegrationSite,
+    environment: Mapping[str, str] | None = None,
+) -> lifecycle.Installation:
     check_prefix_isolated(prefix)
     return lifecycle.Installation(
-        prefix, manager_factory=staging_manager_factory(prefix, site), site=site
+        prefix,
+        manager_factory=staging_manager_factory(prefix, site, environment),
+        site=site,
     )
 
 
@@ -815,6 +918,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--sha256")
     parser.add_argument("--python")
     parser.add_argument("--target-id")
+    parser.add_argument("--fixtures", type=Path)
     parser.add_argument("--role", default=lifecycle.ROLE_SERVICE)
     parser.add_argument("--activate", action="store_true")
     parser.add_argument("--application-only", action="store_true")
@@ -857,8 +961,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if not args.prefix:
         parser.error("--prefix is required")
+    # Only the Mac half has an environment of its own: the Pi's staging unit
+    # moves its site in the ``ExecStart`` line instead, and nothing about the
+    # service depends on where a connector's plan roots are.
+    environment = staging_environment(args.fixtures) if args.fixtures else None
     if args.action == "restart":
-        StagingNativeManager(args.role, prefix=args.prefix, site=site).restart()
+        StagingNativeManager(
+            args.role, prefix=args.prefix, site=site, environment=environment
+        ).restart()
         print(json.dumps({"restarted": args.role}, sort_keys=True))
         return 0
     if args.action == "migrate":
@@ -872,7 +982,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         return 0
-    installation = _installation(args.prefix, site)
+    installation = _installation(args.prefix, site, environment)
     if args.action in ("install", "upgrade"):
         if not args.python:
             parser.error("--python is required; a release runs on a named interpreter")
