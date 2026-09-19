@@ -609,9 +609,16 @@ def _fits_frame(payload: Mapping[str, Any]) -> bool:
 
 
 def _snapshot_selection_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
-    """Reserve bounded snapshot space for live work, then freshest blockers."""
+    """Reserve bounded space for unanswered questions, then live work."""
     activity = _epoch(row.get("last_activity_at")) or _epoch(row.get("run_started_at"))
+    question = row.get("question")
+    waiting_for_reply = bool(
+        isinstance(question, Mapping)
+        and question.get("question_id")
+        and question.get("unanswered_count")
+    )
     return (
+        not waiting_for_reply,
         row.get("primary_state") not in {"running", "verifying"},
         activity is None,
         -(activity or 0.0),
@@ -655,7 +662,7 @@ def build_runs_snapshot(
 
     # Urgency ordering puts even undated invalid plans ahead of live work.
     # Select the bounded working set separately so a backlog cannot crowd out
-    # the runs this client is supposed to observe.
+    # questions awaiting a person or the live runs this client observes.
     rows.sort(key=_snapshot_selection_key)
     truncated = len(rows) > MAX_ROWS
     rows = rows[:MAX_ROWS]
