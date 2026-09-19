@@ -245,6 +245,11 @@ _CONNECTOR_TESTS = "scripts:tests/test_workbench_connector.py"
 #: when nothing carries it. Named separately from the connector module because
 #: the two are the two ends, and a test of one proves nothing about the other.
 _UPLINK_TESTS = "scripts:tests/test_workbench_uplink.py"
+#: The two ends over an actual socket, which no other module covers: the
+#: full-stack module supplies the network itself and says so. Named on the
+#: uplink route because that is the surface where "every lane is covered and
+#: nothing carries a frame" was true until a deployed rehearsal found it.
+_WIRE_TESTS = "scripts:tests/test_workbench_wire.py"
 _REMOTE_READ_TESTS = "scripts:tests/test_workbench_remote_reads.py"
 _REMOTE_ACTION_TESTS = "scripts:tests/test_workbench_remote_actions.py"
 _HTTP_TESTS = "scripts:tests/test_workbench_http.py"
@@ -1034,7 +1039,13 @@ CAPABILITIES: tuple[Capability, ...] = (
         "whatever request the service is holding, so a detail read and a "
         "control leave on the next frame the Mac sends without a poll route "
         "or a socket held open.",
-        coverage=(_UPLINK_TESTS, _HTTP_TESTS, _FULLSTACK_TESTS, _TRANSPORT_TESTS),
+        coverage=(
+            _UPLINK_TESTS,
+            _WIRE_TESTS,
+            _HTTP_TESTS,
+            _FULLSTACK_TESTS,
+            _TRANSPORT_TESTS,
+        ),
     ),
     _http(
         "GET /v1/health",

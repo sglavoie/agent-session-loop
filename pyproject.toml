@@ -313,6 +313,7 @@ module = [
     "asl_workbench.service",
     "asl_workbench.store",
     "asl_workbench.transport",
+    "asl_workbench.uplink",
 ]
 enable_error_code = [
     "arg-type",

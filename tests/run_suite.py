@@ -359,6 +359,11 @@ INTEGRATION_MODULES = (
     # launch children replaced by an inert interpreter rather than the launch
     # path. Nothing here would tell the truth without all of it running.
     "tests.test_workbench_fullstack",
+    # The one hop the module above supplies for itself. Integration because it
+    # is nothing but real moving parts: a listening service, a connector loop
+    # in its own thread, a real clock, and bounded waits for frames to cross a
+    # socket. The lane that runs on a frozen clock cannot hold it.
+    "tests.test_workbench_wire",
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
     "tests.test_asl_overseer_e2e",

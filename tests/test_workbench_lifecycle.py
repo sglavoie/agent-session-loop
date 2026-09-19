@@ -784,6 +784,38 @@ class ConnectorLifecycleTest(unittest.TestCase):
         with self.assertRaises(lifecycle.LifecycleError):
             lifecycle.connector_settings(self.prefix)
 
+    def test_acting_remotely_is_off_until_the_prefix_says_otherwise(self) -> None:
+        """The launch agent carries the permission the prefix was given.
+
+        Without this, a connector installed natively can observe and answer
+        reads and can never carry out a command, because the flag that builds
+        its performer only ever existed on the command line. The default stays
+        off: an installation that never mentioned it is not asking to be acted
+        through.
+        """
+        base = connector_configuration(self.prefix)
+        self.assertNotIn(
+            "--allow-remote-actions",
+            lifecycle.connector_arguments(self.prefix, base, sys.executable),
+        )
+        allowed = {
+            **base,
+            "settings": {**base["settings"], "remote_actions": True},
+        }
+        self.assertEqual(
+            lifecycle.connector_arguments(self.prefix, allowed, sys.executable)[-1],
+            "--allow-remote-actions",
+        )
+
+    def test_a_permission_spelled_as_anything_but_a_boolean_is_refused(self) -> None:
+        base = connector_configuration(self.prefix)
+        write_json(
+            self.prefix / CONFIG_PATH,
+            {**base, "settings": {**base["settings"], "remote_actions": "false"}},
+        )
+        with self.assertRaises(lifecycle.LifecycleError):
+            lifecycle.connector_settings(self.prefix)
+
     def test_removing_the_connector_unloads_it_and_keeps_the_token(self) -> None:
         self.installation().install(python=sys.executable, activate=True)
         status = self.installation().remove()

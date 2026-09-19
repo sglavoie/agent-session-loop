@@ -473,6 +473,13 @@ def connector_settings(prefix: Path) -> dict[str, Any]:
         settings.get("public_origin"), str
     ):
         raise LifecycleError("connector configuration needs a public origin")
+    if "remote_actions" in settings and not isinstance(
+        settings["remote_actions"], bool
+    ):
+        # Checked rather than coerced: every non-empty string is true, so a
+        # configuration reading ``"false"`` would turn acting on somebody's
+        # plans on. A permission is a boolean or it is a mistake.
+        raise LifecycleError("remote_actions must be true or false")
     return data
 
 
@@ -644,6 +651,15 @@ def connector_arguments(
     ``/usr/bin/env python3`` there resolves to whatever the system ships --
     which on this Mac is old enough that the worker runtime is a SyntaxError.
     Naming the interpreter makes the one that was verified the one that runs.
+
+    ``remote_actions`` is the one capability this file decides, because it is
+    the one the operator decides: acting on a plan from a phone is opt-in, and
+    a connector started without the flag announces itself observation-only and
+    is refused a mutating frame by construction rather than by configuration.
+    Absent, it stays off -- an installation that never said so gets the safer
+    of the two -- and it is spelled in the prefix rather than in the launch
+    agent so an operator changes their mind by editing configuration and
+    reinstalling, not by hand-editing a generated definition.
     """
     arguments = [
         python,
@@ -663,6 +679,8 @@ def connector_arguments(
     ]
     for root in settings["plan_roots"]:
         arguments += ["--plan-root", str(root)]
+    if settings["settings"].get("remote_actions"):
+        arguments.append("--allow-remote-actions")
     return arguments
 
 
