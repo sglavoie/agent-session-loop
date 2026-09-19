@@ -347,6 +347,10 @@ INTEGRATION_MODULES = (
     # and real packed artifacts: synthetic repositories are built and their
     # commits packed, because a fake digest would agree with a fake packer.
     "tests.test_workbench_acceptance",
+    # The harness on the other side of the same document. Integration for the
+    # same reason: it builds the release's own native definitions and restages
+    # them, so it exercises the packaging code rather than a description of it.
+    "tests.test_workbench_staging",
     # Integration in the fullest sense the repository has: one plan corpus, the
     # real observation source, a connector, a link that can be made to fail, the
     # Pi's store, and the remote provider behind a loopback socket, with the
