@@ -414,14 +414,17 @@ class LinkTests(WireCase):
         reached :meth:`Uplink.ingest` at all would have been an unpaired
         machine writing into the store's observation tables.
 
-        The answer is the one an unknown path gets, not a 403, because the
-        remote policy conceals a route the caller may not have -- on a surface
-        reachable from a tailnet, confirming that an ingest path exists is
-        itself worth withholding.
+        The answer is 401 rather than a concealing 404: this caller presented a
+        bearer and it was not accepted, which is the one case where the service
+        says so. Concealment is for callers who proved nothing at all. The cost
+        is a bit of route existence leaked to whoever already guessed the path
+        and made up a token; the benefit is that a connector whose credential
+        expired is told what went wrong instead of being sent to debug a
+        deployment that is answering correctly.
         """
         self.start_uploading()
         status, _ = self.upload(b'{"kind": "observation"}', token="x" * 43)
-        self.assertEqual(404, status)
+        self.assertEqual(401, status)
 
     def test_a_body_that_is_not_a_frame_is_refused_and_the_link_survives(
         self,

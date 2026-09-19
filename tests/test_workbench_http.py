@@ -96,6 +96,7 @@ from asl_workbench.http import (
     success_payload,
     unavailable_from,
 )
+from asl_workbench.integrations import PI_SITE, container_access_checks
 from asl_workbench.observation import ObservationPolicy
 from asl_workbench.operations import (
     METHOD_STOP_AFTER_CURRENT,
@@ -583,14 +584,33 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(local_payload["reason"], "internal-error")
         self.assertEqual(remote_payload["reason"], "internal-error")
 
-    def test_a_forbidden_route_is_concealed_on_the_private_network(self) -> None:
-        local = application(role=ROLE_SUMMARY)
-        remote = application(role=ROLE_SUMMARY, policy=REMOTE_POLICY)
+    def test_a_route_is_concealed_from_a_caller_who_proved_nothing(self) -> None:
+        local = application(role=ROLE_PUBLIC)
+        remote = application(role=ROLE_PUBLIC, policy=REMOTE_POLICY)
         request = build("GET", "/api/registry")
         self.assertEqual(local.handle(request).status, 403)
         remote_response = remote.handle(request)
         self.assertEqual(remote_response.status, 404)
         self.assertEqual(document(remote_response)["reason"], "not-found")
+
+    def test_a_caller_who_proved_a_role_is_told_which_role_is_required(self) -> None:
+        """Concealment stops at the callers it was protecting the route from.
+
+        A summary credential on an owner route is the wrong credential, not a
+        wrong URL, and 404 would send its holder looking for a typo. The
+        Companion drew the line here and the Homepage container's access check
+        reads it back from inside the container, so the two modes agree on this
+        one and only the anonymous caller above is kept guessing.
+        """
+        for policy in (LOCAL_POLICY, REMOTE_POLICY):
+            with self.subTest(policy="remote" if policy is REMOTE_POLICY else "local"):
+                app = application(role=ROLE_SUMMARY, policy=policy)
+                response = app.handle(build("GET", "/api/registry"))
+                self.assertEqual(response.status, 403)
+                payload = document(response)
+                self.assertEqual(payload["reason"], "forbidden")
+                self.assertEqual(payload["details"]["required_role"], ROLE_OWNER)
+                self.assertEqual(payload["details"]["role"], ROLE_SUMMARY)
 
 
 class CallTests(unittest.TestCase):
@@ -759,6 +779,94 @@ class AuthenticatorTests(unittest.TestCase):
         principal = authenticator.authenticate(build("GET", "/"), route)
         self.assertEqual(principal.role, ROLE_PUBLIC)
         self.assertFalse(principal.is_owner)
+
+    def test_a_credential_that_was_not_accepted_is_told_so(self) -> None:
+        """Offering something broken is not the same as offering nothing.
+
+        The Companion answered 401 here and the unified service has to as well,
+        or the only thing an expired token gets is the answer a typo gets.
+        """
+        authenticator = OwnerIdentityAuthenticator(CredentialStore(), owner=None)
+        route = ROUTES_BY_KEY[("GET", "/api/summary")]
+        with self.assertRaises(HttpRefusal) as caught:
+            authenticator.authenticate(
+                build("GET", "/", headers={"Authorization": "Bearer nonsense"}), route
+            )
+        self.assertEqual(caught.exception.status, 401)
+        self.assertEqual(caught.exception.reason, "unauthorized")
+
+    def test_a_public_route_does_not_examine_a_credential_at_all(self) -> None:
+        """The route a monitor polls answers the same way to everyone.
+
+        It asks for no proof, so an unusable proof offered alongside is not what
+        would make the request fail -- and a health check that started answering
+        401 to a client with a stale token would take the monitor down with it.
+        """
+        authenticator = OwnerIdentityAuthenticator(CredentialStore(), owner=None)
+        route = ROUTES_BY_KEY[("GET", "/v1/health")]
+        principal = authenticator.authenticate(
+            build("GET", "/", headers={"Authorization": "Bearer nonsense"}), route
+        )
+        self.assertEqual(principal.role, ROLE_PUBLIC)
+
+    def test_an_owner_proved_by_identity_outranks_a_broken_token(self) -> None:
+        authenticator = OwnerIdentityAuthenticator(
+            CredentialStore(), owner="sglavoie@example"
+        )
+        route = ROUTES_BY_KEY[("GET", "/api/registry")]
+        principal = authenticator.authenticate(
+            build(
+                "GET",
+                "/",
+                headers={
+                    IDENTITY_HEADER: "sglavoie@example",
+                    "Authorization": "Bearer nonsense",
+                },
+            ),
+            route,
+        )
+        self.assertEqual(principal.role, ROLE_OWNER)
+
+
+class ContainerAccessTests(unittest.TestCase):
+    """The four answers the Homepage container checks for, from the application.
+
+    This is the one boundary in the system that is verified by a third party on
+    every integration run: :func:`asl_workbench.integrations.verify_container`
+    executes :func:`~asl_workbench.integrations.container_access_script` inside
+    the Homepage container and refuses the integration if any row disagrees.
+    Driving the same table through the application here is what makes that a
+    test failure rather than a cutover failure -- which is precisely how it was
+    found, one session late.
+    """
+
+    def probe_application(self) -> tuple[Application, str]:
+        store = CredentialStore()
+        credential, token = issue(ROLE_SUMMARY, created_at=NOW, label="homepage")
+        store.add(credential)
+        application = Application(
+            RecordingProvider(mode=MODE_REMOTE),
+            OwnerIdentityAuthenticator(store, owner="sglavoie@example"),
+            policy=REMOTE_POLICY,
+        )
+        return application, token
+
+    def test_every_row_of_the_container_check_is_the_answer_it_expects(self) -> None:
+        app, summary_token = self.probe_application()
+        for path, kind, expected in container_access_checks(PI_SITE):
+            token = summary_token if kind == "token" else kind
+            headers = {"Authorization": f"Bearer {token}"} if token else {}
+            with self.subTest(path=path, credential=kind):
+                response = app.handle(build("GET", path, headers=headers))
+                self.assertEqual(response.status, expected)
+
+    def test_the_table_still_describes_four_distinct_questions(self) -> None:
+        # A row that silently collapsed into another would keep passing while
+        # covering less; the interesting property is that the four answers are
+        # not the same answer.
+        rows = container_access_checks(PI_SITE)
+        self.assertEqual(len(rows), 4)
+        self.assertEqual({row[2] for row in rows}, {200, 401, 403})
 
 
 class StaticTests(unittest.TestCase):

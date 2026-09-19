@@ -996,6 +996,21 @@ class OwnerIdentityAuthenticator:
     so an owner who also happens to hold a summary credential is still the
     owner. A caller who proves nothing is public rather than refused; the
     refusal belongs to whatever they then ask for.
+
+    Offering a credential the application does not accept is a different thing
+    from offering none, and it answers ``401`` rather than falling through as
+    public. This is the boundary the Companion drew, in the same two places and
+    for the same reason: a caller holding a broken credential needs to be told
+    that it is broken, or they will spend the afternoon reading the route table
+    instead of reissuing a token. The distinction is worth one bit of route
+    existence -- and only to a caller who already went to the trouble of
+    presenting something -- because the alternative is a private service whose
+    only answer to an expired token is the answer a typo gets.
+
+    A public route is exempt, again as the Companion had it: it asks for no
+    proof, so an unusable proof offered alongside is not what makes the request
+    fail. The health route a monitor polls stays the one thing that answers the
+    same way to everyone.
     """
 
     def __init__(self, store: CredentialStore, *, owner: str | None) -> None:
@@ -1003,13 +1018,19 @@ class OwnerIdentityAuthenticator:
         self._owner = owner
 
     def authenticate(self, request: Request, route: Route) -> Principal:
-        del route
+        presented = request.header("authorization")
         authorization = resolve_role(
             self._store,
-            authorization=request.header("authorization"),
+            authorization=presented,
             identity=request.header(IDENTITY_HEADER),
             owner=self._owner,
         )
+        if (
+            route.role != ROLE_PUBLIC
+            and authorization.role == ROLE_PUBLIC
+            and parse_authorization(presented) is not None
+        ):
+            raise HttpRefusal(401, "unauthorized", "the credential was not accepted")
         return Principal(
             role=authorization.role,
             credential_id=authorization.credential_id,
@@ -1337,9 +1358,15 @@ class Application:
     def _check_role(self, route: Route, principal: Principal) -> None:
         if role_satisfies(principal.role, route.role):
             return
-        if self.policy.conceal_forbidden:
+        if self.policy.conceal_forbidden and principal.role == ROLE_PUBLIC:
             # The same answer an unknown path gets. On a reachable surface the
-            # existence of an owner-only route is itself worth not confirming.
+            # existence of an owner-only route is itself worth not confirming
+            # -- to a caller who proved nothing. Concealment stops there: a
+            # caller who did prove a role and still cannot reach this route has
+            # the wrong credential, not a wrong URL, and 404 would send them
+            # looking for a typo. That is the split the Companion drew, and the
+            # Homepage container's own access check reads it back from inside
+            # the container on every verify.
             raise HttpRefusal(404, "not-found", f"unknown route {route.path}")
         raise HttpRefusal(
             403,

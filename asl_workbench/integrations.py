@@ -425,23 +425,40 @@ def homepage_documents(
     return compose, services
 
 
+def container_access_checks(
+    site: IntegrationSite,
+) -> tuple[tuple[str, str | None, int], ...]:
+    """The four requests the container makes, and the answer each one must get.
+
+    Named rather than written into the script below, because this is a contract
+    between two modules and a contract embedded in a JavaScript string literal
+    cannot be asserted against the application that has to honour it.
+    ``tests/test_workbench_http.py`` drives every row of this table through
+    :class:`~asl_workbench.http.Application`, so a change to the service's
+    boundary fails there rather than inside a container at cutover.
+
+    Each row is a different question. A summary credential reads the summary; an
+    unaccepted one is told it was not accepted rather than shown a wall; the
+    summary credential may not read owner data and is told *that* rather than
+    that the route does not exist; and the health route a monitor polls needs no
+    credential at all.
+    """
+    return (
+        (site.summary_path, "token", 200),
+        (site.summary_path, "invalid", 401),
+        (site.owner_only_path, "token", 403),
+        (site.health_path, None, 200),
+    )
+
+
 def container_access_script(site: IntegrationSite) -> str:
     """The check the Homepage container itself runs against the service.
 
-    Four requests, from inside the container that will be making them: the
-    summary credential reads the summary, an invalid one does not, the summary
-    credential may not read owner data, and the public health route needs no
-    credential at all. Verifying from the host would prove something about the
-    host's network, which is not the thing that has to work.
+    The four requests of :func:`container_access_checks`, made from inside the
+    container that will be making them. Verifying from the host would prove
+    something about the host's network, which is not the thing that has to work.
     """
-    checks = json.dumps(
-        [
-            [site.summary_path, "token", 200],
-            [site.summary_path, "invalid", 401],
-            [site.owner_only_path, "token", 403],
-            [site.health_path, None, 200],
-        ]
-    )
+    checks = json.dumps([list(row) for row in container_access_checks(site)])
     return (
         "const p=JSON.parse(require('fs').readFileSync(0,'utf8'));\n"
         f"const checks={checks};\n"
