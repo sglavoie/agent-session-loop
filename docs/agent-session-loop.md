@@ -8057,7 +8057,12 @@ lock, and any live pid all survive. `asl gc` is the one command exempt from all
 of this: it has promised to write nothing in dry-run and to touch only run
 directories under `--apply`, so it inspects locks without reclaiming them in
 either mode. `asl unlock` remains the only route out for
-a cross-host lock; the rest are taken over by the next `asl run`. Every
+a cross-host lock; the rest are taken over by the next `asl run`. The Workbench
+read endpoints are exempt too, and for the same reason `asl gc` is: they build
+every summary with `reclaim=False`, so refreshing the queue or opening a plan
+observes a stale lock and reports it without removing it. Reclaim on the
+Workbench stays where an operator asked for it — the Recovery Center flow and
+`POST /api/unlock`. Every
 mutation of `lock.json` — a read-side reclaim, a stale takeover, publishing a
 new lock, `asl unlock`, and the release at the end of a run — runs under an
 exclusive `flock` on a `lock.mutex` sidecar in the plan's state directory. The
@@ -8375,6 +8380,176 @@ Archived entries live under `<state-root>/archive/<archive_id>/`.
 Archive storage is outside normal plan-root discovery, so archived plans
 do not reappear in the queue until they are restored.
 
+### Plan catalog
+
+The catalog is the one enumeration of plans the unified Workbench reads,
+shared by the local UI and the Pi. It is split across the two halves of the
+program, because the two halves of the job are different:
+
+- `asl_workbench/catalog.py` holds the definition — the field partition,
+  identity, labels, project grouping, ordering, and pagination. It imports
+  nothing from `agent_session_loop`, so it loads on the Pi, and it takes a
+  `WorkbenchSummary.to_payload()` mapping rather than a plan directory.
+- `agent_session_loop/workbench_catalog.py` holds the filesystem half —
+  discovery, classification, and plan titles — and returns one `CatalogScan`
+  carrying both the portable catalog and the `WorkbenchSummary` objects the
+  local UI still renders, from a single pass over the discovered plans.
+
+Four properties are worth stating, because each is enforced rather than
+intended:
+
+**Every summary field is either cache-safe or private.** `CACHE_SAFE_FIELDS`
+holds the 16 fields a remote provider may retain; `PRIVATE_FIELDS` holds the
+27 it may not. The partition is total over the summary payload in both
+directions, and a field the partition does not name raises rather than being
+guessed into the cheaper half. Everything path-bearing is private, as is
+`searchable_text`, which carries the plan's prose: the pause message and the
+last-message preview are in it. A `CatalogEntry` therefore builds its own
+`search_text` from cache-safe fields only, and the private half is reachable
+only through `PlanDetail`, which refuses a cache-safe or unknown field name.
+
+**Identity is a digest, not a path.** `plan_key` is
+`sha256` over the canonical plan directory, truncated to 16 hex characters,
+and `run_key` hashes the `plan_key`/`run_id` pair rather than the directory —
+byte-identical to the Companion's `identity.py`, which is what lets the
+migration keep the rows the Pi already stores. `display_label` prefers the
+manifest's first heading, then a registry pin label, then the workspace root,
+then the plan directory's last component, and agrees with the Companion
+exactly when no title is available.
+
+**The catalog is uncapped.** The bridge projection caps interventions at 200
+rows of active work on purpose; a catalog that inherited that cap would report
+a large corpus as a small one. Enumeration is complete and paged instead:
+`PlanCatalog.page(offset=, limit=)` and `PlanCatalog.pages()` walk the whole
+catalog, and a corpus of several hundred plans retains its ready, completed,
+and paused work rather than losing the tail.
+
+**An incomplete generation says so.** `generation` is a digest over the
+ordered entry payloads and carries no wall-clock, so two scans of unchanged
+plans agree. When a plan cannot be classified, the scan records a warning and
+clears `complete` on the catalog and on every page cut from it, so an
+incomplete read is never mistaken for authoritative absence.
+
+Catalog reads are observational: summaries are built with `reclaim=False` and
+no retention runs, so repeated reads leave `state.json`, `events.jsonl`, and
+`lock.json` byte-identical. See `asl_workbench/changes.py` for what remains.
+
+### Remote observation
+
+`asl workbench connect` publishes what this Mac can see to a remote
+Workbench service. It is the outbound half of the unified Workbench: the
+local `serve` command renders the corpus into a loopback browser, and
+`connect` sends the same corpus — as bounded, body-free observation frames —
+to a service that is not on this machine.
+
+```bash
+asl workbench connect --target-id pi-1 \
+  --origin https://workbench.example \
+  --token-file ~/.config/asl/workbench-connector.json
+asl workbench connect --target-id pi-1 --origin https://workbench.example \
+  --token-file ~/.config/asl/workbench-connector.json \
+  --heartbeat-interval 10 --observation-interval 60 --json
+```
+
+`--target-id` names the service being published to and is echoed in every
+envelope, so a frame addressed to one service is refused by another.
+`--connector-id` defaults to a sanitized hostname. `--token-file` is a JSON
+document holding a `connector_token`; the file must be a regular file owned
+by the invoking user with no group or other permission bits, which is the
+same rule the service applies to its own secrets. The token travels only as
+an `Authorization: Bearer` header over HTTPS to `POST <origin>/v1/ingest`.
+
+Four properties are enforced rather than intended:
+
+**It reads the shared services in process.** One `workbench_catalog.scan()`
+yields the complete catalog and the summaries that back the run rows, and
+`workbench_history.project_history()` supplies the checkpointed history
+window. There is no bridge subprocess, no NDJSON hop, and no second
+projection to drift: the command spawns nothing and the connector module
+itself (`asl_workbench/connector.py`) never reads a plan or names a path.
+
+**Observation cannot modify what it observes.** Summaries are built with
+`reclaim=False`, lock files are inspected rather than read for recovery, and
+no retention or cleanup runs, so publishing leaves `state.json`,
+`events.jsonl`, and `lock.json` byte-identical. The published run shape
+carries no filesystem path at all — `plan_dir`, `workspace_root`, the
+display label, and the question body are dropped before a frame is built —
+so a remote service can hold the whole catalog without learning this
+machine's disk layout.
+
+**A checkpoint moves only after delivery.** A pass publishes a heartbeat,
+the current runs, every catalog page, and the history batches, and the
+history window is committed only once every frame cut from that pass has
+been accepted. A link failure or a shutdown mid-pass discards the pass
+uncommitted, so the next pass re-reads the same window; ingest is idempotent
+on `batch_id`, `entry_id`, and the catalog `generation`, so a reconnect
+repeats rather than duplicates. Retry is deterministic exponential backoff
+from 1s to a 60s cap, and a recovered link advertises a new generation,
+because a restarted source is not a replay.
+
+**Heartbeats do not wait for observation.** The observation pass runs off the
+delivery path, so a slow scan delays the corpus and not the liveness signal.
+A pass that fails or reports degraded discovery is published as a heartbeat
+with `bridge_alive` false and a bounded `degraded_reason`, which is how a
+remote service distinguishes "this Mac has nothing to report" from "this Mac
+stopped reporting". Only one connector may run per state directory; the
+second refuses with `reason: connector-locked` rather than publishing a
+second, competing view. `SIGTERM` and `SIGINT` stop the loop, drop the
+in-flight pass, and release the lock.
+
+**Capabilities are derived, not declared.** The connector announces exactly
+what it was wired with: `observe`, `catalog`, and `history` always;
+`detail` because a detail responder is wired by default, scoped to the same
+corpus the observations publish; and `mutate` only when
+`--allow-remote-actions` was passed. Without that flag the hello says
+`observation_only`, and the service refuses a mutating frame from this
+connector by construction rather than by configuration.
+
+```bash
+asl workbench connect --target-id pi-1 --origin https://workbench.example \
+  --token-file ~/.config/asl/workbench-connector.json --allow-remote-actions
+```
+
+With the flag, the same downward channel that carries a correlated detail
+read may also carry a command, and the connector performs it through the
+same services `asl workbench serve` uses — launch, resume, reply, question
+reply, stop-after-current, abort, harness selection, redirect, unlock, and
+archive — against the plan *key*, never a path. Everything decided against a
+live turn goes under `STRICT` authorization; selecting a *future* harness is
+the one control with no live turn for a proof to be about, so it goes the open
+way the browser and the CLI already send it. Five refusals bound the lane, and
+each is structural:
+
+* **A command has a window.** Submission carries a deadline, capped at five
+  minutes, and at most four may wait at once. A command whose window closes
+  before it is attempted settles `expired` and is reported as never having
+  run.
+* **Cancellation is only possible before the attempt.** A pending command
+  can be withdrawn; one that has been handed to ASL cannot, because the
+  point at which it could be is already past.
+* **The body is fetched at the moment of use.** A reply's prose has no
+  envelope field — the contract set is pinned byte-for-byte — so the service
+  announces a `reply_ref` and the connector redeems it over
+  `POST <origin>/v1/commands/redeem` with the operation's single-use action
+  token, immediately before handing it to ASL and never before. Reply text
+  is never persisted, never journalled, and never held by a waiting command.
+* **A restart settles; it never retries.** The journal is written *before*
+  the side effect, so recovery can tell apart a command that certainly did
+  not run (`expired`) from one that may have (`unconfirmed`). Both are
+  reported as outcomes. Carrying a pending command across a restart and
+  running it later — against state that has moved, for an operator who has
+  stopped waiting — is the one thing the durable journal exists to prevent.
+* **Only shared words go out.** Outcomes are reported in the transport's
+  closed status and detail-code vocabulary; ASL's own refusal prose stays on
+  this machine.
+
+A remote action that ASL would refuse locally is refused identically here:
+the same freshness check, the same observation-only setting, the same
+current-capability list, and the same authoritative target state decide it,
+because it is the same code deciding. A bulk archive is decomposed into one
+operation per plan and reassembled into the same per-entry result the local
+route returns, so a partial success reads the same from either side.
+
 ### Cleanup and archive workflow
 
 Cleanup mode is a queue review mode for old, inactive work. It switches
@@ -8406,8 +8581,11 @@ archives each entry independently and returns per-entry results plus
 not prevent the rest from being archived.
 
 The Archive view reads `GET /api/archive`, which returns archived
-entries, `archive_retention_days`, each entry's `expires_at`, and recent
-auto-empty results under `archive_maintenance`. `POST
+entries, `archive_retention_days`, each entry's `expires_at` and
+`cleanup_state`, and the cleanup summary under `archive_cleanup`. The read
+removes nothing: `archive_cleanup` reports `candidate_count`,
+`candidate_ids` and `undated_count`, and every entry it names is still on
+disk afterwards. `POST
 /api/archive/restore` restores the archived plan and state back to their
 original paths and restores pin/profile metadata when present. Restore
 fails with `409` and `reason: "restore-conflict"` if either destination
@@ -8429,10 +8607,55 @@ the current selection without restoring or purging any entry.
 Permanent purge only applies to archive entries, not live plans. `POST
 /api/archive/delete` accepts one or more `archive_ids` and requires a
 typed `confirm_count` equal to the selected count; a mismatch returns
-`reason: "confirmation-mismatch"` and leaves every entry in place. Archive
-maintenance auto-empties entries whose age is at least
-`archive_retention_days`; it runs during queue and archive polls, so no
-separate daemon is required.
+`reason: "confirmation-mismatch"` and leaves every entry in place. That route
+is the only way an archive entry is emptied. Retention is a threshold rather
+than a deadline: an entry whose age is at least `archive_retention_days` is
+reported with `cleanup_state: "eligible"` and listed in
+`archive_cleanup.candidate_ids`, and shortening the window marks more
+candidates rather than destroying anything. An entry whose `archived_at`
+cannot be read is `cleanup_state: "undated"` and is never a candidate, because
+"I cannot tell how old this is" must not resolve to "old enough". No read
+performs retention: neither `GET /api/archive` nor `GET /api/queue` empties an
+archive entry or reclaims a plan lock, so the act of watching either view
+changes nothing. Reclaim remains available where an operator asks for it, at
+`POST /api/unlock`.
+
+### One application, two modes
+
+There is one HTTP application. `asl_workbench.http` declares the route
+table, the role each route requires, the request policy, the static
+bundle, and the pipeline that turns a request into an answer; it is
+stdlib-only and imports nothing from `agent_session_loop`. A deployment
+supplies three things and nothing else:
+
+- a **provider**, which carries the operation out —
+  `agent_session_loop.workbench_local.LocalProvider` on the Mac, where an
+  operation reads the filesystem and spawns processes, and
+  `asl_workbench.service.RemoteProvider` on the Pi, where the same
+  operation is answered from retained observations, turned into a bounded
+  read over the link, or journalled and handed down as a mutation;
+- an **authenticator**, which decides what a caller proved:
+  `LocalTokenAuthenticator` for the loopback server (see the bearer-token
+  boundary below) and `OwnerIdentityAuthenticator` for the private
+  network, where the owner is proved by the proxy's identity header and
+  scoped credentials carry summary or connector roles;
+- a **request policy** — `LOCAL_POLICY` or `REMOTE_POLICY` — which is the
+  whole of the rest of the difference: whether a mutation must prove its
+  origin, whether a body must declare its length, how large a body may
+  be, and whether an unexpected failure is allowed to say what it was.
+
+`agent_session_loop.workbench_server` is a compatibility adapter over that
+application: it still resolves the CLI's roots, mints the loopback token,
+serves the bundle, and prints the URL AgentMux opens, and the request
+handler now translates a `BaseHTTPRequestHandler` request into a
+`Request` and writes the `Response` back. Routing precedes
+authentication, deliberately: a wrong method on a real path has always
+answered `405`, and it still does whether or not a token came with it.
+
+The routes are declared once, with a role each, so the two modes cannot
+drift into disagreeing about who may read what. What they legitimately
+differ on is what a given deployment can *do*, and that is reported
+rather than discovered at the click — see `GET /api/capabilities`.
 
 ### HTTP API surface
 
@@ -8443,7 +8666,20 @@ Read endpoints (loopback-open, no token required):
   (`Cache-Control: no-cache, must-revalidate` plus strong-validator
   `ETag` from `st_mtime_ns` + `st_size`; the server replies `304 Not
   Modified` to a matching `If-None-Match`).
-- `GET /api/health` — liveness probe.
+- `GET /api/health` — liveness probe. The one route that requires no role
+  at all, in either mode.
+- `GET /api/capabilities` — what this deployment can do. Returns `mode`
+  (`local` or `remote`), one entry per operation with its `role`,
+  whether it is `available`, and — when it is not — the provider's own
+  `reason` in the words to show whoever is looking at the greyed-out
+  control, plus `unavailable_operations` and the declared `routes`. The
+  application answers this itself rather than asking the provider, so a
+  deployment that can do very little can still say so. Attempting an
+  unavailable operation returns `503` with
+  `reason: "operation-unavailable"` and that same sentence as `error`.
+- `GET /api/summary` — counts and health only, readable by a
+  summary-scoped caller. The narrow read a status pane needs without
+  owner-scoped plan detail; every other read requires the owner.
 - `GET /api/queue` — every discovered plan summarized via
   `WorkbenchSummary` (counts, primary state, recommended action,
   warnings, last-message preview, artifact paths, compact Recovery
@@ -8456,8 +8692,12 @@ Read endpoints (loopback-open, no token required):
   plans sort on `completed_at` and every other plan on
   `last_activity_at`, and a missing timestamp is treated as oldest.
   Queue responses also include
-  `archive_retention_days`, `archive_maintenance`, and per-plan
-  `archivable` / `archive_blocker` fields used by Cleanup mode.
+  `archive_retention_days` and per-plan `archivable` / `archive_blocker`
+  fields used by Cleanup mode. The scan behind the response is the shared
+  catalog (see [Plan catalog](#plan-catalog)), so the payload also carries
+  `catalog_generation`, `catalog_complete`, `catalog_total`, and
+  `catalog_warnings` — the last naming any plan the scan could not classify,
+  as opposed to `discovery_warnings`, which name a source it could not read.
 - `GET /api/plan?plan_dir=<path>` — single-plan detail. The payload
   carries the same additive triage fields as `/api/queue` (`urgency_rank`,
   `urgency_group`, `activity_label`, `concise_reason`, `last_activity_at`,
@@ -8525,8 +8765,9 @@ Read endpoints (loopback-open, no token required):
 - `GET /api/artifacts?plan_dir=<path>` — artifact paths and metadata
   for the latest run.
 - `GET /api/archive` — archive entries plus the current
-  `archive_retention_days`, computed `expires_at` values, and the latest
-  archive-maintenance auto-empty result.
+  `archive_retention_days`, computed `expires_at` values, each entry's
+  `cleanup_state`, and the `archive_cleanup` summary of which entries
+  retention has marked as cleanup candidates. The read removes nothing.
 
 Mutating endpoints (bearer-token required):
 
@@ -8653,10 +8894,13 @@ records to appeal to:
 - `POST /api/launch` and `POST /api/reply` accept an optional `launch_id`
   bounded by `redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS`, and return
   the original launch result with `replayed: true` for a repeat of an id
-  this server already spawned for. Nothing durable records a launch, so
-  the receipt table is this server's own memory: it makes a *retry to the
-  same process* idempotent, and what stops two runs across two Workbench
-  processes remains the plan lock.
+  already admitted for the plan. The receipt is durable: both routes admit
+  through the plan's operation journal, so a resend is idempotent across
+  Workbench processes and across a restart, not only within the process
+  that spawned. An id resubmitted for a different action or a different
+  plan is refused `409 operation-conflict` rather than quietly reused, and
+  a second submission while one is still outstanding is refused `409
+  operation-outstanding`.
 - Both spawning endpoints also refuse outright, with `409` and
   `reason: "run-already-active"`, while `intervention.inspect_run`
   reports a run holding the plan, and with
@@ -8666,6 +8910,101 @@ records to appeal to:
   the lock — where nothing durable says a launch is under way. A paused
   run is not a conflict: resuming one is what `/api/reply` is for.
 
+### Durable operation admission
+
+Every mutation the Workbench and the connector can both submit passes one
+gate first. `agent_session_loop.workbench_operations` keeps a per-plan
+journal at `<state-dir>/<plan-hash>/operations.jsonl`, beside the redirect
+journal, and holds an exclusive `flock` across read, decide, and append —
+so two Workbench processes, or a Workbench and the connector, submitting
+at the same moment serialize there and exactly one is admitted. The rules
+themselves live in `asl_workbench.operations`, which is stdlib-only and
+shares its status vocabulary with the Companion's `protocol.py`.
+
+An operation id names one action against one target. Identity is the
+sha256 fingerprint of the method and the target, so `launch_id` "abc" for
+one plan and `launch_id` "abc" for another are different operations, and
+the same id aimed at a different method is a conflict rather than a
+replay.
+
+Dispatch is recorded before the side effect, never after. An admitted
+operation is written `pending`; the row moves to `dispatched` immediately
+before the process is spawned. That ordering is what makes an interruption
+answerable: **a killed process leaves `expired` when the mutation
+certainly did not run, and `unconfirmed` when it may have and nobody can
+say.** Reconciliation draws its evidence from ASL — the plan lock through
+`intervention.inspect_run`, the owning pid through `state.is_pid_running`
+— and never infers success from absence: an accepted operation whose run
+has vanished becomes `unconfirmed`, not `consumed`. An `unconfirmed`
+operation is never retried automatically. A person submitting a new
+operation in its place, against a target that is demonstrably idle,
+settles the old row `superseded` with detail `replaced-uncertain` — which
+records that it was replaced, not that it did not run.
+
+Admission is a gate in front of the plan lock, not a replacement for it.
+ASL's lock remains the execution authority: admission stops a second
+attempt from being *started*, and the lock is what stops a second run from
+*executing*. Reconciliation classifies a lock without reclaiming it.
+
+The journal holds identifiers only. `OPERATION_PERSIST_FIELDS` is an
+allowlist, and `FORBIDDEN_PERSISTED_KEYS` is checked against every nested
+value before a row is written, so reply text and action tokens cannot
+reach the file even under a key the allowlist keeps.
+
+### One path for a launch, a reply, and a paused resume
+
+`agent_session_loop.workbench_actions.perform` is the single application
+operation behind `POST /api/launch`, `POST /api/reply`, and the bridge's
+`run.resume` and `question.reply`. It runs the same six steps every time:
+inspect the run through `intervention.inspect_run`, check freshness,
+admit through the journal, consult the caller's guard, record dispatch,
+carry the mutation out, and settle the row. Surface-specific code is
+reduced to translating a refusal into that surface's error shape, so the
+local Workbench and the connector cannot drift into answering the same
+request differently. `asl_workbench.actions` holds the portable half —
+the action/method table, the launch-refusal classification, and the
+reading of the plan's event log — so the Pi interprets an imported log
+exactly as the Mac interprets a live one.
+
+**A stale target is refused with or without an action token.** A request
+that names a `run_id` or a `question_id` is making a claim about that run
+or that question, and the claim is checked against what
+`intervention.inspect_run` reports regardless of which surface asked. A
+bridge caller must additionally carry a fresh `action_token`; a browser
+caller that names nothing beyond the plan is held to the run-ownership
+checks alone. Either way, a target that has moved is refused before
+admission, so the operation id the request carried is still spendable.
+
+**What settles an operation depends on what it promised.** A launch
+promised a process, so the spawn is the whole of it and the row goes
+straight to `consumed`. A reply-bearing operation — `question.reply` and
+the `run.resume` that streams a reply into a new run's stdin — promised
+that an operator's words were *read*, which a `Popen` does not establish.
+Those rows settle `accepted`, and reach `consumed` only on a
+`reply_provided` record in the plan's own `events.jsonl` whose `source`
+carries the matching origin (`mailbox` or `stdin`) and, for a mailbox
+reply, the matching `question_id`. A resumed run mints a new run id, so
+the evidence *reports* which run read the reply rather than matching it
+against the id the operation named — requiring a match would refuse every
+successful resume. A witness settles a reply-bearing row even while the
+process that submitted it is still alive, because the run's record is not
+a claim about that process's progress.
+
+**A launch refused before the spawn is `rejected`; a child killed after
+it is `unconfirmed`.** `asl_workbench.actions.launch_closure` draws that
+line from the refusal reason plus whether a process was created, which is
+the same distinction `expired` and `unconfirmed` draw one step earlier. A
+guard refusal closes the row `cancelled` on the way past, so a withdrawn
+submission stops holding the plan's run-start scope instead of blocking
+every later one.
+
+**A launched run gets its own session.** `workbench.launch_plan` passes
+`start_new_session=True`, matching the `AbandonProcessGroup` the launchd
+agents already set. A Ctrl-C in the terminal running `asl workbench
+serve`, a connector going away, or a closing terminal each signals a
+process *group*; without its own session the worker would be killed
+mid-turn by an event that has nothing to do with the plan.
+
 All responses use the `responses.success_payload`/`error_payload`
 envelopes with `command: "workbench"`. Stable error reasons reused
 verbatim from the underlying helpers include `invalid-plan`,
@@ -8673,6 +9012,56 @@ verbatim from the underlying helpers include `invalid-plan`,
 the `control_queue`/`workbench` reason codes. Control endpoints surface
 the enqueued record under `queued_command` (not `command`) so the
 top-level envelope key is not overwritten.
+
+### One path for a stop, an abort, and a correction
+
+`agent_session_loop.workbench_controls` is the single application service
+behind the Workbench's `POST /api/control/*`, `GET /api/redirect-status`
+and `GET /api/conversation-recovery`, and behind the connector's
+`run.stop-after-current`, `run.abort`, `redirect`, `redirect-status`, and
+`recover-conversation`. Every control is checked, queued, and followed by
+the same best-effort wakeup the CLI producer sends, through
+`intervention.dispatch_control_command`; every correction is judged
+against the redirect journal in one order. `asl_workbench.controls` holds
+the portable half — the control-to-queue-command table, what an abort is
+about to mean, the projection window, and the narrowing every
+client-chosen field goes through — so the Pi and the Mac cannot be given
+two spellings of one rule.
+
+**How hard a surface checks is a parameter, not a second
+implementation.** `AUTHORIZATION_OPEN` queues a control for a plan whose
+runner has not started yet, which is what a local operator with no
+snapshot has always been able to do and what the CLI still does;
+`AUTHORIZATION_STRICT`, which the connector uses for every control decided
+against a live turn, refuses anything that is not about the run the caller was
+shown. Both are correct for their caller.
+A correction is the exception on both surfaces: it interrupts a turn, so
+it is always held to a fresh `action_token` — a request without one is
+refused `stale-action-token` rather than as a malformed body.
+
+**Replay is judged before freshness.** The journal is asked what an
+`operation_id` already names before the token is checked, on both
+surfaces, because a correction that landed moves the plan, which moves the
+token, which would make the retry of a lost response look like a stale
+second correction. What is not short-circuited is the request itself: an
+edited retry is `redirect-replay-conflict` with the conflicting field
+named, because reporting an operator's edited words as a successful replay
+of the words the worker actually got is the falsehood this path exists to
+avoid.
+
+**The seven interruption boundaries keep their distinctions.** A
+correction persisted and unanswered reads `unanswered`; one handed to an
+attempt that never receipted it reads `uncertain`, and neither is resolved
+by guessing on either surface. Both reads are read-only by construction —
+`recover-conversation` reports the relaunch and the corrections it would
+inherit, and never performs it, because performing it would persist an
+operator's one-use authorization inside a request that can be replayed.
+
+**A refusal keeps its vocabulary per surface.** The service raises what
+happened and how retryable it is; the HTTP surface turns that into a
+status code and the bridge into one of its versioned `ERROR_CODES`, with
+any reason outside that closed enum travelling as `ERROR_INVALID_REQUEST`
+carrying the durable reason in `details.reason`.
 
 ### Triage queue payload
 
@@ -9136,8 +9525,37 @@ Representative mappings:
 
 ### Frontend behavior
 
-The bundled UI lives at `agent_session_loop/static/` and ships with
-the Python package (no build tooling, no third-party JS). Pages:
+The bundled UI lives at `asl_workbench/static/` and ships with the
+portable package (no build tooling, no third-party JS). There is one
+copy of it: the laptop's `LocalProvider` and the Pi's `RemoteProvider`
+are two front doors onto the same `asl_workbench.http.Application`,
+and `shell_bundle()` serves both of them the same `index.html`,
+`app.js`, `styles.css`, and `static/modules/` tree. A fix made once is
+therefore a fix in both places, which is the point of having moved it.
+
+`app.js` is an entry point rather than the program: it imports the
+modules under `static/modules/` as native ES modules, which the browser
+resolves itself. Nothing is bundled, minified, or transpiled, so no
+deployment needs a Node runtime or a build step — the Pi in particular
+serves the files exactly as they sit in the package. The cost is that
+one page load opens one connection per module, which is why both
+`WorkbenchHTTPServer` and the test fixture raise `request_queue_size`
+well above `socketserver`'s default backlog of five: an overflowed
+accept queue is a reset connection, and a reset module request is a
+blank page rather than a slow one.
+
+The two deployments publish the same plans under different field
+names, because each names what it actually knows: the laptop reads the
+plan on disk and derives `label`, `searchable_text`, and
+`next_action_hint`, while the Pi carries `display_label`/`title` and
+`search_text` from the observation the connector sent and has no hint
+at all. `static/modules/identity.js` reconciles the two vocabularies in
+one place (`planLabel`, `planSearchText`, `planHint`), alongside the
+addressing duality it already held (`plan_dir` on the laptop,
+`plan_key` on the Pi), so no rendering module reads a provider-specific
+field name directly.
+
+Pages:
 
 - **Queue (`#queue`)** — the operator home, framed as a triage inbox.
   Filter chips collapse `verifying` under `running` and `invalid` under
@@ -9210,6 +9628,20 @@ the Python package (no build tooling, no third-party JS). Pages:
   navigation, then clears `state.route.focus` so subsequent 5 s polls
   do not keep snapping the viewport (the param itself stays in the URL,
   so a manual reload will re-focus once).
+
+  One router handles both link formats the two halves left behind, so
+  links already sent out keep working. The Workbench's own form names a
+  plan directly — `#plan?dir=<encoded>` from the laptop, `#plan?key=<plan_key>`
+  from the Pi, either optionally with `&focus=`. The Companion's form
+  names a run instead (`#run=<run_key>`, minted by
+  `catalog.run_key(plan_key, run_id)` and still emitted by the ntfy
+  notifications the Pi sends), which the shell cannot resolve on its own
+  because a run key says nothing about which plan owns it. So
+  `resolveRouteFromPlans` waits for a catalog page, finds the plan whose
+  run matches, and `replaceHash` rewrites the URL to the canonical
+  `#plan?…` form; until that resolves, the detail header reads
+  `(opening run)`. A run key with no plan in the catalog leaves the hash
+  alone and says so, rather than rendering an empty plan.
 
   The Recovery Center renders compact queue/detail `plan.recovery`
   immediately and then replaces it with full `/api/recovery` evidence
@@ -9727,10 +10159,15 @@ The bridge then watches ASL's records and emits a body-free
 
 | Status | Settled by |
 | --- | --- |
-| `consumed` | A mailbox receipt for the closure, a `run_control` command-observed event, or a resume's run leaving the paused state. |
+| `consumed` | A mailbox receipt for the closure, a `run_control` command-observed event, or a `reply_provided` record naming the reply a resume carried. |
 | `rejected` | A control command left the queue with no delivery receipt and the run is gone. |
 | `expired` | No outcome was observed within the 15-minute receipt window. |
 | `superseded` | A resume's plan is still paused under a different run. |
+
+A resume is settled by a run's own record of reading the reply, never by
+the plan leaving the paused state. The pause lifting is a fact about the
+plan and not about the operator's words: a run that resumes, reads
+nothing, and pauses again on its next question would look identical.
 
 The window holds at most 64 operations. Count-based eviction only ever
 drops already-settled operations, so a burst of requests cannot evict an
@@ -10158,6 +10595,40 @@ real tools — the Git-backed repository evidence, the shell helpers, the launch
 maintenance definitions, the harness adapters — is left to the macOS job, which
 runs `just test-all` on the platform the pair is actually released against, so
 the portable lane never reports a pass it did not earn.
+
+The Workbench shell is checked from two directions, because the claim being made
+is that one front end serves two deployments and half of that claim is only
+observable in a browser. `tests/test_workbench_shell.py` runs in the integration
+lane: it seeds one plan corpus, binds both providers to real loopback sockets
+over it, and asserts that the two serve byte-identical assets and answer the
+same questions about the same plans. `tests/workbench_browser/shell.spec.js`
+drives that shell with Playwright at desktop and phone widths against both
+deployments in turn — the queue, the responsive collapse, every detail pane,
+keyboard navigation, and both historic link formats. Two of its claims are about
+the refresh poll rather than the layout, and they are there because neither is
+visible from a request: a poll that redraws the same answer performs no page
+scroll at all, and a poll that shortens the page still puts the operator back.
+The unconditional restore that came before ate taps on a phone, where WebKit
+reads a document scroll between `touchstart` and `touchend` as a pan and throws
+the tap away. `overview.spec.js` and `interactions.spec.js` sit beside it over
+the same fixture: the overview's sections, facets, history pane and the banners
+for what a page could not see, and the controls bar driven up to the edge of
+every mutation and no further. All three run as
+`npm --prefix tests/workbench_browser test`, against a fixture server the
+Playwright config starts itself (`fixture_server.py`, which binds the two
+deployments on the fixed ports recorded in `scenarios.json` so the config and
+the fixture cannot disagree about where they are).
+
+That harness is development-only and deliberately sealed off from what ships:
+`tests/workbench_browser/package.json` declares an empty `dependencies` and
+carries `@playwright/test` as a dev dependency alone, which
+`tests/test_workbench_shell.py` asserts rather than trusts. Neither deployment
+needs Node — the shell is native ES modules served by Python — and the Pi
+especially must not acquire a JavaScript toolchain because a test harness drifted
+into the runtime. `npm --prefix tests/workbench_browser run test:install` fetches
+the browser engines on a machine that has none; nothing else in the repository
+depends on them being there, so a checkout without Playwright still runs every
+Python lane.
 
 `just reliability-stress` is a fourth lane, and it judges what the other three
 cannot: whether a result still holds when the machine is hostile. It keeps three

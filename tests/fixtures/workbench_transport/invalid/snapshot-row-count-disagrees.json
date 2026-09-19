@@ -1,0 +1,46 @@
+{
+  "direction": "up",
+  "envelope": {
+    "capability": "observe",
+    "connector_id": "mac-studio",
+    "kind": "observation",
+    "payload": {
+      "contract_set_id": "asl-amx-1.85ec3041b9f03f47",
+      "digest": "a1b2c3d4e5f60718",
+      "failed_projections": 0,
+      "observed_at": 1770000000.0,
+      "projection_age_seconds": 1.5,
+      "row_count": 4,
+      "runs": [
+        {
+          "actions": [
+            "plan.stop-after-current",
+            "plan.abort"
+          ],
+          "harness": "claude",
+          "last_activity_at": 1769999988.0,
+          "phase": "running",
+          "plan_key": "0123456789abcdef",
+          "primary_state": "running",
+          "project": "asl-workbench",
+          "run_id": "run-2026-03-14-01",
+          "run_key": "fedcba9876543210",
+          "run_started_at": 1769999400.0,
+          "session_id": "10",
+          "unanswered_count": 0,
+          "urgency_group": "in-progress"
+        }
+      ],
+      "source_generation": 42,
+      "staleness_bound_seconds": 60.0,
+      "truncated": false,
+      "view": "snapshot",
+      "warnings": []
+    },
+    "protocol": 1,
+    "sent_at": 1770000000.0,
+    "target_id": "pi-companion"
+  },
+  "error": "invalid-field",
+  "why": "A count that disagrees with the rows it counts is how a truncated upload looks."
+}

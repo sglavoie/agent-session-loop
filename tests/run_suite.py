@@ -157,6 +157,15 @@ FAST_MODULES = (
     "tests.test_asl_overseer_policy_client",
     "tests.test_asl_overseer_resume",
     "tests.test_asl_overseer_watch",
+    "tests.test_workbench_connector",
+    "tests.test_workbench_history",
+    "tests.test_workbench_http",
+    "tests.test_workbench_integrations",
+    "tests.test_workbench_remote_actions",
+    "tests.test_workbench_remote_reads",
+    "tests.test_workbench_store",
+    "tests.test_workbench_transport_contract",
+    "tests.test_workbench_uplink",
     "tests.test_asl_literals",
 )
 
@@ -247,6 +256,15 @@ PORTABLE_MODULES = (
     "tests.test_asl_overseer_policy_client",
     "tests.test_asl_overseer_resume",
     "tests.test_asl_overseer_watch",
+    "tests.test_workbench_connector",
+    "tests.test_workbench_history",
+    "tests.test_workbench_http",
+    "tests.test_workbench_integrations",
+    "tests.test_workbench_remote_actions",
+    "tests.test_workbench_remote_reads",
+    "tests.test_workbench_store",
+    "tests.test_workbench_transport_contract",
+    "tests.test_workbench_uplink",
     "tests.test_asl_literals",
 )
 
@@ -274,6 +292,83 @@ INTEGRATION_MODULES = (
     "tests.test_asl_worker_verification",
     "tests.test_asl_review",
     "tests.test_asl_workbench_launch",
+    # Integration rather than portable: it binds a loopback server and spawns
+    # a fresh interpreter to prove the portable package loads without ASL.
+    "tests.test_workbench_foundations",
+    # Same shape, one step further out: the production artifact is unpacked and
+    # the packaged application is started as a release, so this lane needs a
+    # socket and child interpreters. It is also the one module the Pi's own
+    # interpreter runs -- `python3.13 -m unittest -q tests.test_workbench_portable`
+    # -- which is a separate lane from either of the two lists above.
+    "tests.test_workbench_portable",
+    # Integration for the plainest reason: git, `plutil`, the installed `asl`
+    # executable, and a service release that is genuinely started and stopped.
+    "tests.test_workbench_lifecycle",
+    # Half of it is pure translation, but the rollback half installs two real
+    # releases and starts them, because "the data a release is handed is the
+    # data it ran on" cannot be proven against a switch that was faked.
+    "tests.test_workbench_migration",
+    # Same reason: most of it is pure catalog algebra, but the reads it proves
+    # are observational are proven against a live workbench server.
+    "tests.test_workbench_catalog",
+    # Same again for the detail reads: containment and "a read changes
+    # nothing" are only worth asserting against the routes that serve them.
+    "tests.test_workbench_details",
+    # Integration for a third reason: the guarantee is cross-process, so
+    # proving it takes real child interpreters racing a real flock, and the
+    # route half needs a live server.
+    "tests.test_workbench_operations",
+    # Integration because the claim is that two surfaces are one path: half of
+    # it drives the shared action directly and half drives a live workbench
+    # server, and the point is that both land in the same journal.
+    "tests.test_workbench_launch_reply",
+    # And for the same reason once more, for the controls: the run controls and
+    # the redirect journal are driven here through the shared service and
+    # through both surfaces that call it, so a divergence shows up as a failure
+    # rather than as two passing suites.
+    "tests.test_workbench_controls",
+    # And once more for the archive: "browsing never deletes" is a claim about
+    # what a real GET does to a real archive tree, so it is asserted against a
+    # live server reading real entries rather than against a stub listing.
+    "tests.test_workbench_archive",
+    # Integration because there is no other way to ask the question: the claim
+    # is that one front end serves two deployments, so both providers are bound
+    # to real loopback sockets over one plan corpus and asked the same things.
+    "tests.test_workbench_shell",
+    # And once more for the overview: the vocabulary halves and the selection
+    # algebra would run anywhere, but "both modes present one body of work" is
+    # only a claim about two providers answering the same questions, so both
+    # are bound to loopback sockets over one corpus here too.
+    "tests.test_workbench_overview",
+    # And once more for the mutations: what a mode will carry out, whether its
+    # advance warning matches its refusal, and what a recorded-but-unconfirmed
+    # operation is allowed to claim are all questions about two live providers
+    # answering the same request, so both are bound here too.
+    "tests.test_workbench_interactions",
+    # Integration because the gate it proves is enforced by real git history
+    # and real packed artifacts: synthetic repositories are built and their
+    # commits packed, because a fake digest would agree with a fake packer.
+    "tests.test_workbench_acceptance",
+    # The harness on the other side of the same document. Integration for the
+    # same reason: it builds the release's own native definitions and restages
+    # them, so it exercises the packaging code rather than a description of it.
+    "tests.test_workbench_staging",
+    # The harness that drives the cutover the rehearsal above was a rehearsal
+    # for. Integration for the same reason again, and one of its own: it writes
+    # real prefixes and takes real SQLite backups of them, because a backup
+    # proved against a fake database is a claim about the fake.
+    "tests.test_workbench_cutover",
+    # Integration in the fullest sense the repository has: one plan corpus, the
+    # real observation source, a connector, a link that can be made to fail, the
+    # Pi's store, and the remote provider behind a loopback socket, with the
+    # launch children replaced by an inert interpreter rather than the launch
+    # path. Nothing here would tell the truth without all of it running.
+    "tests.test_workbench_fullstack",
+    # The one hop the module above supplies for itself. Integration because it
+    # is nothing but real moving parts: a listening service, a connector loop
+    # in its own thread, a real clock, and bounded waits for frames to cross a
+    # socket. The lane that runs on a frozen clock cannot hold it.
+    "tests.test_workbench_wire",
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
     "tests.test_asl_overseer_e2e",
@@ -342,12 +437,36 @@ def _run_shard(name: str, command: list[str]) -> dict[str, Any]:
     }
 
 
-def _package_module_count() -> int:
+def _discovered_package_modules() -> set[str]:
+    """Every module broad discovery finds at least one test in.
+
+    The registration ratchet used to compare test *counts* -- discovery's total
+    against the sum of what the shards reported running. A count is only a proxy
+    for the question being asked, and it answers a different one as soon as a
+    module declines to run: a module-level ``SkipTest`` reports ``Ran 0 tests``,
+    which the count read as a module nobody had registered. Two modules in this
+    suite skip that way by design, both because the thing they judge is an
+    installed program rather than this source tree, so the proxy failed the
+    suite for a legitimately unavailable dependency.
+
+    Module names answer the actual question directly. Modules discovery yields
+    no tests from are deliberately absent: ``tests.test_agent_session_loop`` is
+    a name-compatibility shim that contributes none under broad discovery
+    precisely so the split modules are not run twice.
+    """
     loader = unittest.defaultTestLoader
     suite = loader.discover(str(REPO_ROOT / "tests"), top_level_dir=str(REPO_ROOT))
     if loader.errors:
         raise SystemExit("test discovery failed:\n" + "\n".join(loader.errors))
-    return suite.countTestCases()
+    modules: set[str] = set()
+    pending: list[Any] = [suite]
+    while pending:
+        case = pending.pop()
+        if isinstance(case, unittest.TestSuite):
+            pending.extend(case)
+            continue
+        modules.add(type(case).__module__)
+    return modules
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -409,17 +528,31 @@ def main(argv: list[str] | None = None) -> int:
         print(result["output"].rstrip())
 
     if not fast_only:
-        script_tests = sum(
-            result["tests"] for result in results if result["name"] in SCRIPT_SUITES
-        )
-        expected = _package_module_count()
-        package_tests = total_tests - script_tests
-        if package_tests != expected:
+        registered = set(FAST_MODULES) | set(INTEGRATION_MODULES)
+        discovered = _discovered_package_modules()
+        unregistered = sorted(discovered - registered)
+        if unregistered:
             print(
-                f"\nFAIL: shards ran {package_tests} package tests but discovery "
-                f"finds {expected}; a test module is missing from run_suite lists"
+                "\nFAIL: discovery finds tests in "
+                f"{', '.join(unregistered)}; a test module is missing from "
+                "run_suite lists"
             )
             return 1
+        undiscovered = sorted(registered - discovered)
+        if undiscovered:
+            print(
+                f"\nFAIL: run_suite lists {', '.join(undiscovered)} but broad "
+                "discovery finds no test there; the list names a module that "
+                "moved, was renamed, or no longer holds tests"
+            )
+            return 1
+        # A module that ran nothing is not a failure -- the two installed-pair
+        # gates skip when the program they judge is not installed -- but it is
+        # not a success either, and a suite that printed only `ok` for it would
+        # report coverage it did not have.
+        for result in results:
+            if result["name"] in registered and result["tests"] == 0:
+                print(f"\nnote: {result['name']} ran no tests (skipped)")
 
     label = {"portable": "portable suite", "fast": "fast suite"}.get(
         mode, "complete suite"

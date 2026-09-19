@@ -1228,12 +1228,13 @@ class LaunchIdempotencyTests(WorkbenchRedirectTestCase):
         self.assertEqual("invalid-request", body["reason"])
         self.assertIn("launch_id", body["error"])
 
-    def test_a_launch_guard_is_this_servers_own_memory(self) -> None:
-        """Two servers share the plan's ownership and share nothing else.
+    def test_a_launch_guard_reaches_across_two_servers(self) -> None:
+        """Two servers share the plan's operation journal, so they share a guard.
 
-        Stated as a test because it is the guard's real limit: what stops a
-        second run across two Workbench processes is the plan lock, and the
-        receipt table only makes a *retry* to the same server a retry.
+        This test previously pinned the opposite -- that the receipt table was
+        one server's own memory, and a resend to a second server spawned a
+        second run. Session 5 made admission durable and cross-process, so the
+        resend now replays from the journal instead.
         """
         other = self.start_server()
         result = self.launch_result(pid=os.getpid())
@@ -1248,8 +1249,13 @@ class LaunchIdempotencyTests(WorkbenchRedirectTestCase):
             )
 
         self.assertEqual(200, status)
-        self.assertFalse(body["replayed"])
-        self.assertEqual(2, patched.call_count)
+        self.assertTrue(body["replayed"])
+        # The second server never spawned. It has no receipt of its own for
+        # this id, so it answers with the operation the journal holds and no
+        # launch payload rather than inventing one.
+        self.assertIsNone(body["launch"])
+        self.assertEqual("a", body["operation"]["operation_id"])
+        patched.assert_called_once()
 
 
 if __name__ == "__main__":

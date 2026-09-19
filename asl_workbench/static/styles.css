@@ -228,6 +228,7 @@ a:hover {
 
 .wb-controls-bar__search,
 .wb-controls-bar__sort,
+.wb-controls-bar__facet,
 .wb-controls-bar__completed {
   display: inline-flex;
   align-items: center;
@@ -255,7 +256,8 @@ a:hover {
   border-color: var(--wb-accent);
 }
 
-.wb-controls-bar__sort select {
+.wb-controls-bar__sort select,
+.wb-controls-bar__facet select {
   font: inherit;
   background: var(--wb-bg-elev);
   color: var(--wb-text);
@@ -1029,6 +1031,123 @@ a:hover {
   color: var(--wb-accent);
 }
 
+/* Recorded, not run. Its own tone on purpose: reading as success is the one
+   thing a 202 must never do, and reading as failure is the other. */
+.wb-controls__feedback[data-kind="pending"] {
+  background: var(--wb-warning-soft);
+  border-color: var(--wb-warning);
+  color: var(--wb-warning);
+}
+
+.wb-controls__feedback[data-kind="warning"] {
+  border-color: var(--wb-warning);
+  color: var(--wb-warning);
+}
+
+/* A disabled control says why on the element, not only in a tooltip: the
+   responsive shell runs on a phone, where there is no hover to reveal one. */
+.wb-controls [data-disabled-reason],
+.wb-archive__bulk [data-disabled-reason],
+.wb-cleanup-bar [data-disabled-reason],
+.wb-profile-form__actions [data-disabled-reason],
+.wb-reply__actions [data-disabled-reason] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.wb-operations__hint {
+  margin: 0 0 8px;
+  color: var(--wb-text-dim);
+  font-size: 12px;
+}
+
+.wb-operations__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wb-operations__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--wb-warning);
+  background: var(--wb-warning-soft);
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.wb-operations__row[data-outcome="unreachable"] {
+  border-color: var(--wb-danger);
+  background: var(--wb-danger-soft);
+}
+
+.wb-operations__id {
+  color: var(--wb-text);
+  word-break: break-all;
+}
+
+.wb-operations__text {
+  flex: 1 1 200px;
+  color: var(--wb-text-dim);
+}
+
+/* A server-held row has no dismiss: this tab cannot forget something the
+   service is still holding, and offering the button would suggest it can. */
+.wb-operations__row[data-source="server"] .wb-operations__dismiss {
+  display: none;
+}
+
+.wb-archive-review__message {
+  margin: 0 0 8px;
+  color: var(--wb-danger);
+  font-size: 12px;
+}
+
+.wb-archive-review__list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.wb-archive-review__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  padding: 4px 8px;
+  background: var(--wb-bg-row);
+  border: 1px solid var(--wb-border);
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.wb-archive-review__path {
+  color: var(--wb-text-faint);
+  word-break: break-all;
+}
+
+.wb-archive-review__expires {
+  color: var(--wb-danger);
+  margin-left: auto;
+}
+
+.wb-archive-review__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .wb-control__harness,
 .wb-control__abort {
   display: inline-flex;
@@ -1782,6 +1901,10 @@ a:hover {
   color: var(--wb-success);
 }
 
+.wb-cleanup-bar__feedback[data-kind="pending"] {
+  color: var(--wb-warning);
+}
+
 .wb-row__cleanup {
   display: inline-flex;
   align-items: center;
@@ -1853,7 +1976,7 @@ a:hover {
   padding: 3px 6px;
 }
 
-.wb-archive__maintenance {
+.wb-archive__cleanup {
   margin: 8px 0 0;
   color: var(--wb-text-dim);
   font-size: 12px;
@@ -1875,6 +1998,10 @@ a:hover {
 
 .wb-archive__feedback[data-kind="info"] {
   color: var(--wb-success);
+}
+
+.wb-archive__feedback[data-kind="pending"] {
+  color: var(--wb-warning);
 }
 
 .wb-archive__bulk {
@@ -1933,13 +2060,285 @@ a:hover {
 }
 
 .wb-archive-row__archived,
-.wb-archive-row__expires {
+.wb-archive-row__expires,
+.wb-archive-row__cleanup {
   color: var(--wb-text-faint);
   font-size: 11px;
+}
+
+/* A candidate is flagged, not doomed: warning-coloured rather than danger,
+   because nothing removes it until an operator confirms a purge. */
+.wb-archive-row[data-cleanup="eligible"] .wb-archive-row__cleanup,
+.wb-archive-row[data-cleanup="undated"] .wb-archive-row__cleanup {
+  color: var(--wb-warning);
 }
 
 .wb-archive-row__actions {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
+}
+
+/* A project name is a joined membership list ("a + b"), so it can be long.
+   Cap the control rather than let one facet push the rest of the bar off. */
+.wb-controls-bar__facet select {
+  max-width: 220px;
+}
+
+/* What the page could not see.
+ *
+ * Deliberately quieter than wb-warnings: a stale observation or a partial
+ * catalog is a caveat on what is drawn below, not a problem with a plan.
+ */
+.wb-observation {
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--wb-border);
+  background: var(--wb-warning-soft);
+  color: var(--wb-text);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wb-observation__note {
+  margin: 0;
+}
+
+/* Lost is the one case where the page is describing something that may no
+   longer exist at all, so it gets the danger colour; everything else is a
+   caveat, not a failure. */
+.wb-observation__note[data-kind="lost"],
+.wb-observation__note[data-kind="incident"] {
+  color: var(--wb-danger);
+}
+
+.wb-observation__note[data-kind="stale"],
+.wb-observation__note[data-kind="incompatible"] {
+  color: var(--wb-stale);
+}
+
+/* Sections: current attention first, then everything the window moved out of
+   the way. Each one owns its own heading and count so an empty section can say
+   so rather than vanish. */
+.wb-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0 10px;
+}
+
+.wb-section__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 4px;
+}
+
+.wb-section__title {
+  margin: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--wb-text-dim);
+}
+
+.wb-section__count {
+  color: var(--wb-text-faint);
+  font-size: 11px;
+}
+
+.wb-section__empty {
+  margin: 0;
+  padding: 0 4px;
+  color: var(--wb-text-faint);
+  font-size: 12px;
+}
+
+.wb-section__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Work that is retained rather than observed reads dimmer than live work: the
+   rows are real, but what they say is the last thing that was seen, not the
+   current thing. */
+.wb-section[data-section="unconfirmed"] .wb-section__title,
+.wb-section[data-section="older-linked"] .wb-section__title {
+  color: var(--wb-stale);
+}
+
+.wb-project-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wb-project-group__heading {
+  margin: 0;
+  padding: 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--wb-text-faint);
+}
+
+.wb-project-group__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wb-row[data-observation-status="unconfirmed"],
+.wb-row[data-observation-status="absent"] {
+  border-style: dashed;
+}
+
+.wb-row[data-freshness="stale"] {
+  border-left: 2px solid var(--wb-stale);
+}
+
+.wb-row[data-freshness="lost"],
+.wb-row[data-freshness="incompatible"] {
+  border-left: 2px solid var(--wb-danger);
+}
+
+/* History: finished runs, collapsed by default because they are not current
+   work. The list is hidden rather than unbuilt so the count is honest while
+   the section is shut. */
+.wb-history {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--wb-border);
+}
+
+.wb-history__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 8px;
+}
+
+.wb-history__title {
+  margin: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--wb-text-dim);
+}
+
+.wb-history__count {
+  color: var(--wb-text-faint);
+}
+
+.wb-history__head .wb-controls-bar__facet {
+  margin-left: auto;
+}
+
+.wb-history__status,
+.wb-history__missing {
+  margin: 0 8px;
+  color: var(--wb-text-dim);
+  font-size: 12px;
+}
+
+.wb-history__status[data-state="error"] {
+  color: var(--wb-danger);
+}
+
+.wb-history__missing {
+  color: var(--wb-warning);
+}
+
+.wb-history[data-open="false"] .wb-history__list,
+.wb-history[data-open="false"] #wb-history-empty {
+  display: none;
+}
+
+.wb-history__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wb-history-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  background: var(--wb-bg-row);
+  border: 1px solid var(--wb-border);
+  border-radius: 4px;
+}
+
+.wb-history-row__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wb-history-row__label {
+  font-weight: 600;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.wb-history-row__link {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.wb-history-row__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+  color: var(--wb-text-dim);
+  font-size: 11px;
+}
+
+.wb-history-row__facts > div {
+  display: flex;
+  gap: 4px;
+}
+
+.wb-history-row__facts dt {
+  color: var(--wb-text-faint);
+}
+
+.wb-history-row__facts dd {
+  margin: 0;
+}
+
+.wb-history-row__note {
+  margin: 0;
+  color: var(--wb-text-faint);
+  font-size: 11px;
+}
+
+/* An entry rebuilt from a partial import says so, and a deep-linked entry is
+   the one the operator came here to find. */
+.wb-history-row[data-reconstructed="true"] {
+  border-style: dashed;
+}
+
+.wb-history-row[data-linked="true"] {
+  border-color: var(--wb-accent);
+  background: var(--wb-accent-soft);
+}
+
+.wb-history-row[data-outcome="failed"] .wb-badge,
+.wb-history-row[data-outcome="abandoned"] .wb-badge {
+  color: var(--wb-danger);
+}
+
+.wb-history-row[data-outcome="completed"] .wb-badge {
+  color: var(--wb-success);
 }

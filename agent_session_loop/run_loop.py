@@ -565,6 +565,67 @@ def _settle_owed_commit_group_at_startup(
             return
 
 
+def _commit_preflight_refusal(
+    ctx: RunContext,
+    *,
+    cwd: Path,
+    session_scope: plans.SessionScope | None,
+) -> RunError | None:
+    """Ask the per-session commit gate whether it would refuse, without pausing.
+
+    The gate is consulted twice on the path below -- once to learn whether the
+    dirt it sees belongs to a commit the run still owes, and once after that
+    commit has been attempted -- so the question is asked here and the answer is
+    returned rather than acted on. The scope is required because a per-session
+    commit is defined by the aliases the session declared; a missing scope is a
+    refusal for the same reason unreadable dirt is, which is why it is raised
+    into the same channel instead of being reported as a clean tree.
+    """
+    try:
+        if session_scope is None:
+            raise RunError("current session scope is unavailable")
+        review_guard._validate_commit_preflight(
+            cwd,
+            verification_context=ctx.verification_context,
+            needed_aliases=frozenset((*session_scope.reads, *session_scope.writes)),
+        )
+    except RunError as error:
+        return error
+    return None
+
+
+def _spend_owed_commit_group_budget(ctx: RunContext) -> None:
+    """Spend an owed group's remaining retries before a gate refuses its dirt.
+
+    This is the mid-loop twin of
+    :func:`_settle_owed_commit_group_at_startup`, and it exists for the same
+    ordering reason: a settlement that fails re-arms its group for the *next*
+    commit boundary, but the per-session commit preflight stands between here
+    and that boundary and refuses exactly the dirt the failed settlement left
+    behind. A group re-armed behind that gate never gets its retry, and the run
+    stops as ``commit-preflight`` -- non-recoverable, and a description of the
+    worktree rather than of what actually happened, which was a commit this run
+    tried and failed to make with attempts still budgeted.
+
+    Every scope repeats here, unlike at startup. The startup helper limits
+    itself to ``session-paused`` because the alternative is asking the message
+    harness for a turn before the run loop has begun; by this point the harness
+    is the one the loop already uses at its own commit boundary, and the attempt
+    being brought forward is one this iteration was going to make anyway.
+
+    The bound is the same one, twice over: ``_soft_fail_commit`` stops re-arming
+    at :data:`commit_settlement.MAX_COMMIT_GROUP_RETRIES`, and the iteration cap
+    is the backstop for a recovery that answers under a different ``group_id``.
+    A group that exhausts its budget leaves
+    :attr:`RunContext.unsettled_commit_group` armed, which is the caller's cue
+    to stop as ``commit-failed``.
+    """
+    for _ in range(commit_settlement.MAX_COMMIT_GROUP_RETRIES + 1):
+        _settle_owed_commit_group(ctx)
+        if ctx.owed_commit_group is None:
+            return
+
+
 def _settle_paused_retained_work(ctx: RunContext, *, commit_mode: str | None) -> None:
     """Commit what a recoverable pause is about to leave in the worktree.
 
@@ -2316,21 +2377,33 @@ def run_locked(
                 commit_mode == run_selection.COMMIT_MODE_PER_SESSION
                 and workspace is not None
             ):
-                try:
-                    if session_scope is None:
-                        raise RunError("current session scope is unavailable")
-                    review_guard._validate_commit_preflight(
-                        cwd,
-                        verification_context=ctx.verification_context,
-                        needed_aliases=frozenset(
-                            (*session_scope.reads, *session_scope.writes)
-                        ),
+                refusal = _commit_preflight_refusal(
+                    ctx, cwd=cwd, session_scope=session_scope
+                )
+                if refusal is not None and ctx.owed_commit_group is not None:
+                    # The dirt this gate is refusing may be the run's own: a
+                    # commit group that failed part-way leaves the repositories
+                    # it never reached exactly as unexplained as an operator's
+                    # stray edit, and this gate cannot tell the two apart. So
+                    # the owed group spends its budget first. If it settles, the
+                    # dirt is gone and the gate has nothing left to say; if it
+                    # exhausts its retries, the honest reason is
+                    # ``commit-failed`` -- a commit this run attempted and could
+                    # not make -- and not ``commit-preflight``, which would
+                    # report a repairable commit failure as a worktree for a
+                    # human to clean up, one process earlier than the run had to
+                    # stop.
+                    _spend_owed_commit_group_budget(ctx)
+                    if _pause_for_unsettled_commit_group(ctx, snapshot=before):
+                        break
+                    refusal = _commit_preflight_refusal(
+                        ctx, cwd=cwd, session_scope=session_scope
                     )
-                except RunError as error:
+                if refusal is not None:
                     ctx.record_final_snapshot(before)
                     ctx.pause(
                         reason="commit-preflight",
-                        message=str(error),
+                        message=str(refusal),
                         details=session_details,
                     )
                     break

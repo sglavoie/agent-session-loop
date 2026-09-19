@@ -949,6 +949,7 @@ class CommandAndConfigTests(unittest.TestCase):
                 "redirect",
                 "redirect-status",
                 "recover-conversation",
+                "acknowledge-external-changes",
                 "status",
                 "read-result",
             ],
@@ -5589,11 +5590,22 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             self.assertEqual("complete", payload["commit_groups"][0]["status"])
             self.assertFalse(commit_log.exists())
 
-    def test_multi_repo_commit_preflight_requires_every_repository_clean(self) -> None:
+    def test_multi_repo_commit_preflight_requires_a_needed_repository_clean(
+        self,
+    ) -> None:
+        """Dirt in a repository the session declares stops the run before a turn.
+
+        The dirty repository is SVC because SVC is what this fixture's session
+        reads and writes. This test used to dirty OAK and assert the same
+        refusal, and it stopped asserting anything once per-session commits
+        narrowed the gate to the aliases the next session needs: OAK is outside
+        that scope, so the run went on and the returncode assertion was the only
+        thing left holding the test up.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             workspace_root, plan_dir, repositories = self._workspace_plan(tmp_dir)
-            (repositories["OAK"] / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+            (repositories["SVC"] / "dirty.txt").write_text("dirty\n", encoding="utf-8")
             env = self._fake_codex_env(tmp_dir)
 
             completed = self._run(
@@ -5609,8 +5621,47 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             self.assertIn(
                 payload["pause_reason"], {"not-loop-ready", "commit-preflight"}
             )
-            self.assertIn("OAK", json.dumps(payload["pause_details"]))
+            self.assertIn("SVC", json.dumps(payload["pause_details"]))
             self.assertEqual([], payload["turns"])
+
+    def test_multi_repo_commit_preflight_leaves_dirt_outside_the_scope_alone(
+        self,
+    ) -> None:
+        """Dirt the next session never touches is not this gate's business.
+
+        The complement of the refusal above, end to end rather than at the
+        function: per-session commits only commit what the session declared, so
+        a repository the session neither reads nor writes may be dirty without
+        stopping a run that will not touch it. What the run must not do is
+        quietly fold that dirt into a commit of its own.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            workspace_root, plan_dir, repositories = self._workspace_plan(tmp_dir)
+            (repositories["OAK"] / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+            head_before = git_stdout(repositories["OAK"], "rev-parse", "HEAD")
+            env = self._fake_codex_env(tmp_dir)
+
+            completed = self._run(
+                plan_dir,
+                workspace_root,
+                tmp_dir / "state",
+                "--commit-per-session",
+                env_overrides=env,
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertIsNone(payload["pause_reason"])
+            self.assertEqual(1, len(payload["turns"]))
+            self.assertEqual([], payload["commits"])
+            self.assertEqual(
+                head_before, git_stdout(repositories["OAK"], "rev-parse", "HEAD")
+            )
+            self.assertIn(
+                "dirty.txt",
+                git_stdout(repositories["OAK"], "status", "--porcelain"),
+            )
 
     def test_multi_repo_partial_commit_recovers_before_next_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,0 +1,19 @@
+{
+  "direction": "up",
+  "envelope": {
+    "capability": "mutate",
+    "connector_id": "mac-studio",
+    "kind": "operation",
+    "payload": {
+      "detail_code": "connector-restarted",
+      "dispatched_at": 1769999910.0,
+      "method": "plan.abort",
+      "observed_at": 1770000000.0,
+      "operation_id": "op-0002",
+      "status": "unconfirmed"
+    },
+    "protocol": 1,
+    "sent_at": 1770000000.0,
+    "target_id": "pi-companion"
+  }
+}

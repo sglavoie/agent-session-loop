@@ -93,10 +93,31 @@
           <option value="oldest">oldest activity</option>
         </select>
       </label>
+      <label class="wb-controls-bar__facet">
+        <span class="wb-controls-bar__label">project</span>
+        <select id="wb-project-filter" name="project" aria-label="project filter">
+          <option value="">all projects</option>
+        </select>
+      </label>
+      <label class="wb-controls-bar__facet">
+        <span class="wb-controls-bar__label">harness</span>
+        <select id="wb-harness-filter" name="harness" aria-label="harness filter">
+          <option value="">all harnesses</option>
+        </select>
+      </label>
       <label class="wb-controls-bar__completed">
         <input type="checkbox" id="wb-show-completed" />
         <span>show completed</span>
       </label>
+      <button
+        class="wb-button wb-button--ghost"
+        id="wb-older-toggle"
+        type="button"
+        aria-pressed="false"
+        title="Show work that has not moved in the last eight hours"
+      >
+        show older (0)
+      </button>
       <button
         class="wb-button wb-button--ghost"
         id="wb-cleanup-toggle"
@@ -162,6 +183,7 @@
           id="wb-cleanup-archive"
           type="button"
           data-action="bulk-archive"
+          data-operation-action="archive-plans"
         >
           archive selected
         </button>
@@ -178,6 +200,16 @@
       id="wb-warnings"
       class="wb-warnings"
       aria-live="polite"
+      hidden
+    ></section>
+
+    <!-- What the observation behind this page could not see. Separate from
+         wb-warnings, which is about the plans; this is about the page. -->
+    <section
+      id="wb-observation"
+      class="wb-observation"
+      aria-live="polite"
+      data-count="0"
       hidden
     ></section>
 
@@ -320,6 +352,7 @@
                 class="wb-button wb-button--primary"
                 type="submit"
                 data-action="reply-submit"
+                data-operation-action="reply"
               >
                 submit reply
               </button>
@@ -491,6 +524,27 @@
         </div>
       </section>
 
+      <!--
+        Work this tab sent and nobody has confirmed finished. Hidden when
+        there is none, which is the ordinary case. The ids survive a reload
+        because they are the only part of a mutation a reload cannot
+        reconstruct; no draft and no message is kept with them.
+      -->
+      <section
+        class="wb-panel wb-operations"
+        id="wb-operations-panel"
+        aria-label="Unconfirmed operations"
+        hidden
+      >
+        <h2 class="wb-panel__title">Unconfirmed operations</h2>
+        <p class="wb-operations__hint">
+          Recorded and not yet confirmed as run. Retrying the same control
+          reuses the operation id below, so a retry is the same request rather
+          than a second one.
+        </p>
+        <ul class="wb-operations__list" id="wb-operations-list"></ul>
+      </section>
+
       <section class="wb-panel">
         <h2 class="wb-panel__title">Controls</h2>
         <div id="wb-controls-feedback" class="wb-controls__feedback" hidden></div>
@@ -500,6 +554,7 @@
             id="wb-control-launch"
             type="button"
             data-action="launch"
+            data-operation-action="launch"
           >
             launch
           </button>
@@ -508,6 +563,7 @@
             id="wb-control-stop"
             type="button"
             data-action="stop"
+            data-operation-action="stop"
           >
             stop after current
           </button>
@@ -526,6 +582,8 @@
               id="wb-control-abort"
               type="button"
               data-action="abort"
+              data-operation-action="abort"
+              data-enabled-title="Ends the in-flight turn after the grace window, then leaves the session pending. Confirms first."
               title="Ends the in-flight turn after the grace window, then leaves the session pending. Confirms first."
             >
               abort turn
@@ -544,6 +602,7 @@
               id="wb-control-harness-apply"
               type="button"
               data-action="harness-apply"
+              data-operation-action="harness"
             >
               apply
             </button>
@@ -561,6 +620,8 @@
             id="wb-control-unlock"
             type="button"
             data-action="unlock"
+            data-operation-action="unlock"
+            data-enabled-title="Removes the operational lock. Confirms first."
             title="Removes the operational lock. Confirms first."
           >
             unlock stale
@@ -570,6 +631,8 @@
             id="wb-control-archive"
             type="button"
             data-action="archive-plan"
+            data-operation-action="archive-plan"
+            data-enabled-title="Archives the plan directory and ASL state. Restorable. Confirms first."
             title="Archives the plan directory and ASL state. Restorable. Confirms first."
           >
             archive plan
@@ -704,6 +767,7 @@
               class="wb-button wb-button--primary"
               type="submit"
               data-action="save-profile"
+              data-operation-action="pin"
             >
               save profile
             </button>
@@ -712,6 +776,7 @@
               id="wb-profile-unpin"
               type="button"
               data-action="unpin"
+              data-operation-action="unpin"
             >
               unpin
             </button>
@@ -835,6 +900,48 @@
       </aside>
     </div>
 
+    <!-- What has already finished. ASL stops projecting a run when it ends, so
+         without this a run that finished while the operator was away leaves no
+         trace on the screen at all. Narrowed by the same filters as the queue
+         above it, and collapsed by default because it is not current work. -->
+    <section
+      class="wb-history"
+      id="wb-history"
+      data-open="false"
+      aria-label="Finished runs"
+    >
+      <div class="wb-history__head">
+        <button
+          class="wb-button wb-button--ghost"
+          id="wb-history-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="wb-history-list"
+        >
+          show history
+        </button>
+        <h2 class="wb-history__title">
+          history <span class="wb-history__count" id="wb-history-count">0</span>
+        </h2>
+        <label class="wb-controls-bar__facet">
+          <span class="wb-controls-bar__label">outcome</span>
+          <select id="wb-history-outcome" aria-label="history outcome filter">
+            <option value="">all outcomes</option>
+            <option value="completed">completed</option>
+            <option value="stopped">stopped</option>
+            <option value="paused">paused</option>
+            <option value="failed">failed</option>
+            <option value="abandoned">abandoned</option>
+            <option value="unknown">unknown</option>
+          </select>
+        </label>
+      </div>
+      <p class="wb-history__status" id="wb-history-status" role="status" hidden></p>
+      <p class="wb-history__missing" id="wb-history-missing" role="status" hidden></p>
+      <p class="wb-empty" id="wb-history-empty">no finished runs in this window</p>
+      <ul class="wb-history__list" id="wb-history-list"></ul>
+    </section>
+
     <main class="wb-archive" id="wb-archive" hidden aria-label="Archived plans">
       <div class="wb-archive__head">
         <button
@@ -857,9 +964,9 @@
       <section class="wb-panel wb-archive__settings">
         <h2 class="wb-panel__title">Retention</h2>
         <p class="wb-archive__hint">
-          Archived plans are permanently emptied once they are older than the
-          retention window. Auto-empty runs whenever the queue or archive is
-          polled.
+          Archived plans past the retention window are flagged as cleanup
+          candidates and kept. Nothing is emptied by browsing; permanently
+          emptying an entry takes an explicit, confirmed purge.
         </p>
         <div class="wb-archive__retention">
           <label>
@@ -877,15 +984,12 @@
             id="wb-archive-retention-save"
             type="button"
             data-action="archive-retention-save"
+            data-operation-action="archive-settings"
           >
             save retention
           </button>
         </div>
-        <p
-          id="wb-archive-maintenance"
-          class="wb-archive__maintenance"
-          hidden
-        ></p>
+        <p id="wb-archive-cleanup" class="wb-archive__cleanup" hidden></p>
         <div
           id="wb-archive-feedback"
           class="wb-archive__feedback"
@@ -901,6 +1005,44 @@
         hidden
       ></section>
 
+      <!--
+        The expired-archive review. A typed count proves the operator meant to
+        press the button; it proves nothing about whether they know which
+        plans are behind the number. Purging an entry retention has marked
+        opens this first and names every one of them.
+      -->
+      <section
+        class="wb-panel wb-archive-review"
+        id="wb-archive-review"
+        aria-label="Review expired archive entries"
+        hidden
+      >
+        <h2 class="wb-panel__title">Review expired entries</h2>
+        <p class="wb-archive-review__message" id="wb-archive-review-message"></p>
+        <ul
+          class="wb-archive-review__list"
+          id="wb-archive-review-list"
+        ></ul>
+        <div class="wb-archive-review__actions">
+          <button
+            class="wb-button wb-button--danger"
+            id="wb-archive-review-ack"
+            type="button"
+            data-action="archive-review-ack"
+          >
+            I have reviewed these — continue
+          </button>
+          <button
+            class="wb-button wb-button--ghost"
+            id="wb-archive-review-cancel"
+            type="button"
+            data-action="archive-review-cancel"
+          >
+            cancel
+          </button>
+        </div>
+      </section>
+
       <section class="wb-panel">
         <div class="wb-archive__bulk" id="wb-archive-bulk">
           <span id="wb-archive-count">0 entries selected</span>
@@ -913,10 +1055,19 @@
             select all
           </button>
           <button
+            class="wb-button wb-button--ghost"
+            id="wb-archive-select-candidates"
+            type="button"
+            data-action="archive-select-candidates"
+          >
+            select candidates
+          </button>
+          <button
             class="wb-button wb-button--primary"
             id="wb-archive-restore-selected"
             type="button"
             data-action="archive-restore-selected"
+            data-operation-action="archive-restore"
           >
             restore selected
           </button>
@@ -925,6 +1076,7 @@
             id="wb-archive-purge-selected"
             type="button"
             data-action="archive-purge-selected"
+            data-operation-action="archive-purge"
           >
             purge selected
           </button>
@@ -952,12 +1104,14 @@
           <code class="wb-archive-row__path" data-field="path"></code>
           <span class="wb-archive-row__archived" data-field="archived"></span>
           <span class="wb-archive-row__expires" data-field="expires"></span>
+          <span class="wb-archive-row__cleanup" data-field="cleanup"></span>
         </div>
         <div class="wb-archive-row__actions">
           <button
             class="wb-button wb-button--primary"
             type="button"
             data-action="archive-restore"
+            data-operation-action="archive-restore"
           >
             restore
           </button>
@@ -965,10 +1119,48 @@
             class="wb-button wb-button--danger"
             type="button"
             data-action="archive-purge"
+            data-operation-action="archive-purge"
           >
             purge
           </button>
         </div>
+      </li>
+    </template>
+
+    <template id="wb-section-template">
+      <section class="wb-section" data-section="" data-count="0">
+        <header class="wb-section__head">
+          <h2 class="wb-section__title" data-section-heading></h2>
+          <span class="wb-section__count" data-section-count>0</span>
+        </header>
+        <p class="wb-section__empty" data-section-empty hidden></p>
+        <div class="wb-section__list" data-section-list></div>
+      </section>
+    </template>
+
+    <template id="wb-project-group-template">
+      <div class="wb-project-group" data-project="">
+        <h3 class="wb-project-group__heading" data-group-heading></h3>
+        <div class="wb-project-group__rows" data-group-rows></div>
+      </div>
+    </template>
+
+    <template id="wb-history-row-template">
+      <li class="wb-history-row" data-entry-id="" data-outcome="unknown">
+        <header class="wb-history-row__head">
+          <span class="wb-badge" data-field="outcome">unknown</span>
+          <span class="wb-history-row__label" data-field="label"></span>
+          <a class="wb-history-row__link" href="#" data-field="link">link</a>
+        </header>
+        <dl class="wb-history-row__facts">
+          <div><dt>project</dt><dd data-field="project">-</dd></div>
+          <div><dt>harness</dt><dd data-field="harness">-</dd></div>
+          <div><dt>finished</dt><dd data-field="finished">-</dd></div>
+          <div><dt>duration</dt><dd data-field="duration">-</dd></div>
+          <div><dt>sessions</dt><dd data-field="sessions">-</dd></div>
+          <div><dt>run id</dt><dd data-field="run">-</dd></div>
+        </dl>
+        <p class="wb-history-row__note" data-field="note" hidden></p>
       </li>
     </template>
 
@@ -1051,6 +1243,6 @@
       </li>
     </template>
 
-    <script src="/static/app.js" defer></script>
+    <script type="module" src="/static/app.js"></script>
   </body>
 </html>

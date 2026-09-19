@@ -1,0 +1,59 @@
+{
+  "comment": "The two deployments of one shell, each on its own loopback port. Read by fixture_server.py, playwright.config.js and shell.spec.js, so the port map has exactly one source of truth. Ports sit above the Workbench's own 8765 and clear of the companion harness's 8791-8803.",
+  "host": "127.0.0.1",
+  "owner_identity": "owner@example.ts.net",
+  "token": "shell-fixture-token",
+  "desktop_min_width": 960,
+  "deployments": {
+    "local": {
+      "port": 8821,
+      "address": "plan_dir",
+      "description": "The laptop: LocalProvider over the plan corpus on disk, addressed by path, reads open and a token held for writes."
+    },
+    "remote": {
+      "port": 8822,
+      "address": "plan_key",
+      "description": "The Pi: RemoteProvider over an observation of the same corpus, addressed by digest, every route behind the identity Tailscale Serve stamped."
+    }
+  },
+  "plans": {
+    "alpha": {
+      "primary_state": "paused-for-reply",
+      "section": "needs-attention",
+      "description": "Paused mid-run waiting for an operator, with events, progress and artifacts on disk."
+    },
+    "bravo": {
+      "primary_state": "ready",
+      "section": "recent",
+      "description": "Never run: every detail pane has to say it has nothing rather than fail."
+    },
+    "charlie": {
+      "primary_state": "recent",
+      "section": "older",
+      "description": "Finished a run thirty hours ago and went quiet, with two endings in the history window: the one row that has to fall outside the eight-hour inactive-work window in both modes."
+    }
+  },
+  "sections": {
+    "comment": "Which section of the overview each seeded plan belongs in, so a spec asserts placement against the fixture's intent rather than against a copy of the rule it is testing. Named per plan rather than defaulted: a default would let a plan that silently moved sections keep passing.",
+    "hidden": ["older"]
+  },
+  "archive": {
+    "comment": "The two archived plans tests/workbench_support.py seeds, one on each side of the default thirty-day retention window. Two rather than one because the purge review has to name the expired entries and leave the rest alone: an archive where everything had expired could not show the second half.",
+    "entry_count": 2,
+    "expired_count": 1,
+    "expired": {
+      "archive_id": "20260731T090000Z-delta",
+      "cleanup_state": "eligible",
+      "description": "Archived forty-five days ago: past retention, so a purge that includes it has to be reviewed entry by entry first."
+    },
+    "retained": {
+      "archive_id": "20260916T090000Z-echo",
+      "cleanup_state": "retained",
+      "description": "Archived two days ago: inside the window, so it is never a cleanup candidate and never forces a review."
+    }
+  },
+  "history": {
+    "comment": "charlie's two endings, oldest first, as tests/workbench_support.py seeds them.",
+    "outcomes": ["failed", "stopped"]
+  }
+}

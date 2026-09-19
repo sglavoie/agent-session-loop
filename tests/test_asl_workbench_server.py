@@ -1088,10 +1088,21 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual(
             [result.archive_id], [e["archive_id"] for e in body["entries"]]
         )
-        self.assertIn("archive_maintenance", body)
-        self.assertEqual(0, body["archive_maintenance"]["removed_count"])
+        # A fresh entry is inside its window, and the listing says so without
+        # having had to touch it.
+        self.assertEqual(0, body["archive_cleanup"]["candidate_count"])
+        self.assertEqual("retained", body["entries"][0]["cleanup_state"])
+        self.assertFalse(body["entries"][0]["cleanup_candidate"])
+        # The old maintenance block is gone, not zeroed. A caller that still
+        # reads `archive_maintenance` gets nothing rather than "0 purged",
+        # which would read as "the pass ran and found nothing".
+        self.assertNotIn("archive_maintenance", body)
 
-    def test_archive_list_auto_empties_expired_entries(self) -> None:
+    def test_archive_list_leaves_expired_entries_in_place(self) -> None:
+        # Reading the archive used to be the act that emptied it: this same
+        # scenario returned `[]` and a removal count. It now returns the entry,
+        # flagged, and leaves it on disk for an operator to decide about. See
+        # `changes.KEY_EXPLICIT_ARCHIVE_CLEANUP`.
         result = workbench.archive_plan(
             self.canonical_plan_dir,
             state_dir=self.state_dir,
@@ -1107,10 +1118,50 @@ class WorkbenchServerTests(unittest.TestCase):
         raw["archived_at"] = "2000-01-01T00:00:00+00:00"
         meta_path.write_text(json.dumps(raw), encoding="utf-8")
         server = self._start_server()
+
         status, body, _ = _http_request(f"{self._base_url(server)}/api/archive")
+
         self.assertEqual(200, status)
-        self.assertEqual(1, body["archive_maintenance"]["removed_count"])
-        self.assertEqual([], body["entries"])
+        self.assertEqual(
+            [result.archive_id], [e["archive_id"] for e in body["entries"]]
+        )
+        self.assertEqual("eligible", body["entries"][0]["cleanup_state"])
+        self.assertTrue(body["entries"][0]["cleanup_candidate"])
+        self.assertEqual([result.archive_id], body["archive_cleanup"]["candidate_ids"])
+        self.assertTrue(
+            workbench.archive_entry_dir(result.archive_id, self.state_dir).exists()
+        )
+
+    def test_repeated_archive_reads_leave_the_archive_tree_unchanged(self) -> None:
+        # The property, not one instance of it: reading twice must produce the
+        # same tree it started with, expired entry included.
+        result = workbench.archive_plan(
+            self.canonical_plan_dir,
+            state_dir=self.state_dir,
+            registry_path=self.registry_path,
+            include_default_dirs=False,
+        )
+        meta_path = (
+            workbench.archive_entry_dir(result.archive_id, self.state_dir)
+            / workbench.ARCHIVE_METADATA_FILE_NAME
+        )
+        raw = json.loads(meta_path.read_text(encoding="utf-8"))
+        raw["archived_at"] = "2000-01-01T00:00:00+00:00"
+        meta_path.write_text(json.dumps(raw), encoding="utf-8")
+        archive_root = workbench.archive_root(self.state_dir)
+
+        def tree() -> list[str]:
+            return sorted(
+                str(path.relative_to(archive_root)) for path in archive_root.rglob("*")
+            )
+
+        before = tree()
+        server = self._start_server()
+        for _ in range(3):
+            status, _, _ = _http_request(f"{self._base_url(server)}/api/archive")
+            self.assertEqual(200, status)
+
+        self.assertEqual(before, tree())
 
     def test_archive_restore_moves_plan_back(self) -> None:
         result = workbench.archive_plan(
@@ -1207,12 +1258,20 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual(400, status)
         self.assertEqual("invalid-request", body["reason"])
 
-    def test_queue_exposes_archivable_and_maintenance_fields(self) -> None:
+    def test_queue_exposes_archivable_and_catalog_fields(self) -> None:
         server = self._start_server(plan_roots=(str(self.tmp_path / "plans"),))
         status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
         self.assertEqual(200, status)
         self.assertIn("archive_retention_days", body)
-        self.assertIn("archive_maintenance", body)
+        # `archive_maintenance` is gone on purpose: the queue answers from one
+        # non-reclaiming catalog scan and runs no retention, so it has no
+        # maintenance result to report. No read has one any more -- the pass
+        # itself no longer exists. See `changes.KEY_OBSERVATIONAL_READS`.
+        self.assertNotIn("archive_maintenance", body)
+        self.assertIn("catalog_generation", body)
+        self.assertTrue(body["catalog_complete"])
+        self.assertEqual(len(body["plans"]), body["catalog_total"])
+        self.assertEqual([], body["catalog_warnings"])
         plan_payload = body["plans"][0]
         self.assertIn("archivable", plan_payload)
         self.assertIn("archive_blocker", plan_payload)

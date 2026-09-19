@@ -2661,16 +2661,16 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             )
 
     def test_docs_describe_the_workbench_launch_idempotency_key(self) -> None:
-        """``launch_id`` and the limits of an in-process receipt table."""
+        """``launch_id``, and the durable journal the receipt now comes from."""
         docs = self._read("docs/agent-session-loop.md")
         normalized = " ".join(docs.split())
 
         for marker in (
             "accept an optional `launch_id` bounded by "
             "`redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS`",
-            "it makes a *retry to the same process* idempotent, and what "
-            "stops two runs across two Workbench processes remains the plan "
-            "lock",
+            "both routes admit through the plan's operation journal, so a "
+            "resend is idempotent across Workbench processes and across a "
+            "restart, not only within the process that spawned",
             '`reason: "launch-already-in-flight"` while a process this '
             "server started for the plan is still alive",
             "A paused run is not a conflict: resuming one is what `/api/reply` is for.",
@@ -2680,6 +2680,76 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
                 normalized,
                 msg=f"docs omit launch idempotency marker: {marker!r}",
             )
+
+    def test_docs_describe_durable_operation_admission(self) -> None:
+        """The two answers an interruption can leave, and who stays authority."""
+        docs = self._read("docs/agent-session-loop.md")
+        normalized = " ".join(docs.split())
+
+        for marker in (
+            "keeps a per-plan journal at `<state-dir>/<plan-hash>/operations.jsonl`",
+            "holds an exclusive `flock` across read, decide, and append",
+            "Dispatch is recorded before the side effect, never after.",
+            "a killed process leaves `expired` when the mutation certainly "
+            "did not run, and `unconfirmed` when it may have and nobody can "
+            "say",
+            "never infers success from absence",
+            "An `unconfirmed` operation is never retried automatically.",
+            "settles the old row `superseded` with detail `replaced-uncertain`",
+            "Admission is a gate in front of the plan lock, not a replacement for it.",
+            "The journal holds identifiers only.",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"docs omit operation-admission marker: {marker!r}",
+            )
+
+    def test_docs_describe_the_shared_launch_and_reply_path(self) -> None:
+        """One application operation behind both surfaces, and its settlement."""
+        docs = self._read("docs/agent-session-loop.md")
+        normalized = " ".join(docs.split())
+
+        for marker in (
+            "`agent_session_loop.workbench_actions.perform` is the single "
+            "application operation behind `POST /api/launch`, `POST /api/reply`, "
+            "and the bridge's `run.resume` and `question.reply`",
+            "A stale target is refused with or without an action token.",
+            "a target that has moved is refused before admission, so the "
+            "operation id the request carried is still spendable",
+            "What settles an operation depends on what it promised.",
+            "promised that an operator's words were *read*, which a `Popen` "
+            "does not establish",
+            "reach `consumed` only on a `reply_provided` record in the plan's "
+            "own `events.jsonl`",
+            "the evidence *reports* which run read the reply rather than "
+            "matching it against the id the operation named",
+            "A guard refusal closes the row `cancelled` on the way past",
+            "A launched run gets its own session.",
+            "`workbench.launch_plan` passes `start_new_session=True`, matching "
+            "the `AbandonProcessGroup` the launchd agents already set",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"docs omit shared launch/reply marker: {marker!r}",
+            )
+
+    def test_docs_refuse_the_pause_lifting_as_resume_evidence(self) -> None:
+        """The interpretation session 6 replaced, named so it cannot come back."""
+        docs = self._read("docs/agent-session-loop.md")
+        normalized = " ".join(docs.split())
+
+        self.assertIn(
+            "A resume is settled by a run's own record of reading the reply, "
+            "never by the plan leaving the paused state.",
+            normalized,
+        )
+        self.assertIn(
+            "a `reply_provided` record naming the reply a resume carried",
+            normalized,
+        )
+        self.assertNotIn("a resume's run leaving the paused state", normalized)
 
     def test_docs_describe_the_conversation_recovery_card(self) -> None:
         """The new recovery kind, and why it offers no endpoint action."""
@@ -3040,7 +3110,14 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "`confirm_count`",
             "confirmation-mismatch",
             "`archive_retention_days`, default 30 days",
-            "auto-empties entries",
+            # Session 8: retention marks; it does not empty. The marker used to
+            # be "auto-empties entries" -- it is inverted here rather than
+            # dropped so the docs cannot quietly lose the distinction.
+            "Retention is a threshold rather\nthan a deadline",
+            "the only way an archive entry is emptied",
+            '`cleanup_state: "eligible"`',
+            "`archive_cleanup.candidate_ids`",
+            '`cleanup_state: "undated"` and is never a candidate',
             # Session 4: completed-plan cleanup workflow.
             "`completed_at`",
             "ages complete plans off their",

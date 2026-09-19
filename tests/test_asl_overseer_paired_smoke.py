@@ -32,9 +32,11 @@ AgentMux to prove a refusal would be a worse trade than simulating the skew.
 This module spawns processes and needs an installed pair, so it belongs to
 ``INTEGRATION_MODULES`` and never to ``PORTABLE_MODULES``. It skips when there
 is no installed pair to judge, because a checkout is a legitimate place to have
-none. Setting ``AMX_ASL_OVERSEER_SMOKE`` turns that skip into a failure, which
-is what ``just overseer-integration`` in ``sglavoie_agentmux`` sets: a gate that
-silently skips is a gate that reports success for having done nothing.
+none -- including a checkout whose ``asl`` on ``PATH`` is some *other*
+checkout's, which is what a second copy of the repository looks like from here.
+Setting ``AMX_ASL_OVERSEER_SMOKE`` turns that skip into a failure, which is what
+``just overseer-integration`` in ``sglavoie_agentmux`` sets: a gate that silently
+skips is a gate that reports success for having done nothing.
 """
 
 from __future__ import annotations
@@ -123,6 +125,18 @@ def setUpModule() -> None:
     if wrapper is None:
         _unavailable("no `asl` wrapper is on PATH")
         return
+    if not wrapper.is_relative_to(support.REPO_ROOT):
+        # Which checkout the wrapper belongs to is availability, not
+        # compatibility: an `asl` from somewhere else is not this pair installed
+        # badly, it is this pair not installed at all, and judging it would
+        # report on a version neither half of this checkout wrote. A copy of the
+        # repository at a second path -- a worktree, a workbench, a release
+        # staging tree -- is exactly that case, and a legitimate one.
+        _unavailable(
+            f"the installed `asl` wrapper resolves to {wrapper}, which is "
+            f"outside {support.REPO_ROOT} and so belongs to another checkout"
+        )
+        return
     _INSTALLED["binary"] = binary
     _INSTALLED["wrapper"] = wrapper
 
@@ -148,7 +162,14 @@ class InstalledPairTests(_InstalledCase):
     """
 
     def test_the_installed_wrapper_resolves_to_the_package_under_test(self) -> None:
-        """The ASL half: `asl` on PATH is this checkout, not another one."""
+        """The ASL half: `asl` on PATH is this checkout, not another one.
+
+        ``setUpModule`` now declines to run the gate at all when this does not
+        hold, so reaching this assertion and failing it would mean the two
+        disagree about what "installed" means. Asserted here anyway, because the
+        claim every other test in the module rests on should be visible as a
+        claim rather than only as a skip condition.
+        """
         wrapper = Path(_INSTALLED["wrapper"])
 
         self.assertTrue(

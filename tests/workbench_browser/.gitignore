@@ -1,0 +1,7 @@
+# Development-only harness. The engine and its artifacts are machine-local;
+# `package.json` and `package-lock.json` are what get committed, so a checkout
+# installs the pinned version rather than whichever one is current.
+node_modules/
+.artifacts/
+test-results/
+playwright-report/

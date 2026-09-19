@@ -16,6 +16,7 @@ from agent_session_loop import (
     plans,
     state,
     workbench,
+    workbench_archive,
 )
 from tests.support import (
     _seed_archivable_plan,
@@ -762,7 +763,11 @@ class WorkbenchPurgeArchiveTests(unittest.TestCase):
             self.assertEqual(2, result.removed_count)
             self.assertEqual(1, result.failed_count)
 
-    def test_maintain_purges_expired_and_keeps_recent(self) -> None:
+    def test_retention_marks_expired_entries_without_removing_them(self) -> None:
+        # The scenario the deleted `maintain_archive` pass used to be given,
+        # held to the opposite outcome. One entry is well past the window and
+        # one is inside it; the old entry comes back flagged, and both are
+        # still on disk when the review is over.
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp).resolve()
             state_dir = tmp_path / "state"
@@ -779,24 +784,26 @@ class WorkbenchPurgeArchiveTests(unittest.TestCase):
             )
             now = datetime(2026, 7, 3, 12, 0, 0, tzinfo=UTC)
 
-            result = workbench.maintain_archive(
+            view = workbench_archive.review_archive(
                 state_dir=state_dir, registry_path=registry_path, now=now
             )
 
-            self.assertEqual(1, result.removed_count)
-            self.assertEqual(old_id, result.outcomes[0].archive_id)
-            self.assertFalse(workbench.archive_entry_dir(old_id, state_dir).exists())
+            self.assertEqual([old_id], list(view.review.candidate_ids))
+            self.assertEqual(1, view.review.candidate_count)
+            self.assertTrue(workbench.archive_entry_dir(old_id, state_dir).exists())
             self.assertTrue(workbench.archive_entry_dir(new_id, state_dir).exists())
+            # There is no removal count to report, and that absence is the
+            # change: a caller cannot read "0 purged" as "the pass ran".
+            self.assertNotIn("removed_count", view.review.to_payload())
 
-    def test_maintain_respects_shortened_retention(self) -> None:
+    def test_shortening_retention_marks_more_candidates_only(self) -> None:
+        # Shortening the window used to be a deletion trigger: the next read
+        # emptied everything the new window had just expired. It is now a
+        # reclassification, so the operator can widen it back.
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp).resolve()
             state_dir = tmp_path / "state"
             registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
-            registry = workbench.set_archive_retention_days(
-                workbench.load_registry(registry_path), 1
-            )
-            workbench.save_registry(registry, registry_path)
             archive_id = "20260701T120000Z-shortretain1"
             workbench.save_archive_metadata(
                 self._metadata(tmp_path, archive_id, "2026-07-01T12:00:00+00:00"),
@@ -804,14 +811,48 @@ class WorkbenchPurgeArchiveTests(unittest.TestCase):
             )
             now = datetime(2026, 7, 3, 12, 0, 0, tzinfo=UTC)
 
-            result = workbench.maintain_archive(
+            before = workbench_archive.review_archive(
+                state_dir=state_dir, registry_path=registry_path, now=now
+            )
+            self.assertEqual([], list(before.review.candidate_ids))
+
+            workbench_archive.set_retention(1, registry_path=registry_path)
+            after = workbench_archive.review_archive(
                 state_dir=state_dir, registry_path=registry_path, now=now
             )
 
-            self.assertEqual(1, result.removed_count)
-            self.assertFalse(
-                workbench.archive_entry_dir(archive_id, state_dir).exists()
+            self.assertEqual([archive_id], list(after.review.candidate_ids))
+            self.assertTrue(workbench.archive_entry_dir(archive_id, state_dir).exists())
+
+    def test_an_unreadable_archive_date_is_reported_not_swept(self) -> None:
+        # The old pass skipped a malformed `archived_at` with a warning, which
+        # left the entry in a state nothing ever acted on. It is now its own
+        # cleanup state, so an operator can see there is something to decide.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir = tmp_path / "state"
+            registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+            archive_id = "20260701T120000Z-baddate12345"
+            meta_path = workbench.save_archive_metadata(
+                self._metadata(tmp_path, archive_id, "2026-07-01T12:00:00+00:00"),
+                state_dir,
             )
+            # Corrupt the stored timestamp after the fact: the writer refuses
+            # to produce one, which is why an entry only reaches this state by
+            # something outside the writer damaging it.
+            payload = json.loads(meta_path.read_text(encoding="utf-8"))
+            payload["archived_at"] = "not-a-timestamp"
+            meta_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            view = workbench_archive.review_archive(
+                state_dir=state_dir,
+                registry_path=registry_path,
+                now=datetime(2026, 7, 3, 12, 0, 0, tzinfo=UTC),
+            )
+
+            self.assertEqual(1, view.review.undated_count)
+            self.assertEqual([], list(view.review.candidate_ids))
+            self.assertTrue(workbench.archive_entry_dir(archive_id, state_dir).exists())
 
 
 class WorkbenchDiscoveryTests(unittest.TestCase):

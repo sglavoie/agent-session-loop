@@ -1020,11 +1020,16 @@ class _FakePopen:
         env=None,
         cwd=None,
         text=False,
+        start_new_session=False,
     ) -> None:
         self.argv = list(argv)
         self.cwd = cwd
         self.env = dict(env) if env is not None else None
         self.text = text
+        # Recorded, not ignored: whether the child gets its own session is the
+        # difference between a run that survives its launcher's shutdown and
+        # one the launcher's signal takes down with it.
+        self.start_new_session = start_new_session
         self.pid = 4242
         self.returncode: int | None = None
         self._stdin_buffer = io.StringIO() if text else io.BytesIO()

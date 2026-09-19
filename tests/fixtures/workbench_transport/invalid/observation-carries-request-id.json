@@ -1,0 +1,24 @@
+{
+  "direction": "up",
+  "envelope": {
+    "capability": "observe",
+    "connector_id": "mac-studio",
+    "kind": "observation",
+    "payload": {
+      "asl_version": "2026.3.1",
+      "bridge_alive": true,
+      "bridge_protocol": 2,
+      "contract_set_id": "asl-amx-1.85ec3041b9f03f47",
+      "observed_at": 1770000000.0,
+      "projection_age_seconds": 1.5,
+      "source_generation": 42,
+      "view": "heartbeat"
+    },
+    "protocol": 1,
+    "request_id": "req-0001",
+    "sent_at": 1770000000.0,
+    "target_id": "pi-companion"
+  },
+  "error": "unknown-field",
+  "why": "An observation is unsolicited; correlating one would claim a relationship that does not exist."
+}

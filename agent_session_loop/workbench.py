@@ -31,6 +31,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+from asl_workbench import archive as portable_archive
+
 from . import (
     assurance_report,
     cli_trace,
@@ -610,7 +612,7 @@ class RestoreArchiveResult:
 
 @dataclass(frozen=True)
 class ArchivePurgeOutcome:
-    """Per-entry result of a permanent purge or auto-empty pass."""
+    """Per-entry result of a permanent purge -- the only pass that removes."""
 
     archive_id: str
     removed: bool
@@ -1061,48 +1063,11 @@ WORKBENCH_COMMAND_NAME = "workbench"
 PLANS_COMMAND_NAME = "plans"
 
 
-def workbench_pin_from_args(args: Any) -> int:
-    """Pin ``args.plan_dir`` in the default registry from CLI inputs."""
-    plan_dir = args.plan_dir
-    label = getattr(args, "label", None)
-    cwd = getattr(args, "cwd", None)
-    profile = LaunchProfile(cwd=cwd) if cwd is not None else None
-    try:
-        updated, written_path = mutate_registry(
-            None,
-            lambda current: upsert_pin(current, plan_dir, label=label, profile=profile),
-        )
-    except WorkbenchError as error:
-        print(
-            f"agent-session-loop workbench pin: {error}",
-            file=sys.stderr,
-        )
-        return 1
-    matching = next(
-        (pin for pin in updated.pins if pin.plan_dir == _canonical_plan_dir(plan_dir)),
-        None,
-    )
-    resolved = matching.plan_dir if matching is not None else plan_dir
-    print(f"Pinned {resolved} in {written_path}")
-    return 0
-
-
-def workbench_unpin_from_args(args: Any) -> int:
-    """Remove ``args.plan_dir`` from the default registry."""
-    plan_dir = args.plan_dir
-    try:
-        _, written_path = mutate_registry(
-            None,
-            lambda current: remove_pin(current, plan_dir),
-        )
-    except WorkbenchError as error:
-        print(
-            f"agent-session-loop workbench unpin: {error}",
-            file=sys.stderr,
-        )
-        return 1
-    print(f"Unpinned {plan_dir} from {written_path}")
-    return 0
+# The ``workbench pin`` / ``workbench unpin`` CLI handlers moved to
+# ``workbench_archive``, alongside the HTTP routes that do the same two things,
+# so the terminal and the browser refuse the same inputs for the same stated
+# reason. ``cli.py`` resolves them lazily by name, so nothing here imports that
+# module (and nothing needs to).
 
 
 def workbench_registry_from_args(args: Any) -> int:
@@ -1759,12 +1724,14 @@ def archive_root(state_dir: str | Path | None = None) -> Path:
 
 
 def _is_valid_archive_id(archive_id: str) -> bool:
-    """Reject empty ids or ids that would escape the archive root."""
-    if not isinstance(archive_id, str) or not archive_id.strip():
-        return False
-    if archive_id in (".", ".."):
-        return False
-    return "/" not in archive_id and "\\" not in archive_id and "\0" not in archive_id
+    """Reject empty ids or ids that would escape the archive root.
+
+    The rule itself lives in :mod:`asl_workbench.archive` so that every surface
+    that can name an archive entry -- this module, the HTTP routes, a connector
+    -- rejects the same ids. A traversal rule that two callers spell separately
+    is a traversal rule one of them will eventually spell wrong.
+    """
+    return portable_archive.valid_archive_id(archive_id)
 
 
 def new_archive_id() -> str:
@@ -2253,51 +2220,13 @@ def purge_archive_entries(
     return ArchivePurgeResult(outcomes=tuple(outcomes))
 
 
-def maintain_archive(
-    *,
-    state_dir: str | Path | None = None,
-    registry_path: str | Path | None = None,
-    now: datetime | None = None,
-) -> ArchivePurgeResult:
-    """Purge archive entries whose age meets the configured retention window.
-
-    Entries are removed when ``now - archived_at >= archive_retention_days``
-    (read from the Workbench registry, so a shortened retention takes effect on
-    the next maintenance pass). Malformed ``archived_at`` timestamps are
-    surfaced as warnings and left in place. Returns the same per-entry
-    :class:`ArchivePurgeResult` shape used by explicit purges so the Archive
-    view can report auto-empty counts and warnings.
-    """
-    try:
-        registry = load_registry(registry_path)
-    except WorkbenchError as error:
-        raise ArchiveError("registry-unreadable", str(error), status=500) from error
-    retention = timedelta(days=max(0, registry.archive_retention_days))
-
-    resolved_now = now if now is not None else datetime.now(UTC)
-    if resolved_now.tzinfo is None:
-        resolved_now = resolved_now.replace(tzinfo=UTC)
-
-    listing = list_archive_entries(state_dir)
-    warnings = list(listing.warnings)
-    outcomes: list[ArchivePurgeOutcome] = []
-    for entry in listing.entries:
-        archived = _parse_archive_timestamp(entry.archived_at)
-        if archived is None:
-            warnings.append(
-                f"archive[{entry.archive_id}]: invalid archived_at "
-                f"{entry.archived_at!r}; skipping"
-            )
-            continue
-        if resolved_now - archived < retention:
-            continue
-        try:
-            removed = remove_archive_entry(entry.archive_id, state_dir)
-        except WorkbenchError as error:
-            outcomes.append(ArchivePurgeOutcome(entry.archive_id, False, str(error)))
-            continue
-        outcomes.append(ArchivePurgeOutcome(entry.archive_id, removed))
-    return ArchivePurgeResult(outcomes=tuple(outcomes), warnings=tuple(warnings))
+# ``maintain_archive`` used to live here: a pass that emptied every entry past
+# the retention window, invoked from the archive read so that opening the
+# Archive tab was the act that destroyed things. It is gone rather than merely
+# unwired, because an unwired deleter is one call site away from returning.
+# Retention now classifies -- see ``asl_workbench.archive.cleanup_review`` --
+# and ``purge_archive_entries`` below, behind a typed count, is the only way an
+# entry leaves the archive.
 
 
 @dataclass(frozen=True)
@@ -5706,12 +5635,22 @@ def build_workbench_summaries(
 
 
 class LaunchError(Exception):
-    """Raised when a Workbench launch request cannot be honored."""
+    """Raised when a Workbench launch request cannot be honored.
 
-    def __init__(self, reason: str, message: str) -> None:
+    ``spawned`` answers the question a durable journal has to ask about every
+    failure: was there a child? ``process-failed`` is raised from both sides of
+    the spawn, and only the far side has a process that existed, ran, and may
+    have written to the plan before it was killed. A caller that records
+    "certainly did not run" for that case is recording something it cannot
+    know, so the flag travels with the refusal rather than being guessed from
+    the reason.
+    """
+
+    def __init__(self, reason: str, message: str, *, spawned: bool = False) -> None:
         super().__init__(message)
         self.reason = reason
         self.message = message
+        self.spawned = spawned
 
 
 LAUNCH_REASON_INVALID_PLAN = "invalid-plan"
@@ -5985,6 +5924,13 @@ def launch_plan(
             env=popen_env,
             cwd=str(child_cwd) if child_cwd is not None else None,
             text=bool(reply_via_stdin),
+            # The run outlives whoever started it. A Workbench server stopped
+            # with Ctrl-C, a bridge whose connector went away, a terminal
+            # closing -- each delivers its signal to a process *group*, and a
+            # child in the launcher's group would be killed mid-turn by an
+            # event that has nothing to do with the plan. Its own session is
+            # what makes an operator's run survive the operator's tooling.
+            start_new_session=True,
         )
     except (OSError, ValueError) as error:
         raise LaunchError(
@@ -6008,6 +5954,9 @@ def launch_plan(
             raise LaunchError(
                 LAUNCH_REASON_PROCESS_FAILED,
                 f"failed to stream reply text to child stdin: {error}",
+                # A child existed here, and killing it is not the same as never
+                # having started it: it may have reached the plan first.
+                spawned=True,
             ) from error
 
     return LaunchResult(

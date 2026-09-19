@@ -9,6 +9,30 @@ target-version = "py314"
 # globs *.py and lint.sh only claims files with a shell shebang.
 extend-include = ["bin/.local/bin/claude-lint-hook"]
 
+# The portable half of the Workbench is deployed to a Pi documented at Python
+# 3.13, while everything else here runs on the newer interpreter the repository
+# targets above. Pinning the floor in the linter is what makes the boundary
+# something a developer hits before a deployment does: a 3.14-only construct in
+# `asl_workbench` is a lint failure, not an import error on the Pi.
+# `asl_workbench.compatibility` enforces the same floor over the source, and
+# `tests/test_workbench_foundations.py` checks that this entry still exists.
+[tool.ruff.per-file-target-version]
+"asl_workbench/**/*.py" = "py313"
+# The portable test lane runs under the Pi's interpreter too -- the contract
+# invokes `python3.13 -m unittest -q tests.test_workbench_portable` -- so the
+# module and the `tests` package initializer it loads through are pinned to the
+# same floor. Without this the formatter rewrites their `except` groups into
+# 3.14 grammar and the lane fails to import before a single test runs.
+"tests/__init__.py" = "py313"
+"tests/test_workbench_portable.py" = "py313"
+# The staging harness is copied to the Pi and run there beside the unpacked
+# release, so it is held to the Pi's interpreter for the same reason and by the
+# same mechanism. The cutover harness is copied there for the same purpose, and
+# on the day it runs the Pi is mid-migration, which is the worst moment to
+# discover a syntax error.
+"tests/workbench_staging.py" = "py313"
+"tests/workbench_cutover.py" = "py313"
+
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
@@ -20,6 +44,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 [tool.mypy]
 files = [
     "agent_session_loop",
+    "asl_workbench",
     "tests",
     "skills/asl/scripts",
     "skills/session-resplit/scripts",
@@ -239,10 +264,59 @@ module = [
     "agent_session_loop.turn_settlement",
     "agent_session_loop.verification",
     "agent_session_loop.verification_transitions",
+    "agent_session_loop.workbench_actions",
+    "agent_session_loop.workbench_archive",
+    "agent_session_loop.workbench_catalog",
+    "agent_session_loop.workbench_connector",
+    "agent_session_loop.workbench_controls",
+    "agent_session_loop.workbench_details",
+    "agent_session_loop.workbench_history",
+    "agent_session_loop.workbench_local",
+    "agent_session_loop.workbench_operations",
+    "agent_session_loop.workbench_remote_actions",
+    "agent_session_loop.workbench_remote_reads",
     "agent_session_loop.workbench_server",
     "agent_session_loop.workspace_evidence",
     "agent_session_loop.workspaces",
     "agent_session_loop.write_guards",
+    # The portable package starts life on this table rather than working
+    # towards it. Its boundary rules and the extraction rules are the same
+    # rules: it may not import the runner because it may not import ASL at
+    # all, and its payloads cross a process boundary to a Pi, which is the
+    # strongest reason to name what they hold.
+    "asl_workbench",
+    "asl_workbench.__main__",
+    "asl_workbench.actions",
+    "asl_workbench.archive",
+    "asl_workbench.capabilities",
+    "asl_workbench.catalog",
+    "asl_workbench.changes",
+    "asl_workbench.companion_inventory",
+    "asl_workbench.compatibility",
+    "asl_workbench.connector",
+    "asl_workbench.controls",
+    "asl_workbench.credentials",
+    "asl_workbench.details",
+    "asl_workbench.freshness",
+    "asl_workbench.history",
+    "asl_workbench.http",
+    "asl_workbench.incidents",
+    "asl_workbench.installation",
+    "asl_workbench.integrations",
+    "asl_workbench.lifecycle",
+    "asl_workbench.migration",
+    "asl_workbench.notifications",
+    "asl_workbench.observation",
+    "asl_workbench.operations",
+    "asl_workbench.overview",
+    "asl_workbench.remote_actions",
+    "asl_workbench.remote_reads",
+    "asl_workbench.runtime",
+    "asl_workbench.server",
+    "asl_workbench.service",
+    "asl_workbench.store",
+    "asl_workbench.transport",
+    "asl_workbench.uplink",
 ]
 enable_error_code = [
     "arg-type",
