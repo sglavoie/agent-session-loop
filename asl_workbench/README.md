@@ -23,6 +23,7 @@ the full matrix, which is the inventory that does not go stale.
 | `migration.py` | The one-way trip from an installed Companion onto this package, and the backup half of the trip back: the state, configuration, checkpoints, journal, credentials and receipts an existing prefix already holds, moved to the names this package opens without changing an identity, repeating an action, or reinstating a revoked credential. |
 | `runtime.py` | The service entry point the unit starts: one prefix, one runtime lock, one readiness note, and a `--check` that asks whether a release can read a state before it is allowed to serve it. |
 | `server.py` | The HTTP server the runtime binds, and the shutdown handling that lets a service manager stop it without leaving the state locked. |
+| `uplink.py` | The connector-facing half of the service: the one path a paired Mac uploads to, and the one place the Pi puts a frame it wants carried back. An upload's response body *is* the downward link, so a detail read and a control leave on the next frame the Mac sends — which is why there is no poll route and no socket held open. |
 
 `python3 -m asl_workbench` renders the matrix as Markdown, and
 `python3 -m asl_workbench --json` prints the row counts and the declared

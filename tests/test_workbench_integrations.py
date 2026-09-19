@@ -658,6 +658,21 @@ class NamingCase(unittest.TestCase):
             notifications.notification_link("plan/run-1", site=PI_NOTIFICATION_SITE),
         )
 
+    def test_two_deployments_on_one_host_are_two_targets(self) -> None:
+        """The target id has to separate a rehearsal from what it rehearses.
+
+        A staging site keeps the host on purpose -- the rehearsal really does
+        run on the Pi -- and moves the port aside. So the identity a connector
+        addresses cannot be the host: derived that way, a staging connector's
+        uploads would be addressed to the production service too, and the one
+        check standing between the two is the one that stops carrying its
+        weight exactly when it is needed.
+        """
+        staging = replace(PI_SITE, port="9444")
+        self.assertEqual("pi.example.ts.net:9443", PI_SITE.target_id)
+        self.assertNotEqual(PI_SITE.target_id, staging.target_id)
+        self.assertEqual(PI_SITE.host, staging.host)
+
 
 class FakeResponse:
     def __init__(self, status: int, body: bytes) -> None:

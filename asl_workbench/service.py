@@ -72,6 +72,7 @@ from .http import (
     OP_FINAL_REVIEW,
     OP_HEALTH,
     OP_HISTORY,
+    OP_INGEST,
     OP_LAST_MESSAGE,
     OP_LAUNCH,
     OP_LOGS,
@@ -92,6 +93,7 @@ from .http import (
     OP_SUMMARY,
     OP_UNLOCK,
     OP_VERIFICATION,
+    SECURITY_HEADERS,
     Call,
     HttpRefusal,
     Response,
@@ -141,9 +143,11 @@ __all__ = [
     "MUTATION_METHODS",
     "READ_STATUSES",
     "UNAVAILABLE_REASONS",
+    "UPLOAD_OPERATIONS",
     "DetailLane",
     "RemoteProvider",
     "SubmissionLane",
+    "UploadLane",
 ]
 
 
@@ -191,6 +195,13 @@ MUTATION_METHODS: Mapping[str, str] = {
     OP_CONTROL_REDIRECT: METHOD_REDIRECT,
     OP_UNLOCK: METHOD_UNLOCK,
 }
+
+#: What a paired connector does rather than what an operator does. A set of
+#: one, held as a table anyway: the provider's dispatch, its capability report
+#: and the invariant that no route is left unserved and unexplained all read
+#: this name, so an upload path added beside it cannot be served by two of the
+#: three and forgotten by the last.
+UPLOAD_OPERATIONS: frozenset[str] = frozenset({OP_INGEST})
 
 #: The methods whose fingerprint is narrowed by something other than the plan.
 #: Named per method rather than guessed from whichever selector happens to be
@@ -310,6 +321,23 @@ class SubmissionLane(Protocol):
         """Queue the submission for the next acknowledgement frame."""
 
 
+class UploadLane(Protocol):
+    """Taking in one uploaded frame and saying what rides back down.
+
+    The seam is here rather than in the route because what an upload *means*
+    is the pairing's business: which connector this service is paired with,
+    what its credential may speak for, and which frame is worth handing to the
+    acknowledgement. :class:`~asl_workbench.uplink.Uplink` is the
+    implementation; this is the shape the provider needs from it, and it is a
+    protocol so a test can hand the provider a link it drives by hand.
+    """
+
+    def ingest(
+        self, frame: Any, *, now: float, subject: str | None = None
+    ) -> Mapping[str, Any] | None:
+        """Apply the frame; return the envelope to carry down, or ``None``."""
+
+
 # ---------------------------------------------------------------------------
 # The provider
 # ---------------------------------------------------------------------------
@@ -334,12 +362,14 @@ class RemoteProvider:
         connector_id: str,
         reads: DetailLane | None = None,
         mutations: SubmissionLane | None = None,
+        uploads: UploadLane | None = None,
     ) -> None:
         self._store = store
         self._clock = clock
         self._connector_id = connector_id
         self._reads = reads
         self._mutations = mutations
+        self._uploads = uploads
 
     # -- What it can do -----------------------------------------------------
 
@@ -349,6 +379,8 @@ class RemoteProvider:
             supported.update(DETAIL_OPERATIONS)
         if self._mutations is not None:
             supported.update(MUTATION_METHODS)
+        if self._uploads is not None:
+            supported.update(UPLOAD_OPERATIONS)
         reasons = dict(UNAVAILABLE_REASONS)
         if self._reads is None:
             for operation_name in DETAIL_OPERATIONS:
@@ -356,6 +388,9 @@ class RemoteProvider:
         if self._mutations is None:
             for operation_name in MUTATION_METHODS:
                 reasons.setdefault(operation_name, _NO_SUBMISSION_LANE)
+        if self._uploads is None:
+            for operation_name in UPLOAD_OPERATIONS:
+                reasons.setdefault(operation_name, _NO_UPLOAD_LANE)
         return unavailable_from(
             supported, reasons=reasons, default=_DEFAULT_UNAVAILABLE
         )(operation)
@@ -364,6 +399,8 @@ class RemoteProvider:
 
     def invoke(self, call: Call) -> Response:
         operation = call.operation
+        if operation in UPLOAD_OPERATIONS:
+            return self._ingest(call)
         if operation in DETAIL_OPERATIONS:
             return self._detail(call, DETAIL_OPERATIONS[operation])
         if operation in MUTATION_METHODS:
@@ -577,6 +614,29 @@ class RemoteProvider:
             outstanding_operation=self._store.outstanding_operation(plan_key),
         )
 
+    # -- The connector's own path -------------------------------------------
+
+    def _ingest(self, call: Call) -> Response:
+        """Take one uploaded frame in and answer with whatever goes back down.
+
+        The answer is the *bare envelope*, not this module's ``ok`` wrapper.
+        That is the transport's shape rather than the API's, and it has to be:
+        the connector hands the response body straight to
+        :func:`~asl_workbench.transport.validate_frame`, so anything wrapped
+        around it would be a frame the far end refuses as undecodable. An
+        acknowledgement with nothing to carry is a body-less ``202``, which is
+        the same statement with no frame in it.
+        """
+        lane = self._uploads
+        if lane is None:  # pragma: no cover - `unavailable` refused it first
+            raise HttpRefusal(503, "operation-unavailable", _NO_UPLOAD_LANE)
+        carried = lane.ingest(
+            call.body, now=self._clock(), subject=call.principal.subject
+        )
+        if carried is None:
+            return Response(status=202, headers=dict(SECURITY_HEADERS))
+        return Response.json(200, carried)
+
     # -- Bounded reads over the link ----------------------------------------
 
     def _detail(self, call: Call, detail: str) -> Response:
@@ -732,6 +792,10 @@ _NO_READ_LANE = "no connector is paired, so no artifact can be read right now"
 _NO_SUBMISSION_LANE = (
     "no connector is paired, so there is nothing to carry a mutation out"
 )
+#: Not "no connector is paired" -- the connector is the one asking. This
+#: provider was built without an uplink at all, which is a deployment that can
+#: serve what it already holds and can never be given anything new.
+_NO_UPLOAD_LANE = "this service was not built to accept connector uploads"
 
 
 # ---------------------------------------------------------------------------

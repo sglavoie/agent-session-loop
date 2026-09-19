@@ -165,6 +165,7 @@ FAST_MODULES = (
     "tests.test_workbench_remote_reads",
     "tests.test_workbench_store",
     "tests.test_workbench_transport_contract",
+    "tests.test_workbench_uplink",
     "tests.test_asl_literals",
 )
 
@@ -263,6 +264,7 @@ PORTABLE_MODULES = (
     "tests.test_workbench_remote_reads",
     "tests.test_workbench_store",
     "tests.test_workbench_transport_contract",
+    "tests.test_workbench_uplink",
     "tests.test_asl_literals",
 )
 

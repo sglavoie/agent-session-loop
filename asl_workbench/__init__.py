@@ -356,9 +356,11 @@ from .service import (
     MUTATION_METHODS,
     READ_STATUSES,
     UNAVAILABLE_REASONS,
+    UPLOAD_OPERATIONS,
     DetailLane,
     RemoteProvider,
     SubmissionLane,
+    UploadLane,
 )
 from .store import (
     COMPANION_SCHEMA_VERSION,
@@ -409,6 +411,14 @@ from .transport import (
     validate_envelope,
     validate_frame,
 )
+from .uplink import (
+    COMMAND_LIFETIME_SECONDS,
+    LINK_SILENCE_SECONDS,
+    MAX_CARRIED_FRAMES,
+    READ_WAIT_SECONDS,
+    Uplink,
+    UplinkRefusal,
+)
 
 __all__ = [
     "ABORT_NOTE_CODES",
@@ -434,6 +444,7 @@ __all__ = [
     "CLEANUP_RETAINED",
     "CLEANUP_STATES",
     "CLEANUP_UNDATED",
+    "COMMAND_LIFETIME_SECONDS",
     "COMPANION_MODULES",
     "COMPANION_ROUTES",
     "COMPANION_SCHEMA_VERSION",
@@ -478,9 +489,11 @@ __all__ = [
     "KIND_RECEIPT",
     "KIND_REQUEST",
     "LAUNCH_PROFILE_FIELDS",
+    "LINK_SILENCE_SECONDS",
     "LOCAL_POLICY",
     "LOCK_FILE_NAME",
     "MAX_BODY_CHARS",
+    "MAX_CARRIED_FRAMES",
     "MAX_DELIVERY_WINDOW_SECONDS",
     "MAX_DETAIL_BYTES",
     "MAX_FRAME_BYTES",
@@ -515,6 +528,7 @@ __all__ = [
     "READABLE_ARTIFACT_NAMES",
     "READ_OUTCOMES",
     "READ_STATUSES",
+    "READ_WAIT_SECONDS",
     "RECEIPT_OUTCOMES",
     "REDIRECT_RECEIPT_FACTS",
     "REFUSAL_SCOPES",
@@ -545,6 +559,7 @@ __all__ = [
     "TRANSPORT_ERROR_CODES",
     "TRANSPORT_PROTOCOL_VERSION",
     "UNAVAILABLE_REASONS",
+    "UPLOAD_OPERATIONS",
     "Admission",
     "Application",
     "ApplicationRequestHandler",
@@ -650,6 +665,9 @@ __all__ = [
     "SubmissionLane",
     "TransportCompatibility",
     "TransportError",
+    "Uplink",
+    "UplinkRefusal",
+    "UploadLane",
     "Window",
     "WorkbenchStore",
     "abort_note_code",

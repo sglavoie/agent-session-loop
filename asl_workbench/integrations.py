@@ -226,6 +226,24 @@ class IntegrationSite:
         """The monitor name now, plus the names an installed one may carry."""
         return (self.monitor_name, *self.legacy_monitor_names)
 
+    @property
+    def target_id(self) -> str:
+        """The transport identity a connector addresses this deployment by.
+
+        Derived from what this deployment publishes on rather than configured
+        beside it. A target id is how a connector proves it meant *this*
+        deployment, and a second field that could disagree with the published
+        identity would make "is this frame addressed to me?" a question with
+        two answers.
+
+        It is the authority and not the host because a rehearsal runs on the
+        same machine as the deployment it rehearses -- only the port moves
+        aside -- so a host-only identity would make a staging connector's
+        uploads addressed to production as well. Two deployments on one host
+        are two targets.
+        """
+        return self.authority
+
     def publishes(self) -> NotificationSite:
         """The notification site, or a refusal if this host owns no publisher."""
         if self.notifications is None or self.deployment != DEPLOYMENT_PRODUCTION:

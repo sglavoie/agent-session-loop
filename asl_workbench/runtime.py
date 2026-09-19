@@ -74,6 +74,7 @@ from .observation import ObservationPolicy
 from .server import ApplicationServer, install_shutdown_handlers
 from .service import RemoteProvider
 from .store import StoreError, WorkbenchStore
+from .uplink import Uplink
 
 #: The runtime log. Event words only -- ``runtime-started``, ``runtime-stopped``
 #: -- because the deployed host persists no prose, and a request line on this
@@ -225,6 +226,12 @@ def run(
                 policy=policy,
                 created_at=time.time(),
             ) as store:
+                uplink = Uplink(
+                    store,
+                    clock=time.time,
+                    connector_id=connector_id,
+                    target_id=site.target_id,
+                )
                 server = ApplicationServer(
                     (endpoint.bind_host, endpoint.bind_port),
                     Application(
@@ -232,6 +239,9 @@ def run(
                             store,
                             clock=time.time,
                             connector_id=connector_id,
+                            reads=uplink,
+                            mutations=uplink,
+                            uploads=uplink,
                         ),
                         OwnerIdentityAuthenticator(
                             credentials, owner=endpoint.owner_identity
@@ -260,9 +270,14 @@ def run(
                     )
                     # Polled rather than joined outright so a signal is handled
                     # promptly on the main thread whatever the platform does
-                    # with an interrupted lock acquisition.
+                    # with an interrupted lock acquisition. The uplink's own
+                    # deadlines are swept from the same poll: nothing else in a
+                    # deployed process runs on a timer, and a link that went
+                    # quiet has to be noticed without a request arriving to
+                    # notice it.
                     while worker.is_alive():
                         worker.join(POLL_SECONDS)
+                        uplink.sweep(time.time())
                 finally:
                     try:
                         server.shutdown()

@@ -54,6 +54,8 @@ from .credentials import (
 )
 from .details import DetailError
 from .operations import OperationError
+from .transport import MAX_FRAME_BYTES
+from .uplink import UplinkRefusal
 
 __all__ = [
     "API_CONTENT_SECURITY_POLICY",
@@ -80,6 +82,7 @@ __all__ = [
     "STATIC_MIME_TYPES",
     "STATIC_ROOT",
     "STATIC_URL_PREFIX",
+    "UPLINK_PATH",
     "Application",
     "Authenticator",
     "Call",
@@ -121,6 +124,12 @@ SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD"})
 #: 1 MiB, the historic local cap. The largest legitimate body is a redirect
 #: correction or a reply, both of which are prose.
 MAX_REQUEST_BODY = 1024 * 1024
+
+#: The one path a connector posts to, and the only route whose body is a
+#: transport frame rather than a form. Named here because the route table is
+#: what a deployment reads it from; the Mac connector holds its own copy of the
+#: string, because this package is not importable from there.
+UPLINK_PATH = "/v1/ingest"
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +212,7 @@ OP_CONTROL_ABORT = "control-abort"
 OP_CONTROL_SELECT_HARNESS = "control-select-harness"
 OP_CONTROL_REDIRECT = "control-redirect"
 OP_UNLOCK = "unlock"
+OP_INGEST = "ingest"
 
 #: The one operation the application answers itself. A provider that could
 #: decline to describe its own capabilities would leave a frontend with no way
@@ -225,6 +235,11 @@ class Route:
     operation: str
     role: str
     summary: str
+    #: The largest body this route will read, when a mode's own cap is the
+    #: wrong bound for it. Only the connector uplink declares one: everything
+    #: else is a small JSON object, and a ceiling raised for all of them to
+    #: accommodate one is a ceiling for none of them.
+    max_body_bytes: int | None = None
 
     @property
     def mutating(self) -> bool:
@@ -243,6 +258,10 @@ class Route:
 #: summary credential may read. ``POST /api/plan/delete`` remains an alias of
 #: the archive operation rather than a second implementation of it, which is
 #: what it has been since archiving replaced deletion.
+#:
+#: Then the four the deployment needs: :data:`UPLINK_PATH`, which is the only
+#: path a connector ever posts to, and the Companion's three published read
+#: paths as aliases of the ``/api`` routes that answer them.
 ROUTES: tuple[Route, ...] = (
     Route("GET", "/api/health", OP_HEALTH, ROLE_PUBLIC, "liveness probe"),
     Route(
@@ -421,6 +440,37 @@ ROUTES: tuple[Route, ...] = (
     Route(
         "POST", "/api/unlock", OP_UNLOCK, ROLE_OWNER, "remove a stale operational lock"
     ),
+    # -- The connector's own path -------------------------------------------
+    #
+    # One route, both directions: the frame goes up in the request and
+    # whatever the service is holding comes back down in the acknowledgement.
+    # The Companion's `POST /v1/commands/poll` is deliberately not migrated --
+    # it was a second round trip for something the first one can carry.
+    Route(
+        "POST",
+        UPLINK_PATH,
+        OP_INGEST,
+        ROLE_CONNECTOR,
+        "a paired connector's upload, answered with whatever rides back down",
+        max_body_bytes=MAX_FRAME_BYTES,
+    ),
+    # -- The Companion's published read paths, as aliases -------------------
+    #
+    # Homepage's widget, the Uptime Kuma monitor and `IntegrationSite` all
+    # name these three. Serving them beside the `/api` paths is what makes a
+    # cutover one change rather than four that have to land together, and an
+    # alias is not a second implementation: each one names the operation the
+    # `/api` route already names, which `_operation_roles` then re-checks so
+    # an alias cannot quietly ask for a weaker role than what it aliases.
+    Route("GET", "/v1/health", OP_HEALTH, ROLE_PUBLIC, "liveness probe (alias)"),
+    Route(
+        "GET",
+        "/v1/summary",
+        OP_SUMMARY,
+        ROLE_SUMMARY,
+        "plan counts and observation freshness (alias)",
+    ),
+    Route("GET", "/v1/runs", OP_QUEUE, ROLE_OWNER, "Workbench queue summaries (alias)"),
 )
 
 ROUTES_BY_KEY: Mapping[tuple[str, str], Route] = {route.key: route for route in ROUTES}
@@ -1217,6 +1267,21 @@ class Application:
                     details=dict(error.details),
                 ),
             )
+        except UplinkRefusal as error:
+            # Refused in `asl_workbench.uplink`, where the pairing's own rules
+            # live. The status travels with the refusal because the connector's
+            # retry decision depends on which one it was, and a message it had
+            # to parse would not be a decision it could make.
+            return Response.json(
+                error.status,
+                error_payload(
+                    COMMAND_NAME,
+                    reason=error.reason,
+                    error=error.message,
+                    paused=False,
+                    details=dict(error.details),
+                ),
+            )
         except Exception as error:  # noqa: BLE001 - one safety net, by design
             return Response.json(500, self._internal_error(error))
 
@@ -1290,9 +1355,19 @@ class Application:
         names the browser's own verdict, a header no cross-origin form can set
         rules out the request shapes that carry no site at all, and the Origin
         comparison is what holds when a client sends neither.
+
+        A connector route is exempt, and the exemption is the point rather than
+        a hole in it: all three checks ask "did a page on this origin send
+        this", and a connector is not a page. It sends no ``Origin`` and no
+        ``Sec-Fetch-Site`` because nothing in a browser is involved, and what
+        it does hold is an issued bearer credential that no page has -- so the
+        cross-site reasoning these checks encode has nothing to decide here,
+        and applying them anyway would refuse every upload.
         """
         policy = self.policy
         if not route.mutating or not policy.require_origin:
+            return
+        if route.role == ROLE_CONNECTOR:
             return
         site = (request.header("sec-fetch-site") or "").strip().lower()
         if site in policy.refused_fetch_sites:
@@ -1324,7 +1399,7 @@ class Application:
         if not route.mutating:
             return {}
         policy = self.policy
-        length = self._body_length(request)
+        length = self._body_length(request, route)
         if length == 0:
             if policy.require_content_length:
                 raise HttpRefusal(
@@ -1349,7 +1424,8 @@ class Application:
             raise invalid_request("request body must be a JSON object")
         return parsed
 
-    def _body_length(self, request: Request) -> int:
+    def _body_length(self, request: Request, route: Route) -> int:
+        limit = route.max_body_bytes or self.policy.max_body_bytes
         encoding = (request.header("transfer-encoding") or "").strip().lower()
         if encoding:
             raise HttpRefusal(
@@ -1369,12 +1445,11 @@ class Application:
             ) from error
         if length <= 0:
             return 0
-        if length > self.policy.max_body_bytes:
+        if length > limit:
             raise HttpRefusal(
                 413,
                 "request-too-large",
-                f"Content-Length {length} exceeds "
-                f"{self.policy.max_body_bytes}-byte cap",
+                f"Content-Length {length} exceeds {limit}-byte cap",
             )
         return length
 

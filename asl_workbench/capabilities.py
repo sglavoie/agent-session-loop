@@ -240,6 +240,11 @@ _CONTROL_TESTS = "scripts:tests/test_workbench_controls.py"
 _STORE_TESTS = "scripts:tests/test_workbench_store.py"
 _TRANSPORT_TESTS = "scripts:tests/test_workbench_transport_contract.py"
 _CONNECTOR_TESTS = "scripts:tests/test_workbench_connector.py"
+#: The service's own half of the link: what an upload does to the store, what
+#: rides back down in its acknowledgement, and how a read or a control settles
+#: when nothing carries it. Named separately from the connector module because
+#: the two are the two ends, and a test of one proves nothing about the other.
+_UPLINK_TESTS = "scripts:tests/test_workbench_uplink.py"
 _REMOTE_READ_TESTS = "scripts:tests/test_workbench_remote_reads.py"
 _REMOTE_ACTION_TESTS = "scripts:tests/test_workbench_remote_actions.py"
 _HTTP_TESTS = "scripts:tests/test_workbench_http.py"
@@ -1020,6 +1025,37 @@ CAPABILITIES: tuple[Capability, ...] = (
             _REDIRECT_TESTS,
             _CONTROL_TESTS,
         ),
+    ),
+    _http(
+        "POST /v1/ingest",
+        "The paired connector's one upload path, and the only route a "
+        "credential rather than an owner identity reaches. Its response body "
+        "is the downward half of the link: an upload is acknowledged with "
+        "whatever request the service is holding, so a detail read and a "
+        "control leave on the next frame the Mac sends without a poll route "
+        "or a socket held open.",
+        coverage=(_UPLINK_TESTS, _HTTP_TESTS, _FULLSTACK_TESTS, _TRANSPORT_TESTS),
+    ),
+    _http(
+        "GET /v1/health",
+        "Liveness at the path the installed monitor already polls; an alias "
+        "of GET /api/health, same operation and same public role.",
+        coverage=(_HTTP_TESTS, _FOUNDATION_TESTS, _INTEGRATION_TESTS),
+    ),
+    _http(
+        "GET /v1/summary",
+        "Counts and health at the path the Homepage widget already reads; an "
+        "alias of GET /api/summary, same operation and same summary role.",
+        coverage=(_HTTP_TESTS, _FOUNDATION_TESTS, _INTEGRATION_TESTS),
+    ),
+    _http(
+        "GET /v1/runs",
+        "Owner run rows at the path the published site record already names; "
+        "an alias of GET /api/queue, same operation and same owner role. The "
+        "three aliases exist so cutting production over to this application "
+        "is one change to one service rather than four changes to the widget, "
+        "the monitor, the site record and the service at once.",
+        coverage=(_HTTP_TESTS, _FOUNDATION_TESTS, _INTEGRATION_TESTS),
     ),
     # -- Companion Pi service routes ---------------------------------------
     _companion_http(

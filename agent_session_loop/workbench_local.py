@@ -1399,12 +1399,22 @@ _HANDLERS: Mapping[str, Callable[[LocalProvider, Call], Response]] = {
     "unlock": LocalProvider._handle_unlock,
 }
 
-#: Every operation the application declares, minus the one it answers itself.
-#: Built from the route table rather than restated, so a route added without a
-#: handler here fails loudly at import instead of quietly at request time.
+#: Operations that are not this provider's to answer, each exempted from the
+#: handler ratchet with its reason rather than by being left out. Keyed by
+#: operation so the reason a client is given and the reason the ratchet accepts
+#: are the same sentence: an exemption nobody had to justify is how a route
+#: silently stops working.
+_NOT_LOCAL: Mapping[str, str] = {
+    "capabilities": "the application answers this itself",
+    "ingest": ("this host is the connector, not a service a connector uploads to"),
+}
+
+#: Every operation the application declares, minus the ones above. Built from
+#: the route table rather than restated, so a route added without a handler
+#: here fails loudly at import instead of quietly at request time.
 _LOCAL_UNAVAILABLE = unavailable_from(
     _HANDLERS,
-    reasons={},
+    reasons=dict(_NOT_LOCAL),
     default="this operation is not implemented by the local provider",
 )
 
@@ -1412,7 +1422,7 @@ _MISSING_HANDLERS = tuple(
     sorted(
         operation
         for operation in HTTP_OPERATIONS
-        if operation != "capabilities" and operation not in _HANDLERS
+        if operation not in _NOT_LOCAL and operation not in _HANDLERS
     )
 )
 if _MISSING_HANDLERS:  # pragma: no cover - a registration mistake, not a state

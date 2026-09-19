@@ -70,12 +70,14 @@ from asl_workbench.http import (
     LOCAL_POLICY,
     MODE_LOCAL,
     MODE_REMOTE,
+    OP_HEALTH,
     OPERATION_ROLES,
     OPERATIONS,
     REMOTE_POLICY,
     ROUTES,
     ROUTES_BY_KEY,
     SECURITY_HEADERS,
+    UPLINK_PATH,
     Application,
     Call,
     HttpRefusal,
@@ -243,14 +245,42 @@ class RouteTableTests(unittest.TestCase):
             self.assertIs(ROUTES_BY_KEY[route.key], route)
 
     def test_health_is_the_only_route_a_stranger_may_reach(self) -> None:
-        public = [route.key for route in ROUTES if route.role == ROLE_PUBLIC]
-        self.assertEqual(public, [("GET", "/api/health")])
+        """A stranger may reach liveness and nothing else.
 
-    def test_every_mutation_requires_the_owner(self) -> None:
+        Stated as the operation rather than the path, because liveness is
+        served at two paths: `/api/health` and the `/v1/health` alias the
+        installed monitor and the Homepage widget are configured against. Two
+        paths are still one thing a stranger learns, which is what this
+        invariant is about; pinning the list to one path would have made
+        aliasing an operation look like widening access to a new one.
+        """
+        public = [route for route in ROUTES if route.role == ROLE_PUBLIC]
+        self.assertEqual({route.operation for route in public}, {OP_HEALTH})
+        self.assertEqual(
+            sorted(route.key for route in public),
+            [("GET", "/api/health"), ("GET", "/v1/health")],
+        )
+
+    def test_every_mutation_requires_the_owner_or_is_the_uplink(self) -> None:
+        """No writing route is reachable by a stranger or a summary reader.
+
+        The connector uplink is the one write that is not the operator's: it
+        carries a paired Mac's own observations, it is authenticated by a
+        credential this service issued to that Mac, and requiring the owner
+        identity on it would mean a browser session gates a machine-to-machine
+        upload. So it is exempted by name -- and the exemption is checked to be
+        that route alone, so `connector` cannot become a second owner-ish role
+        that other mutations quietly adopt.
+        """
+        connector_routes = []
         for route in ROUTES:
-            if route.mutating:
-                with self.subTest(route=route.key):
-                    self.assertEqual(route.role, ROLE_OWNER)
+            if not route.mutating:
+                continue
+            with self.subTest(route=route.key):
+                self.assertIn(route.role, (ROLE_OWNER, ROLE_CONNECTOR))
+            if route.role == ROLE_CONNECTOR:
+                connector_routes.append(route.key)
+        self.assertEqual(connector_routes, [("POST", UPLINK_PATH)])
 
     def test_the_delete_alias_shares_the_archive_operation_and_its_role(self) -> None:
         alias = ROUTES_BY_KEY[("POST", "/api/plan/delete")]
@@ -813,6 +843,21 @@ class FakeSubmissionLane:
         self.handed.append(dict(payload))
 
 
+class FakeUploadLane:
+    """An upload lane that records frames and carries back what it is given."""
+
+    def __init__(self, carried: Mapping[str, Any] | None = None) -> None:
+        self.carried = carried
+        self.received: list[tuple[Any, str | None]] = []
+
+    def ingest(
+        self, frame: Any, *, now: float, subject: str | None = None
+    ) -> Mapping[str, Any] | None:
+        del now
+        self.received.append((frame, subject))
+        return self.carried
+
+
 class RemoteProviderTests(unittest.TestCase):
     """What a Pi can answer out of what it kept, and what it admits it cannot."""
 
@@ -836,11 +881,13 @@ class RemoteProviderTests(unittest.TestCase):
             )
         )
         self.mutations = FakeSubmissionLane()
+        self.uploads = FakeUploadLane()
 
     def provider(self, **kwargs: Any) -> workbench_service.RemoteProvider:
         defaults: dict[str, Any] = {
             "reads": self.reads,
             "mutations": self.mutations,
+            "uploads": self.uploads,
         }
         defaults.update(kwargs)
         return workbench_service.RemoteProvider(
@@ -1142,6 +1189,7 @@ class RemoteProviderTests(unittest.TestCase):
         served = (
             set(workbench_service.DETAIL_OPERATIONS)
             | set(workbench_service.MUTATION_METHODS)
+            | set(workbench_service.UPLOAD_OPERATIONS)
             | set(workbench_service._STORE_OPERATIONS)
         )
         # `capabilities` is the one operation no provider answers: the
