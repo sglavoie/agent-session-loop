@@ -125,7 +125,7 @@ LOOP_INTERVAL_SECONDS = 0.2
 #: means.
 ACTIVE_PRIMARY_STATES: tuple[str, ...] = bridge.ACTIVE_PRIMARY_STATES
 
-#: Live work, which reserves snapshot space ahead of freshest-blocker order.
+#: Live work, which reserves snapshot space after questions that need a reply.
 _LIVE_PRIMARY_STATES = frozenset({"running", "verifying"})
 
 #: What the Pi may ask for, keyed by what ASL calls it locally.
@@ -236,16 +236,20 @@ def _remote_actions(actions: object) -> list[str]:
 
 
 def _selection_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
-    """Reserve bounded snapshot space for live work, then freshest blockers.
+    """Reserve bounded space for unanswered questions, then live work.
 
     The bridge's ``_snapshot_selection_key`` in intent, restated here because
     it decides which rows survive a cap and that decision has to be visible in
-    the module that applies the cap.
+    the module that applies the cap. A paused question must outrank ordinary
+    running rows: omitting it leaves the remote incident engine with no input,
+    so the notification and reply path can never exist on a busy corpus.
     """
     activity = portable_history.epoch(
         row.get("last_activity_at")
     ) or portable_history.epoch(row.get("run_started_at"))
+    waiting_for_reply = bool(row.get("question_id") and row.get("unanswered_count"))
     return (
+        not waiting_for_reply,
         row.get("primary_state") not in _LIVE_PRIMARY_STATES,
         activity is None,
         -(activity or 0.0),

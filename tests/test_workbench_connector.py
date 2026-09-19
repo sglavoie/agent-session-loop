@@ -2080,6 +2080,63 @@ class PageAndCapTests(CorpusTestCase):
         self.assertEqual(MAX_CATALOG_ENTRIES_PER_PAGE, portable.CATALOG_PAGE_LIMIT)
         self.assertEqual(MAX_RUNS_PER_SNAPSHOT, portable.MAX_PUBLISHED_RUNS)
 
+    def test_an_unanswered_question_survives_a_full_snapshot_of_live_runs(
+        self,
+    ) -> None:
+        live_count = portable.MAX_PUBLISHED_RUNS
+        summaries = [mock.Mock(primary_state="running") for _ in range(live_count)]
+        summaries.append(mock.Mock(primary_state="paused-for-reply"))
+        records = [
+            mock.Mock(
+                entry=catalog.record_from_summary(
+                    summary_payload(f"/tmp/agent-plans/plan-{index}")
+                ).entry
+            )
+            for index in range(live_count + 1)
+        ]
+        rows = [
+            {
+                "run_id": f"run-{index}",
+                "primary_state": "running",
+                "phase": "running",
+                "urgency_group": "in-progress",
+                "last_activity_at": NOW - index,
+                "urgency_rank": 60,
+                "actions": [],
+            }
+            for index in range(live_count)
+        ]
+        rows.append(
+            {
+                "run_id": "phone-question",
+                "primary_state": "paused-for-reply",
+                "phase": "awaiting-reply",
+                "urgency_group": "needs-action",
+                "last_activity_at": NOW - 600.0,
+                "urgency_rank": 10,
+                "actions": [intervention.ACTION_REPLY],
+                "question": {
+                    "question_id": "question-1",
+                    "asked_at": iso(-600.0),
+                    "unanswered_count": 1,
+                },
+            }
+        )
+        scan = mock.Mock(
+            summaries=summaries,
+            catalog=mock.Mock(records=records),
+        )
+
+        with mock.patch.object(bridge, "project_row", side_effect=rows):
+            kept, failed, truncated = self.make_source()._runs(  # noqa: SLF001
+                scan
+            )
+
+        self.assertEqual(0, failed)
+        self.assertTrue(truncated)
+        self.assertEqual(live_count, len(kept))
+        self.assertIn("question-1", {row.get("question_id") for row in kept})
+
     def test_a_malformed_plan_is_catalogued_rather_than_lost(self) -> None:
         # A plan nobody can run is classified, not dropped: an operator looking
         # for the plan that stopped working has to be able to see it. So the
