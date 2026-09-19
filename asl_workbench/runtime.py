@@ -48,6 +48,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from contextlib import closing
+from dataclasses import replace
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -246,7 +247,17 @@ def run(
                         OwnerIdentityAuthenticator(
                             credentials, owner=endpoint.owner_identity
                         ),
-                        policy=REMOTE_POLICY,
+                        # The shell is served over TLS by something in front
+                        # of this socket, so the Origin a browser sends is the
+                        # site's published ``https`` one, never the ``http``
+                        # loopback form the policy builds from the Host. A
+                        # service that did not say so here would refuse every
+                        # owner control from its own page, and refuse it as
+                        # "cross-site", which names the wrong cause.
+                        policy=replace(
+                            REMOTE_POLICY,
+                            allowed_origins=(endpoint.public_origin,),
+                        ),
                         static=shell_bundle(),
                     ),
                 )

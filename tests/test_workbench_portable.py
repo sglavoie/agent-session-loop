@@ -26,6 +26,7 @@ Two questions are asked, in this order:
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import io
 import json
@@ -37,6 +38,7 @@ import time
 import unittest
 import warnings
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 
 from asl_workbench import lifecycle
@@ -305,7 +307,9 @@ class PackagedRuntimeTest(unittest.TestCase):
         )
         self.assertNotEqual(completed.returncode, 0)
 
-    def test_the_packaged_runtime_serves_and_stops(self) -> None:
+    @contextlib.contextmanager
+    def _serving(self) -> Iterator[tuple[subprocess.Popen[bytes], dict[str, object]]]:
+        """The packaged release, started and listening, then cleaned up."""
         started = subprocess.Popen(  # noqa: S603 - fixed argv, this interpreter
             [
                 sys.executable,
@@ -321,26 +325,7 @@ class PackagedRuntimeTest(unittest.TestCase):
             stderr=subprocess.PIPE,
         )
         try:
-            ready = self._await_ready(started)
-            self.assertEqual(ready["pid"], started.pid)
-            self.assertEqual(ready["artifact"], self.release.name)
-            self.assertEqual(ready["host"], PI_SITE.bind_host)
-            self.assertGreater(ready["port"], 0)
-
-            connection = http.client.HTTPConnection(
-                ready["host"], ready["port"], timeout=READY_TIMEOUT
-            )
-            try:
-                connection.request("GET", "/api/health")
-                response = connection.getresponse()
-                body = json.loads(response.read())
-            finally:
-                connection.close()
-            self.assertEqual(response.status, 200)
-            self.assertEqual(body["status"], "ok")
-
-            started.terminate()
-            self.assertEqual(started.wait(timeout=STOP_TIMEOUT), 0)
+            yield started, self._await_ready(started)
         finally:
             if started.poll() is None:
                 started.kill()
@@ -348,9 +333,89 @@ class PackagedRuntimeTest(unittest.TestCase):
             for stream in (started.stdout, started.stderr):
                 if stream is not None:
                     stream.close()
+
+    def _request(
+        self,
+        ready: dict[str, object],
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+        body: bytes | None = None,
+    ) -> tuple[int, dict[str, object]]:
+        """One request against the running release, answered as JSON."""
+        connection = http.client.HTTPConnection(
+            str(ready["host"]), int(ready["port"]), timeout=READY_TIMEOUT
+        )
+        try:
+            connection.request(method, path, body=body, headers=headers or {})
+            response = connection.getresponse()
+            payload = response.read()
+        finally:
+            connection.close()
+        return response.status, json.loads(payload) if payload else {}
+
+    def test_the_packaged_runtime_serves_and_stops(self) -> None:
+        with self._serving() as (started, ready):
+            self.assertEqual(ready["pid"], started.pid)
+            self.assertEqual(ready["artifact"], self.release.name)
+            self.assertEqual(ready["host"], PI_SITE.bind_host)
+            self.assertGreater(ready["port"], 0)
+
+            status, body = self._request(ready, "GET", "/api/health")
+            self.assertEqual(status, 200)
+            self.assertEqual(body["status"], "ok")
+
+            started.terminate()
+            self.assertEqual(started.wait(timeout=STOP_TIMEOUT), 0)
         # Readiness is removed on the way out, so an installer polling it never
         # mistakes a stopped release for a running one.
         self.assertFalse((self.prefix / "state" / "ready.json").exists())
+
+    def test_the_published_origin_is_the_one_a_mutation_is_accepted_from(
+        self,
+    ) -> None:
+        """A control from the shell's own page is not a cross-site request.
+
+        TLS is terminated in front of this socket, so the Origin a browser
+        sends is the site's published ``https`` one -- never the ``http``
+        loopback form the policy derives from the Host. A release that knew
+        only that form refused every owner control from the page it had just
+        served, and refused it as "cross-site request refused", which names a
+        cause that is not the cause. The two requests differ in one header, so
+        what is being checked is the origin and nothing else.
+        """
+        control = json.dumps(
+            {
+                "operation_id": "portable-origin-probe",
+                "plan_key": "0" * 16,
+                "run_key": "0" * 16,
+                "bridge_token": "0" * 32,
+            }
+        ).encode()
+        headers = {
+            "Tailscale-User-Login": OWNER,
+            "X-Workbench-Request": "1",
+            "Content-Type": "application/json",
+        }
+        with self._serving() as (_started, ready):
+            published, _ = self._request(
+                ready,
+                "POST",
+                "/api/control/stop-after-current",
+                headers={**headers, "Origin": PI_SITE.public_origin},
+                body=control,
+            )
+            elsewhere, refusal = self._request(
+                ready,
+                "POST",
+                "/api/control/stop-after-current",
+                headers={**headers, "Origin": "https://example.invalid"},
+                body=control,
+            )
+        self.assertNotEqual(published, 403)
+        self.assertEqual(elsewhere, 403)
+        self.assertEqual(refusal["error"], "cross-site request refused")
 
     def test_a_second_runtime_refuses_the_same_state(self) -> None:
         # One process owns the state. Two would put two writers on one SQLite
