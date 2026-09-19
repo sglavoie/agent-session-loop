@@ -10604,7 +10604,16 @@ over it, and asserts that the two serve byte-identical assets and answer the
 same questions about the same plans. `tests/workbench_browser/shell.spec.js`
 drives that shell with Playwright at desktop and phone widths against both
 deployments in turn — the queue, the responsive collapse, every detail pane,
-keyboard navigation, and both historic link formats. It runs as
+keyboard navigation, and both historic link formats. Two of its claims are about
+the refresh poll rather than the layout, and they are there because neither is
+visible from a request: a poll that redraws the same answer performs no page
+scroll at all, and a poll that shortens the page still puts the operator back.
+The unconditional restore that came before ate taps on a phone, where WebKit
+reads a document scroll between `touchstart` and `touchend` as a pan and throws
+the tap away. `overview.spec.js` and `interactions.spec.js` sit beside it over
+the same fixture: the overview's sections, facets, history pane and the banners
+for what a page could not see, and the controls bar driven up to the edge of
+every mutation and no further. All three run as
 `npm --prefix tests/workbench_browser test`, against a fixture server the
 Playwright config starts itself (`fixture_server.py`, which binds the two
 deployments on the fixed ports recorded in `scenarios.json` so the config and

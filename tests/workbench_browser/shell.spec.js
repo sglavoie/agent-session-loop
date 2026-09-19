@@ -49,6 +49,168 @@ function isDesktop(page) {
   return !!size && size.width >= manifest.desktop_min_width;
 }
 
+// -- A poll that must not move the page -------------------------------------
+//
+// The fixture corpus is three plans, which fits on every viewport with room to
+// spare, so the scroll tests below synthesise a catalog long enough to scroll
+// and a set of banner notes above it whose appearance and disappearance is what
+// changes the page's height. Both are injected into this deployment's own
+// answer rather than seeded into the corpus: the claim is about what the browser
+// does with a redraw, and neither a 60-plan corpus nor a deliberately broken
+// connector belongs in a fixture the other suites share.
+
+/** How many rows the catalog is padded to, so the page scrolls at all. */
+const TALL_CATALOG = 60;
+
+/** How many degraded connectors are reported, so the banner region has height. */
+const DEGRADED_CONNECTORS = 8;
+
+/** A padded catalog: the fixture's rows, then clones of its busiest plan. */
+function padPlans(plans, total) {
+  const wanted = PLAN_STATES.alpha.primary_state;
+  const source = plans.find((plan) => plan.primary_state === wanted) || plans[0];
+  expect(source, "the fixture published no plan to pad the catalog with").toBeTruthy();
+  const padded = plans.slice();
+  while (padded.length < total) {
+    const clone = Object.assign({}, source);
+    const suffix = String(padded.length).padStart(4, "0");
+    // Distinct in every field the shell keys a row by, in both deployments:
+    // clones sharing an identity would be reconciled back down to one row.
+    if (typeof clone.plan_dir === "string") {
+      clone.plan_dir = `${clone.plan_dir}-${suffix}`;
+    }
+    if (typeof clone.plan_key === "string") {
+      clone.plan_key = `${clone.plan_key.slice(0, -4)}${suffix}`;
+    }
+    if (typeof clone.run_key === "string") {
+      clone.run_key = `${clone.run_key.slice(0, -4)}${suffix}`;
+    }
+    if (typeof clone.label === "string") clone.label = `${clone.label}-${suffix}`;
+    padded.push(clone);
+  }
+  return padded;
+}
+
+/** Connectors that have stopped being live, one banner note each. */
+function degradedConnectors(count) {
+  const connectors = [];
+  for (let index = 0; index < count; index += 1) {
+    connectors.push({
+      connector_id: `pi-${index}`,
+      freshness: "stale",
+      degraded_reason: "no observation since the link dropped",
+    });
+  }
+  return connectors;
+}
+
+/**
+ * Serve this deployment's catalog with a length and a banner count of our own.
+ *
+ * `counts` is dropped rather than rewritten: it is the server's tally over the
+ * real catalog, and leaving a tally that disagrees with the rows would have the
+ * chips describing a different page than the list. Dropped, the shell computes
+ * them from what it was handed, which is what it already does for a deployment
+ * that sends none.
+ */
+async function interceptCatalog(page) {
+  const feed = { rows: TALL_CATALOG, connectors: DEGRADED_CONNECTORS };
+  await page.route("**/api/queue*", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.plans = padPlans(body.plans, feed.rows);
+    body.connectors = degradedConnectors(feed.connectors);
+    delete body.counts;
+    body.catalog_total = body.plans.length;
+    body.catalog_matched = body.plans.length;
+    await route.fulfill({ response: response, json: body });
+  });
+  return feed;
+}
+
+/**
+ * Record every programmatic page scroll the shell performs.
+ *
+ * The call is the claim, not the resulting offset: restoring a scroll to the
+ * place it is already at leaves the page looking identical, so a test that only
+ * compared offsets could not tell the conditional restore from the
+ * unconditional one it replaced. What the phone objects to is the call.
+ */
+async function recordPageScrolls(page) {
+  await page.addInitScript(() => {
+    window.__wbScrollCalls = [];
+    const original = window.scrollTo.bind(window);
+    window.scrollTo = function (...args) {
+      window.__wbScrollCalls.push(
+        args.length === 1 ? args[0] : { x: args[0], y: args[1] },
+      );
+      return original(...args);
+    };
+  });
+}
+
+/** Where the operator's place is, how far it can go, and what moved it. */
+async function placeState(page) {
+  return page.evaluate(() => {
+    const queue = document.getElementById("wb-queue");
+    const root = document.documentElement;
+    return {
+      window: window.scrollY,
+      maxWindow: Math.max(0, root.scrollHeight - window.innerHeight),
+      height: root.scrollHeight,
+      queue: queue ? queue.scrollTop : 0,
+      moves: window.__wbScrollCalls.slice(),
+    };
+  });
+}
+
+/** Put the operator at the bottom of the page, then forget we did it. */
+async function scrollToBottom(page) {
+  await page.evaluate(() => {
+    const root = document.documentElement;
+    window.scrollTo(0, Math.max(0, root.scrollHeight - window.innerHeight));
+    const queue = document.getElementById("wb-queue");
+    if (queue) queue.scrollTop = queue.scrollHeight;
+  });
+  await page.evaluate(() => {
+    window.__wbScrollCalls.length = 0;
+  });
+  return placeState(page);
+}
+
+/**
+ * Run one poll and wait for it to have finished drawing.
+ *
+ * Driven rather than waited for, and driven from the module rather than from
+ * `#wb-refresh-now`: the button is at the top of the page, so clicking it while
+ * scrolled to the bottom would have Playwright scroll it into view and destroy
+ * the very thing under test. The 5s timer is stopped for the same reason a
+ * settled page matters here -- an extra poll landing mid-assertion would decide
+ * the outcome.
+ */
+async function pollNow(page) {
+  await page.evaluate(async () => {
+    const queue = await import("/static/modules/queue.js");
+    const shared = await import("/static/modules/state.js");
+    queue.stopQueueTimer();
+    while (shared.state.fetchInFlight) {
+      await new Promise((resolve) => window.setTimeout(resolve, 25));
+    }
+    await queue.refresh();
+    queue.stopQueueTimer();
+  });
+}
+
+/** Open the padded queue and wait for all of it to have rendered. */
+async function openTallQueue(page, deployment) {
+  await page.goto(`${deployment.baseURL}/`);
+  await expect(page.locator("#wb-refresh-status")).toHaveAttribute(
+    "data-state",
+    "idle",
+  );
+  await expect(page.locator(".wb-row")).toHaveCount(TALL_CATALOG);
+}
+
 /** Load the queue and wait for the first poll to have rendered. */
 async function openQueue(page, deployment) {
   await page.goto(`${deployment.baseURL}/`);
@@ -320,6 +482,69 @@ for (const deployment of DEPLOYMENTS) {
       await expect
         .poll(() => page.evaluate(() => document.activeElement.id))
         .toBe("wb-control-unlock");
+    });
+
+    test("a poll that redraws the same queue does not move the page", async ({
+      page,
+    }) => {
+      // The failure this guards is invisible in a screenshot and silent in a
+      // log. WebKit reads a document scroll between `touchstart` and `touchend`
+      // as a pan and throws the tap away, so a refresh that scrolls the page
+      // back to where it already was -- every five seconds, forever -- eats the
+      // press of an operator reaching for a control on a phone. No request, no
+      // feedback, nothing to report: the one failure mode this interface may not
+      // have. So a redraw that displaced nobody must move nobody.
+      await recordPageScrolls(page);
+      await interceptCatalog(page);
+      await openTallQueue(page, deployment);
+
+      const before = await scrollToBottom(page);
+      expect(
+        before.window,
+        "the padded catalog does not scroll in this viewport",
+      ).toBeGreaterThan(0);
+
+      await pollNow(page);
+
+      const after = await placeState(page);
+      // The same answer drawn again is the same height, and the page never
+      // moved, so there is nothing to put back.
+      expect(after.height).toBe(before.height);
+      expect(after.moves).toEqual([]);
+      expect(after.window).toBe(before.window);
+    });
+
+    test("a poll that shortens the page puts the operator back", async ({
+      page,
+    }) => {
+      // The other half of the same rule, and the reason the restore is still
+      // there: when a redraw *does* displace the operator, dropping it would
+      // leave them reading a different part of the queue than the one they were
+      // looking at. Banners clearing is that redraw -- the notes above the queue
+      // go away, the page gets shorter, and the browser clamps the offset to the
+      // new bottom before the shell has drawn anything.
+      await recordPageScrolls(page);
+      const feed = await interceptCatalog(page);
+      await openTallQueue(page, deployment);
+      await expect(
+        page.locator('#wb-observation .wb-observation__note[data-kind="connector"]'),
+      ).toHaveCount(DEGRADED_CONNECTORS);
+
+      const before = await scrollToBottom(page);
+      expect(before.window).toBeGreaterThan(0);
+
+      feed.connectors = 0;
+      await pollNow(page);
+      await expect(page.locator("#wb-observation")).toBeHidden();
+
+      const after = await placeState(page);
+      expect(after.height).toBeLessThan(before.height);
+      // The place the operator was in, asked for again by name.
+      expect(after.moves).toContainEqual({ x: 0, y: before.window });
+      // And granted as far as the shorter page allows, rather than lost: the
+      // bottom of the queue, not the top of it.
+      expect(after.window).toBeGreaterThan(0);
+      expect(Math.abs(after.window - after.maxWindow)).toBeLessThanOrEqual(2);
     });
 
     test("the keyboard can reach a plan without a pointer", async ({

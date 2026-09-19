@@ -470,19 +470,34 @@ function describeConnectors(payload) {
   return notes;
 }
 
+/**
+ * Alerts the deployment raised and can no longer account for.
+ *
+ * Only `unconfirmed` qualifies, and the delivery state is the whole test. An
+ * incident that is `pending`, `retry` or `publishing` is still on its way --
+ * the sentence below would be false about all three, and saying it anyway
+ * would turn every raised alert into a delivery failure the moment it was
+ * raised. `published` arrived and `cancelled` was withdrawn. That leaves the
+ * one state the vocabulary keeps for "nobody can establish whether this
+ * landed, and no path will send it again", which is the only case an operator
+ * has to hear about before trusting a quiet screen.
+ */
 function describeIncidents(payload) {
   const incidents = Array.isArray(payload.incidents) ? payload.incidents : [];
-  const unresolved = incidents.filter(
-    (incident) => incident && incident.resolved_at === null
+  const undelivered = incidents.filter(
+    (incident) =>
+      incident &&
+      incident.resolved_at === null &&
+      incident.delivery_state === "unconfirmed"
   );
-  if (unresolved.length === 0) return [];
-  const named = unresolved
+  if (undelivered.length === 0) return [];
+  const named = undelivered
     .slice(0, 5)
     .map((incident) => incident.project || incident.kind || "an alert")
     .join("; ");
   return [
     "The deployment could not confirm " +
-      (unresolved.length === 1 ? "an alert" : unresolved.length + " alerts") +
+      (undelivered.length === 1 ? "an alert" : undelivered.length + " alerts") +
       " reached their destination and will not resend automatically: " +
       named,
   ];

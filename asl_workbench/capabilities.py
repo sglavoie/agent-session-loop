@@ -285,6 +285,13 @@ _OVERVIEW_BROWSER_TESTS = "scripts:tests/workbench_browser/overview.spec.js"
 #: from a request.
 _INTERACTION_TESTS = "scripts:tests/test_workbench_interactions.py"
 _INTERACTION_BROWSER_TESTS = "scripts:tests/workbench_browser/interactions.spec.js"
+#: The whole application at once: one plan corpus, the real observation source,
+#: a connector over a link that can be made to fail, the Pi's store, and the
+#: remote provider behind a loopback socket, with launch children replaced by an
+#: inert interpreter. Named on the rows whose behaviour is only observable with
+#: all of it running -- a settlement that has to cross the link twice, a
+#: database nobody may find prose in, a ceiling a dead link fills.
+_FULLSTACK_TESTS = "scripts:tests/test_workbench_fullstack.py"
 _PI = "sglavoie_raspberry_pi:services/pi-monitoring"
 
 
@@ -745,6 +752,27 @@ CAPABILITIES: tuple[Capability, ...] = (
         regression_coverage=(_DOCS_TESTS, _SHELL_BROWSER_TESTS),
     ),
     Capability(
+        key=f"{SURFACE_WORKBENCH_BROWSER}:viewport-preservation",
+        surface=SURFACE_WORKBENCH_BROWSER,
+        summary="The five-second poll puts the operator's place back only when "
+        "the redraw displaced it, so reading is never interrupted and a tap is "
+        "never eaten.",
+        origin=ORIGIN_WORKBENCH,
+        owner=OWNER_PORTABLE,
+        authority=AUTHORITY_NONE,
+        # A row of its own rather than a clause of the shell's, because the
+        # conditional is the capability and it is only observable in a browser.
+        # An unconditional restore looks identical in a screenshot and is silent
+        # in a log, and on a phone it is a defect: WebKit reads a document
+        # scroll between `touchstart` and `touchend` as a pan and throws the tap
+        # away, so restoring a scroll to where it already was -- every five
+        # seconds, forever -- eats the press of an operator reaching for a
+        # control, with no request and no feedback. Both halves are driven at
+        # all three widths: a poll that changed nothing performs no scroll at
+        # all, and a poll that shortened the page still puts the operator back.
+        regression_coverage=(_STATIC_TESTS, _SHELL_BROWSER_TESTS),
+    ),
+    Capability(
         key=f"{SURFACE_WORKBENCH_BROWSER}:plan-detail",
         surface=SURFACE_WORKBENCH_BROWSER,
         summary="Detail view: state, sessions, events, logs, artifacts, "
@@ -865,8 +893,15 @@ CAPABILITIES: tuple[Capability, ...] = (
         authority=AUTHORITY_NONE,
         # Asserted in both directions, which is the whole claim: a choice made
         # in the controls lands in the address bar, and a link carrying one
-        # opens the view it describes rather than the default.
-        regression_coverage=(_DOCS_TESTS, _OVERVIEW_BROWSER_TESTS),
+        # opens the view it describes rather than the default. The full-stack
+        # module holds the privacy half: every key the front end writes is a
+        # declared constant under one namespace, spelled out in exactly one
+        # module, and no module reaches for a cookie or a database instead.
+        regression_coverage=(
+            _DOCS_TESTS,
+            _FULLSTACK_TESTS,
+            _OVERVIEW_BROWSER_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_BROWSER}:empty-state-actions",
@@ -1124,7 +1159,16 @@ CAPABILITIES: tuple[Capability, ...] = (
         "the bounded backoff, which were copied rather than reinvented.",
         owner=OWNER_MAC,
         authority=AUTHORITY_ASL,
-        coverage=(f"{_PI}/tests/test_companion_observation.py", _CONNECTOR_TESTS),
+        # The bounded backoff and the bounded queues are only bounded against a
+        # link that really goes away, so the full-stack module is named here: ten
+        # reconnects leave one row and one entry per plan, a dead link fills the
+        # queues to their ceiling and refuses past it rather than growing, and a
+        # thousand-plan catalog still leaves the heartbeat fresh.
+        coverage=(
+            f"{_PI}/tests/test_companion_observation.py",
+            _CONNECTOR_TESTS,
+            _FULLSTACK_TESTS,
+        ),
     ),
     _companion_module(
         "companion.dashboard",
@@ -1264,7 +1308,18 @@ CAPABILITIES: tuple[Capability, ...] = (
         "module is the frozen baseline until the Companion imports the "
         "portable package.",
         owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_protocol.py", _TRANSPORT_TESTS),
+        # Validation is what the envelope is for, so the full-stack module is
+        # named for the refusals a live pairing has to survive: a frame
+        # addressed to another Pi, a version nobody speaks granting nothing, an
+        # unknown capability narrowing the pairing rather than killing it, a
+        # frame over the size limit refused before it is parsed, and a
+        # non-finite number that never becomes a timestamp -- each of them a
+        # refusal the service answers the next request after.
+        coverage=(
+            f"{_PI}/tests/test_companion_protocol.py",
+            _TRANSPORT_TESTS,
+            _FULLSTACK_TESTS,
+        ),
     ),
     _companion_module(
         "companion.questions",
@@ -1402,7 +1457,17 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_COMPANION,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
-        regression_coverage=(f"{_PI}/tests/browser/dashboard.spec.js",),
+        # Same correction as the banners above: the surviving implementation is
+        # the unified shell's router, and it is driven in a browser here -- a
+        # '#run=' link resolved against a catalog page and rewritten to the
+        # canonical form while still carrying which run it named, which is what
+        # lets a run that has gone quiet get its own heading instead of a row
+        # among today's work.
+        regression_coverage=(
+            f"{_PI}/tests/browser/dashboard.spec.js",
+            _SHELL_BROWSER_TESTS,
+            _OVERVIEW_BROWSER_TESTS,
+        ),
     ),
     Capability(
         key=f"{SURFACE_COMPANION_BROWSER}:reply-panel",
@@ -1438,9 +1503,20 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_COMPANION,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
+        # The Pi's own spec is the frozen baseline's; this row is owned by the
+        # portable package, so the surviving banner region is what has to be
+        # gated. The Workbench suites now do it from three sides: the freshness
+        # and completeness a read reports, the full stack actually losing its
+        # link and saying so about itself rather than going quiet, and the
+        # browser drawing the one incident state that means "nobody can
+        # establish whether this alert landed" -- and drawing nothing for the
+        # five that would turn every raised alert into a delivery failure.
         regression_coverage=(
             f"{_PI}/tests/browser/failure_matrix.spec.js",
             f"{_PI}/tests/test_companion_failure_matrix.py",
+            _OVERVIEW_TESTS,
+            _FULLSTACK_TESTS,
+            _OVERVIEW_BROWSER_TESTS,
         ),
     ),
     # -- Integrations -------------------------------------------------------
@@ -1661,10 +1737,16 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_COMPANION,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_PI_SERVICE,
+        # The full-stack module is named here for the two things only a real
+        # file can answer: that a database this application actually published
+        # into -- and a backup taken of it, and the runtime log beside it --
+        # holds no prose and no path, and that republishing the same corpus ten
+        # times neither duplicates a row nor grows the file without bound.
         regression_coverage=(
             f"{_PI}/tests/test_companion_api.py",
             f"{_PI}/tests/test_companion_transport.py",
             _STORE_TESTS,
+            _FULLSTACK_TESTS,
         ),
     ),
     Capability(
@@ -1707,10 +1789,16 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_COMPANION,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_ASL,
+        # "Before" is the claim, and it is only checkable against a link that
+        # can be cut at the moment of dispatch: the full-stack module journals a
+        # submission, drops the report on the way back, and asserts the row is
+        # left unsettled rather than guessed at -- then restarts the connector
+        # and has it close the row out instead of running the mutation twice.
         regression_coverage=(
             f"{_PI}/tests/test_companion_transport.py",
             _OPERATION_TESTS,
             _STORE_TESTS,
+            _FULLSTACK_TESTS,
         ),
     ),
 )

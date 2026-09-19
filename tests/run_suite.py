@@ -343,6 +343,16 @@ INTEGRATION_MODULES = (
     # operation is allowed to claim are all questions about two live providers
     # answering the same request, so both are bound here too.
     "tests.test_workbench_interactions",
+    # Integration because the gate it proves is enforced by real git history
+    # and real packed artifacts: synthetic repositories are built and their
+    # commits packed, because a fake digest would agree with a fake packer.
+    "tests.test_workbench_acceptance",
+    # Integration in the fullest sense the repository has: one plan corpus, the
+    # real observation source, a connector, a link that can be made to fail, the
+    # Pi's store, and the remote provider behind a loopback socket, with the
+    # launch children replaced by an inert interpreter rather than the launch
+    # path. Nothing here would tell the truth without all of it running.
+    "tests.test_workbench_fullstack",
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
     "tests.test_asl_overseer_e2e",

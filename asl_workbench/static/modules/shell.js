@@ -95,28 +95,55 @@ export function applyShellLayout() {
 // Scroll + focus preservation across refresh polls.
 // Polling re-renders panels every 5s; capture-before / restore-after
 // keeps the operator's viewport from jumping while they read.
+//
+// Restoring is conditional on the re-render having actually displaced
+// something, because a poll that redrew the same content has moved nobody and
+// scrolling anyway is not free. A phone is where it costs: WebKit reads a
+// document scroll between `touchstart` and `touchend` as a pan and throws the
+// tap away, so an unconditional restore landing mid-press eats the press of an
+// operator reaching for a control -- silently, with no request and no
+// feedback, which is the one failure this interface may not have. The page
+// height is what says whether a redraw displaced anything; when it did, the
+// original behaviour stands and the operator keeps their place.
+
+/** The document height, which is what a re-render changes when it displaces. */
+function documentHeight() {
+  const root = document.documentElement;
+  return root ? root.scrollHeight : 0;
+}
+
+/** Put a scroll offset back only if it is not already where it belongs. */
+function restoreScrollTop(el, offset) {
+  if (!el || typeof offset !== "number") return;
+  if (el.scrollTop === offset) return;
+  el.scrollTop = offset;
+}
+
+/** Put the window back only if the redraw moved the page under the operator. */
+function restoreWindowScroll(snapshot) {
+  if (typeof snapshot.window !== "number") return;
+  if (window.scrollY === snapshot.window) return;
+  if (documentHeight() === snapshot.height) return;
+  window.scrollTo(window.scrollX || 0, snapshot.window);
+}
 
 export function captureQueueScroll() {
   const queueEl = document.getElementById("wb-queue");
   return {
     queue: queueEl ? queueEl.scrollTop : 0,
     window: typeof window.scrollY === "number" ? window.scrollY : 0,
+    height: documentHeight(),
   };
 }
 
 export function restoreQueueScroll(snapshot) {
   if (!snapshot) return;
-  const queueEl = document.getElementById("wb-queue");
-  if (queueEl && typeof snapshot.queue === "number") {
-    queueEl.scrollTop = snapshot.queue;
-  }
-  const previewBody = document.getElementById("wb-preview-last-message-body");
-  if (previewBody && typeof snapshot.preview === "number") {
-    previewBody.scrollTop = snapshot.preview;
-  }
-  if (typeof snapshot.window === "number") {
-    window.scrollTo(window.scrollX || 0, snapshot.window);
-  }
+  restoreScrollTop(document.getElementById("wb-queue"), snapshot.queue);
+  restoreScrollTop(
+    document.getElementById("wb-preview-last-message-body"),
+    snapshot.preview
+  );
+  restoreWindowScroll(snapshot);
 }
 
 export function captureDetailScroll() {
@@ -126,22 +153,21 @@ export function captureDetailScroll() {
     window: typeof window.scrollY === "number" ? window.scrollY : 0,
     events: events ? events.scrollTop : 0,
     preview: previewBody ? previewBody.scrollTop : 0,
+    height: documentHeight(),
   };
 }
 
 export function restoreDetailScroll(snapshot) {
   if (!snapshot) return;
-  const events = document.getElementById("wb-detail-events");
-  if (events && typeof snapshot.events === "number") {
-    events.scrollTop = snapshot.events;
-  }
-  const previewBody = document.getElementById("wb-preview-last-message-body");
-  if (previewBody && typeof snapshot.preview === "number") {
-    previewBody.scrollTop = snapshot.preview;
-  }
-  if (typeof snapshot.window === "number") {
-    window.scrollTo(window.scrollX || 0, snapshot.window);
-  }
+  restoreScrollTop(
+    document.getElementById("wb-detail-events"),
+    snapshot.events
+  );
+  restoreScrollTop(
+    document.getElementById("wb-preview-last-message-body"),
+    snapshot.preview
+  );
+  restoreWindowScroll(snapshot);
 }
 
 export function applyDetailFocus() {
