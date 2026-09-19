@@ -2435,11 +2435,28 @@ class CommitFailureSoftFailTests(unittest.TestCase):
         return read_jsonl(event_path)
 
     def test_a_refused_commit_blocks_the_next_needed_dirty_session(self) -> None:
+        """The run stops, and it stops as the commit failure it actually was.
+
+        This repository refuses every commit, so the group spends its whole
+        retry budget and the run ends before a second worker launches. The
+        reason is ``commit-failed``: the dirt the next session's tree check
+        would object to is the run's own uncommitted work, and naming the tree
+        instead would report a bounded commit failure as an environment for a
+        human to clean up. Both reasons are environment-blocked, so what this
+        pins is which of the two the supervisor is told about.
+        """
         payload = self._run("soft-fail-run")
 
         self.assertEqual(1, self.exit_code)
         self.assertTrue(payload["paused"])
-        self.assertEqual("commit-preflight", payload["reason"])
+        self.assertEqual("commit-failed", payload["reason"])
+        # Stopping with a retry unspent is the failure mode this guards: the
+        # tree check the next session brings sees the failed group's dirt, so it
+        # used to refuse before the last attempt was ever made.
+        self.assertEqual(
+            commit_settlement.MAX_COMMIT_GROUP_RETRIES + 1,
+            len(payload["commit_failures"]),
+        )
         self.assertEqual([1], payload["completed_sessions"])
         self.assertEqual(
             ["complete", "pending"],

@@ -1133,10 +1133,16 @@ class RemoteProviderTests(unittest.TestCase):
         """
         provider = self.provider()
         explained = set(workbench_service.UNAVAILABLE_REASONS)
+        # Every table the provider dispatches from, read from the provider's own
+        # module rather than transcribed. The store-answered set was a literal
+        # here until `/api/history` was added to it: the provider served the new
+        # route, the transcription did not know about it, and the invariant read
+        # the gap as a route with no handler and no reason. Naming the table is
+        # what keeps this test about the provider instead of about the copy.
         served = (
             set(workbench_service.DETAIL_OPERATIONS)
             | set(workbench_service.MUTATION_METHODS)
-            | {"health", "summary", "queue", "plan"}
+            | set(workbench_service._STORE_OPERATIONS)
         )
         # `capabilities` is the one operation no provider answers: the
         # application reports *on* the provider rather than asking it.

@@ -421,12 +421,36 @@ def _run_shard(name: str, command: list[str]) -> dict[str, Any]:
     }
 
 
-def _package_module_count() -> int:
+def _discovered_package_modules() -> set[str]:
+    """Every module broad discovery finds at least one test in.
+
+    The registration ratchet used to compare test *counts* -- discovery's total
+    against the sum of what the shards reported running. A count is only a proxy
+    for the question being asked, and it answers a different one as soon as a
+    module declines to run: a module-level ``SkipTest`` reports ``Ran 0 tests``,
+    which the count read as a module nobody had registered. Two modules in this
+    suite skip that way by design, both because the thing they judge is an
+    installed program rather than this source tree, so the proxy failed the
+    suite for a legitimately unavailable dependency.
+
+    Module names answer the actual question directly. Modules discovery yields
+    no tests from are deliberately absent: ``tests.test_agent_session_loop`` is
+    a name-compatibility shim that contributes none under broad discovery
+    precisely so the split modules are not run twice.
+    """
     loader = unittest.defaultTestLoader
     suite = loader.discover(str(REPO_ROOT / "tests"), top_level_dir=str(REPO_ROOT))
     if loader.errors:
         raise SystemExit("test discovery failed:\n" + "\n".join(loader.errors))
-    return suite.countTestCases()
+    modules: set[str] = set()
+    pending: list[Any] = [suite]
+    while pending:
+        case = pending.pop()
+        if isinstance(case, unittest.TestSuite):
+            pending.extend(case)
+            continue
+        modules.add(type(case).__module__)
+    return modules
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -488,17 +512,31 @@ def main(argv: list[str] | None = None) -> int:
         print(result["output"].rstrip())
 
     if not fast_only:
-        script_tests = sum(
-            result["tests"] for result in results if result["name"] in SCRIPT_SUITES
-        )
-        expected = _package_module_count()
-        package_tests = total_tests - script_tests
-        if package_tests != expected:
+        registered = set(FAST_MODULES) | set(INTEGRATION_MODULES)
+        discovered = _discovered_package_modules()
+        unregistered = sorted(discovered - registered)
+        if unregistered:
             print(
-                f"\nFAIL: shards ran {package_tests} package tests but discovery "
-                f"finds {expected}; a test module is missing from run_suite lists"
+                "\nFAIL: discovery finds tests in "
+                f"{', '.join(unregistered)}; a test module is missing from "
+                "run_suite lists"
             )
             return 1
+        undiscovered = sorted(registered - discovered)
+        if undiscovered:
+            print(
+                f"\nFAIL: run_suite lists {', '.join(undiscovered)} but broad "
+                "discovery finds no test there; the list names a module that "
+                "moved, was renamed, or no longer holds tests"
+            )
+            return 1
+        # A module that ran nothing is not a failure -- the two installed-pair
+        # gates skip when the program they judge is not installed -- but it is
+        # not a success either, and a suite that printed only `ok` for it would
+        # report coverage it did not have.
+        for result in results:
+            if result["name"] in registered and result["tests"] == 0:
+                print(f"\nnote: {result['name']} ran no tests (skipped)")
 
     label = {"portable": "portable suite", "fast": "fast suite"}.get(
         mode, "complete suite"
