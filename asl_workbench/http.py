@@ -1011,6 +1011,17 @@ class OwnerIdentityAuthenticator:
     proof, so an unusable proof offered alongside is not what makes the request
     fail. The health route a monitor polls stays the one thing that answers the
     same way to everyone.
+
+    The uplink is exempt the other way. A connector route is exact-match in
+    :func:`role_satisfies`, in both directions, so an owner is not a connector
+    and no identity header can make one: reading identity first there would let
+    the proxy's statement outrank the publisher's own credential and refuse the
+    publisher on the only route it has. Serve adds that header to everything the
+    tailnet sends, including the connector's own frames, so this is not an edge
+    case -- it is every publication. The Companion never met it because it
+    dispatched on the route's role rather than on whatever the caller happened
+    to bring, and this restores that split at the one route where the two
+    orderings disagree.
     """
 
     def __init__(self, store: CredentialStore, *, owner: str | None) -> None:
@@ -1022,7 +1033,9 @@ class OwnerIdentityAuthenticator:
         authorization = resolve_role(
             self._store,
             authorization=presented,
-            identity=request.header(IDENTITY_HEADER),
+            identity=None
+            if route.role == ROLE_CONNECTOR
+            else request.header(IDENTITY_HEADER),
             owner=self._owner,
         )
         if (

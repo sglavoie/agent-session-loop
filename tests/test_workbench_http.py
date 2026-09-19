@@ -827,6 +827,60 @@ class AuthenticatorTests(unittest.TestCase):
         )
         self.assertEqual(principal.role, ROLE_OWNER)
 
+    def test_the_uplink_reads_the_connector_credential_not_the_identity(self) -> None:
+        """The publisher's own route is the one identity cannot speak for.
+
+        Tailscale Serve sets the identity header on everything the tailnet
+        sends, and the connector publishes over Serve, so every frame it sends
+        arrives carrying the owner's login. Reading identity first turns the
+        publisher into an owner, and an owner is not a connector: the uplink
+        refuses its own connector and the Mac silently backs off forever. This
+        is the production symptom the cutover hit, reduced to the one call that
+        decides it.
+        """
+        store = CredentialStore()
+        credential, token = issue(ROLE_CONNECTOR, created_at=NOW, subject="mac-studio")
+        store.add(credential)
+        authenticator = OwnerIdentityAuthenticator(store, owner="sglavoie@example")
+        route = ROUTES_BY_KEY[("POST", "/v1/ingest")]
+        principal = authenticator.authenticate(
+            build(
+                "POST",
+                "/v1/ingest",
+                headers={
+                    IDENTITY_HEADER: "sglavoie@example",
+                    "Authorization": f"Bearer {token}",
+                },
+            ),
+            route,
+        )
+        self.assertEqual(principal.role, ROLE_CONNECTOR)
+        self.assertEqual(principal.credential_id, credential.credential_id)
+        self.assertTrue(role_satisfies(principal.role, route.role))
+
+    def test_the_owner_still_cannot_reach_the_uplink_by_identity_alone(self) -> None:
+        """Suppressing identity there opens nothing: it only stops a downgrade.
+
+        The owner arriving at the uplink with nothing but Serve's header proves
+        no connector credential, so they are public and the route refuses them
+        -- which is what should happen, and what used to happen behind a 403
+        that named the owner role instead of naming the absence of a token.
+        """
+        authenticator = OwnerIdentityAuthenticator(
+            CredentialStore(), owner="sglavoie@example"
+        )
+        route = ROUTES_BY_KEY[("POST", "/v1/ingest")]
+        principal = authenticator.authenticate(
+            build(
+                "POST",
+                "/v1/ingest",
+                headers={IDENTITY_HEADER: "sglavoie@example"},
+            ),
+            route,
+        )
+        self.assertEqual(principal.role, ROLE_PUBLIC)
+        self.assertFalse(role_satisfies(principal.role, route.role))
+
 
 class ContainerAccessTests(unittest.TestCase):
     """The four answers the Homepage container checks for, from the application.
