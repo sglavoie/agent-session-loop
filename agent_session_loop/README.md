@@ -1,5 +1,10 @@
 # Agent Session Loop (ASL)
 
+The bridge's bounded snapshot reserves space for running and verifying work,
+then the freshest dated blockers, before undated backlog. The selected rows
+retain normal urgency order. The 200-row and frame-size ceilings still apply;
+omitted rows leave the snapshot explicitly partial.
+
 Bridge question snapshots, body retrieval, intervention facts, and action
 validation select unanswered records owned by the displayed `run_id`. A live
 wait's timestamp, session, and turn come from its exact waiting question;
