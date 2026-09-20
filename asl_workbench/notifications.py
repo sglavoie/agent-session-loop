@@ -84,9 +84,12 @@ FALLBACK_PROJECT_LABEL = "ASL project"
 #: phone, and its shape is preserved rather than improved.
 MAX_NOTIFICATION_LABEL_CHARS = 160
 
-#: The fragment an existing notification's link uses. Every notification ever
-#: sent points at this, and ``static/modules/router.js`` still resolves it.
-RUN_FRAGMENT = "/#run="
+#: The route a new notification uses before the run fragment.  The query is
+#: deliberately stable and ignored by the shell: changing the URL before the
+#: fragment forces mobile browsers to navigate when an old Companion tab is
+#: still open at this origin.  A hash-only change would reuse that tab and its
+#: retired JavaScript, while old ``/#run=`` links remain valid in the router.
+RUN_FRAGMENT = "/?workbench=1#run="
 
 #: How long a publish attempt may take end to end.
 PUBLISH_TIMEOUT_SECONDS = 10.0

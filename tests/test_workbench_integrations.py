@@ -654,7 +654,7 @@ class NamingCase(unittest.TestCase):
         self.assertEqual("ntfy.sglavoie.com", PI_NOTIFICATION_SITE.host)
         self.assertEqual(PI_SITE.publisher_topic, PI_NOTIFICATION_SITE.topic)
         self.assertEqual(
-            "https://pi.example.ts.net:9443/#run=plan%2Frun-1",
+            "https://pi.example.ts.net:9443/?workbench=1#run=plan%2Frun-1",
             notifications.notification_link("plan/run-1", site=PI_NOTIFICATION_SITE),
         )
 
@@ -736,9 +736,13 @@ class PublisherCase(unittest.TestCase):
         self.assertEqual("abcdefghij12", result.receipt_id)
         method, url, body, headers = connection.requests[0]
         self.assertEqual(("POST", "/asl-alerts"), (method, url))
-        self.assertIn(b"https://pi.example.ts.net:9443/#run=plan%2Frun-1", body)
+        self.assertIn(
+            b"https://pi.example.ts.net:9443/?workbench=1#run=plan%2Frun-1",
+            body,
+        )
         self.assertEqual(
-            "https://pi.example.ts.net:9443/#run=plan%2Frun-1", headers["Click"]
+            "https://pi.example.ts.net:9443/?workbench=1#run=plan%2Frun-1",
+            headers["Click"],
         )
         self.assertEqual(notifications.NOTIFICATION_TITLE, headers["Title"])
         self.assertTrue(connection.closed)
