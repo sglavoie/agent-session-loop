@@ -66,6 +66,7 @@ from .operations import (
     DETAIL_BRIDGE_UNAVAILABLE,
     DETAIL_DEADLINE_PASSED,
     DETAIL_NO_RESULT,
+    OPERATION_ACCEPTED,
     OPERATION_EXPIRED,
     OPERATION_UNCONFIRMED,
 )
@@ -251,6 +252,12 @@ DEFAULT_OBSERVATION_INTERVAL_SECONDS = 30.0
 #: somebody is using it and idles again when they stop -- the fast cadence costs
 #: a small frame a second, and only for as long as it is being answered.
 ACTIVE_READ_INTERVAL_SECONDS = 1.0
+
+#: How often an accepted remote mutation is checked for ASL's own durable
+#: consumption evidence.  This runs on the mutation worker, never the delivery
+#: thread, and keeps an accepted live reply from remaining open forever after
+#: the waiting runner has recorded that it consumed the reply.
+MUTATION_SETTLEMENT_INTERVAL_SECONDS = 1.0
 ACTIVE_READ_WINDOW_SECONDS = 30.0
 
 #: How many requests may be waiting for the answering worker, and how many
@@ -1249,6 +1256,8 @@ class ObservationConnector:
         self._mutation_result: _Answer | None = None
         self._mutation_thread: threading.Thread | None = None
         self._mutation_fault: str | None = None
+        self._settling_mutations: dict[str, MutationRequest] = {}
+        self._next_settlement = 0.0
         self._recovered = False
 
     # -- introspection ---------------------------------------------------
@@ -1316,7 +1325,11 @@ class ObservationConnector:
 
     def pending_mutations(self) -> int:
         """How many submitted mutations are in hand and not yet settled."""
-        return self._mutations.pending + self._mutations.attempting
+        return (
+            self._mutations.pending
+            + self._mutations.attempting
+            + len(self._settling_mutations)
+        )
 
     @property
     def mutation_fault(self) -> str | None:
@@ -1509,6 +1522,7 @@ class ObservationConnector:
         # act, so the only mutation that can still be running is the one already
         # handed to a worker -- and nothing restarts it.
         self._mutations.clear()
+        self._settling_mutations.clear()
         self._queue = _Queue()
         self._cycle = None
         for thread in (self._thread, self._answer_thread, self._mutation_thread):
@@ -1873,8 +1887,16 @@ class ObservationConnector:
             if self._mutating is not None:
                 return
         request = self._mutations.next_attempt(now)
+        reconciling = False
+        reconcile = getattr(self._performer, "reconcile", None)
         if request is None:
-            return
+            if not callable(reconcile) or now < self._next_settlement:
+                return
+            request = next(iter(self._settling_mutations.values()), None)
+            if request is None:
+                return
+            reconciling = True
+            self._next_settlement = now + MUTATION_SETTLEMENT_INTERVAL_SECONDS
         with self._lock:
             self._mutating = request
         performer = self._performer
@@ -1883,12 +1905,19 @@ class ObservationConnector:
         def attempt() -> None:
             fault: str | None = None
             body: str | None = None
+            answer: _Answer | None = None
             try:
-                if request.bears_body:
-                    if source is None:
-                        raise BodyUnavailable("no way to redeem this command's body")
-                    body = source.fetch(request, now=now)
-                result = performer.perform(request, body=body, now=now)
+                if reconciling:
+                    assert callable(reconcile)
+                    result = reconcile(request, now=now)
+                else:
+                    if request.bears_body:
+                        if source is None:
+                            raise BodyUnavailable(
+                                "no way to redeem this command's body"
+                            )
+                        body = source.fetch(request, now=now)
+                    result = performer.perform(request, body=body, now=now)
             except BodyUnavailable as error:
                 # Nothing was attempted, so the one word that is certainly true
                 # is that it did not run.
@@ -1897,24 +1926,39 @@ class ObservationConnector:
                 )
                 fault = error.message[:MAX_LABEL_CHARS]
             except Exception as error:  # a performer is arbitrary provider code
-                # It may have acted before it raised, and nobody can say which.
-                # ``unconfirmed`` is the only answer that is not a guess.
-                result = MutationResult(
-                    status=OPERATION_UNCONFIRMED, detail_code=DETAIL_NO_RESULT
+                # A failed first attempt may have acted before it raised, and
+                # therefore reports unconfirmed. A failed passive reconciliation
+                # changes no operation; retain it and try the evidence again.
+                result = (
+                    None
+                    if reconciling
+                    else MutationResult(
+                        status=OPERATION_UNCONFIRMED, detail_code=DETAIL_NO_RESULT
+                    )
                 )
                 fault = f"{type(error).__name__}: {error}"[:MAX_LABEL_CHARS]
             finally:
                 # The body dies with the frame that used it, delivered or not.
                 body = None
-            answer = _Answer(
-                request_id=None,
-                kind=KIND_OPERATION,
-                payload=operation_payload(request, result, observed_at=now),
-                capability=CAPABILITY_MUTATE,
-            )
+            if result is not None:
+                answer = _Answer(
+                    request_id=None,
+                    kind=KIND_OPERATION,
+                    payload=operation_payload(request, result, observed_at=now),
+                    capability=CAPABILITY_MUTATE,
+                )
             with self._lock:
                 self._mutation_result = answer
                 self._mutating = None
+                if result is not None:
+                    if (
+                        not reconciling
+                        and result.status == OPERATION_ACCEPTED
+                        and callable(reconcile)
+                    ):
+                        self._settling_mutations[request.operation_id] = request
+                    elif result.status != OPERATION_ACCEPTED:
+                        self._settling_mutations.pop(request.operation_id, None)
                 if fault is not None:
                     self._mutation_fault = fault
 

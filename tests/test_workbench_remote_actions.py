@@ -61,7 +61,9 @@ from unittest import mock
 
 from agent_session_loop import (
     control_queue,
+    events,
     intervention,
+    mailbox,
     plans,
     state,
     workbench,
@@ -259,6 +261,20 @@ class StubBodySource:
         if self.error is not None:
             raise self.error
         return self.text
+
+
+class SettlingPerformer(StubPerformer):
+    """An accepted command whose later evidence reaches consumed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reconciliations: list[str] = []
+
+    def reconcile(
+        self, request: remote_actions.MutationRequest, *, now: float
+    ) -> remote_actions.MutationResult:
+        self.reconciliations.append(request.operation_id)
+        return remote_actions.MutationResult(status=OPERATION_CONSUMED)
 
 
 def inline(attempt: Any) -> None:
@@ -718,6 +734,23 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(OPERATION_ACCEPTED, report["payload"]["status"])
         self.assertEqual(METHOD_STOP_AFTER_CURRENT, report["payload"]["method"])
         self.assertEqual(1, len(performer.calls))
+
+    def test_an_accepted_mutation_is_reported_again_when_asl_consumes_it(self) -> None:
+        channel = LinkChannel()
+        performer = SettlingPerformer()
+        connector = make_connector(channel=channel, performer=performer)
+        channel.carry(submission("m1"))
+
+        drive(connector, 6)
+        drive(connector, 6, start=NOW + 2.0)
+
+        reports = channel.operations()
+        self.assertEqual(
+            [OPERATION_ACCEPTED, OPERATION_CONSUMED],
+            [report["payload"]["status"] for report in reports],
+        )
+        self.assertEqual(["op-1"], performer.reconciliations)
+        self.assertEqual(0, connector.pending_mutations())
 
     def test_the_report_is_uncorrelated_because_the_receipt_is_the_outcome(
         self,
@@ -1578,6 +1611,72 @@ class PerformerTests(PerformerTestCase):
 
         self.assertEqual(OPERATION_REJECTED, result.status)
         self.assertIsNotNone(result.reason)
+
+    def test_an_accepted_live_reply_reconciles_when_the_runner_consumes_it(
+        self,
+    ) -> None:
+        self.live_run(
+            active_turn={
+                "run_id": RUN_ID,
+                "session_id": SESSION_ID,
+                "turn_index": 1,
+                "session_kind": "implementation",
+                "harness": "claude",
+                "input_wait_active": True,
+            }
+        )
+        question = mailbox.append_question(
+            self.plan_dir,
+            "May the fixture continue?",
+            state_dir=self.state_dir,
+            run_id=RUN_ID,
+            session_id=SESSION_ID,
+            turn_index=1,
+        )
+        request = self.request(
+            operation_id="op-live",
+            method=METHOD_QUESTION_REPLY,
+            reply_ref=REPLY_REF,
+            action_token=ACTION_TOKEN,
+            bridge_token=self.token(),
+            question_id=question.id,
+        )
+
+        first = self.performer.perform(request, body=REPLY_TEXT, now=NOW)
+        self.assertEqual(OPERATION_ACCEPTED, first.status)
+        plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
+        dispatched_at = float(self.row("op-live")["dispatched_at"])
+        from datetime import UTC, datetime
+
+        event = {
+            "created_at": datetime.fromtimestamp(
+                dispatched_at + 1.0, tz=UTC
+            ).isoformat(),
+            "name": events.REPLY_PROVIDED_EVENT,
+            "payload": {
+                "run_id": RUN_ID,
+                "session_id": SESSION_ID,
+                "turn_index": 1,
+                "reply_length": len(REPLY_TEXT),
+                "source": {
+                    "origin": "mailbox",
+                    "run_id": RUN_ID,
+                    "session_id": SESSION_ID,
+                    "turn_index": 1,
+                    "question_id": question.id,
+                    "reply_length": len(REPLY_TEXT),
+                },
+            },
+            "version": 1,
+        }
+        with (plan_state / events.EVENTS_FILE_NAME).open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event) + "\n")
+
+        settled = self.performer.reconcile(request, now=dispatched_at + 2.0)
+
+        assert settled is not None
+        self.assertEqual(OPERATION_CONSUMED, settled.status)
+        self.assertEqual(OPERATION_CONSUMED, self.row("op-live")["status"])
 
     def test_a_redirect_with_no_endpoint_to_reach_is_rejected(self) -> None:
         """Redirect carries prose too, and is still decided by ASL, not here."""
