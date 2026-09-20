@@ -52,8 +52,15 @@ from dataclasses import replace
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from . import incidents, notifications
 from .credentials import ROLE_CONNECTOR, Credential
-from .http import REMOTE_POLICY, Application, OwnerIdentityAuthenticator, shell_bundle
+from .http import (
+    MODE_REMOTE,
+    REMOTE_POLICY,
+    Application,
+    OwnerIdentityAuthenticator,
+    shell_bundle,
+)
 from .installation import (
     CONFIG_PATH,
     DATABASE_FILE,
@@ -87,6 +94,12 @@ LOGGER_NAME = "asl-workbench-runtime"
 
 #: How often the supervising loop wakes to notice a stop or a dead server.
 POLL_SECONDS = 0.2
+
+#: The incident engine owns its own timer because publishing may block for the
+#: transport timeout and must never delay HTTP acceptance or uplink liveness.
+#: Kept at the legacy service's cadence so the unified runtime preserves the
+#: alert threshold without adding a second timing policy.
+INCIDENT_POLL_SECONDS = 0.5
 
 
 class RuntimeRefusal(InstallationError):
@@ -206,7 +219,7 @@ def run(
     os.umask(SHARED_MODE_BITS)
     safe_prefix(prefix)
     endpoint = service_endpoint(prefix / CONFIG_PATH, site)
-    credentials, _publisher_token = service_secrets(prefix / SECRETS_PATH)
+    credentials, publisher_token = service_secrets(prefix / SECRETS_PATH)
     connector_id = connector_subject(credentials.credentials())
     policy = policy_for(endpoint.observation_only)
     state = state or prefix / STATE_DIRECTORY
@@ -227,6 +240,16 @@ def run(
                 policy=policy,
                 created_at=time.time(),
             ) as store:
+                publisher = notifications.select_publisher(
+                    mode=MODE_REMOTE,
+                    deployment=notifications.DEPLOYMENT_PRODUCTION,
+                    token=publisher_token,
+                )
+                incident_engine = incidents.IncidentEngine(
+                    store=store,
+                    clock=time.time,
+                    publisher=publisher,
+                )
                 uplink = Uplink(
                     store,
                     clock=time.time,
@@ -267,7 +290,24 @@ def run(
                     args=(server,),
                     name="workbench-runtime",
                 )
+                stop_incidents = threading.Event()
+
+                def incidents_loop() -> None:
+                    while not stop_incidents.wait(INCIDENT_POLL_SECONDS):
+                        try:
+                            incident_engine.tick()
+                        except sqlite3.Error:
+                            # A transient storage failure must not permanently
+                            # end observation timers. Publishing intent is
+                            # durable before the network call begins.
+                            continue
+
+                incident_worker = threading.Thread(
+                    target=incidents_loop,
+                    name="workbench-incidents",
+                )
                 worker.start()
+                incident_worker.start()
                 try:
                     write_json(
                         ready,
@@ -291,6 +331,8 @@ def run(
                         uplink.sweep(time.time())
                 finally:
                     try:
+                        stop_incidents.set()
+                        incident_worker.join()
                         server.shutdown()
                         worker.join()
                         server.server_close()
