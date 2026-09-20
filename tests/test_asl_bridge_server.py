@@ -158,6 +158,25 @@ class _Corpus:
         )
         return plan_dir
 
+    def input_wait_plan(
+        self, name: str = "plan-input-wait"
+    ) -> tuple[Path, str]:
+        """A harness turn blocked in ``asl ask --wait``."""
+        plan_dir = self.running_plan(name)
+        question = mailbox.append_question(
+            plan_dir,
+            QUESTION_BODY,
+            state_dir=self.state_root,
+            run_id=RUN_ID,
+            session_id="2",
+            turn_index=3,
+        )
+        path = state.plan_state_dir(plan_dir, self.state_root) / events.STATE_FILE_NAME
+        payload = json.loads(path.read_text())
+        payload["active_turn"]["input_wait_active"] = True
+        self.write_state(plan_dir, payload)
+        return plan_dir, question.id
+
     def paused_plan(self, name: str = "plan-paused") -> Path:
         """A paused run whose question is the harness's own last message."""
         plan_dir = _make_workbench_plan(self.plans_root, name)
@@ -620,6 +639,27 @@ class BridgeQuestionGetTests(unittest.TestCase):
 
 
 class BridgeReplyTests(unittest.TestCase):
+    def test_reply_consumes_an_in_turn_input_wait_question(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir, question_id = corpus.input_wait_plan()
+            row = corpus.row_for(plan_dir)
+
+            result = corpus.session().question_reply(
+                {
+                    "plan_dir": str(plan_dir),
+                    "operation_id": "op-input-wait",
+                    "action_token": row["action_token"],
+                    "text": REPLY_TEXT,
+                }
+            )
+
+            self.assertEqual("awaiting-reply", row["phase"])
+            self.assertEqual(question_id, row["question"]["question_id"])
+            self.assertIn(intervention.ACTION_REPLY, row["actions"])
+            self.assertEqual(bridge.OPERATION_ACCEPTED, result["status"])
+            self.assertEqual(question_id, result["question_id"])
+
     def test_reply_appends_through_the_shared_service_and_returns_a_receipt(
         self,
     ) -> None:
