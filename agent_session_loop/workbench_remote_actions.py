@@ -481,6 +481,51 @@ class AslMutationPerformer:
                 )
         return settled
 
+    def reconcile(
+        self, request: MutationRequest, *, now: float
+    ) -> MutationResult | None:
+        """Report when ASL's evidence advances one accepted remote mutation.
+
+        The first result says only that a live reply was appended.  The runner
+        later records that it consumed those words.  Reconcile the local
+        operation journal against that record and return a second result only
+        when the operation has reached a terminal state.
+        """
+        try:
+            plan_dir = self._index.resolve(request.plan_key, now=now)
+        except DetailError:
+            return None
+        try:
+            workbench_operations.reconcile_plan(
+                plan_dir, state_dir=self.state_dir, now=now
+            )
+            record = next(
+                (
+                    row
+                    for row in workbench_operations.read_operations(
+                        plan_dir, state_dir=self.state_dir
+                    )
+                    if row.get("operation_id") == request.operation_id
+                ),
+                None,
+            )
+        except OSError, portable_operations.OperationError:
+            return None
+        if record is None:
+            return None
+        status = str(record.get("status", ""))
+        if status in {
+            portable_operations.OPERATION_PENDING,
+            portable_operations.OPERATION_DISPATCHED,
+            portable_operations.OPERATION_ACCEPTED,
+        }:
+            return None
+        return MutationResult(
+            status=reportable_status(status),
+            detail_code=_detail_of(record),
+            run_id=request.run_id,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Journalling the actions that have no journal of their own
