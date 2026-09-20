@@ -158,9 +158,7 @@ class _Corpus:
         )
         return plan_dir
 
-    def input_wait_plan(
-        self, name: str = "plan-input-wait"
-    ) -> tuple[Path, str]:
+    def input_wait_plan(self, name: str = "plan-input-wait") -> tuple[Path, str]:
         """A harness turn blocked in ``asl ask --wait``."""
         plan_dir = self.running_plan(name)
         question = mailbox.append_question(
