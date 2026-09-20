@@ -1481,6 +1481,10 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         submit_body = submit_match.group(0)
         self.assertIn("window.confirm(", submit_body)
         self.assertIn("clearReplyTextarea()", submit_body)
+        self.assertIn('context.context_kind === "waiting"', decoded)
+        self.assertIn('liveQuestion ? "/api/question-reply" : "/api/reply"', decoded)
+        self.assertIn("action_token: context.action_token", decoded)
+        self.assertIn("body.question_id = context.question_id", decoded)
         # The privacy regression from earlier sessions must still hold:
         # reply text is never persisted to sessionStorage / localStorage.
         for pattern in (

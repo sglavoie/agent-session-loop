@@ -45,14 +45,18 @@ report.
 
 from __future__ import annotations
 
+import hmac
 import itertools
+import secrets
 import threading
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from .credentials import ROLE_CAPABILITIES, ROLE_CONNECTOR
 from .operations import OPERATION_DISPATCHED
+from .remote_actions import MAX_BODY_CHARS
 from .remote_reads import DetailReadClient, ReadAnswer, RemoteReadError
 from .store import IngestInvalid, IngestRefused, WorkbenchStore
 from .transport import (
@@ -128,6 +132,16 @@ class UplinkRefusal(Exception):
         self.details = details
 
 
+@dataclass
+class _HeldBody:
+    """One operator-authored body kept only for this process's live command."""
+
+    reply_ref: str
+    action_token: str
+    text: str
+    expires_at: float
+
+
 class Uplink:
     """One paired connector, as the service sees it.
 
@@ -174,6 +188,7 @@ class Uplink:
         self._ready = threading.Condition()
         self._carry: deque[Mapping[str, Any]] = deque()
         self._settled: dict[str, ReadAnswer] = {}
+        self._bodies: dict[str, _HeldBody] = {}
         self._last_upload_at: float | None = None
         # Unique across this process and across a restart within the same
         # second, so a request id the Mac has already seen and discarded is
@@ -215,7 +230,89 @@ class Uplink:
                 self.reads.link_down(now=now, note="the connector stopped uploading")
             )
             self._drop_carried()
+        self._expire_bodies(now)
         self._keep(self.reads.expire(now))
+
+    # -- Volatile mutation bodies ------------------------------------------
+
+    def stage_body(
+        self, operation_id: str, text: str, *, now: float
+    ) -> tuple[str, str, bool]:
+        """Hold one reply in memory until its dispatched command redeems it."""
+        if not isinstance(text, str) or not text.strip():
+            raise UplinkRefusal(400, "invalid-reply", "reply text must not be empty")
+        if len(text) > MAX_BODY_CHARS:
+            raise UplinkRefusal(
+                400,
+                "invalid-reply",
+                f"reply text exceeds {MAX_BODY_CHARS} characters",
+            )
+        with self._ready:
+            existing = self._bodies.get(operation_id)
+            if existing is not None:
+                return existing.reply_ref, existing.action_token, False
+            held = _HeldBody(
+                reply_ref=f"ref-{operation_id}",
+                action_token=secrets.token_hex(16),
+                text=text,
+                expires_at=now + self.command_lifetime_seconds,
+            )
+            self._bodies[operation_id] = held
+            return held.reply_ref, held.action_token, True
+
+    def discard_body(self, operation_id: str) -> None:
+        """Overwrite and remove any prose held for a command."""
+        with self._ready:
+            held = self._bodies.pop(operation_id, None)
+            if held is not None:
+                held.text = ""
+                held.action_token = ""
+
+    def redeem_body(
+        self,
+        operation_id: str,
+        reply_ref: str,
+        action_token: str,
+        *,
+        connector_id: str,
+        now: float,
+    ) -> str:
+        """Return a dispatched command's body to its paired connector only."""
+        self._expire_bodies(now)
+        record = self.store.operation(operation_id)
+        if record is None or record.get("connector_id") != connector_id:
+            raise UplinkRefusal(
+                404, "unknown-operation", "no dispatched command has that identity"
+            )
+        if record.get("status") != OPERATION_DISPATCHED:
+            raise UplinkRefusal(
+                409,
+                "not-dispatched",
+                f"operation {operation_id} is {record.get('status')}",
+            )
+        with self._ready:
+            held = self._bodies.get(operation_id)
+            if held is None or not held.text:
+                raise UplinkRefusal(
+                    409, "not-dispatched", "the command body is no longer available"
+                )
+            if held.reply_ref != reply_ref or not hmac.compare_digest(
+                held.action_token, action_token
+            ):
+                raise UplinkRefusal(
+                    403, "invalid-action-token", "the command capability does not match"
+                )
+            return held.text
+
+    def _expire_bodies(self, now: float) -> None:
+        with self._ready:
+            expired = [
+                operation_id
+                for operation_id, held in self._bodies.items()
+                if now >= held.expires_at
+            ]
+        for operation_id in expired:
+            self.discard_body(operation_id)
 
     # -- The upward path -----------------------------------------------------
 
@@ -321,6 +418,7 @@ class Uplink:
             dispatched_at=payload.get("dispatched_at"),
             settled_at=payload.get("settled_at"),
         )
+        self.discard_body(operation_id)
 
     # -- The downward path ---------------------------------------------------
 
@@ -338,6 +436,11 @@ class Uplink:
                 return None
             deadline = envelope.get("deadline")
             if isinstance(deadline, int | float) and now >= float(deadline):
+                payload = envelope.get("payload")
+                if isinstance(payload, Mapping):
+                    operation_id = payload.get("operation_id")
+                    if isinstance(operation_id, str):
+                        self.discard_body(operation_id)
                 continue
             # Recorded outside the lock: ``_departed`` writes to the journal,
             # and a database write held across the condition every reader

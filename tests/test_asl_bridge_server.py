@@ -30,6 +30,7 @@ from agent_session_loop import (
     mailbox,
     state,
     workbench,
+    workbench_details,
 )
 
 from .support import (
@@ -566,6 +567,27 @@ class BridgeRowActionTests(unittest.TestCase):
 
 
 class BridgeQuestionGetTests(unittest.TestCase):
+    def test_workbench_questions_include_an_in_turn_mailbox_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir, question_id = corpus.input_wait_plan()
+
+            result = workbench_details.read_questions(
+                plan_dir, state_dir=corpus.state_root
+            )
+
+            self.assertEqual("waiting", result["context_kind"])
+            self.assertEqual(question_id, result["question_id"])
+            self.assertEqual(QUESTION_BODY, result["last_message"])
+            self.assertEqual(QUESTION_BODY, result["rendered_prompt"])
+            self.assertIn(intervention.ACTION_REPLY, result["actions"])
+            self.assertEqual(
+                intervention.action_token(
+                    intervention.inspect_run(plan_dir, state_dir=corpus.state_root)
+                ),
+                result["action_token"],
+            )
+
     def test_live_question_body_is_returned_with_its_size(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))

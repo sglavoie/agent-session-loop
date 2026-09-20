@@ -40,7 +40,16 @@ from asl_workbench import details
 from asl_workbench.catalog import PlanDetail
 from asl_workbench.details import DetailError, DetailScope, Window
 
-from . import artifacts, plans, qna, state, tail, workbench, workbench_catalog
+from . import (
+    artifacts,
+    intervention,
+    plans,
+    qna,
+    state,
+    tail,
+    workbench,
+    workbench_catalog,
+)
 from . import events as events_module
 
 _JSONDict = dict[str, Any]
@@ -853,6 +862,34 @@ def read_questions(
     waiting run is holding.
     """
     try:
+        facts = intervention.inspect_run(plan_dir, state_dir=state_dir)
+        if (
+            facts.run_active
+            and facts.context_kind == "waiting"
+            and facts.question_id is not None
+        ):
+            question_id, context_kind, body = intervention.question_body(
+                plan_dir,
+                question_id=facts.question_id,
+                state_dir=state_dir,
+            )
+            intervention.enforce_body_bound(body)
+            return {
+                "context_kind": context_kind,
+                "run_id": facts.run_id,
+                "question_id": question_id,
+                "actions": list(intervention.permitted_actions(facts)),
+                "action_token": intervention.action_token(facts),
+                "last_message": body,
+                "rendered_prompt": body,
+            }
+    except intervention.InterventionError:
+        # The Q&A reader below owns the established paused-run error contract.
+        # A live-question inspection failure must not replace it with a second
+        # vocabulary when the plan is actually paused.
+        facts = None
+
+    try:
         context = qna.load_qna_context(plan_dir, state_dir=state_dir, reclaim=False)
     except qna.QnAError as error:
         raise DetailError(
@@ -869,9 +906,23 @@ def read_questions(
             details={"plan_dir": str(plan_dir)},
         ) from error
     payload = qna.questions_payload(context)
-    return {
+    answer = {
         key: value for key, value in payload.items() if key not in _QNA_ENVELOPE_KEYS
     }
+    if facts is None:
+        try:
+            facts = intervention.inspect_run(plan_dir, state_dir=state_dir)
+        except intervention.InterventionError:
+            facts = None
+    if facts is not None:
+        answer.update(
+            {
+                "context_kind": context.context_kind,
+                "actions": list(intervention.permitted_actions(facts)),
+                "action_token": intervention.action_token(facts),
+            }
+        )
+    return answer
 
 
 def read_recovery(

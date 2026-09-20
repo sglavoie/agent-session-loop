@@ -60,6 +60,7 @@ from .uplink import UplinkRefusal
 __all__ = [
     "API_CONTENT_SECURITY_POLICY",
     "CAPABILITY_OPERATION",
+    "COMMAND_REDEEM_PATH",
     "COMMAND_NAME",
     "DOCUMENT_CONTENT_SECURITY_POLICY",
     "JSON_CACHE_CONTROL",
@@ -130,6 +131,7 @@ MAX_REQUEST_BODY = 1024 * 1024
 #: what a deployment reads it from; the Mac connector holds its own copy of the
 #: string, because this package is not importable from there.
 UPLINK_PATH = "/v1/ingest"
+COMMAND_REDEEM_PATH = "/v1/commands/redeem"
 
 
 # ---------------------------------------------------------------------------
@@ -207,11 +209,13 @@ OP_ARCHIVE_DELETE = "archive-delete"
 OP_ARCHIVE_SETTINGS = "archive-settings"
 OP_LAUNCH = "launch"
 OP_REPLY = "reply"
+OP_QUESTION_REPLY = "question-reply"
 OP_CONTROL_STOP_AFTER_CURRENT = "control-stop-after-current"
 OP_CONTROL_ABORT = "control-abort"
 OP_CONTROL_SELECT_HARNESS = "control-select-harness"
 OP_CONTROL_REDIRECT = "control-redirect"
 OP_UNLOCK = "unlock"
+OP_COMMAND_REDEEM = "command-redeem"
 OP_INGEST = "ingest"
 
 #: The one operation the application answers itself. A provider that could
@@ -411,6 +415,13 @@ ROUTES: tuple[Route, ...] = (
     ),
     Route(
         "POST",
+        "/api/question-reply",
+        OP_QUESTION_REPLY,
+        ROLE_OWNER,
+        "answer a live question without restarting its run",
+    ),
+    Route(
+        "POST",
         "/api/control/stop-after-current",
         OP_CONTROL_STOP_AFTER_CURRENT,
         ROLE_OWNER,
@@ -439,6 +450,13 @@ ROUTES: tuple[Route, ...] = (
     ),
     Route(
         "POST", "/api/unlock", OP_UNLOCK, ROLE_OWNER, "remove a stale operational lock"
+    ),
+    Route(
+        "POST",
+        COMMAND_REDEEM_PATH,
+        OP_COMMAND_REDEEM,
+        ROLE_CONNECTOR,
+        "exchange a dispatched command token for its in-memory body",
     ),
     # -- The connector's own path -------------------------------------------
     #

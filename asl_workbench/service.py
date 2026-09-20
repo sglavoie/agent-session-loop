@@ -62,6 +62,7 @@ from .http import (
     OP_ARCHIVE_RESTORE,
     OP_ARCHIVE_SETTINGS,
     OP_ARTIFACTS,
+    OP_COMMAND_REDEEM,
     OP_COMMITS,
     OP_CONTROL_ABORT,
     OP_CONTROL_REDIRECT,
@@ -80,6 +81,7 @@ from .http import (
     OP_PLAN_ARCHIVE,
     OP_PLANS_ARCHIVE,
     OP_PROGRESS,
+    OP_QUESTION_REPLY,
     OP_QUESTIONS,
     OP_QUEUE,
     OP_RECOVERY,
@@ -189,6 +191,7 @@ DETAIL_OPERATIONS: Mapping[str, str] = {
 #: :data:`UNAVAILABLE_REASONS` rather than journalled against an invented run.
 MUTATION_METHODS: Mapping[str, str] = {
     OP_REPLY: METHOD_REPLY,
+    OP_QUESTION_REPLY: METHOD_QUESTION_REPLY,
     OP_CONTROL_STOP_AFTER_CURRENT: METHOD_STOP_AFTER_CURRENT,
     OP_CONTROL_ABORT: METHOD_ABORT,
     OP_CONTROL_SELECT_HARNESS: METHOD_SELECT_HARNESS,
@@ -225,6 +228,10 @@ _SELECTORS: Mapping[str, str] = {
 #: Operator-facing, because ``GET /api/capabilities`` shows these to whoever is
 #: looking at a greyed-out control.
 UNAVAILABLE_REASONS: Mapping[str, str] = {
+    OP_COMMAND_REDEEM: (
+        "command bodies can be redeemed only while this service holds its "
+        "volatile mutation lane"
+    ),
     OP_LAUNCH: (
         "starting a run is done on the Mac: a launch names a plan rather than "
         "a run, and the service journal records mutations against a run"
@@ -321,6 +328,29 @@ class SubmissionLane(Protocol):
         """Queue the submission for the next acknowledgement frame."""
 
 
+class MutationBodyLane(Protocol):
+    """Hold reply prose in memory and redeem it for the paired connector."""
+
+    def stage_body(
+        self, operation_id: str, text: str, *, now: float
+    ) -> tuple[str, str, bool]:
+        """Return ``(reply_ref, token, created)`` for one submission."""
+
+    def discard_body(self, operation_id: str) -> None:
+        """Forget any in-memory prose held for ``operation_id``."""
+
+    def redeem_body(
+        self,
+        operation_id: str,
+        reply_ref: str,
+        action_token: str,
+        *,
+        connector_id: str,
+        now: float,
+    ) -> str:
+        """Exchange the command's capability for its operator-authored text."""
+
+
 class UploadLane(Protocol):
     """Taking in one uploaded frame and saying what rides back down.
 
@@ -362,6 +392,7 @@ class RemoteProvider:
         connector_id: str,
         reads: DetailLane | None = None,
         mutations: SubmissionLane | None = None,
+        bodies: MutationBodyLane | None = None,
         uploads: UploadLane | None = None,
     ) -> None:
         self._store = store
@@ -369,6 +400,7 @@ class RemoteProvider:
         self._connector_id = connector_id
         self._reads = reads
         self._mutations = mutations
+        self._bodies = bodies
         self._uploads = uploads
 
     # -- What it can do -----------------------------------------------------
@@ -381,6 +413,8 @@ class RemoteProvider:
             supported.update(MUTATION_METHODS)
         if self._uploads is not None:
             supported.update(UPLOAD_OPERATIONS)
+        if self._bodies is not None:
+            supported.add(OP_COMMAND_REDEEM)
         reasons = dict(UNAVAILABLE_REASONS)
         if self._reads is None:
             for operation_name in DETAIL_OPERATIONS:
@@ -391,6 +425,8 @@ class RemoteProvider:
         if self._uploads is None:
             for operation_name in UPLOAD_OPERATIONS:
                 reasons.setdefault(operation_name, _NO_UPLOAD_LANE)
+        if self._bodies is None:
+            reasons.setdefault(OP_COMMAND_REDEEM, _NO_BODY_LANE)
         return unavailable_from(
             supported, reasons=reasons, default=_DEFAULT_UNAVAILABLE
         )(operation)
@@ -401,6 +437,8 @@ class RemoteProvider:
         operation = call.operation
         if operation in UPLOAD_OPERATIONS:
             return self._ingest(call)
+        if operation == OP_COMMAND_REDEEM:
+            return self._redeem(call)
         if operation in DETAIL_OPERATIONS:
             return self._detail(call, DETAIL_OPERATIONS[operation])
         if operation in MUTATION_METHODS:
@@ -637,6 +675,23 @@ class RemoteProvider:
             return Response(status=202, headers=dict(SECURITY_HEADERS))
         return Response.json(200, carried)
 
+    def _redeem(self, call: Call) -> Response:
+        """Exchange a dispatched command's capability for its volatile body."""
+        lane = self._bodies
+        if lane is None:  # pragma: no cover - `unavailable` refused it first
+            raise HttpRefusal(503, "operation-unavailable", _NO_BODY_LANE)
+        subject = call.principal.subject
+        if not subject:
+            raise HttpRefusal(403, "wrong-connector", "connector identity is required")
+        text = lane.redeem_body(
+            call.require_string("operation_id"),
+            call.require_string("reply_ref"),
+            call.require_string("action_token"),
+            connector_id=subject,
+            now=self._clock(),
+        )
+        return Response.success(reason="ok", reply_text=text)
+
     # -- Bounded reads over the link ----------------------------------------
 
     def _detail(self, call: Call, detail: str) -> Response:
@@ -673,6 +728,16 @@ class RemoteProvider:
             ),
             now=now,
         )
+        if detail == "questions" and answer.answered:
+            rows = answer.entries or ()
+            if len(rows) == 1 and isinstance(rows[0], Mapping):
+                return Response.success(
+                    reason="ok",
+                    **dict(rows[0]),
+                    complete=answer.complete,
+                    observed_at=answer.observed_at,
+                    warnings=list(answer.warnings),
+                )
         return _read_response(answer)
 
     # -- Mutations ----------------------------------------------------------
@@ -692,43 +757,54 @@ class RemoteProvider:
         if lane is None:  # pragma: no cover - `unavailable` refused it first
             raise HttpRefusal(503, "operation-unavailable", _NO_SUBMISSION_LANE)
         now = self._clock()
-        request = self._parse(call, method, now=now)
-        target = OperationTarget(
-            plan_key=request.plan_key, selector=_selector(request, method)
-        )
-        recorded = [
-            _rehydrate(record)
-            for record in (
-                self._store.operation(request.operation_id),
-                self._store.outstanding_operation(request.plan_key),
+        request, staged = self._parse(call, method, now=now)
+        try:
+            target = OperationTarget(
+                plan_key=request.plan_key, selector=_selector(request, method)
             )
-            if record is not None
-        ]
-        admission = admit(
-            recorded,
-            operation_id=request.operation_id,
-            method=method,
-            target=target,
-            now=now,
-            deliver_by=request.deliver_by,
-            command_id=request.command_id,
-            run_key=request.run_key,
-            question_id=request.question_id,
-        )
-        if admission.refused:
-            raise admission.error()
-        if admission.replayed:
-            # The first submission's own row, handed back untouched. Handing it
-            # down again would be a second delivery of one command.
-            record = admission.record or {}
-            return _accepted(record, replay=True)
-        record = self._store.record_operation(
-            admission.record or {}, connector_id=self._connector_id, received_at=now
-        )
-        lane.hand_down(_submission(request, method), now=now)
-        return _accepted(record, replay=False)
+            recorded = [
+                _rehydrate(record)
+                for record in (
+                    self._store.operation(request.operation_id),
+                    self._store.outstanding_operation(request.plan_key),
+                )
+                if record is not None
+            ]
+            admission = admit(
+                recorded,
+                operation_id=request.operation_id,
+                method=method,
+                target=target,
+                now=now,
+                deliver_by=request.deliver_by,
+                command_id=request.command_id,
+                run_key=request.run_key,
+                question_id=request.question_id,
+            )
+            if admission.refused:
+                raise admission.error()
+            if admission.replayed:
+                # The first submission's own row, handed back untouched. Handing it
+                # down again would be a second delivery of one command.
+                record = admission.record or {}
+                if staged and self._bodies is not None:
+                    self._bodies.discard_body(request.operation_id)
+                return _accepted(record, replay=True)
+            record = self._store.record_operation(
+                admission.record or {},
+                connector_id=self._connector_id,
+                received_at=now,
+            )
+            lane.hand_down(_submission(request, method), now=now)
+            return _accepted(record, replay=False)
+        except Exception:
+            if staged and self._bodies is not None:
+                self._bodies.discard_body(request.operation_id)
+            raise
 
-    def _parse(self, call: Call, method: str, *, now: float) -> MutationRequest:
+    def _parse(
+        self, call: Call, method: str, *, now: float
+    ) -> tuple[MutationRequest, bool]:
         """Compose the submission and let the far end's parser judge it.
 
         Validating with :func:`~asl_workbench.remote_actions.parse_submission`
@@ -764,11 +840,31 @@ class RemoteProvider:
             value = call.optional_string(name)
             if value is not None:
                 payload[name] = value
+        staged = False
+        reply_text = call.optional_string("reply_text")
+        if reply_text is not None:
+            lane = self._bodies
+            if lane is None:
+                raise HttpRefusal(
+                    503,
+                    "operation-unavailable",
+                    "this service has no volatile reply-body lane",
+                )
+            bridge_token = call.require_string("action_token")
+            reply_ref, redemption_token, staged = lane.stage_body(
+                operation_id, reply_text, now=now
+            )
+            payload["reply_ref"] = reply_ref
+            payload["action_token"] = redemption_token
+            payload["bridge_token"] = bridge_token
         try:
-            return parse_submission(
-                payload, now=now, window=MAX_DELIVERY_WINDOW_SECONDS
+            return (
+                parse_submission(payload, now=now, window=MAX_DELIVERY_WINDOW_SECONDS),
+                staged,
             )
         except RemoteActionError as error:
+            if staged and self._bodies is not None:
+                self._bodies.discard_body(operation_id)
             raise HttpRefusal(
                 400,
                 "invalid-submission",
@@ -796,6 +892,7 @@ _NO_SUBMISSION_LANE = (
 #: provider was built without an uplink at all, which is a deployment that can
 #: serve what it already holds and can never be given anything new.
 _NO_UPLOAD_LANE = "this service was not built to accept connector uploads"
+_NO_BODY_LANE = "this service was not built to redeem volatile command bodies"
 
 
 # ---------------------------------------------------------------------------

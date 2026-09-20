@@ -920,6 +920,39 @@ class LocalProvider:
         # refused as malformed rather than counted as a launch attempt.
         return self._spawn_run(call, reply_text=call.require_string("reply_text"))
 
+    def _handle_question_reply(self, call: Call) -> Response:
+        """Answer a live mailbox question without spawning another run."""
+        try:
+            outcome = workbench_actions.reply_to_question(
+                call.require_string("plan_dir"),
+                text=call.require_string("reply_text"),
+                operation_id=call.bounded_id(
+                    "operation_id", maximum=MAX_LAUNCH_ID_CHARS
+                ),
+                state_dir=self.config.state_dir,
+                action_token=call.optional_string("action_token"),
+                question_id=call.optional_string("question_id"),
+                run_id=call.optional_string("run_id"),
+            )
+        except OperationError as error:
+            raise HttpRefusal(
+                error.status, error.reason, error.message, details=error.details
+            ) from error
+        except intervention.InterventionError as error:
+            raise HttpRefusal(
+                409, error.reason, error.message, details=dict(error.details)
+            ) from error
+        except workbench_actions.ActionRefused as error:
+            raise HttpRefusal(error.status, error.reason, error.message) from error
+        except (OSError, ValueError) as error:
+            raise HttpRefusal(409, "question-reply-failed", str(error)) from error
+        return Response.success(
+            202,
+            reason="accepted",
+            operation=outcome.operation,
+            replayed=outcome.replayed,
+        )
+
     def _spawn_run(self, call: Call, *, reply_text: str | None) -> Response:
         """Start one run for a plan, at most once per plan and per ``launch_id``.
 
@@ -1392,6 +1425,7 @@ _HANDLERS: Mapping[str, Callable[[LocalProvider, Call], Response]] = {
     "archive-settings": LocalProvider._handle_archive_settings,
     "launch": LocalProvider._handle_launch,
     "reply": LocalProvider._handle_reply,
+    "question-reply": LocalProvider._handle_question_reply,
     "control-stop-after-current": LocalProvider._handle_control_stop_after_current,
     "control-abort": LocalProvider._handle_control_abort,
     "control-select-harness": LocalProvider._handle_control_select_harness,
@@ -1407,6 +1441,7 @@ _HANDLERS: Mapping[str, Callable[[LocalProvider, Call], Response]] = {
 _NOT_LOCAL: Mapping[str, str] = {
     "capabilities": "the application answers this itself",
     "ingest": ("this host is the connector, not a service a connector uploads to"),
+    "command-redeem": ("this host holds no remote command bodies to redeem"),
 }
 
 #: Every operation the application declares, minus the ones above. Built from

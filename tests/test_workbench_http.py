@@ -67,6 +67,7 @@ from asl_workbench.credentials import (
 )
 from asl_workbench.http import (
     CAPABILITY_OPERATION,
+    COMMAND_REDEEM_PATH,
     LOCAL_POLICY,
     MODE_LOCAL,
     MODE_REMOTE,
@@ -99,6 +100,7 @@ from asl_workbench.http import (
 from asl_workbench.integrations import PI_SITE, container_access_checks
 from asl_workbench.observation import ObservationPolicy
 from asl_workbench.operations import (
+    METHOD_QUESTION_REPLY,
     METHOD_STOP_AFTER_CURRENT,
     OPERATION_PENDING,
     REASON_OPERATION_CONFLICT,
@@ -168,12 +170,13 @@ class RecordingProvider:
 class FixedAuthenticator:
     """Whatever role the test says, with no proof involved."""
 
-    def __init__(self, role: str = ROLE_OWNER) -> None:
+    def __init__(self, role: str = ROLE_OWNER, *, subject: str | None = None) -> None:
         self.role = role
+        self.subject = subject
 
     def authenticate(self, request: Request, route: Route) -> Principal:
         del request, route
-        return Principal(role=self.role)
+        return Principal(role=self.role, subject=self.subject)
 
 
 def application(
@@ -265,13 +268,11 @@ class RouteTableTests(unittest.TestCase):
     def test_every_mutation_requires_the_owner_or_is_the_uplink(self) -> None:
         """No writing route is reachable by a stranger or a summary reader.
 
-        The connector uplink is the one write that is not the operator's: it
-        carries a paired Mac's own observations, it is authenticated by a
-        credential this service issued to that Mac, and requiring the owner
-        identity on it would mean a browser session gates a machine-to-machine
-        upload. So it is exempted by name -- and the exemption is checked to be
-        that route alone, so `connector` cannot become a second owner-ish role
-        that other mutations quietly adopt.
+        The connector's two routes are the writes that are not the operator's:
+        one uploads observations and the other redeems a body for a command the
+        service already dispatched. Both require the credential issued to that
+        Mac, and the exact pair is pinned so `connector` cannot quietly become
+        a second owner-like role.
         """
         connector_routes = []
         for route in ROUTES:
@@ -281,7 +282,10 @@ class RouteTableTests(unittest.TestCase):
                 self.assertIn(route.role, (ROLE_OWNER, ROLE_CONNECTOR))
             if route.role == ROLE_CONNECTOR:
                 connector_routes.append(route.key)
-        self.assertEqual(connector_routes, [("POST", UPLINK_PATH)])
+        self.assertEqual(
+            connector_routes,
+            [("POST", COMMAND_REDEEM_PATH), ("POST", UPLINK_PATH)],
+        )
 
     def test_the_delete_alias_shares_the_archive_operation_and_its_role(self) -> None:
         alias = ROUTES_BY_KEY[("POST", "/api/plan/delete")]
@@ -1020,6 +1024,38 @@ class FakeUploadLane:
         return self.carried
 
 
+class FakeBodyLane:
+    """A volatile body lane that exposes staging and redemption to the test."""
+
+    def __init__(self) -> None:
+        self.staged: dict[str, str] = {}
+        self.discarded: list[str] = []
+
+    def stage_body(
+        self, operation_id: str, text: str, *, now: float
+    ) -> tuple[str, str, bool]:
+        del now
+        created = operation_id not in self.staged
+        self.staged.setdefault(operation_id, text)
+        return f"ref-{operation_id}", f"token-{operation_id}", created
+
+    def discard_body(self, operation_id: str) -> None:
+        self.discarded.append(operation_id)
+        self.staged.pop(operation_id, None)
+
+    def redeem_body(
+        self,
+        operation_id: str,
+        reply_ref: str,
+        action_token: str,
+        *,
+        connector_id: str,
+        now: float,
+    ) -> str:
+        del reply_ref, action_token, connector_id, now
+        return self.staged[operation_id]
+
+
 class RemoteProviderTests(unittest.TestCase):
     """What a Pi can answer out of what it kept, and what it admits it cannot."""
 
@@ -1147,6 +1183,35 @@ class RemoteProviderTests(unittest.TestCase):
         self.assertEqual(ask["plan_key"], "plan-abc")
         self.assertEqual(ask["run_key"], "run-1")
         self.assertEqual(ask["now"], NOW)
+
+    def test_a_question_detail_keeps_the_local_response_shape(self) -> None:
+        answer = ReadAnswer(
+            request_id="question-read",
+            outcome="answered",
+            detail="questions",
+            plan_key="plan-abc",
+            entries=(
+                {
+                    "context_kind": "waiting",
+                    "question_id": "q-live",
+                    "action_token": "fresh-view",
+                    "rendered_prompt": "Choose A or B?",
+                    "last_message": "Choose A or B?",
+                },
+            ),
+            received_at=NOW,
+        )
+        payload = document(
+            Application(
+                self.provider(reads=FakeDetailLane(answer)),
+                FixedAuthenticator(ROLE_OWNER),
+                policy=REMOTE_POLICY,
+            ).handle(build("GET", "/api/questions?plan_key=plan-abc"))
+        )
+        self.assertEqual(payload["context_kind"], "waiting")
+        self.assertEqual(payload["question_id"], "q-live")
+        self.assertEqual(payload["rendered_prompt"], "Choose A or B?")
+        self.assertNotIn("entries", payload)
 
     def test_every_read_outcome_has_its_own_status(self) -> None:
         """Four failures, four codes. Folding them into one would hide which."""
@@ -1313,6 +1378,60 @@ class RemoteProviderTests(unittest.TestCase):
         assert recorded is not None
         self.assertNotIn("reply_text", recorded)
         self.assertNotIn("answer", recorded)
+
+    def test_browser_live_reply_is_staged_and_sent_as_question_reply(self) -> None:
+        bodies = FakeBodyLane()
+        response = self.remote_app(bodies=bodies).handle(
+            build(
+                "POST",
+                "/api/question-reply",
+                headers=self.signed(),
+                body=json.dumps(
+                    {
+                        "operation_id": "op-live",
+                        "plan_key": "plan-abc",
+                        "run_key": "run-1",
+                        "run_id": "run-local-1",
+                        "question_id": "q-live",
+                        "action_token": "fresh-view",
+                        "reply_text": "Use approach A.",
+                    }
+                ).encode("utf-8"),
+            )
+        )
+        self.assertEqual(202, response.status)
+        self.assertEqual(bodies.staged["op-live"], "Use approach A.")
+        handed = self.mutations.handed[-1]
+        self.assertEqual(handed["method"], METHOD_QUESTION_REPLY)
+        self.assertEqual(handed["bridge_token"], "fresh-view")
+        self.assertEqual(handed["reply_ref"], "ref-op-live")
+        self.assertEqual(handed["action_token"], "token-op-live")
+        self.assertNotIn("reply_text", handed)
+
+    def test_connector_redeems_the_staged_browser_body(self) -> None:
+        bodies = FakeBodyLane()
+        bodies.stage_body("op-redeem", "Continue.", now=NOW)
+        app = Application(
+            self.provider(bodies=bodies),
+            FixedAuthenticator(ROLE_CONNECTOR, subject="mac"),
+            policy=REMOTE_POLICY,
+        )
+        response = app.handle(
+            build(
+                "POST",
+                COMMAND_REDEEM_PATH,
+                headers=self.signed(),
+                body=json.dumps(
+                    {
+                        "operation_id": "op-redeem",
+                        "reply_ref": "ref-op-redeem",
+                        "action_token": "token-op-redeem",
+                    }
+                ).encode("utf-8"),
+            )
+        )
+        self.assertEqual(200, response.status)
+        self.assertEqual("Continue.", document(response)["reply_text"])
 
     def test_a_reply_without_a_way_to_fetch_its_prose_is_refused(self) -> None:
         response = self.remote_app().handle(

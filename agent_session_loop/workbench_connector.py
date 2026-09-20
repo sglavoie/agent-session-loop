@@ -619,7 +619,7 @@ class HttpsBodySource:
                 },
             )
             response = connection.getresponse()
-            raw = response.read(MAX_BODY_CHARS + 1)
+            raw = response.read(MAX_FRAME_BYTES + 1)
         except (OSError, http.client.HTTPException, ValueError) as error:
             raise BodyUnavailable(f"redemption failed: {error}") from error
         finally:
@@ -633,7 +633,7 @@ class HttpsBodySource:
                 f"{self.origin} refused the redemption with status {response.status}",
                 detail_code=DETAIL_ACTION_TOKEN_REFUSED,
             )
-        if len(raw) > MAX_BODY_CHARS:
+        if len(raw) > MAX_FRAME_BYTES:
             raise BodyUnavailable(f"{self.origin} answered with an oversized body")
         try:
             document = json.loads(raw.decode("utf-8"))
@@ -647,6 +647,8 @@ class HttpsBodySource:
                 "the redemption carried no reply_text",
                 detail_code=DETAIL_ACTION_TOKEN_REFUSED,
             )
+        if len(text) > MAX_BODY_CHARS:
+            raise BodyUnavailable(f"{self.origin} answered with an oversized body")
         return text
 
 

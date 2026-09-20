@@ -344,6 +344,13 @@ export async function loadAndRenderReply() {
     if (body && body.ok) {
       state.detailReplyContext = body;
       setReplyFormDisabled(false);
+      const submit = document.querySelector(
+        '#wb-reply-form button[type="submit"]'
+      );
+      if (submit) {
+        submit.textContent =
+          body.context_kind === "waiting" ? "send reply" : "reply and resume";
+      }
       const promptEl = document.getElementById("wb-reply-prompt");
       if (promptEl) promptEl.textContent = body.rendered_prompt || "";
       const lastEl = document.getElementById("wb-reply-last-message");
