@@ -265,6 +265,7 @@ def run(
                             connector_id=connector_id,
                             reads=uplink,
                             mutations=uplink,
+                            bodies=uplink,
                             uploads=uplink,
                         ),
                         OwnerIdentityAuthenticator(

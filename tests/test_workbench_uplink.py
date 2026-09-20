@@ -22,6 +22,7 @@ from typing import Any
 from asl_workbench.connector import heartbeat_payload
 from asl_workbench.observation import ObservationPolicy
 from asl_workbench.operations import (
+    METHOD_QUESTION_REPLY,
     METHOD_STOP_AFTER_CURRENT,
     OPERATION_ACCEPTED,
     OPERATION_DISPATCHED,
@@ -340,6 +341,91 @@ class CarriageTests(UplinkCase):
         self.uplink.sweep(NOW + 100_000)
         self.assertFalse(self.uplink.linked)
         self.assertIsNone(self.uplink.last_upload_at)
+
+
+class VolatileBodyTests(UplinkCase):
+    """Reply prose is memory-only and redeemable only after dispatch."""
+
+    def _dispatch(self, operation_id: str, text: str) -> tuple[str, str]:
+        reply_ref, action_token, created = self.uplink.stage_body(
+            operation_id, text, now=NOW
+        )
+        self.assertTrue(created)
+        self.store.record_operation(
+            operation_record(
+                operation_id,
+                method=METHOD_QUESTION_REPLY,
+                question_id="question-1",
+            ),
+            connector_id=CONNECTOR,
+            received_at=NOW,
+        )
+        self.uplink.hand_down(
+            {
+                "request": REQUEST_MUTATE,
+                "method": METHOD_QUESTION_REPLY,
+                "operation_id": operation_id,
+                "target": {
+                    "plan_key": PLAN_KEY,
+                    "run_key": RUN_KEY,
+                    "question_id": "question-1",
+                },
+                "reply_ref": reply_ref,
+                "action_token": action_token,
+                "bridge_token": "fresh-view",
+            },
+            now=NOW,
+        )
+        self.uplink.ingest(heartbeat(at=NOW + 1), now=NOW + 1)
+        return reply_ref, action_token
+
+    def test_a_dispatched_body_is_redeemed_by_the_paired_connector(self) -> None:
+        reply_ref, action_token = self._dispatch("reply-1", "Use approach A.")
+        self.assertEqual(
+            "Use approach A.",
+            self.uplink.redeem_body(
+                "reply-1",
+                reply_ref,
+                action_token,
+                connector_id=CONNECTOR,
+                now=NOW + 2,
+            ),
+        )
+        with self.assertRaises(UplinkRefusal) as raised:
+            self.uplink.redeem_body(
+                "reply-1",
+                reply_ref,
+                "wrong-token",
+                connector_id=CONNECTOR,
+                now=NOW + 2,
+            )
+        self.assertEqual("invalid-action-token", raised.exception.reason)
+
+    def test_a_settled_command_forgets_its_reply(self) -> None:
+        reply_ref, action_token = self._dispatch("reply-2", "Continue.")
+        self.uplink.ingest(
+            operation_envelope(
+                payload={
+                    "operation_id": "reply-2",
+                    "status": OPERATION_ACCEPTED,
+                    "observed_at": NOW + 3,
+                    "settled_at": NOW + 3,
+                },
+                connector_id=CONNECTOR,
+                target_id=TARGET,
+                sent_at=NOW + 3,
+            ),
+            now=NOW + 3,
+            subject=CONNECTOR,
+        )
+        with self.assertRaises(UplinkRefusal):
+            self.uplink.redeem_body(
+                "reply-2",
+                reply_ref,
+                action_token,
+                connector_id=CONNECTOR,
+                now=NOW + 4,
+            )
 
 
 class ReadTests(UplinkCase):

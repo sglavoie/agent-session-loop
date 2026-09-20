@@ -79,19 +79,30 @@ export async function handleReplySubmit(event) {
     showFormError("wb-reply-form-errors", "reply must not be empty");
     return;
   }
+  const context = state.detailReplyContext || {};
+  const liveQuestion = context.context_kind === "waiting";
   const restore = captureFocus();
   const confirmed = window.confirm(
-    "Submit this reply to resume the paused session? The text below will be streamed verbatim to the paused agent and is not retrievable from the UI afterward."
+    liveQuestion
+      ? "Send this reply to the running session? The text will be delivered verbatim and is not retrievable from the UI afterward."
+      : "Submit this reply to resume the paused session? The text below will be streamed verbatim to the paused agent and is not retrievable from the UI afterward."
   );
   restore();
   if (!confirmed) return;
-  const body = planBody({ reply_text: replyText });
+  const body = planBody({
+    reply_text: replyText,
+    action_token: context.action_token,
+    run_id: context.run_id,
+  });
+  if (liveQuestion && context.question_id) {
+    body.question_id = context.question_id;
+  }
   // A retry carries the id the first attempt used, which is what makes the
   // local runner answer `replayed` instead of streaming the words twice.
   if (state.reply.operationId) body.operation_id = state.reply.operationId;
   const answer = await runMutation({
     action: "reply",
-    path: "/api/reply",
+    path: liveQuestion ? "/api/question-reply" : "/api/reply",
     body: body,
     subject: "the reply",
     feedback: (kind, message) => {
