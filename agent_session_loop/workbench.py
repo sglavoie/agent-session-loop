@@ -5093,7 +5093,8 @@ def build_workbench_summary(
 
     1. ``invalid`` - plan directory missing or unparseable.
     2. ``verifying`` - active lock and ``active_verification`` set.
-    3. ``running`` - active lock and ``active_turn`` set.
+    3. ``running`` - active lock and ``active_turn`` set, or a live mailbox
+       reply wait is holding the run between harness turns.
     4. ``paused-for-reply`` - runner state ``paused=True`` or an expired
        nonterminal reply wait can be resumed with an operator answer.
     5. ``failed`` - finished run with ``ok=False``.
@@ -5336,6 +5337,28 @@ def build_workbench_summary(
             last_activity_at=running_activity,
             last_activity_source=running_source,
             concise_reason=(f"Session {session_label}, turn {turn_index}"),
+        )
+
+    waiting_for_reply = runner_state.get("waiting_for_reply")
+    if (
+        lock_info is not None
+        and lock_info.active
+        and isinstance(waiting_for_reply, dict)
+        and runner_state.get("waiting_for_reply_status")
+        == state.WAITING_FOR_REPLY_STATUS_LIVE
+    ):
+        session_label = _session_identifier_from_payload(waiting_for_reply) or "?"
+        waiting_activity, waiting_source = _first_activity(
+            ((runner_state.get("run_started_at"), "run-started"),)
+        )
+        return base_kwargs(
+            primary_state="running",
+            recommended_action="watch",
+            next_action_hint=f"Awaiting reply for session {session_label}",
+            detail=f"Live mailbox reply wait on session {session_label}",
+            last_activity_at=waiting_activity,
+            last_activity_source=waiting_source,
+            concise_reason=f"Awaiting reply for session {session_label}",
         )
 
     if runner_state.get("paused") is True or expired_wait_context is not None:

@@ -144,6 +144,44 @@ class _Corpus:
         )
         return plan_dir
 
+    def waiting_plan(self, name: str = "plan-waiting") -> Path:
+        plan_dir = _make_workbench_plan(self.plans_root, name)
+        _write_lock_file(
+            plan_dir,
+            self.state_root,
+            pid=os.getpid(),
+            hostname=socket.gethostname(),
+        )
+        question = mailbox.append_question(
+            plan_dir,
+            QUESTION_BODY,
+            run_id="20260619T160000Z-1",
+            session_id="1",
+            turn_index=4,
+            state_dir=self.state_root,
+        )
+        self.write_state(
+            plan_dir,
+            {
+                "ok": None,
+                "paused": False,
+                "run_id": "20260619T160000Z-1",
+                "harness": "codex",
+                "run_started_at": "2026-06-19T16:00:00+00:00",
+                "active_turn": None,
+                "waiting_for_reply": {
+                    "question_id": question.id,
+                    "session_id": "1",
+                    "turn_index": 4,
+                    "started_at": "2026-06-19T16:05:00+00:00",
+                    "base_deadline": "2099-06-19T16:10:00+00:00",
+                    "hard_deadline": "2099-06-19T16:15:00+00:00",
+                    "last_lease_activity_at": None,
+                },
+            },
+        )
+        return plan_dir
+
 
 def _request(request_id: str, method: str, **params: Any) -> bytes:
     payload: dict[str, Any] = {
@@ -373,6 +411,20 @@ class RunsProjectionTests(unittest.TestCase):
             self.assertEqual("2", row["session_id"])
             self.assertEqual("codex", row["harness"])
             self.assertIsNone(row["question"])
+
+    def test_live_wait_between_turns_projects_reply_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            corpus.waiting_plan()
+
+            (row,) = corpus.snapshot()["rows"]
+
+            self.assertEqual("running", row["primary_state"])
+            self.assertEqual("awaiting-reply", row["phase"])
+            self.assertEqual("1", row["session_id"])
+            self.assertEqual(1, row["question"]["unanswered_count"])
+            self.assertEqual("live", row["question"]["waiting_status"])
+            self.assertIn("question.reply", row["actions"])
 
     def test_snapshot_warns_and_survives_a_plan_that_disappears(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

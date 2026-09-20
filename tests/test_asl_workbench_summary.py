@@ -922,6 +922,46 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual(qna_context.pause_reason, summary.pause_reason)
             self.assertEqual("reply-needed", summary.recovery["kind"])
 
+    def test_live_wait_between_turns_remains_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_lock_file(plan_dir, state_root, pid=os.getpid())
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": None,
+                    "paused": False,
+                    "run_id": "20260724T120000Z-1",
+                    "harness": "codex",
+                    "run_started_at": "2026-07-24T12:00:00+00:00",
+                    "run_finished_at": None,
+                    "active_turn": None,
+                    "active_verification": None,
+                    "waiting_for_reply": {
+                        "question_id": "question-2",
+                        "session_id": "1",
+                        "turn_index": 2,
+                        "started_at": "2026-07-24T12:05:00+00:00",
+                        "base_deadline": "2099-07-24T12:10:00+00:00",
+                        "hard_deadline": "2099-07-24T12:15:00+00:00",
+                        "last_lease_activity_at": None,
+                    },
+                },
+            )
+
+            summary = workbench.build_workbench_summary(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("running", summary.primary_state)
+            self.assertEqual("watch", summary.recommended_action)
+            self.assertEqual("Awaiting reply for session 1", summary.concise_reason)
+            self.assertEqual("2026-07-24T12:00:00+00:00", summary.last_activity_at)
+            self.assertEqual("run-started", summary.last_activity_source)
+
     def test_failed_when_last_run_finished_with_ok_false(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
