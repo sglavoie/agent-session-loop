@@ -34,14 +34,17 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import warnings
 import zipfile
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
-from asl_workbench import lifecycle
+from asl_workbench import lifecycle, notifications, runtime
 from asl_workbench.compatibility import (
     FORBIDDEN_IMPORT_ROOTS,
     MINIMUM_PYTHON_VERSION,
@@ -371,6 +374,48 @@ class PackagedRuntimeTest(unittest.TestCase):
         # Readiness is removed on the way out, so an installer polling it never
         # mistakes a stopped release for a running one.
         self.assertFalse((self.prefix / "state" / "ready.json").exists())
+
+    def test_the_runtime_ticks_the_production_incident_publisher(self) -> None:
+        credentials, _ = runtime.service_secrets(self.prefix / runtime.SECRETS_PATH)
+        publisher = mock.Mock()
+        engine = mock.Mock()
+        server = mock.Mock(bound_host="127.0.0.1", bound_port=8766)
+        ticked = threading.Event()
+        engine.tick.side_effect = ticked.set
+
+        def serve_until_tick(_server: object) -> None:
+            self.assertTrue(ticked.wait(5.0))
+
+        with (
+            mock.patch.object(
+                runtime,
+                "service_secrets",
+                return_value=(credentials, "tk_runtimefixture123"),
+            ),
+            mock.patch.object(
+                notifications, "select_publisher", return_value=publisher
+            ) as select,
+            mock.patch.object(
+                runtime.incidents, "IncidentEngine", return_value=engine
+            ) as construct,
+            mock.patch.object(runtime, "ApplicationServer", return_value=server),
+            mock.patch.object(
+                runtime, "install_shutdown_handlers", return_value=mock.Mock()
+            ),
+        ):
+            runtime.run(
+                self.prefix,
+                site=replace(PI_SITE, bind_port=0),
+                serve=serve_until_tick,
+            )
+
+        select.assert_called_once_with(
+            mode=runtime.MODE_REMOTE,
+            deployment=notifications.DEPLOYMENT_PRODUCTION,
+            token="tk_runtimefixture123",
+        )
+        self.assertIs(construct.call_args.kwargs["publisher"], publisher)
+        engine.tick.assert_called()
 
     def test_the_published_origin_is_the_one_a_mutation_is_accepted_from(
         self,
