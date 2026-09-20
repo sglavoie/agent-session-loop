@@ -437,7 +437,6 @@ def _question_projection(
     """
     waiting = runner_state.get("waiting_for_reply")
     waiting = waiting if isinstance(waiting, Mapping) else None
-    paused = runner_state.get("paused") is True
 
     unanswered: tuple[mailbox.MailboxMessage, ...] = ()
     try:
@@ -451,11 +450,13 @@ def _question_projection(
         for message in unanswered
         if isinstance(message.id, str) and message.id
     )
-    if waiting is None and not paused:
+    context_kind, selected_question_id = intervention.question_context(
+        runner_state, open_ids
+    )
+    if context_kind is None:
         return None, open_ids
 
-    context_kind = CONTEXT_KIND_WAITING if waiting is not None else CONTEXT_KIND_PAUSE
-    question_id = _bounded_id(waiting.get("question_id")) if waiting else None
+    question_id = _bounded_id(selected_question_id)
 
     question_ids = [
         identifier
@@ -465,9 +466,11 @@ def _question_projection(
     selected = next(
         (message for message in unanswered if message.id == question_id), None
     )
-    if waiting is None:
-        selected = unanswered[-1] if unanswered else None
     question_id = _bounded_id(selected.id) if selected is not None else None
+
+    waiting_status = _bounded_text(runner_state.get("waiting_for_reply_status"))
+    if context_kind == CONTEXT_KIND_WAITING and waiting_status is None:
+        waiting_status = state.WAITING_FOR_REPLY_STATUS_LIVE
 
     projection = {
         "context_kind": context_kind,
@@ -483,7 +486,7 @@ def _question_projection(
         "turn_index": _bounded_int(selected.turn_index)
         if selected is not None
         else None,
-        "waiting_status": _bounded_text(runner_state.get("waiting_for_reply_status")),
+        "waiting_status": waiting_status,
         "hard_deadline": (
             _bounded_text(waiting.get("hard_deadline")) if waiting else None
         ),

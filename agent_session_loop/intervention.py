@@ -244,18 +244,7 @@ def build_run_facts(
         and not paused
         and not runner_state.get("run_finished_at")
     )
-    waiting = runner_state.get("waiting_for_reply")
-    waiting = waiting if isinstance(waiting, Mapping) else None
-
-    context_kind: str | None = None
-    question_id: str | None = None
-    if waiting is not None:
-        context_kind = "waiting"
-        candidate = waiting.get("question_id")
-        question_id = candidate if candidate in unanswered_ids else None
-    elif paused:
-        context_kind = "pause"
-        question_id = unanswered_ids[-1] if unanswered_ids else None
+    context_kind, question_id = question_context(runner_state, unanswered_ids)
 
     return RunFacts(
         plan_dir=plan_dir,
@@ -269,6 +258,38 @@ def build_run_facts(
         unanswered_ids=unanswered_ids,
         runner_state=dict(runner_state),
     )
+
+
+def question_context(
+    runner_state: Mapping[str, Any], unanswered_ids: tuple[str, ...]
+) -> tuple[str | None, str | None]:
+    """Return the actionable question context represented by live state.
+
+    ``asl ask --wait`` runs inside a harness turn.  While that command is
+    blocked, the turn heartbeat exposes ``input_wait_active`` and the mailbox
+    owns the open question, but the runner's between-turn
+    ``waiting_for_reply`` record does not exist.  Treat that paired evidence as
+    the same live waiting context so the dashboard can publish and answer the
+    question.  An open mailbox row alone is insufficient because a worker may
+    have asked asynchronously and continued running.
+    """
+    waiting = runner_state.get("waiting_for_reply")
+    waiting = waiting if isinstance(waiting, Mapping) else None
+    if waiting is not None:
+        candidate = waiting.get("question_id")
+        return "waiting", candidate if candidate in unanswered_ids else None
+
+    if runner_state.get("paused") is True:
+        return "pause", unanswered_ids[-1] if unanswered_ids else None
+
+    active_turn = runner_state.get("active_turn")
+    if (
+        isinstance(active_turn, Mapping)
+        and active_turn.get("input_wait_active") is True
+        and unanswered_ids
+    ):
+        return "waiting", unanswered_ids[-1]
+    return None, None
 
 
 def unanswered_question_ids(
