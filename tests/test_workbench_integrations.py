@@ -737,11 +737,11 @@ class PublisherCase(unittest.TestCase):
         method, url, body, headers = connection.requests[0]
         self.assertEqual(("POST", "/asl-alerts"), (method, url))
         self.assertIn(
-            b"https://pi.example.ts.net:9443/?workbench=1#run=plan%2Frun-1",
+            b"https://pi.example.ts.net:9443/?workbench=1#run=plan%2Frun-1&focus=reply",
             body,
         )
         self.assertEqual(
-            "https://pi.example.ts.net:9443/?workbench=1#run=plan%2Frun-1",
+            "https://pi.example.ts.net:9443/?workbench=1#run=plan%2Frun-1&focus=reply",
             headers["Click"],
         )
         self.assertEqual(notifications.NOTIFICATION_TITLE, headers["Title"])

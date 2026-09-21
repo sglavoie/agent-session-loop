@@ -235,6 +235,63 @@ for (const deployment of DEPLOYMENTS) {
       );
     });
 
+    test("an unanswered-question run link opens the live reply form", async ({
+      page,
+    }) => {
+      await openQueue(page, deployment);
+      const plan = rowFor(await catalog(page), "charlie");
+      expect(plan.run_key).toBeTruthy();
+
+      await page.route("**/api/plan*", async (route) => {
+        const response = await route.fetch();
+        const body = await response.json();
+        body.runs = [
+          {
+            run_key: plan.run_key,
+            question_id: "live-question-1",
+            unanswered_count: 1,
+          },
+        ];
+        await route.fulfill({ response: response, json: body });
+      });
+      await page.route("**/api/questions*", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ok: true,
+            reason: "ok",
+            context_kind: "waiting",
+            run_id: "run-live-1",
+            question_id: "live-question-1",
+            action_token: "live-action-token",
+            rendered_prompt: "Confirm the locked-phone alert.",
+            last_message: "Confirm the locked-phone alert.",
+          }),
+        }),
+      );
+
+      await page.goto(
+        authorizedURL(
+          deployment,
+          `#run=${encodeURIComponent(plan.run_key)}&focus=reply`,
+        ),
+      );
+      await expect(page.locator("#wb-shell")).toHaveAttribute(
+        "data-route",
+        "detail",
+      );
+      const form = page.locator("#wb-reply-form");
+      await expect(form).toBeVisible();
+      await expect(form.locator('button[type="submit"]')).toHaveText(
+        "send reply",
+      );
+      await expect(page.locator("#wb-reply-text")).toBeFocused();
+      await expect(page.locator("#wb-redirect-submit")).toHaveText(
+        "interrupt turn & resume with this correction",
+      );
+    });
+
     test("a control aimed at a run that is not there names the run, not the mode", async ({
       page,
     }) => {

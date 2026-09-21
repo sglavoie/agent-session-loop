@@ -84,7 +84,14 @@ export async function refreshDetail() {
     renderDetailHeader(state.detailPlan);
     renderProfileForm(state.detailPlan, state.detailRegistry);
     const tasks = [
-      loadAndRenderRecovery(state.detailPlan),
+      loadAndRenderRecovery(
+        state.detailPlan,
+        Array.isArray(detailBody.runs) ? detailBody.runs : [],
+        state.route.runKey ||
+          (state.detailPlan && state.detailPlan.run_key
+            ? state.detailPlan.run_key
+            : null)
+      ),
       loadAndRenderRedirect(),
       loadAndRenderState(),
       loadAndRenderEvents(),

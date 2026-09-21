@@ -197,9 +197,20 @@ def project_label(project: str) -> str:
     return " ".join(printable.split())[:MAX_NOTIFICATION_LABEL_CHARS]
 
 
-def notification_link(run_key: str, *, site: NotificationSite) -> str:
-    """The deep link one notification carries back to the run it is about."""
-    return site.private_origin + RUN_FRAGMENT + quote(run_key, safe="")
+def notification_link(
+    run_key: str, *, site: NotificationSite, focus_reply: bool = False
+) -> str:
+    """The deep link one notification carries back to the run it is about.
+
+    Historic callers keep the bare ``#run=`` form.  A new unanswered-question
+    alert names the reply focus as well, so resolving the run scrolls to the
+    live question rather than leaving the correction composer as the first
+    actionable control on a phone screen.
+    """
+    link = site.private_origin + RUN_FRAGMENT + quote(run_key, safe="")
+    if focus_reply:
+        link += "&focus=reply"
+    return link
 
 
 def notification(
@@ -210,7 +221,11 @@ def notification(
         raise NotificationError(f"no notification template for kind: {kind!r}")
     reason = NOTIFICATION_TEMPLATES[kind]
     label = project_label(project) or FALLBACK_PROJECT_LABEL
-    link = notification_link(run_key, site=site)
+    link = notification_link(
+        run_key,
+        site=site,
+        focus_reply=kind == INCIDENT_UNANSWERED_QUESTION,
+    )
     return f"{label}: {reason}\n{link}".encode(), link
 
 

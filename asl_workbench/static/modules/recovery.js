@@ -48,7 +48,27 @@ function recoveryCardAction(action) {
   return RECOVERY_CARD_ACTIONS[endpoint] || RECOVERY_CARD_ACTIONS[id] || null;
 }
 
-export async function loadAndRenderRecovery(plan) {
+/** Whether the remote detail read names an unanswered question for this run.
+ *
+ * A live `asl ask --wait` is still a running turn, so its recovery card is not
+ * `reply-needed`.  The remote plan read carries that question on its run row;
+ * use the run key from the notification route when there is one so a retained
+ * older run cannot make the current plan look answerable.
+ */
+export function hasLiveQuestion(runs, linkedRunKey) {
+  const rows = Array.isArray(runs) ? runs : [];
+  return rows.some((run) => {
+    if (!run || typeof run !== "object") return false;
+    if (linkedRunKey && run.run_key !== linkedRunKey) return false;
+    return (
+      typeof run.question_id === "string" &&
+      run.question_id.length > 0 &&
+      Number(run.unanswered_count) > 0
+    );
+  });
+}
+
+export async function loadAndRenderRecovery(plan, runs, linkedRunKey) {
   const planId = routePlanId();
   const compact = plan && plan.recovery ? plan.recovery : null;
   let renderedRecovery = null;
@@ -90,7 +110,10 @@ export async function loadAndRenderRecovery(plan) {
       renderedRecovery = null;
     }
   }
-  if (renderedRecovery && renderedRecovery.kind === "reply-needed") {
+  if (
+    (renderedRecovery && renderedRecovery.kind === "reply-needed") ||
+    hasLiveQuestion(runs, linkedRunKey)
+  ) {
     await loadAndRenderReply();
   } else {
     hideReplyPanel();
