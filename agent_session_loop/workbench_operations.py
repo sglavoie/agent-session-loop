@@ -54,7 +54,7 @@ from asl_workbench import actions as portable_actions
 from asl_workbench import catalog as portable_catalog
 from asl_workbench import operations
 
-from . import clock, durability, events, intervention, plans, state
+from . import clock, durability, events, intervention, mailbox, plans, state
 
 # ---------------------------------------------------------------------------
 # Layout
@@ -520,6 +520,26 @@ def _reply_evidence(
     origin = portable_actions.consuming_origin(method)
     if origin is None:
         return portable_actions.NO_CONSUMPTION
+    question_id = str(record.get("question_id") or "") or None
+    if origin == portable_actions.REPLY_ORIGIN_MAILBOX and question_id is not None:
+        try:
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+        except OSError, ValueError, mailbox.MailboxError:
+            view = None
+        if view is not None:
+            closure = view.reply_for(question_id)
+            if closure is not None and view.receipt_for_closure(closure.id) is not None:
+                # A live `asl ask --wait` consumes its closure in the waiting
+                # process and writes this receipt. It does not start another
+                # harness turn, so no `reply_provided` event follows. The
+                # receipt is the direct, question-bound statement that the
+                # operator's words were read and is therefore stronger than
+                # inferring consumption from a later turn event.
+                return portable_actions.ConsumptionEvidence(
+                    consumed=True,
+                    run_id=closure.run_id,
+                    question_id=question_id,
+                )
     dispatched_at = record.get("dispatched_at")
     if isinstance(dispatched_at, bool) or not isinstance(dispatched_at, int | float):
         # Admitted and never dispatched: there is nothing to have been read.
@@ -528,9 +548,7 @@ def _reply_evidence(
     # streamed into a resumed run's stdin records one only when the pause named
     # one, so requiring it there would discard evidence rather than check it.
     question_id = (
-        str(record.get("question_id") or "") or None
-        if origin == portable_actions.REPLY_ORIGIN_MAILBOX
-        else None
+        question_id if origin == portable_actions.REPLY_ORIGIN_MAILBOX else None
     )
     budget = portable_actions.MAX_WITNESS_BYTES_PER_LOOK
     path = events_path_for_plan(plan_dir, state_dir)
