@@ -980,9 +980,11 @@ def reconcile(
       rules above, and in the strict direction. What it promised is that an
       operator's words were read, so a run being *there* does not settle it --
       only :attr:`Evidence.reply_consumed`, which is a run's own record of
-      taking that reply into a turn, does. A resumed run is a new process with
-      a new id, so the presence test those rules use cannot apply to it
-      anyway: it would call every successful resume somebody else's run.
+      taking that reply into a turn, does. That evidence also resolves an
+      earlier ``unconfirmed`` result: uncertainty is deliberately open to a
+      late receipt. A resumed run is a new process with a new id, so the
+      presence test those rules use cannot apply to it anyway: it would call
+      every successful resume somebody else's run.
 
     ``superseding`` is what a *new* submission passes, and it does one thing:
     an ``unconfirmed`` operation whose target is demonstrably idle stops
@@ -1015,7 +1017,7 @@ def reconcile(
     witnessed = (
         bears_reply
         and evidence.reply_consumed
-        and status in (OPERATION_DISPATCHED, OPERATION_ACCEPTED)
+        and status in (OPERATION_DISPATCHED, OPERATION_ACCEPTED, OPERATION_UNCONFIRMED)
     )
 
     if evidence.owner_alive and not witnessed:
@@ -1063,8 +1065,11 @@ def reconcile(
             return None
         return Reconciliation(OPERATION_UNCONFIRMED, DETAIL_NO_RESULT)
 
-    if status == OPERATION_UNCONFIRMED and superseding and not evidence.run_active:
-        return Reconciliation(OPERATION_SUPERSEDED, DETAIL_REPLACED_UNCERTAIN)
+    if status == OPERATION_UNCONFIRMED:
+        if witnessed:
+            return Reconciliation(OPERATION_CONSUMED, DETAIL_REPLY_WITNESSED)
+        if superseding and not evidence.run_active:
+            return Reconciliation(OPERATION_SUPERSEDED, DETAIL_REPLACED_UNCERTAIN)
 
     # `unconfirmed` with no receipt and nothing replacing it: this is already
     # the most that can be said.
