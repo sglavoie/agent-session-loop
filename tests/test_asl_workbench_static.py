@@ -457,6 +457,8 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn("run.run_key !== linkedRunKey", decoded)
         self.assertIn('typeof run.question_id === "string"', decoded)
         self.assertIn("Number(run.unanswered_count) > 0", decoded)
+        self.assertIn('context.context_kind === "waiting"', decoded)
+        self.assertIn("context.question_id", decoded)
         self.assertIn("await loadAndRenderReply()", decoded)
         self.assertIn("hideReplyPanel()", decoded)
         self.assertIn("RECOVERY_ACTION_TARGETS", decoded)

@@ -283,9 +283,10 @@ for (const deployment of DEPLOYMENTS) {
       );
       const form = page.locator("#wb-reply-form");
       await expect(form).toBeVisible();
-      await expect(form.locator('button[type="submit"]')).toHaveText(
-        "send reply",
-      );
+      const send = form.locator('button[type="submit"]');
+      await expect(send).toHaveText("send reply");
+      await expect(send).toBeEnabled();
+      await expect(send).not.toHaveAttribute("data-disabled-reason");
       await expect(page.locator("#wb-reply-text")).toBeFocused();
       await expect(page.locator("#wb-redirect-submit")).toHaveText(
         "interrupt turn & resume with this correction",
