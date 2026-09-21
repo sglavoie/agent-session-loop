@@ -232,6 +232,7 @@ class Publisher(Protocol):
         plan_key: str,
         run_key: str,
         before_send: Callable[[], bool],
+        question_id: str | None = None,
     ) -> PublishResult: ...
 
 
@@ -907,6 +908,9 @@ class IncidentEngine:
                 project=str(claimed["project"]),
                 plan_key=str(claimed["plan_key"]),
                 run_key=str(claimed["run_key"]),
+                question_id=(
+                    str(claimed["question_id"]) if claimed.get("question_id") else None
+                ),
                 before_send=before_send,
             )
         except Exception:  # noqa: BLE001 - an unknown failure sent nothing knowable

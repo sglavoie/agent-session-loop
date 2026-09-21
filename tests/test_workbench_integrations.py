@@ -731,6 +731,7 @@ class PublisherCase(unittest.TestCase):
             project="Example project",
             plan_key="abc123",
             run_key="plan/run-1",
+            question_id="question/1",
             before_send=lambda: True,
         )
         self.assertEqual(incidents.DELIVERY_PUBLISHED, result.state)
@@ -738,11 +739,11 @@ class PublisherCase(unittest.TestCase):
         method, url, body, headers = connection.requests[0]
         self.assertEqual(("POST", "/asl-alerts"), (method, url))
         self.assertIn(
-            b"https://pi.example.ts.net:9443/?workbench=2#plan?key=abc123&run=plan%2Frun-1&focus=reply",
+            b"https://pi.example.ts.net:9443/?workbench=2#plan?key=abc123&run=plan%2Frun-1&focus=reply&question=question%2F1",
             body,
         )
         self.assertEqual(
-            "https://pi.example.ts.net:9443/?workbench=2#plan?key=abc123&run=plan%2Frun-1&focus=reply",
+            "https://pi.example.ts.net:9443/?workbench=2#plan?key=abc123&run=plan%2Frun-1&focus=reply&question=question%2F1",
             headers["Click"],
         )
         self.assertEqual(notifications.NOTIFICATION_TITLE, headers["Title"])

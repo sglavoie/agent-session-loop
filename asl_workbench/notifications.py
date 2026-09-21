@@ -210,6 +210,7 @@ def notification_link(
     site: NotificationSite,
     focus_reply: bool = False,
     plan_key: str | None = None,
+    question_id: str | None = None,
 ) -> str:
     """The deep link one notification carries back to the run it is about.
 
@@ -227,6 +228,13 @@ def notification_link(
             + quote(run_key, safe="")
             + "&focus=reply"
         )
+        if question_id:
+            # A run may ask more than one question. Without a question-bound
+            # fragment every alert for that run has the exact same URL, and a
+            # phone may reopen its existing tab without navigating or firing a
+            # hashchange. The identifier keeps historic links valid while
+            # making each unanswered-question alert a fresh destination.
+            link += "&question=" + quote(question_id, safe="")
     else:
         fragment = REPLY_RUN_FRAGMENT if focus_reply else RUN_FRAGMENT
         link = site.private_origin + fragment + quote(run_key, safe="")
@@ -242,6 +250,7 @@ def notification(
     run_key: str,
     site: NotificationSite,
     plan_key: str | None = None,
+    question_id: str | None = None,
 ) -> tuple[bytes, str]:
     """The body and the link for one incident, from identity and a kind alone."""
     if kind not in NOTIFICATION_TEMPLATES:
@@ -253,6 +262,7 @@ def notification(
         site=site,
         focus_reply=kind == INCIDENT_UNANSWERED_QUESTION,
         plan_key=plan_key,
+        question_id=question_id,
     )
     return f"{label}: {reason}\n{link}".encode(), link
 
@@ -341,6 +351,7 @@ class NtfyPublisher:
         plan_key: str,
         run_key: str,
         before_send: Callable[[], bool],
+        question_id: str | None = None,
     ) -> PublishResult:
         """Send one notification and report what the attempt established."""
         body, link = notification(
@@ -348,6 +359,7 @@ class NtfyPublisher:
             project=project,
             plan_key=plan_key,
             run_key=run_key,
+            question_id=question_id,
             site=self.site,
         )
         connection = self._connect()
