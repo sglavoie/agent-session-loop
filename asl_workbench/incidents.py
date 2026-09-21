@@ -229,6 +229,7 @@ class Publisher(Protocol):
         *,
         kind: str,
         project: str,
+        plan_key: str,
         run_key: str,
         before_send: Callable[[], bool],
     ) -> PublishResult: ...
@@ -904,6 +905,7 @@ class IncidentEngine:
             result = publisher.publish(
                 kind=str(claimed["kind"]),
                 project=str(claimed["project"]),
+                plan_key=str(claimed["plan_key"]),
                 run_key=str(claimed["run_key"]),
                 before_send=before_send,
             )

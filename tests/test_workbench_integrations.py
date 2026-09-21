@@ -729,6 +729,7 @@ class PublisherCase(unittest.TestCase):
         result = self.publisher(connection).publish(
             kind=incidents.INCIDENT_UNANSWERED_QUESTION,
             project="Example project",
+            plan_key="abc123",
             run_key="plan/run-1",
             before_send=lambda: True,
         )
@@ -737,11 +738,11 @@ class PublisherCase(unittest.TestCase):
         method, url, body, headers = connection.requests[0]
         self.assertEqual(("POST", "/asl-alerts"), (method, url))
         self.assertIn(
-            b"https://pi.example.ts.net:9443/?workbench=1#run=plan%2Frun-1&focus=reply",
+            b"https://pi.example.ts.net:9443/?workbench=2#plan?key=abc123&run=plan%2Frun-1&focus=reply",
             body,
         )
         self.assertEqual(
-            "https://pi.example.ts.net:9443/?workbench=1#run=plan%2Frun-1&focus=reply",
+            "https://pi.example.ts.net:9443/?workbench=2#plan?key=abc123&run=plan%2Frun-1&focus=reply",
             headers["Click"],
         )
         self.assertEqual(notifications.NOTIFICATION_TITLE, headers["Title"])
@@ -765,6 +766,7 @@ class PublisherCase(unittest.TestCase):
         result = self.publisher(connection).publish(
             kind=incidents.INCIDENT_TERMINAL_FAILURE,
             project="p",
+            plan_key="abc123",
             run_key="r",
             before_send=lambda: True,
         )
@@ -776,6 +778,7 @@ class PublisherCase(unittest.TestCase):
         result = self.publisher(connection).publish(
             kind=incidents.INCIDENT_TERMINAL_FAILURE,
             project="p",
+            plan_key="abc123",
             run_key="r",
             before_send=lambda: False,
         )
@@ -806,13 +809,14 @@ class PublisherCase(unittest.TestCase):
                 result = self.publisher(FakeConnection(response=response)).publish(
                     kind=incidents.INCIDENT_LOST_OBSERVATION,
                     project="p",
+                    plan_key="abc123",
                     run_key="r",
                     before_send=lambda: True,
                 )
                 self.assertEqual(incidents.DELIVERY_UNCONFIRMED, result.state)
 
     def test_the_publisher_satisfies_the_engine_protocol(self) -> None:
-        # The engine calls exactly this, by keyword, so the four names are the
+        # The engine calls exactly this, by keyword, so the names are the
         # contract rather than the class.
         self.assertEqual(
             inspect.signature(incidents.Publisher.publish),
