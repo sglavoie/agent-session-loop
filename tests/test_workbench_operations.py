@@ -416,6 +416,18 @@ class ReconciliationTests(unittest.TestCase):
             )
         )
 
+    def test_a_late_reply_witness_resolves_an_uncertain_operation(self) -> None:
+        verdict = operations.reconcile(
+            _record(
+                status=operations.OPERATION_UNCONFIRMED,
+                method=operations.METHOD_QUESTION_REPLY,
+            ),
+            operations.Evidence(reply_consumed=True),
+            now=3000.0,
+        )
+        self.assertEqual(operations.OPERATION_CONSUMED, verdict.status)
+        self.assertEqual(operations.DETAIL_REPLY_WITNESSED, verdict.detail_code)
+
     def test_a_new_submission_replaces_an_uncertain_idle_operation(self) -> None:
         # Not a finding about whether it ran -- nothing can produce one. It is
         # the record that a person submitted something in its place, which is
