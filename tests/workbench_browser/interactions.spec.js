@@ -270,6 +270,50 @@ for (const deployment of DEPLOYMENTS) {
           }),
         }),
       );
+      await page.route("**/api/capabilities*", async (route) => {
+        const response = await route.fetch();
+        const body = await response.json();
+        for (const operation of body.operations || []) {
+          if (operation.operation !== "reply") continue;
+          operation.available = true;
+          operation.reason = null;
+        }
+        body.unavailable_operations = (body.unavailable_operations || []).filter(
+          (operation) => operation !== "reply",
+        );
+        await route.fulfill({ response: response, json: body });
+      });
+      let replyAttempts = 0;
+      await page.route(/\/api\/question-reply(?:\?|$)/, async (route) => {
+        replyAttempts += 1;
+        const request = route.request();
+        const payload = request.postDataJSON();
+        if (replyAttempts === 1) {
+          await route.fulfill({
+            status: 409,
+            contentType: "application/json",
+            body: JSON.stringify({
+              ok: false,
+              reason: "question-mismatch",
+              error: "reply was not recorded",
+            }),
+          });
+          return;
+        }
+        await route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ok: true,
+            reason: "accepted",
+            operation: {
+              operation_id: payload.operation_id,
+              status: "accepted",
+              method: "question.reply",
+            },
+          }),
+        });
+      });
 
       await page.goto(
         authorizedURL(
@@ -291,6 +335,29 @@ for (const deployment of DEPLOYMENTS) {
       await expect(page.locator("#wb-redirect-submit")).toHaveText(
         "interrupt turn & resume with this correction",
       );
+
+      await page.locator("#wb-reply-text").fill("Phone acceptance confirmed.");
+      page.once("dialog", (dialog) => dialog.accept());
+      await send.click();
+      const status = page.locator("#wb-reply-submit-status");
+      await expect(status).toBeVisible();
+      await expect(status).toHaveAttribute("data-kind", "error");
+      await expect(status).toHaveText("reply was not recorded (question-mismatch)");
+      await expect(page.locator("#wb-reply-text")).toHaveValue(
+        "Phone acceptance confirmed.",
+      );
+      await expect(send).toHaveText("send reply");
+      await expect(send).toBeEnabled();
+
+      page.once("dialog", (dialog) => dialog.accept());
+      await send.click();
+      await expect(status).toHaveAttribute("data-kind", "pending");
+      await expect(status).toHaveText(
+        "Reply recorded. Waiting for the running session to consume it.",
+      );
+      await expect(send).toHaveText("reply recorded");
+      await expect(send).toBeDisabled();
+      await expect(page.locator("#wb-reply-text")).toHaveValue("");
     });
 
     test("a control aimed at a run that is not there names the run, not the mode", async ({

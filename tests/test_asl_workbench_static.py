@@ -282,6 +282,7 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
             'id="wb-reply-prompt"',
             'id="wb-reply-last-message"',
             'id="wb-reply-text"',
+            'id="wb-reply-submit-status"',
             'id="wb-detail-sessions"',
             'id="wb-detail-events"',
             'id="wb-detail-progress"',
@@ -459,6 +460,8 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn("Number(run.unanswered_count) > 0", decoded)
         self.assertIn('context.context_kind === "waiting"', decoded)
         self.assertIn("context.question_id", decoded)
+        self.assertIn("Reply recorded. Waiting for the running session", decoded)
+        self.assertIn("Reply delivered. The question is closed", decoded)
         self.assertIn("await loadAndRenderReply()", decoded)
         self.assertIn("hideReplyPanel()", decoded)
         self.assertIn("RECOVERY_ACTION_TARGETS", decoded)

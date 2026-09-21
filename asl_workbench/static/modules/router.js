@@ -48,6 +48,7 @@ import {
 import { syncSelectedPlanView } from "./preview.js";
 import { refresh, scheduleRefresh, stopQueueTimer } from "./queue.js";
 import { resetRedirectForPlan } from "./redirect.js";
+import { resetReplyForPlan } from "./panels.js";
 import { applyShellLayout, isDesktopShell } from "./shell.js";
 import { state } from "./state.js";
 
@@ -306,6 +307,7 @@ export function applyRoute() {
     // Carrying it across a route change would let the next submit reuse an
     // id the journal already bound to a different run.
     resetRedirectForPlan();
+    resetReplyForPlan();
   }
   state.route = next;
   applyShellLayout();

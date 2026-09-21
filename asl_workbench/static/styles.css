@@ -1294,6 +1294,11 @@ a:hover {
   gap: 6px;
 }
 
+.wb-reply__status {
+  margin: 0;
+  font-weight: 600;
+}
+
 .wb-reply__label {
   font-size: 12px;
   color: var(--wb-text-dim);
