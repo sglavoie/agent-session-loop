@@ -279,6 +279,7 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
             'id="wb-profile-unpin"',
             'id="wb-reply-panel"',
             'id="wb-reply-form"',
+            "novalidate",
             'id="wb-reply-prompt"',
             'id="wb-reply-last-message"',
             'id="wb-reply-text"',

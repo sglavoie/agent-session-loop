@@ -336,6 +336,12 @@ for (const deployment of DEPLOYMENTS) {
         "interrupt turn & resume with this correction",
       );
 
+      await send.click();
+      await expect(page.locator("#wb-reply-form-errors")).toBeVisible();
+      await expect(page.locator("#wb-reply-form-errors")).toHaveText(
+        "reply must not be empty",
+      );
+
       await page.locator("#wb-reply-text").fill("Phone acceptance confirmed.");
       page.once("dialog", (dialog) => dialog.accept());
       await send.click();
