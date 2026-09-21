@@ -55,9 +55,33 @@ export function stopDetailTimer() {
   }
 }
 
+/** Keep an unanswered live reply screen still while the operator uses it.
+ *
+ * The detail poll redraws several panels every five seconds. Even when the
+ * reply form itself is unchanged, another panel can change the document
+ * height and make mobile WebKit treat a tap as a scroll. The submit response
+ * is authoritative, so no poll is needed until that response records the
+ * reply; once recorded, polling resumes and can show its consumption.
+ */
+export function liveReplyFormIsInteractive() {
+  const context = state.detailReplyContext;
+  if (
+    !context ||
+    context.context_kind !== "waiting" ||
+    !context.question_id ||
+    state.reply.recordedQuestionId === context.question_id
+  ) {
+    return false;
+  }
+  const panel = document.getElementById("wb-reply-panel");
+  const form = document.getElementById("wb-reply-form");
+  return Boolean(panel && !panel.hidden && form && !form.hidden);
+}
+
 export async function refreshDetail() {
   if (state.route.name !== "detail" || !routePlanId()) return;
   if (state.detailInFlight) return;
+  if (liveReplyFormIsInteractive()) return;
   state.detailInFlight = true;
   setRefreshStatus("loading", "refreshing…");
   const scrollSnapshot = captureDetailScroll();

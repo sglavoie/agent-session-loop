@@ -339,6 +339,15 @@ for (const deployment of DEPLOYMENTS) {
         "interrupt turn & resume with this correction",
       );
 
+      let detailPolls = 0;
+      const countDetailPoll = (request) => {
+        if (new URL(request.url()).pathname === "/api/plan") detailPolls += 1;
+      };
+      page.on("request", countDetailPoll);
+      await page.waitForTimeout(5500);
+      page.off("request", countDetailPoll);
+      expect(detailPolls).toBe(0);
+
       const unchangedRefreshMutations = await page.evaluate(async () => {
         const form = document.getElementById("wb-reply-form");
         const mutations = [];
