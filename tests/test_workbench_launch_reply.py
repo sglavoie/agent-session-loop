@@ -579,6 +579,30 @@ class SharedActionTests(_PlanFixture):
         self.assertEqual(operations.OPERATION_CONSUMED, row["status"])
         self.assertEqual(operations.DETAIL_REPLY_WITNESSED, row["detail_code"])
 
+    def test_a_mailbox_receipt_reconciles_an_in_turn_reply_to_consumed(self) -> None:
+        """An in-turn ask writes a receipt without starting another turn."""
+        question_id = self.make_waiting()
+        outcome = workbench_actions.reply_to_question(
+            self.canonical,
+            text=REPLY_TEXT,
+            operation_id="op-reply",
+            state_dir=self.state_dir,
+            question_id=question_id,
+        )
+        assert outcome.closure_id is not None
+        mailbox.append_receipt(
+            self.canonical,
+            question_id,
+            outcome.closure_id,
+            state_dir=self.state_dir,
+        )
+
+        workbench_operations.reconcile_plan(self.canonical, state_dir=self.state_dir)
+
+        row = self.row("op-reply")
+        self.assertEqual(operations.OPERATION_CONSUMED, row["status"])
+        self.assertEqual(operations.DETAIL_REPLY_WITNESSED, row["detail_code"])
+
     def test_a_reply_to_another_question_leaves_this_one_open(self) -> None:
         question_id = self.make_waiting()
         workbench_actions.reply_to_question(
