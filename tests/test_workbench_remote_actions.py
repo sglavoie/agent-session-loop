@@ -79,6 +79,7 @@ from asl_workbench.operations import (
     DETAIL_CONNECTOR_RESTARTED,
     DETAIL_DEADLINE_PASSED,
     DETAIL_NO_RESULT,
+    DETAIL_REPLY_WITNESSED,
     METHOD_ABORT,
     METHOD_LAUNCH,
     METHOD_PLAN_ARCHIVE,
@@ -1892,6 +1893,44 @@ class RestartTests(PerformerTestCase):
         self.assertEqual(DETAIL_CONNECTOR_RESTARTED, payload["detail_code"])
         # Nothing was queued: recovery settles, it does not act.
         self.assertEqual([], self.queued())
+
+    def test_recovery_reports_a_consumed_in_turn_mailbox_reply(self) -> None:
+        """A receipt is stronger evidence than the dead connector process."""
+        self.write_state()
+        question = mailbox.append_question(
+            self.plan_dir,
+            "May the fixture continue?",
+            state_dir=self.state_dir,
+            run_id=RUN_ID,
+            session_id=SESSION_ID,
+            turn_index=1,
+        )
+        reply = mailbox.append_reply(
+            self.plan_dir,
+            question.id,
+            REPLY_TEXT,
+            state_dir=self.state_dir,
+        )
+        mailbox.append_receipt(
+            self.plan_dir,
+            question.id,
+            reply.id,
+            state_dir=self.state_dir,
+        )
+        self.orphan(
+            "op-reply",
+            OPERATION_ACCEPTED,
+            method=METHOD_QUESTION_REPLY,
+            question_id=question.id,
+            dispatched_at=NOW - 5.0,
+        )
+
+        settled = self.performer.recover(now=NOW)
+
+        (payload,) = settled
+        self.assertEqual(OPERATION_CONSUMED, payload["status"])
+        self.assertEqual(DETAIL_REPLY_WITNESSED, payload["detail_code"])
+        self.assertEqual(OPERATION_CONSUMED, self.row("op-reply")["status"])
 
     def test_a_row_the_local_surface_submitted_is_not_the_connectors_to_settle(
         self,

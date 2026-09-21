@@ -37,11 +37,12 @@ therefore adds:
   bulk route answers with -- so per-entry reporting survives the trip rather
   than collapsing into one status word.
 
-* **A restart closes rows rather than replaying them.** :meth:`recover` settles
-  what a previous connector left open, and settles only rows that carry a
-  ``command_id`` *and* whose owner process is gone: the first keeps it away from
-  operations the local browser submitted, the second keeps it away from ones
-  that are still happening. Nothing is re-attempted, ever.
+* **A restart closes rows rather than replaying them.** :meth:`recover` first
+  applies any durable ASL evidence, then settles what a previous connector left
+  open. It considers only rows that carry a ``command_id`` *and* whose owner
+  process is gone: the first keeps it away from operations the local browser
+  submitted, the second keeps it away from ones that are still happening.
+  Nothing is re-attempted, ever.
 
 Every moment is an argument here too, so a test drives the restart and
 lost-response cases at the moments it chooses rather than waiting for them.
@@ -77,6 +78,7 @@ from asl_workbench.remote_actions import (
     BodyUnavailable,
     MutationRequest,
     MutationResult,
+    Settlement,
     reportable_status,
     restart_settlement,
     settlement_payload,
@@ -437,9 +439,11 @@ class AslMutationPerformer:
         settling it would report an outcome for something in flight.
 
         What survives both is a row this connector's predecessor admitted and
-        nobody is carrying out, and it is closed with the word its recorded
-        status earns: ``expired`` when it never reached dispatch, ``unconfirmed``
-        when it did. Never re-attempted.
+        nobody is carrying out. Durable evidence is reconciled first, so a
+        consumed mailbox reply remains consumed; only an otherwise unresolved
+        row is closed with the word its recorded status earns: ``expired`` when
+        it never reached dispatch, ``unconfirmed`` when it did. Never
+        re-attempted.
         """
         settled: list[dict[str, Any]] = []
         for plan_key, plan_dir in self._index.items(now=now):
@@ -449,10 +453,50 @@ class AslMutationPerformer:
                 )
             except OSError:
                 continue
-            for record in rows:
-                if not record.get("command_id"):
+            eligible = {
+                str(record["operation_id"])
+                for record in rows
+                if record.get("command_id")
+                and not workbench_operations.owner_alive(record)
+            }
+            if not eligible:
+                continue
+            try:
+                reconciled = workbench_operations.reconcile_plan(
+                    plan_dir, state_dir=self.state_dir, now=now
+                )
+            except OSError:
+                reconciled = []
+            for record in reconciled:
+                operation_id = str(record.get("operation_id") or "")
+                if operation_id not in eligible:
                     continue
-                if workbench_operations.owner_alive(record):
+                settled.append(
+                    settlement_payload(
+                        Settlement(
+                            operation_id=operation_id,
+                            status=str(record["status"]),
+                            detail_code=str(
+                                record.get("detail_code")
+                                or portable_operations.DETAIL_NO_RESULT
+                            ),
+                            method=str(record.get("method") or "") or None,
+                        ),
+                        observed_at=now,
+                        target={"plan_key": plan_key},
+                    )
+                )
+                eligible.discard(operation_id)
+            if not eligible:
+                continue
+            try:
+                rows = workbench_operations.open_operations(
+                    plan_dir, state_dir=self.state_dir
+                )
+            except OSError:
+                continue
+            for record in rows:
+                if str(record.get("operation_id") or "") not in eligible:
                     continue
                 settlement = restart_settlement(record, now=now)
                 if settlement is None:
