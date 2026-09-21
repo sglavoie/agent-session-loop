@@ -363,11 +363,12 @@ export async function loadAndRenderReply() {
         '#wb-reply-form button[type="submit"]'
       );
       if (submit) {
-        submit.textContent = recorded
+        const label = recorded
           ? "reply recorded"
           : body.context_kind === "waiting"
             ? "send reply"
             : "reply and resume";
+        if (submit.textContent !== label) submit.textContent = label;
       }
       if (recorded) {
         showReplyStatus(
@@ -376,9 +377,13 @@ export async function loadAndRenderReply() {
         );
       }
       const promptEl = document.getElementById("wb-reply-prompt");
-      if (promptEl) promptEl.textContent = body.rendered_prompt || "";
+      const prompt = body.rendered_prompt || "";
+      if (promptEl && promptEl.textContent !== prompt) promptEl.textContent = prompt;
       const lastEl = document.getElementById("wb-reply-last-message");
-      if (lastEl) lastEl.textContent = body.last_message || "";
+      const lastMessage = body.last_message || "";
+      if (lastEl && lastEl.textContent !== lastMessage) {
+        lastEl.textContent = lastMessage;
+      }
     } else {
       renderReplyContextError(body);
     }
@@ -471,16 +476,18 @@ export function setReplyFormDisabled(disabled, reason) {
   if (!form) return;
   const controls = form.querySelectorAll("textarea, button[type=\"submit\"]");
   controls.forEach((control) => {
-    control.disabled = Boolean(disabled);
+    const next = Boolean(disabled);
+    if (control.disabled !== next) control.disabled = next;
   });
   const button = form.querySelector("button[type=\"submit\"]");
   if (button) {
     if (disabled) {
-      button.setAttribute(
-        "data-blocked-reason",
-        reason || "there is no paused question on this plan to answer"
-      );
-    } else {
+      const blockedReason =
+        reason || "there is no paused question on this plan to answer";
+      if (button.getAttribute("data-blocked-reason") !== blockedReason) {
+        button.setAttribute("data-blocked-reason", blockedReason);
+      }
+    } else if (button.hasAttribute("data-blocked-reason")) {
       button.removeAttribute("data-blocked-reason");
     }
   }

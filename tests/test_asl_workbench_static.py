@@ -463,6 +463,8 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn("context.question_id", decoded)
         self.assertIn("Reply recorded. Waiting for the running session", decoded)
         self.assertIn("Reply delivered. The question is closed", decoded)
+        self.assertIn("if (submit.textContent !== label)", decoded)
+        self.assertIn("if (node.disabled !== disabled)", decoded)
         self.assertIn("await loadAndRenderReply()", decoded)
         self.assertIn("hideReplyPanel()", decoded)
         self.assertIn("RECOVERY_ACTION_TARGETS", decoded)

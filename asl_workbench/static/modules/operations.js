@@ -316,13 +316,19 @@ export function applyActionAvailability(root) {
       availability.enabled = false;
       availability.reason = blocked;
     }
-    node.disabled = !availability.enabled;
+    const disabled = !availability.enabled;
+    if (node.disabled !== disabled) node.disabled = disabled;
     if (availability.reason) {
-      node.setAttribute("data-disabled-reason", availability.reason);
-      node.title = availability.reason;
+      if (node.getAttribute("data-disabled-reason") !== availability.reason) {
+        node.setAttribute("data-disabled-reason", availability.reason);
+      }
+      if (node.title !== availability.reason) node.title = availability.reason;
     } else {
-      node.removeAttribute("data-disabled-reason");
-      node.title = node.getAttribute("data-enabled-title") || "";
+      if (node.hasAttribute("data-disabled-reason")) {
+        node.removeAttribute("data-disabled-reason");
+      }
+      const enabledTitle = node.getAttribute("data-enabled-title") || "";
+      if (node.title !== enabledTitle) node.title = enabledTitle;
     }
   });
 }

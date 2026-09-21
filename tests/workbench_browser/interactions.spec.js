@@ -235,9 +235,10 @@ for (const deployment of DEPLOYMENTS) {
       );
     });
 
-    test("an unanswered-question run link opens the live reply form", async ({
-      page,
-    }) => {
+    test("an unanswered-question run link opens the live reply form", async (
+      { page },
+      testInfo,
+    ) => {
       await openQueue(page, deployment);
       const plan = rowFor(await catalog(page), "charlie");
       expect(plan.run_key).toBeTruthy();
@@ -328,6 +329,8 @@ for (const deployment of DEPLOYMENTS) {
       const form = page.locator("#wb-reply-form");
       await expect(form).toBeVisible();
       const send = form.locator('button[type="submit"]');
+      const activateSend = () =>
+        testInfo.project.name === "mobile-webkit" ? send.tap() : send.click();
       await expect(send).toHaveText("send reply");
       await expect(send).toBeEnabled();
       await expect(send).not.toHaveAttribute("data-disabled-reason");
@@ -336,7 +339,32 @@ for (const deployment of DEPLOYMENTS) {
         "interrupt turn & resume with this correction",
       );
 
-      await send.click();
+      const unchangedRefreshMutations = await page.evaluate(async () => {
+        const form = document.getElementById("wb-reply-form");
+        const mutations = [];
+        const observer = new MutationObserver((records) => {
+          for (const record of records) {
+            mutations.push({
+              type: record.type,
+              attribute: record.attributeName,
+              target: record.target.id || record.target.tagName,
+            });
+          }
+        });
+        observer.observe(form, {
+          attributes: true,
+          childList: true,
+          characterData: true,
+          subtree: true,
+        });
+        const panels = await import("/static/modules/panels.js");
+        await panels.loadAndRenderReply();
+        observer.disconnect();
+        return mutations;
+      });
+      expect(unchangedRefreshMutations).toEqual([]);
+
+      await activateSend();
       await expect(page.locator("#wb-reply-form-errors")).toBeVisible();
       await expect(page.locator("#wb-reply-form-errors")).toHaveText(
         "reply must not be empty",
@@ -344,7 +372,7 @@ for (const deployment of DEPLOYMENTS) {
 
       await page.locator("#wb-reply-text").fill("Phone acceptance confirmed.");
       page.once("dialog", (dialog) => dialog.accept());
-      await send.click();
+      await activateSend();
       const status = page.locator("#wb-reply-submit-status");
       await expect(status).toBeVisible();
       await expect(status).toHaveAttribute("data-kind", "error");
@@ -356,7 +384,7 @@ for (const deployment of DEPLOYMENTS) {
       await expect(send).toBeEnabled();
 
       page.once("dialog", (dialog) => dialog.accept());
-      await send.click();
+      await activateSend();
       await expect(status).toHaveAttribute("data-kind", "pending");
       await expect(status).toHaveText(
         "Reply recorded. Waiting for the running session to consume it.",
