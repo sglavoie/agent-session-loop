@@ -134,6 +134,24 @@ export async function handleReplySubmit(event) {
     state.reply.operationId = answer.operation.id;
     rememberSubmittedReply(answer.operation.id);
   }
+  if (
+    answer.outcome === OUTCOME_PENDING &&
+    !(answer.operation && answer.operation.id)
+  ) {
+    // A 202 is only a durable acceptance when it names the journal row the
+    // service wrote.  Without that identity the browser cannot distinguish a
+    // real Workbench receipt from an intermediary's generic accepted answer,
+    // and claiming "Reply recorded" would destroy the operator's only copy of
+    // the words without any row the connector can deliver.
+    const message =
+      "reply was not recorded: the server returned no durable operation receipt";
+    showFormError("wb-reply-form-errors", message);
+    showReplyStatus("error", message);
+    if (submitButton) {
+      submitButton.textContent = liveQuestion ? "send reply" : "reply and resume";
+    }
+    return;
+  }
   const durable =
     answer.outcome === OUTCOME_RESULT || answer.outcome === OUTCOME_PENDING;
   if (!durable) {
@@ -166,9 +184,19 @@ export async function handleReplySubmit(event) {
       "reply recorded; waiting for the running session"
     );
     if (submitButton) submitButton.textContent = "reply recorded";
+    const recordedIdentity =
+      context.question_id && state.reply.recordedOperationId
+        ? " for question " +
+          context.question_id +
+          " as operation " +
+          state.reply.recordedOperationId +
+          "."
+        : ".";
     showReplyStatus(
       "pending",
-      "Reply recorded. Waiting for the running session to consume it."
+      "Reply recorded" +
+        recordedIdentity +
+        " Waiting for the running session to consume it."
     );
   }
 }
