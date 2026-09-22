@@ -24,7 +24,9 @@ contracts can run exactly one each::
 The module is named so ``unittest discover`` cannot reach it -- the pattern is
 ``test*.py`` -- because until a deployment session has run there is nothing to
 read, and a gate that failed the whole suite for that reason would be a gate
-somebody disabled. Its rules are proved instead by
+somebody disabled. ``tests/run_suite.py`` deliberately does not list it for the
+same reason; deployment contracts invoke the applicable gate explicitly once
+its evidence exists. Its rules are proved instead by
 ``tests/test_workbench_acceptance.py``, which builds synthetic repositories and
 documents and checks that each rejection actually fires.
 
@@ -43,14 +45,14 @@ does not survive that. Both hosts' recorded release must be that digest too,
 because a report that accepts one release while the Pi runs another is the
 exact failure this gate exists for.
 
-**Stale.** Staleness is measured against the package's own history rather than
-against the calendar: evidence is stale when any commit between the release it
-names and ``HEAD`` touched ``asl_workbench/``. A clock-based window would have
-to be chosen, would drift, and would call a correct report invalid on a slow
-week; "the thing you deployed is no longer the thing in the tree" is the
-property that actually matters and it maintains itself. The release must also
-be an ancestor of ``HEAD`` (a report from a branch nobody merged accepts
-nothing), and the report may not predate the commit it accepts or be dated in
+**Stale.** Production and retirement evidence accept the release the repository
+would deploy now, so they become stale when a later commit touching
+``asl_workbench/`` lands. Staging is deliberately historical: its rehearsal
+remains evidence about the release it actually exercised after later package
+work lands. Every stage still requires the named release to be an ancestor of
+``HEAD`` (a report from a branch nobody merged accepts nothing), rebuilds that
+exact release to verify its artifact, and requires both hosts to name the same
+artifact. Reports also may not predate the commit they accept or be dated in
 the future.
 
 **Synthetic.** Every host block declares ``kind: "actual-host"`` and carries a
@@ -534,6 +536,22 @@ def check_release_is_current(repository: Path, revision: str, accepted: str) -> 
         )
 
 
+def check_release_for_stage(
+    repository: Path, revision: str, accepted: str, stage: str
+) -> None:
+    """Apply the release-currency rule appropriate to one deployment stage.
+
+    A staging rehearsal proves what happened to the release it names. Later
+    package work does not invalidate that historical fact, but the commit must
+    still belong to the accepted history. Production and retirement instead
+    assert what is deployed now, so their evidence must remain current.
+    """
+    if stage == STAGE_STAGING:
+        check_release_is_ancestor(repository, revision, accepted)
+    else:
+        check_release_is_current(repository, revision, accepted)
+
+
 def commit_timestamp(repository: Path, revision: str) -> float:
     """When the accepted commit was made, which is the floor for every fact."""
     return float(git(repository, "show", "-s", "--format=%ct", revision))
@@ -594,7 +612,7 @@ def check_common(document: Mapping[str, Any], stage: str, repository: Path) -> N
     artifact = _matching(release, "artifact", _DIGEST, f"{stage}.release")
 
     accepted = accepted_revision(repository)
-    check_release_is_current(repository, revision, accepted)
+    check_release_for_stage(repository, revision, accepted, stage)
     rebuilt = rebuild_digest(repository, revision)
     if rebuilt != artifact:
         raise EvidenceError(
@@ -910,13 +928,13 @@ class _EvidenceCase:
         document = self._document()
         check_sanitized(document, self.stage)
 
-    def test_the_report_accepts_the_release_this_repository_deploys(self) -> None:
+    def test_the_report_accepts_an_authentic_release_for_this_stage(self) -> None:
         document = self._document()
         release = _mapping(document, "release", self.stage)
         revision = _matching(release, "revision", _REVISION, f"{self.stage}.release")
         artifact = _matching(release, "artifact", _DIGEST, f"{self.stage}.release")
         accepted = accepted_revision(REPO_ROOT)
-        check_release_is_current(REPO_ROOT, revision, accepted)
+        check_release_for_stage(REPO_ROOT, revision, accepted, self.stage)
         if self.stage == STAGE_RETIREMENT:
             check_retirement_release(document, self._path(), REPO_ROOT)
         rebuilt = rebuild_digest(REPO_ROOT, revision)
