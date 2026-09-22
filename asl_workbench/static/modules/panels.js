@@ -401,6 +401,26 @@ export async function loadAndRenderReply() {
         lastEl.textContent = lastMessage;
       }
     } else {
+      const linkedQuestion = state.route && state.route.questionId;
+      const recordedQuestion = state.reply.recordedQuestionId;
+      const detailReason =
+        body && body.details && typeof body.details === "object"
+          ? body.details.reason
+          : null;
+      if (
+        recordedQuestion &&
+        (!linkedQuestion || linkedQuestion === recordedQuestion) &&
+        body &&
+        body.reason === "detail-refused" &&
+        detailReason === "not-found"
+      ) {
+        // The recorded reply made this exact question disappear from the
+        // connector.  That is its normal terminal state after ASL consumes the
+        // reply, so preserve the durable submission feedback instead of
+        // replacing it with the remote read's expected not-found refusal.
+        hideReplyPanel();
+        return;
+      }
       renderReplyContextError(body);
     }
   } catch (err) {
