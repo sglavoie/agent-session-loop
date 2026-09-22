@@ -42,10 +42,9 @@ the doing. The tests are grouped by the claim each holds:
   searches every frame the mutation lane produces for the temporary directory
   it was built from.
 
-The Pi's own ``tests/test_companion_transport.py`` holds the mirror image of
-the restart cases from the service's side; the scenarios here are the Mac-side
-halves of the same two: interrupted before delivery, and interrupted after
-dispatch.
+The service-side restart coverage was transferred before the legacy Pi suite
+was retired; the scenarios here are the Mac-side halves of the same two:
+interrupted before delivery, and interrupted after dispatch.
 """
 
 from __future__ import annotations

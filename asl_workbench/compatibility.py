@@ -5,10 +5,8 @@ Python 3.14, and deployed to a Pi documented at Python 3.13 with no wheels
 installed. Those two facts make three rules, and this module is each rule's
 executable form rather than its description:
 
-* **Version.** :data:`MINIMUM_PYTHON_VERSION` is the floor, and it is the same
-  floor the Companion installer already enforces
-  (``sglavoie_raspberry_pi:services/pi-monitoring/companion/lifecycle.py``
-  refuses anything outside ``(3, 13) <= version < (4, 0)``).
+* **Version.** :data:`MINIMUM_PYTHON_VERSION` is the floor preserved from the
+  retired Companion installer: ``(3, 13) <= version < (4, 0)``.
   :func:`check_runtime` answers for a version; :func:`unsupported_syntax`
   answers for the source, by reparsing every module under
   ``ast.parse(feature_version=...)`` so a 3.14-only construct fails here
@@ -42,9 +40,8 @@ PACKAGE_NAME = __name__.split(".")[0]
 PACKAGE_ROOT = Path(__file__).resolve().parent
 
 #: The oldest interpreter the portable package supports, and the series it
-#: stops at. The floor matches the Companion installer's own check, which is
-#: what the deployed Pi actually enforces; raising it here without raising it
-#: there would make a module that the installer accepts refuse to load.
+#: stops at. The floor preserves the deployed Pi contract inherited during
+#: migration; raising it requires a deliberate deployment compatibility change.
 MINIMUM_PYTHON_VERSION: tuple[int, int] = (3, 13)
 MAXIMUM_PYTHON_SERIES: tuple[int, int] = (4, 0)
 

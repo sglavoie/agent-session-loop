@@ -44,7 +44,6 @@ import socket
 import subprocess
 import sys
 import tempfile
-import textwrap
 import time
 import unittest
 from pathlib import Path
@@ -52,7 +51,7 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import plans, state, workbench, workbench_operations
-from asl_workbench import companion_inventory, operations
+from asl_workbench import operations
 from tests.support import (
     _http_request,
     _write_lock_file,
@@ -499,115 +498,6 @@ class PrivacyTests(unittest.TestCase):
                 {"reply_text": "fine", "transcript": "not fine"},
                 allow=frozenset({"reply_text"}),
             )
-
-
-class CompanionCompatibilityTests(unittest.TestCase):
-    """The vocabulary matches the one the Pi already holds rows under."""
-
-    def setUp(self) -> None:
-        package_root = companion_inventory.locate_companion_package(REPO_ROOT)
-        if package_root is None:
-            self.skipTest(
-                "no Pi checkout reachable; set "
-                f"{companion_inventory.ENV_PI_CHECKOUT} to cross-check the "
-                "operation vocabulary against the Companion"
-            )
-        self.pinned = _read_companion_protocol(package_root)
-
-    def test_the_statuses_match(self) -> None:
-        self.assertEqual(
-            sorted(self.pinned["OPERATION_STATUSES"]),
-            sorted(operations.OPERATION_STATUSES),
-        )
-
-    def test_the_transition_table_matches(self) -> None:
-        self.assertEqual(
-            {key: sorted(value) for key, value in self.pinned["transitions"].items()},
-            {
-                key: sorted(value)
-                for key, value in operations.OPERATION_TRANSITIONS.items()
-            },
-        )
-
-    def test_the_outstanding_and_terminal_sets_match(self) -> None:
-        self.assertEqual(
-            sorted(self.pinned["OPERATION_OUTSTANDING_STATUSES"]),
-            sorted(operations.OPERATION_OUTSTANDING_STATUSES),
-        )
-        self.assertEqual(
-            sorted(self.pinned["OPERATION_TERMINAL_STATUSES"]),
-            sorted(operations.OPERATION_TERMINAL_STATUSES),
-        )
-
-    def test_the_export_projection_matches_exactly(self) -> None:
-        # A dashboard row written by the Companion and one written here have to
-        # be the same shape: the Pi holds both under the same schema.
-        self.assertEqual(
-            sorted(self.pinned["OPERATION_EXPORT_FIELDS"]),
-            sorted(operations.OPERATION_EXPORT_FIELDS),
-        )
-
-    def test_the_forbidden_keys_match(self) -> None:
-        self.assertEqual(
-            sorted(self.pinned["FORBIDDEN_PERSISTED_KEYS"]),
-            sorted(operations.FORBIDDEN_PERSISTED_KEYS),
-        )
-
-    def test_the_persist_allowlist_only_adds_identifiers(self) -> None:
-        added = set(operations.OPERATION_PERSIST_FIELDS) - set(
-            self.pinned["OPERATION_PERSIST_FIELDS"]
-        )
-        self.assertEqual({"fingerprint", "scope", "pid", "hostname"}, added)
-        self.assertLessEqual(
-            set(self.pinned["OPERATION_PERSIST_FIELDS"]),
-            set(operations.OPERATION_PERSIST_FIELDS),
-        )
-
-    def test_the_companion_detail_codes_are_all_carried(self) -> None:
-        self.assertLessEqual(
-            set(self.pinned["OPERATION_DETAIL_CODES"]),
-            set(operations.OPERATION_DETAIL_CODES),
-        )
-
-
-def _read_companion_protocol(package_root: Path) -> dict[str, Any]:
-    """Read the Companion's vocabulary without writing to the Pi checkout.
-
-    A subprocess with bytecode writing disabled, because the Pi repository is a
-    read-only dependency here: importing a module from it must not leave a
-    ``__pycache__`` behind in someone else's tree.
-    """
-    script = textwrap.dedent(
-        """
-        import json, sys
-        sys.dont_write_bytecode = True
-        sys.path.insert(0, sys.argv[1])
-        from companion import protocol
-        print(json.dumps({
-            "OPERATION_STATUSES": list(protocol.OPERATION_STATUSES),
-            "OPERATION_OUTSTANDING_STATUSES":
-                sorted(protocol.OPERATION_OUTSTANDING_STATUSES),
-            "OPERATION_TERMINAL_STATUSES":
-                sorted(protocol.OPERATION_TERMINAL_STATUSES),
-            "OPERATION_PERSIST_FIELDS": sorted(protocol.OPERATION_PERSIST_FIELDS),
-            "OPERATION_EXPORT_FIELDS": sorted(protocol.OPERATION_EXPORT_FIELDS),
-            "FORBIDDEN_PERSISTED_KEYS": sorted(protocol.FORBIDDEN_PERSISTED_KEYS),
-            "OPERATION_DETAIL_CODES": list(protocol.OPERATION_DETAIL_CODES),
-            "transitions": {
-                key: sorted(value)
-                for key, value in protocol.OPERATION_TRANSITIONS.items()
-            },
-        }))
-        """
-    )
-    completed = subprocess.run(
-        [sys.executable, "-c", script, str(package_root.parent)],
-        capture_output=True,
-        text=True,
-        check=True,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-    )
-    return json.loads(completed.stdout)
 
 
 class JournalFixture:

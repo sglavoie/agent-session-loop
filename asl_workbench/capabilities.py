@@ -25,12 +25,10 @@ Rows for the Workbench's HTTP routes and CLI entry points are *derived*
 against the live code by ``tests/test_workbench_foundations.py``: the route
 table in ``agent_session_loop/workbench_server.py`` and the argument parser in
 ``agent_session_loop/cli.py`` are read, and a surface without a row fails.
-The Companion's rows are checked the same way against
-:mod:`asl_workbench.companion_inventory` whenever a Pi checkout is reachable.
 Browser workflows, integrations, and persistence boundaries are enumerated
-rather than derived -- there is nothing mechanical to read them off -- and
-their completeness is this session's judgement, recorded so a later session
-amends it deliberately.
+rather than derived -- there is nothing mechanical to read them off. Their
+historical origin remains recorded, but the retired Companion modules, routes,
+dashboard, fixtures, and tests are deliberately absent from this final matrix.
 
 ``python3 -m asl_workbench`` renders the matrix as Markdown; ``--json`` prints
 the counts and declared gaps as data instead.
@@ -46,6 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .compatibility import PACKAGE_NAME
+from .operations import OPERATION_METHODS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -59,9 +58,6 @@ SURFACE_WORKBENCH_STATIC = "workbench-static"
 SURFACE_WORKBENCH_CLI = "workbench-cli"
 SURFACE_WORKBENCH_BROWSER = "workbench-browser"
 SURFACE_BRIDGE = "bridge"
-SURFACE_COMPANION_HTTP = "companion-http"
-SURFACE_COMPANION_MODULE = "companion-module"
-SURFACE_COMPANION_BROWSER = "companion-browser"
 SURFACE_INTEGRATION = "integration"
 SURFACE_PERSISTENCE = "persistence"
 
@@ -71,9 +67,6 @@ SURFACES: tuple[str, ...] = (
     SURFACE_WORKBENCH_CLI,
     SURFACE_WORKBENCH_BROWSER,
     SURFACE_BRIDGE,
-    SURFACE_COMPANION_HTTP,
-    SURFACE_COMPANION_MODULE,
-    SURFACE_COMPANION_BROWSER,
     SURFACE_INTEGRATION,
     SURFACE_PERSISTENCE,
 )
@@ -108,7 +101,14 @@ AUTHORITIES: tuple[str, ...] = (
 
 #: The repository aliases a coverage reference may name, as registered by the
 #: plan. A reference is ``alias:path`` so it reads the same in a handoff.
-COVERAGE_ALIASES: tuple[str, ...] = ("scripts", "sglavoie_raspberry_pi")
+COVERAGE_ALIASES: tuple[str, ...] = ("scripts",)
+
+#: The final behavior owner for every mutation method. ASL remains the
+#: authority on permission and outcome, while the portable operation layer is
+#: the single owner of admission, identity, serialization, and reconciliation.
+OPERATION_BEHAVIOR_OWNERS: Mapping[str, str] = {
+    method: OWNER_PORTABLE for method in OPERATION_METHODS
+}
 
 #: Coverage references that resolve inside this repository are checked against
 #: the filesystem; the prefix below is how they are recognised.
@@ -174,47 +174,6 @@ def _http(
         compatibility_adapters=adapters,
         regression_coverage=coverage,
         intentional_changes=changes,
-    )
-
-
-def _companion_module(
-    name: str,
-    summary: str,
-    *,
-    owner: str,
-    coverage: tuple[str, ...],
-    authority: str = AUTHORITY_PI_SERVICE,
-    adapters: tuple[str, ...] = (),
-    gap: str | None = None,
-) -> Capability:
-    return Capability(
-        key=f"{SURFACE_COMPANION_MODULE}:{name}",
-        surface=SURFACE_COMPANION_MODULE,
-        summary=summary,
-        origin=ORIGIN_COMPANION,
-        owner=owner,
-        authority=authority,
-        compatibility_adapters=adapters,
-        regression_coverage=coverage,
-        coverage_gap=gap,
-    )
-
-
-def _companion_http(
-    key: str,
-    summary: str,
-    *,
-    coverage: tuple[str, ...],
-    owner: str = OWNER_PORTABLE,
-) -> Capability:
-    return Capability(
-        key=f"{SURFACE_COMPANION_HTTP}:{key}",
-        surface=SURFACE_COMPANION_HTTP,
-        summary=summary,
-        origin=ORIGIN_COMPANION,
-        owner=owner,
-        authority=AUTHORITY_PI_SERVICE,
-        regression_coverage=coverage,
     )
 
 
@@ -302,7 +261,6 @@ _INTERACTION_BROWSER_TESTS = "scripts:tests/workbench_browser/interactions.spec.
 #: all of it running -- a settlement that has to cross the link twice, a
 #: database nobody may find prose in, a ceiling a dead link fills.
 _FULLSTACK_TESTS = "scripts:tests/test_workbench_fullstack.py"
-_PI = "sglavoie_raspberry_pi:services/pi-monitoring"
 
 
 # -- The matrix -------------------------------------------------------------
@@ -547,6 +505,12 @@ CAPABILITIES: tuple[Capability, ...] = (
             _OPERATION_TESTS,
             _ACTION_TESTS,
         ),
+    ),
+    _http(
+        "POST /api/question-reply",
+        "Answer the exact live mailbox question without restarting its run; "
+        "the remote provider stages prose outside the durable operation row.",
+        coverage=(_ACTION_TESTS, _HTTP_TESTS, _INTERACTION_BROWSER_TESTS),
     ),
     _http(
         "POST /api/control/stop-after-current",
@@ -986,7 +950,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         regression_coverage=(
             _BRIDGE_TESTS,
             _ACTION_TESTS,
-            f"{_PI}/tests/test_companion_live_reply.py",
         ),
     ),
     Capability(
@@ -1000,7 +963,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         regression_coverage=(
             _BRIDGE_TESTS,
             _ACTION_TESTS,
-            f"{_PI}/tests/test_companion_resume.py",
         ),
     ),
     Capability(
@@ -1048,6 +1010,12 @@ CAPABILITIES: tuple[Capability, ...] = (
         ),
     ),
     _http(
+        "POST /v1/commands/redeem",
+        "Exchange a dispatched command token for its bounded in-memory body. "
+        "This connector-only compatibility path never persists the prose.",
+        coverage=(_HTTP_TESTS, _FULLSTACK_TESTS, _WIRE_TESTS),
+    ),
+    _http(
         "GET /v1/health",
         "Liveness at the path the installed monitor already polls; an alias "
         "of GET /api/health, same operation and same public role.",
@@ -1068,401 +1036,25 @@ CAPABILITIES: tuple[Capability, ...] = (
         "the monitor, the site record and the service at once.",
         coverage=(_HTTP_TESTS, _FOUNDATION_TESTS, _INTEGRATION_TESTS),
     ),
-    # -- Companion Pi service routes ---------------------------------------
-    _companion_http(
-        "GET /",
-        "Dashboard page on the bare host, behind the owner check.",
-        coverage=(f"{_PI}/tests/test_companion_dashboard.py",),
-    ),
-    _companion_http(
-        "GET /dashboard",
-        "Dashboard page on its explicit path, for bookmarks and alert links.",
-        coverage=(f"{_PI}/tests/test_companion_dashboard.py",),
-    ),
-    _companion_http(
-        "GET /assets/dashboard.css",
-        "Dashboard stylesheet, owner-gated like the data it renders.",
-        coverage=(f"{_PI}/tests/test_companion_dashboard.py",),
-    ),
-    _companion_http(
-        "GET /assets/dashboard.js",
-        "Dashboard script, owner-gated like the data it renders.",
-        coverage=(f"{_PI}/tests/test_companion_dashboard.py",),
-    ),
-    _companion_http(
-        "GET /v1/health",
-        "The one public route: service liveness, and nothing about any run.",
-        coverage=(f"{_PI}/tests/test_companion_api.py",),
-    ),
-    _companion_http(
-        "GET /v1/summary",
-        "Shape-only run summary for the restricted summary credential.",
-        coverage=(f"{_PI}/tests/test_companion_api.py",),
-    ),
-    _companion_http(
-        "GET /v1/status",
-        "Owner status: transport liveness, projection age, completeness.",
-        coverage=(
-            f"{_PI}/tests/test_companion_api.py",
-            f"{_PI}/tests/test_companion_observation.py",
-        ),
-    ),
-    _companion_http(
-        "GET /v1/runs",
-        "Owner run rows from retained observations, with freshness.",
-        coverage=(f"{_PI}/tests/test_companion_api.py",),
-    ),
-    _companion_http(
-        "GET /v1/history",
-        "Seven-day terminal-run history imported from ASL's event journals, "
-        "interpreted by the shared history service.",
-        coverage=(f"{_PI}/tests/test_companion_history.py", _HISTORY_TESTS),
-    ),
-    _companion_http(
-        "GET /v1/questions",
-        "The question bodies the Pi holds, owner-only and never in /v1/runs.",
-        coverage=(f"{_PI}/tests/test_companion_api.py",),
-    ),
-    _companion_http(
-        "GET /v1/projects",
-        "Project and plan labels, with filesystem paths withheld.",
-        coverage=(f"{_PI}/tests/test_companion_projects.py",),
-    ),
-    _companion_http(
-        "POST /v1/ingest",
-        "The single connector upload path: observations, results, operation updates.",
-        coverage=(
-            f"{_PI}/tests/test_companion_transport.py",
-            f"{_PI}/tests/test_companion_protocol.py",
-        ),
-    ),
-    _companion_http(
-        "POST /v1/commands/poll",
-        "Connector collects the commands the Pi is holding.",
-        coverage=(f"{_PI}/tests/test_companion_transport.py",),
-    ),
-    _companion_http(
-        "POST /v1/commands/redeem",
-        "Connector redeems a reply body exactly once.",
-        coverage=(
-            f"{_PI}/tests/test_companion_transport.py",
-            f"{_PI}/tests/test_companion_live_reply.py",
-        ),
-    ),
-    _companion_http(
-        "GET /v1/operations",
-        "Owner view of submitted mutations and their reconciled outcomes.",
-        coverage=(f"{_PI}/tests/test_companion_transport.py",),
-    ),
-    _companion_http(
-        "POST /v1/operations",
-        "Owner submits one bounded mutation with a closed field set.",
-        coverage=(f"{_PI}/tests/test_companion_transport.py",),
-    ),
-    _companion_http(
-        "POST /v1/operations/cancel",
-        "Owner cancels a submitted mutation that has not been dispatched.",
-        coverage=(f"{_PI}/tests/test_companion_transport.py",),
-    ),
-    # -- Companion modules --------------------------------------------------
-    _companion_module(
-        "companion",
-        "Package contract: two processes, one protocol, read-mostly cockpit.",
-        owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_protocol.py",),
-    ),
-    _companion_module(
-        "companion.auth",
-        "Three caller roles with three different proofs: connector, summary, "
-        "owner. Migrated to asl_workbench.credentials, which binds each role "
-        "to the envelope kinds and transport capabilities it may exercise; the "
-        "Pi module is the frozen baseline until the Companion imports the "
-        "portable package.",
-        owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_api.py", _TRANSPORT_TESTS),
-    ),
-    _companion_module(
-        "companion.commands",
-        "The Pi's command queue and the Mac's durable operation journal. A "
-        "journal carried across the upgrade is reconciled rather than "
-        "replayed: what was admitted but never attempted expires, what was "
-        "attempted becomes unconfirmed, and no record keeps a body anything "
-        "could resend.",
-        owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_transport.py", _MIGRATION_TESTS),
-    ),
-    _companion_module(
-        "companion.config",
-        "Strict typed configuration: unknown keys are refused, not ignored.",
-        owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_api.py",),
-    ),
-    _companion_module(
-        "companion.connector",
-        "Owns the ASL bridge subprocess on the Mac and turns frames into "
-        "observations. Superseded by asl_workbench.connector and "
-        "'asl workbench connect', which read the shared services in process; "
-        "the Pi module is the frozen baseline for the single-instance lock and "
-        "the bounded backoff, which were copied rather than reinvented.",
-        owner=OWNER_MAC,
-        authority=AUTHORITY_ASL,
-        # The bounded backoff and the bounded queues are only bounded against a
-        # link that really goes away, so the full-stack module is named here: ten
-        # reconnects leave one row and one entry per plan, a dead link fills the
-        # queues to their ceiling and refuses past it rather than growing, and a
-        # thousand-plan catalog still leaves the heartbeat fresh.
-        coverage=(
-            f"{_PI}/tests/test_companion_observation.py",
-            _CONNECTOR_TESTS,
-            _FULLSTACK_TESTS,
-        ),
-    ),
-    _companion_module(
-        "companion.dashboard",
-        "Three static files and the policy that serves them; nothing renders "
-        "on the Pi.",
-        owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_dashboard.py",),
-    ),
-    _companion_module(
-        "companion.framing",
-        "Bounded NDJSON framing for the bridge subprocess.",
-        owner=OWNER_MAC,
-        authority=AUTHORITY_ASL,
-        coverage=(f"{_PI}/tests/test_companion_protocol.py",),
-    ),
-    _companion_module(
-        "companion.freshness",
-        "Three independent staleness questions: liveness, age, completeness. "
-        "Migrated to asl_workbench.freshness; the Pi module is the frozen "
-        "baseline until the Companion imports the portable package.",
-        owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_observation.py", _STORE_TESTS),
-    ),
-    _companion_module(
-        "companion.history",
-        "Incremental import of ASL terminal runs into seven-day history. The "
-        "interpretation now lives in asl_workbench.history, beside ASL's own "
-        "vocabulary; the reading lives in "
-        "agent_session_loop.workbench_history.",
-        owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_history.py", _HISTORY_TESTS),
-    ),
-    _companion_module(
-        "companion.identity",
-        "Stable plan, run, and session identity, and labels safe to leave the Mac.",
-        owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_observation.py",),
-    ),
-    _companion_module(
-        "companion.incidents",
-        "Durable incident policy with persist-before-publish delivery. "
-        "Migrated to asl_workbench.incidents; the Pi module is the frozen "
-        "baseline until the Companion imports the portable package.",
-        owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_incidents.py", _STORE_TESTS),
-    ),
-    _companion_module(
-        "companion.integrations",
-        "Scoped Pi integrations: read-only preview, receipt before each "
-        "mutation. Migrated to asl_workbench.integrations, where the host's "
-        "names became IntegrationSite data; the Pi module is the frozen "
-        "baseline until the Companion imports the portable package.",
-        owner=OWNER_PORTABLE,
-        authority=AUTHORITY_HOST,
-        coverage=(
-            f"{_PI}/tests/test_companion_integrations.py",
-            _INTEGRATION_TESTS,
-        ),
-    ),
-    _companion_module(
-        "companion.integrations_kuma",
-        "Private stdin-only Kuma adapter for the one service-health monitor. "
-        "Migrated to asl_workbench.integrations.KUMA_SCRIPT, which takes the "
-        "monitor name and endpoint from the payload rather than the script.",
-        owner=OWNER_PORTABLE,
-        authority=AUTHORITY_HOST,
-        coverage=(
-            f"{_PI}/tests/test_companion_integrations.py",
-            _INTEGRATION_TESTS,
-        ),
-    ),
-    _companion_module(
-        "companion.lifecycle",
-        "Content-addressed per-user installation and the fixed native unit "
-        "identifiers. Migrated to asl_workbench.lifecycle, which installs both "
-        "roles: a pinned artifact of the portable package for the service, and "
-        "a recorded attachment to the existing ASL installation for the Mac "
-        "connector. The prefixes, the launchd label and the unit name are "
-        "unchanged, because a deployed host already owns them, and an existing "
-        "installation is carried across by asl_workbench.migration rather than "
-        "re-provisioned: the state moves to the names this package opens, the "
-        "configuration is translated, and nothing an operator has already been "
-        "shown changes identity.",
-        owner=OWNER_PORTABLE,
-        authority=AUTHORITY_HOST,
-        coverage=(
-            f"{_PI}/tests/test_companion_lifecycle.py",
-            _LIFECYCLE_TESTS,
-            _MIGRATION_TESTS,
-            _PORTABLE_TESTS,
-        ),
-    ),
-    _companion_module(
-        "companion.live",
-        "The Mac's live half: read one ASL question and answer it.",
-        owner=OWNER_MAC,
-        authority=AUTHORITY_ASL,
-        coverage=(f"{_PI}/tests/test_companion_live_reply.py",),
-    ),
-    _companion_module(
-        "companion.ntfy",
-        "Receipt-aware ntfy publisher over the standard library only. "
-        "Migrated to asl_workbench.notifications, which adds the deployment "
-        "guard that keeps a local or staging run from becoming a second "
-        "publisher; the Pi module is the frozen baseline until the Companion "
-        "imports the portable package.",
-        owner=OWNER_PORTABLE,
-        coverage=(
-            f"{_PI}/tests/test_companion_incidents.py",
-            _INTEGRATION_TESTS,
-        ),
-    ),
-    _companion_module(
-        "companion.observation",
-        "The one place ASL's shapes become the Companion's shapes. Timestamp "
-        "and project/run enrichment are shared with the local view through "
-        "asl_workbench.history.",
-        owner=OWNER_PORTABLE,
-        coverage=(
-            f"{_PI}/tests/test_companion_observation.py",
-            _HISTORY_TESTS,
-            _STORE_TESTS,
-        ),
-    ),
-    _companion_module(
-        "companion.projects",
-        "Project and plan labels read locally; paths never leave the Mac.",
-        owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_projects.py",),
-    ),
-    _companion_module(
-        "companion.protocol",
-        "Protocol v1: envelope validation, operation states, allowlists. The "
-        "Workbench's own five envelopes are versioned separately in "
-        "asl_workbench.transport, which reuses this module's bounded frames "
-        "and closed shapes without inheriting its version number; the Pi "
-        "module is the frozen baseline until the Companion imports the "
-        "portable package.",
-        owner=OWNER_PORTABLE,
-        # Validation is what the envelope is for, so the full-stack module is
-        # named for the refusals a live pairing has to survive: a frame
-        # addressed to another Pi, a version nobody speaks granting nothing, an
-        # unknown capability narrowing the pairing rather than killing it, a
-        # frame over the size limit refused before it is parsed, and a
-        # non-finite number that never becomes a timestamp -- each of them a
-        # refusal the service answers the next request after.
-        coverage=(
-            f"{_PI}/tests/test_companion_protocol.py",
-            _TRANSPORT_TESTS,
-            _FULLSTACK_TESTS,
-        ),
-    ),
-    _companion_module(
-        "companion.questions",
-        "The question bodies the Pi holds, and nothing else.",
-        owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_api.py",),
-    ),
-    _companion_module(
-        "companion.recovery",
-        "Companion-only consistent snapshots and offline restore staging. "
-        "Migrated to asl_workbench.lifecycle: every switch snapshots the state "
-        "through SQLite before it happens, an interrupted install leaves a "
-        "transaction record that blocks the next one until it is recovered, "
-        "and a rollback reinstalls the previous release from its retained "
-        "artifact rather than from files something may have edited -- together "
-        "with the state that release was running on, while the data written "
-        "since the upgrade is kept separately rather than discarded. An "
-        "interrupted migration recovers the same way an interrupted install "
-        "does, and neither a recovery nor a rollback reinstates a credential "
-        "somebody has since revoked.",
-        owner=OWNER_PORTABLE,
-        authority=AUTHORITY_HOST,
-        coverage=(
-            f"{_PI}/tests/test_companion_rollout.py",
-            _LIFECYCLE_TESTS,
-            _MIGRATION_TESTS,
-        ),
-    ),
-    _companion_module(
-        "companion.resume",
-        "What a resume launch proves and what it does not. The interpretation "
-        "is ASL's own now, in asl_workbench.actions; this module is the "
-        "Companion's adapter onto it.",
-        owner=OWNER_MAC,
-        authority=AUTHORITY_ASL,
-        coverage=(_ACTION_TESTS, f"{_PI}/tests/test_companion_resume.py"),
-    ),
-    _companion_module(
-        "companion.runtime",
-        "Installed entry points; secrets and reply bodies stay out of "
-        "diagnostics. Migrated to asl_workbench.runtime, which the unit starts "
-        "from the release directory as a module of the packaged application, "
-        "under a runtime lock that makes a second service refuse rather than "
-        "share the state.",
-        owner=OWNER_PORTABLE,
-        authority=AUTHORITY_HOST,
-        coverage=(
-            f"{_PI}/tests/test_companion_lifecycle.py",
-            _PORTABLE_TESTS,
-            _LIFECYCLE_TESTS,
-        ),
-    ),
-    _companion_module(
-        "companion.service",
-        "The Pi's HTTP service: one ingest path, three read audiences, one "
-        "health check.",
-        owner=OWNER_PORTABLE,
-        coverage=(f"{_PI}/tests/test_companion_api.py",),
-    ),
-    _companion_module(
-        "companion.store",
-        "The Pi's SQLite store: migrations, ordered ingestion, retention, "
-        "reads. Migrated to asl_workbench.store, which owns catalog storage "
-        "the Pi module never had; the Pi module is the frozen baseline until "
-        "the Companion imports the portable package. An existing database is "
-        "carried onto it in place, keeping the run keys, entry ids and "
-        "incident ids it already holds.",
-        owner=OWNER_PORTABLE,
-        coverage=(
-            f"{_PI}/tests/test_companion_api.py",
-            f"{_PI}/tests/test_companion_history.py",
-            _MIGRATION_TESTS,
-            _STORE_TESTS,
-        ),
-    ),
-    # -- Companion browser workflows ---------------------------------------
+    # -- Workbench browser workflows migrated from Companion ----------------
     Capability(
-        key=f"{SURFACE_COMPANION_BROWSER}:overview-sections",
-        surface=SURFACE_COMPANION_BROWSER,
+        key=f"{SURFACE_WORKBENCH_BROWSER}:overview-sections",
+        surface=SURFACE_WORKBENCH_BROWSER,
         summary="Needs-attention, running, unconfirmed, recent, and linked-"
         "older sections as the phone overview.",
         origin=ORIGIN_COMPANION,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
-        # The Pi's spec is kept because it is what the behaviour was proven by;
-        # the two new references are what proves it survived the move, section
-        # by section and in both deployments rather than only on the phone.
+        # The surviving references prove the transferred behaviour section by
+        # section and in both deployments rather than only on the phone.
         regression_coverage=(
-            f"{_PI}/tests/browser/dashboard.spec.js",
             _OVERVIEW_TESTS,
             _OVERVIEW_BROWSER_TESTS,
         ),
     ),
     Capability(
-        key=f"{SURFACE_COMPANION_BROWSER}:filters-and-sort",
-        surface=SURFACE_COMPANION_BROWSER,
+        key=f"{SURFACE_WORKBENCH_BROWSER}:filters-and-sort",
+        surface=SURFACE_WORKBENCH_BROWSER,
         summary="Project, harness, search, sort order, age-window note, and "
         "clear-filters.",
         origin=ORIGIN_COMPANION,
@@ -1473,22 +1065,19 @@ CAPABILITIES: tuple[Capability, ...] = (
         # halves: the narrowing is applied before the page and counted over the
         # whole match, and every mode the select offers is one a server takes.
         regression_coverage=(
-            f"{_PI}/tests/browser/dashboard.spec.js",
             _OVERVIEW_TESTS,
             _OVERVIEW_BROWSER_TESTS,
         ),
     ),
     Capability(
-        key=f"{SURFACE_COMPANION_BROWSER}:freshness-chip",
-        surface=SURFACE_COMPANION_BROWSER,
+        key=f"{SURFACE_WORKBENCH_BROWSER}:freshness-chip",
+        surface=SURFACE_WORKBENCH_BROWSER,
         summary="Observed-at and freshness chip: what the page is showing and "
         "how old it is.",
         origin=ORIGIN_COMPANION,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
         regression_coverage=(
-            f"{_PI}/tests/browser/dashboard.spec.js",
-            f"{_PI}/tests/test_companion_observation.py",
             # Including the case the chip exists for: a partial generation
             # leaves rows the newest observation never confirmed, and the page
             # has to say so instead of drawing them as live.
@@ -1497,8 +1086,8 @@ CAPABILITIES: tuple[Capability, ...] = (
         ),
     ),
     Capability(
-        key=f"{SURFACE_COMPANION_BROWSER}:linked-run-deep-link",
-        surface=SURFACE_COMPANION_BROWSER,
+        key=f"{SURFACE_WORKBENCH_BROWSER}:linked-run-deep-link",
+        surface=SURFACE_WORKBENCH_BROWSER,
         summary="Notification deep link opens one run, with a dismissable "
         "older-run warning.",
         origin=ORIGIN_COMPANION,
@@ -1511,56 +1100,53 @@ CAPABILITIES: tuple[Capability, ...] = (
         # lets a run that has gone quiet get its own heading instead of a row
         # among today's work.
         regression_coverage=(
-            f"{_PI}/tests/browser/dashboard.spec.js",
             _SHELL_BROWSER_TESTS,
             _OVERVIEW_BROWSER_TESTS,
         ),
     ),
     Capability(
-        key=f"{SURFACE_COMPANION_BROWSER}:reply-panel",
-        surface=SURFACE_COMPANION_BROWSER,
+        key=f"{SURFACE_WORKBENCH_BROWSER}:reply-panel",
+        surface=SURFACE_WORKBENCH_BROWSER,
         summary="Phone reply flow: question body, draft, availability, send, "
         "and its refusal messages.",
         origin=ORIGIN_COMPANION,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_ASL,
         regression_coverage=(
-            f"{_PI}/tests/browser/reply_ui.spec.js",
-            f"{_PI}/tests/test_companion_reply_ui.py",
+            _ACTION_TESTS,
+            _INTERACTION_TESTS,
+            _INTERACTION_BROWSER_TESTS,
         ),
     ),
     Capability(
-        key=f"{SURFACE_COMPANION_BROWSER}:resume-reply",
-        surface=SURFACE_COMPANION_BROWSER,
+        key=f"{SURFACE_WORKBENCH_BROWSER}:resume-reply",
+        surface=SURFACE_WORKBENCH_BROWSER,
         summary="Resume a paused run from the phone, with the explanation of "
         "what a launch proves.",
         origin=ORIGIN_COMPANION,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_ASL,
         regression_coverage=(
-            f"{_PI}/tests/browser/reply_ui.spec.js",
-            f"{_PI}/tests/test_companion_resume.py",
+            _ACTION_TESTS,
+            _INTERACTION_TESTS,
+            _INTERACTION_BROWSER_TESTS,
         ),
     ),
     Capability(
-        key=f"{SURFACE_COMPANION_BROWSER}:failure-banners",
-        surface=SURFACE_COMPANION_BROWSER,
+        key=f"{SURFACE_WORKBENCH_BROWSER}:failure-banners",
+        surface=SURFACE_WORKBENCH_BROWSER,
         summary="Banners for transport, staleness, and incident conditions the "
         "page must not hide.",
         origin=ORIGIN_COMPANION,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
-        # The Pi's own spec is the frozen baseline's; this row is owned by the
-        # portable package, so the surviving banner region is what has to be
-        # gated. The Workbench suites now do it from three sides: the freshness
+        # The surviving banner region is gated from three sides: the freshness
         # and completeness a read reports, the full stack actually losing its
         # link and saying so about itself rather than going quiet, and the
         # browser drawing the one incident state that means "nobody can
         # establish whether this alert landed" -- and drawing nothing for the
         # five that would turn every raised alert into a delivery failure.
         regression_coverage=(
-            f"{_PI}/tests/browser/failure_matrix.spec.js",
-            f"{_PI}/tests/test_companion_failure_matrix.py",
             _OVERVIEW_TESTS,
             _FULLSTACK_TESTS,
             _OVERVIEW_BROWSER_TESTS,
@@ -1579,10 +1165,7 @@ CAPABILITIES: tuple[Capability, ...] = (
             "existing notification links must keep resolving",
             "only a production deployment may hold the production publisher",
         ),
-        regression_coverage=(
-            f"{_PI}/tests/test_companion_incidents.py",
-            _INTEGRATION_TESTS,
-        ),
+        regression_coverage=(_INTEGRATION_TESTS,),
     ),
     Capability(
         key=f"{SURFACE_INTEGRATION}:uptime-kuma-monitor",
@@ -1596,10 +1179,7 @@ CAPABILITIES: tuple[Capability, ...] = (
             "a monitor installed under the Companion's name is renamed in "
             "place rather than duplicated",
         ),
-        regression_coverage=(
-            f"{_PI}/tests/test_companion_integrations.py",
-            _INTEGRATION_TESTS,
-        ),
+        regression_coverage=(_INTEGRATION_TESTS,),
     ),
     Capability(
         key=f"{SURFACE_INTEGRATION}:tailscale-serve-route",
@@ -1610,10 +1190,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_HOST,
         compatibility_adapters=("the existing private URL must not change",),
-        regression_coverage=(
-            f"{_PI}/tests/test_companion_integrations.py",
-            _INTEGRATION_TESTS,
-        ),
+        regression_coverage=(_INTEGRATION_TESTS,),
     ),
     Capability(
         key=f"{SURFACE_INTEGRATION}:homepage-documents",
@@ -1627,10 +1204,7 @@ CAPABILITIES: tuple[Capability, ...] = (
             "an installed card is recognised by its receipt and its former "
             "group heading, so the visible name can change without orphaning it",
         ),
-        regression_coverage=(
-            f"{_PI}/tests/test_companion_integrations.py",
-            _INTEGRATION_TESTS,
-        ),
+        regression_coverage=(_INTEGRATION_TESTS,),
     ),
     Capability(
         key=f"{SURFACE_INTEGRATION}:agentmux-bridge",
@@ -1665,10 +1239,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         compatibility_adapters=(
             "existing installation prefixes and unit identifiers are preserved",
         ),
-        regression_coverage=(
-            f"{_PI}/tests/test_companion_lifecycle.py",
-            _LIFECYCLE_TESTS,
-        ),
+        regression_coverage=(_LIFECYCLE_TESTS,),
     ),
     # -- Persistence boundaries --------------------------------------------
     Capability(
@@ -1705,7 +1276,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         authority=AUTHORITY_ASL,
         regression_coverage=(
             _SERVER_TESTS,
-            f"{_PI}/tests/test_companion_history.py",
             _HISTORY_TESTS,
         ),
     ),
@@ -1790,8 +1360,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         # holds no prose and no path, and that republishing the same corpus ten
         # times neither duplicates a row nor grows the file without bound.
         regression_coverage=(
-            f"{_PI}/tests/test_companion_api.py",
-            f"{_PI}/tests/test_companion_transport.py",
             _STORE_TESTS,
             _FULLSTACK_TESTS,
         ),
@@ -1808,7 +1376,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         authority=AUTHORITY_HOST,
         compatibility_adapters=("existing credentials are preserved, not reissued",),
         regression_coverage=(
-            f"{_PI}/tests/test_companion_lifecycle.py",
             _TRANSPORT_TESTS,
             _LIFECYCLE_TESTS,
         ),
@@ -1823,10 +1390,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_COMPANION,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_HOST,
-        regression_coverage=(
-            f"{_PI}/tests/test_companion_lifecycle.py",
-            _LIFECYCLE_TESTS,
-        ),
+        regression_coverage=(_LIFECYCLE_TESTS,),
     ),
     Capability(
         key=f"{SURFACE_PERSISTENCE}:connector-operation-journal",
@@ -1842,7 +1406,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         # left unsettled rather than guessed at -- then restarts the connector
         # and has it close the row out instead of running the mutation twice.
         regression_coverage=(
-            f"{_PI}/tests/test_companion_transport.py",
             _OPERATION_TESTS,
             _STORE_TESTS,
             _FULLSTACK_TESTS,
@@ -1892,9 +1455,9 @@ def coverage_gaps() -> tuple[Capability, ...]:
 def coverage_paths(alias: str) -> tuple[str, ...]:
     """Distinct repository-relative coverage paths named under one alias.
 
-    Split out by alias because the two repositories are checked differently:
-    ``scripts`` paths always resolve, while ``sglavoie_raspberry_pi`` paths only
-    resolve when a Pi checkout is reachable.
+    The final matrix names only coverage for the surviving implementation in
+    ``scripts``. Historical Pi evidence is retained as evidence, not as a test
+    dependency for maintained behavior.
     """
     if alias not in COVERAGE_ALIASES:
         raise MatrixError(f"no coverage alias named {alias!r}")
@@ -1952,6 +1515,11 @@ def validate_matrix(
     changes = set(known_changes) if known_changes is not None else None
     problems: list[str] = []
     seen: set[str] = set()
+    if set(OPERATION_BEHAVIOR_OWNERS) != set(OPERATION_METHODS):
+        problems.append("operation ownership does not cover the closed method set")
+    for method, owner in OPERATION_BEHAVIOR_OWNERS.items():
+        if owner not in OWNERS:
+            problems.append(f"operation {method}: unknown owner {owner!r}")
     for row in CAPABILITIES:
         if row.key in seen:
             problems.append(f"{row.key}: duplicate key")
@@ -2066,4 +1634,5 @@ def payload() -> dict[str, object]:
         "total": len(CAPABILITIES),
         "by_surface": dict(counts),
         "coverage_gaps": [row.key for row in coverage_gaps()],
+        "operation_behavior_owners": dict(OPERATION_BEHAVIOR_OWNERS),
     }

@@ -25,12 +25,10 @@ than in each of them.
   non-finite constants ``json`` would otherwise accept and later re-emit as
   text no other parser will read back.
 
-This module is deliberately the Companion's rules rather than better ones: an
-installed prefix at
-``sglavoie_raspberry_pi:services/pi-monitoring/companion/lifecycle.py``'s
-layout must keep loading here without being rewritten. What is new is that they
-are stated once, in the portable package, where both the integration
-transactions and the packaging operations that follow can reach them.
+This module deliberately preserves the retired Companion's installation rules:
+an existing prefix must keep loading here without being rewritten. They are now
+stated once, in the portable package, where both integration transactions and
+packaging operations can reach them.
 """
 
 from __future__ import annotations

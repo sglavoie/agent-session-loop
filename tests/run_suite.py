@@ -295,6 +295,10 @@ INTEGRATION_MODULES = (
     # Integration rather than portable: it binds a loopback server and spawns
     # a fresh interpreter to prove the portable package loads without ASL.
     "tests.test_workbench_foundations",
+    # Final cross-repository ownership audit: it reads the registered Pi
+    # checkout to prove the retired implementation is gone and its historical
+    # evidence remains, so it cannot run in a scripts-only portable checkout.
+    "tests.test_workbench_consolidation",
     # Same shape, one step further out: the production artifact is unpacked and
     # the packaged application is started as a release, so this lane needs a
     # socket and child interpreters. It is also the one module the Pi's own

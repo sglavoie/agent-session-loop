@@ -100,7 +100,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from asl_workbench import companion_inventory, lifecycle
+from asl_workbench import lifecycle
 
 #: The ``scripts`` checkout this module is part of.
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -125,6 +125,8 @@ EVIDENCE_RELATIVE_PATH = (
 #: check against whatever they point at.
 ENV_EVIDENCE_DIR = "ASL_WORKBENCH_EVIDENCE_DIR"
 ENV_RELEASE_REVISION = "ASL_WORKBENCH_RELEASE_REVISION"
+ENV_PI_CHECKOUT = "ASL_WORKBENCH_PI_CHECKOUT"
+PI_REPOSITORY_RELATIVE_PATH = Path("1_dev_projects") / "sglavoie_raspberry_pi"
 
 #: Bounds. A report is a few kilobytes of identifiers and timestamps; anything
 #: larger is carrying something it should not be.
@@ -258,19 +260,36 @@ class EvidenceError(AssertionError):
 # Locating the evidence
 
 
+def locate_pi_repository(
+    scripts_root: Path = REPO_ROOT,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> Path | None:
+    """Locate the registered Pi repository without depending on retired source."""
+    env = os.environ if environ is None else environ
+    candidates = []
+    if override := env.get(ENV_PI_CHECKOUT):
+        candidates.append(Path(override))
+    candidates.append(Path(scripts_root).resolve().parent / PI_REPOSITORY_RELATIVE_PATH)
+    for candidate in candidates:
+        if (candidate / EVIDENCE_RELATIVE_PATH).is_dir():
+            return candidate
+    return None
+
+
 def evidence_directory(environ: Mapping[str, str] | None = None) -> Path:
     """Where the three reports live, or raise saying why nothing can be read."""
     env = os.environ if environ is None else environ
     override = env.get(ENV_EVIDENCE_DIR)
     if override:
         return Path(override)
-    package = companion_inventory.locate_companion_package(REPO_ROOT, environ=env)
-    if package is None:
+    repository = locate_pi_repository(environ=env)
+    if repository is None:
         raise EvidenceError(
             "no Pi checkout is reachable, so deployment evidence cannot be read; "
-            f"set {ENV_EVIDENCE_DIR} or {companion_inventory.ENV_PI_CHECKOUT}"
+            f"set {ENV_EVIDENCE_DIR} or {ENV_PI_CHECKOUT}"
         )
-    return package.parent.parent.parent / EVIDENCE_RELATIVE_PATH
+    return repository / EVIDENCE_RELATIVE_PATH
 
 
 def evidence_path(stage: str, environ: Mapping[str, str] | None = None) -> Path:
@@ -466,20 +485,8 @@ def rebuild_digest(repository: Path, revision: str) -> str:
             ) from error
 
 
-def check_release_is_current(repository: Path, revision: str, accepted: str) -> None:
-    """Refuse a release that is not the one this repository would deploy now.
-
-    Three questions, and they fail differently on purpose. A revision that is
-    not a commit here names a release nobody can produce. A revision that is not
-    an ancestor of the accepted one is evidence about something else entirely.
-    A revision that *is* an ancestor but has package commits after it is
-    evidence about a release the tree has since moved past -- stale, which is
-    the failure the calendar would have been used to detect and detects worse.
-
-    Existence is asked first so a typed or invented revision is reported as
-    what it is, rather than as whatever the ancestry question says about a
-    commit that is not there.
-    """
+def check_release_is_ancestor(repository: Path, revision: str, accepted: str) -> None:
+    """Require a real commit on the accepted release's history."""
     try:
         git(repository, "rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}")
     except EvidenceError as error:
@@ -494,6 +501,23 @@ def check_release_is_current(repository: Path, revision: str, accepted: str) -> 
                 f"the evidence accepts {revision[:12]}, which is not an ancestor of "
                 f"the release under acceptance ({accepted[:12]})"
             )
+
+
+def check_release_is_current(repository: Path, revision: str, accepted: str) -> None:
+    """Refuse a release that is not the one this repository would deploy now.
+
+    Three questions, and they fail differently on purpose. A revision that is
+    not a commit here names a release nobody can produce. A revision that is not
+    an ancestor of the accepted one is evidence about something else entirely.
+    A revision that *is* an ancestor but has package commits after it is
+    evidence about a release the tree has since moved past -- stale, which is
+    the failure the calendar would have been used to detect and detects worse.
+
+    Existence is asked first so a typed or invented revision is reported as
+    what it is, rather than as whatever the ancestry question says about a
+    commit that is not there.
+    """
+    check_release_is_ancestor(repository, revision, accepted)
     changed = git(
         repository,
         "rev-list",
@@ -570,7 +594,15 @@ def check_common(document: Mapping[str, Any], stage: str, repository: Path) -> N
     artifact = _matching(release, "artifact", _DIGEST, f"{stage}.release")
 
     accepted = accepted_revision(repository)
-    check_release_is_current(repository, revision, accepted)
+    if stage == STAGE_RETIREMENT:
+        # Retirement changes the source inventory, tests, and ownership docs
+        # after production acceptance; it does not silently redeploy. The
+        # deployed artifact is bound to production evidence below, while the
+        # current working tree is judged by the consolidation and repository
+        # suites in this session's contract.
+        check_release_is_ancestor(repository, revision, accepted)
+    else:
+        check_release_is_current(repository, revision, accepted)
     rebuilt = rebuild_digest(repository, revision)
     if rebuilt != artifact:
         raise EvidenceError(
@@ -775,6 +807,64 @@ def check_phone(
             raise EvidenceError(f"{confirm_where}.checks.{name}: not confirmed")
 
 
+def check_retirement_release(
+    document: Mapping[str, Any], report_path: Path, repository: Path
+) -> None:
+    """Bind retirement to the deployment and phone evidence production proved."""
+    production = read_document(report_path.with_name(f"{STAGE_PRODUCTION}.json"))
+    require_keys(
+        production,
+        ("schema", "stage", "recorded_at", "release", "hosts", "checks", "phone"),
+        STAGE_PRODUCTION,
+    )
+    check_sanitized(production, STAGE_PRODUCTION)
+    if production.get("schema") != SCHEMA_VERSION:
+        raise EvidenceError(
+            "production.schema: retirement requires the accepted production schema"
+        )
+    if production.get("stage") != STAGE_PRODUCTION:
+        raise EvidenceError(
+            "production.stage: retirement requires the accepted production report"
+        )
+    retirement_release = _mapping(document, "release", STAGE_RETIREMENT)
+    production_release = _mapping(production, "release", STAGE_PRODUCTION)
+    require_keys(production_release, ("revision", "artifact"), "production.release")
+    for field in ("revision", "artifact"):
+        if retirement_release.get(field) != production_release.get(field):
+            raise EvidenceError(
+                f"retirement.release.{field}: does not match the accepted "
+                "production deployment"
+            )
+    revision = _matching(
+        production_release, "revision", _REVISION, "production.release"
+    )
+    artifact = _matching(production_release, "artifact", _DIGEST, "production.release")
+    floor = commit_timestamp(repository, revision)
+    ceiling = _timestamp(production, "recorded_at", STAGE_PRODUCTION)
+    hosts = _mapping(production, "hosts", STAGE_PRODUCTION)
+    require_keys(hosts, tuple(HOST_ROLES), "production.hosts")
+    names: dict[str, str] = {}
+    for role in HOST_ROLES:
+        where = f"production.hosts.{role}"
+        host = _mapping(hosts, role, "production.hosts")
+        names[role] = check_provenance(host, role, where)
+        running = _matching(host, "release", _DIGEST, where)
+        if running != artifact:
+            raise EvidenceError(
+                f"{where}.release: does not match the accepted production deployment"
+            )
+        _check_window(
+            _timestamp(host, "observed_at", where),
+            floor,
+            ceiling,
+            f"{where}.observed_at",
+        )
+    if names["mac"] == names["pi"]:
+        raise EvidenceError("production.hosts: one machine cannot prove two hosts")
+    check_checks(production, STAGE_PRODUCTION, floor, ceiling)
+    check_phone(production, artifact, names, floor, ceiling)
+
+
 # ---------------------------------------------------------------------------
 # The whole of one stage
 
@@ -784,7 +874,8 @@ def verify(
 ) -> dict[str, Any]:
     """Read and accept one stage's evidence, or raise saying what is wrong."""
     root = repository or REPO_ROOT
-    document = read_document(path or evidence_path(stage))
+    report_path = path or evidence_path(stage)
+    document = read_document(report_path)
     check_common(document, stage, root)
     release = _mapping(document, "release", stage)
     revision = str(release["revision"])
@@ -797,6 +888,8 @@ def verify(
         hosts = _mapping(document, "hosts", stage)
         names = {role: str(_mapping(hosts, role, stage)["host"]) for role in HOST_ROLES}
         check_phone(document, artifact, names, floor, ceiling)
+    elif stage == STAGE_RETIREMENT:
+        check_retirement_release(document, report_path, root)
     return document
 
 
@@ -815,8 +908,11 @@ class _EvidenceCase:
 
     stage = ""
 
+    def _path(self) -> Path:
+        return evidence_path(self.stage)
+
     def _document(self) -> dict[str, Any]:
-        return read_document(evidence_path(self.stage))
+        return read_document(self._path())
 
     def test_the_report_exists_and_is_a_sanitized_object(self) -> None:
         document = self._document()
@@ -828,7 +924,11 @@ class _EvidenceCase:
         revision = _matching(release, "revision", _REVISION, f"{self.stage}.release")
         artifact = _matching(release, "artifact", _DIGEST, f"{self.stage}.release")
         accepted = accepted_revision(REPO_ROOT)
-        check_release_is_current(REPO_ROOT, revision, accepted)
+        if self.stage == STAGE_RETIREMENT:
+            check_release_is_ancestor(REPO_ROOT, revision, accepted)
+            check_retirement_release(document, self._path(), REPO_ROOT)
+        else:
+            check_release_is_current(REPO_ROOT, revision, accepted)
         rebuilt = rebuild_digest(REPO_ROOT, revision)
         if rebuilt != artifact:
             raise EvidenceError(

@@ -37,7 +37,6 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from asl_workbench import companion_inventory
 from tests import run_suite
 from tests import workbench_acceptance as acceptance
 
@@ -265,6 +264,17 @@ class AcceptanceCase(unittest.TestCase):
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         path = directory / f"{stage}.json"
         path.write_text(json.dumps(document), encoding="utf-8")
+        if stage == acceptance.STAGE_RETIREMENT:
+            production = valid_document(acceptance.STAGE_PRODUCTION)
+            production["release"] = dict(document["release"])
+            for host in production["hosts"].values():
+                host["release"] = document["release"]["artifact"]
+            production["phone"]["confirmation"]["release"] = document["release"][
+                "artifact"
+            ]
+            (directory / "production.json").write_text(
+                json.dumps(production), encoding="utf-8"
+            )
         return path
 
     def accepts(self, stage: str, document: Mapping[str, Any]) -> None:
@@ -367,9 +377,7 @@ class MissingEvidence(AcceptanceCase):
 
     def test_an_unreachable_pi_checkout_is_a_refusal_rather_than_a_skip(self) -> None:
         with (
-            mock.patch.object(
-                companion_inventory, "locate_companion_package", return_value=None
-            ),
+            mock.patch.object(acceptance, "locate_pi_repository", return_value=None),
             self.assertRaises(acceptance.EvidenceError) as caught,
         ):
             acceptance.evidence_directory({})
@@ -378,10 +386,7 @@ class MissingEvidence(AcceptanceCase):
     def test_the_gate_reads_the_registered_pi_location(self) -> None:
         # The path is named by the plan, so it is asserted rather than assumed.
         pi = Path("/tmp/pi-checkout")
-        companion = pi / "services" / "pi-monitoring" / "companion"
-        with mock.patch.object(
-            companion_inventory, "locate_companion_package", return_value=companion
-        ):
+        with mock.patch.object(acceptance, "locate_pi_repository", return_value=pi):
             path = acceptance.evidence_path(acceptance.STAGE_PRODUCTION, {})
         self.assertEqual(
             path,
@@ -433,6 +438,44 @@ class WrongReleaseEvidence(AcceptanceCase):
             ),
             "not the release being accepted",
         )
+
+    def test_retirement_must_name_the_accepted_production_deployment(self) -> None:
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        retirement = valid_document(acceptance.STAGE_RETIREMENT)
+        production = valid_document(acceptance.STAGE_PRODUCTION)
+        production["release"] = {
+            "revision": fixture().package,
+            "artifact": fixture().digest_package,
+        }
+        for host in production["hosts"].values():
+            host["release"] = fixture().digest_package
+        retirement_path = directory / "retirement.json"
+        retirement_path.write_text(json.dumps(retirement), encoding="utf-8")
+        (directory / "production.json").write_text(
+            json.dumps(production), encoding="utf-8"
+        )
+        with self.assertRaises(acceptance.EvidenceError) as caught:
+            acceptance.verify(
+                acceptance.STAGE_RETIREMENT,
+                repository=fixture().root,
+                path=retirement_path,
+            )
+        self.assertIn("accepted production deployment", str(caught.exception))
+
+    def test_retirement_rechecks_the_production_phone_acceptance(self) -> None:
+        retirement = valid_document(acceptance.STAGE_RETIREMENT)
+        path = self.written(acceptance.STAGE_RETIREMENT, retirement)
+        production_path = path.with_name("production.json")
+        production = json.loads(production_path.read_text(encoding="utf-8"))
+        production["phone"]["confirmation"]["verdict"] = "pending"
+        production_path.write_text(json.dumps(production), encoding="utf-8")
+        with self.assertRaises(acceptance.EvidenceError) as caught:
+            acceptance.verify(
+                acceptance.STAGE_RETIREMENT,
+                repository=fixture().root,
+                path=path,
+            )
+        self.assertIn("acceptance stays pending", str(caught.exception))
 
 
 class StaleEvidence(AcceptanceCase):
