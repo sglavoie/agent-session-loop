@@ -21,7 +21,7 @@
 
 import { OUTCOME_PENDING, OUTCOME_RESULT } from "./api.js";
 import { planBody, routePlanId } from "./identity.js";
-import { captureFocus, runMutation } from "./operations.js";
+import { captureFocus, rememberReceipt, runMutation } from "./operations.js";
 import {
   hideReplyPanel,
   setReplyFormDisabled,
@@ -133,6 +133,25 @@ export async function handleReplySubmit(event) {
   if (answer.operation && answer.operation.id) {
     state.reply.operationId = answer.operation.id;
     rememberSubmittedReply(answer.operation.id);
+    // The generic mutation receipt already preserves the operation id across
+    // a reload. Add the question id here, where the live context is still in
+    // hand, so a notification tab can restore the exact recorded-reply state
+    // instead of replacing it with a transient question-read error.
+    if (
+      answer.outcome === OUTCOME_PENDING ||
+      answer.outcome === OUTCOME_RESULT
+    ) {
+      rememberReceipt({
+        operation_id: answer.operation.id,
+        action: "reply",
+        plan: routePlanId(),
+        outcome: answer.outcome,
+        status: answer.operation.status,
+        reason: answer.reason,
+        settled: answer.outcome === OUTCOME_RESULT,
+        question_id: context.question_id,
+      });
+    }
   }
   if (
     answer.outcome === OUTCOME_PENDING &&

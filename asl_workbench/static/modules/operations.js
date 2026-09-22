@@ -426,6 +426,7 @@ export function rememberReceipt(fields) {
     status: fields.status === null ? null : String(fields.status || ""),
     reason: fields.reason ? String(fields.reason) : null,
     settled: fields.settled === true,
+    question_id: fields.question_id ? String(fields.question_id) : null,
   };
   entries.push(receipt);
   writeReceipts(entries);

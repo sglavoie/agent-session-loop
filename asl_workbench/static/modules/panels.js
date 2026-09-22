@@ -4,13 +4,23 @@
  * fails says so where it lives instead of taking the detail view with it.
  */
 
-import { apiRequest, describeError, request, submit } from "./api.js";
+import {
+  OUTCOME_PENDING,
+  OUTCOME_RESULT,
+  apiRequest,
+  describeError,
+  request,
+  submit,
+} from "./api.js";
 import {
   LINKED_QUESTION_OPEN_TIMEOUT_MS,
   REPLY_CONTEXT_ERROR_HINTS,
 } from "./constants.js";
 import { planUrl, routePlanId } from "./identity.js";
-import { applyActionAvailability } from "./operations.js";
+import {
+  applyActionAvailability,
+  receiptsForPlan,
+} from "./operations.js";
 import { clearFormErrors, showFormError } from "./profile.js";
 import { state } from "./state.js";
 
@@ -369,6 +379,7 @@ export async function loadAndRenderReply() {
         clearFormErrors("wb-reply-form-errors");
         showReplyStatus("", "");
       }
+      restoreRecordedReply(questionId);
       if (
         questionId &&
         state.reply.deliveredQuestionId === questionId
@@ -434,6 +445,7 @@ export async function loadAndRenderReply() {
       }
     } else {
       const linkedQuestion = state.route && state.route.questionId;
+      restoreRecordedReply(linkedQuestion);
       const recordedQuestion = state.reply.recordedQuestionId;
       const detailReason =
         body && body.details && typeof body.details === "object"
@@ -443,6 +455,7 @@ export async function loadAndRenderReply() {
         body &&
         body.reason === "detail-refused" &&
         detailReason === "not-found";
+      const questionTimedOut = body && body.reason === "detail-timeout";
       const linkedNotFound = linkedQuestion && questionNotFound;
       if (
         recordedQuestion &&
@@ -456,7 +469,7 @@ export async function loadAndRenderReply() {
         hideReplyPanel();
         return;
       }
-      if (linkedNotFound) {
+      if (linkedNotFound || (linkedQuestion && questionTimedOut)) {
         const startedAt = state.reply.openingStartedAt;
         if (
           state.reply.openingQuestionId !== linkedQuestion ||
@@ -468,7 +481,9 @@ export async function loadAndRenderReply() {
         }
         renderReplyContextError({
           error:
-            "This alert's question is no longer available. Open the latest notification or return to the queue.",
+            questionTimedOut
+              ? "This alert's question could not be loaded before the deadline. Open the latest notification or return to the queue."
+              : "This alert's question is no longer available. Open the latest notification or return to the queue.",
         });
         return;
       }
@@ -480,6 +495,39 @@ export async function loadAndRenderReply() {
       error: describeError(err),
     });
   }
+}
+
+/** Restore a durable live-reply receipt after Safari reloads the alert tab. */
+export function restoreRecordedReply(questionId) {
+  if (!questionId) return false;
+  const outstanding = state.detailOutstanding;
+  const target =
+    outstanding && outstanding.target && typeof outstanding.target === "object"
+      ? outstanding.target
+      : {};
+  const heldQuestion =
+    outstanding && (outstanding.question_id || target.question_id);
+  if (
+    outstanding &&
+    outstanding.operation_id &&
+    outstanding.method === "question.reply" &&
+    heldQuestion === questionId
+  ) {
+    state.reply.recordedQuestionId = questionId;
+    state.reply.recordedOperationId = String(outstanding.operation_id);
+    return true;
+  }
+  const receipt = receiptsForPlan(routePlanId()).find(
+    (entry) =>
+      entry.action === "reply" &&
+      entry.question_id === questionId &&
+      (entry.outcome === OUTCOME_PENDING || entry.outcome === OUTCOME_RESULT) &&
+      entry.operation_id
+  );
+  if (!receipt) return false;
+  state.reply.recordedQuestionId = questionId;
+  state.reply.recordedOperationId = receipt.operation_id;
+  return true;
 }
 
 /** Keep a question-bound notification on its exact question while data catches up. */

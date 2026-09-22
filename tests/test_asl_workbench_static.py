@@ -1508,6 +1508,9 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn(
             "the server returned no durable operation receipt", submit_body
         )
+        self.assertIn("question_id: context.question_id", submit_body)
+        self.assertIn("restoreRecordedReply(questionId)", decoded)
+        self.assertIn('body.reason === "detail-timeout"', decoded)
         # The privacy regression from earlier sessions must still hold:
         # reply text is never persisted to sessionStorage / localStorage.
         for pattern in (
