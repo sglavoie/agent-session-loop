@@ -466,7 +466,7 @@ def _observe_run(
 ) -> None:
     run_key = str(run["run_key"])
     plan_key = str(run["plan_key"])
-    plan_epoch(connection, connector_id, plan_key, now)
+    first_seen_at = plan_epoch(connection, connector_id, plan_key, now)
 
     # A delayed projection must not resurrect a run whose ending we hold.
     terminal = connection.execute(
@@ -497,7 +497,17 @@ def _observe_run(
         # snapshot would mean a question is never unanswered for long enough.
         asked_since = previous["question_since"]
     else:
-        asked_since = now
+        try:
+            question_asked_at = float(run["question_asked_at"])
+        except (KeyError, TypeError, ValueError):
+            question_asked_at = now
+        # A bounded worker wait can briefly disappear between two waits for the
+        # same durable mailbox question.  Recover its original age from the
+        # projection instead of restarting the notification timer.  The plan's
+        # local monitoring epoch prevents an old question discovered at service
+        # startup from producing an immediate historical alert, while the upper
+        # clamp rejects a source clock that claims the question is in the future.
+        asked_since = max(first_seen_at, min(question_asked_at, now))
 
     connection.execute(
         "INSERT INTO incident_watch (connector_id, run_key, plan_key, project, "

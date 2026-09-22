@@ -1585,6 +1585,22 @@ class IncidentIdentityTests(IncidentCase):
             self.diagnostics()[0]["delivery_state"], incidents.DELIVERY_PUBLISHED
         )
 
+    def test_resuming_the_same_question_recovers_its_original_wait_age(self) -> None:
+        question = self.question_row()
+        question["question_asked_at"] = NOW
+        self.observe([question])
+        self.at(119)
+        self.observe([run_row("run-1")])
+        self.at(120)
+        self.observe([question])
+        self.engine.tick()
+        self.assertEqual(self.publisher.calls, [])
+        self.at(120.001)
+        self.engine.tick()
+        self.assertEqual(
+            self.diagnostics()[0]["delivery_state"], incidents.DELIVERY_PUBLISHED
+        )
+
     def test_an_unknown_incident_kind_is_refused(self) -> None:
         with self.store.transaction() as connection, self.assertRaises(ValueError):
             incidents.record(
