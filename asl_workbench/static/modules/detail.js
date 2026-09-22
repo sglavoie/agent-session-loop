@@ -7,7 +7,11 @@
  */
 
 import { apiRequest, describeError } from "./api.js";
-import { DETAIL_REFRESH_INTERVAL_MS, HARNESS_NAMES } from "./constants.js";
+import {
+  DETAIL_REFRESH_INTERVAL_MS,
+  HARNESS_NAMES,
+  LINKED_QUESTION_REFRESH_INTERVAL_MS,
+} from "./constants.js";
 import {
   planHint,
   planIdOf,
@@ -41,11 +45,18 @@ import { state } from "./state.js";
 
 export function scheduleDetailRefresh() {
   stopDetailTimer();
+  const linkedQuestion = state.route && state.route.questionId;
+  const loadedQuestion =
+    state.detailReplyContext && state.detailReplyContext.question_id;
+  const delay =
+    linkedQuestion && linkedQuestion !== loadedQuestion
+      ? LINKED_QUESTION_REFRESH_INTERVAL_MS
+      : DETAIL_REFRESH_INTERVAL_MS;
   state.detailTimer = window.setTimeout(() => {
     refreshDetail().finally(() => {
       if (state.route.name === "detail") scheduleDetailRefresh();
     });
-  }, DETAIL_REFRESH_INTERVAL_MS);
+  }, delay);
 }
 
 export function stopDetailTimer() {
@@ -134,7 +145,10 @@ export async function refreshDetail() {
     setRefreshStatus("error", "error: " + describeError(err));
   } finally {
     state.detailInFlight = false;
-    if (pendingFocus) {
+    if (state.reply.scrollToTopAfterDelivery) {
+      state.reply.scrollToTopAfterDelivery = false;
+      window.scrollTo(window.scrollX || 0, 0);
+    } else if (pendingFocus) {
       applyDetailFocus();
     } else {
       restoreDetailScroll(scrollSnapshot);

@@ -9,6 +9,7 @@ import { request } from "./api.js";
 
 export const REFRESH_INTERVAL_MS = 5000;
 export const DETAIL_REFRESH_INTERVAL_MS = 5000;
+export const LINKED_QUESTION_REFRESH_INTERVAL_MS = 1000;
 export const SEARCH_DEBOUNCE_MS = 150;
 export const DESKTOP_SHELL_MEDIA_QUERY = "(min-width: 960px)";
 export const TOKEN_STORAGE_KEY = "wb.token";
