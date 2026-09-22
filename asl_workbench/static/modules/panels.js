@@ -6,7 +6,7 @@
 
 import { apiRequest, describeError, request, submit } from "./api.js";
 import { REPLY_CONTEXT_ERROR_HINTS } from "./constants.js";
-import { planUrl } from "./identity.js";
+import { planUrl, routePlanId } from "./identity.js";
 import { applyActionAvailability } from "./operations.js";
 import { clearFormErrors, showFormError } from "./profile.js";
 import { state } from "./state.js";
@@ -334,12 +334,20 @@ export function renderArtifactsPanel(artifacts) {
 }
 
 export async function loadAndRenderReply() {
+  const requestedPlan = routePlanId();
+  const requestedQuestion = state.route && state.route.questionId;
   const panel = document.getElementById("wb-reply-panel");
   if (panel) panel.hidden = false;
   try {
     const body = await apiRequest(
       planUrl("/api/questions")
     );
+    if (
+      routePlanId() !== requestedPlan ||
+      (state.route && state.route.questionId) !== requestedQuestion
+    ) {
+      return;
+    }
     if (body && body.ok) {
       const questionId = body.question_id ? String(body.question_id) : null;
       const linkedQuestion = state.route && state.route.questionId;

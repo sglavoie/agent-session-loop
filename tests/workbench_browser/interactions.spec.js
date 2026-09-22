@@ -246,8 +246,13 @@ for (const deployment of DEPLOYMENTS) {
       let projectedQuestion = "live-question-1";
       let servedQuestion = "live-question-1";
       let questionClosed = false;
+      let delayFirstPlanRead = true;
 
       await page.route("**/api/plan*", async (route) => {
+        if (delayFirstPlanRead) {
+          delayFirstPlanRead = false;
+          await new Promise((resolve) => setTimeout(resolve, 3500));
+        }
         const response = await route.fetch();
         const body = await response.json();
         body.runs = [
@@ -305,6 +310,22 @@ for (const deployment of DEPLOYMENTS) {
         replyAttempts += 1;
         const request = route.request();
         const payload = request.postDataJSON();
+        if (payload.reply_text === "Immediately consumed reply.") {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              ok: true,
+              reason: "consumed",
+              operation: {
+                operation_id: "immediate-consumption-operation",
+                status: "consumed",
+                method: "question.reply",
+              },
+            }),
+          });
+          return;
+        }
         if (replyAttempts === 1) {
           await route.fulfill({
             status: 409,
@@ -346,7 +367,10 @@ for (const deployment of DEPLOYMENTS) {
         .poll(() => new URL(page.url()).hash)
         .toContain("question=live-question-1");
       const form = page.locator("#wb-reply-form");
-      await expect(form).toBeVisible();
+      // The exact-question read is independent of the much larger detail
+      // refresh. A slow plan payload must not keep a notification link on the
+      // "Opening…" state.
+      await expect(form).toBeVisible({ timeout: 2500 });
       const send = form.locator('button[type="submit"]');
       const activateSend = () =>
         testInfo.project.name === "mobile-webkit" ? send.tap() : send.click();
@@ -495,21 +519,6 @@ for (const deployment of DEPLOYMENTS) {
       });
       await expect(form).toBeVisible({ timeout: 3000 });
       await page.locator("#wb-reply-text").fill("Immediately consumed reply.");
-      await page.route(/\/api\/question-reply(?:\?|$)/, async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            ok: true,
-            reason: "consumed",
-            operation: {
-              operation_id: "immediate-consumption-operation",
-              status: "consumed",
-              method: "question.reply",
-            },
-          }),
-        });
-      });
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
       page.once("dialog", (dialog) => dialog.accept());
