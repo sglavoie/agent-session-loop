@@ -16,6 +16,8 @@ from tests import workbench_acceptance
 
 SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
 MONITORING_RELATIVE = Path("services") / "pi-monitoring"
+CANONICAL_BROWSER_ENTRY_POINT = "scripts:asl_workbench/static/index.html"
+CANONICAL_BROWSER_MODULES = Path("asl_workbench/static/modules")
 
 DELIBERATE_ADAPTER_CAPABILITIES = frozenset(
     {
@@ -34,6 +36,32 @@ DELIBERATE_ADAPTER_CAPABILITIES = frozenset(
         "persistence:companion-credentials",
     }
 )
+
+
+def _tracked_repository_files(
+    repositories: dict[str, Path],
+) -> dict[str, tuple[Path, ...]]:
+    return {
+        alias: tuple(
+            Path(value)
+            for value in workbench_acceptance.git(repository, "ls-files", "-z").split(
+                "\0"
+            )
+            if value
+        )
+        for alias, repository in repositories.items()
+    }
+
+
+def _browser_entry_points(
+    repository_files: dict[str, tuple[Path, ...]],
+) -> frozenset[str]:
+    return frozenset(
+        f"{alias}:{path.as_posix()}"
+        for alias, paths in repository_files.items()
+        for path in paths
+        if path.name == "index.html"
+    )
 
 
 class ConsolidationFixture(unittest.TestCase):
@@ -90,7 +118,7 @@ class LegacyRetirementTests(ConsolidationFixture):
         self.assertIn("does not carry a copy", text)
 
 
-class OwnershipAuditTests(unittest.TestCase):
+class OwnershipAuditTests(ConsolidationFixture):
     def test_only_surviving_surfaces_and_coverage_are_published(self) -> None:
         self.assertFalse(
             any(surface.startswith("companion-") for surface in capabilities.SURFACES)
@@ -125,10 +153,54 @@ class OwnershipAuditTests(unittest.TestCase):
         }
         self.assertEqual(DELIBERATE_ADAPTER_CAPABILITIES, actual)
 
-    def test_the_canonical_package_contains_the_only_browser_assets(self) -> None:
-        static = SCRIPTS_ROOT / "asl_workbench/static"
-        self.assertTrue((static / "index.html").is_file())
-        self.assertTrue(any((static / "modules").glob("*.js")))
+    def _assert_only_canonical_browser_frontend(
+        self, repository_files: dict[str, tuple[Path, ...]]
+    ) -> None:
+        expected = {CANONICAL_BROWSER_ENTRY_POINT}
+        actual = _browser_entry_points(repository_files)
+        unexpected = actual - expected
+        self.assertFalse(
+            unexpected,
+            f"second browser frontend(s): {', '.join(sorted(unexpected))}",
+        )
+        self.assertEqual(
+            expected,
+            actual,
+            "the canonical browser frontend is missing",
+        )
+        self.assertTrue(
+            any(
+                path.parent == CANONICAL_BROWSER_MODULES and path.suffix == ".js"
+                for path in repository_files.get("scripts", ())
+            ),
+            "the canonical browser module tree is missing",
+        )
+
+    def test_no_second_browser_frontend_exists_in_either_repository(self) -> None:
+        repository_files = _tracked_repository_files(
+            {
+                "scripts": SCRIPTS_ROOT,
+                "sglavoie_raspberry_pi": self.pi_repository,
+            }
+        )
+        self._assert_only_canonical_browser_frontend(repository_files)
+
+    def test_uniqueness_assertion_rejects_a_second_browser_frontend(self) -> None:
+        repository_files = _tracked_repository_files(
+            {
+                "scripts": SCRIPTS_ROOT,
+                "sglavoie_raspberry_pi": self.pi_repository,
+            }
+        )
+        repository_files["scripts"] += (
+            Path("second_frontend/index.html"),
+            Path("second_frontend/modules/app.js"),
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError, r"scripts:second_frontend/index\.html"
+        ):
+            self._assert_only_canonical_browser_frontend(repository_files)
 
 
 if __name__ == "__main__":
