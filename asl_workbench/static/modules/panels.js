@@ -342,6 +342,11 @@ export async function loadAndRenderReply() {
     );
     if (body && body.ok) {
       const questionId = body.question_id ? String(body.question_id) : null;
+      const linkedQuestion = state.route && state.route.questionId;
+      if (linkedQuestion && questionId !== linkedQuestion) {
+        renderReplyPending(linkedQuestion);
+        return;
+      }
       if (state.reply.questionId !== questionId) {
         state.reply.operationId = null;
         state.reply.questionId = questionId;
@@ -393,6 +398,21 @@ export async function loadAndRenderReply() {
       error: describeError(err),
     });
   }
+}
+
+/** Keep a question-bound notification on its exact question while data catches up. */
+export function renderReplyPending(questionId) {
+  state.detailReplyContext = null;
+  const panel = document.getElementById("wb-reply-panel");
+  if (panel) panel.hidden = false;
+  const form = document.getElementById("wb-reply-form");
+  if (form) form.hidden = true;
+  clearFormErrors("wb-reply-form-errors");
+  const promptEl = document.getElementById("wb-reply-prompt");
+  if (promptEl) promptEl.textContent = "Opening the question from this alert…";
+  const lastEl = document.getElementById("wb-reply-last-message");
+  if (lastEl) lastEl.textContent = questionId ? "question " + questionId : "";
+  showReplyStatus("pending", "Opening the current question…");
 }
 
 export function renderReplyContextError(payload) {

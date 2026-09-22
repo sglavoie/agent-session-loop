@@ -55,11 +55,12 @@ function recoveryCardAction(action) {
  * use the run key from the notification route when there is one so a retained
  * older run cannot make the current plan look answerable.
  */
-export function hasLiveQuestion(runs, linkedRunKey) {
+export function hasLiveQuestion(runs, linkedRunKey, linkedQuestionId) {
   const rows = Array.isArray(runs) ? runs : [];
   return rows.some((run) => {
     if (!run || typeof run !== "object") return false;
     if (linkedRunKey && run.run_key !== linkedRunKey) return false;
+    if (linkedQuestionId && run.question_id !== linkedQuestionId) return false;
     return (
       typeof run.question_id === "string" &&
       run.question_id.length > 0 &&
@@ -68,7 +69,12 @@ export function hasLiveQuestion(runs, linkedRunKey) {
   });
 }
 
-export async function loadAndRenderRecovery(plan, runs, linkedRunKey) {
+export async function loadAndRenderRecovery(
+  plan,
+  runs,
+  linkedRunKey,
+  linkedQuestionId,
+) {
   const planId = routePlanId();
   const compact = plan && plan.recovery ? plan.recovery : null;
   let renderedRecovery = null;
@@ -111,8 +117,9 @@ export async function loadAndRenderRecovery(plan, runs, linkedRunKey) {
     }
   }
   if (
+    linkedQuestionId ||
     (renderedRecovery && renderedRecovery.kind === "reply-needed") ||
-    hasLiveQuestion(runs, linkedRunKey)
+    hasLiveQuestion(runs, linkedRunKey, linkedQuestionId)
   ) {
     await loadAndRenderReply();
   } else {

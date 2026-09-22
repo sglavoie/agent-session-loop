@@ -65,10 +65,12 @@ export function stopDetailTimer() {
  */
 export function liveReplyFormIsInteractive() {
   const context = state.detailReplyContext;
+  const linkedQuestion = state.route && state.route.questionId;
   if (
     !context ||
     context.context_kind !== "waiting" ||
     !context.question_id ||
+    (linkedQuestion && context.question_id !== linkedQuestion) ||
     state.reply.recordedQuestionId === context.question_id
   ) {
     return false;
@@ -114,7 +116,8 @@ export async function refreshDetail() {
         state.route.runKey ||
           (state.detailPlan && state.detailPlan.run_key
             ? state.detailPlan.run_key
-            : null)
+            : null),
+        state.route.questionId || null
       ),
       loadAndRenderRedirect(),
       loadAndRenderState(),

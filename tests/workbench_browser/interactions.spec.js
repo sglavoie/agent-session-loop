@@ -243,13 +243,16 @@ for (const deployment of DEPLOYMENTS) {
       const plan = rowFor(await catalog(page), "charlie");
       expect(plan.run_key).toBeTruthy();
 
+      let projectedQuestion = "live-question-1";
+      let servedQuestion = "live-question-1";
+
       await page.route("**/api/plan*", async (route) => {
         const response = await route.fetch();
         const body = await response.json();
         body.runs = [
           {
             run_key: plan.run_key,
-            question_id: "live-question-1",
+            question_id: projectedQuestion,
             unanswered_count: 1,
           },
         ];
@@ -264,10 +267,10 @@ for (const deployment of DEPLOYMENTS) {
             reason: "ok",
             context_kind: "waiting",
             run_id: "run-live-1",
-            question_id: "live-question-1",
+            question_id: servedQuestion,
             action_token: "live-action-token",
-            rendered_prompt: "Confirm the locked-phone alert.",
-            last_message: "Confirm the locked-phone alert.",
+            rendered_prompt: "Confirm " + servedQuestion + ".",
+            last_message: "Confirm " + servedQuestion + ".",
           }),
         }),
       );
@@ -319,13 +322,16 @@ for (const deployment of DEPLOYMENTS) {
       await page.goto(
         authorizedURL(
           deployment,
-          `#run=${encodeURIComponent(plan.run_key)}&focus=reply`,
+          `#run=${encodeURIComponent(plan.run_key)}&focus=reply&question=live-question-1`,
         ),
       );
       await expect(page.locator("#wb-shell")).toHaveAttribute(
         "data-route",
         "detail",
       );
+      await expect
+        .poll(() => new URL(page.url()).hash)
+        .toContain("question=live-question-1");
       const form = page.locator("#wb-reply-form");
       await expect(form).toBeVisible();
       const send = form.locator('button[type="submit"]');
@@ -372,6 +378,32 @@ for (const deployment of DEPLOYMENTS) {
         return mutations;
       });
       expect(unchangedRefreshMutations).toEqual([]);
+
+      // A later alert for this same run changes only the question identity.
+      // The old interactive form must stop being authoritative immediately;
+      // otherwise its own anti-poll guard freezes the tab on that old question
+      // until the operator manually reloads it.
+      await page.evaluate(() => {
+        const params = new URLSearchParams(
+          window.location.hash.substring(window.location.hash.indexOf("?") + 1),
+        );
+        params.set("question", "live-question-2");
+        window.location.hash = "#plan?" + params.toString();
+      });
+      await expect(page.locator("#wb-reply-submit-status")).toHaveText(
+        "Opening the current question…",
+      );
+      await expect(form).toBeHidden();
+
+      // The connector projection catches up after the first question read.
+      // The scheduled detail poll must adopt it without a page reload.
+      projectedQuestion = "live-question-2";
+      servedQuestion = "live-question-2";
+      await expect(form).toBeVisible({ timeout: 12000 });
+      await expect(page.locator("#wb-reply-prompt")).toHaveText(
+        "Confirm live-question-2.",
+      );
+      await expect(send).toBeEnabled();
 
       await activateSend();
       await expect(page.locator("#wb-reply-form-errors")).toBeVisible();

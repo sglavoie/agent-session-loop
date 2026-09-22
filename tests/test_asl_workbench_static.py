@@ -455,8 +455,11 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn("renderRecoveryPanel(compact)", decoded)
         self.assertIn("renderRecoveryPanel(body.recovery)", decoded)
         self.assertIn('renderedRecovery.kind === "reply-needed"', decoded)
-        self.assertIn("hasLiveQuestion(runs, linkedRunKey)", decoded)
+        self.assertIn(
+            "hasLiveQuestion(runs, linkedRunKey, linkedQuestionId)", decoded
+        )
         self.assertIn("run.run_key !== linkedRunKey", decoded)
+        self.assertIn("run.question_id !== linkedQuestionId", decoded)
         self.assertIn('typeof run.question_id === "string"', decoded)
         self.assertIn("Number(run.unanswered_count) > 0", decoded)
         self.assertIn('context.context_kind === "waiting"', decoded)
