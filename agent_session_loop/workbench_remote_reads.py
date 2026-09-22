@@ -481,11 +481,18 @@ class AslDetailResponder:
             )
             return _Material(entries=[_scrub(payload)])
         if kind == "questions":
+            raw_target = request.get("target")
+            target = raw_target if isinstance(raw_target, Mapping) else {}
+            question_id = target.get("question_id")
             return _Material(
                 entries=[
                     _scrub(
                         workbench_details.read_questions(
-                            plan_dir, state_dir=self.state_dir
+                            plan_dir,
+                            question_id=(
+                                question_id if isinstance(question_id, str) else None
+                            ),
+                            state_dir=self.state_dir,
                         )
                     )
                 ]

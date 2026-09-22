@@ -173,7 +173,7 @@ BODY_TTL_SECONDS = 120.0
 #: One held body, identified by what was asked rather than by which request
 #: asked it: plan, run, surface, selector, offset. Two reads of the same window
 #: are the same body, and the second is served without a round trip.
-ReadKey = tuple[str, str, str, str, int]
+ReadKey = tuple[str, str, str, str, str, int]
 
 
 # --------------------------------------------------------------------------
@@ -196,6 +196,7 @@ class ReadRequest:
     plan_key: str
     run_key: str | None = None
     run_id: str | None = None
+    question_id: str | None = None
     artifact: str | None = None
     stream: str | None = None
     offset: int | None = None
@@ -220,6 +221,7 @@ class ReadRequest:
             self.plan_key,
             self.run_key or "",
             self.detail,
+            self.question_id or "",
             self.artifact or self.stream or "",
             int(self.offset or 0),
         )
@@ -231,6 +233,8 @@ class ReadRequest:
             addressed["run_key"] = self.run_key
         if self.run_id is not None:
             addressed["run_id"] = self.run_id
+        if self.question_id is not None:
+            addressed["question_id"] = self.question_id
         return addressed
 
     def to_payload(self) -> dict[str, Any]:
@@ -602,6 +606,7 @@ class DetailReadClient:
         plan_key: str,
         run_key: str | None = None,
         run_id: str | None = None,
+        question_id: str | None = None,
         artifact: str | None = None,
         stream: str | None = None,
         offset: int | None = None,
@@ -624,6 +629,7 @@ class DetailReadClient:
             plan_key=plan_key,
             run_key=run_key,
             run_id=run_id,
+            question_id=question_id,
             artifact=artifact,
             stream=stream,
             offset=offset,

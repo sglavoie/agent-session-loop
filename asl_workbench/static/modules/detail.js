@@ -54,10 +54,11 @@ export function scheduleDetailRefresh() {
       ? LINKED_QUESTION_REFRESH_INTERVAL_MS
       : DETAIL_REFRESH_INTERVAL_MS;
   state.detailTimer = window.setTimeout(() => {
-    const update =
-      linkedQuestion && linkedQuestion !== loadedQuestion
-        ? loadAndRenderReply().then(() => refreshDetail())
-        : refreshDetail();
+    const update = linkedQuestion
+      ? liveReplyFormIsInteractive()
+        ? Promise.resolve()
+        : loadAndRenderReply()
+      : refreshDetail();
     update.finally(() => {
       if (state.route.name === "detail") scheduleDetailRefresh();
     });
@@ -98,6 +99,12 @@ export function liveReplyFormIsInteractive() {
 
 export async function refreshDetail() {
   if (state.route.name !== "detail" || !routePlanId()) return;
+  // A notification is a question screen, not a plan-detail shortcut. Reading
+  // the other panels can surface another open question and lets unrelated
+  // plan state compete with the one action the alert asked the operator to
+  // take. Keep every refresh, including visibility refreshes, on the exact
+  // question selected by the route.
+  if (state.route.questionId) return loadAndRenderReply();
   if (state.detailInFlight) return;
   if (liveReplyFormIsInteractive()) return;
   state.detailInFlight = true;

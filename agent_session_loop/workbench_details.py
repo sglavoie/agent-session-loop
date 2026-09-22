@@ -853,9 +853,10 @@ _QNA_ENVELOPE_KEYS = frozenset({"ok", "command", "reason", "paused"})
 def read_questions(
     plan_dir: str | Path,
     *,
+    question_id: str | None = None,
     state_dir: str | Path | None = None,
 ) -> _JSONDict:
-    """The paused run's question context, classified without reclaiming.
+    """One selected question context, classified without reclaiming.
 
     ``reclaim=False``: loading the resolver prompt is how an operator finds out
     a run is waiting, and finding out must not be what releases the lock the
@@ -863,14 +864,16 @@ def read_questions(
     """
     try:
         facts = intervention.inspect_run(plan_dir, state_dir=state_dir)
-        if (
-            facts.run_active
-            and facts.context_kind == "waiting"
-            and facts.question_id is not None
-        ):
+        if facts.run_active and facts.context_kind == "waiting":
+            selected_question = question_id or facts.question_id
+            if selected_question is None:
+                raise intervention.InterventionError(
+                    intervention.REASON_NO_OPEN_QUESTION,
+                    "no open question is waiting for a reply",
+                )
             question_id, context_kind, body = intervention.question_body(
                 plan_dir,
-                question_id=facts.question_id,
+                question_id=selected_question,
                 state_dir=state_dir,
             )
             intervention.enforce_body_bound(body)
@@ -883,7 +886,14 @@ def read_questions(
                 "last_message": body,
                 "rendered_prompt": body,
             }
-    except intervention.InterventionError:
+    except intervention.InterventionError as error:
+        if question_id is not None:
+            raise DetailError(
+                details.REASON_NOT_FOUND,
+                error.message,
+                status=404,
+                details={"plan_dir": str(plan_dir), **error.details},
+            ) from error
         # The Q&A reader below owns the established paused-run error contract.
         # A live-question inspection failure must not replace it with a second
         # vocabulary when the plan is actually paused.
