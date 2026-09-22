@@ -306,41 +306,78 @@ class SparkHelperTests(unittest.TestCase):
         class FakeProcess:
             pid = 42_000
 
-            def __init__(self, *, exits_during_grace_period: bool) -> None:
-                self.exits_during_grace_period = exits_during_grace_period
+            def __init__(self) -> None:
+                self.reaped = False
                 self.wait_timeouts: list[float | None] = []
 
             def wait(self, timeout: float | None = None) -> int:
                 self.wait_timeouts.append(timeout)
-                if timeout is not None and not self.exits_during_grace_period:
-                    raise subprocess.TimeoutExpired("spark", timeout)
+                self.reaped = True
                 return 0
 
-        reaped_process = FakeProcess(exits_during_grace_period=True)
-        reaped_signals: list[signal.Signals] = []
-
-        def reject_recycled_group(_pid: int, signum: signal.Signals) -> None:
-            reaped_signals.append(signum)
-            if signum == signal.SIGKILL:
-                raise AssertionError("signalled the reaped process group")
-
-        with mock.patch("os.killpg", side_effect=reject_recycled_group):
-            stop_tree(reaped_process)
-        self.assertEqual(reaped_signals, [signal.SIGTERM])
-        self.assertEqual(reaped_process.wait_timeouts, [0.5])
-
-        running_process = FakeProcess(exits_during_grace_period=False)
-        running_signals: list[signal.Signals] = []
+        process = FakeProcess()
+        signals: list[signal.Signals] = []
 
         def lose_process_group(_pid: int, signum: signal.Signals) -> None:
-            running_signals.append(signum)
+            self.assertFalse(process.reaped)
+            signals.append(signum)
             if signum == signal.SIGKILL:
                 raise PermissionError("process group was recycled")
 
-        with mock.patch("os.killpg", side_effect=lose_process_group):
-            stop_tree(running_process)
-        self.assertEqual(running_signals, [signal.SIGTERM, signal.SIGKILL])
-        self.assertEqual(running_process.wait_timeouts, [0.5, None])
+        with (
+            mock.patch("os.killpg", side_effect=lose_process_group),
+            mock.patch("time.sleep") as sleep,
+        ):
+            stop_tree(process)
+        sleep.assert_called_once_with(0.5)
+        self.assertEqual(signals, [signal.SIGTERM, signal.SIGKILL])
+        self.assertEqual(process.wait_timeouts, [None])
+        self.assertTrue(process.reaped)
+
+    def test_stop_tree_kills_descendants_when_the_cli_exits_first(self) -> None:
+        stop_tree = runpy.run_path(str(SPARK), run_name="spark_helper_test")[
+            "_stop_tree"
+        ]
+
+        class FakeProcess:
+            pid = 42_001
+
+            def __init__(self) -> None:
+                self.exited = False
+                self.reaped = False
+                self.wait_timeouts: list[float | None] = []
+
+            def wait(self, timeout: float | None = None) -> int:
+                self.assert_not_reaped_after_signal()
+                self.wait_timeouts.append(timeout)
+                self.reaped = True
+                return 0
+
+            def assert_not_reaped_after_signal(self) -> None:
+                if self.reaped:
+                    raise AssertionError("direct child was already reaped")
+
+        process = FakeProcess()
+        signals: list[signal.Signals] = []
+
+        def finish_grace_period(seconds: float) -> None:
+            self.assertEqual(seconds, 0.5)
+            process.exited = True
+
+        def record_group_signal(_pid: int, signum: signal.Signals) -> None:
+            process.assert_not_reaped_after_signal()
+            if signum == signal.SIGKILL:
+                self.assertTrue(process.exited)
+            signals.append(signum)
+
+        with (
+            mock.patch("os.killpg", side_effect=record_group_signal),
+            mock.patch("time.sleep", side_effect=finish_grace_period),
+        ):
+            stop_tree(process)
+        self.assertEqual(signals, [signal.SIGTERM, signal.SIGKILL])
+        self.assertEqual(process.wait_timeouts, [None])
+        self.assertTrue(process.reaped)
 
 
 if __name__ == "__main__":
