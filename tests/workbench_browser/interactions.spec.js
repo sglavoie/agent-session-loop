@@ -245,6 +245,7 @@ for (const deployment of DEPLOYMENTS) {
 
       let projectedQuestion = "live-question-1";
       let servedQuestion = "live-question-1";
+      let questionClosed = false;
 
       await page.route("**/api/plan*", async (route) => {
         const response = await route.fetch();
@@ -258,8 +259,20 @@ for (const deployment of DEPLOYMENTS) {
         ];
         await route.fulfill({ response: response, json: body });
       });
-      await page.route("**/api/questions*", (route) =>
-        route.fulfill({
+      await page.route("**/api/questions*", (route) => {
+        if (questionClosed) {
+          return route.fulfill({
+            status: 409,
+            contentType: "application/json",
+            body: JSON.stringify({
+              ok: false,
+              reason: "detail-refused",
+              error: "detail-refused",
+              details: { outcome: "refused", reason: "not-found" },
+            }),
+          });
+        }
+        return route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify({
@@ -272,8 +285,8 @@ for (const deployment of DEPLOYMENTS) {
             rendered_prompt: "Confirm " + servedQuestion + ".",
             last_message: "Confirm " + servedQuestion + ".",
           }),
-        }),
-      );
+        });
+      });
       await page.route("**/api/capabilities*", async (route) => {
         const response = await route.fetch();
         const body = await response.json();
@@ -447,6 +460,20 @@ for (const deployment of DEPLOYMENTS) {
       await expect(send).toHaveText("reply recorded");
       await expect(send).toBeDisabled();
       await expect(page.locator("#wb-reply-text")).toHaveValue("");
+
+      // Once ASL consumes the durable reply, the exact question is no longer
+      // a readable remote detail. That expected not-found must confirm closure
+      // instead of replacing the recorded state with a detail-refused error.
+      questionClosed = true;
+      await page.evaluate(async () => {
+        const panels = await import("/static/modules/panels.js");
+        await panels.loadAndRenderReply();
+      });
+      await expect(status).toHaveAttribute("data-kind", "info");
+      await expect(status).toHaveText(
+        "Reply delivered. The question is closed and the run resumed.",
+      );
+      await expect(page.locator("#wb-reply-form-errors")).toBeHidden();
     });
 
     test("a control aimed at a run that is not there names the run, not the mode", async ({
