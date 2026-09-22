@@ -36,7 +36,7 @@ from typing import Any
 
 import tests
 from agent_session_loop import cli_trace
-from asl_workbench import lifecycle
+from asl_workbench import lifecycle, runtime
 from asl_workbench.installation import (
     CONFIG_PATH,
     CONNECTOR_TOKEN_PATH,
@@ -78,6 +78,15 @@ _SERVE = (
     "from asl_workbench.integrations import PI_SITE\n"
     "runtime.run(Path(sys.argv[1]), site=replace(PI_SITE, bind_port=0))\n"
 )
+
+
+class RuntimePolicyTests(unittest.TestCase):
+    def test_installed_runtime_uses_the_documented_two_minute_phone_alert(self) -> None:
+        for observation_only in (False, True):
+            policy = runtime.policy_for(observation_only)
+            self.assertEqual(120.0, policy.unanswered_question_alert_seconds)
+            self.assertEqual(observation_only, policy.observation_only)
+            self.assertEqual(not observation_only, policy.mutations_permitted)
 
 
 def stub_package() -> dict[str, bytes]:
