@@ -227,6 +227,7 @@ def build_run_facts(
     runner_state: Mapping[str, Any],
     lock_active: bool,
     unanswered_ids: tuple[str, ...],
+    active_wait_question_id: str | None = None,
 ) -> RunFacts:
     """Classify already-read state, so a projection need not read it twice.
 
@@ -245,6 +246,9 @@ def build_run_facts(
         and not runner_state.get("run_finished_at")
     )
     context_kind, question_id = question_context(runner_state, unanswered_ids)
+    if active_wait_question_id in unanswered_ids:
+        context_kind = "waiting"
+        question_id = active_wait_question_id
 
     return RunFacts(
         plan_dir=plan_dir,
@@ -332,13 +336,48 @@ def inspect_run(
     lock_info = state.inspect_lock_info(canonical, state_dir)
     state_path = state.plan_state_dir(canonical, state_dir) / events.STATE_FILE_NAME
     runner_state = state._runner_state_payload(state_path, lock_info=lock_info)
+    run_id = runner_state.get("run_id")
+    mailbox_view: mailbox.MailboxView | None = None
+    unanswered: tuple[mailbox.MailboxMessage, ...] = ()
+    try:
+        mailbox_view = mailbox.read_mailbox(canonical, state_dir=state_dir)
+        unanswered = tuple(
+            message
+            for message in mailbox_view.unanswered_questions
+            if isinstance(run_id, str) and run_id and message.run_id == run_id
+        )
+    except OSError, ValueError, mailbox.MailboxError:
+        unanswered = ()
+    active_wait_question_id: str | None = None
+    active_turn = runner_state.get("active_turn")
+    if mailbox_view is not None and isinstance(active_turn, Mapping):
+        session_value = active_turn.get("session_id") or active_turn.get("session")
+        session_id = (
+            session_value
+            if isinstance(session_value, str) and session_value
+            else None
+        )
+        turn_index = active_turn.get("turn_index")
+        if (
+            isinstance(run_id, str)
+            and run_id
+            and session_id is not None
+            and isinstance(turn_index, int)
+            and not isinstance(turn_index, bool)
+        ):
+            active_wait = mailbox_view.active_worker_wait(
+                run_id=run_id,
+                session_id=session_id,
+                turn_index=turn_index,
+            )
+            if active_wait is not None:
+                active_wait_question_id = active_wait.to
     return build_run_facts(
         canonical,
         runner_state=runner_state,
         lock_active=bool(lock_info is not None and lock_info.active),
-        unanswered_ids=unanswered_question_ids(
-            canonical, state_dir=state_dir, run_id=runner_state.get("run_id")
-        ),
+        unanswered_ids=tuple(message.id for message in unanswered),
+        active_wait_question_id=active_wait_question_id,
     )
 
 

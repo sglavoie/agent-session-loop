@@ -439,9 +439,14 @@ def _question_projection(
     waiting = waiting if isinstance(waiting, Mapping) else None
 
     unanswered: tuple[mailbox.MailboxMessage, ...] = ()
+    mailbox_view: mailbox.MailboxView | None = None
     try:
-        unanswered = mailbox.unanswered_questions_for_run(
-            plan_dir, runner_state.get("run_id"), state_dir=state_dir
+        mailbox_view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+        run_id = runner_state.get("run_id")
+        unanswered = tuple(
+            message
+            for message in mailbox_view.unanswered_questions
+            if isinstance(run_id, str) and run_id and message.run_id == run_id
         )
     except OSError, ValueError, mailbox.MailboxError:
         unanswered = ()
@@ -453,6 +458,31 @@ def _question_projection(
     context_kind, selected_question_id = intervention.question_context(
         runner_state, open_ids
     )
+    active_turn = runner_state.get("active_turn")
+    if mailbox_view is not None and isinstance(active_turn, Mapping):
+        run_id = runner_state.get("run_id")
+        session_id = _session_identifier(active_turn)
+        turn_index = _bounded_int(active_turn.get("turn_index"))
+        if (
+            isinstance(run_id, str)
+            and run_id
+            and session_id is not None
+            and turn_index is not None
+        ):
+            active_wait = mailbox_view.active_worker_wait(
+                run_id=run_id,
+                session_id=session_id,
+                turn_index=turn_index,
+            )
+            if active_wait is not None and active_wait.to in open_ids:
+                # ``input_wait_active`` is a heartbeat observation.  A
+                # connector poll can land between heartbeats even while the
+                # worker remains blocked in ``asl ask --wait``.  The paired
+                # mailbox wait is durable for exactly that blocked interval,
+                # so it is the authoritative tie-breaker for the same live
+                # run/session/turn.
+                context_kind = CONTEXT_KIND_WAITING
+                selected_question_id = active_wait.to
     if context_kind is None:
         return None, open_ids
 
@@ -545,6 +575,12 @@ def project_row(
         runner_state=runner_state,
         lock_active=bool(lock_info is not None and lock_info.active),
         unanswered_ids=open_ids,
+        active_wait_question_id=(
+            question.get("question_id")
+            if question is not None
+            and question.get("context_kind") == CONTEXT_KIND_WAITING
+            else None
+        ),
     )
     active = (
         runner_state.get("active_verification")
