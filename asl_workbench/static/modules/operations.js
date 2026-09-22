@@ -76,7 +76,7 @@ export const ACTIONS = {
     operation: "reply",
     subject: "the reply",
     requires: "reply",
-    stale: "no run is paused waiting for an operator reply",
+    stale: "no run is waiting for an operator reply",
   },
   stop: {
     operation: "control-stop-after-current",
@@ -235,8 +235,12 @@ export function planHasLiveRun(plan) {
   return PLAN_LIVE_RUN_STATES.indexOf(String(plan.primary_state || "")) !== -1;
 }
 
-/** True when a run is paused waiting for an operator to answer it. */
+/** True when a paused run or a live in-turn question awaits an answer. */
 export function planAwaitsReply(plan) {
+  const context = state.detailReplyContext;
+  if (context && context.context_kind === "waiting" && context.question_id) {
+    return true;
+  }
   if (!plan) return false;
   return PLAN_REPLY_STATES.indexOf(String(plan.primary_state || "")) !== -1;
 }
@@ -312,13 +316,19 @@ export function applyActionAvailability(root) {
       availability.enabled = false;
       availability.reason = blocked;
     }
-    node.disabled = !availability.enabled;
+    const disabled = !availability.enabled;
+    if (node.disabled !== disabled) node.disabled = disabled;
     if (availability.reason) {
-      node.setAttribute("data-disabled-reason", availability.reason);
-      node.title = availability.reason;
+      if (node.getAttribute("data-disabled-reason") !== availability.reason) {
+        node.setAttribute("data-disabled-reason", availability.reason);
+      }
+      if (node.title !== availability.reason) node.title = availability.reason;
     } else {
-      node.removeAttribute("data-disabled-reason");
-      node.title = node.getAttribute("data-enabled-title") || "";
+      if (node.hasAttribute("data-disabled-reason")) {
+        node.removeAttribute("data-disabled-reason");
+      }
+      const enabledTitle = node.getAttribute("data-enabled-title") || "";
+      if (node.title !== enabledTitle) node.title = enabledTitle;
     }
   });
 }

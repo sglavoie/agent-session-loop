@@ -119,6 +119,9 @@ export const state = {
   reply: {
     operationId: null,
     submittedIds: [],
+    questionId: null,
+    recordedQuestionId: null,
+    recordedOperationId: null,
   },
   // What `GET /api/capabilities` said this deployment can carry out, and the
   // read that is finding out. `null` means nobody has asked yet, which every

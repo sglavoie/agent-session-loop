@@ -20,10 +20,13 @@
  */
 
 import { OUTCOME_PENDING, OUTCOME_RESULT } from "./api.js";
-import { showControlsFeedback } from "./controls.js";
 import { planBody, routePlanId } from "./identity.js";
 import { captureFocus, runMutation } from "./operations.js";
-import { hideReplyPanel } from "./panels.js";
+import {
+  hideReplyPanel,
+  setReplyFormDisabled,
+  showReplyStatus,
+} from "./panels.js";
 import { clearFormErrors, showFormError } from "./profile.js";
 import { state } from "./state.js";
 
@@ -71,6 +74,7 @@ export function isOwnReply(operationId) {
 export async function handleReplySubmit(event) {
   event.preventDefault();
   clearFormErrors("wb-reply-form-errors");
+  showReplyStatus("", "");
   if (!routePlanId()) return;
   const textarea = document.getElementById("wb-reply-text");
   if (!textarea) return;
@@ -89,6 +93,13 @@ export async function handleReplySubmit(event) {
   );
   restore();
   if (!confirmed) return;
+  const form = document.getElementById("wb-reply-form");
+  const submitButton = form
+    ? form.querySelector('button[type="submit"]')
+    : null;
+  if (form) form.setAttribute("aria-busy", "true");
+  if (submitButton) submitButton.textContent = "sending reply…";
+  showReplyStatus("pending", "Sending reply…");
   const body = planBody({
     reply_text: replyText,
     action_token: context.action_token,
@@ -109,10 +120,16 @@ export async function handleReplySubmit(event) {
       // A refusal belongs beside the draft that is still on screen; anything
       // else belongs with the rest of the operation feedback.
       if (kind === "error") showFormError("wb-reply-form-errors", message);
-      else showControlsFeedback(kind, message);
+      showReplyStatus(kind, message);
     },
   });
-  if (!answer) return;
+  if (form) form.removeAttribute("aria-busy");
+  if (!answer) {
+    if (submitButton) {
+      submitButton.textContent = liveQuestion ? "send reply" : "reply and resume";
+    }
+    return;
+  }
   if (answer.operation && answer.operation.id) {
     state.reply.operationId = answer.operation.id;
     rememberSubmittedReply(answer.operation.id);
@@ -123,6 +140,9 @@ export async function handleReplySubmit(event) {
     // The words are still the operator's and still the only copy. What is kept
     // with them is the identity, so pressing submit again is this reply rather
     // than another one.
+    if (submitButton) {
+      submitButton.textContent = liveQuestion ? "send reply" : "reply and resume";
+    }
     return;
   }
   clearReplyTextarea();
@@ -130,5 +150,18 @@ export async function handleReplySubmit(event) {
     // Only a run that actually resumed gets the panel taken away; a recorded
     // reply leaves the question open until the Mac reads it.
     hideReplyPanel();
+  } else {
+    state.reply.recordedQuestionId = context.question_id || null;
+    state.reply.recordedOperationId =
+      answer.operation && answer.operation.id ? answer.operation.id : null;
+    setReplyFormDisabled(
+      true,
+      "reply recorded; waiting for the running session"
+    );
+    if (submitButton) submitButton.textContent = "reply recorded";
+    showReplyStatus(
+      "pending",
+      "Reply recorded. Waiting for the running session to consume it."
+    );
   }
 }

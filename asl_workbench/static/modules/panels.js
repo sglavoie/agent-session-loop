@@ -336,25 +336,54 @@ export function renderArtifactsPanel(artifacts) {
 export async function loadAndRenderReply() {
   const panel = document.getElementById("wb-reply-panel");
   if (panel) panel.hidden = false;
-  clearFormErrors("wb-reply-form-errors");
   try {
     const body = await apiRequest(
       planUrl("/api/questions")
     );
     if (body && body.ok) {
+      const questionId = body.question_id ? String(body.question_id) : null;
+      if (state.reply.questionId !== questionId) {
+        state.reply.operationId = null;
+        state.reply.questionId = questionId;
+        state.reply.recordedQuestionId = null;
+        state.reply.recordedOperationId = null;
+        clearFormErrors("wb-reply-form-errors");
+        showReplyStatus("", "");
+      }
       state.detailReplyContext = body;
-      setReplyFormDisabled(false);
+      const form = document.getElementById("wb-reply-form");
+      if (form) form.hidden = false;
+      const recorded =
+        questionId && state.reply.recordedQuestionId === questionId;
+      setReplyFormDisabled(
+        Boolean(recorded),
+        recorded ? "reply recorded; waiting for the running session" : null
+      );
       const submit = document.querySelector(
         '#wb-reply-form button[type="submit"]'
       );
       if (submit) {
-        submit.textContent =
-          body.context_kind === "waiting" ? "send reply" : "reply and resume";
+        const label = recorded
+          ? "reply recorded"
+          : body.context_kind === "waiting"
+            ? "send reply"
+            : "reply and resume";
+        if (submit.textContent !== label) submit.textContent = label;
+      }
+      if (recorded) {
+        showReplyStatus(
+          "pending",
+          "Reply recorded. Waiting for the running session to consume it."
+        );
       }
       const promptEl = document.getElementById("wb-reply-prompt");
-      if (promptEl) promptEl.textContent = body.rendered_prompt || "";
+      const prompt = body.rendered_prompt || "";
+      if (promptEl && promptEl.textContent !== prompt) promptEl.textContent = prompt;
       const lastEl = document.getElementById("wb-reply-last-message");
-      if (lastEl) lastEl.textContent = body.last_message || "";
+      const lastMessage = body.last_message || "";
+      if (lastEl && lastEl.textContent !== lastMessage) {
+        lastEl.textContent = lastMessage;
+      }
     } else {
       renderReplyContextError(body);
     }
@@ -390,9 +419,48 @@ export function renderReplyContextError(payload) {
 
 export function hideReplyPanel() {
   const panel = document.getElementById("wb-reply-panel");
+  if (state.reply.recordedQuestionId) {
+    if (panel) panel.hidden = false;
+    const form = document.getElementById("wb-reply-form");
+    if (form) form.hidden = true;
+    showReplyStatus(
+      "info",
+      "Reply delivered. The question is closed and the run resumed."
+    );
+    state.detailReplyContext = null;
+    return;
+  }
   if (panel) panel.hidden = true;
   state.detailReplyContext = null;
   setReplyFormDisabled(false);
+}
+
+export function resetReplyForPlan() {
+  state.reply.operationId = null;
+  state.reply.questionId = null;
+  state.reply.recordedQuestionId = null;
+  state.reply.recordedOperationId = null;
+  const form = document.getElementById("wb-reply-form");
+  if (form) {
+    form.hidden = false;
+    form.removeAttribute("aria-busy");
+  }
+  clearFormErrors("wb-reply-form-errors");
+  showReplyStatus("", "");
+}
+
+export function showReplyStatus(kind, message) {
+  const status = document.getElementById("wb-reply-submit-status");
+  if (!status) return;
+  if (!message) {
+    status.hidden = true;
+    status.textContent = "";
+    status.removeAttribute("data-kind");
+    return;
+  }
+  status.hidden = false;
+  status.setAttribute("data-kind", kind || "info");
+  status.textContent = message;
 }
 
 /**
@@ -408,16 +476,18 @@ export function setReplyFormDisabled(disabled, reason) {
   if (!form) return;
   const controls = form.querySelectorAll("textarea, button[type=\"submit\"]");
   controls.forEach((control) => {
-    control.disabled = Boolean(disabled);
+    const next = Boolean(disabled);
+    if (control.disabled !== next) control.disabled = next;
   });
   const button = form.querySelector("button[type=\"submit\"]");
   if (button) {
     if (disabled) {
-      button.setAttribute(
-        "data-blocked-reason",
-        reason || "there is no paused question on this plan to answer"
-      );
-    } else {
+      const blockedReason =
+        reason || "there is no paused question on this plan to answer";
+      if (button.getAttribute("data-blocked-reason") !== blockedReason) {
+        button.setAttribute("data-blocked-reason", blockedReason);
+      }
+    } else if (button.hasAttribute("data-blocked-reason")) {
       button.removeAttribute("data-blocked-reason");
     }
   }
