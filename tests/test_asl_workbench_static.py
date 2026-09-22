@@ -455,9 +455,7 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn("renderRecoveryPanel(compact)", decoded)
         self.assertIn("renderRecoveryPanel(body.recovery)", decoded)
         self.assertIn('renderedRecovery.kind === "reply-needed"', decoded)
-        self.assertIn(
-            "hasLiveQuestion(runs, linkedRunKey, linkedQuestionId)", decoded
-        )
+        self.assertIn("hasLiveQuestion(runs, linkedRunKey, linkedQuestionId)", decoded)
         self.assertIn("run.run_key !== linkedRunKey", decoded)
         self.assertIn("run.question_id !== linkedQuestionId", decoded)
         self.assertIn('typeof run.question_id === "string"', decoded)
@@ -1505,9 +1503,7 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn('liveQuestion ? "/api/question-reply" : "/api/reply"', decoded)
         self.assertIn("action_token: context.action_token", decoded)
         self.assertIn("body.question_id = context.question_id", decoded)
-        self.assertIn(
-            "the server returned no durable operation receipt", submit_body
-        )
+        self.assertIn("the server returned no durable operation receipt", submit_body)
         self.assertIn("question_id: context.question_id", submit_body)
         self.assertIn("restoreRecordedReply(questionId)", decoded)
         self.assertIn('body.reason === "detail-timeout"', decoded)

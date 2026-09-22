@@ -353,9 +353,7 @@ def inspect_run(
     if mailbox_view is not None and isinstance(active_turn, Mapping):
         session_value = active_turn.get("session_id") or active_turn.get("session")
         session_id = (
-            session_value
-            if isinstance(session_value, str) and session_value
-            else None
+            session_value if isinstance(session_value, str) and session_value else None
         )
         turn_index = active_turn.get("turn_index")
         if (
