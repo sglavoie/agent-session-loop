@@ -131,6 +131,11 @@ def policy_for(observation_only: bool) -> ObservationPolicy:
     disagree would leave "may this deployment be acted on?" with two answers.
     """
     return ObservationPolicy(
+        # The production phone procedure promises the normal two-minute alert
+        # threshold.  Leaving this at ObservationPolicy's conservative
+        # five-minute default consumes nearly all of a 6–7 minute locked-phone
+        # readiness window before the notification is even published.
+        unanswered_question_alert_seconds=120.0,
         observation_only=observation_only,
         mutations_permitted=not observation_only,
     )
