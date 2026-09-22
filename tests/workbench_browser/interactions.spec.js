@@ -340,6 +340,16 @@ for (const deployment of DEPLOYMENTS) {
       await expect(send).toHaveText("send reply");
       await expect(send).toBeEnabled();
       await expect(send).not.toHaveAttribute("data-disabled-reason");
+      await expect(page.locator("#wb-reply-prompt-details")).toHaveAttribute(
+        "open",
+        "",
+      );
+      await expect(page.locator("#wb-reply-prompt")).toHaveText(
+        "Confirm live-question-1.",
+      );
+      await expect(page.locator("#wb-reply-submit-status")).toHaveText(
+        "Current question loaded from this notification.",
+      );
       await expect(page.locator("#wb-reply-text")).toBeFocused();
       await expect(page.locator("#wb-redirect-submit")).toHaveText(
         "interrupt turn & resume with this correction",
@@ -392,6 +402,10 @@ for (const deployment of DEPLOYMENTS) {
       });
       await expect(page.locator("#wb-reply-submit-status")).toHaveText(
         "Opening the current question…",
+      );
+      await expect(page.locator("#wb-reply-prompt-details")).toHaveAttribute(
+        "open",
+        "",
       );
       await expect(form).toBeHidden();
 
