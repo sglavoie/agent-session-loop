@@ -243,18 +243,26 @@ for (const deployment of DEPLOYMENTS) {
       const plan = rowFor(await catalog(page), "charlie");
       expect(plan.run_key).toBeTruthy();
 
+      const planAddress = plan.plan_dir
+        ? `plan_dir=${encodeURIComponent(plan.plan_dir)}`
+        : `plan_key=${encodeURIComponent(plan.plan_key)}`;
+      const baselinePlanBody = await page.evaluate(async (query) => {
+        const response = await fetch(`/api/plan?${query}`);
+        return response.json();
+      }, planAddress);
+
       let projectedQuestion = "live-question-1";
       let servedQuestion = "live-question-1";
       let questionClosed = false;
       let delayFirstPlanRead = true;
+      let transientQuestionRefusals = 2;
 
       await page.route("**/api/plan*", async (route) => {
+        const body = JSON.parse(JSON.stringify(baselinePlanBody));
         if (delayFirstPlanRead) {
           delayFirstPlanRead = false;
           await new Promise((resolve) => setTimeout(resolve, 3500));
         }
-        const response = await route.fetch();
-        const body = await response.json();
         body.runs = [
           {
             run_key: plan.run_key,
@@ -262,9 +270,26 @@ for (const deployment of DEPLOYMENTS) {
             unanswered_count: 1,
           },
         ];
-        await route.fulfill({ response: response, json: body });
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(body),
+        });
       });
       await page.route("**/api/questions*", (route) => {
+        if (transientQuestionRefusals > 0) {
+          transientQuestionRefusals -= 1;
+          return route.fulfill({
+            status: 409,
+            contentType: "application/json",
+            body: JSON.stringify({
+              ok: false,
+              reason: "detail-refused",
+              error: "detail-refused",
+              details: { outcome: "refused", reason: "not-found" },
+            }),
+          });
+        }
         if (questionClosed) {
           return route.fulfill({
             status: 409,
@@ -488,6 +513,18 @@ for (const deployment of DEPLOYMENTS) {
       // Once ASL consumes the durable reply, the exact question is no longer
       // a readable remote detail. That expected not-found must confirm closure
       // instead of replacing the recorded state with a detail-refused error.
+      await page.evaluate(async () => {
+        const detail = await import("/static/modules/detail.js");
+        detail.stopDetailTimer();
+      });
+      await expect
+        .poll(() =>
+          page.evaluate(async () => {
+            const { state } = await import("/static/modules/state.js");
+            return state.detailInFlight;
+          }),
+        )
+        .toBe(false);
       questionClosed = true;
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
@@ -538,6 +575,32 @@ for (const deployment of DEPLOYMENTS) {
       await expect(status).toHaveAttribute("data-kind", "info");
       await expect(status).toHaveText(
         "Reply delivered. The question is closed and the run resumed.",
+      );
+
+      // A genuinely stale notification eventually stops retrying, but it
+      // explains that state in operator language instead of exposing the
+      // connector's detail-refused transport code.
+      projectedQuestion = "live-question-4";
+      servedQuestion = "live-question-3";
+      await page.evaluate(() => {
+        const params = new URLSearchParams(
+          window.location.hash.substring(window.location.hash.indexOf("?") + 1),
+        );
+        params.set("question", "live-question-4");
+        window.location.hash = "#plan?" + params.toString();
+      });
+      await expect(status).toHaveText("Opening the current question…");
+      await page.evaluate(async () => {
+        const { state } = await import("/static/modules/state.js");
+        state.reply.openingStartedAt = Date.now() - 20000;
+        const panels = await import("/static/modules/panels.js");
+        await panels.loadAndRenderReply();
+      });
+      await expect(page.locator("#wb-reply-form-errors")).toHaveText(
+        "This alert's question is no longer available. Open the latest notification or return to the queue.",
+      );
+      await expect(page.locator("#wb-reply-form-errors")).not.toContainText(
+        "detail-refused",
       );
     });
 
