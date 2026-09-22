@@ -148,7 +148,14 @@ export async function handleReplySubmit(event) {
   clearReplyTextarea();
   if (answer.outcome === OUTCOME_RESULT) {
     // Only a run that actually resumed gets the panel taken away; a recorded
-    // reply leaves the question open until the Mac reads it.
+    // reply leaves the question open until the Mac reads it. A fast consumer
+    // can settle the operation before this POST answers, so retain the same
+    // question identity the pending path uses. The following question read
+    // will normally be a not-found refusal, and it must confirm delivery
+    // rather than replace this terminal state with detail-refused.
+    state.reply.recordedQuestionId = context.question_id || null;
+    state.reply.recordedOperationId =
+      answer.operation && answer.operation.id ? answer.operation.id : null;
     hideReplyPanel();
   } else {
     state.reply.recordedQuestionId = context.question_id || null;

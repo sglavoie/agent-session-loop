@@ -478,6 +478,9 @@ export function renderReplyContextError(payload) {
 export function hideReplyPanel() {
   const panel = document.getElementById("wb-reply-panel");
   if (state.reply.recordedQuestionId) {
+    const firstDelivery =
+      state.reply.deliveredQuestionId !== state.reply.recordedQuestionId;
+    state.reply.deliveredQuestionId = state.reply.recordedQuestionId;
     if (panel) panel.hidden = false;
     const form = document.getElementById("wb-reply-form");
     if (form) form.hidden = true;
@@ -486,6 +489,17 @@ export function hideReplyPanel() {
       "Reply delivered. The question is closed and the run resumed."
     );
     state.detailReplyContext = null;
+    if (firstDelivery) {
+      // A reply can settle inside a detail poll. That poll normally restores
+      // the operator's old scroll position after rendering, which would hide
+      // this terminal state below the fold. Defer the one-time return to the
+      // top until the poll's finally block; outside a poll, do it now.
+      if (state.detailInFlight) {
+        state.reply.scrollToTopAfterDelivery = true;
+      } else {
+        window.scrollTo(window.scrollX || 0, 0);
+      }
+    }
     return;
   }
   if (panel) panel.hidden = true;
@@ -498,6 +512,8 @@ export function resetReplyForPlan() {
   state.reply.questionId = null;
   state.reply.recordedQuestionId = null;
   state.reply.recordedOperationId = null;
+  state.reply.deliveredQuestionId = null;
+  state.reply.scrollToTopAfterDelivery = false;
   const form = document.getElementById("wb-reply-form");
   if (form) {
     form.hidden = false;

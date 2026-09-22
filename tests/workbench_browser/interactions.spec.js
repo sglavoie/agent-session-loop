@@ -426,7 +426,7 @@ for (const deployment of DEPLOYMENTS) {
       // The scheduled detail poll must adopt it without a page reload.
       projectedQuestion = "live-question-2";
       servedQuestion = "live-question-2";
-      await expect(form).toBeVisible({ timeout: 12000 });
+      await expect(form).toBeVisible({ timeout: 3000 });
       await expect(page.locator("#wb-reply-prompt")).toHaveText(
         "Confirm live-question-2.",
       );
@@ -465,6 +465,63 @@ for (const deployment of DEPLOYMENTS) {
       // a readable remote detail. That expected not-found must confirm closure
       // instead of replacing the recorded state with a detail-refused error.
       questionClosed = true;
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+      await page.evaluate(async () => {
+        const detail = await import("/static/modules/detail.js");
+        await detail.refreshDetail();
+      });
+      await expect(status).toHaveAttribute("data-kind", "info");
+      await expect(status).toHaveText(
+        "Reply delivered. The question is closed and the run resumed.",
+      );
+      await expect(page.locator("#wb-reply-form-errors")).toBeHidden();
+      await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+
+      // A connector can consume the reply before the POST returns. That 200
+      // result must establish the same durable question identity as a 202,
+      // so the immediately following not-found read remains a delivered
+      // state. It must also return a phone operator to the top once, rather
+      // than restoring the scroll position from before the poll.
+      questionClosed = false;
+      projectedQuestion = "live-question-3";
+      servedQuestion = "live-question-3";
+      await page.evaluate(() => {
+        const params = new URLSearchParams(
+          window.location.hash.substring(window.location.hash.indexOf("?") + 1),
+        );
+        params.set("question", "live-question-3");
+        window.location.hash = "#plan?" + params.toString();
+      });
+      await expect(form).toBeVisible({ timeout: 3000 });
+      await page.locator("#wb-reply-text").fill("Immediately consumed reply.");
+      await page.route(/\/api\/question-reply(?:\?|$)/, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ok: true,
+            reason: "consumed",
+            operation: {
+              operation_id: "immediate-consumption-operation",
+              status: "consumed",
+              method: "question.reply",
+            },
+          }),
+        });
+      });
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+      page.once("dialog", (dialog) => dialog.accept());
+      await activateSend();
+      await expect(status).toHaveAttribute("data-kind", "info");
+      await expect(status).toHaveText(
+        "Reply delivered. The question is closed and the run resumed.",
+      );
+      await expect(form).toBeHidden();
+      await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+
+      questionClosed = true;
       await page.evaluate(async () => {
         const panels = await import("/static/modules/panels.js");
         await panels.loadAndRenderReply();
@@ -473,7 +530,6 @@ for (const deployment of DEPLOYMENTS) {
       await expect(status).toHaveText(
         "Reply delivered. The question is closed and the run resumed.",
       );
-      await expect(page.locator("#wb-reply-form-errors")).toBeHidden();
     });
 
     test("a control aimed at a run that is not there names the run, not the mode", async ({
