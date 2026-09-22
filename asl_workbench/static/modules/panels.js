@@ -347,7 +347,8 @@ export async function loadAndRenderReply() {
         renderReplyPending(linkedQuestion);
         return;
       }
-      if (state.reply.questionId !== questionId) {
+      const questionChanged = state.reply.questionId !== questionId;
+      if (questionChanged) {
         state.reply.operationId = null;
         state.reply.questionId = questionId;
         state.reply.recordedQuestionId = null;
@@ -384,6 +385,16 @@ export async function loadAndRenderReply() {
       const promptEl = document.getElementById("wb-reply-prompt");
       const prompt = body.rendered_prompt || "";
       if (promptEl && promptEl.textContent !== prompt) promptEl.textContent = prompt;
+      const promptDetails = document.getElementById("wb-reply-prompt-details");
+      if (promptDetails && linkedQuestion) promptDetails.open = true;
+      const hintEl = document.getElementById("wb-reply-hint");
+      if (hintEl && linkedQuestion) {
+        hintEl.textContent =
+          "This notification opened the current question below. Reply sends the answer to the running session.";
+      }
+      if (linkedQuestion && !recorded && questionChanged) {
+        showReplyStatus("info", "Current question loaded from this notification.");
+      }
       const lastEl = document.getElementById("wb-reply-last-message");
       const lastMessage = body.last_message || "";
       if (lastEl && lastEl.textContent !== lastMessage) {
@@ -410,6 +421,13 @@ export function renderReplyPending(questionId) {
   clearFormErrors("wb-reply-form-errors");
   const promptEl = document.getElementById("wb-reply-prompt");
   if (promptEl) promptEl.textContent = "Opening the question from this alert…";
+  const promptDetails = document.getElementById("wb-reply-prompt-details");
+  if (promptDetails) promptDetails.open = true;
+  const hintEl = document.getElementById("wb-reply-hint");
+  if (hintEl) {
+    hintEl.textContent =
+      "Waiting for the exact question carried by this notification. This page updates automatically.";
+  }
   const lastEl = document.getElementById("wb-reply-last-message");
   if (lastEl) lastEl.textContent = questionId ? "question " + questionId : "";
   showReplyStatus("pending", "Opening the current question…");

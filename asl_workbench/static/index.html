@@ -315,12 +315,12 @@
           hidden
         >
           <h3 class="wb-recovery__group-title">Reply</h3>
-          <p class="wb-reply__hint">
+          <p class="wb-reply__hint" id="wb-reply-hint">
             The runner is paused waiting on a clarifying answer. Submit returns
             the answer verbatim to <code>asl run --reply</code>; the draft is
             never persisted to disk or browser storage.
           </p>
-          <details class="wb-reply__context">
+          <details class="wb-reply__context" id="wb-reply-prompt-details">
             <summary>resolver prompt</summary>
             <pre id="wb-reply-prompt" class="wb-reply__prompt"></pre>
           </details>
