@@ -1554,6 +1554,7 @@ class IncidentIdentityTests(IncidentCase):
             self.engine.tick()
         self.assertEqual(len(self.diagnostics()), 1)
         self.assertEqual(len(self.publisher.calls), 1)
+        self.assertEqual(self.publisher.calls[0]["question_id"], "q-1")
 
     def test_a_different_question_is_a_different_incident(self) -> None:
         self.observe()

@@ -91,6 +91,13 @@ MAX_NOTIFICATION_LABEL_CHARS = 160
 #: retired JavaScript, while old ``/#run=`` links remain valid in the router.
 RUN_FRAGMENT = "/?workbench=1#run="
 
+#: A live-question alert must reload the shell before it tries to expose a
+#: control added by a newer release.  Mobile browsers commonly reuse the open
+#: tab when only the fragment changes, which leaves the old JavaScript running
+#: even though the Pi already serves the fixed assets.  This versioned query
+#: crosses the navigation boundary while the fragment contract stays intact.
+REPLY_RUN_FRAGMENT = "/?workbench=2#run="
+
 #: How long a publish attempt may take end to end.
 PUBLISH_TIMEOUT_SECONDS = 10.0
 
@@ -197,20 +204,66 @@ def project_label(project: str) -> str:
     return " ".join(printable.split())[:MAX_NOTIFICATION_LABEL_CHARS]
 
 
-def notification_link(run_key: str, *, site: NotificationSite) -> str:
-    """The deep link one notification carries back to the run it is about."""
-    return site.private_origin + RUN_FRAGMENT + quote(run_key, safe="")
+def notification_link(
+    run_key: str,
+    *,
+    site: NotificationSite,
+    focus_reply: bool = False,
+    plan_key: str | None = None,
+    question_id: str | None = None,
+) -> str:
+    """The deep link one notification carries back to the run it is about.
+
+    Historic callers keep the bare ``#run=`` form.  A new unanswered-question
+    alert names the reply focus as well, so resolving the run scrolls to the
+    live question rather than leaving the correction composer as the first
+    actionable control on a phone screen.
+    """
+    if focus_reply and plan_key:
+        link = (
+            site.private_origin
+            + "/?workbench=2#plan?key="
+            + quote(plan_key, safe="")
+            + "&run="
+            + quote(run_key, safe="")
+            + "&focus=reply"
+        )
+        if question_id:
+            # A run may ask more than one question. Without a question-bound
+            # fragment every alert for that run has the exact same URL, and a
+            # phone may reopen its existing tab without navigating or firing a
+            # hashchange. The identifier keeps historic links valid while
+            # making each unanswered-question alert a fresh destination.
+            link += "&question=" + quote(question_id, safe="")
+    else:
+        fragment = REPLY_RUN_FRAGMENT if focus_reply else RUN_FRAGMENT
+        link = site.private_origin + fragment + quote(run_key, safe="")
+        if focus_reply:
+            link += "&focus=reply"
+    return link
 
 
 def notification(
-    *, kind: str, project: str, run_key: str, site: NotificationSite
+    *,
+    kind: str,
+    project: str,
+    run_key: str,
+    site: NotificationSite,
+    plan_key: str | None = None,
+    question_id: str | None = None,
 ) -> tuple[bytes, str]:
     """The body and the link for one incident, from identity and a kind alone."""
     if kind not in NOTIFICATION_TEMPLATES:
         raise NotificationError(f"no notification template for kind: {kind!r}")
     reason = NOTIFICATION_TEMPLATES[kind]
     label = project_label(project) or FALLBACK_PROJECT_LABEL
-    link = notification_link(run_key, site=site)
+    link = notification_link(
+        run_key,
+        site=site,
+        focus_reply=kind == INCIDENT_UNANSWERED_QUESTION,
+        plan_key=plan_key,
+        question_id=question_id,
+    )
     return f"{label}: {reason}\n{link}".encode(), link
 
 
@@ -295,12 +348,19 @@ class NtfyPublisher:
         *,
         kind: str,
         project: str,
+        plan_key: str,
         run_key: str,
         before_send: Callable[[], bool],
+        question_id: str | None = None,
     ) -> PublishResult:
         """Send one notification and report what the attempt established."""
         body, link = notification(
-            kind=kind, project=project, run_key=run_key, site=self.site
+            kind=kind,
+            project=project,
+            plan_key=plan_key,
+            run_key=run_key,
+            question_id=question_id,
+            site=self.site,
         )
         connection = self._connect()
         try:
