@@ -279,6 +279,17 @@ for (const deployment of DEPLOYMENTS) {
       await page.route("**/api/questions*", (route) => {
         if (transientQuestionRefusals > 0) {
           transientQuestionRefusals -= 1;
+          if (transientQuestionRefusals === 1) {
+            return route.fulfill({
+              status: 504,
+              contentType: "application/json",
+              body: JSON.stringify({
+                ok: false,
+                reason: "detail-timeout",
+                error: "no answer before the deadline",
+              }),
+            });
+          }
           return route.fulfill({
             status: 409,
             contentType: "application/json",
@@ -537,6 +548,18 @@ for (const deployment of DEPLOYMENTS) {
       await expect(send).toHaveText("reply recorded");
       await expect(send).toBeDisabled();
       await expect(page.locator("#wb-reply-text")).toHaveValue("");
+
+      // Safari may reload a notification tab while the connector is still
+      // settling its accepted operation. The question and operation ids are
+      // safe receipt metadata, so the page must restore the recorded state
+      // instead of reopening the form or replacing it with a detail error.
+      await page.reload();
+      await expect(status).toHaveAttribute("data-kind", "pending");
+      await expect(status).toHaveText(
+        /Reply recorded for question live-question-2 as operation [a-f0-9]+\. Waiting for the running session to consume it\./,
+      );
+      await expect(send).toHaveText("reply recorded");
+      await expect(send).toBeDisabled();
 
       // Once ASL consumes the durable reply, the exact question is no longer
       // a readable remote detail. That expected not-found must confirm closure
