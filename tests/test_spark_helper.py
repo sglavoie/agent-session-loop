@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import signal
 import subprocess
 import sys
@@ -12,6 +13,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SPARK = REPO_ROOT / "bin/.local/bin/spark"
@@ -295,6 +297,50 @@ class SparkHelperTests(unittest.TestCase):
             if process.poll() is None:
                 process.kill()
                 process.wait()
+
+    def test_stop_tree_never_signals_a_reaped_process_group(self) -> None:
+        stop_tree = runpy.run_path(str(SPARK), run_name="spark_helper_test")[
+            "_stop_tree"
+        ]
+
+        class FakeProcess:
+            pid = 42_000
+
+            def __init__(self, *, exits_during_grace_period: bool) -> None:
+                self.exits_during_grace_period = exits_during_grace_period
+                self.wait_timeouts: list[float | None] = []
+
+            def wait(self, timeout: float | None = None) -> int:
+                self.wait_timeouts.append(timeout)
+                if timeout is not None and not self.exits_during_grace_period:
+                    raise subprocess.TimeoutExpired("spark", timeout)
+                return 0
+
+        reaped_process = FakeProcess(exits_during_grace_period=True)
+        reaped_signals: list[signal.Signals] = []
+
+        def reject_recycled_group(_pid: int, signum: signal.Signals) -> None:
+            reaped_signals.append(signum)
+            if signum == signal.SIGKILL:
+                raise AssertionError("signalled the reaped process group")
+
+        with mock.patch("os.killpg", side_effect=reject_recycled_group):
+            stop_tree(reaped_process)
+        self.assertEqual(reaped_signals, [signal.SIGTERM])
+        self.assertEqual(reaped_process.wait_timeouts, [0.5])
+
+        running_process = FakeProcess(exits_during_grace_period=False)
+        running_signals: list[signal.Signals] = []
+
+        def lose_process_group(_pid: int, signum: signal.Signals) -> None:
+            running_signals.append(signum)
+            if signum == signal.SIGKILL:
+                raise PermissionError("process group was recycled")
+
+        with mock.patch("os.killpg", side_effect=lose_process_group):
+            stop_tree(running_process)
+        self.assertEqual(running_signals, [signal.SIGTERM, signal.SIGKILL])
+        self.assertEqual(running_process.wait_timeouts, [0.5, None])
 
 
 if __name__ == "__main__":
