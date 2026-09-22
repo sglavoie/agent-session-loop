@@ -351,6 +351,17 @@ for (const deployment of DEPLOYMENTS) {
           });
           return;
         }
+        if (payload.reply_text === "Receipt-less reply.") {
+          await route.fulfill({
+            status: 202,
+            contentType: "application/json",
+            body: JSON.stringify({
+              ok: true,
+              reason: "accepted",
+            }),
+          });
+          return;
+        }
         if (replyAttempts === 1) {
           await route.fulfill({
             status: 409,
@@ -500,11 +511,28 @@ for (const deployment of DEPLOYMENTS) {
       await expect(send).toHaveText("send reply");
       await expect(send).toBeEnabled();
 
+      await page.locator("#wb-reply-text").fill("Receipt-less reply.");
+      page.once("dialog", (dialog) => dialog.accept());
+      await activateSend();
+      await expect(status).toHaveAttribute("data-kind", "error");
+      await expect(status).toHaveText(
+        "reply was not recorded: the server returned no durable operation receipt",
+      );
+      await expect(page.locator("#wb-reply-form-errors")).toHaveText(
+        "reply was not recorded: the server returned no durable operation receipt",
+      );
+      await expect(page.locator("#wb-reply-text")).toHaveValue(
+        "Receipt-less reply.",
+      );
+      await expect(send).toHaveText("send reply");
+      await expect(send).toBeEnabled();
+
+      await page.locator("#wb-reply-text").fill("Phone acceptance confirmed.");
       page.once("dialog", (dialog) => dialog.accept());
       await activateSend();
       await expect(status).toHaveAttribute("data-kind", "pending");
       await expect(status).toHaveText(
-        "Reply recorded. Waiting for the running session to consume it.",
+        /Reply recorded for question live-question-2 as operation [a-f0-9]+\. Waiting for the running session to consume it\./,
       );
       await expect(send).toHaveText("reply recorded");
       await expect(send).toBeDisabled();

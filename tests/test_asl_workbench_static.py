@@ -464,7 +464,9 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn("Number(run.unanswered_count) > 0", decoded)
         self.assertIn('context.context_kind === "waiting"', decoded)
         self.assertIn("context.question_id", decoded)
-        self.assertIn("Reply recorded. Waiting for the running session", decoded)
+        self.assertIn('"Reply recorded" +', decoded)
+        self.assertIn('" as operation " +', decoded)
+        self.assertIn("Waiting for the running session to consume it", decoded)
         self.assertIn("Reply delivered. The question is closed", decoded)
         self.assertIn("if (submit.textContent !== label)", decoded)
         self.assertIn("if (node.disabled !== disabled)", decoded)
@@ -1503,6 +1505,9 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn('liveQuestion ? "/api/question-reply" : "/api/reply"', decoded)
         self.assertIn("action_token: context.action_token", decoded)
         self.assertIn("body.question_id = context.question_id", decoded)
+        self.assertIn(
+            "the server returned no durable operation receipt", submit_body
+        )
         # The privacy regression from earlier sessions must still hold:
         # reply text is never persisted to sessionStorage / localStorage.
         for pattern in (

@@ -400,9 +400,18 @@ export async function loadAndRenderReply() {
         if (submit.textContent !== label) submit.textContent = label;
       }
       if (recorded) {
+        const recordedIdentity = state.reply.recordedOperationId
+          ? " for question " +
+            questionId +
+            " as operation " +
+            state.reply.recordedOperationId +
+            "."
+          : ".";
         showReplyStatus(
           "pending",
-          "Reply recorded. Waiting for the running session to consume it."
+          "Reply recorded" +
+            recordedIdentity +
+            " Waiting for the running session to consume it."
         );
       }
       const promptEl = document.getElementById("wb-reply-prompt");
