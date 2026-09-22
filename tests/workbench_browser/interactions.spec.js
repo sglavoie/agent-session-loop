@@ -235,6 +235,206 @@ for (const deployment of DEPLOYMENTS) {
       );
     });
 
+    test("an unanswered-question run link opens the live reply form", async (
+      { page },
+      testInfo,
+    ) => {
+      await openQueue(page, deployment);
+      const plan = rowFor(await catalog(page), "charlie");
+      expect(plan.run_key).toBeTruthy();
+
+      let projectedQuestion = "live-question-1";
+      let servedQuestion = "live-question-1";
+
+      await page.route("**/api/plan*", async (route) => {
+        const response = await route.fetch();
+        const body = await response.json();
+        body.runs = [
+          {
+            run_key: plan.run_key,
+            question_id: projectedQuestion,
+            unanswered_count: 1,
+          },
+        ];
+        await route.fulfill({ response: response, json: body });
+      });
+      await page.route("**/api/questions*", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ok: true,
+            reason: "ok",
+            context_kind: "waiting",
+            run_id: "run-live-1",
+            question_id: servedQuestion,
+            action_token: "live-action-token",
+            rendered_prompt: "Confirm " + servedQuestion + ".",
+            last_message: "Confirm " + servedQuestion + ".",
+          }),
+        }),
+      );
+      await page.route("**/api/capabilities*", async (route) => {
+        const response = await route.fetch();
+        const body = await response.json();
+        for (const operation of body.operations || []) {
+          if (operation.operation !== "reply") continue;
+          operation.available = true;
+          operation.reason = null;
+        }
+        body.unavailable_operations = (body.unavailable_operations || []).filter(
+          (operation) => operation !== "reply",
+        );
+        await route.fulfill({ response: response, json: body });
+      });
+      let replyAttempts = 0;
+      await page.route(/\/api\/question-reply(?:\?|$)/, async (route) => {
+        replyAttempts += 1;
+        const request = route.request();
+        const payload = request.postDataJSON();
+        if (replyAttempts === 1) {
+          await route.fulfill({
+            status: 409,
+            contentType: "application/json",
+            body: JSON.stringify({
+              ok: false,
+              reason: "question-mismatch",
+              error: "reply was not recorded",
+            }),
+          });
+          return;
+        }
+        await route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ok: true,
+            reason: "accepted",
+            operation: {
+              operation_id: payload.operation_id,
+              status: "accepted",
+              method: "question.reply",
+            },
+          }),
+        });
+      });
+
+      await page.goto(
+        authorizedURL(
+          deployment,
+          `#run=${encodeURIComponent(plan.run_key)}&focus=reply&question=live-question-1`,
+        ),
+      );
+      await expect(page.locator("#wb-shell")).toHaveAttribute(
+        "data-route",
+        "detail",
+      );
+      await expect
+        .poll(() => new URL(page.url()).hash)
+        .toContain("question=live-question-1");
+      const form = page.locator("#wb-reply-form");
+      await expect(form).toBeVisible();
+      const send = form.locator('button[type="submit"]');
+      const activateSend = () =>
+        testInfo.project.name === "mobile-webkit" ? send.tap() : send.click();
+      await expect(send).toHaveText("send reply");
+      await expect(send).toBeEnabled();
+      await expect(send).not.toHaveAttribute("data-disabled-reason");
+      await expect(page.locator("#wb-reply-text")).toBeFocused();
+      await expect(page.locator("#wb-redirect-submit")).toHaveText(
+        "interrupt turn & resume with this correction",
+      );
+
+      let detailPolls = 0;
+      const countDetailPoll = (request) => {
+        if (new URL(request.url()).pathname === "/api/plan") detailPolls += 1;
+      };
+      page.on("request", countDetailPoll);
+      await page.waitForTimeout(5500);
+      page.off("request", countDetailPoll);
+      expect(detailPolls).toBe(0);
+
+      const unchangedRefreshMutations = await page.evaluate(async () => {
+        const form = document.getElementById("wb-reply-form");
+        const mutations = [];
+        const observer = new MutationObserver((records) => {
+          for (const record of records) {
+            mutations.push({
+              type: record.type,
+              attribute: record.attributeName,
+              target: record.target.id || record.target.tagName,
+            });
+          }
+        });
+        observer.observe(form, {
+          attributes: true,
+          childList: true,
+          characterData: true,
+          subtree: true,
+        });
+        const panels = await import("/static/modules/panels.js");
+        await panels.loadAndRenderReply();
+        observer.disconnect();
+        return mutations;
+      });
+      expect(unchangedRefreshMutations).toEqual([]);
+
+      // A later alert for this same run changes only the question identity.
+      // The old interactive form must stop being authoritative immediately;
+      // otherwise its own anti-poll guard freezes the tab on that old question
+      // until the operator manually reloads it.
+      await page.evaluate(() => {
+        const params = new URLSearchParams(
+          window.location.hash.substring(window.location.hash.indexOf("?") + 1),
+        );
+        params.set("question", "live-question-2");
+        window.location.hash = "#plan?" + params.toString();
+      });
+      await expect(page.locator("#wb-reply-submit-status")).toHaveText(
+        "Opening the current question…",
+      );
+      await expect(form).toBeHidden();
+
+      // The connector projection catches up after the first question read.
+      // The scheduled detail poll must adopt it without a page reload.
+      projectedQuestion = "live-question-2";
+      servedQuestion = "live-question-2";
+      await expect(form).toBeVisible({ timeout: 12000 });
+      await expect(page.locator("#wb-reply-prompt")).toHaveText(
+        "Confirm live-question-2.",
+      );
+      await expect(send).toBeEnabled();
+
+      await activateSend();
+      await expect(page.locator("#wb-reply-form-errors")).toBeVisible();
+      await expect(page.locator("#wb-reply-form-errors")).toHaveText(
+        "reply must not be empty",
+      );
+
+      await page.locator("#wb-reply-text").fill("Phone acceptance confirmed.");
+      page.once("dialog", (dialog) => dialog.accept());
+      await activateSend();
+      const status = page.locator("#wb-reply-submit-status");
+      await expect(status).toBeVisible();
+      await expect(status).toHaveAttribute("data-kind", "error");
+      await expect(status).toHaveText("reply was not recorded (question-mismatch)");
+      await expect(page.locator("#wb-reply-text")).toHaveValue(
+        "Phone acceptance confirmed.",
+      );
+      await expect(send).toHaveText("send reply");
+      await expect(send).toBeEnabled();
+
+      page.once("dialog", (dialog) => dialog.accept());
+      await activateSend();
+      await expect(status).toHaveAttribute("data-kind", "pending");
+      await expect(status).toHaveText(
+        "Reply recorded. Waiting for the running session to consume it.",
+      );
+      await expect(send).toHaveText("reply recorded");
+      await expect(send).toBeDisabled();
+      await expect(page.locator("#wb-reply-text")).toHaveValue("");
+    });
+
     test("a control aimed at a run that is not there names the run, not the mode", async ({
       page,
     }) => {

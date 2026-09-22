@@ -279,9 +279,11 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
             'id="wb-profile-unpin"',
             'id="wb-reply-panel"',
             'id="wb-reply-form"',
+            "novalidate",
             'id="wb-reply-prompt"',
             'id="wb-reply-last-message"',
             'id="wb-reply-text"',
+            'id="wb-reply-submit-status"',
             'id="wb-detail-sessions"',
             'id="wb-detail-events"',
             'id="wb-detail-progress"',
@@ -445,11 +447,27 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
             "legacyRecoveryActionTarget",
         ):
             self.assertIn(helper, decoded, msg=f"missing helper: {helper}")
-        self.assertIn("loadAndRenderRecovery(state.detailPlan)", decoded)
+        self.assertIn("loadAndRenderRecovery(", decoded)
+        self.assertIn("Array.isArray(detailBody.runs) ? detailBody.runs : []", decoded)
+        self.assertIn("state.route.runKey", decoded)
+        self.assertIn("state.detailPlan.run_key", decoded)
         self.assertIn('planUrl("/api/recovery")', decoded)
         self.assertIn("renderRecoveryPanel(compact)", decoded)
         self.assertIn("renderRecoveryPanel(body.recovery)", decoded)
         self.assertIn('renderedRecovery.kind === "reply-needed"', decoded)
+        self.assertIn(
+            "hasLiveQuestion(runs, linkedRunKey, linkedQuestionId)", decoded
+        )
+        self.assertIn("run.run_key !== linkedRunKey", decoded)
+        self.assertIn("run.question_id !== linkedQuestionId", decoded)
+        self.assertIn('typeof run.question_id === "string"', decoded)
+        self.assertIn("Number(run.unanswered_count) > 0", decoded)
+        self.assertIn('context.context_kind === "waiting"', decoded)
+        self.assertIn("context.question_id", decoded)
+        self.assertIn("Reply recorded. Waiting for the running session", decoded)
+        self.assertIn("Reply delivered. The question is closed", decoded)
+        self.assertIn("if (submit.textContent !== label)", decoded)
+        self.assertIn("if (node.disabled !== disabled)", decoded)
         self.assertIn("await loadAndRenderReply()", decoded)
         self.assertIn("hideReplyPanel()", decoded)
         self.assertIn("RECOVERY_ACTION_TARGETS", decoded)

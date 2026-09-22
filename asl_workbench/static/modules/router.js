@@ -48,7 +48,7 @@ import {
 import { syncSelectedPlanView } from "./preview.js";
 import { refresh, scheduleRefresh, stopQueueTimer } from "./queue.js";
 import { resetRedirectForPlan } from "./redirect.js";
-import { resetReplyForPlan } from "./panels.js";
+import { renderReplyPending, resetReplyForPlan } from "./panels.js";
 import { applyShellLayout, isDesktopShell } from "./shell.js";
 import { state } from "./state.js";
 
@@ -57,6 +57,7 @@ const EMPTY_ROUTE = {
   planDir: null,
   planKey: null,
   runKey: null,
+  questionId: null,
   entryId: null,
   focus: null,
 };
@@ -219,6 +220,7 @@ export function parseHashRoute() {
       // key at the rewrite below is what used to make `older-linked` a section
       // nothing could ever land in.
       runKey: params.get("run") || null,
+      questionId: params.get("question") || null,
       focus: focusFrom(params),
     });
   }
@@ -231,6 +233,7 @@ export function parseHashRoute() {
     return Object.assign(queueRoute(), {
       name: "detail",
       runKey: runKey,
+      questionId: params.get("question") || null,
       focus: focusFrom(params),
     });
   }
@@ -269,11 +272,14 @@ export function resolveRouteFromPlans(plans) {
     // names are one destination, so the back button should leave the app the
     // way it would have from the canonical link. The run key rides along so
     // the rewrite loses only the ambiguity, not the provenance.
-    replaceHash(
+    let canonical =
       detailHash(address, route.focus) +
-        "&run=" +
-        encodeURIComponent(route.runKey)
-    );
+      "&run=" +
+      encodeURIComponent(route.runKey);
+    if (route.questionId) {
+      canonical += "&question=" + encodeURIComponent(route.questionId);
+    }
+    replaceHash(canonical);
     return true;
   }
   return false;
@@ -302,7 +308,13 @@ export function applyRoute() {
   const previous = state.route || EMPTY_ROUTE;
   const previousPlanDir = previous.planDir;
   const previousKey = previous.planKey;
-  if (next.planDir !== previousPlanDir || next.planKey !== previousKey) {
+  const questionChanged =
+    (next.questionId || null) !== (previous.questionId || null);
+  if (
+    next.planDir !== previousPlanDir ||
+    next.planKey !== previousKey ||
+    questionChanged
+  ) {
     // A correction's identity belongs to the plan it was written against.
     // Carrying it across a route change would let the next submit reuse an
     // id the journal already bound to a different run.
@@ -310,6 +322,9 @@ export function applyRoute() {
     resetReplyForPlan();
   }
   state.route = next;
+  if (next.name === "detail" && next.questionId && questionChanged) {
+    renderReplyPending(next.questionId);
+  }
   applyShellLayout();
   const desktop = isDesktopShell();
   if (next.name === "archive") {

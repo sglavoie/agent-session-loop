@@ -79,6 +79,7 @@ export const state = {
     planDir: null,
     planKey: null,
     runKey: null,
+    questionId: null,
     entryId: null,
     focus: null,
   },
