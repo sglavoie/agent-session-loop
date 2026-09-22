@@ -125,6 +125,8 @@ export const state = {
     recordedOperationId: null,
     deliveredQuestionId: null,
     scrollToTopAfterDelivery: false,
+    openingQuestionId: null,
+    openingStartedAt: null,
   },
   // What `GET /api/capabilities` said this deployment can carry out, and the
   // read that is finding out. `null` means nobody has asked yet, which every

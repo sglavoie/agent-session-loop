@@ -25,6 +25,7 @@ import {
   loadAndRenderEvents,
   loadAndRenderLog,
   loadAndRenderProgress,
+  loadAndRenderReply,
   loadAndRenderState,
 } from "./panels.js";
 import {
@@ -53,7 +54,11 @@ export function scheduleDetailRefresh() {
       ? LINKED_QUESTION_REFRESH_INTERVAL_MS
       : DETAIL_REFRESH_INTERVAL_MS;
   state.detailTimer = window.setTimeout(() => {
-    refreshDetail().finally(() => {
+    const update =
+      linkedQuestion && linkedQuestion !== loadedQuestion
+        ? loadAndRenderReply().then(() => refreshDetail())
+        : refreshDetail();
+    update.finally(() => {
       if (state.route.name === "detail") scheduleDetailRefresh();
     });
   }, delay);
@@ -137,6 +142,7 @@ export async function refreshDetail() {
       loadAndRenderLog("stdout"),
       loadAndRenderLog("stderr"),
       loadAndRenderArtifacts(),
+      loadAndRenderReply(),
     ];
     await Promise.all(tasks);
     const ts = new Date().toLocaleTimeString();

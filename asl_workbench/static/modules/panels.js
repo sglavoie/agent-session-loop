@@ -5,7 +5,10 @@
  */
 
 import { apiRequest, describeError, request, submit } from "./api.js";
-import { REPLY_CONTEXT_ERROR_HINTS } from "./constants.js";
+import {
+  LINKED_QUESTION_OPEN_TIMEOUT_MS,
+  REPLY_CONTEXT_ERROR_HINTS,
+} from "./constants.js";
 import { planUrl, routePlanId } from "./identity.js";
 import { applyActionAvailability } from "./operations.js";
 import { clearFormErrors, showFormError } from "./profile.js";
@@ -355,6 +358,8 @@ export async function loadAndRenderReply() {
         renderReplyPending(linkedQuestion);
         return;
       }
+      state.reply.openingQuestionId = null;
+      state.reply.openingStartedAt = null;
       const questionChanged = state.reply.questionId !== questionId;
       if (questionChanged) {
         state.reply.operationId = null;
@@ -363,6 +368,16 @@ export async function loadAndRenderReply() {
         state.reply.recordedOperationId = null;
         clearFormErrors("wb-reply-form-errors");
         showReplyStatus("", "");
+      }
+      if (
+        questionId &&
+        state.reply.deliveredQuestionId === questionId
+      ) {
+        // This read may have started before the reply settled. A late copy of
+        // the formerly live question cannot downgrade the terminal delivery
+        // state back to "recorded" or reopen its form.
+        hideReplyPanel();
+        return;
       }
       state.detailReplyContext = body;
       const form = document.getElementById("wb-reply-form");
@@ -415,18 +430,37 @@ export async function loadAndRenderReply() {
         body && body.details && typeof body.details === "object"
           ? body.details.reason
           : null;
+      const questionNotFound =
+        body &&
+        body.reason === "detail-refused" &&
+        detailReason === "not-found";
+      const linkedNotFound = linkedQuestion && questionNotFound;
       if (
         recordedQuestion &&
         (!linkedQuestion || linkedQuestion === recordedQuestion) &&
-        body &&
-        body.reason === "detail-refused" &&
-        detailReason === "not-found"
+        questionNotFound
       ) {
         // The recorded reply made this exact question disappear from the
         // connector.  That is its normal terminal state after ASL consumes the
         // reply, so preserve the durable submission feedback instead of
         // replacing it with the remote read's expected not-found refusal.
         hideReplyPanel();
+        return;
+      }
+      if (linkedNotFound) {
+        const startedAt = state.reply.openingStartedAt;
+        if (
+          state.reply.openingQuestionId !== linkedQuestion ||
+          typeof startedAt !== "number" ||
+          Date.now() - startedAt < LINKED_QUESTION_OPEN_TIMEOUT_MS
+        ) {
+          renderReplyPending(linkedQuestion);
+          return;
+        }
+        renderReplyContextError({
+          error:
+            "This alert's question is no longer available. Open the latest notification or return to the queue.",
+        });
         return;
       }
       renderReplyContextError(body);
@@ -441,6 +475,10 @@ export async function loadAndRenderReply() {
 
 /** Keep a question-bound notification on its exact question while data catches up. */
 export function renderReplyPending(questionId) {
+  if (state.reply.openingQuestionId !== questionId) {
+    state.reply.openingQuestionId = questionId || null;
+    state.reply.openingStartedAt = Date.now();
+  }
   state.detailReplyContext = null;
   const panel = document.getElementById("wb-reply-panel");
   if (panel) panel.hidden = false;
@@ -522,6 +560,8 @@ export function resetReplyForPlan() {
   state.reply.recordedOperationId = null;
   state.reply.deliveredQuestionId = null;
   state.reply.scrollToTopAfterDelivery = false;
+  state.reply.openingQuestionId = null;
+  state.reply.openingStartedAt = null;
   const form = document.getElementById("wb-reply-form");
   if (form) {
     form.hidden = false;
