@@ -17,7 +17,15 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_session_loop import bridge, cli, mailbox, plans, state, workbench
+from agent_session_loop import (
+    bridge,
+    cli,
+    intervention,
+    mailbox,
+    plans,
+    state,
+    workbench,
+)
 
 from .support import (
     _WORKBENCH_DEAD_PID,
@@ -451,6 +459,65 @@ class RunsProjectionTests(unittest.TestCase):
             self.assertEqual("waiting", row["question"]["context_kind"])
             self.assertEqual("live", row["question"]["waiting_status"])
             self.assertIn("question.reply", row["actions"])
+            self.assertEqual(
+                intervention.action_token(
+                    intervention.inspect_run(
+                        plan_dir, state_dir=corpus.state_root
+                    )
+                ),
+                row["action_token"],
+            )
+
+    def test_active_worker_wait_projects_between_input_wait_heartbeats(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir = corpus.running_plan()
+            question, _ = mailbox.append_wait_question(
+                plan_dir,
+                QUESTION_BODY,
+                state_dir=corpus.state_root,
+                run_id="20260619T150000Z-1",
+                session_id="2",
+                turn_index=3,
+                waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+            )
+
+            (row,) = corpus.snapshot()["rows"]
+
+            self.assertEqual("running", row["primary_state"])
+            self.assertEqual("awaiting-reply", row["phase"])
+            self.assertEqual(question.id, row["question"]["question_id"])
+            self.assertEqual("waiting", row["question"]["context_kind"])
+            self.assertEqual("live", row["question"]["waiting_status"])
+            self.assertIn("question.reply", row["actions"])
+            self.assertEqual(
+                intervention.action_token(
+                    intervention.inspect_run(
+                        plan_dir, state_dir=corpus.state_root
+                    )
+                ),
+                row["action_token"],
+            )
+
+    def test_worker_wait_from_another_turn_does_not_project(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir = corpus.running_plan()
+            mailbox.append_wait_question(
+                plan_dir,
+                QUESTION_BODY,
+                state_dir=corpus.state_root,
+                run_id="20260619T150000Z-1",
+                session_id="2",
+                turn_index=2,
+                waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+            )
+
+            (row,) = corpus.snapshot()["rows"]
+
+            self.assertEqual("running", row["primary_state"])
+            self.assertEqual("running", row["phase"])
+            self.assertIsNone(row["question"])
 
     def test_snapshot_warns_and_survives_a_plan_that_disappears(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
