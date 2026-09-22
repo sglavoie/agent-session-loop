@@ -814,7 +814,9 @@ class LocalProvider:
         return Response.success(
             reason="ok",
             **workbench_details.read_questions(
-                call.require_query("plan_dir"), state_dir=self.config.state_dir
+                call.require_query("plan_dir"),
+                question_id=call.optional_query("question_id"),
+                state_dir=self.config.state_dir,
             ),
         )
 

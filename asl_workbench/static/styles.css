@@ -293,6 +293,34 @@ a:hover {
   display: block;
 }
 
+/* A notification link is a single-purpose question surface.  The exact
+ * question remains the only visible task from the opening state through the
+ * recorded and delivered receipts; queue rows and plan controls cannot
+ * compete with it or reveal a newer question from the same plan. */
+.wb-question-bound > .wb-header,
+.wb-question-bound > .wb-filters,
+.wb-question-bound > .wb-controls-bar,
+.wb-question-bound > .wb-cleanup-bar,
+.wb-question-bound > .wb-warnings,
+.wb-question-bound > .wb-observation,
+.wb-question-bound > .wb-queue-meta {
+  display: none !important;
+}
+
+.wb-shell[data-question-bound="true"] {
+  display: block !important;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.wb-shell[data-question-bound="true"] .wb-queue,
+.wb-shell[data-question-bound="true"] .wb-detail > :not(#wb-recovery-panel),
+.wb-shell[data-question-bound="true"]
+  #wb-recovery-panel
+  > :not(#wb-reply-panel) {
+  display: none !important;
+}
+
 .wb-shell__placeholder {
   display: none;
   padding: 24px;

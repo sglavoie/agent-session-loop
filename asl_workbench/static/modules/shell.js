@@ -20,7 +20,7 @@ export function wireShellViewport() {
   const onChange = () => {
     applyShellLayout();
     if (state.route.name !== "detail") return;
-    if (isDesktopShell()) {
+    if (isDesktopShell() && !state.route.questionId) {
       refresh();
       scheduleRefresh();
     } else {
@@ -37,12 +37,15 @@ export function wireShellViewport() {
 export function applyShellLayout() {
   const desktop = isDesktopShell();
   const route = state.route.name;
+  const questionBound = route === "detail" && !!state.route.questionId;
   const hasPreview = !!state.previewPlan;
+  document.body.classList.toggle("wb-question-bound", questionBound);
   const shell = document.getElementById("wb-shell");
   if (shell) {
     shell.setAttribute("data-route", route);
     shell.setAttribute("data-viewport", desktop ? "desktop" : "mobile");
     shell.setAttribute("data-preview", hasPreview ? "active" : "empty");
+    shell.setAttribute("data-question-bound", questionBound ? "true" : "false");
   }
   const queueEl = document.getElementById("wb-queue");
   const detailEl = document.getElementById("wb-detail");
@@ -69,11 +72,13 @@ export function applyShellLayout() {
   if (cleanupBarEl) cleanupBarEl.hidden = !state.cleanupMode || route === "detail";
   if (route === "detail") {
     if (detailEl) detailEl.hidden = false;
-    if (queueEl) queueEl.hidden = !desktop;
-    if (filtersEl) filtersEl.hidden = !desktop;
-    if (controlsEl) controlsEl.hidden = !desktop;
-    if (queueMetaEl) queueMetaEl.hidden = !desktop || !state.lastQueueMeta;
-    if (warningsEl && !desktop) warningsEl.hidden = true;
+    if (queueEl) queueEl.hidden = questionBound || !desktop;
+    if (filtersEl) filtersEl.hidden = questionBound || !desktop;
+    if (controlsEl) controlsEl.hidden = questionBound || !desktop;
+    if (queueMetaEl) {
+      queueMetaEl.hidden = questionBound || !desktop || !state.lastQueueMeta;
+    }
+    if (warningsEl && (questionBound || !desktop)) warningsEl.hidden = true;
     if (placeholderEl) placeholderEl.hidden = true;
     if (previewEl) previewEl.hidden = true;
   } else {

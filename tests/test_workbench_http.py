@@ -1201,17 +1201,24 @@ class RemoteProviderTests(unittest.TestCase):
             ),
             received_at=NOW,
         )
+        reads = FakeDetailLane(answer)
         payload = document(
             Application(
-                self.provider(reads=FakeDetailLane(answer)),
+                self.provider(reads=reads),
                 FixedAuthenticator(ROLE_OWNER),
                 policy=REMOTE_POLICY,
-            ).handle(build("GET", "/api/questions?plan_key=plan-abc"))
+            ).handle(
+                build(
+                    "GET",
+                    "/api/questions?plan_key=plan-abc&question_id=q-live",
+                )
+            )
         )
         self.assertEqual(payload["context_kind"], "waiting")
         self.assertEqual(payload["question_id"], "q-live")
         self.assertEqual(payload["rendered_prompt"], "Choose A or B?")
         self.assertNotIn("entries", payload)
+        self.assertEqual(reads.asks[0]["question_id"], "q-live")
 
     def test_every_read_outcome_has_its_own_status(self) -> None:
         """Four failures, four codes. Folding them into one would hide which."""

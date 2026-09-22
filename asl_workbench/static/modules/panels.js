@@ -351,7 +351,10 @@ export async function loadAndRenderReply() {
   if (panel) panel.hidden = false;
   try {
     const body = await apiRequest(
-      planUrl("/api/questions")
+      planUrl(
+        "/api/questions",
+        requestedQuestion ? { question_id: requestedQuestion } : null
+      )
     );
     if (
       routePlanId() !== requestedPlan ||
@@ -435,6 +438,24 @@ export async function loadAndRenderReply() {
       }
       if (linkedQuestion && !recorded && questionChanged) {
         showReplyStatus("info", "Current question loaded from this notification.");
+      }
+      if (
+        linkedQuestion &&
+        state.route &&
+        state.route.focus === "reply" &&
+        !recorded
+      ) {
+        const textarea = document.getElementById("wb-reply-text");
+        if (textarea && typeof textarea.focus === "function") {
+          try {
+            textarea.focus({ preventScroll: true });
+          } catch (err) {
+            textarea.focus();
+          }
+        }
+        // One-shot just like every other detail focus: a later question poll
+        // must not steal the keyboard back from the operator.
+        state.route.focus = null;
       }
       const lastEl = document.getElementById("wb-reply-last-message");
       const lastMessage = body.last_message || "";

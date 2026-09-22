@@ -364,6 +364,22 @@ class CompositionTests(unittest.TestCase):
         )
         self.assertNotEqual(first.key, second.key)
 
+    def test_a_question_selector_is_carried_and_separates_cached_reads(self) -> None:
+        first = remote_reads.ReadRequest(
+            request_id="r1",
+            detail="questions",
+            plan_key=PLAN_KEY,
+            question_id="question-1",
+        )
+        second = remote_reads.ReadRequest(
+            request_id="r2",
+            detail="questions",
+            plan_key=PLAN_KEY,
+            question_id="question-2",
+        )
+        self.assertEqual(first.target()["question_id"], "question-1")
+        self.assertNotEqual(first.key, second.key)
+
     def test_a_composed_read_is_a_frame_the_far_end_would_accept(self) -> None:
         from asl_workbench.transport import validate_envelope
 

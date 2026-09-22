@@ -49,7 +49,6 @@ import { syncSelectedPlanView } from "./preview.js";
 import { refresh, scheduleRefresh, stopQueueTimer } from "./queue.js";
 import { resetRedirectForPlan } from "./redirect.js";
 import {
-  loadAndRenderReply,
   renderReplyPending,
   resetReplyForPlan,
 } from "./panels.js";
@@ -312,13 +311,11 @@ export function applyRoute() {
   const previous = state.route || EMPTY_ROUTE;
   const previousPlanDir = previous.planDir;
   const previousKey = previous.planKey;
+  const addressChanged =
+    next.planDir !== previousPlanDir || next.planKey !== previousKey;
   const questionChanged =
     (next.questionId || null) !== (previous.questionId || null);
-  if (
-    next.planDir !== previousPlanDir ||
-    next.planKey !== previousKey ||
-    questionChanged
-  ) {
+  if (addressChanged || questionChanged) {
     // A correction's identity belongs to the plan it was written against.
     // Carrying it across a route change would let the next submit reuse an
     // id the journal already bound to a different run.
@@ -326,7 +323,11 @@ export function applyRoute() {
     resetReplyForPlan();
   }
   state.route = next;
-  if (next.name === "detail" && next.questionId && questionChanged) {
+  if (
+    next.name === "detail" &&
+    next.questionId &&
+    (questionChanged || addressChanged)
+  ) {
     renderReplyPending(next.questionId);
   }
   applyShellLayout();
@@ -350,17 +351,12 @@ export function applyRoute() {
     const address = addressOfRoute(next);
     setSelectedPlan(address ? address.value : null);
     syncSelectedPlanView();
-    if (next.questionId) {
-      // A notification already names the exact question and an addressable
-      // plan. Read that one small payload immediately instead of making a
-      // phone wait behind the plan, registry, recovery, logs and artifacts
-      // needed by the rest of the detail screen. The full refresh still runs
-      // in parallel and adopts the same context once it catches up.
-      void loadAndRenderReply();
-    }
+    // `refreshDetail` deliberately narrows a question-bound route to the
+    // exact question read. No plan panels or queue data are allowed to redraw
+    // this notification screen once its run key has resolved.
     refreshDetail();
     scheduleDetailRefresh();
-    if (desktop) {
+    if (desktop && !next.questionId) {
       // Desktop keeps the queue visible alongside the detail; poll both so
       // operator can see queue changes while inspecting a plan.
       refresh();
