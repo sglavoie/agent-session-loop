@@ -749,6 +749,27 @@ class PublisherCase(unittest.TestCase):
         self.assertEqual(notifications.NOTIFICATION_TITLE, headers["Title"])
         self.assertTrue(connection.closed)
 
+    def test_a_release_change_forces_a_fresh_mobile_navigation(self) -> None:
+        connection = FakeConnection(response=FakeResponse(200, receipt()))
+        self.publisher(
+            connection,
+            navigation_version="bcd8c364435a0429",
+        ).publish(
+            kind=incidents.INCIDENT_UNANSWERED_QUESTION,
+            project="Example project",
+            plan_key="abc123",
+            run_key="plan/run-1",
+            question_id="question/1",
+            before_send=lambda: True,
+        )
+        _method, _url, _body, headers = connection.requests[0]
+        self.assertEqual(
+            "https://pi.example.ts.net:9443/"
+            "?workbench=2&release=bcd8c364435a0429"
+            "#plan?key=abc123&run=plan%2Frun-1&focus=reply&question=question%2F1",
+            headers["Click"],
+        )
+
     def test_every_incident_kind_has_a_message(self) -> None:
         self.assertEqual(set(incidents.INCIDENT_KINDS), set(NOTIFICATION_TEMPLATES))
         for kind in incidents.INCIDENT_KINDS:
