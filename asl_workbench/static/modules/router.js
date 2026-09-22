@@ -48,7 +48,11 @@ import {
 import { syncSelectedPlanView } from "./preview.js";
 import { refresh, scheduleRefresh, stopQueueTimer } from "./queue.js";
 import { resetRedirectForPlan } from "./redirect.js";
-import { renderReplyPending, resetReplyForPlan } from "./panels.js";
+import {
+  loadAndRenderReply,
+  renderReplyPending,
+  resetReplyForPlan,
+} from "./panels.js";
 import { applyShellLayout, isDesktopShell } from "./shell.js";
 import { state } from "./state.js";
 
@@ -346,6 +350,14 @@ export function applyRoute() {
     const address = addressOfRoute(next);
     setSelectedPlan(address ? address.value : null);
     syncSelectedPlanView();
+    if (next.questionId) {
+      // A notification already names the exact question and an addressable
+      // plan. Read that one small payload immediately instead of making a
+      // phone wait behind the plan, registry, recovery, logs and artifacts
+      // needed by the rest of the detail screen. The full refresh still runs
+      // in parallel and adopts the same context once it catches up.
+      void loadAndRenderReply();
+    }
     refreshDetail();
     scheduleDetailRefresh();
     if (desktop) {
