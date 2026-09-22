@@ -81,10 +81,22 @@ BESPOKE_MUTATIONS: frozenset[str] = frozenset({"/api/control/redirect"})
 #: words alongside the id would put them in session storage and undo that
 #: promise on the first refresh.
 RECEIPT_FIELDS: frozenset[str] = frozenset(
-    {"operation_id", "action", "plan", "outcome", "status", "reason", "settled"}
+    {
+        "operation_id",
+        "action",
+        "plan",
+        "outcome",
+        "status",
+        "reason",
+        "settled",
+        "question_id",
+    }
 )
 
-#: What the Pi does not carry out, exactly. Twelve operations, and the list is
+#: Transport-only operations the local provider deliberately does not own.
+LOCAL_UNAVAILABLE: frozenset[str] = frozenset({"command-redeem", "ingest"})
+
+#: What the browser fixture's Pi does not carry out, exactly. The list is
 #: spelled rather than derived: the point of asserting it is that a mutation
 #: silently becoming available (or unavailable) on the remote deployment is a
 #: change to what the Pi is for, and should have to be typed here.
@@ -94,7 +106,9 @@ REMOTE_UNAVAILABLE: frozenset[str] = frozenset(
         "archive-list",
         "archive-restore",
         "archive-settings",
+        "command-redeem",
         "conversation-recovery",
+        "ingest",
         "launch",
         "plan-archive",
         "plans-archive",
@@ -272,6 +286,9 @@ class InteractionContractTests(unittest.TestCase):
             if path.name not in {"api.js", "operations.js"}
         }
         corpus = "\n".join(sources.values())
+        guarded_specs = "\n".join(
+            re.findall(r"runMutation\(\{(.*?)\n\s*\}\);", corpus, re.DOTALL)
+        )
         for route in workbench_http.ROUTES:
             if not route.mutating or route.path in BESPOKE_MUTATIONS:
                 continue
@@ -282,8 +299,8 @@ class InteractionContractTests(unittest.TestCase):
                 continue
             with self.subTest(route=route.path):
                 self.assertIn(
-                    f'path: "{route.path}"',
-                    corpus,
+                    f'"{route.path}"',
+                    guarded_specs,
                     "a mutating route must be submitted as a runMutation spec",
                 )
         # And never as a plain read. `apiRequest` returns a parsed body with no
@@ -448,12 +465,13 @@ class CapabilityContractTests(InteractionDeploymentTestCase):
                         f"{operation} was reported without a role",
                     )
 
-    def test_the_laptop_carries_out_everything_it_offers(self) -> None:
-        # The local provider is the one that actually runs ASL, so an
-        # unavailable operation there would be a capability the consolidated
-        # application lost rather than one it never had.
+    def test_the_laptop_declines_only_service_side_transport(self) -> None:
+        # The local provider runs ASL but is not the service a connector uploads
+        # to, nor does it hold remote reply bodies for redemption.
         _, body = _request(self.deployments.local, "/api/capabilities")
-        self.assertEqual([], body.get("unavailable_operations"))
+        self.assertEqual(
+            LOCAL_UNAVAILABLE, set(body.get("unavailable_operations") or [])
+        )
 
     def test_the_pi_declines_exactly_the_operations_it_cannot_reach(self) -> None:
         _, body = _request(self.deployments.remote, "/api/capabilities")

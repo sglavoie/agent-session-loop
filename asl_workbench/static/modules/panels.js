@@ -9,8 +9,6 @@ import {
   OUTCOME_RESULT,
   apiRequest,
   describeError,
-  request,
-  submit,
 } from "./api.js";
 import {
   LINKED_QUESTION_OPEN_TIMEOUT_MS,
