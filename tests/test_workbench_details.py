@@ -43,8 +43,16 @@ import unittest
 import urllib.parse
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
-from agent_session_loop import events, plans, state, workbench_details
+from agent_session_loop import (
+    events,
+    intervention,
+    plans,
+    qna,
+    state,
+    workbench_details,
+)
 from asl_workbench import catalog, details
 from tests.support import (
     _WORKBENCH_DEAD_PID,
@@ -227,6 +235,71 @@ class PaginationTests(unittest.TestCase):
     def test_limit_is_capped(self) -> None:
         with self.assertRaises(details.DetailError):
             details.paginate([], offset=0, limit=details.MAX_EVENT_LIMIT + 1)
+
+
+class QuestionReadTests(unittest.TestCase):
+    """Selected and unselected reads keep their distinct refusal contracts."""
+
+    @staticmethod
+    def waiting_facts() -> intervention.RunFacts:
+        return intervention.RunFacts(
+            plan_dir=Path("/tmp/plan"),
+            run_id="run-1",
+            lock_active=True,
+            run_active=True,
+            paused=False,
+            turn_active=True,
+            context_kind="waiting",
+            question_id="q-live",
+            unanswered_ids=("q-live",),
+        )
+
+    def test_an_unselected_oversized_question_keeps_the_qna_error_contract(
+        self,
+    ) -> None:
+        oversized = "x" * (intervention.MAX_QUESTION_BODY_BYTES + 1)
+        qna_error = qna.QnAError(
+            qna.REASON_NO_PAUSED_RUN,
+            "latest runner state is not paused",
+        )
+        with (
+            mock.patch.object(
+                intervention, "inspect_run", return_value=self.waiting_facts()
+            ),
+            mock.patch.object(
+                intervention,
+                "question_body",
+                return_value=("q-live", "waiting", oversized),
+            ),
+            mock.patch.object(
+                qna, "load_qna_context", side_effect=qna_error
+            ) as load_context,
+            self.assertRaises(details.DetailError) as raised,
+        ):
+            workbench_details.read_questions("/tmp/plan", question_id=None)
+
+        self.assertEqual(qna.REASON_NO_PAUSED_RUN, raised.exception.reason)
+        self.assertEqual(404, raised.exception.status)
+        load_context.assert_called_once_with("/tmp/plan", state_dir=None, reclaim=False)
+
+    def test_a_selected_missing_question_is_not_found(self) -> None:
+        missing = intervention.InterventionError(
+            intervention.REASON_NO_OPEN_QUESTION,
+            "the selected question is not open",
+        )
+        with (
+            mock.patch.object(
+                intervention, "inspect_run", return_value=self.waiting_facts()
+            ),
+            mock.patch.object(intervention, "question_body", side_effect=missing),
+            mock.patch.object(qna, "load_qna_context") as load_context,
+            self.assertRaises(details.DetailError) as raised,
+        ):
+            workbench_details.read_questions("/tmp/plan", question_id="q-missing")
+
+        self.assertEqual(details.REASON_NOT_FOUND, raised.exception.reason)
+        self.assertEqual(404, raised.exception.status)
+        load_context.assert_not_called()
 
 
 class ScopeContainmentTests(unittest.TestCase):
