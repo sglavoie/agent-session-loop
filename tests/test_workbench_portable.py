@@ -413,6 +413,7 @@ class PackagedRuntimeTest(unittest.TestCase):
             mode=runtime.MODE_REMOTE,
             deployment=notifications.DEPLOYMENT_PRODUCTION,
             token="tk_runtimefixture123",
+            navigation_version=runtime.release_name(),
         )
         self.assertIs(construct.call_args.kwargs["publisher"], publisher)
         engine.tick.assert_called()

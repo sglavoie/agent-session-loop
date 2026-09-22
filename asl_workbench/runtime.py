@@ -249,6 +249,7 @@ def run(
                     mode=MODE_REMOTE,
                     deployment=notifications.DEPLOYMENT_PRODUCTION,
                     token=publisher_token,
+                    navigation_version=release_name(),
                 )
                 incident_engine = incidents.IncidentEngine(
                     store=store,

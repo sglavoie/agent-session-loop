@@ -92,10 +92,10 @@ MAX_NOTIFICATION_LABEL_CHARS = 160
 RUN_FRAGMENT = "/?workbench=1#run="
 
 #: A live-question alert must reload the shell before it tries to expose a
-#: control added by a newer release.  Mobile browsers commonly reuse the open
-#: tab when only the fragment changes, which leaves the old JavaScript running
-#: even though the Pi already serves the fixed assets.  This versioned query
-#: crosses the navigation boundary while the fragment contract stays intact.
+#: control added by a newer release.  The runtime adds its artifact identity to
+#: this query: mobile browsers commonly reuse an open tab when only the
+#: fragment changes, which otherwise leaves the old JavaScript running even
+#: though the Pi already serves fixed assets.
 REPLY_RUN_FRAGMENT = "/?workbench=2#run="
 
 #: How long a publish attempt may take end to end.
@@ -211,6 +211,7 @@ def notification_link(
     focus_reply: bool = False,
     plan_key: str | None = None,
     question_id: str | None = None,
+    navigation_version: str | None = None,
 ) -> str:
     """The deep link one notification carries back to the run it is about.
 
@@ -219,10 +220,14 @@ def notification_link(
     live question rather than leaving the correction composer as the first
     actionable control on a phone screen.
     """
+    reply_query = "/?workbench=2"
+    if navigation_version:
+        reply_query += "&release=" + quote(navigation_version, safe="")
     if focus_reply and plan_key:
         link = (
             site.private_origin
-            + "/?workbench=2#plan?key="
+            + reply_query
+            + "#plan?key="
             + quote(plan_key, safe="")
             + "&run="
             + quote(run_key, safe="")
@@ -236,7 +241,9 @@ def notification_link(
             # making each unanswered-question alert a fresh destination.
             link += "&question=" + quote(question_id, safe="")
     else:
-        fragment = REPLY_RUN_FRAGMENT if focus_reply else RUN_FRAGMENT
+        fragment = (
+            reply_query + "#run=" if focus_reply else RUN_FRAGMENT
+        )
         link = site.private_origin + fragment + quote(run_key, safe="")
         if focus_reply:
             link += "&focus=reply"
@@ -251,6 +258,7 @@ def notification(
     site: NotificationSite,
     plan_key: str | None = None,
     question_id: str | None = None,
+    navigation_version: str | None = None,
 ) -> tuple[bytes, str]:
     """The body and the link for one incident, from identity and a kind alone."""
     if kind not in NOTIFICATION_TEMPLATES:
@@ -263,6 +271,7 @@ def notification(
         focus_reply=kind == INCIDENT_UNANSWERED_QUESTION,
         plan_key=plan_key,
         question_id=question_id,
+        navigation_version=navigation_version,
     )
     return f"{label}: {reason}\n{link}".encode(), link
 
@@ -332,13 +341,19 @@ class NtfyPublisher:
         site: NotificationSite = PI_NOTIFICATION_SITE,
         deployment: str = DEPLOYMENT_PRODUCTION,
         connect: ConnectionFactory | None = None,
+        navigation_version: str | None = None,
     ) -> None:
         authorize_publisher(deployment, site)
         if not isinstance(token, str) or not _TOKEN.fullmatch(token):
             raise NotificationError("invalid ntfy credential")
+        if navigation_version is not None and not _TOKEN.fullmatch(
+            navigation_version
+        ):
+            raise NotificationError("invalid notification navigation version")
         self._token = token
         self.site = site
         self.deployment = deployment
+        self.navigation_version = navigation_version
         self._connect = (
             connect if connect is not None else https_connection_factory(site)
         )
@@ -360,6 +375,7 @@ class NtfyPublisher:
             plan_key=plan_key,
             run_key=run_key,
             question_id=question_id,
+            navigation_version=self.navigation_version,
             site=self.site,
         )
         connection = self._connect()
@@ -416,6 +432,7 @@ def select_publisher(
     token: str | None,
     site: NotificationSite = PI_NOTIFICATION_SITE,
     connect: ConnectionFactory | None = None,
+    navigation_version: str | None = None,
 ) -> NtfyPublisher | None:
     """The only supported way to obtain a publisher, and usually there is none.
 
@@ -434,7 +451,13 @@ def select_publisher(
     if token is None:
         return None
     authorize_publisher(deployment, site)
-    return NtfyPublisher(token, site=site, deployment=deployment, connect=connect)
+    return NtfyPublisher(
+        token,
+        site=site,
+        deployment=deployment,
+        connect=connect,
+        navigation_version=navigation_version,
+    )
 
 
 __all__ = [
