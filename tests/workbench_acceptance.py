@@ -594,15 +594,7 @@ def check_common(document: Mapping[str, Any], stage: str, repository: Path) -> N
     artifact = _matching(release, "artifact", _DIGEST, f"{stage}.release")
 
     accepted = accepted_revision(repository)
-    if stage == STAGE_RETIREMENT:
-        # Retirement changes the source inventory, tests, and ownership docs
-        # after production acceptance; it does not silently redeploy. The
-        # deployed artifact is bound to production evidence below, while the
-        # current working tree is judged by the consolidation and repository
-        # suites in this session's contract.
-        check_release_is_ancestor(repository, revision, accepted)
-    else:
-        check_release_is_current(repository, revision, accepted)
+    check_release_is_current(repository, revision, accepted)
     rebuilt = rebuild_digest(repository, revision)
     if rebuilt != artifact:
         raise EvidenceError(
@@ -924,11 +916,9 @@ class _EvidenceCase:
         revision = _matching(release, "revision", _REVISION, f"{self.stage}.release")
         artifact = _matching(release, "artifact", _DIGEST, f"{self.stage}.release")
         accepted = accepted_revision(REPO_ROOT)
+        check_release_is_current(REPO_ROOT, revision, accepted)
         if self.stage == STAGE_RETIREMENT:
-            check_release_is_ancestor(REPO_ROOT, revision, accepted)
             check_retirement_release(document, self._path(), REPO_ROOT)
-        else:
-            check_release_is_current(REPO_ROOT, revision, accepted)
         rebuilt = rebuild_digest(REPO_ROOT, revision)
         if rebuilt != artifact:
             raise EvidenceError(

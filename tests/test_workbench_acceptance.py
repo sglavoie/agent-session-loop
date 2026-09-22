@@ -481,16 +481,20 @@ class WrongReleaseEvidence(AcceptanceCase):
 class StaleEvidence(AcceptanceCase):
     """Evidence about software this repository has since moved past."""
 
-    def test_a_package_commit_after_the_release_makes_the_report_stale(self) -> None:
+    def test_a_package_commit_after_the_release_makes_each_deployment_stale(
+        self,
+    ) -> None:
         fix = fixture()
-        document = valid_document(acceptance.STAGE_STAGING)
-        document["release"] = {
-            "revision": fix.package,
-            "artifact": fix.digest_package,
-        }
-        for host in document["hosts"].values():
-            host["release"] = fix.digest_package
-        self.refuses(acceptance.STAGE_STAGING, document, "the evidence is stale")
+        for stage in acceptance.STAGES:
+            with self.subTest(stage=stage):
+                document = valid_document(stage)
+                document["release"] = {
+                    "revision": fix.package,
+                    "artifact": fix.digest_package,
+                }
+                for host in document["hosts"].values():
+                    host["release"] = fix.digest_package
+                self.refuses(stage, document, "the evidence is stale")
 
     def test_a_release_that_was_never_merged_is_refused(self) -> None:
         fix = fixture()
