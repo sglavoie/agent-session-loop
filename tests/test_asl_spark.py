@@ -304,7 +304,7 @@ class ModelAvailabilityTests(unittest.TestCase):
             root = Path(tmp)
             model = run_selection.SPARK_MODEL
             blocked = spark_status.SparkStatus(
-                "blocked", "window-exhausted", "2026-09-19T21:40:00Z"
+                "blocked", "window-exhausted", "2100-01-01T01:00:00Z"
             )
             result = model_availability.reconcile_live(
                 root, model, blocked, run_id="run-1"

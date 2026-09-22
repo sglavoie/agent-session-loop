@@ -44,7 +44,7 @@ import urllib.parse
 from pathlib import Path
 
 from agent_session_loop import bridge, workbench
-from asl_workbench import capabilities, changes, companion_inventory
+from asl_workbench import capabilities, changes
 from asl_workbench.compatibility import (
     KIND_FORBIDDEN,
     KIND_THIRD_PARTY,
@@ -183,19 +183,6 @@ class CapabilityMatrixTests(unittest.TestCase):
             driven_by_a_browser,
             "the shell suite exists, so at least one row must name it",
         )
-
-    def test_companion_browser_rows_name_their_real_specs(self) -> None:
-        # The Companion half does have browser specs, so its rows must point at
-        # them rather than inherit the Workbench's gap.
-        for row in capabilities.by_surface(capabilities.SURFACE_COMPANION_BROWSER):
-            with self.subTest(capability=row.key):
-                self.assertIsNone(row.coverage_gap)
-                self.assertTrue(
-                    any(
-                        reference.endswith(".spec.js")
-                        for reference in row.regression_coverage
-                    )
-                )
 
     def test_compatibility_adapters_are_recorded_where_they_exist(self) -> None:
         # The historic delete route is the clearest case: it must keep working
@@ -495,67 +482,6 @@ class PythonVersionBoundaryTests(unittest.TestCase):
         config = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn(RUFF_PER_FILE_TARGET_TABLE, config)
         self.assertIn(RUFF_PORTABLE_TARGET, config)
-
-
-class CompanionInventoryTests(unittest.TestCase):
-    """The pinned Companion surface matches a real Companion checkout."""
-
-    def setUp(self) -> None:
-        self.package_root = companion_inventory.locate_companion_package(REPO_ROOT)
-
-    def _require_checkout(self) -> Path:
-        if self.package_root is None:
-            self.skipTest(
-                "no Pi checkout reachable; set "
-                f"{companion_inventory.ENV_PI_CHECKOUT} to cross-check the "
-                "pinned Companion surface"
-            )
-        return self.package_root
-
-    def test_the_pinned_module_list_matches_the_checkout(self) -> None:
-        derived = companion_inventory.derive_modules(self._require_checkout())
-        self.assertEqual(tuple(sorted(companion_inventory.COMPANION_MODULES)), derived)
-
-    def test_the_pinned_route_table_matches_the_checkout(self) -> None:
-        derived = companion_inventory.derive_routes(self._require_checkout())
-        self.assertEqual(companion_inventory.COMPANION_ROUTES, derived)
-
-    def test_the_matrix_covers_every_companion_module(self) -> None:
-        recorded = capabilities.surface_keys(capabilities.SURFACE_COMPANION_MODULE)
-        self.assertEqual(set(companion_inventory.COMPANION_MODULES), set(recorded))
-
-    def test_the_matrix_covers_every_companion_route(self) -> None:
-        recorded = capabilities.surface_keys(capabilities.SURFACE_COMPANION_HTTP)
-        expected = {route.key for route in companion_inventory.COMPANION_ROUTES}
-        self.assertEqual(expected, set(recorded))
-
-    def test_companion_coverage_references_resolve_in_the_checkout(self) -> None:
-        package_root = self._require_checkout()
-        repo_root = package_root.parent.parent.parent
-        for path in capabilities.coverage_paths("sglavoie_raspberry_pi"):
-            with self.subTest(coverage=path):
-                self.assertTrue(
-                    (repo_root / path).exists(),
-                    f"matrix names coverage that does not exist: {path}",
-                )
-
-    def test_a_missing_checkout_is_reported_rather_than_assumed_absent(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw_tmp:
-            located = companion_inventory.locate_companion_package(
-                Path(raw_tmp) / "scripts", environ={}
-            )
-            self.assertIsNone(located)
-
-    def test_an_override_points_the_reader_at_another_checkout(self) -> None:
-        package_root = self._require_checkout()
-        pi_repo = package_root.parent.parent.parent
-        located = companion_inventory.locate_companion_package(
-            Path("/nonexistent/scripts"),
-            environ={companion_inventory.ENV_PI_CHECKOUT: str(pi_repo)},
-        )
-        self.assertEqual(package_root, located)
 
 
 class LocalAPICharacterizationTests(WorkbenchAPIFixture, unittest.TestCase):

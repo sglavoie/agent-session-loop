@@ -39,7 +39,6 @@ from typing import Any
 
 from agent_session_loop import bridge, plans, workbench, workbench_catalog
 from asl_workbench import catalog
-from asl_workbench.companion_inventory import locate_companion_package
 from tests.support import (
     _WORKBENCH_DEAD_PID,
     _discovered,
@@ -215,76 +214,32 @@ class VocabularyMirrorTests(unittest.TestCase):
 
 
 class IdentityCompatibilityTests(unittest.TestCase):
-    """Migrating to the catalog keeps every identity the Pi already stores."""
+    """The migrated identity contract remains pinned after legacy retirement."""
 
-    def _companion_identity(self) -> Any:
-        package = locate_companion_package(REPO_ROOT)
-        if package is None:
-            self.skipTest("no Pi checkout reachable from this workspace")
-        import importlib
-        import sys
-
-        # `identity` imports `.protocol`, which imports the package itself, so
-        # loading the file standalone raises on the relative import: it has to
-        # be imported under its real package name. The Pi checkout is a
-        # read-only dependency here, so bytecode writing is off for the
-        # duration -- an import that leaves `__pycache__` behind is a write
-        # into a repository this session may only read.
-        parent = str(Path(package).parent)
-        name = Path(package).name
-        previously_imported = {
-            module_name
-            for module_name in sys.modules
-            if module_name == name or module_name.startswith(f"{name}.")
+    def test_plan_and_run_keys_keep_the_migrated_values(self) -> None:
+        expected = {
+            "/Users/someone/.local/share/agent-plans/plan-alpha": (
+                "88426a841cdebdc6",
+                "9b50e252e784032b",
+                "e20f6de03811fa6d",
+            ),
+            "/tmp/agent-plans/plan with spaces": (
+                "765de4972b519822",
+                "c6393b39a4df3963",
+                "b0439898035bbef7",
+            ),
+            '/tmp/agent-plans/plan,with"punctuation': (
+                "1a0cfd41bf8f2994",
+                "20e47ea16c33148c",
+                "7456af58ccd7b084",
+            ),
         }
-
-        def _restore(written: bool = sys.dont_write_bytecode) -> None:
-            sys.dont_write_bytecode = written
-            sys.path.remove(parent)
-            for module_name in list(sys.modules):
-                if module_name in previously_imported:
-                    continue
-                if module_name == name or module_name.startswith(f"{name}."):
-                    del sys.modules[module_name]
-
-        sys.dont_write_bytecode = True
-        sys.path.insert(0, parent)
-        self.addCleanup(_restore)
-        return importlib.import_module(f"{name}.identity")
-
-    def test_plan_and_run_keys_equal_the_companions(self) -> None:
-        companion = self._companion_identity()
-        self.assertEqual(companion.KEY_CHARS, catalog.KEY_CHARS)
-        for plan_dir in (
-            "/Users/someone/.local/share/agent-plans/plan-alpha",
-            "/tmp/agent-plans/plan with spaces",
-            '/tmp/agent-plans/plan,with"punctuation',
-        ):
-            self.assertEqual(companion.plan_key(plan_dir), catalog.plan_key(plan_dir))
-            key = catalog.plan_key(plan_dir)
-            for run_id in (None, "", "20260619T120000Z-9"):
-                self.assertEqual(
-                    companion.run_key(key, run_id), catalog.run_key(key, run_id)
-                )
-
-    def test_labels_equal_the_companions_for_the_same_candidates(self) -> None:
-        companion = self._companion_identity()
-        cases: tuple[dict[str, Any], ...] = (
-            {"plan_dir": "/tmp/agent-plans/plan-alpha"},
-            {"plan_dir": "/tmp/plan", "label": "Nightly SVC check"},
-            {"plan_dir": "/tmp/plan", "workspace_root": "/Users/x/work/Kiln"},
-            {"plan_dir": "/tmp/plan", "label": "a\nb\tc", "repository_count": 5},
-            {"plan_dir": "/tmp/plan", "label": "   ", "repository_count": 1},
-            {"plan_dir": "", "label": None},
-        )
-        for case in cases:
-            with self.subTest(case=case):
-                self.assertEqual(
-                    companion.project_label(**case),
-                    catalog.display_label(**case),
-                    "display_label must agree with the Companion when no plan "
-                    "title is supplied, or migrating renames every plan",
-                )
+        for plan_dir, (key, no_run, run) in expected.items():
+            with self.subTest(plan_dir=plan_dir):
+                self.assertEqual(key, catalog.plan_key(plan_dir))
+                self.assertEqual(no_run, catalog.run_key(key, None))
+                self.assertEqual(no_run, catalog.run_key(key, ""))
+                self.assertEqual(run, catalog.run_key(key, "20260619T120000Z-9"))
 
     def test_a_plan_key_needs_a_plan_directory(self) -> None:
         for bad in (None, "", "   ", 7):

@@ -1,9 +1,8 @@
 """Moving a deployed Companion installation onto this package, and back off it.
 
 Two prefixes already exist on two hosts: a systemd user service on the Pi and a
-launch agent on the Mac, both installed by
-``sglavoie_raspberry_pi:services/pi-monitoring/companion/lifecycle.py``. Neither
-can be re-provisioned. The connector token was handed out once and is stored as
+launch agent on the Mac, both installed by the now-retired Companion lifecycle.
+Neither can be re-provisioned. The connector token was handed out once and is stored as
 a digest; the database holds months of run history whose ``run_key`` values are
 already published in notification links; the incident rows are identities an
 operator has seen. So the upgrade is a migration of what is there rather than a
@@ -29,7 +28,7 @@ something:
   action token, because the journal has no column for either -- which is what
   makes "the migration cannot re-send an answer" a property of the file rather
   than a promise about this code.
-* **The whole prefix is backed up, not the database.** The Companion's snapshot
+* **The whole prefix is backed up, not the database.** The retired snapshot
   covered three files. :data:`BACKUP_MEMBERS` plus the integration receipts is
   what an installation actually consists of, and a restore that recreated the
   database beside receipts describing host resources from another era would be

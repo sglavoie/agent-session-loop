@@ -461,9 +461,7 @@ class RunsProjectionTests(unittest.TestCase):
             self.assertIn("question.reply", row["actions"])
             self.assertEqual(
                 intervention.action_token(
-                    intervention.inspect_run(
-                        plan_dir, state_dir=corpus.state_root
-                    )
+                    intervention.inspect_run(plan_dir, state_dir=corpus.state_root)
                 ),
                 row["action_token"],
             )
@@ -492,9 +490,7 @@ class RunsProjectionTests(unittest.TestCase):
             self.assertIn("question.reply", row["actions"])
             self.assertEqual(
                 intervention.action_token(
-                    intervention.inspect_run(
-                        plan_dir, state_dir=corpus.state_root
-                    )
+                    intervention.inspect_run(plan_dir, state_dir=corpus.state_root)
                 ),
                 row["action_token"],
             )

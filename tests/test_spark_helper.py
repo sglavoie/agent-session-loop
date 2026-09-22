@@ -37,9 +37,9 @@ if sys.argv[1:] == ["app-server", "--stdio"]:
                 continue
             bucket = {"limitId": "opaque-id", "limitName": "GPT-5.3-Codex-Spark",
                 "primary": {"usedPercent": 100 if mode == "blocked" else 20,
-                    "resetsAt": 1789853632},
+                    "resetsAt": 4102444800},
                 "secondary": {"usedPercent": 100 if mode == "blocked" else 10,
-                    "resetsAt": 1789854000},
+                    "resetsAt": 4102448400},
                 "rateLimitReachedType": None}
             if mode == "reached":
                 bucket["rateLimitReachedType"] = "primary"
@@ -163,9 +163,9 @@ class SparkHelperTests(unittest.TestCase):
                 self.assertFalse(self.capture.exists())
                 self.assertFalse((self.root / "state-home").exists())
                 if mode == "blocked":
-                    self.assertEqual("2026-09-19T21:40:00Z", payload["retry_at"])
+                    self.assertEqual("2100-01-01T01:00:00Z", payload["retry_at"])
                 if mode == "reached":
-                    self.assertEqual("2026-09-19T21:33:52Z", payload["retry_at"])
+                    self.assertEqual("2100-01-01T00:00:00Z", payload["retry_at"])
 
     def test_blocked_wrapper_never_launches_exec(self) -> None:
         self.env["FAKE_LIMIT_MODE"] = "blocked"
@@ -184,7 +184,7 @@ class SparkHelperTests(unittest.TestCase):
                     "models": {
                         "gpt-5.3-codex-spark": {
                             "reason": "quota-exhausted",
-                            "retry_at": "2026-09-19T21:40:00Z",
+                            "retry_at": "2100-01-01T01:00:00Z",
                         }
                     },
                 }

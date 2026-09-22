@@ -15,10 +15,9 @@ the full matrix, which is the inventory that does not go stale.
 
 | Module | What it is |
 |---|---|
-| `capabilities.py` | The capability/ownership matrix: every route, entry point, workflow, integration, and persistence boundary of both halves, each naming one owner, its authority, its compatibility adapters, and its regression coverage. |
+| `capabilities.py` | The final capability/ownership matrix: every surviving route, entry point, workflow, integration, and persistence boundary, each naming one owner, its authority, its deliberate compatibility adapters, and its regression coverage. Historical origin is retained without retaining the retired implementation. |
 | `changes.py` | The two behaviors the consolidation changes on purpose, with the tests currently pinning the old behavior. |
 | `compatibility.py` | The three portability boundaries — Python version, stdlib-only dependencies, no ASL import — in executable form. |
-| `companion_inventory.py` | The Companion's pinned module list and route table, plus readers that cross-check the pin against a real Pi checkout. |
 | `lifecycle.py` | Packaging and both native lifecycles: a content-addressed artifact of this package for the Pi service, a recorded attachment to the installed ASL for the Mac connector, and the install, upgrade, rollback, recover and remove operations over a single prefix. |
 | `migration.py` | The one-way trip from an installed Companion onto this package, and the backup half of the trip back: the state, configuration, checkpoints, journal, credentials and receipts an existing prefix already holds, moved to the names this package opens without changing an identity, repeating an action, or reinstating a revoked credential. |
 | `runtime.py` | The service entry point the unit starts: one prefix, one runtime lock, one readiness note, and a `--check` that asks whether a release can read a state before it is allowed to serve it. |
@@ -35,7 +34,7 @@ truth.
 
 **It runs on the Pi.** The deployed host is on Python 3.13 while this
 repository targets 3.14, so `MINIMUM_PYTHON_VERSION` is `(3, 13)` — the same
-floor the Companion installer already enforces — and `pyproject.toml` pins
+floor the retired Companion installer enforced — and `pyproject.toml` pins
 `asl_workbench/**/*.py` to `py313` in Ruff's `per-file-target-version` table.
 The Pi installs no wheels, so every import must resolve to the standard library
 or to this package.

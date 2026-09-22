@@ -241,9 +241,7 @@ def notification_link(
             # making each unanswered-question alert a fresh destination.
             link += "&question=" + quote(question_id, safe="")
     else:
-        fragment = (
-            reply_query + "#run=" if focus_reply else RUN_FRAGMENT
-        )
+        fragment = reply_query + "#run=" if focus_reply else RUN_FRAGMENT
         link = site.private_origin + fragment + quote(run_key, safe="")
         if focus_reply:
             link += "&focus=reply"
@@ -346,9 +344,7 @@ class NtfyPublisher:
         authorize_publisher(deployment, site)
         if not isinstance(token, str) or not _TOKEN.fullmatch(token):
             raise NotificationError("invalid ntfy credential")
-        if navigation_version is not None and not _TOKEN.fullmatch(
-            navigation_version
-        ):
+        if navigation_version is not None and not _TOKEN.fullmatch(navigation_version):
             raise NotificationError("invalid notification navigation version")
         self._token = token
         self.site = site

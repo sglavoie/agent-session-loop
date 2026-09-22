@@ -720,10 +720,12 @@ for (const deployment of DEPLOYMENTS) {
         "operation_id",
         "outcome",
         "plan",
+        "question_id",
         "reason",
         "settled",
         "status",
       ]);
+      expect(receipt.question_id).toBeNull();
 
       // And it is still on screen after the page is thrown away and reloaded,
       // which is the only state in which an operator would go looking for it.

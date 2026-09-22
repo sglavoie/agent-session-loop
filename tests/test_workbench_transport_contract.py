@@ -50,13 +50,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from agent_session_loop import agent_mux_contract
-from asl_workbench import (
-    companion_inventory,
-    credentials,
-    observation,
-    store,
-    transport,
-)
+from asl_workbench import credentials, observation, store, transport
 from asl_workbench.operations import (
     FORBIDDEN_PERSISTED_KEYS,
     OPERATION_PERSIST_FIELDS,
@@ -1248,79 +1242,6 @@ class TheTransportIsSeparateFromTheAgentMuxContract(unittest.TestCase):
             transport.validate_envelope(envelope, direction=transport.DIRECTION_UP)
         self.assertEqual(transport.ERROR_INCOMPATIBLE_PROTOCOL, caught.exception.code)
         self.assertNotIn("contract", caught.exception.detail)
-
-
-class TheCompanionsVocabulariesAreReusedNotReinvented(unittest.TestCase):
-    """Borrowed words, checked against the checkout they were borrowed from."""
-
-    def setUp(self) -> None:
-        self.package_root = companion_inventory.locate_companion_package(REPO_ROOT)
-
-    def _parse(self, name: str) -> ast.Module:
-        if self.package_root is None:
-            self.skipTest(
-                "no Pi checkout reachable; set "
-                f"{companion_inventory.ENV_PI_CHECKOUT} to cross-check the "
-                "borrowed Companion vocabularies"
-            )
-        return ast.parse((self.package_root / name).read_text(encoding="utf-8"))
-
-    def test_the_run_phases_match_the_companions_list(self) -> None:
-        tree = self._parse("protocol.py")
-        self.assertEqual(tuple(_source_constant(tree, "ASL_PHASES")), transport.PHASES)
-
-    def test_the_credential_roles_and_file_shape_match_the_companions(self) -> None:
-        tree = self._parse("auth.py")
-        for name, ours in (
-            ("ROLE_CONNECTOR", credentials.ROLE_CONNECTOR),
-            ("ROLE_SUMMARY", credentials.ROLE_SUMMARY),
-            ("ROLE_OWNER", credentials.ROLE_OWNER),
-            ("ROLE_PUBLIC", credentials.ROLE_PUBLIC),
-            ("IDENTITY_HEADER", credentials.IDENTITY_HEADER),
-            ("TOKEN_SEPARATOR", credentials.TOKEN_SEPARATOR),
-            (
-                "CREDENTIALS_SCHEMA_VERSION",
-                credentials.CREDENTIALS_SCHEMA_VERSION,
-            ),
-        ):
-            with self.subTest(constant=name):
-                self.assertEqual(_source_constant(tree, name), ours)
-
-    def test_the_stored_credential_keys_match_the_companions(self) -> None:
-        # An installed credentials file is read by both; a key one side does
-        # not know is a file the other side refuses.
-        tree = self._parse("auth.py")
-        self.assertEqual(
-            _source_constant(tree, "_CREDENTIAL_KEYS"),
-            frozenset(
-                {
-                    "credential_id",
-                    "role",
-                    "salt",
-                    "digest",
-                    "created_at",
-                    "subject",
-                    "label",
-                    "disabled",
-                }
-            ),
-        )
-        self.assertEqual(
-            _source_constant(tree, "_FILE_KEYS"), frozenset({"version", "credentials"})
-        )
-
-    def test_the_workbench_frame_ceiling_is_its_own_number(self) -> None:
-        """Bounded frames are the Companion's idea; this ceiling is not its value.
-
-        The Companion's limit belongs to the Companion's protocol. Sharing the
-        number would make one of the two impossible to change without touching
-        the other, which is the coupling the separate versioning exists to
-        avoid.
-        """
-        tree = self._parse("protocol.py")
-        theirs = _source_constant(tree, "MAX_FRAME_BYTES")
-        self.assertIsInstance(theirs, int)
-        self.assertNotEqual(theirs, transport.MAX_FRAME_BYTES)
 
 
 if __name__ == "__main__":

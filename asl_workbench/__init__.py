@@ -90,11 +90,6 @@ from .catalog import (
     unclassified_summary_fields,
 )
 from .changes import INTENTIONAL_CHANGES, IntentionalChange, intentional_change
-from .companion_inventory import (
-    COMPANION_MODULES,
-    COMPANION_ROUTES,
-    locate_companion_package,
-)
 from .compatibility import (
     MINIMUM_PYTHON_VERSION,
     BoundaryReport,
@@ -445,8 +440,6 @@ __all__ = [
     "CLEANUP_STATES",
     "CLEANUP_UNDATED",
     "COMMAND_LIFETIME_SECONDS",
-    "COMPANION_MODULES",
-    "COMPANION_ROUTES",
     "COMPANION_SCHEMA_VERSION",
     "COMPLETENESS_COMPLETE",
     "COMPLETENESS_LABELS",
@@ -709,7 +702,6 @@ __all__ = [
     "is_destructive",
     "issue",
     "launch_closure",
-    "locate_companion_package",
     "matches_search",
     "method_for_action",
     "method_scope",
