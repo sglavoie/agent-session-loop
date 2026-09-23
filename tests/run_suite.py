@@ -33,6 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # multi-second subprocess orchestration. Ordered longest-first.
 FAST_MODULES = (
     "tests.test_daily_remind",
+    "tests.test_forgejo_sync",
     "tests.test_claude_lint_hook",
     "tests.test_asl_cli",
     "tests.test_asl_cli_trace",
