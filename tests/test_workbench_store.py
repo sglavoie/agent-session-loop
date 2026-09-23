@@ -1279,6 +1279,32 @@ class CatalogTests(StoreCase):
         )
         self.assertEqual(self.store.runs(now=NOW, project="nobody"), [])
 
+    def test_a_catalog_that_only_guessed_unknown_keeps_the_run_rows_project(
+        self,
+    ) -> None:
+        """The catalog's fallback name must not overwrite a name a row knows."""
+        self.send_snapshot(
+            observed_at=NOW - 20,
+            runs=[run_row("alpha", plan_key="plan-a", project="raspberry-pi")],
+        )
+        self.send_catalog(
+            observed_at=NOW - 10,
+            generation="gen-1",
+            entries=[
+                catalog_entry(
+                    "plan-a",
+                    display_label="Alpha plan",
+                    title="Ship the alpha",
+                    projects=["Unknown project"],
+                    project_group="Unknown project",
+                )
+            ],
+        )
+        row = self.store.runs(now=NOW)[0]
+        self.assertEqual(row["project"], "raspberry-pi")
+        self.assertEqual(row["plan_label"], "Alpha plan")
+        self.assertEqual(row["plan_title"], "Ship the alpha")
+
     def test_an_unlabelled_plan_falls_back_without_leaking_a_directory_name(
         self,
     ) -> None:
@@ -1734,6 +1760,30 @@ class IncidentResolutionTests(IncidentCase):
         self.at(122)
         self.observe([run_row("run-1")])
         self.assertIsNotNone(self.diagnostics()[0]["resolved_at"])
+
+    def test_a_slow_walk_is_not_counted_twice_against_freshness(self) -> None:
+        """``observed_at`` is the walk's start; its duration is not extra age."""
+        self.observe([run_row("run-1")])
+        self.at(100)
+        self.observe(
+            [run_row("run-1")],
+            observed_at=self.wall - 35,
+            projection_age_seconds=35.0,
+        )
+        self.at(150)
+        self.engine.tick()
+        self.assertEqual(self.diagnostics(), [])
+
+    def test_a_snapshot_older_than_the_stale_bound_is_not_evidence(self) -> None:
+        self.observe([run_row("run-1")])
+        self.at(100)
+        self.observe([run_row("run-1")], observed_at=self.wall - 61)
+        self.at(150)
+        self.engine.tick()
+        self.assertEqual(
+            [row["kind"] for row in self.diagnostics()],
+            [incidents.INCIDENT_LOST_OBSERVATION],
+        )
 
     def test_a_paused_run_is_not_lost_active_work(self) -> None:
         self.observe([run_row("run-1", primary_state="paused-for-reply")])

@@ -408,11 +408,13 @@ def observe_snapshot(
     payload = envelope["payload"]
     connector_id = str(envelope["connector_id"])
     observed_at = float(payload["observed_at"])
-    projection_age = max(0.0, float(payload.get("projection_age_seconds") or 0.0))
     # What the *source* saw, not what arrived. A projection that took a minute
     # to reach here describes a corpus a minute old, and treating it as current
     # is how a stale view resurrects a run whose ending is already stored.
-    source_at = min(now, observed_at) - projection_age
+    # ``observed_at`` is stamped when the corpus walk starts, so it already is
+    # that moment; the snapshot's ``projection_age_seconds`` is the walk's own
+    # duration, and subtracting it again would count the walk twice.
+    source_at = min(now, observed_at)
     stale = policy.observation_stale_seconds
     if (
         payload.get("contract_set_id") not in policy.supported_contract_set_ids

@@ -71,6 +71,35 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 ["SVC", "OAK"], [row["alias"] for row in payload["repositories"]]
             )
 
+    def test_a_legacy_run_state_still_names_its_working_directory(self) -> None:
+        # A single-repository run recorded only ``cwd``; without it the catalog
+        # has nothing to name the project from and falls back to "Unknown".
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = tmp_path / "plan"
+            write_plan(plan_dir, ("complete", "complete"))
+            repo = tmp_path / "raspberry-pi"
+            repo.mkdir()
+            _write_state_payload(
+                plan_dir,
+                tmp_path / "state",
+                {
+                    "ok": True,
+                    "paused": False,
+                    "run_id": "run-legacy",
+                    "cwd": str(repo),
+                    "active_turn": None,
+                    "turns": [],
+                },
+            )
+
+            payload = workbench.build_workbench_summary(
+                _discovered(plan_dir), state_dir=tmp_path / "state"
+            ).to_payload()
+
+            self.assertEqual(str(repo), payload["cwd"])
+            self.assertIsNone(payload.get("workspace_root"))
+
     def test_invalid_when_plan_directory_does_not_exist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

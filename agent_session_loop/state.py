@@ -1157,9 +1157,11 @@ def _runner_state_payload(
         "review_harness": run_config.get("review_harness"),
         "supervisor_audit": run_config.get("supervisor_audit"),
         "assurance": assurance,
+        # A legacy single-repository run records only the directory it ran
+        # in; that directory is still what names its project.
+        "cwd": raw.get("cwd"),
         **(
             {
-                "cwd": raw.get("cwd"),
                 "workspace_root": raw.get("workspace_root"),
                 "registry_digest": raw.get("registry_digest"),
                 "repositories": raw.get("repositories"),

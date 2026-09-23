@@ -63,6 +63,7 @@ from typing import Any, Self
 
 from . import freshness as freshness_module
 from . import incidents
+from .catalog import UNKNOWN_PROJECT
 from .observation import (
     MAX_LABEL_CHARS,
     MAX_WARNINGS,
@@ -1001,8 +1002,12 @@ class WorkbenchStore:
             labels[(str(row["connector_id"]), str(row["plan_key"]))] = {
                 "display_label": row["display_label"],
                 "title": row["title"],
+                # The catalog's "Unknown project" is its own fallback, not a
+                # name: it must not overwrite a run row that knows better.
                 "projects": [
-                    str(name) for name in _decoded_list(row["projects"]) or []
+                    str(name)
+                    for name in _decoded_list(row["projects"]) or []
+                    if str(name) != UNKNOWN_PROJECT
                 ],
                 "project_group": row["project_group"],
             }
@@ -1015,11 +1020,12 @@ class WorkbenchStore:
         metadata = labels.get((str(record["connector_id"]), str(record["plan_key"])))
         if metadata and metadata["projects"]:
             record["project"] = " + ".join(metadata["projects"])[:MAX_LABEL_CHARS]
+        else:
+            record["project"] = _legacy_project(str(record["project"]))
+        if metadata:
             record["plan_label"] = metadata["display_label"]
             if metadata["title"]:
                 record["plan_title"] = metadata["title"]
-        else:
-            record["project"] = _legacy_project(str(record["project"]))
 
     @staticmethod
     def _project_names(
