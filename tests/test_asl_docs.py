@@ -623,6 +623,39 @@ class PlanWorkflowDocsTests(unittest.TestCase):
         self.assertIn("baseline_expectation", text)
         self.assertIn("asl prepare <plan-path> --cwd <repo-root>", text)
 
+    def test_plan_iterate_uses_evidence_based_increment_sizing(self) -> None:
+        text = self._plan_iterate_text()
+
+        self.assertIn("smallest useful deliverable", text)
+        self.assertIn("time to meaningful feedback", text)
+        self.assertIn("integration uncertainty", text)
+        self.assertIn("Do not add artificial sessions solely for `asl prepare`", text)
+        self.assertIn("do not narrow scope unless the user explicitly chooses", text)
+        self.assertNotIn("six sessions or fewer", text)
+        self.assertNotIn("finer split buys nothing", text)
+
+    def test_session_workflow_docs_preserve_complete_increments(self) -> None:
+        split = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        resplit = (REPO_ROOT / "skills/session-resplit/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        expand = (REPO_ROOT / "skills/session-expand/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        preflight = (REPO_ROOT / "skills/plan-preflight-iterate/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("first real integration proof", split)
+        self.assertIn("across the whole plan", split)
+        self.assertNotIn("six sessions or fewer", split)
+        self.assertIn("size or an inseparable boundary is the bottleneck", resplit)
+        self.assertIn("explicit child spec", resplit)
+        self.assertIn("without inventing a preflight failure", expand)
+        self.assertIn("factual preflight corrections distinct", preflight)
+
     def test_plan_iterate_uses_shared_source_heading_grammar(self) -> None:
         text = self._plan_iterate_text()
 

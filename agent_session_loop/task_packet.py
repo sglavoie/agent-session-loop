@@ -271,6 +271,11 @@ class SessionTaskPacket:
                 "fails, the runner restores this session to pending and "
                 "supplies the failed-check evidence for repair."
             )
+            lines.append(
+                "Record a finding only for an unmet accepted requirement or a "
+                "concrete defect supported by evidence. Optional improvements "
+                "are not new acceptance criteria."
+            )
             lines.append("")
             lines.extend(self._justified_repeat_lines())
             lines.append("")
@@ -307,6 +312,12 @@ class SessionTaskPacket:
                 "completion, the runner executes it authoritatively. If it fails, "
                 "the runner restores this session to pending and supplies the "
                 "failed-check evidence for repair."
+            )
+            lines.append(
+                "Reuse still-valid evidence for unchanged behavior; diagnose the "
+                "actual failure before widening checks. If you discover an "
+                "integration blocker, record it through the handoff or mailbox; "
+                "do not redesign boundaries or remove required checks."
             )
             lines.append("")
             lines.extend(self._justified_repeat_lines())

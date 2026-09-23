@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 
 ## Purpose
 
-Replace one pending session in an existing split plan with nested child sessions such as `session-8.1.md`, `session-8.2.md`, and `session-8.3.md`. Use this when one pending session is too large or needs clearer boundaries, but the rest of the plan should remain intact.
+Replace one pending session in an existing split plan with nested child sessions such as `session-8.1.md`, `session-8.2.md`, and `session-8.3.md`. Use this only when evidence shows size or an inseparable boundary is the bottleneck; a slow check, provider/guard failure, repair churn, or pending human acceptance is not by itself a reason to subdivide.
 
 Sequential by design: generated children are serial work units with parseable completion contracts. This skill neither reads nor emits parallel scheduling metadata; legacy `parallel-validation.md` files and any `## Parallel Metadata` blocks left on disk are ignored.
 
@@ -47,7 +47,7 @@ Resolve missing values conservatively:
 
 1. **Plan directory**: a direct session file → its parent directory; a plan directory → itself; no path → walk upward from the cwd until a directory holds `context.md`, `manifest.md`, and at least one exact `session-<ID>.md`, or use the single readable plan directory visible in the conversation. If none is unique, ask the user and stop. The helper's `--json` reason `ambiguous-input` also fires when nothing can be inferred.
 2. **Target session**: a direct session file or `--session <ID>` selects the exact parent; otherwise the first pending session in dotted numeric order (final handoff statuses are authoritative — read them via `asl status <plan-dir> --json`, whose `sessions[]` array reports each `id`/`status` and whose `next_pending_id` names the default parent).
-3. **Child count**: an integer argument or `--parts <N>` is authoritative. Without one, choose 2 through 5 from the parent instructions — 2 for a short session, 3 for medium multi-step work, 4 or 5 only when the parent clearly contains separable subsystems or phases. If no meaningful split is possible, stop with `RESPLIT_PAUSE: cannot-split - parent instructions are too small or indivisible`.
+3. **Child count**: an integer argument or `--parts <N>` is authoritative. Without one, diagnose the bottleneck from the parent, its contract, and handoff evidence before choosing 2 through 5: use more children only for separable, independently verifiable outcomes. If no meaningful split is possible, stop with `RESPLIT_PAUSE: cannot-split - parent instructions are too small or indivisible`.
 
 Never infer by reading or modifying the original source plan outside the split plan directory. The split plan directory is the unit of work.
 
@@ -72,7 +72,7 @@ Read the `--json` payload as the source of truth: on success `{ok:true, parent_i
 
 Read the selected parent session's content above its final `## Handoff`. The helper preserves the title/intent, `> **Before starting**` context requirement, expansion-note and previous-session references, and all implementation instructions; it strips any `## Parallel Metadata` block and renders each child deterministically (`## Lineage`, `## Parent Scope`, `## Child Scope`, `## Completion Contract`, `## Handoff`) via `authoring.render_session_file`. Do not author child markdown by hand — supply semantics through `--child-spec`.
 
-Create children that are useful execution units, not arbitrary slices. Prefer boundaries based on files, subsystems, phases, tests, or explicit deliverables; when a compact parent paragraph lists deliverables after a colon or in bullets, split on those before falling back to generic phases.
+Create children that are useful execution units, not arbitrary slices. Prefer boundaries based on files, subsystems, phases, tests, or explicit deliverables; when a compact parent paragraph lists deliverables after a colon or in bullets, split on those before falling back to generic phases. State the evidence that makes subdivision useful and where the child sequence first proves the parent’s integration. Use an explicit child spec whenever broad parent checks would otherwise be inherited by every child: allocate focused checks to the child that changes the behavior, keep broad checks at the justified integration boundary, and explain any unavoidable repeated gate.
 
 **Child spec schema** (`--child-spec <file>` takes a JSON list, or an object with a `children` list; one entry per child, in child-ID order):
 
@@ -89,7 +89,7 @@ Create children that are useful execution units, not arbitrary slices. Prefer bo
 Contract allocation rules (enforced by the helper; violations fail closed as `ambiguous-contract`/`ambiguous-input` before any file is touched):
 
 - Every child needs explicit `done_when` criteria and at least one verification check via `inherit_checks` (parent check names) and/or `checks` (explicit replacement objects, same JSON shape as contract checks).
-- If any child inherits parent checks, **every** parent check must be inherited by at least one child; leaving one unallocated is `ambiguous-contract`. If no child inherits, every child must carry its own `checks` (the explicit replacement of the parent recipe).
+- If any child inherits parent checks, **every** parent check must be inherited by at least one child; leaving one unallocated is `ambiguous-contract`. If no child inherits, every child must carry its own `checks` (the explicit replacement of the parent recipe). Do not let every child automatically inherit an expensive parent check merely for convenience; explicit allocation must still cover all of the parent’s acceptance criteria.
 - `inherit_checks` naming an undefined parent check, legacy `{title, instructions}`-only specs, and empty allocations are rejected (`ambiguous-contract`); unknown spec keys are rejected (`ambiguous-input`).
 - In a registered plan, every explicit replacement check retains a valid `repo` alias from the child's inherited read scope, and every `path` / command `cwd` remains relative beneath that repository. Do not move a check to another alias merely to match a proposed child boundary. Child instructions and later handoffs use qualified `Alias:path` locations, while completed file entries remain limited to inherited write aliases.
 

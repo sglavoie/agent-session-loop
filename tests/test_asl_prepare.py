@@ -590,6 +590,10 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
                 f'"version": {prepare.LEGACY_PREPARE_VALIDATION_VERSION}',
                 rendered,
             )
+            self.assertIn("environment and integrations", rendered)
+            self.assertIn(
+                "Keep factual mismatches distinct from planning advice", rendered
+            )
             # Plan file contents are referenced, never inlined.
             self.assertNotIn("Update the retry helper", rendered)
             for issue_type in prepare.ISSUE_TYPES:

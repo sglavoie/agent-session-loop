@@ -770,6 +770,8 @@ follow-up fix plan. Instead:
    recurring `repair_group` (when present) and hand control back to the
    operator for a manual fix or resplit decision.
 
+When reporting a stalled or exhausted run, classify the evidence before proposing another attempt: implementation work, verification failure, repair churn, provider/guard failure, or pending human acceptance. State what new evidence would make a retry meaningful. Slow progress alone does not justify resplitting or raising a cap; unanswered questions and the existing retry limits remain in force.
+
 Registered review is one combined read-only review across the ordered registry.
 Every finding, evidence path, and completion check is repository-attributed;
 repair children read the full registry but write only finding-derived aliases,

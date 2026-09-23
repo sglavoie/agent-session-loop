@@ -112,6 +112,8 @@ Repair plan:
 - env-state: 1
 ```
 
+Keep factual preflight corrections distinct from scope and design decisions. You may advise when verification does not exercise the claimed environment or integrations, broad gates repeat without a justified boundary, or integration is deferred too late; those are planning observations, not invented preflight failures. Do not silently weaken a contract or reduce scope to clear a finding.
+
 ### Step 4: Iterative Repair Rounds
 
 Run up to **5 rounds** of guided repair. Each round handles a small batch (1–3 findings) and then reruns preflight.

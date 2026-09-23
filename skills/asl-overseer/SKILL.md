@@ -168,6 +168,8 @@ Say what you observed, what you did, what was refused, and what you did not see.
 
 ## Escalation
 
+For a stalled or exhausted run, report the observed category — implementation work, verification, repair churn, provider/guard failure, or a human acceptance wait — and the new evidence required before another attempt. Do not treat slow progress as grounds to resplit, raise a cap, or answer an open acceptance question.
+
 Escalate — do not decide — when:
 
 - A human already decided this and their decision says hold, or a human's decision was superseded and the successor is unclear (`held`, `human_decision`, `policy_superseded`).

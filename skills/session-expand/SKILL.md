@@ -119,6 +119,8 @@ When processing all sessions, verify the serial work-session ordering is interna
 
 Record only "later session assumes earlier work that no prior session covers" findings. Do not classify sessions as `parallel-safe`/`serial-required`/`blocked`, validate ownership overlap, or emit any parallel-validation outputs. The manifest readiness block captured in Step 2 is a snapshot only — the final directory-mode `asl preflight --mark-loop-ready` (Step 7) is the authoritative readiness gate and the only place this skill may advance readiness. Do not edit readiness lines by hand.
 
+Also advise, without inventing a preflight failure, when contracts do not exercise the claimed environment or integration, when an expensive check is needlessly repeated across sessions, or when the first real integration proof is late. Keep factual corrections separate from scope or design choices: factual errors flow through `corrections`; boundary, scope, and contract tradeoffs require the user’s explicit decision and remain advisory until then.
+
 ### Step 5: Identify Patterns to Reuse
 
 For each session, find existing codebase patterns the implementation should follow. Record **at most 3** per session — only the most directly relevant:

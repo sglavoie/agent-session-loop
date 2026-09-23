@@ -666,6 +666,11 @@ def _render_child_body(
                 "scope to other subsystems or unrelated findings."
             ),
             (
+                "- Address each demonstrated failure across the workflow it "
+                "affects, but do not add unrelated scope or turn optional "
+                "improvements into acceptance criteria."
+            ),
+            (
                 "- Leave every targeted check in the completion contract "
                 "passing, but do not rerun the contract solely as a final "
                 "gate: ASL runs it authoritatively after this session, "

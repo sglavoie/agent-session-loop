@@ -159,6 +159,16 @@ class RescopeBoundsTests(unittest.TestCase):
             )
         )
 
+    def test_review_instructions_keep_optional_improvements_out_of_acceptance(
+        self,
+    ) -> None:
+        rendered = self._body(None)
+
+        self.assertIn("unmet accepted requirement or a concrete defect", rendered)
+        self.assertIn(
+            "Optional improvements do not become new acceptance criteria", rendered
+        )
+
     def test_a_rescope_leaves_the_instructions_and_contract_untouched(self) -> None:
         original = self._body(
             {

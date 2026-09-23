@@ -122,20 +122,20 @@ authority the runner will enforce.
 
 ### Step 4: Handle Edge Cases
 
-**No session markers found**: Enter this workflow only when canonical parsing succeeds with zero explicit session headings — that is, `asl split --check` reported no findings and an empty `session_ids`. Parser errors are malformed-plan errors, not an invitation to propose boundaries; repair them mechanically in Step 2 instead. Propose session boundaries using concrete data:
+**No session markers found**: Enter this workflow only when canonical parsing succeeds with zero explicit session headings — that is, `asl split --check` reported no findings and an empty `session_ids`. Parser errors are malformed-plan errors, not an invitation to propose boundaries; repair them mechanically in Step 2 instead. Propose boundaries around coherent, verifiable outcomes using concrete data:
 
 1. Group work items that share files or directories into one session (use surface-scan data when available).
 2. Estimate session weight: plan text lines + files touched + existing LoC + subsystem spread.
-3. Balance sessions by weight — a session touching 15 files across 4 subsystems is far heavier than one editing 3 files in the same package; split heavy sessions, merge lightweight ones.
-4. Prefer **six sessions or fewer**. When the weights land on a seventh, narrow the plan's scope rather than splitting more finely — the long repair tails appeared in the larger splits, so a finer split buys nothing. Name the scope you are proposing to cut when you present the structure in step 5, and let the user decide it in step 7.
-5. Present the proposed structure with per-session summaries: `<Title> -- <N> files, ~<L> existing lines, <subsystem(s)>`.
+3. Use file count, context size, and subsystem spread as supporting evidence; prefer a boundary only when it produces a useful deliverable, earlier meaningful feedback, or lower integration uncertainty. Split heavy sessions and merge lightweight ones only when that improves those outcomes.
+4. Inspect existing boundaries as well as newly proposed ones. State where the first real integration proof occurs and whether any earlier boundary would reduce repeated work or late integration risk.
+5. Present the proposed structure with per-session summaries: `<Title> -- <N> files, ~<L> existing lines, <subsystem(s)>`, the expected outcome, and the first integration proof.
 6. If the surface scan was skipped (< 5 file references), fall back to heading/affinity grouping.
 7. Ask the user for approval before proceeding.
 8. Once approved, write the restructured plan — original content unchanged, organized under canonical `## Session N: <title>` headings — save it as a new source markdown file, and pass that path to `asl split --plan-file` in Step 6 so the generated directory traces to a real source file.
 
 **Single session found**: `asl split --check` (and `asl split`) reports reason `single-session`. Tell the user "Only 1 session found — splitting is not needed." and stop.
 
-**Two or more sessions found**: Continue to Step 5.
+**Two or more sessions found**: Assess the existing boundaries using the same outcome, feedback, integration, and repeated-work evidence. If restructuring would improve them, present it and obtain user approval; otherwise preserve them. Continue to Step 5.
 
 ### Step 5: Author Completion Contracts
 
@@ -160,7 +160,7 @@ Contract authoring rules (validated by `agent_session_loop.authoring.contract_fr
 - Every session states its own verification command and its own done-condition: one contract per session, `done_when` naming what is true when that session ends and `verify.checks` carrying a command that proves it. Never defer either to a later session's contract — a session a successor has to finish cannot converge on its own.
 - `done_when` needs at least one non-trivial bullet derived from the session's own goal (title or first sentence); never leave generic placeholders that read like `<criterion>`.
 - `verify.checks` must be non-empty. `type` is one of `command`, `file_exists`, `regex_in_file`; `command` checks take a non-empty `argv` list (no shell strings) and `timeout_seconds <= 3600`; `file_exists` / `regex_in_file` take a path (and a Python-`re`-valid `pattern`). In a registered plan, put `"repo": "Alias"` on every check and keep every `path` and command `cwd` repository-relative, non-absolute, and free of upward `..` traversal; the alias must be in that session's read scope. In a legacy plan, checks may omit `repo` and retain repo-relative or absolute `path` / `cwd` behavior. `name` is optional and auto-assigned as `check-<index>`.
-- Author one authoritative gate for each logical verification surface. A check without `on_failure_of` is a gate and determines whether the contract passes. Do not emit both a focused test command and a broader command that already includes those tests as unconditional gates; prefer the repo's evidenced aggregate command when it is appropriately scoped to the session.
+- Author focused checks for local changes and reserve broad gates for justified integration or release boundaries. A check without `on_failure_of` is a gate and determines whether the contract passes. Do not emit both a focused test command and a broader command that already includes those tests as unconditional gates; prefer the repo's evidenced aggregate command when it is appropriately scoped to the session. Consider repetition across the whole plan, not only duplicate commands in one recipe: reuse still-valid evidence for unchanged behavior, while preserving every repository-required check and the broad gate at the boundary where it proves integration.
 - A genuinely narrower troubleshooting check may set `on_failure_of` to a non-empty list of named gates. It then runs only when at least one named gate fails, is reported as a diagnostic, and never changes the aggregate pass/fail decision. Dependencies must name unconditional gates in the same recipe; self-references, unknown names, and diagnostic-to-diagnostic chains are invalid. Keep diagnostics only when their failure evidence is worth the extra runtime. Exact duplicate `argv`/`cwd` pairs are a yellow `verification-duplicate` preflight finding.
 - `verify.session` must match the session id exactly (no leading zeroes, dotted form).
 - `verify.parallel` is optional and defaults to `false`. Set it to `true` only when a phase has two or more `command` checks that cannot interfere with each other — no shared output directory, port, database, temp path, or lock. The runner executes gates first and eligible diagnostics afterward; within either phase it runs command checks concurrently (at most four at a time) while reporting results in declared order. When in doubt leave it unset; sequential is always correct, and baseline recording ignores the flag.
@@ -212,7 +212,7 @@ Echo the `asl split --json` output as a concise summary:
 3. Output directory (`output_dir`) and its `Plan ID` (`plan_id`). For a registered plan, also print the ordered alias/path registry from `repositories` and its credential-free `registry_digest`; never print credentials.
 4. File listing (`files`) with approximate sizes.
 5. The ready-to-paste serial execution command (the `## Execution` block from `manifest.md`).
-6. Estimated token savings percentage; if an Execution Weight table was generated, highlight any "heavy" session. Suggest splitting it further only while the plan stays at six sessions or fewer; at that ceiling, suggest narrowing the heavy session's scope instead.
+6. Estimated token savings percentage; if an Execution Weight table was generated, highlight any "heavy" session and explain whether a different coherent boundary would produce earlier feedback or integration proof. Do not impose a session-count ceiling or propose scope cuts without an explicit user decision.
 7. State that the plan ships as `**Readiness**: draft` with a stable readiness SHA-256, that a skeleton runner-managed `progress.md` was written (inspect with `asl progress <plan-dir>`, `--tail`, `--json`; `asl backfill-progress [--force] <plan-dir>` is the manual recovery path), and that `session-expand` will run final preflight with `--mark-loop-ready`.
 8. Suggest running `<skill-prefix>session-expand <output-dir>` next (the `next_steps` field already renders the per-harness invocation) to validate paths, signatures, contracts, assumptions, and final loop-ready preflight before execution. After expansion, `asl run` is the normal entry point and self-heals derived progress/readiness drift before pausing, so an operator only needs `asl preflight --mark-loop-ready` (or `plan-preflight-iterate`) when a non-derived blocker remains.
 

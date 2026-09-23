@@ -1542,6 +1542,8 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         self.assertIn("Record the brief reason in this session's", rendered)
         # The existing scope and commit rules survive.
         self.assertIn("Fix only the issues in the findings above", rendered)
+        self.assertIn("Address each demonstrated failure across the workflow", rendered)
+        self.assertIn("do not add unrelated scope", rendered)
         self.assertIn("Do not commit the repair yourself", rendered)
 
     def test_child_scope_defers_another_groups_known_failure_to_that_group(

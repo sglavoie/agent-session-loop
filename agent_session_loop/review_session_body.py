@@ -342,6 +342,11 @@ def build_generated_review_session_body(
                 "sessions of this plan."
             ),
             (
+                "- Report a finding only for an unmet accepted requirement or a "
+                "concrete defect supported by evidence. Optional improvements do "
+                "not become new acceptance criteria."
+            ),
+            (
                 f"- Write review findings to `{review.FINAL_REVIEW_FILENAME}` "
                 "inside this plan directory."
             ),

@@ -184,6 +184,8 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn(review.FINAL_REVIEW_ARTIFACT_FILENAME, rendered)
         self.assertIn("a fix is not yours to write", rendered)
         self.assertIn("as a finding with its own repair group", rendered)
+        self.assertIn("unmet accepted requirement or a concrete defect", rendered)
+        self.assertIn("Optional improvements are not new acceptance criteria", rendered)
 
     def test_unknown_session_kind_is_refused(self) -> None:
         with self.assertRaises(ValueError):
@@ -218,6 +220,8 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn("Do not rerun the full Completion Contract", rendered)
         self.assertIn("restores this session to pending", rendered)
         self.assertNotIn("run any tests the session names", rendered)
+        self.assertIn("Reuse still-valid evidence for unchanged behavior", rendered)
+        self.assertIn("do not redesign boundaries or remove required checks", rendered)
 
     def test_packet_states_when_repeated_or_broader_checking_is_justified(
         self,

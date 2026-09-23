@@ -1056,6 +1056,13 @@ class ValidationTaskPacket:
                 "no fences. Do not edit any file: the caller validates your "
                 "output and owns every plan mutation."
             ),
+            (
+                "Check claims against the environment and integrations they "
+                "claim to exercise. Keep factual mismatches distinct from "
+                "planning advice: do not invent a validation issue, weaken a "
+                "contract, or propose a scope change solely because a broad "
+                "gate repeats or integration occurs late."
+            ),
             "",
             "## Read (open these paths; contents are not embedded)",
             f"- Shared context: {self.context_path}",

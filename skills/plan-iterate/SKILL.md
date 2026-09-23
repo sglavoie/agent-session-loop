@@ -85,7 +85,7 @@ Are failure modes, boundary conditions, empty states, and error paths addressed?
 **Dimension 6 — Sequencing & Dependencies**
 For multi-session plans: Is the session order justified? Are inter-session dependencies stated?
 For single-session plans: Are implementation steps in a logical order?
-**Convergence rules** (multi-session plans): every session must state its own verification command and its own done-condition — never a shared criterion deferred to a later session. Prefer **six sessions or fewer**; when the work looks like more, narrow the plan's scope rather than splitting more finely, because the long repair tails appeared in the larger splits. Mark this dimension thin when a session carries no verification command or no done-condition, and mark it thin when the plan needs a seventh session; the Step 4 question for it proposes what to cut, not a finer split.
+**Convergence rules** (multi-session plans): every session must state its own verification command and its own done-condition — never a shared criterion deferred to a later session. Size sessions from evidence: the smallest useful deliverable, time to meaningful feedback, integration uncertainty, and likely repeated work. File count and context size are supporting evidence, not a ceiling. Mark this dimension thin when a session lacks a verification command or done-condition, when boundaries defer the first real integration proof too late, or when a proposed scope reduction has not been explicitly decided by the user.
 
 **Dimension 7 — Verification**
 Is there a concrete verification strategy? Test commands, expected outputs, manual test steps, or acceptance criteria. A bare `## Verification` with a single shell command is adequate. No verification section at all is missing.
@@ -211,8 +211,10 @@ _Sequencing_:
 
 - "Sessions N and M seem to have a dependency on [shared resource]. Should Session N create it, or should it already exist?"
 - Options: reorder, add prerequisite step, or document assumption
-- "The plan needs N sessions, above the six-sessions-or-fewer preference. Which scope should be cut so it converges in six or fewer?"
-- Options: 2-3 concrete scope cuts drawn from the plan — never a finer split of the same work
+- "These boundaries delay the first integration proof until Session N. Should the plan make an earlier coherent increment, or keep the current boundary with that risk recorded?"
+- Options: concrete boundary choices grounded in the plan; do not invent extra sessions merely to satisfy `asl prepare`'s multi-session format.
+- "This proposed scope reduction changes the deliverable. Do you want to defer it, or keep the complete increment and use the evidence-based session structure shown?"
+- Options: the explicit scope decision and its consequence; never silently cut scope to meet a session count.
 - "Session N states no verification command (or no done-condition). What proves it is finished?"
 - Options: candidate commands evidenced by the repo's own test/lint recipes
 
@@ -409,7 +411,7 @@ The final plan must pass the `asl prepare` structure gate, which otherwise exits
 - Contract checks carry `baseline_expectation` (`pass` or `fail`) where a meaningful pre-implementation baseline expectation exists; checks without it carry no baseline obligations.
 - Mark an unconditional gate with `review_replay: true` only when it asserts durable current state that every later generated review should recheck. Leave HEAD identity, dirty-tree state, intermediate-file presence, baseline-only facts, and other point-in-time assertions unmarked; never mark an `on_failure_of` diagnostic. Unmarked legacy and newly authored checks remain session-local.
 - Every session states its own verification command in `### Verify` and its own done-condition in `### Done when`. Neither may be blank, generic, or deferred to a later session's contract — a session whose completion is only provable by a successor cannot converge on its own.
-- The plan converges in **six sessions or fewer**. When the work looks like it needs a seventh, narrow the plan's scope rather than splitting more finely: the long repair tails appeared in the larger splits, so a finer split buys nothing. Record the cut scope under `## Consciously Deferred` per the Step I7 durable-section rule.
+- The plan has a deliberate, evidence-based session structure. Keep the unconstrained ideal destination distinct from the next executable increment; do not require the ideal to fit a session budget. Do not add artificial sessions solely for `asl prepare`, and do not narrow scope unless the user explicitly chooses that reduction. Record an accepted deferral under `## Consciously Deferred` per the Step I7 durable-section rule.
 
 Derive done criteria and verification recipes from the plan content and the Step I2 research; ask the user (one AskUserQuestion round at most) only when a verification command is genuinely unknowable from the plan and codebase.
 
