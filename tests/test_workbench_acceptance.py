@@ -318,6 +318,19 @@ class AcceptedEvidence(AcceptanceCase):
         with mock.patch.dict(os.environ, {acceptance.ENV_RELEASE_REVISION: fix.docs}):
             self.accepts(acceptance.STAGE_RETIREMENT, document)
 
+    def test_a_staging_rehearsal_remains_valid_after_package_changes(self) -> None:
+        # Staging records a completed rehearsal, not the current production
+        # deployment. A later package commit cannot undo what was exercised.
+        fix = fixture()
+        document = valid_document(acceptance.STAGE_STAGING)
+        document["release"] = {
+            "revision": fix.package,
+            "artifact": fix.digest_package,
+        }
+        for host in document["hosts"].values():
+            host["release"] = fix.digest_package
+        self.accepts(acceptance.STAGE_STAGING, document)
+
     def test_the_template_carries_every_field_the_gate_requires(self) -> None:
         # What a deployment session is handed has to be what the gate reads, or
         # the session finds out field by field from failures.
@@ -439,6 +452,17 @@ class WrongReleaseEvidence(AcceptanceCase):
             "not the release being accepted",
         )
 
+    def test_a_staging_host_running_another_release_is_refused(self) -> None:
+        self.refuses(
+            acceptance.STAGE_STAGING,
+            edited(
+                acceptance.STAGE_STAGING,
+                "hosts.pi.release",
+                fixture().digest_package,
+            ),
+            "not the release being accepted",
+        )
+
     def test_retirement_must_name_the_accepted_production_deployment(self) -> None:
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         retirement = valid_document(acceptance.STAGE_RETIREMENT)
@@ -481,11 +505,11 @@ class WrongReleaseEvidence(AcceptanceCase):
 class StaleEvidence(AcceptanceCase):
     """Evidence about software this repository has since moved past."""
 
-    def test_a_package_commit_after_the_release_makes_each_deployment_stale(
+    def test_a_package_commit_after_the_release_makes_live_deployments_stale(
         self,
     ) -> None:
         fix = fixture()
-        for stage in acceptance.STAGES:
+        for stage in (acceptance.STAGE_PRODUCTION, acceptance.STAGE_RETIREMENT):
             with self.subTest(stage=stage):
                 document = valid_document(stage)
                 document["release"] = {

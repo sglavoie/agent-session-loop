@@ -16,6 +16,26 @@ from tests import workbench_acceptance
 
 SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
 MONITORING_RELATIVE = Path("services") / "pi-monitoring"
+CANONICAL_BROWSER_ENTRY_POINT = "scripts:asl_workbench/static/index.html"
+CANONICAL_BROWSER_DIRECTORY = "scripts:asl_workbench/static/"
+CANONICAL_BROWSER_MODULES = Path("asl_workbench/static/modules")
+
+# Changedetection's monitoring helper is an independent support page, not a
+# Workbench frontend.
+CHANGEDETECTION_MONITORING_PAGE = (
+    "sglavoie_raspberry_pi:services/changedetection/support/monitoring-browser.html"
+)
+# The AgentMux bridge's monitoring helper is an independent diagnostics page,
+# not a Workbench frontend.
+BRIDGE_MONITORING_PAGE = (
+    "sglavoie_raspberry_pi:services/pi-monitoring/bridge/monitoring-browser.html"
+)
+NON_WORKBENCH_BROWSER_DOCUMENTS = frozenset(
+    {
+        CHANGEDETECTION_MONITORING_PAGE,
+        BRIDGE_MONITORING_PAGE,
+    }
+)
 
 DELIBERATE_ADAPTER_CAPABILITIES = frozenset(
     {
@@ -34,6 +54,32 @@ DELIBERATE_ADAPTER_CAPABILITIES = frozenset(
         "persistence:companion-credentials",
     }
 )
+
+
+def _tracked_repository_files(
+    repositories: dict[str, Path],
+) -> dict[str, tuple[Path, ...]]:
+    return {
+        alias: tuple(
+            Path(value)
+            for value in workbench_acceptance.git(repository, "ls-files", "-z").split(
+                "\0"
+            )
+            if value
+        )
+        for alias, repository in repositories.items()
+    }
+
+
+def _browser_documents(
+    repository_files: dict[str, tuple[Path, ...]],
+) -> frozenset[str]:
+    return frozenset(
+        f"{alias}:{path.as_posix()}"
+        for alias, paths in repository_files.items()
+        for path in paths
+        if path.suffix.casefold() == ".html"
+    )
 
 
 class ConsolidationFixture(unittest.TestCase):
@@ -90,7 +136,7 @@ class LegacyRetirementTests(ConsolidationFixture):
         self.assertIn("does not carry a copy", text)
 
 
-class OwnershipAuditTests(unittest.TestCase):
+class OwnershipAuditTests(ConsolidationFixture):
     def test_only_surviving_surfaces_and_coverage_are_published(self) -> None:
         self.assertFalse(
             any(surface.startswith("companion-") for surface in capabilities.SURFACES)
@@ -125,10 +171,79 @@ class OwnershipAuditTests(unittest.TestCase):
         }
         self.assertEqual(DELIBERATE_ADAPTER_CAPABILITIES, actual)
 
-    def test_the_canonical_package_contains_the_only_browser_assets(self) -> None:
-        static = SCRIPTS_ROOT / "asl_workbench/static"
-        self.assertTrue((static / "index.html").is_file())
-        self.assertTrue(any((static / "modules").glob("*.js")))
+    def _assert_only_canonical_browser_frontend(
+        self, repository_files: dict[str, tuple[Path, ...]]
+    ) -> None:
+        actual = _browser_documents(repository_files)
+        noncanonical = frozenset(
+            path for path in actual if not path.startswith(CANONICAL_BROWSER_DIRECTORY)
+        )
+        unexpected = noncanonical - NON_WORKBENCH_BROWSER_DOCUMENTS
+        self.assertFalse(
+            unexpected,
+            f"second browser frontend(s): {', '.join(sorted(unexpected))}",
+        )
+        self.assertEqual(
+            NON_WORKBENCH_BROWSER_DOCUMENTS,
+            noncanonical,
+            "the named non-Workbench browser document exceptions changed",
+        )
+        self.assertIn(
+            CANONICAL_BROWSER_ENTRY_POINT,
+            actual,
+            "the canonical browser frontend is missing",
+        )
+        self.assertTrue(
+            any(
+                path.parent == CANONICAL_BROWSER_MODULES and path.suffix == ".js"
+                for path in repository_files.get("scripts", ())
+            ),
+            "the canonical browser module tree is missing",
+        )
+
+    def test_no_second_browser_frontend_exists_in_either_repository(self) -> None:
+        repository_files = _tracked_repository_files(
+            {
+                "scripts": SCRIPTS_ROOT,
+                "sglavoie_raspberry_pi": self.pi_repository,
+            }
+        )
+        self._assert_only_canonical_browser_frontend(repository_files)
+
+    def test_uniqueness_assertion_rejects_a_second_browser_frontend(self) -> None:
+        repository_files = _tracked_repository_files(
+            {
+                "scripts": SCRIPTS_ROOT,
+                "sglavoie_raspberry_pi": self.pi_repository,
+            }
+        )
+        repository_files["scripts"] += (
+            Path("second_frontend/index.html"),
+            Path("second_frontend/modules/app.js"),
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError, r"scripts:second_frontend/index\.html"
+        ):
+            self._assert_only_canonical_browser_frontend(repository_files)
+
+    def test_the_audit_rejects_a_dashboard_named_second_frontend(self) -> None:
+        repository_files = _tracked_repository_files(
+            {
+                "scripts": SCRIPTS_ROOT,
+                "sglavoie_raspberry_pi": self.pi_repository,
+            }
+        )
+        repository_files["sglavoie_raspberry_pi"] += (
+            Path("services/pi-monitoring/companion/web/dashboard.html"),
+            Path("services/pi-monitoring/companion/web/dashboard.js"),
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"sglavoie_raspberry_pi:services/pi-monitoring/companion/web/dashboard\.html",
+        ):
+            self._assert_only_canonical_browser_frontend(repository_files)
 
 
 if __name__ == "__main__":

@@ -871,7 +871,7 @@ def read_questions(
                     intervention.REASON_NO_OPEN_QUESTION,
                     "no open question is waiting for a reply",
                 )
-            question_id, context_kind, body = intervention.question_body(
+            resolved_question_id, context_kind, body = intervention.question_body(
                 plan_dir,
                 question_id=selected_question,
                 state_dir=state_dir,
@@ -880,7 +880,7 @@ def read_questions(
             return {
                 "context_kind": context_kind,
                 "run_id": facts.run_id,
-                "question_id": question_id,
+                "question_id": resolved_question_id,
                 "actions": list(intervention.permitted_actions(facts)),
                 "action_token": intervention.action_token(facts),
                 "last_message": body,
