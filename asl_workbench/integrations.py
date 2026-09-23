@@ -412,13 +412,13 @@ def homepage_documents(
           headers:
             Authorization: {json.dumps("Bearer " + token)}
           mappings:
-            - field: status
+            - field: reason
               label: Status
               format: text
-            - field: freshness
-              label: Freshness
-              format: text
-            - field: counts.running
+            - field: freshness.total
+              label: Observed
+              format: number
+            - field: counts.by_state.running
               label: Running
               format: number
 """

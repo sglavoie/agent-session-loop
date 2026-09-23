@@ -376,7 +376,10 @@ class IntegrationCase(unittest.TestCase):
     ) -> None:
         self.integration.execute("apply", "homepage")
         after = self.services.read_bytes()
-        self.assertIn(b"counts.running", after)
+        self.assertIn(b"field: reason", after)
+        self.assertIn(b"field: freshness.total", after)
+        self.assertIn(b"field: counts.by_state.running", after)
+        self.assertNotIn(b"field: freshness\n", after)
         self.assertIn(PI_SITE.summary_path.encode(), after)
         self.assertEqual(0o600, self.services.stat().st_mode & 0o777)
         self.integration.execute("apply", "homepage")
