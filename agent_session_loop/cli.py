@@ -3261,7 +3261,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     assurance_pending_parser.add_argument(
         "--run-id",
         metavar="RUN_ID",
-        help="Audit only this run, even if its record says to skip it",
+        help=(
+            "Audit only this run, even if its record says to skip it or its "
+            "only published audit was unavailable"
+        ),
     )
     assurance_pending_parser.add_argument(
         "--plan",

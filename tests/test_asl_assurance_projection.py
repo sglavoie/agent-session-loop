@@ -1738,6 +1738,16 @@ class UnavailableAuditTests(ProjectionTestCase):
         self.assertNotEqual(projection.DEFAULT_UNAVAILABLE_RECOMMENDATION, advice)
         self.assertIn("once the limit resets", advice)
 
+    def test_every_rerun_recommendation_names_the_run(self) -> None:
+        # A bare process-pending pass reports a run that already has an
+        # unavailable record as already audited; only --run-id re-audits it.
+        for advice in (
+            projection.DEFAULT_UNAVAILABLE_RECOMMENDATION,
+            *projection.UNAVAILABLE_RECOMMENDATIONS.values(),
+        ):
+            with self.subTest(advice=advice[:40]):
+                self.assertIn("process-pending --run-id RUN_ID", advice)
+
     def test_one_reason_class_deduplicates_across_distinct_exception_text(self) -> None:
         self.publish(
             self._unavailable(RUN_ID, "harness-transport", "socket hangup at 0x7ffe")

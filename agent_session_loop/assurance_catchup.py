@@ -419,6 +419,19 @@ def _archive_abandoned_audit_artifacts(run_dir: Path) -> tuple[str, ...]:
     return tuple(path.name for path in leftovers)
 
 
+def _unavailable_only(published: projection.RunAudit) -> bool:
+    """Whether every audit published for a run says it could not be judged.
+
+    Such a run has a ledger record but no verdict, so re-auditing it answers a
+    question nobody has answered yet rather than re-grading one already
+    settled. It is still only done for a run named by id: a bulk pass that
+    re-audited these would re-grade old evidence against newer code, which is
+    how catch-up reopens issues an operator resolved.
+    """
+    summaries = published.summaries or (published.summary,)
+    return all(summary.state == "unavailable" for summary in summaries)
+
+
 def process_run(
     pending: PendingRun,
     *,
@@ -452,14 +465,17 @@ def process_run(
             inbox = projection.read_projection(state_dir=state_dir)
         except (AssuranceError, OSError) as error:
             return result(OUTCOME_UNUSABLE, reason=str(error))
-        if inbox.run(pending.run_id) is not None:
+        published = inbox.run(pending.run_id)
+        if published is not None and not (force and _unavailable_only(published)):
             return result(OUTCOME_ALREADY_AUDITED)
         if not force and _predates_generation(pending, inbox):
             return result(OUTCOME_SKIPPED, reason=REASON_SUPERSEDED_GENERATION)
         if not _state_still_describes(pending):
             return result(OUTCOME_UNUSABLE, reason=REASON_EVIDENCE_SUPERSEDED)
         # Only reachable once the ledger has shown nothing was published for
-        # this run, so nothing being moved aside backs a published finding.
+        # this run, or that everything published says the audit could not be
+        # judged. In the second case the archive keeps the failed attempt's
+        # artifacts, which is the evidence that unavailable issue points at.
         try:
             archived = _archive_abandoned_audit_artifacts(pending.run_dir)
         except OSError as error:
@@ -508,9 +524,10 @@ def process_pending(
     ``limit`` bounds the audits this pass launches, not the records it looks
     at: a run already published or deliberately skipped costs nothing and must
     not crowd out a run that still owes real work. Naming a ``run_id``
-    processes that run even when its record carries a skip or predates the
-    current code generation, which is the only way an audit that predates this
-    feature, or the newest resolution, is ever run — never in bulk.
+    processes that run even when its record carries a skip, predates the
+    current code generation, or already has a published audit that could not
+    be judged (``unavailable``). Naming it is the only way any of those is ever
+    audited — never in bulk.
     """
     if limit < 1:
         raise CatchupError(

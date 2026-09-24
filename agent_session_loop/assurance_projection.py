@@ -145,11 +145,22 @@ SYSTEM_ISSUE_LANE: RubricLane = "unknown-anomalies"
 SYSTEM_ISSUE_SEVERITY: Severity = "medium"
 UNAVAILABLE_INVARIANT_PREFIX = "audit.availability"
 
+#: How a re-audit is actually requested. A bare ``process-pending`` pass reports
+#: a run that already has an unavailable record as already audited, so the run
+#: has to be named; and only a run whose runner died owing its audit has the
+#: catch-up record that command reads. Kept in one place so every
+#: recommendation below names the command the CLI really accepts.
+_REAUDIT_COMMAND = (
+    "`asl assurance process-pending --run-id RUN_ID` (a run listed on this "
+    "issue; it works for a run whose runner died before auditing it, and a run "
+    "that audited itself has no catch-up record to re-audit from)"
+)
+
 #: What an operator is told to do about an audit that could not be judged. The
 #: default fits a failure a re-run could clear, which is most of them.
 DEFAULT_UNAVAILABLE_RECOMMENDATION = (
-    "Re-run the audit for this run with `asl assurance process-pending` and "
-    "read the named attempt artifacts if it fails the same way."
+    f"Re-run the audit with {_REAUDIT_COMMAND}, and read the named attempt "
+    "artifacts if it fails the same way or cannot be re-run."
 )
 
 #: Reason classes the default would be wrong for. A quota exhaustion is one:
@@ -162,12 +173,12 @@ UNAVAILABLE_RECOMMENDATIONS: Mapping[str, str] = MappingProxyType(
     {
         "quota-exhausted": (
             "Nothing here is broken: the audit was refused because the account "
-            "is out of provider quota. Re-run it with `asl assurance "
-            "process-pending` once the limit resets, and read the named attempt "
-            "artifacts if it then fails for some other reason."
+            f"is out of provider quota. Re-run it with {_REAUDIT_COMMAND} once "
+            "the limit resets, and read the named attempt artifacts if it then "
+            "fails for some other reason."
         ),
         "workspace-changed-during-audit": (
-            "Re-run the audit with `asl assurance process-pending` after workspace "
+            f"Re-run the audit with {_REAUDIT_COMMAND} after workspace "
             "activity has stopped. Read supervisor-audit-workspace-change.json "
             "and the named attempt artifacts for the comparison; snapshots "
             "cannot identify who wrote and do not establish an auditor breach."

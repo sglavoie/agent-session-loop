@@ -1822,6 +1822,62 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
                 assurance_catchup.OUTCOME_AUDITED, report.results[0].outcome
             )
 
+    def _publish_unavailable(self, history: tuple[Path, Path, Path, Path]) -> None:
+        self._abandon(history)
+        first = self._process(history, _ScriptedAuditor("not json", "still not"))
+        self.assertEqual("unavailable", first.results[0].state)
+
+    def test_naming_a_run_whose_only_audit_was_unavailable_audits_it_again(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            root = history[2].parent
+            self._publish_unavailable(history)
+            auditor = self._auditor(history)
+
+            report = self._process(history, auditor, run_id=RUN_ID)
+
+            result = report.results[0]
+            self.assertEqual(assurance_catchup.OUTCOME_AUDITED, result.outcome)
+            self.assertEqual("all-clear", result.state, result.reason)
+            self.assertEqual(1, len(auditor.prompts))
+            self.assertTrue(result.archived_artifacts)
+            view = assurance_projection.read_projection(state_dir=root)
+            run = view.run(RUN_ID)
+            assert run is not None
+            self.assertEqual(
+                ["unavailable", "all-clear"],
+                [summary.state for summary in run.summaries],
+            )
+
+    def test_a_bulk_pass_leaves_an_unavailable_run_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._publish_unavailable(history)
+            auditor = self._auditor(history)
+
+            report = self._process(history, auditor)
+
+            self.assertEqual(
+                assurance_catchup.OUTCOME_ALREADY_AUDITED, report.results[0].outcome
+            )
+            self.assertEqual([], auditor.prompts)
+
+    def test_naming_a_run_with_a_verdict_does_not_audit_it_again(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._abandon(history)
+            self._process(history)
+            auditor = self._auditor(history)
+
+            report = self._process(history, auditor, run_id=RUN_ID)
+
+            self.assertEqual(
+                assurance_catchup.OUTCOME_ALREADY_AUDITED, report.results[0].outcome
+            )
+            self.assertEqual([], auditor.prompts)
+
     def _dispose(self, root: Path, kind: str, recorded_at: str) -> None:
         """Put one disposed issue in the ledger, decided at ``recorded_at``.
 
