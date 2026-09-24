@@ -949,16 +949,94 @@ def recovery_diagnostics(
     if state_dir is not None:
         argv.extend(["--state-dir", str(state_dir)])
     argv.append("--json")
-    path = state.plan_state_dir(plan_dir, state_dir) / RECOVERY_FILE_NAME
-    try:
-        progress = json.loads(path.read_text()) if path.exists() else None
-    except ValueError, OSError:
-        progress = {"error": "recovery journal is unreadable"}
     return dict(
         preview_command=shlex.join(argv) if aliases else None,
         acceptance=(
             "Review evidence; use --accept DIGEST --reason TEXT "
             "and --checkpoint-retained"
         ),
-        progress=progress,
+        **{
+            "progress": None,
+            **recovery_journal_projection(
+                plan_dir, state_dir=state_dir, session_id=session_id, guard=guard
+            ),
+        },
     )
+
+
+def _incident_run_id(event_path: Path, guard: dict[str, Any]) -> str | None:
+    """The run whose recorded pause retained ``guard``, when it is on record.
+
+    A guard that has not been published yet (the pause is being built right
+    now) has no event, and its digest alone already tells it apart from any
+    earlier incident.
+    """
+    try:
+        lines = event_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        payload = record.get("payload") if isinstance(record, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        details = payload.get("details")
+        if isinstance(details, dict) and details.get("workspace_write_guard") == guard:
+            run_id = payload.get("run_id")
+            return run_id if isinstance(run_id, str) else None
+    return None
+
+
+def recovery_journal_projection(
+    plan_dir: Path,
+    *,
+    state_dir: str | Path | None = None,
+    session_id: str | None = None,
+    guard: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project the plan-level recovery journal onto one incident.
+
+    The journal outlives the incident it recovered, so reading it bare would
+    report an earlier session's finished recovery as progress on whatever
+    pause is current (ASI-157). ``progress`` is therefore only projected when
+    the journal's proposal names this incident -- the same session, the same
+    retained guard digest, and the same original run. With no current incident
+    only an unfinished recovery is projected, since acknowledging resumes it
+    whatever pause is current. Any other journal is reported as
+    ``historical_recovery``, without its completion state.
+    """
+    state_root = state.plan_state_dir(plan_dir, state_dir)
+    path = state_root / RECOVERY_FILE_NAME
+    if not path.exists():
+        return {}
+    try:
+        progress = json.loads(path.read_text())
+    except ValueError, OSError:
+        return {"progress": {"error": "recovery journal is unreadable"}}
+    proposal = progress.get("proposal") if isinstance(progress, dict) else None
+    if not isinstance(proposal, dict):
+        return {"progress": {"error": "recovery journal has no proposal"}}
+    if guard is None:
+        current = not progress.get("complete")
+    else:
+        incident_run_id = _incident_run_id(state_root / events.EVENTS_FILE_NAME, guard)
+        current = (
+            proposal.get("session_id") == session_id
+            and proposal.get("retained_guard_sha256") == _digest(guard)
+            and (
+                incident_run_id is None
+                or proposal.get("original_run_id") == incident_run_id
+            )
+        )
+    if current:
+        return {"progress": progress}
+    return {
+        "historical_recovery": {
+            "session_id": proposal.get("session_id"),
+            "original_run_id": proposal.get("original_run_id"),
+            "retained_guard_sha256": proposal.get("retained_guard_sha256"),
+        }
+    }

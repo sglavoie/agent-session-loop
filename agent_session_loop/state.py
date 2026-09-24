@@ -2056,12 +2056,12 @@ def status_payload(
         else None
     )
     if recovery is None:
-        recovery_path = plan_state / scope_recovery.RECOVERY_FILE_NAME
-        if recovery_path.exists():
-            try:
-                recovery = {"progress": json.loads(recovery_path.read_text())}
-            except ValueError, OSError:
-                recovery = {"progress": {"error": "recovery journal is unreadable"}}
+        recovery = (
+            scope_recovery.recovery_journal_projection(
+                snapshot.plan_dir, state_dir=state_dir
+            )
+            or None
+        )
     return responses.success_payload(
         "status",
         plan_dir=str(snapshot.plan_dir),
