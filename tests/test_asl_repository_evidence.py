@@ -984,9 +984,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         return workspace_evidence._workspace_write_guard_evidence(
             workspace=self.workspace,
             scope=plans.SessionScope(reads=("SVC", "OAK"), writes=("SVC",)),
-            comparison=repository_evidence.compare_workspace_snapshots(
-                before, after
-            ),
+            comparison=repository_evidence.compare_workspace_snapshots(before, after),
             exclude=(),
             include_ignored=False,
         )

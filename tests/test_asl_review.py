@@ -1594,8 +1594,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
 
         self.assertTrue(repair_plan.ok, repair_plan.error)
         self.assertIn(
-            f"- `{artifact}` — `completion check` — read-only reference "
-            "(do not edit)",
+            f"- `{artifact}` — `completion check` — read-only reference (do not edit)",
             repair_plan.repair_groups[0].rendered_text,
         )
 
@@ -1642,9 +1641,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
             f"- `{artifact}` — `Goal / Handoff` — read-only reference (do not edit)",
             rendered,
         )
-        self.assertIn(
-            "- `justfile` — `install-hooks (lines 137-140)`\n", rendered
-        )
+        self.assertIn("- `justfile` — `install-hooks (lines 137-140)`\n", rendered)
         self.assertIn("- `scripts/hooks/pre-push`\n", rendered)
 
     def test_done_criteria_demanding_another_session_artifact_is_refused(

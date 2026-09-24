@@ -1337,14 +1337,13 @@ class HangSentinel:
                     "root_pid": pid,
                     "hold_reason": hold_reason,
                     "attempted_at": str(
-                        block.get("last_checked_at")
-                        or clock.isoformat(clock.utc_now())
+                        block.get("last_checked_at") or clock.isoformat(clock.utc_now())
                     ),
                 }
                 release = self._input_release
             else:
                 release = None
-        if release is not None:
+        if release is not None and channel is not None:
             released = False
             with contextlib.suppress(Exception):
                 released = bool(channel.release_input())

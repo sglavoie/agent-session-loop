@@ -789,7 +789,9 @@ class StatusRefusalArtifactAdjudicationTests(SettlementTestCase):
         self.assertTrue(guard["adjudicated_only"])
         self.assertEqual(changed, guard["changed_artifacts"])
         self.assertEqual(reason, guard["deferred_to_pause_reason"])
-        self.assertEqual(guard, self.ctx.payload["pause_details"]["plan_artifact_guard"])
+        self.assertEqual(
+            guard, self.ctx.payload["pause_details"]["plan_artifact_guard"]
+        )
         # Reverted at most once: the adjudication never reverts or appends a
         # failure note, and the turn is rejected under this guard exactly once.
         self.assertFalse(guard["reverted_to_pending"])
@@ -802,7 +804,9 @@ class StatusRefusalArtifactAdjudicationTests(SettlementTestCase):
         digests_before = self.digests()
         self.rewrite("1")
 
-        settlement = self.settle(after=self.before, plan_artifacts_before=digests_before)
+        settlement = self.settle(
+            after=self.before, plan_artifacts_before=digests_before
+        )
 
         self.assertEqual(turn_settlement.ACTION_STOP, settlement.action)
         self.assert_passed_adjudicated_only("no-status-change")

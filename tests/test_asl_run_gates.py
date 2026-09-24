@@ -1131,7 +1131,12 @@ class RunReadinessGateTests(unittest.TestCase):
         # than a bare tamper report.
         self.assertEqual(1, completed.returncode)
         self.assertEqual("unexpected-status-change", payload["pause_reason"])
-        self.assertNotIn("plan_artifact_guard", payload["turns"][0])
+        # The plan-artifact guard still adjudicates the write (ASI-119), but
+        # defers to the status diagnosis rather than replacing it.
+        guard = payload["turns"][0]["plan_artifact_guard"]
+        self.assertTrue(guard["adjudicated_only"])
+        self.assertFalse(guard["passed"])
+        self.assertEqual("unexpected-status-change", guard["deferred_to_pause_reason"])
 
     def test_selected_session_completion_passes_the_plan_artifact_guard(self) -> None:
         self._write_plan(("pending", "pending"), readiness="loop-ready")

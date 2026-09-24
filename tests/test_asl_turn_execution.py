@@ -631,8 +631,12 @@ class PostResultTerminationPreviewTests(unittest.TestCase):
         expected = "harness terminated after result (post-result-shutdown, rc 143)"
         self.assertEqual(expected, payload["last_activity_preview"])
         self.assertEqual(self.RESULT_LINE, payload["last_harness_activity_preview"])
-        self.assertEqual("post-result-shutdown", payload["failure_classification"]["marker"])
-        self.assertTrue(self.stdout_log().endswith(f"{self.RESULT_LINE}\nasl: {expected}\n"))
+        self.assertEqual(
+            "post-result-shutdown", payload["failure_classification"]["marker"]
+        )
+        self.assertTrue(
+            self.stdout_log().endswith(f"{self.RESULT_LINE}\nasl: {expected}\n")
+        )
         on_disk = json.loads(self.paths["result"].read_text(encoding="utf-8"))
         self.assertEqual(expected, on_disk["last_activity_preview"])
 

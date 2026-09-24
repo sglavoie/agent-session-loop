@@ -1306,7 +1306,9 @@ def remote_ref_drift(
         if isinstance(head, str) and head:
             local_tips.add(head)
         local_tips.update(
-            sha for name, sha in entries(fingerprint) if not is_remote_tracking_ref(name)
+            sha
+            for name, sha in entries(fingerprint)
+            if not is_remote_tracking_ref(name)
         )
     old = {n: sha for n, sha in entries(before) if is_remote_tracking_ref(n)}
     new = {n: sha for n, sha in entries(after) if is_remote_tracking_ref(n)}

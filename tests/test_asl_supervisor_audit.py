@@ -41,10 +41,10 @@ from agent_session_loop import (
     repository_evidence,
     review,
     review_session_contract,
+    run_commit,
     run_entry,
     run_flags,
     run_payloads,
-    run_commit,
     run_prompts,
     run_selection,
     runner,
@@ -1815,9 +1815,14 @@ class EvidenceBundleTests(unittest.TestCase):
         collector = supervisor_audit._Collector(
             supervisor_audit.EvidenceRoots(roots=())
         )
-        budget = len(
-            assurance_models.canonical_json_bytes({**payload, "events": {"records": closing}})
-        ) + 2048
+        budget = (
+            len(
+                assurance_models.canonical_json_bytes(
+                    {**payload, "events": {"records": closing}}
+                )
+            )
+            + 2048
+        )
 
         supervisor_audit._shed(payload, collector, max_bytes=budget)
 
@@ -5580,9 +5585,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
 
             bundle, _ = self._audit(history)
 
-            attempts = {
-                a.get("name"): a for a in bundle.payload["commits"]["attempts"]
-            }
+            attempts = {a.get("name"): a for a in bundle.payload["commits"]["attempts"]}
             self.assertIn(paths["artifact_dir"].name, attempts)
             self.assertIs(
                 False, attempts[paths["artifact_dir"].name]["result"]["available"]

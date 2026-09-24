@@ -978,9 +978,7 @@ _SECRET_VALUE_RE = re.compile(
 )
 #: The closed vocabulary the external-write guard classifies a path into.
 #: A value drawn from it is a verdict, never a secret, whatever its key.
-_EXTERNAL_WRITE_CLASS_VALUES = frozenset(
-    external_write_evidence.EXTERNAL_WRITE_CLASSES
-)
+_EXTERNAL_WRITE_CLASS_VALUES = frozenset(external_write_evidence.EXTERNAL_WRITE_CLASSES)
 
 
 def _is_path_key(name: str) -> bool:
