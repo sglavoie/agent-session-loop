@@ -6232,6 +6232,75 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                 results["misleading-success"].detail,
             )
 
+    def _checks_without_the_retry(
+        self, bundle: supervisor_audit.AuditInput
+    ) -> dict[str, DeterministicResult]:
+        """Judge ``bundle`` as if the size cap had shed the clean retry.
+
+        ``_shed`` protects anomalous turns and the most recent ones, never the
+        retry that supersedes an anomalous turn, so on a long run the retry is
+        the first thing the cap gives up (ASI-23).
+        """
+        payload = copy.deepcopy(bundle.payload)
+        payload["turns"] = [
+            turn for turn in payload["turns"] if turn["name"] != "turn-0002-01"
+        ]
+        results = supervisor_audit.run_deterministic_checks(payload)
+        return {result.check: result for result in results}
+
+    def test_supersession_survives_the_retry_being_shed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_retry_pair(history)
+
+            bundle, _ = self._audit(history)
+            first = bundle.payload["turns"][0]
+
+            self.assertEqual("turn-0002-01", first["superseded_by"])
+            self.assertNotIn("superseded_by", bundle.payload["turns"][1])
+            results = self._checks_without_the_retry(bundle)
+            self.assertEqual("pass", results["misleading-success"].status)
+
+    def test_an_unretried_anomalous_turn_is_never_stamped_superseded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            payload = self._read_result(history[3])
+            payload.update(
+                {"session_id": "01", "turn_index": 1, "status_result": "blocked"}
+            )
+            self._write_result(history[3] / "turn-0001-01", payload)
+
+            bundle, _ = self._audit(history)
+
+            self.assertNotIn("superseded_by", bundle.payload["turns"][0])
+            results = self._checks_without_the_retry(bundle)
+            self.assertEqual("fail", results["misleading-success"].status)
+
+    def test_a_shed_retry_does_not_excuse_a_write_scope_breach(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_retry_pair(
+                history,
+                first={
+                    "workspace_write_guard": {
+                        "passed": False,
+                        "write_aliases": ["app", "other"],
+                        "authorized_aliases": ["app"],
+                        "violations": [{"alias": "other"}],
+                        "unavailable": {},
+                    }
+                },
+            )
+
+            bundle, _ = self._audit(history)
+            results = self._checks_without_the_retry(bundle)
+
+            self.assertEqual("fail", results["misleading-success"].status)
+            self.assertIn(
+                "exceeded its declared write scope",
+                results["misleading-success"].detail,
+            )
+
     def test_an_expected_conditional_skip_does_not_contradict_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))

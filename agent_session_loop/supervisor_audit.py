@@ -3074,6 +3074,7 @@ def collect_audit_input(
 
     payload["evidence"] = collector.evidence()
     payload["omissions"] = collector.omissions.to_list()
+    _stamp_supersessions(turns)
     _shed(payload, collector, max_bytes=max_bytes)
     payload["evidence"] = collector.evidence()
     payload["omissions"] = collector.omissions.to_list()
@@ -4328,6 +4329,11 @@ def _verification_covered_the_turn(session_verification: Mapping[str, Any]) -> b
     return bool(_sequence(session_verification.get("checks")))
 
 
+#: Turn key naming the later clean completion that replaced a turn, stamped
+#: at collection time so supersession survives the retry being shed.
+TURN_SUPERSEDED_BY_KEY = "superseded_by"
+
+
 def _superseded_turn_names(turns: Sequence[Mapping[str, Any]]) -> frozenset[str]:
     """Turns a later clean completion of the same session replaced.
 
@@ -4338,8 +4344,38 @@ def _superseded_turn_names(turns: Sequence[Mapping[str, Any]]) -> frozenset[str]
     a false success. A turn whose index or session cannot be read is never
     treated as superseded, so an unreadable projection keeps the finding.
     """
+    stamped = {
+        turn["name"]
+        for turn in turns
+        if isinstance(turn.get("name"), str)
+        and isinstance(turn.get(TURN_SUPERSEDED_BY_KEY), str)
+    }
+    return frozenset(_supersessions(turns)) | stamped
 
-    completed: dict[str, int] = {}
+
+def _stamp_supersessions(turns: Sequence[dict[str, Any]]) -> None:
+    """Record on each superseded turn the name of the retry that replaced it.
+
+    Supersession is judged on the full turn list at collection time because
+    the size cap protects anomalous turns but not the clean retries that
+    supersede them: once a retry is shed, the bundle alone would read the
+    recovered attempt as unanswered counter-evidence (ASI-23).
+    """
+    for name, replacement in _supersessions(turns).items():
+        replacement_name = replacement.get("name")
+        if not isinstance(replacement_name, str):
+            continue
+        for turn in turns:
+            if turn.get("name") == name:
+                turn[TURN_SUPERSEDED_BY_KEY] = replacement_name
+
+
+def _supersessions(
+    turns: Sequence[Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    """Map each superseded turn's name to the clean completion that replaced it."""
+
+    completed: dict[str, tuple[int, Mapping[str, Any]]] = {}
     for turn in turns:
         if turn.get("anomalous") is True:
             continue
@@ -4350,8 +4386,10 @@ def _superseded_turn_names(turns: Sequence[Mapping[str, Any]]) -> frozenset[str]
             continue
         if result.get("status_result") != "complete":
             continue
-        completed[session_id] = max(completed.get(session_id, index), index)
-    superseded: set[str] = set()
+        latest = completed.get(session_id)
+        if latest is None or index >= latest[0]:
+            completed[session_id] = (index, turn)
+    superseded: dict[str, Mapping[str, Any]] = {}
     for turn in turns:
         result = _mapping(turn.get("result"))
         session_id = result.get("session_id")
@@ -4362,9 +4400,9 @@ def _superseded_turn_names(turns: Sequence[Mapping[str, Any]]) -> frozenset[str]
         if not isinstance(name, str):
             continue
         latest = completed.get(session_id)
-        if latest is not None and latest > index:
-            superseded.add(name)
-    return frozenset(superseded)
+        if latest is not None and latest[0] > index:
+            superseded[name] = latest[1]
+    return superseded
 
 
 #: A deferred broad-check failure is closed by a later all-clear review
