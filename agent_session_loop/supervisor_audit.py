@@ -1028,8 +1028,20 @@ _ANOMALY_EVENT_NAMES = frozenset(
         events.RUN_PAUSED_EVENT,
         events.TURN_HANG_CLEARED_EVENT,
         events.TURN_HANG_SUSPECTED_EVENT,
+        events.TURN_REJECTED_EVENT,
         events.VERIFICATION_CHECK_SKIPPED_EVENT,
         events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT,
+    }
+)
+
+#: Protected records the cap gives up only after every other protected one:
+#: how the run ended and which turns the guards refused are the facts a
+#: containment verdict cannot be reached without.
+_LAST_SHED_EVENT_NAMES = frozenset(
+    {
+        events.RUN_FINISHED_EVENT,
+        events.RUN_PAUSED_EVENT,
+        events.TURN_REJECTED_EVENT,
     }
 )
 
@@ -1738,13 +1750,19 @@ def _tree_digest(root: Path, *, patterns: Sequence[str]) -> dict[str, Any]:
 
 
 def _event_priority(name: str, payload: Mapping[str, Any]) -> int:
-    """Return 0 for evidence the cap protects, 2 for what it sheds first."""
+    """Return 0 for evidence the cap protects, 2 for what it sheds first.
+
+    Bulk chatter never reaches the protected tier, even when one record's
+    payload looks like a failure: hundreds of heartbeats and deliveries
+    sharing that tier with the pause they precede would shed the pause first,
+    because a tier is shed oldest first (ASI-9).
+    """
     if name in _ANOMALY_EVENT_NAMES or name == _RUN_STARTED_EVENT:
         return 0
+    if name in _BULK_EVENT_NAMES:
+        return 1 if _payload_shows_failure(payload) else 2
     if _payload_shows_failure(payload):
         return 0
-    if name in _BULK_EVENT_NAMES:
-        return 2
     return 1
 
 
@@ -2851,11 +2869,14 @@ def _shed(
         return len(assurance_models.canonical_json_bytes(payload))
 
     def drop_events(priority: int, batch: int) -> bool:
-        doomed = [
+        candidates = [
             index
             for index, record in enumerate(records)
             if record.get("priority") == priority
-        ][:batch]
+        ]
+        # Within a tier, the terminal and rejection records go last.
+        candidates.sort(key=lambda i: records[i].get("name") in _LAST_SHED_EVENT_NAMES)
+        doomed = sorted(candidates[:batch])
         for index in reversed(doomed):
             collector.omissions.record("events", REASON_SIZE_CAP, records[index])
             del records[index]
@@ -3677,7 +3698,11 @@ def _commit_repository_alias(record: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _commit_attributions(context: _CheckContext) -> list[tuple[str | None, str | None]]:
+def _commit_attributions(
+    context: _CheckContext,
+    *,
+    skip: Callable[[Mapping[str, Any]], bool] | None = None,
+) -> list[tuple[str | None, str | None]]:
     """The session and repository every commit in the bundle names.
 
     Either half may be ``None`` when the record does not say, and both readings
@@ -3690,6 +3715,9 @@ def _commit_attributions(context: _CheckContext) -> list[tuple[str | None, str |
     commit of unknown repository, which is the one shape that can never be
     ruled out (ASI-9). A group that names no repository anywhere committed
     nothing and contributes nothing.
+
+    ``skip`` withholds individual commit entries, wherever they sit; a group
+    whose every entry is withheld contributes nothing.
     """
     pairs: list[tuple[str | None, str | None]] = []
     for record in _commit_records(context):
@@ -3702,7 +3730,10 @@ def _commit_attributions(context: _CheckContext) -> list[tuple[str | None, str |
                     _commit_repository_alias(entry),
                 )
                 for entry in nested
+                if skip is None or not skip(entry)
             )
+            continue
+        if skip is not None and skip(record):
             continue
         aliases = [
             alias
@@ -3714,6 +3745,19 @@ def _commit_attributions(context: _CheckContext) -> list[tuple[str | None, str |
         elif "repositories" not in record and "ordered_aliases" not in record:
             pairs.append((session, _commit_repository_alias(record)))
     return pairs
+
+
+def _guard_head_moves(guard: Mapping[str, Any]) -> set[tuple[str | None, Any]]:
+    """The ``(repository, head after)`` pairs one guard record saw move."""
+    moves: set[tuple[str | None, Any]] = set()
+    for alias, change in _mapping(guard.get("changed")).items():
+        change = _mapping(change)
+        transition = _mapping(change.get("head_transition"))
+        head_after = change.get("head_after") or transition.get("after")
+        before = change.get("head_before") or transition.get("before")
+        if isinstance(head_after, str) and head_after and head_after != before:
+            moves.add((str(alias).split(_WORKTREE_KEY_SEPARATOR, 1)[0], head_after))
+    return moves
 
 
 @dataclass(frozen=True)
@@ -3766,6 +3810,8 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
     paused_fingerprints: dict[_ViolationFingerprint, set[str]] = {}
     paused_sessions: set[str] = set()
     paused_any = False
+    offending_turns: set[str] = set()
+    offending_heads: set[tuple[str | None, Any]] = set()
 
     def _claim(
         session: str | None,
@@ -3801,6 +3847,9 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
             session = _write_scope_session(
                 guard.get("session_id"), result.get("session_id")
             )
+            if isinstance(turn.get("name"), str):
+                offending_turns.add(turn["name"])
+            offending_heads.update(_guard_head_moves(guard))
             _claim(
                 session,
                 aliases,
@@ -3810,6 +3859,44 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
         if _mapping(guard.get("unavailable")):
             blind.append(f"{turn.get('name')} could not be inventoried")
 
+    def _pause(reason: Any, details: Mapping[str, Any]) -> None:
+        """Read one scope pause, from the event log or the persisted status."""
+        nonlocal observed, paused_any
+        guard = _mapping(details.get("workspace_write_guard"))
+        observed += 1
+        if reason == events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE:
+            blind.append("the write guard reported itself unavailable")
+        aliases = _write_scope_violated_aliases(guard)
+        # A guard that both found violations and failed to inventory
+        # something pauses under the unavailable reason, because that is the
+        # worse of the two. The pause is still the run stopping on this guard
+        # record, and reading only the scope-violation reason reported a run
+        # that did pause as one that never did (ASI-9). An unavailable pause
+        # naming no violation is only blindness, and corroborates nothing.
+        scope_pause = reason == events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION
+        if not (aliases or scope_pause):
+            return
+        paused_any = True
+        session = _write_scope_session(
+            guard.get("session_id"),
+            details.get("session_id"),
+            details.get("session"),
+        )
+        if session is not None:
+            paused_sessions.add(session)
+        if aliases:
+            offending_heads.update(_guard_head_moves(guard))
+            fingerprint = _write_scope_violation_fingerprint(guard)
+            if session is not None:
+                paused_fingerprints.setdefault(fingerprint, set()).add(session)
+            _claim(
+                session,
+                aliases,
+                fingerprint,
+                guard.get("reverted_to_pending") is True,
+            )
+
+    pause_recorded = False
     for record in context.records:
         name = record.get("name")
         record_payload = _mapping(record.get("payload"))
@@ -3835,40 +3922,42 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
                 )
         elif name != events.RUN_PAUSED_EVENT:
             continue
-        elif reason in _WRITE_SCOPE_PAUSE_REASONS:
-            observed += 1
-            if reason == events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE:
-                blind.append("the write guard reported itself unavailable")
-            aliases = _write_scope_violated_aliases(guard)
-            # A guard that both found violations and failed to inventory
-            # something pauses under the unavailable reason, because that is the
-            # worse of the two. The pause is still the run stopping on this guard
-            # record, and reading only the scope-violation reason reported a run
-            # that did pause as one that never did (ASI-9). An unavailable pause
-            # naming no violation is only blindness, and corroborates nothing.
-            scope_pause = reason == events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION
-            if not (aliases or scope_pause):
-                continue
-            paused_any = True
-            session = _write_scope_session(
-                guard.get("session_id"),
-                details.get("session_id"),
-                details.get("session"),
-            )
-            if session is not None:
-                paused_sessions.add(session)
-            if aliases:
-                fingerprint = _write_scope_violation_fingerprint(guard)
-                if session is not None:
-                    paused_fingerprints.setdefault(fingerprint, set()).add(session)
-                _claim(
-                    session,
-                    aliases,
-                    fingerprint,
-                    guard.get("reverted_to_pending") is True,
-                )
+        else:
+            pause_recorded = True
+            if reason in _WRITE_SCOPE_PAUSE_REASONS:
+                _pause(reason, details)
 
-    attributions = _commit_attributions(context)
+    # The persisted status carries the same pause the event log does, so a
+    # bundle whose event records the size cap dropped still holds the pause
+    # there. It is read only when the log kept no pause of its own, so one
+    # pause is never counted twice.
+    status = context.section("status")
+    if (
+        context.events_shed
+        and not pause_recorded
+        and status.get("pause_reason") in _WRITE_SCOPE_PAUSE_REASONS
+    ):
+        _pause(status.get("pause_reason"), _mapping(status.get("pause_details")))
+
+    def _self_observed(entry: Mapping[str, Any]) -> bool:
+        """Whether a commit is the offending turn's own head move, not a carry.
+
+        The audit derives an ``observed-write-guard`` commit from the head
+        transition the write guard saw during a turn. When that turn is the one
+        the guard caught, the derived commit is the violation itself as the
+        guard observed it rather than a later commit that carried the write
+        forward, so counting it made every caught head move read as an escape.
+        """
+        if entry.get("origin") != OBSERVED_COMMIT_ORIGIN:
+            return False
+        if entry.get("turn") in offending_turns:
+            return True
+        return (
+            _commit_repository_alias(entry),
+            entry.get("head_after"),
+        ) in offending_heads
+
+    attributions = _commit_attributions(context, skip=_self_observed)
     any_commit = bool(attributions)
 
     # The runner writes one guard record into the turn result and the same

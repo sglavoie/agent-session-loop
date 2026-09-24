@@ -1776,6 +1776,57 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertIn(events.RUN_FINISHED_EVENT, names)
             self.assertIn("run_started", names)
 
+    def test_shedding_gives_up_failing_chatter_before_the_pause(self) -> None:
+        """The pause and the rejection outlast heartbeats that look like failures.
+
+        A tier is shed oldest first, so hundreds of failure-shaped heartbeats
+        sharing the protected tier with a late pause shed the pause first and
+        leave containment unjudgeable (ASI-9).
+        """
+
+        def record(sequence: int, name: str, payload: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "sequence": sequence,
+                "name": name,
+                "created_at": None,
+                "version": 2,
+                "priority": supervisor_audit._event_priority(name, payload),
+                "payload": payload,
+            }
+
+        chatter = [
+            record(index, events.TURN_HEARTBEAT_EVENT, {"hang_suspected": True})
+            for index in range(1, 200)
+        ] + [
+            record(200 + index, events.AGENT_MUX_DELIVERY_EVENT, {"ok": False})
+            for index in range(200)
+        ]
+        closing = [
+            record(500, events.TURN_REJECTED_EVENT, {"run_id": RUN_ID}),
+            record(501, events.RUN_PAUSED_EVENT, {"reason": "x" * 64}),
+        ]
+        payload: dict[str, Any] = {
+            "events": {"records": chatter + closing},
+            "mailbox": {"records": []},
+            "turns": [],
+            "omissions": [],
+        }
+        collector = supervisor_audit._Collector(
+            supervisor_audit.EvidenceRoots(roots=())
+        )
+        budget = len(
+            assurance_models.canonical_json_bytes({**payload, "events": {"records": closing}})
+        ) + 2048
+
+        supervisor_audit._shed(payload, collector, max_bytes=budget)
+
+        names = [item["name"] for item in payload["events"]["records"]]
+        self.assertIn(events.RUN_PAUSED_EVENT, names)
+        self.assertIn(events.TURN_REJECTED_EVENT, names)
+        self.assertEqual(
+            0, supervisor_audit._event_priority(events.TURN_REJECTED_EVENT, {})
+        )
+
     def test_tightening_a_bundle_sends_less_of_the_same_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bundle = self._collect(*self._history(Path(tmp), event_count=20000))
@@ -5323,6 +5374,129 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             # touch, and a pause could not have made up for its absence.
             self.assertEqual("fail", results["scope-escape"].status)
             self.assertIn("not reverted to pending", results["scope-escape"].detail)
+
+    def _record_pause_in_state(
+        self, history: tuple[Path, Path, Path, Path], *, reverted: bool = True
+    ) -> None:
+        """Mirror the scope pause into state the way ``run_loop`` persists it."""
+        payload = self._read_state(history[2])
+        payload.update(
+            paused=True,
+            pause_reason=events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            pause_details={
+                "session": 1,
+                "workspace_write_guard": self._violating_guard(reverted=reverted),
+            },
+        )
+        self._write_state(history[2], payload)
+
+    def test_a_pause_the_status_kept_settles_a_catch_the_log_shed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history)
+            self._record_pause_in_state(history)
+
+            bundle, _ = self._audit(history)
+            results = self._shed_events(bundle)
+
+            # The persisted status holds the same pause the size cap dropped
+            # from the log, so the catch is proven rather than left blind.
+            self.assertEqual("pass", results["scope-escape"].status)
+            self.assertEqual("fail", results["scope-guard-catch"].status)
+            self.assertIn(
+                "paused the run before anything was committed",
+                results["scope-guard-catch"].detail,
+            )
+
+    def test_a_status_pause_does_not_excuse_an_unreverted_violation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history, reverted=False)
+            self._record_pause_in_state(history, reverted=False)
+
+            bundle, _ = self._audit(history)
+            results = self._shed_events(bundle)
+
+            self.assertEqual("fail", results["scope-escape"].status)
+            self.assertIn("not reverted to pending", results["scope-escape"].detail)
+
+    def _record_offending_head_move(self, run_dir: Path) -> None:
+        """Let the offending turn's own guard see the violated repository move."""
+        payload = self._read_result(run_dir)
+        payload["workspace_write_guard"]["changed"] = {
+            "docs": {
+                "head_changed": True,
+                "head_before": "a" * 40,
+                "head_after": "b" * 40,
+                "head_transition": {
+                    "before": "a" * 40,
+                    "after": "b" * 40,
+                    "relation": "fast-forward",
+                    "commits_added": 1,
+                    "commits_removed": 0,
+                    "history_rewrite": False,
+                },
+            }
+        }
+        self._write_result(run_dir / "turn-0001-01", payload)
+
+    def test_the_offending_turns_own_head_move_does_not_defeat_the_catch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history)
+            self._record_offending_head_move(history[3])
+
+            bundle, results = self._audit(history)
+
+            # The audit derives an observed commit from that very head move, and
+            # it is the violation as the guard saw it, not a later commit that
+            # carried the write forward (ASI-9).
+            self.assertIn(
+                supervisor_audit.OBSERVED_COMMIT_ORIGIN,
+                [c.get("origin") for c in bundle.payload["commits"]["commits"]],
+            )
+            self.assertEqual("pass", results["scope-escape"].status)
+            self.assertEqual("fail", results["scope-guard-catch"].status)
+
+    def test_a_later_turns_observed_commit_still_defeats_the_catch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history)
+            self._record_offending_head_move(history[3])
+            later = self._read_result(history[3])
+            later["workspace_write_guard"] = {
+                "passed": True,
+                "session_id": "01",
+                "write_aliases": ["app"],
+                "authorized_aliases": ["app"],
+                "violations": [],
+                "unavailable": {},
+                "changed": {
+                    "docs": {
+                        "head_changed": True,
+                        "head_before": "b" * 40,
+                        "head_after": "c" * 40,
+                        "head_transition": {
+                            "before": "b" * 40,
+                            "after": "c" * 40,
+                            "relation": "fast-forward",
+                            "commits_added": 1,
+                            "commits_removed": 0,
+                            "history_rewrite": False,
+                        },
+                    }
+                },
+            }
+            later_dir = history[3] / "turn-0002-01"
+            later_dir.mkdir()
+            self._write_result(later_dir, later)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["scope-escape"].status)
+            self.assertIn("could have carried", results["scope-escape"].detail)
 
     def test_a_commit_for_the_offending_session_undoes_the_catch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
