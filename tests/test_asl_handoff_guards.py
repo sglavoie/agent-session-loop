@@ -38,12 +38,14 @@ the record an operator reaches for to find out what the guard did.
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from agent_session_loop import (
     events,
@@ -56,6 +58,7 @@ from agent_session_loop import (
     run_termination,
     runner,
     session_verification,
+    turn_execution,
     turn_settlement,
 )
 from tests.support import assert_no_runner_import, write_plan
@@ -427,7 +430,9 @@ class AppendProgressEntryTests(_PlanCase):
 class RevertSessionStatusTests(_PlanCase):
     """The one way a ``complete`` claim is taken back."""
 
-    def revert(self, session_id: str = "1", **overrides: Any) -> Path | None:
+    def revert(
+        self, session_id: str = "1", **overrides: Any
+    ) -> handoff_guards.SessionRevert | None:
         return handoff_guards._revert_session_status_to_pending(
             self.snapshot(),
             session_id,
@@ -436,13 +441,39 @@ class RevertSessionStatusTests(_PlanCase):
         )
 
     def test_the_status_line_goes_back_to_pending(self) -> None:
-        path = self.revert()
-        self.assertEqual(self.session_path("1"), path)
+        reverted = self.revert()
+        assert reverted is not None
+        self.assertEqual(self.session_path("1"), reverted.path)
         self.assertIn(
             f"{plans.STATUS_PREFIX} pending",
-            (path or Path()).read_text(encoding="utf-8"),
+            reverted.path.read_text(encoding="utf-8"),
         )
         self.assertEqual("pending", self.snapshot().sessions[0].status)
+
+    def test_a_complete_session_is_reported_as_reopened(self) -> None:
+        reverted = self.revert("1")
+        assert reverted is not None
+        self.assertEqual("complete", reverted.from_status)
+        self.assertTrue(reverted.reopened)
+        self.assertTrue(handoff_guards._reopened(reverted))
+
+    def test_an_already_pending_session_gets_the_note_but_is_not_reopened(
+        self,
+    ) -> None:
+        # ASI-30: the note is still the record of why the guard refused, but a
+        # session that never left pending was not reopened, and saying so
+        # emits a session_reopened transition that never happened.
+        reverted = self.revert("2", failure_note="guard refused a pending turn")
+        assert reverted is not None
+        self.assertEqual(self.session_path("2"), reverted.path)
+        self.assertEqual("pending", reverted.from_status)
+        self.assertFalse(reverted.reopened)
+        self.assertFalse(handoff_guards._reopened(reverted))
+        self.assertFalse(handoff_guards._reopened(None))
+        self.assertEqual(
+            ["guard refused a pending turn"],
+            [call["note"] for call in self.appender.calls],
+        )
 
     def test_the_note_is_offered_the_bounds_of_the_handoff_section(self) -> None:
         self.revert(failure_note="plan artifact guard failed")
@@ -494,6 +525,174 @@ class RevertSessionStatusTests(_PlanCase):
             text.index(f"{plans.STATUS_PREFIX} complete"),
             text.index(f"{plans.STATUS_PREFIX} pending"),
         )
+
+
+class RefusalReopeningTruthTests(_PlanCase):
+    """A refusal reports a reopening only when the status actually moved (ASI-30).
+
+    Session 1 of the fixture plan is ``complete`` and session 2 ``pending``;
+    each reverting guard is driven against both.
+    """
+
+    #: Modules whose guards revert a session and then record the rejection.
+    CALLER_MODULES = (
+        "handoff_guards",
+        "session_verification",
+        "write_guards",
+    )
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.event_path = self.tmp_dir / "events.jsonl"
+        self.result_path = self.tmp_dir / "result.json"
+        self.persistence = run_persistence._RunPersistence()
+        self.turn_payload: dict[str, Any] = {"turn_index": 1}
+        self.payload: dict[str, Any] = {"run_id": "run-1"}
+
+    def events_named(self, name: str) -> list[dict[str, Any]]:
+        if not self.event_path.exists():
+            return []
+        records = [
+            json.loads(line)
+            for line in self.event_path.read_text(encoding="utf-8").splitlines()
+        ]
+        return [record["payload"] for record in records if record["name"] == name]
+
+    def plan_artifact_guard(self, session_id: str) -> str:
+        other = "2" if session_id == "1" else "1"
+        digests_before = plans.session_artifact_digests(
+            self.plan_dir, exclude_session_id=session_id
+        )
+        path = self.session_path(other)
+        path.write_text(
+            path.read_text(encoding="utf-8") + "\n- **Note**: rewritten\n",
+            encoding="utf-8",
+        )
+        before = self.snapshot()
+        self.assertTrue(
+            handoff_guards._enforce_plan_artifact_guard(
+                event_path=self.event_path,
+                payload=self.payload,
+                persistence=self.persistence,
+                before=before,
+                after=before,
+                digests_before=digests_before,
+                runner_written=(),
+                session_id=session_id,
+                session_label=f"session {session_id}",
+                session_details={"session_id": session_id},
+                turn_payload=self.turn_payload,
+                paths={"result": self.result_path},
+                plan_cache=plans.PlanSnapshotCache(),
+                append_handoff_note=self.appender,
+                reinspect=session_verification._reinspect_after_revert,
+            )
+        )
+        return "plan_artifact_guard"
+
+    def mailbox_completion_guard(self, session_id: str) -> str:
+        with mock.patch.object(
+            handoff_guards,
+            "_mailbox_completion_guard_evidence",
+            return_value={"question_id": "q-1"},
+        ):
+            self.assertTrue(
+                handoff_guards._enforce_mailbox_completion_guard(
+                    event_path=self.event_path,
+                    payload=self.payload,
+                    persistence=self.persistence,
+                    after=self.snapshot(),
+                    session_id=session_id,
+                    session_label=f"session {session_id}",
+                    session_details={"session_id": session_id},
+                    turn_index=1,
+                    state_dir_arg=None,
+                    turn_payload=self.turn_payload,
+                    paths={"result": self.result_path},
+                    plan_cache=plans.PlanSnapshotCache(),
+                    append_handoff_note=self.appender,
+                    reinspect=session_verification._reinspect_after_revert,
+                )
+            )
+        return "mailbox_completion_guard"
+
+    def test_only_a_session_that_left_pending_is_reported_reopened(self) -> None:
+        for guard in ("plan_artifact_guard", "mailbox_completion_guard"):
+            for session_id, from_status in (("1", "complete"), ("2", "pending")):
+                with self.subTest(guard=guard, session=session_id):
+                    self.setUp()
+                    record_key = getattr(self, guard)(session_id)
+                    reopened = from_status != "pending"
+                    self.assertEqual(
+                        reopened,
+                        self.turn_payload[record_key]["reverted_to_pending"],
+                    )
+                    self.assertEqual(
+                        "pending",
+                        self.snapshot().sessions[int(session_id) - 1].status,
+                    )
+                    # The failure note is appended either way.
+                    self.assertEqual(1, len(self.appender.calls))
+                    rejected = self.events_named(events.TURN_REJECTED_EVENT)
+                    self.assertEqual([reopened], [r["reopened"] for r in rejected])
+                    reopenings = self.events_named(events.SESSION_REOPENED_EVENT)
+                    if reopened:
+                        self.assertEqual(
+                            ["complete"], [r["from_status"] for r in reopenings]
+                        )
+                    else:
+                        self.assertEqual([], reopenings)
+
+    def test_a_revert_decides_the_reopening_and_its_from_status(self) -> None:
+        for from_status, expected in (
+            ("pending", []),
+            ("complete", ["complete"]),
+            ("blocked", ["blocked"]),
+        ):
+            with self.subTest(from_status=from_status):
+                self.setUp()
+                turn_execution.record_turn_rejected(
+                    event_path=self.event_path,
+                    payload=self.payload,
+                    persistence=self.persistence,
+                    turn_payload=self.turn_payload,
+                    session_id="1",
+                    guard="test-guard",
+                    reason="blocked",
+                    revert=handoff_guards.SessionRevert(
+                        path=self.session_path("1"), from_status=from_status
+                    ),
+                )
+                self.assertEqual(
+                    expected,
+                    [
+                        r["from_status"]
+                        for r in self.events_named(events.SESSION_REOPENED_EVENT)
+                    ],
+                )
+
+    def test_no_reverting_caller_infers_a_reopening_from_the_rewrite(self) -> None:
+        # Every caller of the revert hands the result to record_turn_rejected
+        # as ``revert=`` and never reads "a file was rewritten" as "the session
+        # was reopened".
+        for module_name in self.CALLER_MODULES:
+            with self.subTest(module=module_name):
+                module = importlib.import_module(f"agent_session_loop.{module_name}")
+                tree = ast.parse(inspect.getsource(module))
+                for function in ast.walk(tree):
+                    if not isinstance(function, ast.FunctionDef):
+                        continue
+                    calls = _called_names(function)
+                    if "_revert_session_status_to_pending" not in calls:
+                        continue
+                    if "record_turn_rejected" not in calls:
+                        continue
+                    source = (
+                        ast.get_source_segment(inspect.getsource(module), function)
+                        or ""
+                    )
+                    self.assertNotIn("reverted is not None,", source, function.name)
+                    self.assertIn("revert=reverted", source, function.name)
 
 
 class PlanArtifactAdjudicationTests(_PlanCase):

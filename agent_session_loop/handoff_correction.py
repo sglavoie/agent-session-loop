@@ -452,7 +452,7 @@ def _reopen_uninspectable_handoff(
     )
     if reverted is None:
         return None, evidence
-    evidence["reopened"] = True
+    evidence["reopened"] = reverted.reopened
     try:
         reinspected = plan_cache.get_fresh(before.plan_dir)
     except plans.PlanError as error:
@@ -520,7 +520,7 @@ def _repair_paused_handoff_status(
     )
     evidence: dict[str, Any] = {
         **plans.session_identity_payload(session_id),
-        "session_path": str(reverted),
+        "session_path": str(reverted.path),
         "from_status": from_status,
         "to_status": "pending",
         "pause_reason": pause_reason,

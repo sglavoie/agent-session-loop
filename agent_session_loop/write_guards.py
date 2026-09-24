@@ -338,7 +338,7 @@ def _enforce_workspace_write_guard(
         "session_id": session_id,
         "reason": reason,
         "phase": "after",
-        "reverted_to_pending": reverted is not None,
+        "reverted_to_pending": handoff_guards._reopened(reverted),
         "repair_required": workspace_evidence._workspace_repair_required(
             evidence, reason
         ),
@@ -367,7 +367,7 @@ def _enforce_workspace_write_guard(
         session_id=session_id,
         guard="workspace-write-guard",
         reason=reason,
-        reopened=reverted is not None,
+        revert=reverted,
     )
     run_termination._pause_run(
         event_path,
@@ -480,7 +480,7 @@ def _enforce_legacy_implementation_write_guard(
         "session_id": session_id,
         "reason": reason,
         "phase": "after",
-        "reverted_to_pending": reverted is not None,
+        "reverted_to_pending": handoff_guards._reopened(reverted),
     }
     with persistence.lock:
         payload["final_snapshot"] = plans.snapshot_payload(inspected)
@@ -494,7 +494,7 @@ def _enforce_legacy_implementation_write_guard(
         session_id=session_id,
         guard="legacy-implementation-write-guard",
         reason=reason,
-        reopened=reverted is not None,
+        revert=reverted,
     )
     run_termination._pause_run(
         event_path,
@@ -796,7 +796,7 @@ def _enforce_protected_path_guard(
         append_handoff_note=append_handoff_note,
     )
     inspected = reinspect(before.plan_dir, revert_target, reverted, plan_cache)
-    guard_record["reverted_to_pending"] = reverted is not None
+    guard_record["reverted_to_pending"] = handoff_guards._reopened(reverted)
     with persistence.lock:
         payload["final_snapshot"] = plans.snapshot_payload(inspected)
         turn_payload["protected_path_guard"] = guard_record
@@ -809,7 +809,7 @@ def _enforce_protected_path_guard(
         session_id=session_id,
         guard="protected-path-guard",
         reason=reason,
-        reopened=reverted is not None,
+        revert=reverted,
     )
     run_termination._pause_run(
         event_path,

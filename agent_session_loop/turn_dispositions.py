@@ -945,12 +945,12 @@ def _reconcile_unsettled_completion(
         "reason": reason,
         "returncode": result.returncode,
         "reverted": reverted is not None,
-        "session_path": str(reverted) if reverted is not None else None,
+        "session_path": str(reverted.path) if reverted is not None else None,
     }
     with ctx.persistence.lock:
         turn_payload["completion_reconciliation"] = record
         durability.write_json_file(paths["result"], turn_payload)
-        if reverted is not None:
+        if handoff_guards._reopened(reverted):
             ctx.persistence.append_event(
                 ctx.event_path,
                 events.SESSION_REOPENED_EVENT,

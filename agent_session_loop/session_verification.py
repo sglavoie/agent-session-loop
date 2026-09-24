@@ -203,7 +203,7 @@ def _enforce_review_verdict(
         session_id=session_id,
         guard="review-verdict",
         reason="invalid-review-verdict",
-        reopened=reverted is not None,
+        revert=reverted,
         detail={"failure_reason": verdict.get("reason"), "attempt": graded.attempt},
     )
 
@@ -319,7 +319,7 @@ def _enforce_session_verification(
             session_id=session_id,
             guard="session-verification",
             reason=refusal.reason,
-            reopened=reverted is not None,
+            revert=reverted,
             detail=refusal.guard_detail,
         )
         run_termination._pause_run(
@@ -557,7 +557,7 @@ def _enforce_session_verification(
         session_id=session_id,
         guard="session-verification",
         reason="verify-failed",
-        reopened=reverted is not None,
+        revert=reverted,
         detail={"summary": summary, "fingerprint": repair.fingerprint},
     )
     run_termination._pause_run(
@@ -574,7 +574,7 @@ def _enforce_session_verification(
 def _reinspect_after_revert(
     plan_dir: Path,
     fallback: plans.PlanSnapshot,
-    reverted_path: Path | None,
+    reverted_path: object | None,
     plan_cache: plans.PlanSnapshotCache,
 ) -> plans.PlanSnapshot:
     if reverted_path is None:

@@ -126,11 +126,12 @@ class SessionStatusReverter(Protocol):
 
 
 #: Re-reads the plan after a status revert, returning the fallback snapshot
-#: unchanged when nothing was reverted. The most-shared primitive in the guard
-#: layer; declared here because this is the first boundary to leave the runner
-#: that needs it.
+#: unchanged when nothing was reverted (the third argument is ``None``; any other
+#: value -- a rewritten path or a ``handoff_guards.SessionRevert`` -- means the
+#: plan changed). The most-shared primitive in the guard layer; declared here
+#: because this is the first boundary to leave the runner that needs it.
 SnapshotReinspector = Callable[
-    [Path, plans.PlanSnapshot, Path | None, plans.PlanSnapshotCache],
+    [Path, plans.PlanSnapshot, object | None, plans.PlanSnapshotCache],
     plans.PlanSnapshot,
 ]
 

@@ -79,6 +79,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -125,6 +126,34 @@ class HandoffNoteAppender(Protocol):
     ) -> list[str]: ...
 
 
+@dataclass(frozen=True)
+class SessionRevert:
+    """What :func:`_revert_session_status_to_pending` actually did.
+
+    The failure note is appended whenever the session has a Handoff section,
+    but the status only moves when it was not already ``pending``. Reporting a
+    rewrite as a reopening would emit ``session_reopened`` (and
+    ``reverted_to_pending``) for a session that never left ``pending``
+    (ASI-30), so the transition is carried separately from the rewrite.
+    """
+
+    path: Path
+    from_status: str | None
+
+    @property
+    def reopened(self) -> bool:
+        """Whether the status line moved from something other than pending."""
+        return (
+            self.from_status is not None
+            and self.from_status.strip().lower() != "pending"
+        )
+
+
+def _reopened(revert: SessionRevert | None) -> bool:
+    """Whether a revert moved the session back to pending."""
+    return revert is not None and revert.reopened
+
+
 def session_status_reverter(
     append_handoff_note: HandoffNoteAppender,
 ) -> run_termination.SessionStatusReverter:
@@ -143,12 +172,13 @@ def session_status_reverter(
         *,
         failure_note: str,
     ) -> Path | None:
-        return _revert_session_status_to_pending(
+        reverted = _revert_session_status_to_pending(
             snapshot,
             session_id,
             failure_note=failure_note,
             append_handoff_note=append_handoff_note,
         )
+        return reverted.path if reverted is not None else None
 
     return revert
 
@@ -213,7 +243,14 @@ def _revert_session_status_to_pending(
     *,
     failure_note: str,
     append_handoff_note: HandoffNoteAppender,
-) -> Path | None:
+) -> SessionRevert | None:
+    """Return the session to pending and append ``failure_note``.
+
+    Returns ``None`` when the session file or its Handoff section is missing.
+    Otherwise the file was rewritten (the note is always appended) and the
+    result records the status it held before, so callers can tell a real
+    reopening from a session that was already pending.
+    """
     path = _session_path_in_snapshot(snapshot, session_id)
     if path is None:
         return None
@@ -234,8 +271,10 @@ def _revert_session_status_to_pending(
         if lines[index].startswith("## "):
             section_end = index
             break
+    from_status: str | None = None
     for index in range(handoff_index + 1, section_end):
         if lines[index].startswith(plans.STATUS_PREFIX):
+            from_status = lines[index][len(plans.STATUS_PREFIX) :].strip()
             lines[index] = f"{plans.STATUS_PREFIX} pending"
             break
     lines = append_handoff_note(
@@ -246,7 +285,7 @@ def _revert_session_status_to_pending(
     )
     suffix = "\n" if text.endswith("\n") else ""
     path.write_text("\n".join(lines) + suffix, encoding="utf-8")
-    return path
+    return SessionRevert(path=path, from_status=from_status)
 
 
 def _mailbox_completion_guard_evidence(
@@ -363,7 +402,7 @@ def _enforce_mailbox_completion_guard(
     snapshot_after = reinspect(after.plan_dir, after, reverted, plan_cache)
     guard = {
         "passed": False,
-        "reverted_to_pending": reverted is not None,
+        "reverted_to_pending": _reopened(reverted),
         **evidence,
     }
     with persistence.lock:
@@ -378,7 +417,7 @@ def _enforce_mailbox_completion_guard(
         session_id=session_id,
         guard="mailbox-completion-guard",
         reason="blocked",
-        reopened=reverted is not None,
+        revert=reverted,
     )
     run_termination._pause_run(
         event_path,
@@ -514,7 +553,7 @@ def _enforce_review_mutation_guard(
     guard_record = {
         "passed": False,
         "reason": reason,
-        "reverted_to_pending": reverted is not None,
+        "reverted_to_pending": _reopened(reverted),
         **evidence,
     }
     with persistence.lock:
@@ -529,7 +568,7 @@ def _enforce_review_mutation_guard(
         session_id=session_id,
         guard="review-mutation-guard",
         reason=reason,
-        reopened=reverted is not None,
+        revert=reverted,
     )
     run_termination._pause_run(
         event_path,
@@ -728,7 +767,7 @@ def _enforce_plan_artifact_guard(
     guard_record = {
         "passed": False,
         "reason": reason,
-        "reverted_to_pending": reverted is not None,
+        "reverted_to_pending": _reopened(reverted),
         **evidence,
     }
     with persistence.lock:
@@ -743,7 +782,7 @@ def _enforce_plan_artifact_guard(
         session_id=session_id,
         guard="plan-artifact-guard",
         reason=reason,
-        reopened=reverted is not None,
+        revert=reverted,
     )
     run_termination._pause_run(
         event_path,

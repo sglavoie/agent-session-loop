@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from . import (
     agent_mux_delivery,
@@ -55,6 +55,9 @@ from . import (
     plans,
     process_tree,
 )
+
+if TYPE_CHECKING:
+    from .handoff_guards import SessionRevert
 
 INTERRUPTED_EXIT = 130
 HEARTBEAT_INTERVAL_SECONDS = 30.0
@@ -955,9 +958,14 @@ def record_turn_rejected(
     guard: str,
     reason: str,
     reopened: bool = False,
+    revert: SessionRevert | None = None,
     detail: Mapping[str, Any] | None = None,
 ) -> None:
     """Record that a post-execution guard refused an already-executed turn.
+
+    A guard that reverted the session passes ``revert``; it then decides
+    ``reopened`` and the ``from_status`` on ``session_reopened``, so a session
+    that was already pending gets its failure note but no reopening (ASI-30).
 
     Without this the only trace of a refusal is a pause reason plus a plan that
     silently disagrees with the last turn record. ``session_reopened`` is
@@ -971,6 +979,10 @@ def record_turn_rejected(
     before recording the rejection, so it is the resulting snapshot by
     construction.
     """
+    from_status = "complete"
+    if revert is not None:
+        reopened = revert.reopened
+        from_status = revert.from_status or from_status
     rejection: dict[str, Any] = {
         "run_id": payload.get("run_id"),
         "turn_index": turn_payload.get("turn_index"),
@@ -992,7 +1004,7 @@ def record_turn_rejected(
             "run_id": payload.get("run_id"),
             "turn_index": turn_payload.get("turn_index"),
             **plans.session_identity_payload(session_id),
-            "from_status": "complete",
+            "from_status": from_status,
             "to_status": "pending",
             "guard": guard,
             "reason": reason,
