@@ -393,23 +393,48 @@ def required_write_repositories(
     )
 
 
+def _plan_artifact_pattern(plan_dir: Path) -> re.Pattern[str]:
+    return re.compile(
+        re.escape(str(plan_dir))
+        + rf"/session-({plans.SESSION_ID_PATTERN})\.(?:expand\.)?md"
+    )
+
+
+def _foreign_plan_artifacts_in(
+    pattern: re.Pattern[str], child_id: SessionId, text: str
+) -> dict[str, SessionId]:
+    referenced: dict[str, SessionId] = {}
+    for match in pattern.finditer(text):
+        if match.group(1) == child_id.value:
+            continue
+        name = match.group(0).rsplit("/", 1)[-1]
+        referenced[name] = parse_session_id(match.group(1))
+    return referenced
+
+
 def foreign_plan_artifact_references(
     plan_dir: Path,
     child_id: SessionId,
     group_findings: Sequence[Mapping[str, Any]],
 ) -> tuple[str, ...]:
-    """Return the plan session artifacts a repair group points its child at.
+    """Return the plan session artifacts a repair group would make its child edit.
 
     A task packet makes exactly one session file writable, and the plan
-    artifact guard pauses the run when a turn changes any other one. Both
-    channels that carry a finding's work into a child can name a plan artifact
-    anyway: :func:`_render_child_body` prints every ``evidence[].path`` as the
-    child's work list, and :func:`_merge_verification_checks` copies the
-    findings' ``verification_checks`` verbatim into its completion contract. A
-    child launched against one of those cannot win either way -- the check
-    either already passes and proves nothing, or it demands the very edit the
-    guard exists to refuse, and the child burns its retries reporting that it
-    was not allowed to do the work (ASI-134).
+    artifact guard pauses the run when a turn changes any other one. Two
+    channels carry a finding's *required work* into a child and can name a
+    plan artifact anyway: :func:`_merge_verification_checks` copies the
+    findings' ``verification_checks`` (argv, cwd and all) verbatim into its
+    completion contract, and the findings' ``done_criteria`` become its
+    ``Done when`` list. A child launched against one of those cannot win either
+    way -- the check either already passes and proves nothing, or it demands
+    the very edit the guard exists to refuse, and the child burns its retries
+    reporting that it was not allowed to do the work (ASI-134).
+
+    ``evidence[].path`` is deliberately not a channel: a finding routinely
+    cites another session's packet as the *reason* the work is owed (its goal,
+    its handoff), and :func:`_render_child_body` labels such a citation as a
+    read-only reference, so refusing the group over it refused ordinary repair
+    work (ASI-162).
 
     Only references anchored to ``plan_dir`` count. A repository file that
     happens to be named ``session-<id>.md`` is an ordinary work target, and
@@ -418,22 +443,13 @@ def foreign_plan_artifact_references(
     The child's own artifacts are excluded: those are the one session file the
     packet does make writable.
     """
-    pattern = re.compile(
-        re.escape(str(plan_dir))
-        + rf"/session-({plans.SESSION_ID_PATTERN})\.(?:expand\.)?md"
-    )
+    pattern = _plan_artifact_pattern(plan_dir)
     referenced: dict[str, SessionId] = {}
     for finding in group_findings:
         haystacks = [json.dumps(finding.get("verification_checks", ()))]
-        haystacks.extend(
-            str(evidence.get("path", "")) for evidence in finding.get("evidence", ())
-        )
+        haystacks.extend(str(bullet) for bullet in finding.get("done_criteria", ()))
         for text in haystacks:
-            for match in pattern.finditer(text):
-                if match.group(1) == child_id.value:
-                    continue
-                name = match.group(0).rsplit("/", 1)[-1]
-                referenced[name] = parse_session_id(match.group(1))
+            referenced.update(_foreign_plan_artifacts_in(pattern, child_id, text))
     return tuple(sorted(referenced, key=lambda name: (referenced[name].sort_key, name)))
 
 
@@ -610,7 +626,11 @@ def _render_child_body(
     findings: Sequence[dict[str, Any]],
     marker_version: int = GENERATED_REVIEW_REPAIR_SESSION_VERSION,
     write_repository_sources: Mapping[str, str] | None = None,
+    plan_dir: Path | None = None,
 ) -> list[str]:
+    # Evidence that cites another session's packet explains why the work is
+    # owed; it is never a write target, and the child is told so (ASI-162).
+    artifact_pattern = None if plan_dir is None else _plan_artifact_pattern(plan_dir)
     lines: list[str] = [
         REVIEW_REPAIR_SESSION_MARKER,
         review_repair_session_version_marker(marker_version),
@@ -649,9 +669,14 @@ def _render_child_body(
         for evidence in finding["evidence"]:
             symbol = evidence.get("symbol")
             if symbol:
-                lines.append(f"- `{evidence['path']}` — `{symbol}`")
+                line = f"- `{evidence['path']}` — `{symbol}`"
             else:
-                lines.append(f"- `{evidence['path']}`")
+                line = f"- `{evidence['path']}`"
+            if artifact_pattern is not None and _foreign_plan_artifacts_in(
+                artifact_pattern, child_id, str(evidence["path"])
+            ):
+                line += " — read-only reference (do not edit)"
+            lines.append(line)
         lines.append("")
         lines.append("Done criteria:")
         for bullet in finding["done_criteria"]:
@@ -773,6 +798,7 @@ def _build_repair_group_plans(
             findings=group_findings,
             marker_version=marker_version,
             write_repository_sources=write_repository_sources,
+            plan_dir=plan_dir,
         )
         try:
             contract = authoring.contract_from_payload(

@@ -1576,16 +1576,85 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
     def _plan_artifact_path(self, name: str) -> str:
         return str(plans.canonicalize_path(self.plan_dir) / name)
 
-    def test_a_finding_aimed_at_another_session_artifact_is_refused(self) -> None:
+    def test_evidence_citing_another_session_artifact_is_a_read_only_reference(
+        self,
+    ) -> None:
+        # Evidence explains why the work is owed; it is not a write target, so
+        # the group materializes and the citation is labelled read-only
+        # (ASI-162).
+        artifact = self._plan_artifact_path("session-1.md")
         finding = self._finding(
             "F1",
             "runner",
+            evidence=[{"path": artifact, "symbol": "completion check"}],
+        )
+        self._write_plan([finding])
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(repair_plan.ok, repair_plan.error)
+        self.assertIn(
+            f"- `{artifact}` — `completion check` — read-only reference "
+            "(do not edit)",
+            repair_plan.repair_groups[0].rendered_text,
+        )
+
+    def test_f3_shaped_finding_citing_a_session_packet_materializes(self) -> None:
+        # The ASI-162 finding: real work in the repository, with the session
+        # packet cited only as the goal the work was owed against.
+        artifact = self._plan_artifact_path("session-1.md")
+        finding = self._finding(
+            "F3",
+            "install-pre-push-hook",
+            severity="med",
             evidence=[
+                {"path": "justfile", "symbol": "install-hooks (lines 137-140)"},
+                {"path": "scripts/hooks/pre-push"},
+                {"path": artifact, "symbol": "Goal / Handoff"},
+            ],
+            done_criteria=[
+                "Install the existing hook for this repository so the "
+                "effective core.hooksPath is scripts/hooks.",
+                "Confirm the resolved scripts/hooks/pre-push exists, is "
+                "executable, and has valid shell syntax.",
+            ],
+            verification_checks=[
                 {
-                    "path": self._plan_artifact_path("session-1.md"),
-                    "symbol": "completion check",
+                    "type": "command",
+                    "name": "pre-push-hook-is-installed",
+                    "cwd": ".",
+                    "argv": [
+                        "python3",
+                        "-c",
+                        "import subprocess\nsubprocess.check_output(['git', "
+                        "'config', '--get', 'core.hooksPath'])\n",
+                    ],
                 }
             ],
+        )
+        self._write_plan([finding])
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(repair_plan.ok, repair_plan.error)
+        rendered = repair_plan.repair_groups[0].rendered_text
+        self.assertIn(
+            f"- `{artifact}` — `Goal / Handoff` — read-only reference (do not edit)",
+            rendered,
+        )
+        self.assertIn(
+            "- `justfile` — `install-hooks (lines 137-140)`\n", rendered
+        )
+        self.assertIn("- `scripts/hooks/pre-push`\n", rendered)
+
+    def test_done_criteria_demanding_another_session_artifact_is_refused(
+        self,
+    ) -> None:
+        artifact = self._plan_artifact_path("session-1.md")
+        finding = self._finding(
+            "F1",
+            "runner",
+            done_criteria=[f"{artifact} records the corrected completion check."],
         )
         self._write_plan([finding])
         before = self._plan_bytes()
