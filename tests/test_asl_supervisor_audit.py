@@ -44,6 +44,7 @@ from agent_session_loop import (
     run_entry,
     run_flags,
     run_payloads,
+    run_commit,
     run_prompts,
     run_selection,
     runner,
@@ -5497,6 +5498,49 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
 
             self.assertEqual("fail", results["scope-escape"].status)
             self.assertIn("could have carried", results["scope-escape"].detail)
+
+    def test_the_recovered_message_directory_is_not_a_commit_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            _, baseline = self._audit(history)
+            # `run_commit` keeps recovered paused-work messages in a sibling of
+            # the attempt directories whose name also starts with `commit-`,
+            # and reading it as an attempt reported an attempt with no result
+            # (ASI-117).
+            recovery = (
+                history[3] / run_commit.RECOVERED_PAUSED_WORK_MESSAGE_DIR_NAME / "g1"
+            )
+            recovery.mkdir(parents=True)
+            (recovery / "message.txt").write_text("subject\n", encoding="utf-8")
+
+            bundle, results = self._audit(history)
+
+            names = [a.get("name") for a in bundle.payload["commits"]["attempts"]]
+            self.assertNotIn(run_commit.RECOVERED_PAUSED_WORK_MESSAGE_DIR_NAME, names)
+            self.assertEqual(
+                baseline["commit-failure-accounting"].status,
+                results["commit-failure-accounting"].status,
+            )
+
+    def test_a_numbered_commit_directory_without_a_result_is_still_an_attempt(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            paths = run_commit._commit_paths(
+                history[3], commit_index=1, session_id="1", repository_alias="docs"
+            )
+            paths["artifact_dir"].mkdir()
+
+            bundle, _ = self._audit(history)
+
+            attempts = {
+                a.get("name"): a for a in bundle.payload["commits"]["attempts"]
+            }
+            self.assertIn(paths["artifact_dir"].name, attempts)
+            self.assertIs(
+                False, attempts[paths["artifact_dir"].name]["result"]["available"]
+            )
 
     def test_a_commit_for_the_offending_session_undoes_the_catch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

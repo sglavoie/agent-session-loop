@@ -1085,7 +1085,18 @@ _COMMIT_STATE_KEYS = (
     # either; with it, the settlement's own verdict travels beside them.
     PAUSED_WORK_COMMIT_KEY,
 )
-_COMMIT_DIR_PREFIX = "commit-"
+#: A commit attempt's artifact directory, as ``run_commit`` names it:
+#: ``commit-{index:04d}-{suffix}``. Matching the numbered prefix rather than
+#: ``commit-`` alone keeps sibling directories such as ``commit-group-recovery``
+#: (``run_commit.RECOVERED_PAUSED_WORK_MESSAGE_DIR_NAME``), which hold messages
+#: rather than attempts, from reading as an attempt with no result (ASI-117).
+_COMMIT_ATTEMPT_DIR_RE = re.compile(r"^commit-\d{4,}-")
+
+
+def _is_commit_attempt_dir_name(name: str) -> bool:
+    """Whether a run-directory entry name is a commit attempt's directory."""
+    return _COMMIT_ATTEMPT_DIR_RE.match(name) is not None
+
 
 #: How a projected commit was learned. The runner's own commit records carry no
 #: origin, so this marks exactly the entries the audit derived from the write
@@ -2229,7 +2240,7 @@ def _commit_section(
         directories = sorted(
             entry
             for entry in run_dir.iterdir()
-            if entry.is_dir() and entry.name.startswith(_COMMIT_DIR_PREFIX)
+            if entry.is_dir() and _is_commit_attempt_dir_name(entry.name)
         )
     except OSError:
         directories = []
