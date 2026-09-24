@@ -32,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import math
 import os
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping, MutableMapping
@@ -598,6 +599,48 @@ def observed_model_payload(observed_model: str | None) -> dict[str, str | None]:
     }
 
 
+_RESULT_PREVIEW = re.compile(r"\b[a-z]+ result: ")
+
+
+def post_result_termination_note(
+    result: harnesses.HarnessResult,
+    *,
+    last_activity_preview: object,
+    harness_shutdown: object,
+) -> str | None:
+    """Say what ended a turn whose last output was its terminal result.
+
+    ``None`` unless the last activity was a result line *and* something other
+    than a clean exit followed it: a post-result shutdown record, an abort, an
+    interrupt, a timeout or a nonzero exit. Those turns otherwise keep a
+    preview reading "claude result: success" beside a returncode of 143.
+    """
+    if not isinstance(last_activity_preview, str) or not _RESULT_PREVIEW.search(
+        last_activity_preview
+    ):
+        return None
+    shutdown = harness_shutdown if isinstance(harness_shutdown, Mapping) else None
+    recovery = (shutdown or {}).get("recovery")
+    if result.aborted:
+        cause = "aborted"
+    elif result.interrupted:
+        cause = "interrupted"
+    elif result.timed_out:
+        cause = "timed-out"
+    elif (
+        isinstance(recovery, Mapping)
+        and recovery.get("policy") == process_tree.POST_RESULT_ROOT_RECOVERY_POLICY
+    ):
+        cause = "post-result-shutdown"
+    elif shutdown is not None:
+        cause = str(shutdown.get("result") or "harness-shutdown")
+    elif result.returncode != 0:
+        cause = "nonzero-exit"
+    else:
+        return None
+    return f"harness terminated after result ({cause}, rc {result.returncode})"
+
+
 def write_turn_artifacts(
     *,
     paths: dict[str, Path],
@@ -611,7 +654,21 @@ def write_turn_artifacts(
     plan_error: str | None = None,
     unredacted_prompt: str | None = None,
 ) -> dict[str, Any]:
-    durability.write_text(paths["stdout"], result.stdout)
+    last_activity_preview = live_turn.get("last_activity_preview")
+    termination_note = post_result_termination_note(
+        result,
+        last_activity_preview=last_activity_preview,
+        harness_shutdown=live_turn.get("harness_shutdown"),
+    )
+    stdout_text = result.stdout
+    if termination_note is not None:
+        # The last line the harness wrote was its result, so the preview (and
+        # the log's tail) would still read as a clean finish. Name what
+        # actually ended the turn in both places (ASI-152).
+        if stdout_text and not stdout_text.endswith("\n"):
+            stdout_text += "\n"
+        stdout_text += f"asl: {termination_note}\n"
+    durability.write_text(paths["stdout"], stdout_text)
     durability.write_text(paths["stderr"], result.stderr)
     durability.write_text(paths["last_message"], result.last_message)
 
@@ -676,12 +733,16 @@ def write_turn_artifacts(
         ],
         "last_activity_at": live_turn.get("last_activity_at"),
         "last_activity_stream": live_turn.get("last_activity_stream"),
-        "last_activity_preview": live_turn.get("last_activity_preview"),
+        "last_activity_preview": (
+            last_activity_preview if termination_note is None else termination_note
+        ),
         "last_heartbeat_at": live_turn.get("last_heartbeat_at"),
         "heartbeat_count": live_turn.get("heartbeat_count", 0),
         "before": plans.snapshot_payload(before),
         "after": plans.snapshot_payload(after) if after is not None else None,
     }
+    if termination_note is not None:
+        payload["last_harness_activity_preview"] = last_activity_preview
     if result.stream_io is not None:
         payload["stream_io"] = dict(result.stream_io)
     if (
