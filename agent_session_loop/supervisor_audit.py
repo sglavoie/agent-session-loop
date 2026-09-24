@@ -67,6 +67,7 @@ from . import (
     commit_groups,
     durability,
     events,
+    external_write_evidence,
     harness_failures,
     harnesses,
     mailbox,
@@ -975,6 +976,18 @@ _SECRET_VALUE_RE = re.compile(
     r"|(?:AKIA|ASIA)[0-9A-Z]{16}"
     r"|ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
 )
+#: The closed vocabulary the external-write guard classifies a path into.
+#: A value drawn from it is a verdict, never a secret, whatever its key.
+_EXTERNAL_WRITE_CLASS_VALUES = frozenset(
+    external_write_evidence.EXTERNAL_WRITE_CLASSES
+)
+
+
+def _is_path_key(name: str) -> bool:
+    """Whether a map key is an absolute path rather than a field name."""
+    return name.startswith("/") and "\n" not in name
+
+
 _CREDENTIAL_URL_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://)[^/\s@]+@")
 
 #: Keys whose value is a command line. Argv is redacted positionally as well as
@@ -1394,10 +1407,22 @@ class _Collector:
                 )
             return self._redact_string(value, key=key, parent=parent)
         if isinstance(value, Mapping):
-            return {
-                str(name): self.redact(item, key=str(name), parent=key)
-                for name, item in value.items()
-            }
+            redacted: dict[str, Any] = {}
+            for raw_name, item in value.items():
+                name = str(raw_name)
+                if _is_path_key(name):
+                    # A path-shaped key is data, not a field name: the guard
+                    # keys its per-path manifests by the path it judged, and a
+                    # path that merely ends in ``ntfy.token`` names no secret.
+                    # Its value is therefore judged in the enclosing field's
+                    # context, and the key itself is held to the same root
+                    # policy as a path-shaped value.
+                    redacted[self._redact_path_key(name)] = self._redact_path_keyed(
+                        name, item, key=key, parent=parent
+                    )
+                    continue
+                redacted[name] = self.redact(item, key=name, parent=key)
+            return redacted
         if isinstance(value, (list, tuple)):
             items = list(value)
             if key in _ARGV_KEYS:
@@ -1447,6 +1472,31 @@ class _Collector:
             f"{_truncate_utf8(cleaned, MAX_INLINE_STRING_BYTES)}"
             f"…[truncated sha256:{_sha256_text(text)[:16]}]"
         )
+
+    def _redact_path_keyed(
+        self, name: str, item: Any, *, key: str | None, parent: str | None
+    ) -> Any:
+        """Redact the value stored under the path-shaped key ``name``."""
+        if isinstance(item, str):
+            if item in _EXTERNAL_WRITE_CLASS_VALUES:
+                return item
+            if _SECRET_KEY_RE.search(Path(name).name):
+                # A free-form string stored against a credential-shaped
+                # file name may be that file's content; withhold it.
+                return REDACTED
+        return self.redact(item, key=key, parent=parent)
+
+    def _redact_path_key(self, name: str) -> str:
+        """Return a path-shaped map key, hashed when outside approved roots.
+
+        A key inside an approved root is kept verbatim so a lookup by path
+        still resolves; one outside every root is withheld exactly as a
+        path-shaped value would be.
+        """
+        if self._roots.locate(name) is not None:
+            return name
+        self.omissions.record("references", REASON_OUTSIDE_APPROVED_ROOTS, name)
+        return f"[{REASON_OUTSIDE_APPROVED_ROOTS}:{_sha256_text(name)[:16]}]"
 
     def _content_stub(self, text: str) -> str:
         self.omissions.record("payload", REASON_APPLICATION_CONTENT, len(text))

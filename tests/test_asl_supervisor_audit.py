@@ -9149,5 +9149,57 @@ class WorkerPauseExitAuditTests(unittest.TestCase):
         self.assertEqual("unavailable", self.checks(bundle)["operator-abort"].status)
 
 
+class PathKeyedRedactionTests(unittest.TestCase):
+    """A path used as a map key is data, not a field name (ASI-35)."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        roots = supervisor_audit.EvidenceRoots.build(
+            run_dir=self.root / "run", state_dir=self.root, plan_dir=self.root
+        )
+        self.collector = supervisor_audit._Collector(roots)
+
+    def _paths(self, paths: dict[str, Any]) -> dict[str, Any]:
+        projected = self.collector.redact(
+            {"workspace_write_guard": {"external_writes": {"paths": paths}}}
+        )
+        return projected["workspace_write_guard"]["external_writes"]["paths"]
+
+    def test_credential_shaped_file_names_keep_their_classification(self) -> None:
+        names = ("ntfy.token", "action_token", "api_key")
+        paths = {str(self.root / name): "unclassified" for name in names}
+        paths[str(self.root / "state.json")] = "control-plane"
+
+        self.assertEqual(paths, self._paths(paths))
+
+    def test_a_real_secret_field_is_still_redacted(self) -> None:
+        projected = self.collector.redact({"config": {"token": "abc"}})
+        self.assertEqual(supervisor_audit.REDACTED, projected["config"]["token"])
+
+    def test_a_secret_value_under_a_path_key_is_still_redacted(self) -> None:
+        secret = "ghp_" + "A" * 36
+        plain = str(self.root / "notes.txt")
+        named = str(self.root / "api_key")
+
+        projected = self._paths({plain: secret, named: "hunter2"})
+
+        self.assertNotIn(secret, json.dumps(projected))
+        self.assertEqual(supervisor_audit.REDACTED, projected[named])
+
+    def test_a_path_key_outside_the_approved_roots_is_withheld(self) -> None:
+        outside = "/private/var/lib/pi-monitoring/autopilot/ntfy.token"
+
+        projected = self._paths({outside: "unclassified"})
+
+        self.assertNotIn(outside, json.dumps(projected))
+        ((name, value),) = projected.items()
+        self.assertTrue(
+            name.startswith(f"[{supervisor_audit.REASON_OUTSIDE_APPROVED_ROOTS}:")
+        )
+        self.assertEqual("unclassified", value)
+
+
 if __name__ == "__main__":
     unittest.main()
