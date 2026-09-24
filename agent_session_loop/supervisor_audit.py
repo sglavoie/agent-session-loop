@@ -4131,6 +4131,27 @@ def _check_state_event_agreement(context: _CheckContext) -> _Verdict:
     )
 
 
+#: Records that carry a commit group's full description, any one of which
+#: identifies the group when the size cap shed the others.
+_COMMIT_GROUP_LIFECYCLE_EVENTS = frozenset(
+    {
+        events.COMMIT_GROUP_STARTED_EVENT,
+        events.COMMIT_GROUP_UPDATED_EVENT,
+        events.COMMIT_GROUP_FINISHED_EVENT,
+    }
+)
+
+
+def _session_paused_group_id(group: Any) -> str | None:
+    """The id of a ``session-paused`` commit group, or ``None`` for any other."""
+    group = _mapping(group)
+    scope = group.get("scope") or _mapping(group.get("identity")).get("scope")
+    if scope != commit_groups.GROUP_SCOPE_SESSION_PAUSED:
+        return None
+    group_id = group.get("group_id")
+    return group_id if isinstance(group_id, str) and group_id else None
+
+
 def _paused_work_settlement_group_ids(
     tail: Sequence[Mapping[str, Any]],
 ) -> frozenset[str]:
@@ -4154,22 +4175,23 @@ def _paused_work_settlement_group_ids(
     closed_at: list[int] = []
     for index, record in enumerate(tail):
         name = str(record.get("name") or "")
+        payload = _mapping(record.get("payload"))
         if name == events.PAUSED_WORK_COMMITTED_EVENT:
             closed_at.append(index)
+            # The close names its own group, so a settlement stays
+            # recognisable when the size cap shed the record that opened it.
+            group_id = _session_paused_group_id(payload.get("commit_group"))
+        elif name in _COMMIT_GROUP_LIFECYCLE_EVENTS:
+            group_id = _session_paused_group_id(payload.get("group"))
+        else:
             continue
-        if name != events.COMMIT_GROUP_STARTED_EVENT:
-            continue
-        group = _mapping(_mapping(record.get("payload")).get("group"))
-        if group.get("scope") != commit_groups.GROUP_SCOPE_SESSION_PAUSED:
-            continue
-        group_id = group.get("group_id")
-        if isinstance(group_id, str) and group_id:
+        if group_id is not None:
             opened.setdefault(group_id, index)
     if not opened or not closed_at:
         return frozenset()
     last_closed = closed_at[-1]
     return frozenset(
-        group_id for group_id, index in opened.items() if index < last_closed
+        group_id for group_id, index in opened.items() if index <= last_closed
     )
 
 

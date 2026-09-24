@@ -4300,6 +4300,70 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                 results["terminal-artifacts"].detail,
             )
 
+    def _shed_start_epilogue(self, *, closed: bool) -> list[tuple[str, dict[str, Any]]]:
+        """A settlement whose ``commit_group_started`` record the cap shed.
+
+        The group is still described by its surviving lifecycle records and by
+        the ``paused_work_committed`` close, which carry the scope on the
+        group's identity the way ``run_commit`` writes it.
+        """
+        group = {
+            "group_id": "group-paused-1",
+            "identity": {"scope": commit_groups.GROUP_SCOPE_SESSION_PAUSED},
+        }
+        epilogue = self._settlement_epilogue(
+            closed=closed, record=self._settlement_record(commit_group=group)
+        )
+        del epilogue[0]
+        return epilogue
+
+    def test_a_settlement_whose_start_was_shed_is_identified_by_its_close(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._paused_run(history, self._shed_start_epilogue(closed=True))
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["terminal-artifacts"].status)
+            self.assertIn(
+                "the settlement of the work its pause retained",
+                results["terminal-artifacts"].detail,
+            )
+
+    def test_a_settlement_identified_by_its_group_update_still_needs_a_close(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            epilogue = self._shed_start_epilogue(closed=False)
+            epilogue.insert(
+                0,
+                (
+                    events.COMMIT_GROUP_UPDATED_EVENT,
+                    {
+                        "run_id": RUN_ID,
+                        "phase": "updated",
+                        "group": {
+                            "group_id": "group-paused-1",
+                            "identity": {
+                                "scope": commit_groups.GROUP_SCOPE_SESSION_PAUSED
+                            },
+                        },
+                    },
+                ),
+            )
+            self._paused_run(history, epilogue)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["terminal-artifacts"].status)
+            self.assertIn(
+                "2 record(s) of work follow the run's terminal record",
+                results["terminal-artifacts"].detail,
+            )
+
     def test_a_post_terminal_commit_outside_the_settlement_still_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
