@@ -404,6 +404,9 @@ class ClaudeStreamSession:
         self._interrupt_requested = False
         self._turn_interrupted = False
         self._background_tasks: set[str] = set()
+        #: Whether a terminal result has been noted, so a hold reason is only
+        #: reported for a stdin kept open *after* the CLI answered.
+        self._result_noted = False
 
     # -- state a caller reads ----------------------------------------------
 
@@ -422,6 +425,37 @@ class ClaudeStreamSession:
     def stdin_closed(self) -> bool:
         with self._state_lock:
             return self._stdin_closed
+
+    @property
+    def stdin_hold_reason(self) -> str | None:
+        """Why stdin is still open after a terminal result, or ``None``.
+
+        ``None`` before any result and once stdin is closed. Otherwise names
+        what :meth:`note_result` is waiting for: background tasks the CLI
+        announced and never reported finished, or written messages no result
+        has answered yet.
+        """
+        with self._state_lock:
+            if self._stdin_closed or not self._result_noted:
+                return None
+            if self._background_tasks:
+                return "background-tasks"
+            if self._messages_answered < self._messages_written:
+                return "unanswered-messages"
+            return "open"
+
+    def release_stdin(self) -> bool:
+        """Close a stdin held open after a result; ``True`` if this closed it.
+
+        The recovery for a CLI left alone and idle behind that hold: EOF is
+        how it is asked to finish, and it is tried before any signal.
+        """
+        with self._write_lock:
+            with self._state_lock:
+                if self._stdin_closed:
+                    return False
+            self._close_stdin_locked()
+            return True
 
     @property
     def session_id(self) -> str | None:
@@ -524,6 +558,7 @@ class ClaudeStreamSession:
         # either be counted before the decision or observe the closed pipe.
         with self._write_lock:
             with self._state_lock:
+                self._result_noted = True
                 if self._interrupt_requested:
                     # This result reports the turn the CLI was told to stop, so
                     # it is drained rather than counted: it answers whatever it

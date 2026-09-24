@@ -323,7 +323,10 @@ class StreamSessionPromptTests(TempDirTestCase):
             emit(dict(type="system", subtype="task_started", task_id=task_id))
         emit(dict(type="result", subtype="success", result="reviews running"))
         self.assertFalse(stdin.closed_by_asl)
-        self.assertFalse(processor.final_result_seen)
+        # Terminal for the main turn even though stdin stays open for the
+        # tasks: the hang sentinel must learn a result arrived (ASI-151).
+        self.assertTrue(processor.final_result_seen)
+        self.assertEqual("background-tasks", session.stdin_hold_reason)
         for task_id in ("code", "tests"):
             emit(dict(type="system", subtype="task_notification", task_id=task_id))
             emit(dict(type="result", origin={"kind": "task-notification"}))
@@ -334,6 +337,40 @@ class StreamSessionPromptTests(TempDirTestCase):
         emit(dict(type="result", origin={"kind": "task-notification"}))
         self.assertTrue(stdin.closed_by_asl)
         self.assertTrue(processor.final_result_seen)
+        self.assertIsNone(session.stdin_hold_reason)
+
+    def test_result_before_an_unnotified_task_still_fires_the_final_hook(
+        self,
+    ) -> None:
+        # ASI-151: a task the CLI announced and never reported finished held
+        # stdin open, the terminal result never reached the hang sentinel, and
+        # the idle root sat for 5142s. The result is terminal regardless.
+        session, stdin = session_with()
+        session.send_prompt()
+        processor = harnesses._ClaudeStreamJsonOutputProcessor(session)
+        self.assertIsNone(session.stdin_hold_reason)
+
+        def emit(record: dict[str, Any]) -> None:
+            processor.process_chunk("stdout", json.dumps(record) + "\n")
+
+        emit(dict(type="system", subtype="task_started", task_id="stale"))
+        emit(dict(type="result", subtype="success", result="done"))
+
+        self.assertTrue(processor.final_result_seen)
+        self.assertFalse(stdin.closed_by_asl)
+        self.assertEqual("background-tasks", session.stdin_hold_reason)
+
+        self.assertTrue(session.release_stdin())
+        self.assertTrue(stdin.closed_by_asl)
+        self.assertIsNone(session.stdin_hold_reason)
+        self.assertFalse(session.release_stdin())
+
+    def test_unanswered_messages_name_their_hold(self) -> None:
+        session, _ = session_with()
+        session.send_prompt()
+        session.steer(request_for())
+        self.assertFalse(session.note_result())
+        self.assertEqual("unanswered-messages", session.stdin_hold_reason)
 
     def test_task_followup_does_not_answer_queued_guidance(self) -> None:
         session, stdin = session_with()
@@ -406,7 +443,10 @@ class StreamSessionPromptTests(TempDirTestCase):
         )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertFalse(result.timed_out)
-        self.assertEqual([True], fired)
+        # Once for the main turn's result, and once more for the follow-up
+        # after the task notification opened a new request; stdin still
+        # waited for the follow-up, which is what the script asserts.
+        self.assertEqual([True, True], fired)
         self.assertEqual("review finished\n", result.last_message)
 
 

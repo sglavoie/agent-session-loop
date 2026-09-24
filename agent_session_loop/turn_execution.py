@@ -71,6 +71,7 @@ HANG_CONFIRM_SAMPLES_ENV_VAR = "ASL_HANG_CONFIRM_SAMPLES"
 HANG_RESULT_GRACE_ENV_VAR = "ASL_HANG_RESULT_GRACE_SECONDS"
 HANG_REASON_RESULT_RECEIVED = "result_received_process_alive"
 HANG_REASON_ZERO_CPU = "zero_cpu_idle"
+POST_RESULT_STDIN_RELEASE_POLICY = "post_result_stdin_release"
 LIVE_CONTROL_POLL_INTERVAL_SECONDS = 5.0
 # Streams whose control markers the runner is willing to act on. The agent's
 # final message and stdout are what the agent chose to say; stderr is a
@@ -1136,6 +1137,14 @@ class HangSentinel:
         self._root_shutdown_started: float | None = None
         self._root_shutdown_tree: tuple[dict[str, Any], ...] = ()
         self._root_shutdown_escalated = False
+        # The harness's input channel, when it has one ASL may close. A
+        # streaming harness can hold its stdin open past a terminal result
+        # (background tasks it still tracks, a message it has not answered);
+        # a root left alone and idle behind that hold is asked to finish by
+        # closing stdin before any signal is sent (ASI-151).
+        self._input_channel: harnesses.HarnessTransport | None = None
+        self._input_release: dict[str, Any] | None = None
+        self._input_released_at: float | None = None
         # Bumped on every note_activity; assessments carry the generation
         # they sampled so any verdict outlived by resumed output is discarded
         # (mid-sample by evaluate, post-return by confirm_assessment).
@@ -1158,10 +1167,26 @@ class HangSentinel:
             self._root_shutdown_started = None
             self._root_shutdown_tree = ()
             self._root_shutdown_escalated = False
+            self._input_release = None
+            self._input_released_at = None
             self._cpu_high_water = {}
             self._last_cpu_seconds = None
             self._zero_cpu_streak = 0
             self._recovery_attempted = False
+
+    def note_input_channel(self, channel: harnesses.HarnessTransport | None) -> None:
+        with self._lock:
+            self._input_channel = channel
+
+    def input_hold_reason(self) -> str | None:
+        """Why the harness's stdin is still open, or ``None`` when it is not."""
+        with self._lock:
+            channel = self._input_channel
+        if channel is None:
+            return None
+        with contextlib.suppress(Exception):
+            return channel.input_hold_reason()
+        return None
 
     def note_final_result(self) -> None:
         with self._lock:
@@ -1192,6 +1217,8 @@ class HangSentinel:
             self._root_shutdown_started = None
             self._root_shutdown_tree = ()
             self._root_shutdown_escalated = False
+            self._input_release = None
+            self._input_released_at = None
             return retracted
 
     def note_turn_exit(self) -> dict[str, Any] | None:
@@ -1218,6 +1245,8 @@ class HangSentinel:
         block = assessment.suspected
         if block is None or block.get("reason") != HANG_REASON_RESULT_RECEIVED:
             return assessment
+        # Read before the lock: the channel answers under its own lock.
+        hold_reason = self.input_hold_reason()
         with self._lock:
             if (
                 assessment.generation != self._activity_generation
@@ -1233,6 +1262,64 @@ class HangSentinel:
             )
             force = False
             previous_recovery = block.get("recovery")
+            if hold_reason is not None:
+                # The harness still holds stdin open after its result. With
+                # descendants alive the hold may be for them (a background
+                # task still running), so nothing is reaped. With the root
+                # alone and idle, closing stdin is the graceful ask to finish,
+                # and it is made once before any signal (ASI-151).
+                channel = self._input_channel
+                if not root_only or channel is None or self._input_release:
+                    return assessment
+                self._input_release = {
+                    "policy": POST_RESULT_STDIN_RELEASE_POLICY,
+                    "root_pid": pid,
+                    "hold_reason": hold_reason,
+                    "attempted_at": str(
+                        block.get("last_checked_at")
+                        or clock.isoformat(clock.utc_now())
+                    ),
+                }
+                release = self._input_release
+            else:
+                release = None
+        if release is not None:
+            released = False
+            with contextlib.suppress(Exception):
+                released = bool(channel.release_input())
+            with self._lock:
+                release["released"] = released
+                if (
+                    assessment.generation != self._activity_generation
+                    or self._suspected is None
+                ):
+                    return HangAssessment(generation=assessment.generation)
+                self._input_released_at = self._monotonic()
+                recovered_block = dict(self._suspected)
+                recovered_block["recovery"] = dict(release)
+                self._suspected = recovered_block
+                return HangAssessment(
+                    suspected=dict(recovered_block),
+                    transition=assessment.transition,
+                    retracted=assessment.retracted,
+                    generation=assessment.generation,
+                    cpu_progress=assessment.cpu_progress,
+                )
+        with self._lock:
+            if (
+                assessment.generation != self._activity_generation
+                or self._suspected is None
+            ):
+                return assessment
+            if (
+                self._input_released_at is not None
+                and not self._root_shutdown_tree
+                and self._monotonic() - self._input_released_at
+                < self._root_shutdown_grace_seconds
+            ):
+                # stdin was just closed; give the CLI the same grace a
+                # SIGTERM gets before falling back to the signal path.
+                return assessment
             if self._root_shutdown_tree:
                 if (
                     self._root_shutdown_started is None
@@ -1345,6 +1432,8 @@ class HangSentinel:
                 self._root_shutdown_started = None
                 self._root_shutdown_tree = ()
                 self._root_shutdown_escalated = False
+                self._input_release = None
+                self._input_released_at = None
                 return HangAssessment(
                     transition="cleared" if retracted is not None else None,
                     retracted=(dict(retracted) if retracted is not None else None),
@@ -1568,6 +1657,9 @@ class LiveTurn:
 
     def note_final_result(self) -> None:
         self._hang_sentinel.note_final_result()
+
+    def note_transport(self, transport: harnesses.HarnessTransport | None) -> None:
+        self._hang_sentinel.note_input_channel(transport)
 
     def note_observed_model(self, model: str) -> None:
         with self._lock:
@@ -1803,6 +1895,9 @@ class LiveTurn:
                 input_wait_active=input_wait_active,
             )
             assessment = self._hang_sentinel.recover_post_result(assessment)
+        stdin_hold_reason = (
+            None if self._stop.is_set() else self._hang_sentinel.input_hold_reason()
+        )
         hang_event: tuple[str, dict[str, Any]] | None = None
         with self._lock:
             if (
@@ -1839,6 +1934,10 @@ class LiveTurn:
             }
             if self._active_turn.get("session_number") is not None:
                 heartbeat["session_number"] = self._active_turn["session_number"]
+            if stdin_hold_reason is not None:
+                # Why a harness that already answered still has its stdin
+                # open -- the one fact that explains an idle post-result root.
+                heartbeat["stdin_hold_reason"] = stdin_hold_reason
             self._active_turn["last_heartbeat_at"] = heartbeat["created_at"]
             self._active_turn["heartbeat_count"] = heartbeat_count
             self._active_turn["elapsed_seconds"] = heartbeat["elapsed_seconds"]
@@ -2201,6 +2300,7 @@ class TurnExecutor:
                 effort=launch.effort,
                 on_spawn=on_spawn,
                 on_final_result=live_turn.note_final_result,
+                on_transport=live_turn.note_transport,
                 on_observed_model=live_turn.note_observed_model,
                 abort=launch.abort,
                 live_delivery=launch.live_delivery,

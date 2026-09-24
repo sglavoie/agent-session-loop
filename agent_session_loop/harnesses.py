@@ -1105,13 +1105,22 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
             self._final_result_seen = True
             if self._session is not None:
                 origin = record.get("origin")
-                self._final_result_seen = self._session.note_result(
-                    background_followup=(
-                        isinstance(origin, dict)
-                        and origin.get("kind") == "task-notification"
-                    ),
+                background_followup = (
+                    isinstance(origin, dict)
+                    and origin.get("kind") == "task-notification"
+                )
+                ended = self._session.note_result(
+                    background_followup=background_followup,
                     is_error=record.get("is_error") is True,
                 )
+                # "Terminal result seen" and "stdin closed" are different
+                # facts. A main-turn result is terminal even when the session
+                # keeps stdin open for a background task or an unanswered
+                # message: without it the hang sentinel never learns a result
+                # arrived and post-result recovery cannot arm (ASI-151). Only a
+                # task-notification follow-up that leaves the conversation
+                # open is not terminal.
+                self._final_result_seen = ended or not background_followup
             result = record.get("result")
             if isinstance(result, str):
                 self._final_result = result
@@ -1302,6 +1311,17 @@ class HarnessTransport:
 
     def shutdown(self) -> None:
         """Release the conversation. Called once, on every path out of a turn."""
+
+    def input_hold_reason(self) -> str | None:
+        """Why stdin is still held open after a terminal result, or ``None``.
+
+        ``None`` -- the base answer -- means there is no held input to release.
+        """
+        return None
+
+    def release_input(self) -> bool:
+        """Close a held stdin; ``True`` when this call closed it."""
+        return False
 
 
 def _request_native_interrupt(transport: HarnessTransport | None) -> None:
@@ -2908,6 +2928,12 @@ class _ClaudeStreamTransport(HarnessTransport):
     def interrupt(self) -> bool:
         return self.session.interrupt()
 
+    def input_hold_reason(self) -> str | None:
+        return self.session.stdin_hold_reason
+
+    def release_input(self) -> bool:
+        return self.session.release_stdin()
+
     def shutdown(self) -> None:
         # No interrupt here, unlike the app-server transport. A claude turn is
         # the process itself rather than a turn inside a server, and by the time
@@ -3982,6 +4008,7 @@ def run_harness(
     on_conversation: ConversationCallback | None = None,
     on_prompt_submitted: SubmissionCallback | None = None,
     resume_conversation_id: str | None = None,
+    on_transport: Callable[[HarnessTransport | None], None] | None = None,
 ) -> HarnessResult:
     """Run one harness turn through the selected adapter.
 
@@ -4020,6 +4047,7 @@ def run_harness(
         on_conversation=on_conversation,
         on_prompt_submitted=on_prompt_submitted,
         resume_conversation_id=resume_conversation_id,
+        on_transport=on_transport,
     )
 
 

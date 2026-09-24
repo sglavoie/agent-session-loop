@@ -6186,6 +6186,94 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
             )
             self.assertEqual(2, len(kills))
 
+    class HeldInput:
+        """A transport whose stdin is still open after a terminal result."""
+
+        def __init__(self, reason: str = "background-tasks") -> None:
+            self.reason: str | None = reason
+            self.releases = 0
+
+        def input_hold_reason(self) -> str | None:
+            return self.reason
+
+        def release_input(self) -> bool:
+            self.releases += 1
+            self.reason = None
+            return True
+
+    def test_held_stdin_on_an_idle_root_is_closed_before_any_signal(self) -> None:
+        # ASI-151: the CLI kept stdin open for a task it never reported
+        # finished, and sat alone and idle behind it. EOF is the graceful ask,
+        # tried once; the verified SIGTERM path is the fallback after grace.
+        sentinel, ticks = self.root_sentinel()
+        held = self.HeldInput()
+        sentinel.note_input_channel(held)  # type: ignore[arg-type]
+        assessment = self.suspected_result(sentinel)
+        kills = []
+        signal_root = process_tree.signal_verified_root_recovery
+
+        def deliver(report, pids, *, force=False):
+            return signal_root(
+                report,
+                pids,
+                force=force,
+                kill=lambda pid, sig: kills.append((pid, sig)),
+            )
+
+        with (
+            mock.patch.object(
+                process_tree,
+                "sample_process_table",
+                return_value={123: self.tree()[0]},
+            ),
+            mock.patch.object(
+                process_tree, "signal_verified_root_recovery", side_effect=deliver
+            ),
+        ):
+            released = sentinel.recover_post_result(assessment)
+            recovery = released.suspected["recovery"]
+            self.assertEqual(
+                turn_execution.POST_RESULT_STDIN_RELEASE_POLICY, recovery["policy"]
+            )
+            self.assertEqual("background-tasks", recovery["hold_reason"])
+            self.assertTrue(recovery["released"])
+            self.assertEqual(1, held.releases)
+            self.assertEqual([], kills)
+
+            ticks[0] = 129
+            sentinel.recover_post_result(
+                sentinel.evaluate(idle_seconds=150, now=self.NOW)
+            )
+            self.assertEqual([], kills)
+
+            ticks[0] = 130
+            term = sentinel.recover_post_result(
+                sentinel.evaluate(idle_seconds=180, now=self.NOW)
+            )
+            self.assertEqual([(123, signal.SIGTERM)], kills)
+            self.assertEqual(
+                turn_execution.POST_RESULT_STDIN_RELEASE_POLICY,
+                term.suspected["recovery"]["previous_attempt"]["policy"],
+            )
+        self.assertEqual(1, held.releases)
+
+    def test_held_stdin_with_live_descendants_reaps_nothing(self) -> None:
+        # The hold may be for a background task still running below the
+        # root, so neither stdin nor any leaf is touched.
+        sentinel = self.make_sentinel()
+        held = self.HeldInput()
+        sentinel.note_input_channel(held)  # type: ignore[arg-type]
+        assessment = self.suspected_result(sentinel)
+
+        with mock.patch.object(
+            process_tree, "prepare_verified_leaf_recovery"
+        ) as prepare:
+            unchanged = sentinel.recover_post_result(assessment)
+
+        self.assertIs(assessment, unchanged)
+        prepare.assert_not_called()
+        self.assertEqual(0, held.releases)
+
     def test_root_escalation_checks_the_original_identity(self) -> None:
         sentinel, ticks = self.root_sentinel()
         assessment = self.suspected_result(sentinel)
