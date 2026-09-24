@@ -3144,13 +3144,27 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
         mutate: bool = True,
         unreadable_plan: bool = False,
         forbid_mailbox_wait: bool = False,
+        git_argvs: tuple[tuple[str, ...], ...] = (),
     ) -> dict[str, Any]:
-        """Drive one review turn whose harness fails the way `kwargs` describe."""
+        """Drive one review turn whose harness fails the way `kwargs` describe.
+
+        ``git_argvs`` run in the repository during the turn, standing in for a
+        ref move made by the session or by a concurrent process.
+        """
+        pending_git = list(git_argvs)
 
         def fake_run_harness(name: str, **kwargs: object) -> harnesses.HarnessResult:
             if mutate:
                 (self.repo_root / "README.md").write_text(
                     "mutated by review\n", encoding="utf-8"
+                )
+            # Only the review turn moves refs, not a later audit harness call.
+            while pending_git:
+                subprocess.run(
+                    ["git", *pending_git.pop(0)],
+                    cwd=self.repo_root,
+                    capture_output=True,
+                    check=True,
                 )
             plan_dir = Path(str(kwargs["plan_dir"]))
             path = plan_dir / self.review_session.path.name
@@ -3316,6 +3330,131 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
         self.assertTrue(payload["paused"])
         self.assertEqual("timeout", payload["pause_reason"])
         self.assertTrue(payload["turns"][0]["review_mutation_guard"]["passed"])
+
+    # ASI-161: a background push (or fetch) moving refs/remotes/* is drift with
+    # an unknown writer, never a content mutation by the review.
+
+    def _head(self) -> str:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    def test_a_remote_tracking_ref_move_alone_passes_with_drift_recorded(
+        self,
+    ) -> None:
+        head = self._head()
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "older"],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "update-ref", "refs/remotes/origin/main", head],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=True,
+        )
+        tip = self._head()
+
+        payload = self._run_locked(
+            mutate=False,
+            git_argvs=(
+                ("update-ref", "refs/remotes/origin/main", tip),
+                ("update-ref", "refs/remotes/origin/feature", tip),
+            ),
+        )
+
+        self.assertNotEqual("review-mutated-worktree", payload.get("pause_reason"))
+        guard = payload["turns"][0]["review_mutation_guard"]
+        self.assertTrue(guard["passed"])
+        self.assertEqual(
+            [
+                {
+                    "ref": "refs/remotes/origin/feature",
+                    "change": "added",
+                    "before": None,
+                    "after": tip,
+                    "writer": "unknown",
+                    "new_tip_is_local": True,
+                },
+                {
+                    "ref": "refs/remotes/origin/main",
+                    "change": "changed",
+                    "before": head,
+                    "after": tip,
+                    "writer": "unknown",
+                    "new_tip_is_local": True,
+                },
+            ],
+            guard["remote_ref_drift"],
+        )
+
+    def test_a_remote_ref_moved_to_a_non_local_commit_is_still_only_drift(
+        self,
+    ) -> None:
+        # A fetch lands commits no local ref names; it changes no content.
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        fetched = subprocess.run(
+            ["git", "commit-tree", tree, "-p", "HEAD", "-m", "upstream"],
+            cwd=self.repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+        payload = self._run_locked(
+            mutate=False,
+            git_argvs=(("update-ref", "refs/remotes/origin/main", fetched),),
+        )
+
+        guard = payload["turns"][0]["review_mutation_guard"]
+        self.assertTrue(guard["passed"])
+        self.assertFalse(guard["remote_ref_drift"][0]["new_tip_is_local"])
+
+    def test_a_local_branch_or_tag_move_still_trips_the_guard(self) -> None:
+        for argv in (("branch", "review-side-branch"), ("tag", "v-review")):
+            with self.subTest(argv=argv):
+                self.setUp()
+                payload = self._run_locked(mutate=False, git_argvs=(argv,))
+
+                self.assertEqual("review-mutated-worktree", payload["pause_reason"])
+                guard = payload["turns"][0]["review_mutation_guard"]
+                self.assertFalse(guard["passed"])
+                self.assertEqual(
+                    [f"refs/{'heads' if argv[0] == 'branch' else 'tags'}/{argv[1]}"],
+                    [entry["ref"] for entry in guard["changed_paths"]["refs_added"]],
+                )
+                self.assertNotIn("remote_ref_drift", guard)
+
+    def test_remote_drift_beside_a_tracked_change_still_trips_the_guard(
+        self,
+    ) -> None:
+        payload = self._run_locked(
+            git_argvs=(("update-ref", "refs/remotes/origin/main", "HEAD"),),
+        )
+
+        turn = self._assert_guard_pause(payload)
+        guard = turn["review_mutation_guard"]
+        self.assertEqual(
+            ["refs/remotes/origin/main"],
+            [entry["ref"] for entry in guard["remote_ref_drift"]],
+        )
+        # The remote-ref move is drift evidence, never named as a mutation.
+        for key in ("refs_added", "refs_removed", "refs_changed"):
+            self.assertEqual([], guard["changed_paths"][key])
+        self.assertIn("README.md", payload["pause_message"])
+        self.assertNotIn("refs/remotes", payload["pause_message"])
 
 
 class ReviewMutationGuardFingerprintTests(unittest.TestCase):

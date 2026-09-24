@@ -14,6 +14,7 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
+    events,
     external_write_evidence,
     handoff_guards,
     plans,
@@ -958,6 +959,110 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         self.assertEqual(["tundra_OAK", "deregistered-repository"], suppressed)
         self.assertEqual(["surprise-repository"], repaired["added"])
         self.assertEqual(["tundra_svc"], repaired["removed"])
+
+    # ASI-150: a background sync pushing a local branch moves only
+    # refs/remotes/*; that is drift with an unknown writer, not a write.
+
+    def _git(self, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=self.workspace_root / "tundra_OAK",
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+
+    def _read_only_guard(self, mutate) -> dict[str, Any]:
+        aliases = ("tundra_OAK", "tundra_svc")
+        before = repository_evidence.capture_registered_snapshot(
+            self.workspace_root, self.plan_dir, aliases
+        )
+        mutate()
+        after = repository_evidence.capture_registered_snapshot(
+            self.workspace_root, self.plan_dir, aliases
+        )
+        return workspace_evidence._workspace_write_guard_evidence(
+            workspace=self.workspace,
+            scope=plans.SessionScope(reads=("SVC", "OAK"), writes=("SVC",)),
+            comparison=repository_evidence.compare_workspace_snapshots(
+                before, after
+            ),
+            exclude=(),
+            include_ignored=False,
+        )
+
+    def test_remote_ref_drift_in_a_read_only_repository_is_not_a_violation(
+        self,
+    ) -> None:
+        head = self._git("rev-parse", "HEAD")
+        self._git("update-ref", "refs/remotes/sync/main", head)
+        self._git("commit", "--allow-empty", "-m", "pushed later")
+        tip = self._git("rev-parse", "HEAD")
+
+        evidence = self._read_only_guard(
+            lambda: self._git("update-ref", "refs/remotes/sync/main", tip)
+        )
+
+        self.assertTrue(evidence["passed"])
+        self.assertEqual([], evidence["violations"])
+        self.assertEqual([], evidence["authorized_aliases"])
+        self.assertEqual(
+            [
+                {
+                    "ref": "refs/remotes/sync/main",
+                    "change": "changed",
+                    "before": head,
+                    "after": tip,
+                    "writer": "unknown",
+                    "new_tip_is_local": True,
+                }
+            ],
+            evidence["remote_ref_drift"]["tundra_OAK"],
+        )
+        repair = workspace_evidence._workspace_repair_required(
+            evidence, events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION
+        )
+        self.assertFalse(any(repair.values()))
+
+    def test_local_ref_or_content_beside_remote_drift_keeps_full_repair(
+        self,
+    ) -> None:
+        def mixed() -> None:
+            self._git("update-ref", "refs/remotes/sync/main", "HEAD")
+            self._git("branch", "side")
+
+        for mutate in (
+            mixed,
+            lambda: (
+                self._git("update-ref", "refs/remotes/sync/main", "HEAD"),
+                (self.workspace_root / "tundra_OAK" / "README.md").write_text(
+                    "changed\n", encoding="utf-8"
+                ),
+            ),
+        ):
+            with self.subTest(mutate=mutate):
+                self.setUp()
+                evidence = self._read_only_guard(mutate)
+
+                self.assertFalse(evidence["passed"])
+                self.assertEqual(
+                    ["read-only-repository"],
+                    [violation["kind"] for violation in evidence["violations"]],
+                )
+                self.assertNotIn(
+                    "refs/remotes/sync/main",
+                    workspace_evidence._workspace_guard_violation_summary(evidence),
+                )
+                self.assertEqual(
+                    {
+                        "durable_scope": True,
+                        "fresh_expansion": True,
+                        "fresh_preflight": True,
+                    },
+                    workspace_evidence._workspace_repair_required(
+                        evidence, events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION
+                    ),
+                )
 
 
 class LegacyUnobservedRepositoryTests(unittest.TestCase):

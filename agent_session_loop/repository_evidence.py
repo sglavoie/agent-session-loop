@@ -34,8 +34,12 @@ __all__ = [
     "discover_git_worktree_inventory",
     "discover_git_worktrees",
     "format_repository_changes",
+    "is_remote_tracking_ref",
+    "remote_ref_drift",
     "repository_evidence_unavailable",
     "repository_state",
+    "split_remote_ref_changes",
+    "without_remote_tracking_refs",
 ]
 
 
@@ -1237,6 +1241,120 @@ def compare_repository_fingerprints(
     return _review_guard_changed_paths(before, after)
 
 
+#: Ref namespace holding a local cache of another repository's branches. Only
+#: ``git fetch`` and ``git push`` write it, and moving it changes no worktree
+#: file, index entry, local branch, tag, or HEAD in this repository.
+REMOTE_TRACKING_REF_PREFIX = "refs/remotes/"
+
+_REF_CHANGE_KEYS = ("refs_added", "refs_removed", "refs_changed")
+
+
+def is_remote_tracking_ref(name: object) -> bool:
+    """Whether ``name`` is a remote-tracking ref (``refs/remotes/*``)."""
+    return str(name or "").startswith(REMOTE_TRACKING_REF_PREFIX)
+
+
+def without_remote_tracking_refs(fingerprint: Mapping[str, Any]) -> dict[str, Any]:
+    """Return ``fingerprint`` with its remote-tracking ref tips dropped.
+
+    Every other field is kept verbatim, so two fingerprints that compare equal
+    after this projection differ at most in ``refs/remotes/*`` tips -- the
+    whole-fingerprint comparison the guards rely on stays exhaustive for every
+    other evidence category, including ones added later.
+    """
+    projected = dict(fingerprint)
+    refs = fingerprint.get("refs")
+    if isinstance(refs, (list, tuple)):
+        projected["refs"] = [
+            entry
+            for entry in refs
+            if not (
+                isinstance(entry, (list, tuple))
+                and entry
+                and is_remote_tracking_ref(entry[0])
+            )
+        ]
+    return projected
+
+
+def remote_ref_drift(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Describe every ``refs/remotes/*`` move between two fingerprints.
+
+    A remote-tracking ref moves whenever anything fetches or pushes -- a
+    background sync job, another checkout sharing the ref store, or the session
+    publishing a commit it made -- so the writer is recorded as unknown. The
+    move is drift evidence, never a content mutation: the guards judge the
+    worktree, index, local refs, and HEAD, none of which a remote-ref move can
+    change. ``new_tip_is_local`` records whether the new tip equals a local ref
+    tip or HEAD in either snapshot (a push of an existing local commit), so an
+    auditor can tell a push from a fetch without re-probing.
+    """
+
+    def entries(fingerprint: Mapping[str, Any]) -> list[tuple[str, str]]:
+        return [
+            (str(entry[0]), str(entry[1]))
+            for entry in fingerprint.get("refs") or ()
+            if isinstance(entry, (list, tuple)) and len(entry) == 2
+        ]
+
+    local_tips: set[str] = set()
+    for fingerprint in (before, after):
+        head = fingerprint.get("head")
+        if isinstance(head, str) and head:
+            local_tips.add(head)
+        local_tips.update(
+            sha for name, sha in entries(fingerprint) if not is_remote_tracking_ref(name)
+        )
+    old = {n: sha for n, sha in entries(before) if is_remote_tracking_ref(n)}
+    new = {n: sha for n, sha in entries(after) if is_remote_tracking_ref(n)}
+    drift: list[dict[str, Any]] = []
+    for name in sorted(set(old) | set(new)):
+        tip_before, tip_after = old.get(name), new.get(name)
+        if tip_before == tip_after:
+            continue
+        if tip_before is None:
+            change = "added"
+        elif tip_after is None:
+            change = "removed"
+        else:
+            change = "changed"
+        drift.append(
+            {
+                "ref": name,
+                "change": change,
+                "before": tip_before,
+                "after": tip_after,
+                "writer": "unknown",
+                "new_tip_is_local": tip_after is not None and tip_after in local_tips,
+            }
+        )
+    return drift
+
+
+def split_remote_ref_changes(changes: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop remote-tracking ref moves from a fingerprint comparison.
+
+    Local branches and tags stay in ``refs_added``/``refs_removed``/
+    ``refs_changed``; :func:`remote_ref_drift` carries the dropped moves.
+    """
+    filtered = dict(changes)
+    for key in _REF_CHANGE_KEYS:
+        moves = changes.get(key)
+        if not isinstance(moves, (list, tuple)):
+            continue
+        filtered[key] = [
+            entry
+            for entry in moves
+            if not (
+                isinstance(entry, Mapping) and is_remote_tracking_ref(entry.get("ref"))
+            )
+        ]
+    return filtered
+
+
 def unchanged_head_transition(head: str) -> dict[str, Any]:
     """The transition verdict for a tip that did not move.
 
@@ -1892,10 +2010,20 @@ def compare_workspace_snapshots(
             changes = compare_repository_fingerprints(
                 before_fingerprint, after_fingerprint
             )
-            changed[repository] = {
+            record = {
                 **changes,
                 "qualified_paths": _qualified_paths(repository, changes),
             }
+            drift = remote_ref_drift(before_fingerprint, after_fingerprint)
+            if drift:
+                # Additive: the raw ref lists stay complete for existing
+                # readers, and the write guard reads these two keys so a
+                # remote-tracking ref move alone never convicts a turn.
+                record["remote_ref_drift"] = drift
+                record["remote_ref_drift_only"] = without_remote_tracking_refs(
+                    before_fingerprint
+                ) == without_remote_tracking_refs(after_fingerprint)
+            changed[repository] = record
 
     return {
         "changed": changed,

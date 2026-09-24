@@ -304,6 +304,7 @@ def _workspace_write_guard_evidence(
     changed_payload: dict[str, Any] = {}
     violations: list[dict[str, Any]] = []
     authorized: list[str] = []
+    remote_ref_drift: dict[str, list[Any]] = {}
 
     raw_changed = comparison.get("changed")
     if isinstance(raw_changed, Mapping):
@@ -330,6 +331,15 @@ def _workspace_write_guard_evidence(
                 **changes,
             }
             changed_payload[repository] = record
+            if changes.get("remote_ref_drift_only") is True:
+                # Only refs/remotes/* moved (ASI-150): a background sync or
+                # fetch, or the session pushing a commit it already made. That
+                # is recorded drift with an unknown writer, not a write, so it
+                # needs no write authority and no durable-scope repair.
+                remote_ref_drift[repository] = list(
+                    changes.get("remote_ref_drift") or ()
+                )
+                continue
             if alias is not None and alias in scope.writes:
                 authorized.append(alias)
                 continue
@@ -404,6 +414,7 @@ def _workspace_write_guard_evidence(
         "violations": violations,
         "excluded": list(exclude),
         "include_ignored": include_ignored,
+        **({"remote_ref_drift": remote_ref_drift} if remote_ref_drift else {}),
     }
 
 
@@ -502,6 +513,27 @@ def _workspace_guard_violation_summary(evidence: Mapping[str, Any]) -> str:
     if len(named) > 3:
         suffix += f" (+{len(named) - 3} more)"
     return suffix
+
+
+def _workspace_repair_required(
+    evidence: Mapping[str, Any], reason: str
+) -> dict[str, bool]:
+    """Derive the durable repair a failed workspace guard asks for.
+
+    A content, local-ref, or topology violation is what a durable scope edit,
+    fresh expansion, and fresh preflight answer. Remote-tracking ref drift is
+    never a violation (ASI-150), so a verdict carrying no violation asks for
+    none of them -- except an unavailable verdict, which keeps the full
+    requirement because unobserved evidence cannot prove the scope sound.
+    """
+    required = bool(evidence.get("violations")) or (
+        reason == events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE
+    )
+    return {
+        "durable_scope": required,
+        "fresh_expansion": required,
+        "fresh_preflight": required,
+    }
 
 
 def _session_expansion_evidence(plan_dir: Path, session_id: str) -> dict[str, Any]:

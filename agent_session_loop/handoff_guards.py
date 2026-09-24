@@ -438,6 +438,15 @@ def _enforce_review_mutation_guard(
     )
     excluded = list(exclude)
     unavailable = review_guard._review_guard_unavailable_detail(fingerprint_after)
+    # A remote-tracking ref move (a background push or fetch, or the session
+    # publishing a commit it already made) changes no content this guard
+    # protects, so it is recorded as drift and kept out of the comparison
+    # (ASI-161).
+    drift = (
+        repository_evidence.remote_ref_drift(fingerprint_before, fingerprint_after)
+        if unavailable is None
+        else []
+    )
     if unavailable is not None:
         reason = events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE
         failure_note = f"review mutation guard unavailable: {unavailable['reason']}"
@@ -451,10 +460,14 @@ def _enforce_review_mutation_guard(
             "excluded": excluded,
             "include_ignored": include_ignored,
         }
-    elif fingerprint_after != fingerprint_before:
+    elif repository_evidence.without_remote_tracking_refs(
+        fingerprint_after
+    ) != repository_evidence.without_remote_tracking_refs(fingerprint_before):
         reason = "review-mutated-worktree"
-        changed_paths = review_guard._review_guard_changed_paths(
-            fingerprint_before, fingerprint_after
+        changed_paths = repository_evidence.split_remote_ref_changes(
+            review_guard._review_guard_changed_paths(
+                fingerprint_before, fingerprint_after
+            )
         )
         failure_note = (
             "review mutation guard failed: repository content changed "
@@ -472,12 +485,15 @@ def _enforce_review_mutation_guard(
             "excluded": excluded,
             "include_ignored": include_ignored,
         }
+        if drift:
+            evidence["remote_ref_drift"] = drift
     else:
         with persistence.lock:
             turn_payload["review_mutation_guard"] = {
                 "passed": True,
                 "excluded": excluded,
                 "include_ignored": include_ignored,
+                **({"remote_ref_drift": drift} if drift else {}),
             }
             repo_state = review_guard._review_repo_state(fingerprint_after)
             if repo_state is not None:

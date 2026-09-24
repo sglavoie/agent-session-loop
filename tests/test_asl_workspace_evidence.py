@@ -44,6 +44,7 @@ MOVED_SYMBOLS = (
     "_workspace_write_guard_evidence",
     "_legacy_implementation_write_guard_evidence",
     "_workspace_guard_violation_summary",
+    "_workspace_repair_required",
     "_session_expansion_evidence",
     "_latest_workspace_scope_repair_requirement",
     "_workspace_scope_repair_is_fresh",

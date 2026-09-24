@@ -316,9 +316,13 @@ def _enforce_workspace_write_guard(
             f"{summary}; repair the durable repository scope and rerun "
             "expansion/preflight before continuing"
         )
+        # The guard compares snapshots; it cannot tell the session's writes
+        # from a concurrent process's, so the message must not claim either
+        # (ASI-140).
         message = (
-            f"{session_label} changed registered repositories outside its "
-            f"write aliases{summary}; changes were retained"
+            f"registered repositories changed during {session_label} "
+            f"(writer unknown) outside its write aliases{summary}; "
+            "changes were retained"
         )
 
     revert_target = after if after is not None else before
@@ -335,11 +339,9 @@ def _enforce_workspace_write_guard(
         "reason": reason,
         "phase": "after",
         "reverted_to_pending": reverted is not None,
-        "repair_required": {
-            "durable_scope": True,
-            "fresh_expansion": True,
-            "fresh_preflight": True,
-        },
+        "repair_required": workspace_evidence._workspace_repair_required(
+            evidence, reason
+        ),
     }
     if reason == events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION:
         guard_record["snapshot_before"] = snapshot_before
