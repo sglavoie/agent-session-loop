@@ -440,8 +440,70 @@ def _optional_str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _registered_repository_root(plan_dir: str | None, alias: str) -> str | None:
+    """The root a registered alias resolves to, when the plan registers it."""
+    if not plan_dir:
+        return None
+    try:
+        registry = plans.read_repository_registry(plan_dir)
+        metadata = plans.load_plan_metadata(plan_dir)
+    except plans.PlanError, OSError, ValueError:
+        return None
+    if registry is None or not isinstance(metadata, plans.WorkspacePlanMetadata):
+        return None
+    for repository in registry.repositories:
+        if repository.alias == alias:
+            return str(
+                plans.canonicalize_path(Path(metadata.workspace_root) / repository.path)
+            )
+    return None
+
+
+def _commit_failed_remediation_message(
+    details: Mapping[str, Any], *, plan_dir: str | None, cwd: str | None
+) -> str | None:
+    """Name the group, session and repository a ``commit-failed`` pause owes.
+
+    The static hint says "re-run the failing git command in <repo-root>", and
+    substituting the run's cwd there points a registered workspace at the
+    workspace root rather than the repository whose commit failed. It also
+    promised the run "resumes from the same session", when what a restart
+    actually does first is retry the owed group (ASI-160). Returns ``None``
+    when the pause carries no group, so the generic hint stands.
+    """
+    group_id = _optional_str(details.get("group_id"))
+    session_id = details.get("session_id")
+    if group_id is None:
+        return None
+    alias = _optional_str(details.get("failed_alias"))
+    root = (
+        _registered_repository_root(plan_dir, alias) if alias is not None else None
+    ) or cwd
+    where = f"`{root}`" if root else "the failing repository"
+    subject = f"repository `{alias}`" if alias else "its repository"
+    session = f" for session {session_id}" if session_id is not None else ""
+    parts = [
+        f"Commit group {group_id}{session} did not land in {subject}. ",
+        f"Re-run the failing `git` command in {where} to see the error in full",
+    ]
+    stderr_path = _optional_str(details.get("stderr_path"))
+    if stderr_path:
+        parts.append(f" (the failed attempt's stderr is at `{stderr_path}`)")
+    parts.append(
+        ": a hook that rejected the commit, an unresolved merge/rebase state, "
+        "or an index lock left by another process. Clear that condition and "
+        f"re-run; the next run first retries outstanding commit group "
+        f"{group_id}{session} before it selects any other session."
+    )
+    return "".join(parts)
+
+
 def _runtime_reason_remediation(
-    reason: str, *, plan_dir: str | None, cwd: str | None
+    reason: str,
+    *,
+    plan_dir: str | None,
+    cwd: str | None,
+    details: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """The repair hint a stable pause reason resolves to, if it has one.
 
@@ -449,6 +511,8 @@ def _runtime_reason_remediation(
     reads one remediation vocabulary whichever source produced it. The plan
     directory and repository root are substituted when the payload knows them,
     leaving the placeholders intact rather than quoting them when it does not.
+    A ``commit-failed`` pause that names its owed group is worded from those
+    details instead of the generic hint.
     """
 
     hint = preflight.runtime_repair_hint(reason)
@@ -459,6 +523,13 @@ def _runtime_reason_remediation(
         message = preflight.repair_hint_payload(hint, plan_dir=plan_dir, cwd=cwd)[
             "message"
         ]
+    if hint.category == "commit-failed":
+        message = (
+            _commit_failed_remediation_message(
+                details or {}, plan_dir=plan_dir, cwd=cwd
+            )
+            or message
+        )
     return {
         "check_id": hint.check_id,
         "category": hint.category,
@@ -515,7 +586,9 @@ def _pause_remediation(
                 ),
             }
         ]
-    fallback = _runtime_reason_remediation(reason, plan_dir=plan_dir, cwd=cwd)
+    fallback = _runtime_reason_remediation(
+        reason, plan_dir=plan_dir, cwd=cwd, details=details
+    )
     return [] if fallback is None else [fallback]
 
 

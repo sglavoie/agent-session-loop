@@ -1106,7 +1106,8 @@ RUNTIME_REPAIR_HINTS: dict[str, RepairHint] = {
             "command in <repo-root> to see the error in full: a hook that "
             "rejected the commit, an unresolved merge/rebase state, or an "
             "index lock left by another process. Clear that condition and "
-            "re-run; the run resumes from the same session."
+            "re-run; the next run first retries the outstanding commit group "
+            "before it selects another session."
         ),
         question_template=(
             "Runner paused: the commit failed ({message}). "

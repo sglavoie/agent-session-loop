@@ -383,6 +383,12 @@ def _soft_fail_commit(
     if not retrying:
         ctx.owed_commit_group = None
         if group is not None:
+            failed_commit = record.get("commit")
+            stderr_path = (
+                failed_commit.get("stderr_path")
+                if isinstance(failed_commit, Mapping)
+                else None
+            )
             ctx.unsettled_commit_group = {
                 "scope": record["scope"],
                 "session_id": record["session_id"],
@@ -391,6 +397,10 @@ def _soft_fail_commit(
                 "retries_spent": spent,
                 "message": record["message"],
                 "error": record["error"],
+                # Where the last attempt's `asl commit` stderr landed, so the
+                # remediation can point at the error instead of asking for a
+                # re-run to reproduce it (ASI-160).
+                "stderr_path": stderr_path if isinstance(stderr_path, str) else None,
             }
         return
     ctx.owed_commit_group_attempts[str(group_id)] = spent + 1

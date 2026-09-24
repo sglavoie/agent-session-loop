@@ -39,12 +39,19 @@ from typing import Any
 from agent_session_loop import (
     events,
     plans,
+    preflight,
     run_control,
     run_persistence,
     run_termination,
     runner,
 )
-from tests.support import assert_no_runner_import, read_jsonl, write_plan
+from tests.support import (
+    assert_no_runner_import,
+    init_multi_repo_workspace,
+    read_jsonl,
+    write_multi_repo_plan,
+    write_plan,
+)
 
 #: The symbols this module took from the runner. The program's no-alias rule
 #: says the runner keeps none of them behind, so a re-export added later to
@@ -340,6 +347,73 @@ class PauseWriteTests(_TerminationCase):
 
     def test_a_reason_that_resolves_to_nothing_records_no_guesswork(self) -> None:
         self.assertEqual([], run_termination._pause_remediation({}, reason="inspect"))
+
+    def _commit_failed_message(self, details: dict[str, Any], **kwargs: Any) -> str:
+        [entry] = run_termination._pause_remediation(
+            details, reason="commit-failed", **kwargs
+        )
+        self.assertEqual("runtime.commit-failed", entry["check_id"])
+        message = entry["message"]
+        self.assertNotIn("resumes from the same session", message)
+        return str(message)
+
+    def test_commit_failed_names_the_owed_group_and_its_repository_root(
+        self,
+    ) -> None:
+        # ASI-160 (run 20260923T220442521308Z-18975): the hint pointed at the
+        # run cwd, ignored the failed alias, and promised the run resumes from
+        # the same session when a restart first retries the owed group.
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        workspace = tmp / "workspace"
+        repositories = init_multi_repo_workspace(workspace)
+        plan_dir = tmp / "plan"
+        write_multi_repo_plan(plan_dir, ("complete", "pending"))
+        registry = plans.read_repository_registry(plan_dir)
+        assert registry is not None
+        plans.save_workspace_plan_metadata(plan_dir, workspace, registry.digest)
+
+        message = self._commit_failed_message(
+            {
+                "scope": "session",
+                "session_id": "5",
+                "group_id": "group-7",
+                "failed_alias": "OAK",
+                "stderr_path": "/state/runs/r/commits/3/stderr.log",
+            },
+            plan_dir=str(plan_dir),
+            cwd=str(workspace),
+        )
+
+        oak_root = str(plans.canonicalize_path(repositories["OAK"]))
+        self.assertIn(f"`{oak_root}`", message)
+        self.assertIn("repository `OAK`", message)
+        self.assertIn("/state/runs/r/commits/3/stderr.log", message)
+        self.assertIn(
+            "the next run first retries outstanding commit group group-7 for session 5",
+            message,
+        )
+
+    def test_commit_failed_falls_back_to_the_run_cwd_for_an_unregistered_alias(
+        self,
+    ) -> None:
+        message = self._commit_failed_message(
+            {"session_id": "5", "group_id": "group-7", "failed_alias": "."},
+            cwd="/work/repo",
+        )
+        self.assertIn("`/work/repo`", message)
+        self.assertNotIn("stderr is at", message)
+        self.assertIn("outstanding commit group group-7 for session 5", message)
+
+    def test_commit_failed_without_group_details_keeps_the_generic_hint(
+        self,
+    ) -> None:
+        message = self._commit_failed_message(
+            {"error": "durable commit-group evidence could not be reconstructed"}
+        )
+        self.assertEqual(
+            preflight.RUNTIME_REPAIR_HINTS["commit-failed"].message, message
+        )
+        self.assertIn("retries the outstanding commit group", message)
 
     def test_a_closed_question_names_the_explicit_reply_resume_command(self) -> None:
         self.payload["plan_dir"] = "/tmp/plan with 'quotes'"

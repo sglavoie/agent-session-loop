@@ -579,6 +579,23 @@ class CommitGroupBarrierTests(unittest.TestCase):
         failures = self.ctx.payload[commit_settlement.COMMIT_FAILURES_KEY]
         self.assertEqual("group-1", failures[-1]["group_id"])
 
+    def test_the_armed_barrier_carries_the_failed_attempt_stderr_path(self) -> None:
+        # ASI-160: the commit-failed remediation points at this file rather
+        # than asking the operator to reproduce the error.
+        for _ in range(commit_settlement.MAX_COMMIT_GROUP_RETRIES + 1):
+            run_loop._soft_fail_commit(
+                self.ctx,  # type: ignore[arg-type]
+                scope="session",
+                session_id="5",
+                group=FAILING_GROUP,
+                commit={"stderr_path": "/state/commits/3/stderr.log"},
+                error="git refused the commit",
+                message="the session commit could not be made",
+            )
+        armed = self.ctx.unsettled_commit_group
+        assert armed is not None
+        self.assertEqual("/state/commits/3/stderr.log", armed["stderr_path"])
+
     def test_a_failure_with_no_group_never_arms_the_barrier(self) -> None:
         # An attempt that failed before any group existed has nothing durable
         # a later run could recover, so pausing on it would refuse the first
