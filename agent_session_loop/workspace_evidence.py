@@ -218,6 +218,29 @@ def _workspace_snapshot_unavailable(
     return unavailable
 
 
+def _unavailable_path_and_reason(raw: Any) -> tuple[Any, Any]:
+    """Read one unavailable row's failing node and reason.
+
+    The top-level fields win: the external-write producer puts ``reason`` at
+    the top and nests only a digest (no reason) under ``after``, so reading
+    the nested snapshot first misfiles an external path as a repository
+    capture failure (ASI-153). Repository rows that nest their detail under
+    ``after``/``before`` still resolve through the fallback.
+    """
+    detail = raw if isinstance(raw, Mapping) else {}
+    node = detail.get("path")
+    reason = detail.get("reason")
+    for phase in ("after", "before"):
+        phase_detail = detail.get(phase)
+        if isinstance(phase_detail, Mapping):
+            if node is None:
+                node = phase_detail.get("path")
+            if reason is None:
+                reason = phase_detail.get("reason")
+            break
+    return node, reason
+
+
 def _workspace_unavailable_summary(
     unavailable: Mapping[str, Any],
     *,
@@ -230,16 +253,8 @@ def _workspace_unavailable_summary(
     }
     named: list[str] = []
     for repository in sorted(unavailable):
-        raw_detail = unavailable[repository]
-        detail = raw_detail if isinstance(raw_detail, Mapping) else {}
-        for phase in ("after", "before"):
-            phase_detail = detail.get(phase)
-            if isinstance(phase_detail, Mapping):
-                detail = phase_detail
-                break
+        node, reason = _unavailable_path_and_reason(unavailable[repository])
         label = aliases.get(repository, repository)
-        node = detail.get("path")
-        reason = detail.get("reason")
         subject = f"{label}:{node}" if node else label
         named.append(f"{subject} ({reason})" if reason else subject)
     if not named:
@@ -259,15 +274,8 @@ def _workspace_unavailable_message(
     external = False
     repository = False
     for raw in unavailable.values():
-        detail = raw if isinstance(raw, Mapping) else {}
-        for phase in ("after", "before"):
-            if isinstance(detail.get(phase), Mapping):
-                detail = detail[phase]
-                break
-        if (
-            detail.get("reason")
-            == external_write_evidence.EXTERNAL_WRITE_UNCLASSIFIED_REASON
-        ):
+        _node, reason = _unavailable_path_and_reason(raw)
+        if reason == external_write_evidence.EXTERNAL_WRITE_UNCLASSIFIED_REASON:
             external = True
         else:
             repository = True

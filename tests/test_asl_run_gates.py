@@ -3431,12 +3431,51 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
         )
 
     def test_external_authority_pause_and_action_agree_with_the_guard(self) -> None:
-        unavailable = {
-            "pi-gradle.py": {
-                "reason": "external-write-unclassified",
-                "digest": "a" * 64,
+        # The producer's real shape: ``reason`` at the top level, and an
+        # ``after`` digest that carries no reason of its own (ASI-153).
+        self._assert_external_authority_pause(
+            {
+                "/tmp/pi-gradle.py": {
+                    "reason": "external-write-unclassified",
+                    "surface": "backtick-path",
+                    "after": {
+                        "present": True,
+                        "kind": "file",
+                        "mtime_ns": 1,
+                        "size": 12,
+                        "sha256": "a" * 64,
+                    },
+                }
             }
-        }
+        )
+
+    def test_recorded_private_var_tmp_row_is_not_a_repository_failure(
+        self,
+    ) -> None:
+        # Verbatim row from run 20260919T111001880618Z-14051, whose pause
+        # blamed "repository evidence could not be captured safely" (ASI-153).
+        self._assert_external_authority_pause(
+            {
+                "/private/var/tmp": {
+                    "after": {
+                        "entry_count": 0,
+                        "kind": "directory",
+                        "mtime_ns": 1789845003102184572,
+                        "present": True,
+                        "sha256": (
+                            "e3b0c44298fc1c149afbf4c8996fb924"
+                            "27ae41e4649b934ca495991b7852b855"
+                        ),
+                        "size": 64,
+                        "truncated": False,
+                    },
+                    "reason": "external-write-unclassified",
+                    "surface": "absolute-path",
+                }
+            }
+        )
+
+    def _assert_external_authority_pause(self, unavailable: dict[str, Any]) -> None:
         with (
             mock.patch.object(
                 harnesses, "run_harness", side_effect=self._completed_harness_result
@@ -3463,7 +3502,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
             (self.plan_dir / "session-1.md").read_text(encoding="utf-8"),
         ):
             self.assertIn("external paths have unresolved write authority", message)
-            self.assertNotIn("repository could not be captured", message)
+            self.assertNotIn("repository evidence could not be captured", message)
         self.assertEqual(
             "pending", plans.inspect_plan(self.plan_dir).sessions[0].status
         )

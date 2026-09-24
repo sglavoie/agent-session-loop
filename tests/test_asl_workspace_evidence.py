@@ -39,6 +39,7 @@ MOVED_SYMBOLS = (
     "_annotate_history_transitions",
     "_workspace_review_bases",
     "_workspace_snapshot_unavailable",
+    "_unavailable_path_and_reason",
     "_workspace_unavailable_summary",
     "_workspace_unavailable_message",
     "_workspace_write_guard_evidence",
