@@ -2140,7 +2140,17 @@ def _reconcile_observed_commits(
     for entry in observed:
         alias = entry.get("repository")
         transition = _mapping(entry.get("transition"))
-        head_after = entry.get("head_after") or transition.get("after")
+        # A transition is one measured move, so its endpoints and its count
+        # travel together. The entry's own heads are the session's baseline,
+        # which a continuation merge can carry back past this turn's move;
+        # pairing that baseline with the transition's count described a range
+        # the count was never measured over (ASI-158).
+        if transition:
+            head_before = transition.get("before")
+            head_after = transition.get("after")
+        else:
+            head_before = entry.get("head_before")
+            head_after = entry.get("head_after")
         if (
             isinstance(alias, str)
             and isinstance(head_after, str)
@@ -2157,7 +2167,7 @@ def _reconcile_observed_commits(
             "repository_key": entry.get("repository_key") or alias,
             "repository_alias": alias,
             "repo": alias,
-            "head_before": entry.get("head_before") or transition.get("before"),
+            "head_before": head_before,
             "head_after": head_after,
             "commit_sha": head_after if commits_added else None,
             "relation": transition.get("relation"),
@@ -3764,8 +3774,10 @@ def _guard_head_moves(guard: Mapping[str, Any]) -> set[tuple[str | None, Any]]:
     for alias, change in _mapping(guard.get("changed")).items():
         change = _mapping(change)
         transition = _mapping(change.get("head_transition"))
-        head_after = change.get("head_after") or transition.get("after")
-        before = change.get("head_before") or transition.get("before")
+        # Endpoints come from one source, as in _reconcile_observed_commits.
+        source = transition if transition else change
+        head_after = source.get("after" if transition else "head_after")
+        before = source.get("before" if transition else "head_before")
         if isinstance(head_after, str) and head_after and head_after != before:
             moves.add((str(alias).split(_WORKTREE_KEY_SEPARATOR, 1)[0], head_after))
     return moves

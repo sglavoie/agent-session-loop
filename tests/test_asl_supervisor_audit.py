@@ -3327,6 +3327,52 @@ class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual("run/turn-0001-01", attempt["reference"])
             self.assertEqual(["app"], commits["commit_groups"][0]["ordered_aliases"])
 
+    def test_a_projected_commit_takes_its_range_from_one_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            # A continuation merge leaves the entry's own heads on the session
+            # baseline, older than this turn's move, while the transition and
+            # its count describe the turn alone. Mixing the two claimed the
+            # count over a range it was never measured on (ASI-158).
+            baseline = "c" * 40
+            history = self._worker_committed(
+                tmp,
+                head_changed=True,
+                head_before=baseline,
+                head_after=self.HEAD_AFTER,
+                head_transition={
+                    "before": self.HEAD_BEFORE,
+                    "after": self.HEAD_AFTER,
+                    "relation": "fast-forward",
+                    "commits_added": 1,
+                    "commits_removed": 0,
+                    "history_rewrite": False,
+                },
+            )
+
+            commits = self._bundle(history).payload["commits"]
+
+            projected = commits["commits"][0]
+            self.assertEqual(self.HEAD_BEFORE, projected["head_before"])
+            self.assertEqual(self.HEAD_AFTER, projected["head_after"])
+            self.assertEqual(1, projected["commits_added"])
+
+    def test_a_projected_commit_without_a_transition_keeps_the_entry_heads(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._worker_committed(
+                tmp,
+                head_changed=True,
+                head_before=self.HEAD_BEFORE,
+                head_after=self.HEAD_AFTER,
+            )
+
+            projected = self._bundle(history).payload["commits"]["commits"][0]
+
+            self.assertEqual(self.HEAD_BEFORE, projected["head_before"])
+            self.assertEqual(self.HEAD_AFTER, projected["head_after"])
+            self.assertIsNone(projected["commits_added"])
+
     def _worker_committed_under_key(
         self, tmp: str, key: str, *, registered: bool = True
     ) -> tuple[Path, Path, Path, Path]:
