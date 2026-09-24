@@ -11,7 +11,9 @@ The sequence, in the one order it may run in:
   ``pending`` to ``complete``. Three refusals live here: no change at all, more
   than one, and the wrong one. They run behind the terminating dispositions on
   purpose — a turn that timed out has a sharper diagnosis than "the status did
-  not move", and this is what is left once those are ruled out.
+  not move", and this is what is left once those are ruled out. Each refusal
+  still runs the plan-artifact guard in adjudicate-only mode after it pauses,
+  so a packet the turn rewrote gets a verdict beside that pause (ASI-119).
 * **The plan-artifact guard, unconditionally.** ``turn_postflight`` already ran
   it gated on a terminating disposition; this is the same guard on the surviving
   turn, and it catches the tampering the status guards cannot see: an edit to
@@ -284,6 +286,32 @@ def settle_turn(
         ),
     )
     status_changes = plans.status_changes(before, after)
+
+    def _adjudicate_plan_artifacts_after_pause() -> None:
+        # A status refusal ends the turn before the plan artifact guard's
+        # ordinary slot below, but the packet question is a different one and a
+        # turn that fails both has to report both (ASI-119). Mirror the
+        # post-turn guards: adjudicate only, record beside the pause already
+        # taken, never revert a second time or displace its reason.
+        handoff_guards._enforce_plan_artifact_guard(
+            event_path=ctx.event_path,
+            payload=ctx.payload,
+            persistence=ctx.persistence,
+            before=before,
+            after=after,
+            digests_before=plan_artifacts_before,
+            runner_written=plan_artifacts_written_by_runner,
+            session_id=session_id,
+            session_label=session_label,
+            session_details=session_details,
+            turn_payload=turn_payload,
+            paths=paths,
+            plan_cache=ctx.plan_cache,
+            append_handoff_note=handoff_correction._append_handoff_note,
+            reinspect=session_verification._reinspect_after_revert,
+            adjudicate_only=True,
+        )
+
     if not status_changes:
         with ctx.persistence.lock:
             ctx.payload["expected_status_changes"] = list(expected_change)
@@ -311,6 +339,7 @@ def settle_turn(
                 "observed_status_changes": [],
             },
         )
+        _adjudicate_plan_artifacts_after_pause()
         return TurnSettlement(ACTION_STOP, snapshot, None)
     if len(status_changes) > 1:
         with ctx.persistence.lock:
@@ -339,6 +368,7 @@ def settle_turn(
                 "observed_status_changes": list(status_changes),
             },
         )
+        _adjudicate_plan_artifacts_after_pause()
         return TurnSettlement(ACTION_STOP, snapshot, None)
     if status_changes != expected_change:
         with ctx.persistence.lock:
@@ -368,6 +398,7 @@ def settle_turn(
                 "observed_status_changes": list(status_changes),
             },
         )
+        _adjudicate_plan_artifacts_after_pause()
         return TurnSettlement(ACTION_STOP, snapshot, None)
 
     # The turn survived every result branch, so nothing terminated it
