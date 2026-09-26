@@ -107,6 +107,8 @@ from .observation import COMPLETENESS_COMPLETE
 from .operations import (
     MAX_OPERATION_ID_CHARS,
     METHOD_ABORT,
+    METHOD_LAUNCH,
+    METHOD_PLAN_ARCHIVE,
     METHOD_QUESTION_REPLY,
     METHOD_REDIRECT,
     METHOD_REPLY,
@@ -190,6 +192,8 @@ DETAIL_OPERATIONS: Mapping[str, str] = {
 #: name a plan instead -- launching and archiving -- are declared unavailable in
 #: :data:`UNAVAILABLE_REASONS` rather than journalled against an invented run.
 MUTATION_METHODS: Mapping[str, str] = {
+    OP_LAUNCH: METHOD_LAUNCH,
+    OP_PLAN_ARCHIVE: METHOD_PLAN_ARCHIVE,
     OP_REPLY: METHOD_REPLY,
     OP_QUESTION_REPLY: METHOD_QUESTION_REPLY,
     OP_CONTROL_STOP_AFTER_CURRENT: METHOD_STOP_AFTER_CURRENT,
@@ -231,13 +235,6 @@ UNAVAILABLE_REASONS: Mapping[str, str] = {
     OP_COMMAND_REDEEM: (
         "command bodies can be redeemed only while this service holds its "
         "volatile mutation lane"
-    ),
-    OP_LAUNCH: (
-        "starting a run is done on the Mac: a launch names a plan rather than "
-        "a run, and the service journal records mutations against a run"
-    ),
-    OP_PLAN_ARCHIVE: (
-        "archiving moves the plan's own directory, which only the Mac holds"
     ),
     OP_REGISTRY: (
         "the registry is the Mac's own file and is not published over the link"
@@ -570,6 +567,7 @@ class RemoteProvider:
             catalog_completeness=catalog_completeness,
             catalog_matched=matched,
             catalog_total=totals.plans,
+            catalog_revision=self._store.catalog_revision(),
             counts=counts,
             filters=filters.as_document(),
             truncated=filters.offset + len(entries) < matched,
@@ -624,6 +622,12 @@ class RemoteProvider:
         """One retained catalog entry and the runs observed against it."""
         now = self._clock()
         plan_key = _plan_key(call)
+        operation_id = call.optional_query("operation_id")
+        if operation_id is not None:
+            record = self._store.operation(operation_id)
+            if record is None or record.get("plan_key") != plan_key:
+                raise HttpRefusal(404, "not-found", "operation not found for this plan")
+            return Response.success(reason="ok", operation=export_operation(record))
         entries = [
             entry
             for entry in self._store.catalog(
@@ -780,7 +784,7 @@ class RemoteProvider:
                 now=now,
                 deliver_by=request.deliver_by,
                 command_id=request.command_id,
-                run_key=request.run_key,
+                run_key=request.run_key or request.plan_key,
                 question_id=request.question_id,
             )
             if admission.refused:
@@ -819,15 +823,25 @@ class RemoteProvider:
             raise invalid_request(
                 f"field 'operation_id' exceeds {MAX_OPERATION_ID_CHARS} characters"
             )
-        # `run_key` is optional to the far end's parser and required here. The
-        # journal column is `NOT NULL`, so a submission without one would be
-        # admitted, handed down, and then fail at the insert -- a mutation on
-        # its way out with no durable record that it left. Refusing it names the
-        # missing field while the operator can still supply it.
-        target: dict[str, Any] = {
-            "plan_key": call.require_string("plan_key"),
-            "run_key": call.require_string("run_key"),
-        }
+        if method == METHOD_PLAN_ARCHIVE:
+            plan_key = call.require_string("plan_key")
+            if call.require_string("confirm_plan_key") != plan_key:
+                raise invalid_request("confirm_plan_key must match plan_key")
+        if method == METHOD_LAUNCH and call.body.get("profile") not in (None, {}):
+            raise invalid_request(
+                "remote launch uses the Mac's default profile; profile overrides "
+                "are available on the local Workbench"
+            )
+        target: dict[str, Any] = {"plan_key": call.require_string("plan_key")}
+        # A launch or archive acts on a plan at rest. It has no run key to
+        # carry, including for a plan that has never run. The existing journal
+        # column is filled from the real plan key at admission, but the wire
+        # target remains plan-scoped and never claims a run exists.
+        run_key = call.optional_string("run_key")
+        if method not in (METHOD_LAUNCH, METHOD_PLAN_ARCHIVE):
+            run_key = call.require_string("run_key")
+        if run_key and method not in (METHOD_LAUNCH, METHOD_PLAN_ARCHIVE):
+            target["run_key"] = run_key
         for name in ("run_id", "question_id", "session_id"):
             value = call.optional_string(name)
             if value is not None:

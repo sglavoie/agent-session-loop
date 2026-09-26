@@ -110,7 +110,11 @@ export async function handleLaunchClick() {
   await runMutation({
     action: "launch",
     path: "/api/launch",
-    body: planBody({ profile: payload.profile }),
+    body: planBody(
+      state.capabilities && state.capabilities.mode === "remote"
+        ? {}
+        : { profile: payload.profile }
+    ),
     feedback: showControlsFeedback,
     describe: (answer) => {
       if (answer.outcome !== OUTCOME_RESULT) return null;
@@ -236,15 +240,22 @@ export async function handleArchiveClick() {
   // Confirmed by typing the plan's own path, so a mode that addresses
   // plans by digest and never publishes a path has nothing to confirm
   // against and does not offer the archive from here.
+  const remote = state.capabilities && state.capabilities.mode === "remote";
   const planDir =
     (state.detailPlan && state.detailPlan.plan_dir) || state.route.planDir;
-  if (!planDir || !routePlanId()) return;
+  if (!routePlanId() || (!remote && !planDir)) return;
   const restore = captureFocus();
-  const typed = window.prompt(
-    "Archive this plan? This moves the plan directory, Workbench pin, and ASL state into the archive, where it can be restored until retention expires. Type the full plan path to confirm:\n\n" +
-      planDir,
-    ""
-  );
+  const typed = remote
+    ? window.prompt(
+        "Archive this plan on the Mac? It can be restored until retention expires. Type ARCHIVE to confirm:\n\n" +
+          ((state.detailPlan && state.detailPlan.display_label) || routePlanId()),
+        ""
+      )
+    : window.prompt(
+        "Archive this plan? This moves the plan directory, Workbench pin, and ASL state into the archive, where it can be restored until retention expires. Type the full plan path to confirm:\n\n" +
+          planDir,
+        ""
+      );
   restore();
   if (typed === null) return;
   const confirmPlanDir = (typed || "").trim();
@@ -252,15 +263,22 @@ export async function handleArchiveClick() {
     showControlsFeedback("error", "archive confirmation required");
     return;
   }
-  if (confirmPlanDir !== planDir) {
-    showControlsFeedback("error", "confirmation must match the full plan path");
+  if (remote ? confirmPlanDir !== "ARCHIVE" : confirmPlanDir !== planDir) {
+    showControlsFeedback(
+      "error",
+      remote ? "type ARCHIVE to confirm" : "confirmation must match the full plan path"
+    );
     return;
   }
   showControlsFeedback("", "");
   const answer = await runMutation({
     action: "archive-plan",
     path: "/api/plan/archive",
-    body: planBody({ confirm_plan_dir: confirmPlanDir }),
+    body: planBody(
+      remote
+        ? { confirm_plan_key: routePlanId() }
+        : { confirm_plan_dir: confirmPlanDir }
+    ),
     subject: "the archive",
     feedback: showControlsFeedback,
   });

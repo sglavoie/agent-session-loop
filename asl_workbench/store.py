@@ -51,6 +51,7 @@ every identifier those rows are keyed by.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -2146,6 +2147,18 @@ class WorkbenchStore:
             clauses.append(f"e.primary_state IN ({placeholders})" if states else "0")
             parameters.extend(states)
         return clauses, parameters
+
+    def catalog_revision(self) -> str:
+        """Stable identity for the published catalog across paged reads."""
+        with self.reading() as connection:
+            rows = connection.execute(
+                "SELECT connector_id, catalog_generation, catalog_complete "
+                "FROM connector ORDER BY connector_id"
+            ).fetchall()
+        material = [tuple(row) for row in rows]
+        return hashlib.sha256(
+            json.dumps(material, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:24]
 
     def catalog(
         self,

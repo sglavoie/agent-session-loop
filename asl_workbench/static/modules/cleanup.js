@@ -5,9 +5,9 @@
  * never a way around the per-plan refusal.
  */
 
-import { OUTCOME_RESULT } from "./api.js";
+import { apiRequest, OUTCOME_PENDING, OUTCOME_RESULT } from "./api.js";
 import { DAY_MS } from "./constants.js";
-import { planIdOf } from "./identity.js";
+import { planIdOf, planLabel } from "./identity.js";
 import {
   applyActionAvailability,
   captureFocus,
@@ -19,7 +19,7 @@ import {
   persistCleanupThreshold,
   setSortMode,
 } from "./prefs.js";
-import { oldestSortTimestampFor, refresh } from "./queue.js";
+import { oldestSortTimestampFor, queueQuery, refresh } from "./queue.js";
 import { state } from "./state.js";
 
 export function wireCleanupControls() {
@@ -57,6 +57,12 @@ export function wireCleanupControls() {
   if (archiveBtn) {
     archiveBtn.addEventListener("click", handleBulkArchive);
   }
+  document.getElementById("wb-cleanup-review-cancel")?.addEventListener(
+    "click", closeCleanupReview
+  );
+  document.getElementById("wb-cleanup-review-confirm")?.addEventListener(
+    "click", performBulkArchive
+  );
 }
 
 export function setCleanupMode(enabled) {
@@ -73,6 +79,8 @@ export function setCleanupMode(enabled) {
     }
   } else {
     state.cleanupSelection.clear();
+    state.cleanupCandidates.clear();
+    closeCleanupReview();
   }
   applyCleanupMode();
   refresh();
@@ -103,24 +111,61 @@ export function planIsArchivableCandidate(plan) {
   // the operator threshold; plans with no timestamp always qualify. Complete
   // plans age off their completion time (completed_at) while everything else
   // uses last activity, matching the completion-aware oldest sort.
-  if (!plan || plan.archivable === false) return false;
+  if (
+    !plan ||
+    plan.archivable === false ||
+    ["running", "verifying"].includes(plan.primary_state)
+  ) return false;
   const ts = oldestSortTimestampFor(plan);
   if (ts === null) return true;
   const ageDays = (Date.now() - ts) / DAY_MS;
   return ageDays >= state.cleanupThresholdDays;
 }
 
-export function selectCandidates() {
-  // "select candidates" keeps the stale-threshold behavior: from the
-  // currently visible rows, add only those older than the threshold.
-  const visible = state.lastVisiblePlans || [];
-  visible.forEach((plan) => {
-    if (planIsArchivableCandidate(plan)) {
-      state.cleanupSelection.add(planIdOf(plan));
+export async function selectCandidates() {
+  // Fetch every page under one catalog revision. A partial selection is not
+  // advertised as "all candidates", and a changed revision is never mixed
+  // with entries from the old one.
+  const first = await apiRequest(queueQuery());
+  if (!first || first.ok !== true) {
+    showCleanupFeedback("error", "could not load the plan catalog");
+    return;
+  }
+  const revision = first.catalog_revision || null;
+  const matched = Number.isInteger(first.catalog_matched)
+    ? first.catalog_matched
+    : (Array.isArray(first.plans) ? first.plans.length : 0);
+  const pages = [first];
+  let offset = Array.isArray(first.plans) ? first.plans.length : 0;
+  const selectButton = document.getElementById("wb-cleanup-select-candidates");
+  if (selectButton) selectButton.disabled = true;
+  try {
+    while (offset < matched) {
+      const page = await apiRequest(queueQuery(offset));
+      if (!page || page.ok !== true || !Array.isArray(page.plans) ||
+          page.plans.length === 0 || page.catalog_revision !== revision ||
+          page.catalog_matched !== matched) {
+        throw new Error("the catalog changed while candidates were loading; select again");
+      }
+      pages.push(page);
+      offset += page.plans.length;
     }
-  });
-  syncCleanupCheckboxes();
-  updateCleanupReview();
+    const candidates = new Map();
+    pages.forEach((page) => page.plans.forEach((plan) => {
+      const id = planIdOf(plan);
+      if (id && planIsArchivableCandidate(plan)) candidates.set(id, plan);
+    }));
+    state.cleanupSelection = new Set(candidates.keys());
+    state.cleanupCandidates = candidates;
+    state.cleanupSelectionRevision = revision;
+    syncCleanupCheckboxes();
+    updateCleanupReview();
+    showCleanupFeedback("info", candidates.size + " old plans selected from " + matched + " matching plans");
+  } catch (error) {
+    showCleanupFeedback("error", String(error.message || error));
+  } finally {
+    if (selectButton) selectButton.disabled = false;
+  }
 }
 
 export function selectVisibleRows() {
@@ -129,9 +174,11 @@ export function selectVisibleRows() {
   // an active lock (archivable === false) are skipped, preserving the same
   // blocking the per-row checkbox enforces.
   const visible = state.lastVisiblePlans || [];
+  state.cleanupSelectionRevision = state.queueCatalogRevision;
   visible.forEach((plan) => {
     if (plan && plan.archivable !== false && planIdOf(plan)) {
       state.cleanupSelection.add(planIdOf(plan));
+      state.cleanupCandidates.set(planIdOf(plan), plan);
     }
   });
   syncCleanupCheckboxes();
@@ -141,6 +188,8 @@ export function selectVisibleRows() {
 export function clearCleanupSelection() {
   if (state.cleanupSelection.size === 0) return;
   state.cleanupSelection.clear();
+  state.cleanupCandidates.clear();
+  state.cleanupSelectionRevision = null;
   syncCleanupCheckboxes();
   updateCleanupReview();
 }
@@ -149,8 +198,11 @@ export function setCleanupSelected(planDir, selected) {
   if (!planDir) return;
   if (selected) {
     state.cleanupSelection.add(planDir);
+    const plan = (state.lastVisiblePlans || []).find((row) => planIdOf(row) === planDir);
+    if (plan) state.cleanupCandidates.set(planDir, plan);
   } else {
     state.cleanupSelection.delete(planDir);
+    state.cleanupCandidates.delete(planDir);
   }
   updateCleanupReview();
 }
@@ -171,10 +223,17 @@ export function updateCleanupReview() {
   }
   const archiveBtn = document.getElementById("wb-cleanup-archive");
   if (archiveBtn) {
+    const remote = state.capabilities && state.capabilities.mode === "remote";
+    archiveBtn.setAttribute(
+      "data-operation-action",
+      remote ? "archive-plan" : "archive-plans"
+    );
     // An empty selection and a mode that cannot archive are two different
     // reasons to be shut, and the operator can only act on one of them.
     if (count === 0) {
       archiveBtn.setAttribute("data-blocked-reason", "no plans are selected");
+    } else if (remote && state.queueFreshness !== "live") {
+      archiveBtn.setAttribute("data-blocked-reason", "the Mac observation is not live; wait for the connector before archiving");
     } else {
       archiveBtn.removeAttribute("data-blocked-reason");
     }

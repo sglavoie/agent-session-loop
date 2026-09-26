@@ -44,6 +44,7 @@ export const state = {
   queueIncidents: [],
   queueObservedAt: null,
   queueCompleteness: null,
+  queueCatalogRevision: null,
   // Finished runs inside the retention window, newest first, and what the
   // read said about itself. Separate from the queue because history is a
   // different question with a different retention.
@@ -55,6 +56,9 @@ export const state = {
   cleanupMode: false,
   cleanupThresholdDays: CLEANUP_DEFAULT_THRESHOLD_DAYS,
   cleanupSelection: new Set(),
+  cleanupCandidates: new Map(),
+  cleanupSelectionRevision: null,
+  cleanupReviewOpen: false,
   archiveInFlight: false,
   archiveEntries: [],
   archiveSelection: new Set(),

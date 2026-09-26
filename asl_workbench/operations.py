@@ -586,7 +586,13 @@ def persist_operation(record: Mapping[str, Any]) -> dict[str, Any]:
 
 def export_operation(record: Mapping[str, Any]) -> dict[str, Any]:
     """Project one operation onto the fields a cockpit may read back."""
-    return _project(record, OPERATION_EXPORT_FIELDS, "exported operation")
+    projected = _project(record, OPERATION_EXPORT_FIELDS, "exported operation")
+    if projected.get("method") in (METHOD_LAUNCH, METHOD_PLAN_ARCHIVE):
+        # The remote service's legacy journal requires a non-null run_key. For
+        # these plan-scoped operations it stores the real plan key there; that
+        # storage adapter must never be presented as a run identity.
+        projected.pop("run_key", None)
+    return projected
 
 
 def _project(

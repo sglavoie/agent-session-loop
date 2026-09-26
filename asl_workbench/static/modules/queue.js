@@ -67,7 +67,7 @@ export function stopQueueTimer() {
  * fetched. So the narrowing goes to the server, which applies it before the
  * limit and counts over what matched.
  */
-export function queueQuery() {
+export function queueQuery(offset = 0) {
   const params = new URLSearchParams();
   if (state.activeFilter && state.activeFilter !== "all") {
     params.set("group", state.activeFilter);
@@ -85,6 +85,7 @@ export function queueQuery() {
     state.showCompleted || state.cleanupMode ? "1" : "0"
   );
   params.set("limit", String(QUEUE_PAGE_LIMIT));
+  if (offset > 0) params.set("offset", String(offset));
   const query = params.toString();
   return query ? "/api/queue?" + query : "/api/queue";
 }
@@ -220,8 +221,14 @@ export function adoptQueuePayload(payload) {
         : null,
     total:
       typeof payload.catalog_total === "number" ? payload.catalog_total : null,
-    offset: typeof payload.offset === "number" ? payload.offset : 0,
-    limit: typeof payload.limit === "number" ? payload.limit : QUEUE_PAGE_LIMIT,
+    offset:
+      payload.filters && typeof payload.filters.offset === "number"
+        ? payload.filters.offset
+        : 0,
+    limit:
+      payload.filters && typeof payload.filters.limit === "number"
+        ? payload.filters.limit
+        : QUEUE_PAGE_LIMIT,
     truncated: payload.truncated === true,
   };
   state.queueFreshness =
@@ -237,6 +244,10 @@ export function adoptQueuePayload(payload) {
   state.queueCompleteness =
     typeof payload.catalog_completeness === "string"
       ? payload.catalog_completeness
+      : null;
+  state.queueCatalogRevision =
+    typeof payload.catalog_revision === "string"
+      ? payload.catalog_revision
       : null;
 }
 

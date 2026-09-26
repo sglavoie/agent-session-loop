@@ -197,6 +197,25 @@
     </div>
 
     <section
+      class="wb-cleanup-review"
+      id="wb-cleanup-review-panel"
+      aria-label="Review selected plans"
+      hidden
+    >
+      <div class="wb-cleanup-review__head">
+        <div>
+          <h2>Review plans to archive</h2>
+          <p id="wb-cleanup-review-summary"></p>
+        </div>
+        <button class="wb-button wb-button--ghost" id="wb-cleanup-review-cancel" type="button">cancel</button>
+      </div>
+      <ul id="wb-cleanup-review-list" class="wb-cleanup-review__list"></ul>
+      <div class="wb-cleanup-review__actions">
+        <button class="wb-button wb-button--danger" id="wb-cleanup-review-confirm" type="button">archive reviewed plans</button>
+      </div>
+    </section>
+
+    <section
       id="wb-warnings"
       class="wb-warnings"
       aria-live="polite"
