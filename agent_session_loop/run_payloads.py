@@ -166,6 +166,9 @@ def _run_config_payload(
         "review_guard_include_ignored": review_guard._review_guard_include_ignored(
             args
         ),
+        "allow_external_changes": sorted(
+            set(getattr(args, "allow_external_changes", None) or ())
+        ),
         "commit_mode": commit_mode,
         "repair_commit_mode": run_selection.REPAIR_COMMIT_MODE_PER_CHILD,
         "unsafe_bypass": run_selection._unsafe_bypass(args),

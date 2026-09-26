@@ -1209,6 +1209,25 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertTrue(review_guard._review_guard_include_ignored(enabled_args))
         self.assertIn("review_guard_include_ignored", run_entry._RESUME_OVERLAY_DESTS)
 
+    def test_allow_external_changes_repeats_and_round_trips(self) -> None:
+        parser = cli.build_parser()
+
+        default_args = parser.parse_args(["run", "/tmp/plan"])
+        repeated_args = parser.parse_args(
+            [
+                "run",
+                "/tmp/plan",
+                "--allow-external-changes",
+                "scripts",
+                "--allow-external-changes",
+                "dotfiles",
+            ]
+        )
+
+        self.assertIsNone(default_args.allow_external_changes)
+        self.assertEqual(["scripts", "dotfiles"], repeated_args.allow_external_changes)
+        self.assertIn("allow_external_changes", run_entry._RESUME_OVERLAY_DESTS)
+
     def test_review_guard_exclude_merges_env_and_flags(self) -> None:
         args = cli.build_parser().parse_args(
             [

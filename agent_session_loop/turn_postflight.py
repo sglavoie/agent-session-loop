@@ -207,6 +207,7 @@ def enforce_post_turn_guards(
     paths: dict[str, Path],
     state_dir_arg: str | None,
     disarm_exception_guard: Callable[[], None],
+    external_change_aliases: frozenset[str] = frozenset(),
 ) -> PostTurnGuards:
     """Run the five post-execution guards, in order, over one finished turn.
 
@@ -252,6 +253,7 @@ def enforce_post_turn_guards(
             run_dir=ctx.run_dir,
             external_digests_before=external_digests_before,
             turn_started_ns=turn_started_ns,
+            external_change_aliases=external_change_aliases,
         ):
             finalization_paused = True
         elif is_review_session:

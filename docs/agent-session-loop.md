@@ -528,7 +528,7 @@ before any `--review-harness` work.
 ## Commands
 
 ```text
-asl run PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--review-harness codex|claude|copilot] [--review-harness-model MODEL] [--effort EFFORT] [--timeout SEC] [--audit-harness codex|claude|copilot] [--audit-harness-model MODEL] [--audit-effort EFFORT] [--audit-timeout SEC] [--supervisor-audit|--no-supervisor-audit] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--max-repair-group-attempts N] [--max-review-fix-cycles-ceiling N] [--review-guard-exclude PATH] [--review-guard-include-ignored] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--no-mailbox] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
+asl run PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--review-harness codex|claude|copilot] [--review-harness-model MODEL] [--effort EFFORT] [--timeout SEC] [--audit-harness codex|claude|copilot] [--audit-harness-model MODEL] [--audit-effort EFFORT] [--audit-timeout SEC] [--supervisor-audit|--no-supervisor-audit] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--max-repair-group-attempts N] [--max-review-fix-cycles-ceiling N] [--review-guard-exclude PATH] [--review-guard-include-ignored] [--allow-external-changes ALIAS] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--no-mailbox] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
 asl preflight PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--max-pending-sessions N] [--mark-loop-ready] [--json]
 asl verify PLAN_DIR --session ID [--cwd ROOT] [--artifact-dir DIR] [--json]
 asl contract-check PLAN_DIR [--session ID] [--cwd ROOT] [--agent-mux] [--state-dir DIR] [--json]
@@ -1749,7 +1749,21 @@ added or removed registered repositories pause as
 evidence pauses as
 `workspace-write-guard-unavailable`. Both post-turn failures retain repository
 contents, restore the handoff to pending, record qualified evidence, and run
-before verification or commit. Scope violations require a durable scope repair
+before verification or commit.
+
+`--allow-external-changes ALIAS` (repeatable, registered plans only, persisted
+for `--resume`) declares a registered repository someone else may keep
+changing while the run works — typically the operator editing a repository
+that early sessions only read. A content change there during a turn whose
+write scope excludes the alias is recorded under the guard record's
+`external_changes` (writer unknown) instead of pausing; adding or removing a
+checkout still pauses. The guard can no longer tell the worker's writes there
+from anyone else's, so the pre-tool policy refuses the worker's file-edit tools
+in that alias for the turn (`external_read_only_aliases`, Claude only; a shell
+write is not predicted). A session that writes the alias owns every change in
+it as before, and a per-session commit stages those changes, so stop editing
+that repository before such a session runs. An unregistered alias, or the flag
+on a legacy plan, fails the run. Scope violations require a durable scope repair
 and fresh expansion/preflight before continuing. A later run that finds such a
 violation still uncleared, and a readiness gate that did not pass, refuses
 before the loop starts and names the retained record rather than the gate —

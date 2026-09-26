@@ -393,6 +393,14 @@ class ParseCommandTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertIn("--review-guard-include-ignored", result["run_args"])
 
+    def test_allow_external_changes_round_trips(self) -> None:
+        result = autopilot.parse_command(
+            "asl run /tmp/plan --allow-external-changes scripts"
+        )
+        self.assertTrue(result["ok"], result)
+        index = result["run_args"].index("--allow-external-changes")
+        self.assertEqual("scripts", result["run_args"][index + 1])
+
     def test_review_guard_include_ignored_absent_by_default(self) -> None:
         result = autopilot.parse_command("asl run /tmp/plan")
         self.assertTrue(result["ok"])

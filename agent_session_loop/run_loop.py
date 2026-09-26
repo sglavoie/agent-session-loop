@@ -1483,6 +1483,9 @@ def run_locked(
     mailbox_enabled = bool(mailbox_activation["enabled"])
     review_guard_excludes = review_guard._review_guard_excludes(args)
     review_guard_include_ignored = review_guard._review_guard_include_ignored(args)
+    external_change_aliases = review_guard._external_change_aliases(
+        args, verification_context
+    )
     # One selection for every commit this run makes, including the recovery of
     # a group a previous process left unresolved: the declared implementation
     # harness, not whichever harness a live switch moved a turn onto.
@@ -2750,6 +2753,16 @@ def run_locked(
                     else {guards.LEGACY_PATH_QUALIFIER: str(cwd)}
                 )
                 ctx.guard_controller.mark_turn_snapshot(protected_path_baseline)
+                # The worker may read an externally changed alias it cannot
+                # write, but its own edit tools are refused there: the
+                # postflight comparison no longer convicts that alias, so this
+                # lane is what still tells the worker it is out of scope.
+                ctx.guard_controller.set_external_read_only_aliases(
+                    external_change_aliases
+                    - frozenset(
+                        session_scope.writes if session_scope is not None else ()
+                    )
+                )
                 turn_env = ctx.guard_controller.prepare_turn(
                     harness=turn_harness,
                     pretool_armed=harnesses.get_adapter(
@@ -3043,6 +3056,7 @@ def run_locked(
                 paths=paths,
                 state_dir_arg=args.state_dir,
                 disarm_exception_guard=disarm_exception_guard,
+                external_change_aliases=external_change_aliases,
             )
             if postflight.stopped:
                 if result.aborted:
@@ -3443,6 +3457,7 @@ def run_locked(
                     )
                 elif guard_mode == "workspace":
                     write_guards._enforce_workspace_write_guard(
+                        external_change_aliases=external_change_aliases,
                         event_path=ctx.event_path,
                         payload=ctx.payload,
                         persistence=ctx.persistence,

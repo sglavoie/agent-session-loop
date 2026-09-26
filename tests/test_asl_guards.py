@@ -1855,6 +1855,65 @@ class GuardPreToolHookTests(unittest.TestCase):
         self.assertNotIn(str(self.hook), commands[0])
 
 
+class ExternalReadOnlyAliasTests(unittest.TestCase):
+    """``--allow-external-changes``: edits refused before they run, per turn.
+
+    The postflight comparison records rather than convicts a change in such an
+    alias, so the hook is the lane that still keeps the worker's own edit tools
+    out of it. It must work with no operator guard active at all.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.app = self.root / "app"
+        self.scripts = self.root / "scripts"
+        self.app.mkdir()
+        self.scripts.mkdir()
+        self.controller = guards.GuardController(
+            run_id="run-1",
+            run_dir=self.root / "runs" / "run-1",
+            workspace_aliases={"app": str(self.app), "scripts": str(self.scripts)},
+        )
+        self.hook = claude_stream.guard_hook_script_path()
+
+    def call(self, tool_name: str, path: Path) -> dict[str, Any] | None:
+        completed = subprocess.run(
+            [sys.executable, str(self.hook), str(self.controller.policy_file)],
+            input=json.dumps(
+                {"tool_name": tool_name, "tool_input": {"file_path": str(path)}}
+            ),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, completed.returncode)
+        output = completed.stdout.strip()
+        return json.loads(output) if output else None
+
+    def test_policy_exists_without_guards_and_refuses_only_edit_tools(self) -> None:
+        self.controller.set_external_read_only_aliases(["scripts"])
+        self.controller.prepare_turn(harness="claude", pretool_armed=True)
+        policy = json.loads(self.controller.policy_file.read_text(encoding="utf-8"))
+        self.assertEqual(["scripts"], policy["external_read_only_aliases"])
+        self.assertEqual([], policy["guards"])
+
+        decision = self.call("Edit", self.scripts / "tool.py")
+        self.assertIsNotNone(decision)
+        reason = decision["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("scripts:tool.py", reason)
+        self.assertIsNone(self.call("Read", self.scripts / "tool.py"))
+        self.assertIsNone(self.call("Write", self.app / "main.py"))
+
+    def test_a_turn_that_writes_the_alias_drops_the_policy(self) -> None:
+        self.controller.set_external_read_only_aliases(["scripts"])
+        self.controller.prepare_turn(harness="claude", pretool_armed=True)
+        self.assertTrue(self.controller.policy_file.exists())
+        self.controller.set_external_read_only_aliases([])
+        self.controller.prepare_turn(harness="claude", pretool_armed=True)
+        self.assertFalse(self.controller.policy_file.exists())
+
+
 class GuardDocumentationTests(unittest.TestCase):
     """Every stable reason a guard can produce is documented."""
 

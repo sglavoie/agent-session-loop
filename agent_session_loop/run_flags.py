@@ -259,6 +259,18 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
         ),
     ),
     RunFlag(
+        dest="allow_external_changes",
+        option_strings=("--allow-external-changes",),
+        action="append",
+        help=(
+            "Registered repository alias someone else may change while this run "
+            "works; repeat for several. A change there during a turn that does "
+            "not write the alias is recorded, not a scope violation, and the "
+            "worker's own file-edit tools are refused there where the harness "
+            "supports a pre-tool hook"
+        ),
+    ),
+    RunFlag(
         dest="commit_mode",
         option_strings=("--commit-per-session",),
         action="store_const",

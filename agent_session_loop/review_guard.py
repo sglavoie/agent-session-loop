@@ -149,6 +149,31 @@ def _review_guard_include_ignored(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "review_guard_include_ignored", False))
 
 
+def _external_change_aliases(
+    args: argparse.Namespace,
+    context: verification.VerificationContext,
+) -> frozenset[str]:
+    """Resolve ``--allow-external-changes`` against the plan's registry.
+
+    Only a registered workspace has aliases to name, and an alias the registry
+    does not know is a typo that would otherwise leave the guard strict while
+    the operator believes it relaxed, so both fail the run.
+    """
+    requested = frozenset(getattr(args, "allow_external_changes", None) or ())
+    if not requested:
+        return frozenset()
+    if context.workspace is None:
+        raise RunError(
+            "--allow-external-changes requires a registered multi-repository plan"
+        )
+    unknown = sorted(requested - set(context.workspace.registry.aliases))
+    if unknown:
+        raise RunError(
+            "--allow-external-changes names unregistered aliases: " + ", ".join(unknown)
+        )
+    return requested
+
+
 def _run_git(
     cwd: Path,
     args: list[str],

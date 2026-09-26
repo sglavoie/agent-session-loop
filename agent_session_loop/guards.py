@@ -808,6 +808,7 @@ def policy_document(
     guards: Sequence[GuardRule],
     executables: Mapping[str, str],
     workspace_aliases: Mapping[str, str] | None = None,
+    external_read_only_aliases: Sequence[str] = (),
 ) -> dict[str, Any]:
     """The exact JSON a shim or a pre-tool hook reads, derived from the active set.
 
@@ -836,6 +837,11 @@ def policy_document(
         ],
         "executables": dict(executables),
         "workspace": {"aliases": dict(workspace_aliases or {})},
+        # Aliases the operator lets someone else change during the run
+        # (``--allow-external-changes``) that the turn in flight may not write.
+        # The postflight comparison records rather than convicts a change
+        # there, so the hook's refusal of an edit tool is the worker's signal.
+        "external_read_only_aliases": sorted(external_read_only_aliases),
     }
 
 
@@ -949,6 +955,7 @@ class GuardController:
         self._guards: dict[str, GuardRule] = {}
         self._executables: dict[str, str] = {}
         self._workspace_aliases: dict[str, str] = dict(workspace_aliases or {})
+        self._external_read_only_aliases: tuple[str, ...] = ()
         self._expired = False
         # Coverage context for the turn now in flight. It is per-turn rather
         # than per-run because the harness can be switched mid-run, and a guard
@@ -1022,7 +1029,19 @@ class GuardController:
         """
         with self._lock:
             self._workspace_aliases = dict(aliases)
-            if self._guards and not self._expired:
+            if self._policy_needed_locked():
+                self._restore_locked()
+
+    def set_external_read_only_aliases(self, aliases: Iterable[str]) -> None:
+        """Name the externally changed aliases the next turn may not write.
+
+        Set per turn because it depends on the session's write scope. It keeps
+        the policy on disk even with no operator guard active, since it is the
+        only pre-execution refusal those aliases get.
+        """
+        with self._lock:
+            self._external_read_only_aliases = tuple(sorted(set(aliases)))
+            if self._policy_needed_locked():
                 self._restore_locked()
 
     def to_payload(self) -> list[dict[str, Any]]:
@@ -1247,7 +1266,7 @@ class GuardController:
             guard_bin = self.guard_bin
             try:
                 guard_bin.mkdir(parents=True, exist_ok=True)
-                if self._guards and not self._expired:
+                if self._policy_needed_locked():
                     self._materialize_locked(self._guards, self._executables)
                 else:
                     self.policy_file.unlink(missing_ok=True)
@@ -1287,6 +1306,11 @@ class GuardController:
 
     # -- internals ---------------------------------------------------------
 
+    def _policy_needed_locked(self) -> bool:
+        return not self._expired and bool(
+            self._guards or self._external_read_only_aliases
+        )
+
     def _materialize_locked(
         self,
         guards: Mapping[str, GuardRule],
@@ -1308,6 +1332,7 @@ class GuardController:
                 guards=list(guards.values()),
                 executables=executables,
                 workspace_aliases=self._workspace_aliases,
+                external_read_only_aliases=self._external_read_only_aliases,
             ),
         )
         for name in sorted(

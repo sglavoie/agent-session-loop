@@ -153,14 +153,15 @@ def _is_write_tool(tool_name: Any) -> bool:
     return any(hint in lowered for hint in _WRITE_TOOL_HINTS)
 
 
-def _matched_path_guard(
+def _qualified_write_target(
     tool_input: dict[str, Any],
     policy: dict[str, Any],
-) -> dict[str, Any] | None:
+) -> list[tuple[str, str]]:
+    """Every ``(alias, relative)`` naming the file a write tool call targets."""
     workspace = policy.get("workspace")
     aliases = workspace.get("aliases") if isinstance(workspace, dict) else None
     if not isinstance(aliases, dict) or not aliases:
-        return None
+        return []
     raw_path: Any = None
     for key in _WRITE_PATH_KEYS:
         candidate = tool_input.get(key)
@@ -168,12 +169,34 @@ def _matched_path_guard(
             raw_path = candidate
             break
     if not isinstance(raw_path, str):
-        return None
+        return []
     try:
         absolute = os.path.realpath(os.path.abspath(raw_path))
     except OSError, ValueError:
+        return []
+    return _qualify(absolute, aliases)
+
+
+def _matched_external_read_only_alias(
+    tool_input: dict[str, Any],
+    policy: dict[str, Any],
+) -> tuple[str, str] | None:
+    """The ``(alias, relative)`` of a write into an external read-only alias."""
+    raw = policy.get("external_read_only_aliases")
+    if not isinstance(raw, list) or not raw:
         return None
-    qualified = _qualify(absolute, aliases)
+    read_only = {alias for alias in raw if isinstance(alias, str)}
+    for alias, relative in _qualified_write_target(tool_input, policy):
+        if alias in read_only:
+            return alias, relative
+    return None
+
+
+def _matched_path_guard(
+    tool_input: dict[str, Any],
+    policy: dict[str, Any],
+) -> dict[str, Any] | None:
+    qualified = _qualified_write_target(tool_input, policy)
     if not qualified:
         return None
     for guard in policy.get("guards") or ():
@@ -278,6 +301,19 @@ def main(argv: list[str]) -> int:
             guard,
             f"{protected.get('qualifier')}:{protected.get('pattern')} must end "
             "this turn exactly as it started",
+        )
+        return 0
+    external = (
+        _matched_external_read_only_alias(tool_input, policy)
+        if _is_write_tool(tool_name)
+        else None
+    )
+    if external is not None:
+        alias, relative = external
+        _deny(
+            {"id": "external-read-only"},
+            f"{alias}:{relative} is in a repository this session may only read "
+            "(others are changing it during this run)",
         )
         return 0
     if isinstance(tool_name, str) and tool_name in _COMMAND_TOOLS:

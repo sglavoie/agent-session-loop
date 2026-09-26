@@ -606,6 +606,54 @@ class ExternalRecoveryTests(unittest.TestCase):
         (self.repos["pi"] / "independent.txt").write_text("turn wrote here\n")
         self.assertFalse(verdict(before, self.capture())["passed"])
 
+    def test_external_change_alias_is_recorded_not_convicted(self):
+        from agent_session_loop import review_guard, verification
+
+        before = self.capture()
+        (self.repos["notes"] / "README.md").write_text("session work\n")
+        (self.repos["pi"] / "independent.txt").write_text("operator edit\n")
+        comparison = repository_evidence.compare_workspace_snapshots(
+            before, self.capture()
+        )
+
+        def verdict(scope, aliases):
+            return workspace_evidence._workspace_write_guard_evidence(
+                workspace=self.resolved,
+                scope=scope,
+                comparison=comparison,
+                exclude=(),
+                include_ignored=False,
+                external_change_aliases=aliases,
+            )
+
+        read_pi = plans.SessionScope(reads=("notes", "pi"), writes=("notes",))
+        strict = verdict(read_pi, frozenset())
+        self.assertFalse(strict["passed"])
+        allowed = verdict(read_pi, frozenset({"pi"}))
+        self.assertTrue(allowed["passed"], allowed["violations"])
+        self.assertEqual(["notes"], allowed["authorized_aliases"])
+        self.assertEqual({"pi": ["pi:independent.txt"]}, allowed["external_changes"])
+        # A session that writes the alias owns its changes as before.
+        write_pi = plans.SessionScope(reads=("notes", "pi"), writes=("notes", "pi"))
+        owned = verdict(write_pi, frozenset({"pi"}))
+        self.assertTrue(owned["passed"])
+        self.assertNotIn("external_changes", owned)
+        self.assertEqual(["notes", "pi"], owned["authorized_aliases"])
+
+        context = verification.VerificationContext.resolved_workspace(self.resolved)
+        args = mock.Mock(allow_external_changes=["pi", "pi"])
+        self.assertEqual(
+            frozenset({"pi"}), review_guard._external_change_aliases(args, context)
+        )
+        args.allow_external_changes = ["nope"]
+        with self.assertRaisesRegex(review_guard.RunError, "nope"):
+            review_guard._external_change_aliases(args, context)
+        with self.assertRaisesRegex(review_guard.RunError, "registered"):
+            review_guard._external_change_aliases(
+                mock.Mock(allow_external_changes=["pi"]),
+                verification.VerificationContext.legacy(self.workspace),
+            )
+
     def test_interruption_after_commit_reconciles_without_duplicate(self):
         from agent_session_loop import run_commit
 

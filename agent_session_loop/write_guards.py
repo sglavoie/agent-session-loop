@@ -233,6 +233,7 @@ def _enforce_workspace_write_guard(
     run_dir: Path | None = None,
     external_digests_before: Mapping[str, Mapping[str, Any]] | None = None,
     turn_started_ns: int | None = None,
+    external_change_aliases: frozenset[str] = frozenset(),
 ) -> bool:
     """Fail closed when a registered implementation turn exceeds its writes."""
     snapshot_after: repository_evidence.WorkspaceSnapshot | None = None
@@ -291,6 +292,7 @@ def _enforce_workspace_write_guard(
             digests_before=external_digests_before,
             turn_started_ns=turn_started_ns,
         ),
+        external_change_aliases=external_change_aliases,
     )
     if evidence["passed"]:
         with persistence.lock:

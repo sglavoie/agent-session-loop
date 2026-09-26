@@ -337,6 +337,7 @@ def _workspace_write_guard_evidence(
     exclude: tuple[str, ...],
     include_ignored: bool,
     external_writes: Mapping[str, Any] | None = None,
+    external_change_aliases: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Classify workspace-vector changes against one session's write scope.
 
@@ -344,6 +345,12 @@ def _workspace_write_guard_evidence(
     :func:`external_write_evidence._external_write_evidence`. Its unclassified rows join
     ``unavailable`` rather than ``violations`` for the same reason an
     unobserved repository does: the guard has no observation to classify.
+
+    ``external_change_aliases`` are the aliases the operator declared someone
+    else may change during the run (``--allow-external-changes``). A content
+    change there that the session may not write is recorded under
+    ``external_changes`` with an unknown writer instead of convicting the turn;
+    adding or removing a checkout still does.
     """
     registered = {
         repository.repository.path: repository.alias
@@ -353,6 +360,7 @@ def _workspace_write_guard_evidence(
     violations: list[dict[str, Any]] = []
     authorized: list[str] = []
     remote_ref_drift: dict[str, list[Any]] = {}
+    external_changes: dict[str, list[str]] = {}
 
     raw_changed = comparison.get("changed")
     if isinstance(raw_changed, Mapping):
@@ -390,6 +398,9 @@ def _workspace_write_guard_evidence(
                 continue
             if alias is not None and alias in scope.writes:
                 authorized.append(alias)
+                continue
+            if alias is not None and alias in external_change_aliases:
+                external_changes[repository] = list(qualified_paths)
                 continue
             if alias in scope.reads:
                 kind = "read-only-repository"
@@ -463,6 +474,7 @@ def _workspace_write_guard_evidence(
         "excluded": list(exclude),
         "include_ignored": include_ignored,
         **({"remote_ref_drift": remote_ref_drift} if remote_ref_drift else {}),
+        **({"external_changes": external_changes} if external_changes else {}),
     }
 
 
