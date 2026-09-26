@@ -2888,6 +2888,7 @@ def _check_registered_env_git(
         return ()
     findings: list[PreflightFinding] = []
     needed = None
+    committed = None
     if commit_mode == "per-session":
         try:
             if snapshot is None:
@@ -2895,12 +2896,18 @@ def _check_registered_env_git(
             needed = plans.needed_repository_aliases(
                 snapshot, context.workspace.registry
             )
+            committed = plans.commit_repository_aliases(
+                snapshot, context.workspace.registry
+            )
         except (PlanError, ValueError, OSError) as error:
             return (_finding("red", "env-git", str(error)),)
     for repository in context.workspace.repositories:
         if needed is not None and repository.alias not in needed:
             continue
-        if needed is not None:
+        # A tree the next session only reads is inspected but may stay dirty:
+        # its commit stages write aliases only (see commit_repository_aliases).
+        clean_required = committed is None or repository.alias in committed
+        if needed is not None and clean_required:
             try:
                 linked_roots = repository_evidence.linked_worktrees(repository.root)
                 registered_roots = {r.root for r in context.workspace.repositories}
@@ -2939,6 +2946,19 @@ def _check_registered_env_git(
                     detail=detail,
                 )
             )
+        elif status.stdout and not clean_required:
+            findings.append(
+                _finding(
+                    "green",
+                    "env-git",
+                    (
+                        f"repository {repository.alias} is dirty but read-only "
+                        "for the next session; its changes are not committed"
+                    ),
+                    path=str(repository.root),
+                    detail=f"commit-mode: {commit_mode}",
+                )
+            )
         elif status.stdout:
             findings.append(
                 _finding(
@@ -2946,7 +2966,7 @@ def _check_registered_env_git(
                     "env-git",
                     (
                         f"repository {repository.alias} is dirty; commit-mode "
-                        "runs require needed registered trees to be clean"
+                        "runs require written registered trees to be clean"
                     ),
                     path=str(repository.root),
                     detail=f"commit-mode: {commit_mode}",

@@ -293,7 +293,16 @@ def _validate_commit_preflight(
     *,
     verification_context: verification.VerificationContext | None = None,
     needed_aliases: frozenset[str] | None = None,
+    clean_aliases: frozenset[str] | None = None,
 ) -> dict[str, Any]:
+    """Refuse an auto-commit run whose committed trees are not clean.
+
+    ``needed_aliases`` selects the registered repositories to inspect and
+    ``clean_aliases`` the subset that must be clean; ``None`` requires every
+    inspected repository clean. A needed alias outside ``clean_aliases`` is one
+    the session only reads: it must still be an inspectable worktree, but its
+    dirt cannot enter the session's commit, so it is recorded and not refused.
+    """
     context = verification_context or verification.VerificationContext.legacy(cwd)
     if context.workspace is None:
         _validate_git_worktree(cwd)
@@ -311,7 +320,8 @@ def _validate_commit_preflight(
             raise RunError(
                 f"could not inspect repository {repository.alias}: {error}"
             ) from error
-        if needed_aliases is not None:
+        clean_required = clean_aliases is None or repository.alias in clean_aliases
+        if needed_aliases is not None and clean_required:
             try:
                 linked_roots = repository_evidence.linked_worktrees(repository.root)
             except repository_evidence.RepositoryEvidenceError as error:
@@ -333,9 +343,10 @@ def _validate_commit_preflight(
                 "path": repository.repository.path,
                 "resolved_root": str(repository.root),
                 "clean": clean,
+                "clean_required": clean_required,
             }
         )
-        if not clean:
+        if not clean and clean_required:
             raise RunError(
                 "git status --porcelain must be empty before auto-commit "
                 f"in repository {repository.alias}"

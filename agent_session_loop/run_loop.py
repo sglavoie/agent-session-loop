@@ -598,6 +598,7 @@ def _commit_preflight_refusal(
             cwd,
             verification_context=ctx.verification_context,
             needed_aliases=frozenset((*session_scope.reads, *session_scope.writes)),
+            clean_aliases=frozenset(session_scope.writes),
         )
     except RunError as error:
         return error
@@ -1982,6 +1983,10 @@ def run_locked(
                 max_sessions=max_sessions,
             )
         if commit_mode is not None:
+            per_session_registered = (
+                commit_mode == run_selection.COMMIT_MODE_PER_SESSION
+                and ctx.verification_context.workspace is not None
+            )
             commit_preflight = review_guard._validate_commit_preflight(
                 cwd,
                 verification_context=ctx.verification_context,
@@ -1989,8 +1994,14 @@ def run_locked(
                     plans.needed_repository_aliases(
                         snapshot, ctx.verification_context.workspace.registry
                     )
-                    if commit_mode == run_selection.COMMIT_MODE_PER_SESSION
-                    and ctx.verification_context.workspace is not None
+                    if per_session_registered
+                    else None
+                ),
+                clean_aliases=(
+                    plans.commit_repository_aliases(
+                        snapshot, ctx.verification_context.workspace.registry
+                    )
+                    if per_session_registered
                     else None
                 ),
             )

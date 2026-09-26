@@ -504,7 +504,7 @@ class ExternalRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(1, self.invoke()[0])
 
-    def test_needed_union_cleanliness_and_legacy_end_behavior(self):
+    def test_written_tree_cleanliness_and_legacy_end_behavior(self):
         from agent_session_loop import preflight, review_guard, verification
 
         git_stdout(self.repos["notes"], "add", "README.md")
@@ -537,8 +537,40 @@ class ExternalRecoveryTests(unittest.TestCase):
             )
         )
         snapshot = plans.inspect_plan(self.plan)
-        self.assertTrue(
-            preflight._check_registered_env_git(context, "per-session", snapshot)
+        # A dirty tree the session only reads is inspected, reported green, and
+        # never refused: its commit stages write aliases only.
+        findings = preflight._check_registered_env_git(context, "per-session", snapshot)
+        self.assertEqual(["green"], [finding.severity for finding in findings])
+        self.assertIn("read-only", findings[0].message)
+        result = review_guard._validate_commit_preflight(
+            self.workspace,
+            verification_context=context,
+            needed_aliases=plans.needed_repository_aliases(
+                snapshot, self.resolved.registry
+            ),
+            clean_aliases=plans.commit_repository_aliases(
+                snapshot, self.resolved.registry
+            ),
+        )
+        by_alias = {row["alias"]: row for row in result["repositories"]}
+        self.assertEqual(
+            {"clean": False, "clean_required": False},
+            {key: by_alias["pi"][key] for key in ("clean", "clean_required")},
+        )
+        self.session.write_text(
+            self.session.read_text().replace(
+                "**Writes repositories**: notes", "**Writes repositories**: notes, pi"
+            )
+        )
+        snapshot = plans.inspect_plan(self.plan)
+        self.assertEqual(
+            ["yellow"],
+            [
+                finding.severity
+                for finding in preflight._check_registered_env_git(
+                    context, "per-session", snapshot
+                )
+            ],
         )
         with self.assertRaises(review_guard.RunError):
             review_guard._validate_commit_preflight(
@@ -547,7 +579,32 @@ class ExternalRecoveryTests(unittest.TestCase):
                 needed_aliases=plans.needed_repository_aliases(
                     snapshot, self.resolved.registry
                 ),
+                clean_aliases=plans.commit_repository_aliases(
+                    snapshot, self.resolved.registry
+                ),
             )
+
+    def test_dirty_read_only_tree_convicts_only_turn_writes(self):
+        # The write guard judges the turn's own delta, so dirt a read-only tree
+        # already carried at turn start is what the commit gate may now allow.
+        scope = plans.SessionScope(reads=("notes", "pi"), writes=("notes",))
+
+        def verdict(before, after):
+            return workspace_evidence._workspace_write_guard_evidence(
+                workspace=self.resolved,
+                scope=scope,
+                comparison=repository_evidence.compare_workspace_snapshots(
+                    before, after
+                ),
+                exclude=(),
+                include_ignored=False,
+            )
+
+        before = self.capture()
+        (self.repos["notes"] / "README.md").write_text("session work\n")
+        self.assertTrue(verdict(before, self.capture())["passed"])
+        (self.repos["pi"] / "independent.txt").write_text("turn wrote here\n")
+        self.assertFalse(verdict(before, self.capture())["passed"])
 
     def test_interruption_after_commit_reconciles_without_duplicate(self):
         from agent_session_loop import run_commit

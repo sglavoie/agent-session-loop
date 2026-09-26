@@ -508,17 +508,41 @@ def parse_session_scope(
     return parse_session_scope_lines(text.splitlines(), registry_aliases)
 
 
+def _next_session_scope(
+    snapshot: PlanSnapshot, registry: RepositoryRegistry
+) -> SessionScope | None:
+    session = snapshot.next_pending
+    if session is None:
+        return None
+    return parse_session_scope(
+        session.path.read_text(encoding="utf-8"), registry.aliases
+    )
+
+
 def needed_repository_aliases(
     snapshot: PlanSnapshot, registry: RepositoryRegistry
 ) -> frozenset[str]:
     """Fail closed on the next session's scope; no pending session needs no tree."""
-    session = snapshot.next_pending
-    if session is None:
+    scope = _next_session_scope(snapshot, registry)
+    if scope is None:
         return frozenset()
-    scope = parse_session_scope(
-        session.path.read_text(encoding="utf-8"), registry.aliases
-    )
     return frozenset((*scope.reads, *scope.writes))
+
+
+def commit_repository_aliases(
+    snapshot: PlanSnapshot, registry: RepositoryRegistry
+) -> frozenset[str]:
+    """The next session's write aliases: the only trees its commit can stage.
+
+    A per-session commit stages write-guard evidence for declared write aliases
+    only, so a read-only tree's pre-existing dirt can never enter it, and the
+    write guard compares turn-start and turn-end snapshots rather than assuming a
+    clean start. Only these trees must therefore be clean before the turn.
+    """
+    scope = _next_session_scope(snapshot, registry)
+    if scope is None:
+        return frozenset()
+    return frozenset(scope.writes)
 
 
 def render_session_scope(scope: SessionScope) -> str:

@@ -501,7 +501,10 @@ validation.
 
 Legacy plans require their
 resolved Git worktree to be clean before the first harness turn; registered
-plans require every declared repository clean. Use `--commit-per-session` to
+per-session plans require the next session's write repositories clean (its
+read-only repositories need only be inspectable, since their dirt can never
+enter its commit), and registered end commits require every declared
+repository clean. Use `--commit-per-session` to
 commit after each verified completed session, or `--commit-at-end` to commit
 after all pending sessions complete in the same run. Registered per-session
 groups contain only changed write aliases proven by the turn guard; registered
@@ -2944,8 +2947,11 @@ Preflight resolves the ordered registry once; validates child existence,
 directory type, exact Git top-level, origin, disjointness, scope, and contract
 locations; captures every registered repository fail-closed; and reuses the
 resolved repository context for command and baseline checks. Per-session commit
-mode requires the current session’s needed trees to be clean; at-end commits
-require every registered tree to be clean. Registered JSON adds
+mode inspects the current session’s read and write trees but requires only
+its write trees to be clean — a dirty read-only tree is reported green, because
+the session's commit stages write aliases only and the write guard judges the
+turn's own before/after delta; at-end commits require every registered tree to
+be clean. Registered JSON adds
 `workspace_root`, `registry_digest`, and ordered `repositories` summaries;
 text output prints the same ordered summaries. Legacy plans retain `Repo root`
 text and omit those additive JSON fields.
