@@ -862,7 +862,11 @@ class ReplayingDetailLane:
 
     def fetch(self, **kwargs: Any) -> ReadAnswer:
         self.asks.append(dict(kwargs))
-        target: dict[str, Any] = {"plan_key": kwargs["plan_key"]}
+        target: dict[str, Any] = (
+            {"archive": "list"}
+            if kwargs["detail"] == "archive"
+            else {"plan_key": kwargs["plan_key"]}
+        )
         if kwargs.get("run_key"):
             target["run_key"] = kwargs["run_key"]
         request: dict[str, Any] = {"detail": kwargs["detail"], "target": target}

@@ -228,6 +228,8 @@ class ReadRequest:
 
     def target(self) -> dict[str, Any]:
         """The plan and run this read is about."""
+        if self.detail == "archive":
+            return {"archive": "list"}
         addressed: dict[str, Any] = {"plan_key": self.plan_key}
         if self.run_key is not None:
             addressed["run_key"] = self.run_key

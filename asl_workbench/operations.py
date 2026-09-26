@@ -73,6 +73,9 @@ METHOD_SELECT_HARNESS = "plan.select-harness"
 METHOD_REDIRECT = "plan.redirect"
 METHOD_UNLOCK = "plan.unlock"
 METHOD_PLAN_ARCHIVE = "plan.archive"
+METHOD_ARCHIVE_RESTORE = "archive.restore"
+METHOD_ARCHIVE_DELETE = "archive.delete"
+METHOD_ARCHIVE_SETTINGS = "archive.settings"
 
 OPERATION_METHODS: tuple[str, ...] = (
     METHOD_LAUNCH,
@@ -84,6 +87,9 @@ OPERATION_METHODS: tuple[str, ...] = (
     METHOD_REDIRECT,
     METHOD_UNLOCK,
     METHOD_PLAN_ARCHIVE,
+    METHOD_ARCHIVE_RESTORE,
+    METHOD_ARCHIVE_DELETE,
+    METHOD_ARCHIVE_SETTINGS,
 )
 
 #: Mutations that are *not* plan-scoped, named here rather than left out, so a
@@ -96,9 +102,6 @@ UNSCOPED_MUTATIONS: tuple[str, ...] = (
     "registry.pin",
     "registry.unpin",
     "plans.archive",
-    "archive.restore",
-    "archive.delete",
-    "archive.settings",
 )
 
 #: The Companion's bridge method names, mapped onto this vocabulary. A command
@@ -211,6 +214,8 @@ OPERATION_TRANSITIONS: Mapping[str, frozenset[str]] = {
     OPERATION_DISPATCHED: frozenset(
         {
             OPERATION_ACCEPTED,
+            # Synchronous Mac actions complete in the delivery attempt itself.
+            OPERATION_CONSUMED,
             OPERATION_REJECTED,
             OPERATION_EXPIRED,
             OPERATION_UNCONFIRMED,
@@ -587,7 +592,13 @@ def persist_operation(record: Mapping[str, Any]) -> dict[str, Any]:
 def export_operation(record: Mapping[str, Any]) -> dict[str, Any]:
     """Project one operation onto the fields a cockpit may read back."""
     projected = _project(record, OPERATION_EXPORT_FIELDS, "exported operation")
-    if projected.get("method") in (METHOD_LAUNCH, METHOD_PLAN_ARCHIVE):
+    if projected.get("method") in (
+        METHOD_LAUNCH,
+        METHOD_PLAN_ARCHIVE,
+        METHOD_ARCHIVE_RESTORE,
+        METHOD_ARCHIVE_DELETE,
+        METHOD_ARCHIVE_SETTINGS,
+    ):
         # The remote service's legacy journal requires a non-null run_key. For
         # these plan-scoped operations it stores the real plan key there; that
         # storage adapter must never be presented as a run identity.

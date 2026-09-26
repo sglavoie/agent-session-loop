@@ -4,7 +4,7 @@
  * one, so the pane is never blank while the queue has something to say.
  */
 
-import { setCleanupSelected } from "./cleanup.js";
+import { planIsSelectable, setCleanupSelected } from "./cleanup.js";
 import {
   detailHashForPlan,
   planHint,
@@ -513,7 +513,7 @@ export function populateCleanupCell(row, plan) {
   if (!cell) return;
   const box = cell.querySelector("input");
   cell.hidden = !state.cleanupMode;
-  const archivable = plan.archivable !== false;
+  const archivable = planIsSelectable(plan);
   if (box) {
     box.checked = state.cleanupSelection.has(planIdOf(plan));
     box.disabled = !archivable;

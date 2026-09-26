@@ -59,7 +59,7 @@ from asl_workbench.transport import (
     MAX_DETAIL_ENTRIES,
 )
 
-from . import workbench, workbench_catalog, workbench_details
+from . import workbench, workbench_archive, workbench_catalog, workbench_details
 
 __all__ = [
     "MAX_ENTRY_BUDGET_BYTES",
@@ -418,6 +418,16 @@ class AslDetailResponder:
         kind = request.get("detail")
         if not isinstance(kind, str) or kind not in details.DETAIL_KINDS:
             return self._refusal(str(kind), target, details.REASON_INVALID_REQUEST, now)
+        if kind == "archive":
+            if target != {"archive": "list"}:
+                return self._refusal(kind, target, details.REASON_INVALID_REQUEST, now)
+            try:
+                material = self._archive(request)
+            except workbench_archive.ArchiveRefused:
+                return self._refusal(kind, target, details.REASON_OS_ERROR, now)
+            return detail_payload(
+                detail=kind, target=target, material=material, observed_at=now
+            )
         try:
             plan_dir = self.index.resolve(target.get("plan_key"), now=now)
             material = self._read(kind, plan_dir, request)
@@ -436,6 +446,48 @@ class AslDetailResponder:
                 target["run_key"] = portable_catalog.run_key(plan_key, material.run_id)
         return detail_payload(
             detail=kind, target=target, material=material, observed_at=now
+        )
+
+    def _archive(self, request: Mapping[str, Any]) -> _Material:
+        """One bounded page of archive metadata, with no Mac path in it."""
+        view = workbench_archive.review_archive(
+            state_dir=self.state_dir, registry_path=self.registry_path
+        )
+        rows: list[dict[str, Any]] = []
+        for entry in view.entry_payloads():
+            summary = entry.get("summary")
+            rows.append(
+                {
+                    "archive_id": entry["archive_id"],
+                    "summary": summary
+                    if isinstance(summary, str)
+                    and "/" not in summary
+                    and "\\" not in summary
+                    else None,
+                    "archived_at": entry.get("archived_at"),
+                    "expires_at": entry.get("expires_at"),
+                    "cleanup_state": entry.get("cleanup_state"),
+                    "plan_archived": entry.get("plan_archived"),
+                    "state_archived": entry.get("state_archived"),
+                }
+            )
+        offset = max(0, int(request.get("offset") or 0))
+        selected, cursor = _fit_rows(
+            rows[offset : offset + MAX_DETAIL_ENTRIES - 1], offset=offset
+        )
+        if cursor is None and offset + len(selected) < len(rows):
+            cursor = offset + len(selected)
+        metadata = {
+            "archive_retention_days": view.retention_days,
+            "candidate_count": view.review.candidate_count,
+            "undated_count": view.review.undated_count,
+            "entry_count": len(rows),
+        }
+        return _Material(
+            entries=[{"archive_metadata": metadata}, *selected],
+            offset=offset,
+            next_offset=cursor,
+            total=len(rows),
         )
 
     def _refusal(

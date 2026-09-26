@@ -7,6 +7,7 @@
  */
 
 import { apiRequest, describeError } from "./api.js";
+import { showCleanupFeedback, updateCleanupReview } from "./cleanup.js";
 import {
   FILTER_GROUPS,
   QUEUE_PAGE_LIMIT,
@@ -165,6 +166,14 @@ export function renderQueue(payload, updatedAt) {
   }
   reconcileSelectedPlan(plansList);
   adoptQueuePayload(payload);
+  if (state.cleanupSelection.size && state.cleanupSelectionRevision &&
+      state.queueCatalogRevision !== state.cleanupSelectionRevision) {
+    state.cleanupSelection.clear();
+    state.cleanupCandidates.clear();
+    state.cleanupSelectionRevision = null;
+    showCleanupFeedback("warning", "the catalog changed; select plans again before archiving");
+    updateCleanupReview();
+  }
   const sorted = plansList.slice().sort(comparePlanRows);
   renderCounts(state.queueCounts || computeCounts(sorted));
   renderFacets(state.queueFacets);

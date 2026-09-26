@@ -52,6 +52,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
+from . import archive as archive_rules
 from . import overview
 from .freshness import aggregate_completeness, aggregate_freshness
 from .http import (
@@ -107,6 +108,9 @@ from .observation import COMPLETENESS_COMPLETE
 from .operations import (
     MAX_OPERATION_ID_CHARS,
     METHOD_ABORT,
+    METHOD_ARCHIVE_DELETE,
+    METHOD_ARCHIVE_RESTORE,
+    METHOD_ARCHIVE_SETTINGS,
     METHOD_LAUNCH,
     METHOD_PLAN_ARCHIVE,
     METHOD_QUESTION_REPLY,
@@ -185,15 +189,14 @@ DETAIL_OPERATIONS: Mapping[str, str] = {
 #: composed payload, so a method added here that the lane will not carry is
 #: refused at submission rather than accepted and then dropped.
 #:
-#: Every one of them also names a run. That is not a coincidence and not a
-#: preference: the service journal's ``run_key`` column is ``NOT NULL``, which
-#: is the Companion's submission contract made durable, so an operation with no
-#: run to name has nowhere to be recorded. The two deliverable methods that
-#: name a plan instead -- launching and archiving -- are declared unavailable in
-#: :data:`UNAVAILABLE_REASONS` rather than journalled against an invented run.
+#: Plan and archive actions use a stable scope key in the journal's required
+#: ``run_key`` column. Their wire targets do not claim that a run exists.
 MUTATION_METHODS: Mapping[str, str] = {
     OP_LAUNCH: METHOD_LAUNCH,
     OP_PLAN_ARCHIVE: METHOD_PLAN_ARCHIVE,
+    OP_ARCHIVE_RESTORE: METHOD_ARCHIVE_RESTORE,
+    OP_ARCHIVE_DELETE: METHOD_ARCHIVE_DELETE,
+    OP_ARCHIVE_SETTINGS: METHOD_ARCHIVE_SETTINGS,
     OP_REPLY: METHOD_REPLY,
     OP_QUESTION_REPLY: METHOD_QUESTION_REPLY,
     OP_CONTROL_STOP_AFTER_CURRENT: METHOD_STOP_AFTER_CURRENT,
@@ -246,13 +249,8 @@ UNAVAILABLE_REASONS: Mapping[str, str] = {
         "unpinning edits the Mac's registry, which this service never holds"
     ),
     OP_PLANS_ARCHIVE: (
-        "bulk archiving is not carried over the link; archive one plan at a time"
-    ),
-    OP_ARCHIVE_LIST: "the archive lives on the Mac and is not published",
-    OP_ARCHIVE_RESTORE: "restoring reads the Mac's archive directly",
-    OP_ARCHIVE_DELETE: "purging the archive is done where the archive is",
-    OP_ARCHIVE_SETTINGS: (
-        "retention is a registry setting, and the registry stays on the Mac"
+        "use cleanup review to archive selected plans with one confirmed "
+        "command per plan"
     ),
     OP_REDIRECT_STATUS: (
         "a correction's progress is reported through the operation journal, "
@@ -407,6 +405,7 @@ class RemoteProvider:
         supported = set(_STORE_OPERATIONS)
         if self._reads is not None:
             supported.update(DETAIL_OPERATIONS)
+            supported.add(OP_ARCHIVE_LIST)
         if self._mutations is not None:
             supported.update(MUTATION_METHODS)
         if self._uploads is not None:
@@ -417,6 +416,7 @@ class RemoteProvider:
         if self._reads is None:
             for operation_name in DETAIL_OPERATIONS:
                 reasons.setdefault(operation_name, _NO_READ_LANE)
+            reasons.setdefault(OP_ARCHIVE_LIST, _NO_READ_LANE)
         if self._mutations is None:
             for operation_name in MUTATION_METHODS:
                 reasons.setdefault(operation_name, _NO_SUBMISSION_LANE)
@@ -439,6 +439,8 @@ class RemoteProvider:
             return self._redeem(call)
         if operation in DETAIL_OPERATIONS:
             return self._detail(call, DETAIL_OPERATIONS[operation])
+        if operation == OP_ARCHIVE_LIST:
+            return self._archive_list(call)
         if operation in MUTATION_METHODS:
             return self._submit(call, MUTATION_METHODS[operation])
         handler = _STORE_OPERATIONS.get(operation)
@@ -748,6 +750,83 @@ class RemoteProvider:
 
     # -- Mutations ----------------------------------------------------------
 
+    def _archive_list(self, call: Call) -> Response:
+        """Read the Mac archive in bounded pages; retain none of its paths."""
+        operation_id = call.optional_query("operation_id")
+        if operation_id is not None:
+            record = self._store.operation(operation_id)
+            if record is None or record.get("method") not in (
+                METHOD_ARCHIVE_RESTORE,
+                METHOD_ARCHIVE_DELETE,
+                METHOD_ARCHIVE_SETTINGS,
+            ):
+                raise HttpRefusal(404, "not-found", "archive operation not found")
+            return Response.success(reason="ok", operation=export_operation(record))
+        lane = self._reads
+        if lane is None:
+            raise HttpRefusal(503, "operation-unavailable", _NO_READ_LANE)
+        entries: list[dict[str, Any]] = []
+        metadata: dict[str, Any] = {}
+        offset = 0
+        observed_at: float | None = None
+        for _ in range(50):
+            answer = lane.fetch(
+                detail="archive", plan_key="", offset=offset, now=self._clock()
+            )
+            if not answer.answered:
+                return _read_response(answer)
+            rows = list(answer.entries)
+            if not rows or "archive_metadata" not in rows[0]:
+                raise HttpRefusal(
+                    502, "invalid-archive-read", "the Mac returned no archive metadata"
+                )
+            page_meta = rows[0]["archive_metadata"]
+            if not isinstance(page_meta, Mapping):
+                raise HttpRefusal(
+                    502,
+                    "invalid-archive-read",
+                    "the Mac returned malformed archive metadata",
+                )
+            if metadata and metadata != dict(page_meta):
+                raise HttpRefusal(
+                    409,
+                    "archive-changed",
+                    "the archive changed during this read; refresh it",
+                )
+            metadata = dict(page_meta)
+            entries.extend(dict(row) for row in rows[1:])
+            observed_at = answer.observed_at
+            if answer.next_offset is None:
+                break
+            if answer.next_offset <= offset:
+                raise HttpRefusal(
+                    502, "invalid-archive-read", "archive pagination did not advance"
+                )
+            offset = answer.next_offset
+        else:
+            raise HttpRefusal(
+                503, "archive-too-large", "the archive exceeds the bounded read window"
+            )
+        candidate_ids = [
+            row["archive_id"]
+            for row in entries
+            if row.get("cleanup_state") == "eligible"
+        ]
+        return Response.success(
+            reason="ok",
+            entries=entries,
+            archive_retention_days=metadata.get("archive_retention_days"),
+            archive_cleanup={
+                "candidate_ids": candidate_ids,
+                "candidate_count": len(candidate_ids),
+                "undated_count": metadata.get("undated_count", 0),
+                "entry_count": len(entries),
+                "retention_days": metadata.get("archive_retention_days"),
+            },
+            warnings=[],
+            observed_at=observed_at,
+        )
+
     def _submit(self, call: Call, method: str) -> Response:
         """Admit one mutation, journal it, and hand it down. Never carry it out.
 
@@ -832,15 +911,57 @@ class RemoteProvider:
                 "remote launch uses the Mac's default profile; profile overrides "
                 "are available on the local Workbench"
             )
-        target: dict[str, Any] = {"plan_key": call.require_string("plan_key")}
+        if method in (METHOD_ARCHIVE_RESTORE, METHOD_ARCHIVE_DELETE):
+            if method == METHOD_ARCHIVE_RESTORE:
+                archive_id = call.require_string("archive_id")
+            else:
+                try:
+                    ids = archive_rules.require_archive_ids(
+                        call.body.get("archive_ids")
+                    )
+                    archive_rules.require_count_confirmation(
+                        ids, call.body.get("confirm_count")
+                    )
+                except archive_rules.ArchiveRequestError as error:
+                    raise invalid_request(error.message) from error
+                if len(ids) != 1:
+                    raise invalid_request(
+                        "remote purge accepts one archive entry per command"
+                    )
+                archive_id = ids[0]
+            if not archive_rules.valid_archive_id(archive_id):
+                raise invalid_request("invalid archive_id")
+            target: dict[str, Any] = {"archive_id": archive_id}
+        elif method == METHOD_ARCHIVE_SETTINGS:
+            try:
+                days = archive_rules.require_retention_days(
+                    call.body.get("archive_retention_days")
+                )
+            except archive_rules.ArchiveRequestError as error:
+                raise invalid_request(error.message) from error
+            target = {"archive": "settings"}
+        else:
+            target = {"plan_key": call.require_string("plan_key")}
         # A launch or archive acts on a plan at rest. It has no run key to
         # carry, including for a plan that has never run. The existing journal
         # column is filled from the real plan key at admission, but the wire
         # target remains plan-scoped and never claims a run exists.
         run_key = call.optional_string("run_key")
-        if method not in (METHOD_LAUNCH, METHOD_PLAN_ARCHIVE):
+        if method not in (
+            METHOD_LAUNCH,
+            METHOD_PLAN_ARCHIVE,
+            METHOD_ARCHIVE_RESTORE,
+            METHOD_ARCHIVE_DELETE,
+            METHOD_ARCHIVE_SETTINGS,
+        ):
             run_key = call.require_string("run_key")
-        if run_key and method not in (METHOD_LAUNCH, METHOD_PLAN_ARCHIVE):
+        if run_key and method not in (
+            METHOD_LAUNCH,
+            METHOD_PLAN_ARCHIVE,
+            METHOD_ARCHIVE_RESTORE,
+            METHOD_ARCHIVE_DELETE,
+            METHOD_ARCHIVE_SETTINGS,
+        ):
             target["run_key"] = run_key
         for name in ("run_id", "question_id", "session_id"):
             value = call.optional_string(name)
@@ -852,6 +973,8 @@ class RemoteProvider:
             "operation_id": operation_id,
             "target": target,
         }
+        if method == METHOD_ARCHIVE_SETTINGS:
+            payload["archive_retention_days"] = days
         for name in ("reply_ref", "action_token", "bridge_token", "harness", "reason"):
             value = call.optional_string(name)
             if value is not None:
@@ -1018,6 +1141,8 @@ def _submission(request: MutationRequest, method: str) -> dict[str, Any]:
         value = getattr(request, name, None)
         if value:
             payload[name] = value
+    if request.archive_retention_days is not None:
+        payload["archive_retention_days"] = request.archive_retention_days
     return payload
 
 

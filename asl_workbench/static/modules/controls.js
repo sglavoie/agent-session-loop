@@ -91,6 +91,16 @@ export async function handleLaunchClick() {
   if (!routePlanId()) return;
   clearFormErrors("wb-profile-form-errors");
   showControlsFeedback("", "");
+  if (state.capabilities?.mode === "remote") {
+    await runMutation({
+      action: "launch",
+      path: "/api/launch",
+      body: planBody({}),
+      subject: "the launch with the Mac default profile",
+      feedback: showControlsFeedback,
+    });
+    return;
+  }
   const payload = readProfileFormPayload();
   const errors = validateLaunchPayload(payload);
   if (errors.length > 0) {
@@ -110,11 +120,7 @@ export async function handleLaunchClick() {
   await runMutation({
     action: "launch",
     path: "/api/launch",
-    body: planBody(
-      state.capabilities && state.capabilities.mode === "remote"
-        ? {}
-        : { profile: payload.profile }
-    ),
+    body: planBody({ profile: payload.profile }),
     feedback: showControlsFeedback,
     describe: (answer) => {
       if (answer.outcome !== OUTCOME_RESULT) return null;

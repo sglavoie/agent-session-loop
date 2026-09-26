@@ -2375,3 +2375,131 @@ a:hover {
 .wb-history-row[data-outcome="completed"] .wb-badge {
   color: var(--wb-success);
 }
+
+/* Workbench surface: clear hierarchy for queue review and archive work. */
+:root {
+  --wb-bg: #0b1220;
+  --wb-bg-elev: #121d2d;
+  --wb-bg-row: #172438;
+  --wb-bg-row-alt: #172438;
+  --wb-border: #2b3b51;
+  --wb-text: #edf3fa;
+  --wb-text-dim: #aebed0;
+  --wb-text-faint: #8195ad;
+  --wb-accent: #70c8ee;
+  --wb-accent-soft: rgba(112, 200, 238, 0.14);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --wb-bg: #f1f5f9;
+    --wb-bg-elev: #fff;
+    --wb-bg-row: #fff;
+    --wb-bg-row-alt: #fff;
+    --wb-border: #cfdae5;
+    --wb-text: #172638;
+    --wb-text-dim: #4d6073;
+    --wb-text-faint: #687d92;
+    --wb-accent: #126a95;
+    --wb-accent-soft: rgba(18, 106, 149, 0.1);
+  }
+}
+
+html, body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.wb-header {
+  padding: 16px clamp(16px, 3vw, 40px);
+  background: var(--wb-bg-elev);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+}
+.wb-header__brand { font-size: 19px; letter-spacing: 0.015em; }
+.wb-header__subtitle { font-size: 16px; }
+.wb-filters, .wb-controls-bar, .wb-cleanup-bar {
+  padding-left: clamp(16px, 3vw, 40px);
+  padding-right: clamp(16px, 3vw, 40px);
+}
+.wb-controls-bar { gap: 12px 18px; padding-top: 14px; padding-bottom: 14px; }
+.wb-controls-bar__search input[type="search"],
+.wb-controls-bar__sort select, .wb-controls-bar__facet select {
+  min-height: 38px;
+  border-radius: 8px;
+  padding: 7px 10px;
+}
+.wb-button, .wb-chip { border-radius: 8px; min-height: 34px; }
+.wb-button:focus-visible, .wb-chip:focus-visible, .wb-row:focus-visible,
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--wb-accent);
+  outline-offset: 2px;
+}
+.wb-queue { gap: 10px; padding: clamp(12px, 2vw, 24px); }
+.wb-row {
+  padding: 16px 18px;
+  border-radius: 12px;
+  gap: 9px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+}
+.wb-row:hover { border-color: var(--wb-text-faint); }
+.wb-row__label { font-size: 15px; }
+.wb-row__path, .wb-detail__path, .wb-archive-row__path {
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.wb-row__facts, .wb-preview__facts { gap: 8px 18px; }
+.wb-row__facts dt, .wb-preview__facts dt { font-size: 11px; }
+.wb-row__facts dd, .wb-preview__facts dd { font-size: 13px; }
+.wb-detail { padding: clamp(16px, 2.5vw, 32px); gap: 16px; }
+.wb-detail__label { font-size: clamp(20px, 2vw, 28px); }
+.wb-panel { padding: 18px 20px; gap: 12px; border-radius: 12px; }
+.wb-panel__title { font-size: 13px; color: var(--wb-text); }
+.wb-archive-row { border-radius: 10px; padding: 14px; }
+
+.wb-cleanup-review {
+  margin: 16px clamp(16px, 3vw, 40px);
+  padding: 20px;
+  border: 1px solid var(--wb-warning);
+  border-radius: 12px;
+  background: var(--wb-bg-elev);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.12);
+}
+.wb-cleanup-review__head, .wb-cleanup-review__actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.wb-cleanup-review__head h2 { margin: 0; font-size: 18px; }
+.wb-cleanup-review__head p { margin: 4px 0 0; color: var(--wb-text-dim); }
+.wb-cleanup-review__list {
+  max-height: 300px;
+  overflow: auto;
+  list-style: none;
+  padding: 0;
+  margin: 16px 0;
+  border: 1px solid var(--wb-border);
+  border-radius: 8px;
+}
+.wb-cleanup-review__list li {
+  display: grid;
+  gap: 2px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--wb-border);
+}
+.wb-cleanup-review__list li:last-child { border-bottom: 0; }
+.wb-cleanup-review__list small { color: var(--wb-text-dim); }
+.wb-cleanup-review__actions { justify-content: flex-end; }
+
+@media (min-width: 960px) {
+  .wb-shell[data-viewport="desktop"] { grid-template-columns: minmax(360px, 36%) minmax(0, 1fr); }
+  .wb-shell[data-viewport="desktop"] .wb-queue { max-height: calc(100vh - 160px); top: 0; }
+}
+@media (max-width: 640px) {
+  .wb-header { padding: 12px 16px; }
+  .wb-header__subtitle { display: none; }
+  .wb-controls-bar__search { flex-basis: 100%; }
+  .wb-row { padding: 14px; }
+  .wb-cleanup-review { padding: 16px; }
+  .wb-cleanup-review__head { flex-wrap: wrap; }
+}

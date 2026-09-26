@@ -104,6 +104,9 @@ from .observation import (
 from .operations import (
     FORBIDDEN_PERSISTED_KEYS,
     MAX_OPERATION_ID_CHARS,
+    METHOD_ARCHIVE_DELETE,
+    METHOD_ARCHIVE_RESTORE,
+    METHOD_ARCHIVE_SETTINGS,
     OPERATION_ACCEPTED,
     OPERATION_CONSUMED,
     OPERATION_DETAIL_CODES,
@@ -518,8 +521,18 @@ DEADLINE_KINDS: frozenset[str] = frozenset({KIND_REQUEST})
 #: The plan or run an envelope is about, kept in one nested object so no
 #: top-level payload name collides with a storage column.
 TARGET_SHAPE = _Shape(
-    required=frozenset({"plan_key"}),
-    optional=frozenset({"run_key", "run_id", "question_id", "session_id"}),
+    required=frozenset(),
+    optional=frozenset(
+        {
+            "plan_key",
+            "run_key",
+            "run_id",
+            "question_id",
+            "session_id",
+            "archive",
+            "archive_id",
+        }
+    ),
 )
 
 _SHARED_REQUEST_OPTIONAL = frozenset({"reason"})
@@ -551,7 +564,15 @@ REQUEST_SHAPES: Mapping[str, _Shape] = {
     REQUEST_MUTATE: _Shape(
         required=frozenset({"request", "operation_id", "method", "target"}),
         optional=_SHARED_REQUEST_OPTIONAL
-        | frozenset({"action_token", "reply_ref", "bridge_token", "harness"}),
+        | frozenset(
+            {
+                "action_token",
+                "reply_ref",
+                "bridge_token",
+                "harness",
+                "archive_retention_days",
+            }
+        ),
     ),
 }
 
@@ -957,7 +978,21 @@ def assert_no_body(document: Any, *, where: str) -> None:
 def _validate_target(value: Any, where: str) -> None:
     target = _mapping(value, where)
     check_shape(target, TARGET_SHAPE, where)
-    _key(target["plan_key"], f"{where}.plan_key")
+    subjects = [
+        name for name in ("plan_key", "archive", "archive_id") if name in target
+    ]
+    if len(subjects) != 1:
+        raise _fail(ERROR_INVALID_FIELD, where, "exactly one subject is required")
+    if "plan_key" in target:
+        _key(target["plan_key"], f"{where}.plan_key")
+    if "archive" in target:
+        _word(target["archive"], f"{where}.archive", ("list", "settings"))
+    if "archive_id" in target:
+        _identifier(target["archive_id"], f"{where}.archive_id")
+    if "plan_key" not in target and any(
+        name in target for name in ("run_key", "run_id", "question_id", "session_id")
+    ):
+        raise _fail(ERROR_INVALID_FIELD, where, "run selectors require a plan_key")
     _optional(target, "run_key", where, _key)
     _optional(target, "run_id", where, _identifier)
     _optional(target, "question_id", where, _identifier)
@@ -996,7 +1031,19 @@ def _validate_request(payload: Mapping[str, Any], where: str) -> str:
         ):
             raise _fail(ERROR_INVALID_FIELD, where, "window ends before it starts")
     if request == REQUEST_DETAIL:
-        _word(payload["detail"], f"{where}.detail", DETAIL_KINDS)
+        detail = _word(payload["detail"], f"{where}.detail", DETAIL_KINDS)
+        target = payload["target"]
+        if detail == "archive":
+            if target.get("archive") != "list":
+                raise _fail(
+                    ERROR_INVALID_FIELD,
+                    f"{where}.target",
+                    "archive read requires archive=list",
+                )
+        elif "plan_key" not in target:
+            raise _fail(
+                ERROR_INVALID_FIELD, f"{where}.target", "plan read requires plan_key"
+            )
         _optional(
             payload, "artifact", where, lambda v, at: _word(v, at, ARTIFACT_NAMES)
         )
@@ -1018,6 +1065,28 @@ def _validate_request(payload: Mapping[str, Any], where: str) -> str:
         method = payload["method"]
         if method not in OPERATION_METHODS:
             raise _fail(ERROR_FORBIDDEN_METHOD, f"{where}.method", str(method))
+        target = payload["target"]
+        if method in (METHOD_ARCHIVE_RESTORE, METHOD_ARCHIVE_DELETE):
+            if "archive_id" not in target:
+                raise _fail(
+                    ERROR_WRONG_TARGET, f"{where}.target", "archive_id required"
+                )
+        elif method == METHOD_ARCHIVE_SETTINGS:
+            if target.get("archive") != "settings":
+                raise _fail(
+                    ERROR_WRONG_TARGET, f"{where}.target", "archive=settings required"
+                )
+        elif "plan_key" not in target:
+            raise _fail(ERROR_WRONG_TARGET, f"{where}.target", "plan_key required")
+        days = payload.get("archive_retention_days")
+        if method == METHOD_ARCHIVE_SETTINGS:
+            _count(days, f"{where}.archive_retention_days", minimum=1)
+        elif days is not None:
+            raise _fail(
+                ERROR_INVALID_FIELD,
+                f"{where}.archive_retention_days",
+                "only archive settings may carry this",
+            )
         _optional(payload, "action_token", where, _identifier)
         _optional(payload, "reply_ref", where, _identifier)
         _optional(payload, "bridge_token", where, _identifier)
@@ -1254,6 +1323,17 @@ def _validate_detail(payload: Mapping[str, Any], where: str) -> str:
     check_shape(payload, DETAIL_SHAPE, where)
     detail = _word(payload["detail"], f"{where}.detail", DETAIL_KINDS)
     _validate_target(payload["target"], f"{where}.target")
+    if detail == "archive":
+        if payload["target"].get("archive") != "list":
+            raise _fail(
+                ERROR_INVALID_FIELD,
+                f"{where}.target",
+                "archive answer requires archive=list",
+            )
+    elif "plan_key" not in payload["target"]:
+        raise _fail(
+            ERROR_INVALID_FIELD, f"{where}.target", "plan answer requires plan_key"
+        )
     _number(payload["observed_at"], f"{where}.observed_at")
     _word(payload["complete"], f"{where}.complete", COMPLETENESS_LABELS)
     _optional(payload, "artifact", where, lambda v, at: _word(v, at, ARTIFACT_NAMES))

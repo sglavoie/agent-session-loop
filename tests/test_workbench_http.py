@@ -1168,8 +1168,8 @@ class RemoteProviderTests(unittest.TestCase):
         """An unpaired link is true of every operation and explains none of them."""
         provider = self.provider(reads=None, mutations=None)
         self.assertEqual(
-            provider.unavailable("launch"),
-            workbench_service.UNAVAILABLE_REASONS["launch"],
+            provider.unavailable("registry"),
+            workbench_service.UNAVAILABLE_REASONS["registry"],
         )
 
     def test_a_detail_read_becomes_a_bounded_ask(self) -> None:
@@ -1479,6 +1479,7 @@ class RemoteProviderTests(unittest.TestCase):
             | set(workbench_service.MUTATION_METHODS)
             | set(workbench_service.UPLOAD_OPERATIONS)
             | set(workbench_service._STORE_OPERATIONS)
+            | {"archive-list"}
         )
         # `capabilities` is the one operation no provider answers: the
         # application reports *on* the provider rather than asking it.

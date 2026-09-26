@@ -60,6 +60,9 @@ from asl_workbench import operations as portable_operations
 from asl_workbench.details import DetailError
 from asl_workbench.operations import (
     METHOD_ABORT,
+    METHOD_ARCHIVE_DELETE,
+    METHOD_ARCHIVE_RESTORE,
+    METHOD_ARCHIVE_SETTINGS,
     METHOD_LAUNCH,
     METHOD_PLAN_ARCHIVE,
     METHOD_QUESTION_REPLY,
@@ -209,6 +212,17 @@ class AslMutationPerformer:
         have half-happened comes back ``unconfirmed``. The connector turns an
         escaping exception into ``unconfirmed`` too, so the two agree.
         """
+        if request.method in (
+            METHOD_ARCHIVE_RESTORE,
+            METHOD_ARCHIVE_DELETE,
+            METHOD_ARCHIVE_SETTINGS,
+        ):
+            try:
+                return self._archive_collection(request, now=now)
+            except (MutationRefused, workbench_archive.ArchiveRefused) as error:
+                return MutationResult(status=OPERATION_REJECTED, reason=error.reason)
+            except OSError:
+                return MutationResult(status=OPERATION_UNCONFIRMED)
         try:
             plan_dir = self._index.resolve(request.plan_key, now=now)
         except DetailError as error:
@@ -428,6 +442,37 @@ class AslMutationPerformer:
             journal.terminal = True
         return MutationResult(status=OPERATION_CONSUMED)
 
+    def _archive_collection(
+        self, request: MutationRequest, *, now: float
+    ) -> MutationResult:
+        """Run one archive command through a durable collection journal."""
+        journal_subject = workbench.archive_root(self.state_dir)
+        with _journalled(self, request, journal_subject, now=now) as journal:
+            if journal.replayed is not None:
+                return journal.replayed
+            if request.method == METHOD_ARCHIVE_RESTORE:
+                assert request.archive_id is not None
+                workbench_archive.restore_entry(
+                    request.archive_id,
+                    state_dir=self.state_dir,
+                    registry_path=self.registry_path,
+                )
+            elif request.method == METHOD_ARCHIVE_DELETE:
+                assert request.archive_id is not None
+                result = workbench_archive.purge_entries(
+                    [request.archive_id], 1, state_dir=self.state_dir
+                )
+                if result.removed_count != 1:
+                    raise MutationRefused("not-found", "archive entry was not removed")
+            else:
+                assert request.archive_retention_days is not None
+                workbench_archive.set_retention(
+                    request.archive_retention_days,
+                    registry_path=self.registry_path,
+                )
+            journal.terminal = True
+        return MutationResult(status=OPERATION_CONSUMED)
+
     # -- restart ---------------------------------------------------------
     def recover(self, *, now: float) -> list[dict[str, Any]]:
         """Settle and report what a previous connector left open.
@@ -446,7 +491,11 @@ class AslMutationPerformer:
         re-attempted.
         """
         settled: list[dict[str, Any]] = []
-        for plan_key, plan_dir in self._index.items(now=now):
+        subjects = [
+            *self._index.items(now=now),
+            (None, workbench.archive_root(self.state_dir)),
+        ]
+        for plan_key, plan_dir in subjects:
             try:
                 rows = workbench_operations.open_operations(
                     plan_dir, state_dir=self.state_dir
@@ -462,8 +511,12 @@ class AslMutationPerformer:
             if not eligible:
                 continue
             try:
-                reconciled = workbench_operations.reconcile_plan(
-                    plan_dir, state_dir=self.state_dir, now=now
+                reconciled = (
+                    workbench_operations.reconcile_plan(
+                        plan_dir, state_dir=self.state_dir, now=now
+                    )
+                    if plan_key is not None
+                    else []
                 )
             except OSError:
                 reconciled = []
@@ -483,7 +536,7 @@ class AslMutationPerformer:
                             method=str(record.get("method") or "") or None,
                         ),
                         observed_at=now,
-                        target={"plan_key": plan_key},
+                        target={"plan_key": plan_key} if plan_key else None,
                     )
                 )
                 eligible.discard(operation_id)
@@ -520,7 +573,7 @@ class AslMutationPerformer:
                     settlement_payload(
                         settlement,
                         observed_at=now,
-                        target={"plan_key": plan_key},
+                        target={"plan_key": plan_key} if plan_key else None,
                     )
                 )
         return settled

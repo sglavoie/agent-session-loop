@@ -538,3 +538,13 @@ remain active: new changes in unused repositories still reject the turn and
 require a fresh acknowledgement. Legacy and `--commit-at-end` checks retain
 their existing behavior. `asl status --json` exposes preview commands and durable
 recovery progress for operator inspection and supervisor audit.
+
+The remote ASL Workbench now carries plan launch and plan archive commands for
+idle plans, plus archive listing, restore, purge and retention settings. The Pi
+addresses plans and archive entries by opaque keys; the Mac resolves those keys
+and applies the same local safety checks. A remote launch uses the Mac's default
+profile. Cleanup review loads every matching catalog page under one revision,
+then submits one archive command per selected plan and waits for its receipt
+before continuing. The archive view uses the same per-entry receipt rule for
+restore and purge. A pending command is shown as pending until the Mac reports
+its result; an uncertain result stops the batch for operator review.

@@ -1330,7 +1330,9 @@ class ResponderTestCase(unittest.TestCase):
         request: dict[str, Any] = {
             "request": "detail.read",
             "detail": detail,
-            "target": {"plan_key": self.plan_key},
+            "target": {"archive": "list"}
+            if detail == "archive"
+            else {"plan_key": self.plan_key},
         }
         if detail == "logs":
             # A log read selects a stream or an artifact by name; asking for

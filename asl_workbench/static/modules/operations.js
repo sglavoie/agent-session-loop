@@ -294,6 +294,15 @@ export function actionAvailability(name) {
  * two places this interface runs.
  */
 export function applyActionAvailability(root) {
+  const remote = state.capabilities?.mode === "remote";
+  const profile = document.getElementById("wb-profile-panel");
+  if (profile) profile.hidden = remote;
+  const launch = document.getElementById("wb-control-launch");
+  if (launch) {
+    launch.setAttribute("data-enabled-title", remote
+      ? "Launch with the Mac default profile. The Mac checks readiness before starting."
+      : "Launch this plan with the profile below.");
+  }
   const scope = root || document;
   const nodes = scope.querySelectorAll("[data-operation-action]");
   Array.prototype.forEach.call(nodes, (node) => {

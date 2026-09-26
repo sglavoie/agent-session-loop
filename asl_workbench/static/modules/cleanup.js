@@ -8,11 +8,7 @@
 import { apiRequest, OUTCOME_PENDING, OUTCOME_RESULT } from "./api.js";
 import { DAY_MS } from "./constants.js";
 import { planIdOf, planLabel } from "./identity.js";
-import {
-  applyActionAvailability,
-  captureFocus,
-  runMutation,
-} from "./operations.js";
+import { applyActionAvailability, runMutation } from "./operations.js";
 import {
   normalizeThresholdDays,
   persistCleanupMode,
@@ -111,37 +107,42 @@ export function planIsArchivableCandidate(plan) {
   // the operator threshold; plans with no timestamp always qualify. Complete
   // plans age off their completion time (completed_at) while everything else
   // uses last activity, matching the completion-aware oldest sort.
-  if (
-    !plan ||
-    plan.archivable === false ||
-    ["running", "verifying"].includes(plan.primary_state)
-  ) return false;
+  if (!planIsSelectable(plan)) return false;
   const ts = oldestSortTimestampFor(plan);
   if (ts === null) return true;
   const ageDays = (Date.now() - ts) / DAY_MS;
   return ageDays >= state.cleanupThresholdDays;
 }
 
+export function planIsSelectable(plan) {
+  return !!(
+    plan && plan.archivable !== false &&
+    !["running", "verifying"].includes(plan.primary_state)
+  );
+}
+
 export async function selectCandidates() {
   // Fetch every page under one catalog revision. A partial selection is not
   // advertised as "all candidates", and a changed revision is never mixed
   // with entries from the old one.
-  const first = await apiRequest(queueQuery());
-  if (!first || first.ok !== true) {
-    showCleanupFeedback("error", "could not load the plan catalog");
-    return;
-  }
-  const revision = first.catalog_revision || null;
-  const matched = Number.isInteger(first.catalog_matched)
-    ? first.catalog_matched
-    : (Array.isArray(first.plans) ? first.plans.length : 0);
-  const pages = [first];
-  let offset = Array.isArray(first.plans) ? first.plans.length : 0;
+  const initialQuery = queueQuery();
   const selectButton = document.getElementById("wb-cleanup-select-candidates");
   if (selectButton) selectButton.disabled = true;
   try {
+    const first = await apiRequest(initialQuery);
+    if (!first || first.ok !== true || !Array.isArray(first.plans)) {
+      throw new Error("could not load the plan catalog");
+    }
+    const revision = first.catalog_revision || null;
+    const matched = Number.isInteger(first.catalog_matched)
+      ? first.catalog_matched
+      : first.plans.length;
+    const pages = [first];
+    let offset = first.plans.length;
     while (offset < matched) {
-      const page = await apiRequest(queueQuery(offset));
+      const params = new URLSearchParams(initialQuery.split("?")[1] || "");
+      params.set("offset", String(offset));
+      const page = await apiRequest("/api/queue?" + params.toString());
       if (!page || page.ok !== true || !Array.isArray(page.plans) ||
           page.plans.length === 0 || page.catalog_revision !== revision ||
           page.catalog_matched !== matched) {
@@ -176,7 +177,7 @@ export function selectVisibleRows() {
   const visible = state.lastVisiblePlans || [];
   state.cleanupSelectionRevision = state.queueCatalogRevision;
   visible.forEach((plan) => {
-    if (plan && plan.archivable !== false && planIdOf(plan)) {
+    if (planIsSelectable(plan) && planIdOf(plan)) {
       state.cleanupSelection.add(planIdOf(plan));
       state.cleanupCandidates.set(planIdOf(plan), plan);
     }
@@ -243,22 +244,117 @@ export function updateCleanupReview() {
   applyActionAvailability(document.getElementById("wb-cleanup-bar"));
 }
 
-export async function handleBulkArchive() {
-  const planDirs = Array.from(state.cleanupSelection);
-  if (planDirs.length === 0) return;
-  const restoreFocus = captureFocus();
-  const confirmed = window.confirm(
-    "Archive " +
-      planDirs.length +
-      " selected plan(s)? Archived plans move to the Workbench archive and can be restored until retention expires."
-  );
-  restoreFocus();
-  if (!confirmed) return;
+export function handleBulkArchive() {
+  const ids = Array.from(state.cleanupSelection);
+  if (ids.length === 0) return;
+  const panel = document.getElementById("wb-cleanup-review-panel");
+  const list = document.getElementById("wb-cleanup-review-list");
+  const summary = document.getElementById("wb-cleanup-review-summary");
+  if (!panel || !list || !summary) return;
+  list.replaceChildren();
+  ids.forEach((id) => {
+    const plan = state.cleanupCandidates.get(id);
+    const item = document.createElement("li");
+    const title = document.createElement("strong");
+    title.textContent = plan ? planLabel(plan) : id;
+    const detail = document.createElement("small");
+    detail.textContent = plan
+      ? [plan.project_group, plan.primary_state, plan.last_activity_at || "never active"]
+          .filter(Boolean).join(" · ")
+      : id;
+    item.append(title, detail);
+    list.appendChild(item);
+  });
+  summary.textContent = ids.length + " plans selected. Each plan will be checked again on the Mac before it moves to the archive.";
+  panel.hidden = false;
+  state.cleanupReviewOpen = true;
+  panel.scrollIntoView({ block: "nearest" });
+  document.getElementById("wb-cleanup-review-confirm")?.focus();
+}
+
+export function closeCleanupReview() {
+  const panel = document.getElementById("wb-cleanup-review-panel");
+  if (panel) panel.hidden = true;
+  state.cleanupReviewOpen = false;
+  document.getElementById("wb-cleanup-archive")?.focus();
+}
+
+async function waitForArchive(planKey, operationId) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    const body = await apiRequest(
+      "/api/plan?plan_key=" + encodeURIComponent(planKey) +
+      "&operation_id=" + encodeURIComponent(operationId)
+    );
+    const status = body && body.operation && body.operation.status;
+    if (["consumed", "rejected", "expired", "superseded", "unconfirmed", "cancelled"].includes(status)) {
+      return status;
+    }
+  }
+  return "unconfirmed";
+}
+
+export async function performBulkArchive() {
+  const ids = Array.from(state.cleanupSelection);
+  if (!ids.length) return;
+  closeCleanupReview();
+  if (state.cleanupSelectionRevision &&
+      state.queueCatalogRevision !== state.cleanupSelectionRevision) {
+    showCleanupFeedback("error", "the catalog changed; select candidates again before archiving");
+    return;
+  }
   showCleanupFeedback("", "");
+  if (state.capabilities && state.capabilities.mode === "remote") {
+    if (state.queueFreshness !== "live") {
+      showCleanupFeedback("error", "the Mac observation is not live; wait for the connector before archiving");
+      return;
+    }
+    let archived = 0;
+    let failed = 0;
+    for (const id of ids) {
+      showCleanupFeedback("pending", "archiving " + (archived + failed + 1) + " of " + ids.length + "…");
+      const answer = await runMutation({
+        action: "archive-plan",
+        path: "/api/plan/archive",
+        body: { plan_key: id, confirm_plan_key: id },
+        subject: "archive of " + id,
+        planId: id,
+        feedback: () => {},
+      });
+      if (answer && answer.outcome === OUTCOME_PENDING && answer.operation?.id) {
+        let status;
+        try {
+          status = await waitForArchive(id, answer.operation.id);
+        } catch (error) {
+          status = "unconfirmed";
+        }
+        if (status !== "consumed") {
+          failed += 1;
+          showCleanupFeedback("warning", "stopped after " + archived + " archived; " + id + " is " + status + ". Review its receipt before retrying.");
+          break;
+        }
+      } else if (!answer || answer.outcome !== OUTCOME_RESULT) {
+        failed += 1;
+        showCleanupFeedback(
+          "warning",
+          "stopped after " + archived + " archived; " + id + " was not admitted (" +
+            (answer?.error || answer?.reason || "no answer") + ")."
+        );
+        break;
+      }
+      archived += 1;
+      state.cleanupSelection.delete(id);
+      state.cleanupCandidates.delete(id);
+    }
+    updateCleanupReview();
+    if (!failed) showCleanupFeedback("info", "archived " + archived + " plans");
+    refresh();
+    return;
+  }
   const answer = await runMutation({
     action: "archive-plans",
     path: "/api/plans/archive",
-    body: { plan_dirs: planDirs },
+    body: { plan_dirs: ids },
     subject: "the bulk archive",
     feedback: showCleanupFeedback,
     // A bulk archive that completed can still have lost entries on the way, so
@@ -286,6 +382,7 @@ export async function handleBulkArchive() {
   // would need to retry with.
   if (answer && answer.outcome === OUTCOME_RESULT) {
     state.cleanupSelection.clear();
+    state.cleanupCandidates.clear();
     updateCleanupReview();
     refresh();
   }

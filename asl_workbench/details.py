@@ -52,6 +52,7 @@ from .catalog import CACHE_SAFE_FIELDS, PRIVATE_FIELDS, PlanDetail, safe_label
 #: detail view, so a transport that carries a request carries a word from a
 #: closed set rather than a route string a future version may rename.
 DETAIL_KINDS: tuple[str, ...] = (
+    "archive",
     "plan",
     "artifacts",
     "state",

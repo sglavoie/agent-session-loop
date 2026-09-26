@@ -752,6 +752,8 @@ for (const deployment of DEPLOYMENTS) {
       // and says which of the two reasons applies.
       await openQueue(page, deployment);
       const { byOperation } = await capabilities(page);
+      const cleanupAction =
+        deployment.address === "plan_key" ? "plan-archive" : "plans-archive";
       await page.locator("#wb-cleanup-toggle").click();
       const bar = page.locator("#wb-cleanup-bar");
       await expect(bar).toBeVisible();
@@ -760,9 +762,9 @@ for (const deployment of DEPLOYMENTS) {
       await expect(archive).toBeDisabled();
       await expect(archive).toHaveAttribute(
         "data-disabled-reason",
-        byOperation["plans-archive"].available
+        byOperation[cleanupAction].available
           ? "no plans are selected"
-          : byOperation["plans-archive"].reason,
+          : byOperation[cleanupAction].reason,
       );
 
       // Selecting is a read: it fills the review list and arms nothing. The
@@ -771,7 +773,7 @@ for (const deployment of DEPLOYMENTS) {
       await expect(page.locator("#wb-cleanup-count")).not.toContainText(
         "0 plans selected",
       );
-      if (byOperation["plans-archive"].available) {
+      if (byOperation[cleanupAction].available) {
         await expect(archive).toBeEnabled();
       } else {
         // Still shut on the Pi, and now for the mode's reason rather than the
@@ -779,13 +781,52 @@ for (const deployment of DEPLOYMENTS) {
         await expect(archive).toBeDisabled();
         await expect(archive).toHaveAttribute(
           "data-disabled-reason",
-          byOperation["plans-archive"].reason,
+          byOperation[cleanupAction].reason,
         );
       }
       await page.locator("#wb-cleanup-clear").click();
       await expect(page.locator("#wb-cleanup-count")).toContainText(
         "0 plans selected",
       );
+    });
+
+    test("select candidates includes matches beyond the first catalog page", async ({ page }) => {
+      await openQueue(page, deployment);
+      await page.route("**/api/queue?**", async (route) => {
+        const url = new URL(route.request().url());
+        const offset = Number(url.searchParams.get("offset") || 0);
+        const makePlan = (index) => ({
+          plan_key: `candidate-${index}`,
+          display_label: `Candidate ${index}`,
+          primary_state: "ready",
+          archivable: true,
+          last_activity_at: null,
+        });
+        const plans = offset === 0
+          ? Array.from({ length: 200 }, (_, index) => makePlan(index))
+          : [makePlan(200)];
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ok: true,
+            plans,
+            catalog_matched: 201,
+            catalog_revision: "stable-catalog",
+          }),
+        });
+      });
+      await page.locator("#wb-cleanup-toggle").click();
+      await page.locator("#wb-cleanup-select-candidates").click();
+      await expect(page.locator("#wb-cleanup-count")).toContainText("201 plans selected");
+      await expect(page.locator("#wb-cleanup-feedback")).toContainText(
+        "201 old plans selected from 201 matching plans",
+      );
+      const selected = await page.evaluate(async () => {
+        const { state } = await import("/static/modules/state.js");
+        return [...state.cleanupSelection];
+      });
+      expect(selected).toContain("candidate-200");
     });
 
     test("the archive is either browsable or explained, never blank", async ({

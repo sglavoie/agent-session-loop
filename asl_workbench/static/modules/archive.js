@@ -13,7 +13,7 @@
  * number mean something.
  */
 
-import { OUTCOME_RESULT, apiRequest, describeError } from "./api.js";
+import { OUTCOME_PENDING, OUTCOME_RESULT, apiRequest, describeError } from "./api.js";
 import { applyChipPressedState } from "./filters.js";
 import {
   applyActionAvailability,
@@ -280,9 +280,11 @@ export function renderArchiveEntries(entries) {
     setField(
       li,
       "label",
-      entry.summary || displayName(entry.original_plan_dir)
+      entry.summary || displayName(entry.original_plan_dir) || archiveId
     );
     setField(li, "path", entry.original_plan_dir || "");
+    const pathField = li.querySelector('[data-field="path"]');
+    if (pathField) pathField.hidden = !entry.original_plan_dir;
     setField(
       li,
       "archived",
@@ -388,21 +390,42 @@ export function requestArchiveRestore(archiveId) {
   });
 }
 
+async function settledArchiveAnswer(answer) {
+  if (!answer || answer.outcome !== OUTCOME_PENDING) return answer?.outcome === OUTCOME_RESULT;
+  const id = answer.operation?.id;
+  if (!id) return false;
+  try {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      const receipt = await apiRequest("/api/archive?operation_id=" + encodeURIComponent(id));
+      const status = receipt?.operation?.status;
+      if (status === "consumed") return true;
+      if (["rejected", "expired", "superseded", "unconfirmed", "cancelled"].includes(status)) {
+        showArchiveFeedback("error", "operation " + id + " is " + status);
+        return false;
+      }
+    }
+  } catch (error) {
+    showArchiveFeedback("warning", "operation " + id + " is unconfirmed: " + describeError(error));
+    return false;
+  }
+  showArchiveFeedback("warning", "operation " + id + " is still pending; check its receipt before retrying");
+  return false;
+}
+
 export async function handleArchiveRestore(archiveId) {
   if (!archiveId) return;
   showArchiveFeedback("", "");
   const answer = await requestArchiveRestore(archiveId);
-  if (answer && answer.outcome === OUTCOME_RESULT) {
+  if (await settledArchiveAnswer(answer)) {
     showArchiveFeedback("info", "restored " + archiveId);
     loadArchiveView();
   }
 }
 
 export async function handleArchiveRestoreSelected() {
-  // Best-effort bulk restore: copy the selected IDs at click time, confirm
-  // with a plain count prompt (no typed confirmation — that is reserved for
-  // permanent purge), then restore each entry through the single-entry
-  // endpoint and continue past per-entry failures.
+  // Copy selected IDs at click time and restore one at a time. An uncertain
+  // receipt stops the batch so the operator can inspect it before retrying.
   const ids = Array.from(state.archiveSelection).filter(Boolean);
   if (ids.length === 0) return;
   const restoreFocus = captureFocus();
@@ -414,25 +437,20 @@ export async function handleArchiveRestoreSelected() {
   showArchiveFeedback("", "");
   let restored = 0;
   let failed = 0;
-  let unsettled = 0;
   for (const id of ids) {
     const answer = await requestArchiveRestore(id);
-    if (answer && answer.outcome === OUTCOME_RESULT) {
+    if (await settledArchiveAnswer(answer)) {
       restored += 1;
       state.archiveSelection.delete(id);
-    } else if (answer && answer.ok) {
-      // Recorded and not run. Counted apart from a failure, and the entry is
-      // left selected, because nothing about it has moved yet.
-      unsettled += 1;
     } else {
       failed += 1;
+      break;
     }
   }
   const parts = ["restored " + restored];
-  if (unsettled) parts.push(unsettled + " recorded but not yet run");
-  if (failed) parts.push(failed + " failed");
+  if (failed) parts.push("stopped at the first unconfirmed or failed entry");
   showArchiveFeedback(
-    failed > 0 ? "error" : unsettled > 0 ? "pending" : "info",
+    failed > 0 ? "warning" : "info",
     parts.join(", ")
   );
   loadArchiveView();
@@ -484,7 +502,7 @@ export function openArchiveReview(ids, expired) {
     const path = document.createElement("span");
     path.className = "wb-archive-review__path";
     path.textContent = entry.original_plan_dir || "";
-    li.appendChild(path);
+    if (entry.original_plan_dir) li.appendChild(path);
     const expires = document.createElement("span");
     expires.className = "wb-archive-review__expires";
     expires.textContent = "expired: " + formatLastActivity(entry.expires_at);
@@ -541,8 +559,9 @@ export async function handleArchivePurge(archiveIds) {
   );
   restoreFocus();
   if (typed === null) return;
-  const confirmCount = parseInt((typed || "").trim(), 10);
-  if (!Number.isFinite(confirmCount) || confirmCount !== ids.length) {
+  const typedCount = (typed || "").trim();
+  const confirmCount = Number(typedCount);
+  if (!/^\d+$/.test(typedCount) || confirmCount !== ids.length) {
     showArchiveFeedback(
       "error",
       "confirmation count must equal " + ids.length
@@ -550,25 +569,31 @@ export async function handleArchivePurge(archiveIds) {
     return;
   }
   showArchiveFeedback("", "");
-  const answer = await runMutation({
-    action: "archive-purge",
-    path: "/api/archive/delete",
-    body: { archive_ids: ids, confirm_count: confirmCount },
-    subject: "the purge",
-    feedback: showArchiveFeedback,
-  });
-  if (answer && answer.outcome === OUTCOME_RESULT) {
-    const removed =
-      typeof answer.payload.removed_count === "number"
-        ? answer.payload.removed_count
-        : 0;
-    ids.forEach((id) => {
-      state.archiveSelection.delete(id);
-      state.archiveReviewed.delete(String(id));
+  const remote = state.capabilities?.mode === "remote";
+  let removed = 0;
+  for (const id of (remote ? ids : [null])) {
+    const answer = await runMutation({
+      action: "archive-purge",
+      path: "/api/archive/delete",
+      body: remote
+        ? { archive_ids: [id], confirm_count: 1 }
+        : { archive_ids: ids, confirm_count: confirmCount },
+      subject: "the purge",
+      feedback: showArchiveFeedback,
     });
-    showArchiveFeedback("info", "purged " + removed);
-    loadArchiveView();
+    if (!(await settledArchiveAnswer(answer))) {
+      showArchiveFeedback("warning", "purged " + removed + "; stopped at an unconfirmed or failed entry. Check its receipt before retrying.");
+      break;
+    }
+    const completed = remote ? [id] : ids;
+    completed.forEach((done) => {
+      state.archiveSelection.delete(done);
+      state.archiveReviewed.delete(String(done));
+    });
+    removed += remote ? 1 : (answer.payload?.removed_count || 0);
   }
+  if (removed === ids.length) showArchiveFeedback("info", "purged " + removed);
+  loadArchiveView();
 }
 
 export async function handleRetentionSave() {
@@ -590,7 +615,7 @@ export async function handleRetentionSave() {
     subject: "the retention change",
     feedback: showArchiveFeedback,
   });
-  if (answer && answer.outcome === OUTCOME_RESULT) {
+  if (await settledArchiveAnswer(answer)) {
     state.archiveRetentionDays =
       typeof answer.payload.archive_retention_days === "number"
         ? answer.payload.archive_retention_days

@@ -20,7 +20,7 @@ import {
   wireArchiveControls,
   wireEmptyStateActions,
 } from "./modules/archive.js";
-import { wireCleanupControls } from "./modules/cleanup.js";
+import { updateCleanupReview, wireCleanupControls } from "./modules/cleanup.js";
 import { DESKTOP_SHELL_MEDIA_QUERY } from "./modules/constants.js";
 import { wireControls } from "./modules/controls.js";
 import { refreshDetail } from "./modules/detail.js";
@@ -110,7 +110,10 @@ export function init() {
   // Asked once, not awaited: every control works on the assumption that an
   // operation is available until the deployment says otherwise, so the answer
   // narrows the interface rather than unlocking it.
-  loadCapabilities().then(() => applyActionAvailability());
+  loadCapabilities().then(() => {
+    updateCleanupReview();
+    applyActionAvailability();
+  });
   window.addEventListener("hashchange", applyRoute);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") return;

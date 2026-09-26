@@ -64,6 +64,9 @@ from .operations import (
     DETAIL_CONNECTOR_RESTARTED,
     DETAIL_DEADLINE_PASSED,
     METHOD_ABORT,
+    METHOD_ARCHIVE_DELETE,
+    METHOD_ARCHIVE_RESTORE,
+    METHOD_ARCHIVE_SETTINGS,
     METHOD_LAUNCH,
     METHOD_PLAN_ARCHIVE,
     METHOD_REDIRECT,
@@ -167,6 +170,9 @@ DELIVERABLE_METHODS: frozenset[str] = frozenset(
         METHOD_ABORT,
         METHOD_LAUNCH,
         METHOD_PLAN_ARCHIVE,
+        METHOD_ARCHIVE_DELETE,
+        METHOD_ARCHIVE_RESTORE,
+        METHOD_ARCHIVE_SETTINGS,
         METHOD_REDIRECT,
         METHOD_SELECT_HARNESS,
         METHOD_STOP_AFTER_CURRENT,
@@ -245,6 +251,9 @@ class MutationRequest:
     session_id: str | None = None
     harness: str | None = None
     reason: str | None = None
+    archive_id: str | None = None
+    archive: str | None = None
+    archive_retention_days: int | None = None
     #: Where the prose lives, never the prose itself.
     reply_ref: str | None = None
     #: Single-use authority to redeem :attr:`reply_ref`.
@@ -269,6 +278,10 @@ class MutationRequest:
 
     def target(self) -> dict[str, Any]:
         """The submission's target, as the transport's own nested object."""
+        if self.archive_id is not None:
+            return {"archive_id": self.archive_id}
+        if self.archive is not None:
+            return {"archive": self.archive}
         target: dict[str, Any] = {"plan_key": self.plan_key}
         for name in _TARGET_FIELDS:
             value = getattr(self, name)
@@ -399,9 +412,37 @@ def parse_submission(
     target = payload.get("target")
     if not isinstance(target, Mapping):
         raise RemoteActionError(ERROR_WRONG_TARGET, "a submission needs a target")
+    archive_id = _optional_identifier(target, "archive_id")
+    archive = _optional_identifier(target, "archive")
     plan_key = _optional_identifier(target, "plan_key")
-    if plan_key is None:
-        raise RemoteActionError(ERROR_WRONG_TARGET, "a target needs a plan_key")
+    if method in (METHOD_ARCHIVE_RESTORE, METHOD_ARCHIVE_DELETE):
+        if archive_id is None or plan_key is not None or archive is not None:
+            raise RemoteActionError(
+                ERROR_WRONG_TARGET, "archive action needs one archive_id"
+            )
+        plan_key = "archive:" + archive_id
+    elif method == METHOD_ARCHIVE_SETTINGS:
+        if archive != "settings" or plan_key is not None or archive_id is not None:
+            raise RemoteActionError(
+                ERROR_WRONG_TARGET, "archive settings needs archive=settings"
+            )
+        plan_key = "archive:settings"
+    elif plan_key is None or archive_id is not None or archive is not None:
+        raise RemoteActionError(ERROR_WRONG_TARGET, "plan action needs one plan_key")
+    retention_days = payload.get("archive_retention_days")
+    if method == METHOD_ARCHIVE_SETTINGS:
+        if (
+            isinstance(retention_days, bool)
+            or not isinstance(retention_days, int)
+            or retention_days < 1
+        ):
+            raise RemoteActionError(
+                ERROR_FORBIDDEN_METHOD, "archive_retention_days must be positive"
+            )
+    elif retention_days is not None:
+        raise RemoteActionError(
+            ERROR_FORBIDDEN_METHOD, "retention is only for archive settings"
+        )
 
     action_token = _optional_identifier(payload, "action_token") or ""
     reply_ref = _optional_identifier(payload, "reply_ref")
@@ -450,6 +491,9 @@ def parse_submission(
         session_id=_optional_identifier(target, "session_id"),
         harness=harness,
         reason=reason if isinstance(reason, str) and reason.strip() else None,
+        archive_id=archive_id,
+        archive=archive,
+        archive_retention_days=retention_days,
         reply_ref=reply_ref,
         action_token=action_token,
         bridge_token=bridge_token,

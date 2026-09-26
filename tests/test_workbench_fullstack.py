@@ -94,6 +94,7 @@ from agent_session_loop import (
     intervention,
     state,
     workbench,
+    workbench_actions,
     workbench_connector,
     workbench_operations,
     workbench_remote_actions,
@@ -948,6 +949,15 @@ class CorrelatedReadTests(FullStackCase):
 
     reads = True
 
+    def test_remote_archive_listing_is_a_read_with_no_mac_paths(self) -> None:
+        self.publish()
+        status, body = self.request("/api/archive")
+        self.assertEqual(200, status, body)
+        self.assertEqual(2, len(body["entries"]))
+        self.assertEqual(1, body["archive_cleanup"]["candidate_count"])
+        self.assertIn("archive_retention_days", body)
+        self.assertNotIn(str(self.corpus.plan_dirs[0]), json.dumps(body))
+
     def test_an_answer_carries_the_macs_own_material_not_a_translation(self) -> None:
         self.publish()
         status, body = self.request(
@@ -1138,6 +1148,124 @@ class MutationBoundaryTests(FullStackCase):
             )
             found += len(rows)
         return found
+
+
+class ArchiveMutationTests(FullStackCase):
+    """Plan and archive actions settle against the Mac's synthetic corpus."""
+
+    reads = True
+    mutations = True
+
+    def settle(self, operation_id: str) -> dict[str, Any]:
+        self.idle(60.0)
+        self.publish()
+        record = self.store.operation(operation_id)
+        assert record is not None
+        return record
+
+    def test_plan_archive_moves_an_idle_plan_and_can_be_read_back(self) -> None:
+        self.publish()
+        key = self.corpus.plan_keys["bravo"]
+        status, body = self.request(
+            "/api/plan/archive",
+            method="POST",
+            body={
+                "operation_id": "op-archive-bravo",
+                "plan_key": key,
+                "confirm_plan_key": key,
+            },
+        )
+        self.assertEqual(202, status, body)
+        self.assertNotIn("run_key", body["operation"])
+        self.assertEqual(
+            operations.OPERATION_CONSUMED, self.settle("op-archive-bravo")["status"]
+        )
+        self.assertFalse(self.corpus.plan_dir("bravo").exists())
+        status, archive = self.request("/api/archive")
+        self.assertEqual(200, status, archive)
+        self.assertEqual(3, len(archive["entries"]))
+
+    def test_remote_launch_uses_the_mac_default_profile(self) -> None:
+        self.publish()
+        key = self.corpus.plan_keys["bravo"]
+        status, body = self.request(
+            "/api/launch",
+            method="POST",
+            body={"operation_id": "op-launch-bravo", "plan_key": key},
+        )
+        self.assertEqual(202, status, body)
+        fake = mock.Mock(
+            status=operations.OPERATION_CONSUMED,
+            operation={},
+            facts=mock.Mock(run_id=None),
+        )
+        with mock.patch.object(
+            workbench_actions, "launch_run", return_value=fake
+        ) as launch:
+            self.assertEqual(
+                operations.OPERATION_CONSUMED,
+                self.settle("op-launch-bravo")["status"],
+            )
+        self.assertEqual(self.corpus.plan_dir("bravo"), launch.call_args.args[0])
+        self.assertIsNone(launch.call_args.kwargs["profile"])
+
+        status, refusal = self.request(
+            "/api/launch",
+            method="POST",
+            body={
+                "operation_id": "op-launch-override",
+                "plan_key": key,
+                "profile": {"cwd": "/tmp"},
+            },
+        )
+        self.assertEqual(400, status, refusal)
+
+    def test_restore_purge_and_retention_are_receipted(self) -> None:
+        self.publish()
+        archive_id = "20260731T090000Z-delta"
+        status, body = self.request(
+            "/api/archive/restore",
+            method="POST",
+            body={"operation_id": "op-restore-delta", "archive_id": archive_id},
+        )
+        self.assertEqual(202, status, body)
+        self.assertEqual(
+            operations.OPERATION_CONSUMED, self.settle("op-restore-delta")["status"]
+        )
+        status, receipt = self.request("/api/archive?operation_id=op-restore-delta")
+        self.assertEqual(200, status, receipt)
+        self.assertEqual("consumed", receipt["operation"]["status"])
+
+        archive_id = "20260916T090000Z-echo"
+        status, body = self.request(
+            "/api/archive/delete",
+            method="POST",
+            body={
+                "operation_id": "op-purge-echo",
+                "archive_ids": [archive_id],
+                "confirm_count": 1,
+            },
+        )
+        self.assertEqual(202, status, body)
+        self.assertEqual(
+            operations.OPERATION_CONSUMED, self.settle("op-purge-echo")["status"]
+        )
+        self.assertFalse(
+            (workbench.archive_root(self.corpus.state_dir) / archive_id).exists()
+        )
+
+        status, body = self.request(
+            "/api/archive/settings",
+            method="POST",
+            body={"operation_id": "op-retention", "archive_retention_days": 45},
+        )
+        self.assertEqual(202, status, body)
+        self.assertEqual(
+            operations.OPERATION_CONSUMED, self.settle("op-retention")["status"]
+        )
+        status, archive = self.request("/api/archive")
+        self.assertEqual(200, status, archive)
+        self.assertEqual(45, archive["archive_retention_days"])
 
 
 # ---------------------------------------------------------------------------
