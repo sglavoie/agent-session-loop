@@ -22,7 +22,9 @@ It owns four things that the run loop used to hold inline:
   :func:`_workspace_guard_violation_summary` name at most three subjects and a
   count, so a pause reason stays a sentence rather than a payload dump.
   :func:`_workspace_unavailable_message` supplies their shared explanation,
-  distinguishing external write authority from repository capture failures.
+  distinguishing external write authority from repository capture failures;
+  :func:`_legacy_write_guard_failure_message` applies the same explanation to
+  a failed legacy verdict and names repository-set violations.
 * **Scope-repair freshness.** :func:`_session_expansion_evidence` fingerprints an
   expansion file, :func:`_latest_workspace_scope_repair_requirement` recovers the
   latest uncleared scope violation for a session from the event log,
@@ -244,13 +246,20 @@ def _unavailable_path_and_reason(raw: Any) -> tuple[Any, Any]:
 def _workspace_unavailable_summary(
     unavailable: Mapping[str, Any],
     *,
-    workspace: workspaces.ResolvedWorkspace,
+    workspace: workspaces.ResolvedWorkspace | None,
 ) -> str:
-    """Name repositories and failing nodes in a bounded pause suffix."""
-    aliases = {
-        repository.repository.path: repository.alias
-        for repository in workspace.repositories
-    }
+    """Name repositories and failing nodes in a bounded pause suffix.
+
+    A legacy run has no resolved workspace, so its rows are named by key.
+    """
+    aliases = (
+        {
+            repository.repository.path: repository.alias
+            for repository in workspace.repositories
+        }
+        if workspace is not None
+        else {}
+    )
     named: list[str] = []
     for repository in sorted(unavailable):
         node, reason = _unavailable_path_and_reason(unavailable[repository])
@@ -268,7 +277,7 @@ def _workspace_unavailable_summary(
 def _workspace_unavailable_message(
     unavailable: Mapping[str, Any],
     *,
-    workspace: workspaces.ResolvedWorkspace,
+    workspace: workspaces.ResolvedWorkspace | None,
 ) -> str:
     """Explain the guard's blindness without inventing a repository failure."""
     external = False
@@ -287,6 +296,37 @@ def _workspace_unavailable_message(
     return "; ".join(explanations) + _workspace_unavailable_summary(
         unavailable, workspace=workspace
     )
+
+
+def _legacy_write_guard_failure_message(evidence: Mapping[str, Any]) -> str:
+    """Explain a failed legacy write-guard verdict from its recorded evidence.
+
+    The legacy guard fails on unavailable rows (repository capture failures,
+    unobserved repositories, or external paths with unresolved write
+    authority) and on repository-set violations. Each is named as recorded,
+    so an external write is never reported as a repository or history capture
+    failure (ASI-153).
+    """
+    explanations: list[str] = []
+    unavailable = evidence.get("unavailable")
+    if isinstance(unavailable, Mapping) and unavailable:
+        explanations.append(_workspace_unavailable_message(unavailable, workspace=None))
+    violations = evidence.get("violations")
+    if isinstance(violations, list) and violations:
+        named = [
+            f"{violation.get('repository')} ({violation.get('kind')})"
+            for violation in violations
+            if isinstance(violation, Mapping)
+        ]
+        suffix = f": {', '.join(named[:3])}" if named else ""
+        if len(named) > 3:
+            suffix += f" (+{len(named) - 3} more)"
+        explanations.append(f"repository set changed outside the legacy scope{suffix}")
+    if not explanations:
+        return (
+            "legacy repository scope or history evidence could not be captured safely"
+        )
+    return "; ".join(explanations)
 
 
 def _workspace_write_guard_evidence(

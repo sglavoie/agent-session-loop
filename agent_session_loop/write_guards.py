@@ -463,10 +463,8 @@ def _enforce_legacy_implementation_write_guard(
         return False
 
     reason = events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE
-    failure_note = (
-        "implementation write guard unavailable; legacy repository scope or "
-        "history evidence could not be captured safely"
-    )
+    explanation = workspace_evidence._legacy_write_guard_failure_message(evidence)
+    failure_note = f"implementation write guard unavailable; {explanation}"
     revert_target = after if after is not None else before
     reverted = handoff_guards._revert_session_status_to_pending(
         revert_target,
@@ -502,7 +500,7 @@ def _enforce_legacy_implementation_write_guard(
         reason=reason,
         message=(
             f"implementation write guard unavailable after {session_label}; "
-            "legacy repository scope or history evidence could not be captured safely"
+            f"{explanation}"
         ),
         details={
             **session_details,

@@ -42,6 +42,7 @@ MOVED_SYMBOLS = (
     "_unavailable_path_and_reason",
     "_workspace_unavailable_summary",
     "_workspace_unavailable_message",
+    "_legacy_write_guard_failure_message",
     "_workspace_write_guard_evidence",
     "_legacy_implementation_write_guard_evidence",
     "_workspace_guard_violation_summary",
@@ -262,6 +263,69 @@ class WorkspaceUnavailableMessageTests(unittest.TestCase):
         )
         self.assertIn("external paths have unresolved write authority", message)
         self.assertIn("repository evidence could not be captured safely", message)
+
+
+class LegacyWriteGuardFailureMessageTests(unittest.TestCase):
+    # The unavailable row the legacy guard recorded in run
+    # 20260925T235115074418Z-36414 (ASI-153).
+    EXTERNAL_ROW = {
+        "[outside-approved-roots:32c8ea14cfd9ac96]": {
+            "after": {
+                "kind": "file",
+                "mtime_ns": 1790380682505749000,
+                "present": True,
+                "sha256": (
+                    "a9b2e5e08c1dce6e64276ea5365fe804f633d1a9e165a72fb4e8f02ec705803f"
+                ),
+                "size": 26380,
+            },
+            "reason": "external-write-unclassified",
+            "surface": "absolute-path",
+        }
+    }
+
+    def test_an_external_write_is_not_a_repository_or_history_failure(self) -> None:
+        message = workspace_evidence._legacy_write_guard_failure_message(
+            {"unavailable": self.EXTERNAL_ROW, "violations": []}
+        )
+        self.assertEqual(
+            "external paths have unresolved write authority: "
+            "[outside-approved-roots:32c8ea14cfd9ac96] (external-write-unclassified)",
+            message,
+        )
+
+    def test_a_repository_capture_failure_is_still_named(self) -> None:
+        message = workspace_evidence._legacy_write_guard_failure_message(
+            {"unavailable": {".": {"after": {"reason": "unreadable"}}}}
+        )
+        self.assertEqual(
+            "repository evidence could not be captured safely: . (unreadable)",
+            message,
+        )
+
+    def test_repository_set_violations_are_named_rather_than_called_blindness(
+        self,
+    ) -> None:
+        message = workspace_evidence._legacy_write_guard_failure_message(
+            {
+                "unavailable": {},
+                "violations": [
+                    {"kind": "repository-added", "repository": "vendor/lib"}
+                ],
+            }
+        )
+        self.assertEqual(
+            "repository set changed outside the legacy scope: "
+            "vendor/lib (repository-added)",
+            message,
+        )
+        self.assertNotIn("could not be captured", message)
+
+    def test_evidence_naming_no_cause_keeps_the_generic_explanation(self) -> None:
+        self.assertIn(
+            "could not be captured safely",
+            workspace_evidence._legacy_write_guard_failure_message({}),
+        )
 
 
 class WorkspaceGuardViolationSummaryTests(unittest.TestCase):
