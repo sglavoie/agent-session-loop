@@ -1015,6 +1015,18 @@ class _RecordingHarness:
 
 
 class RestrictedAuditTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Every harness here is a recording fake, so whether its real CLI is on
+        # this machine's PATH must not decide the verdict: without this, a host
+        # missing one CLI reports that harness `harness-not-installed`.
+        patcher = mock.patch.object(
+            harnesses.HarnessAdapter,
+            "resolve_executable",
+            lambda adapter: f"/fake/bin/{adapter.executable}",
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _role(self, harness: str) -> AuditRole:
         return AuditRole(
             harness=harness,
