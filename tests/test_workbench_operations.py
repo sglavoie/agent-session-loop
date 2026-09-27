@@ -688,11 +688,22 @@ class DurableJournalTests(JournalFixture, unittest.TestCase):
         self.assertEqual(inode, self.journal_path.stat().st_ino)
 
     def test_export_drops_the_local_identifiers(self) -> None:
-        self.admit("op-1")
-        exported = workbench_operations.export_operations(
-            self.canonical, state_dir=self.state_dir
+        self.admit("op-1", method=operations.METHOD_ABORT)
+        self.admit("op-2")
+        exported = {
+            record["operation_id"]: record
+            for record in workbench_operations.export_operations(
+                self.canonical, state_dir=self.state_dir
+            )
+        }
+        self.assertEqual(set(operations.OPERATION_EXPORT_FIELDS), set(exported["op-1"]))
+        # A plan-scoped operation (here a launch) has no run: its journal row
+        # stores the plan key in the run_key column, which export must not
+        # present as a run identity.
+        self.assertEqual(
+            set(operations.OPERATION_EXPORT_FIELDS) - {"run_key"},
+            set(exported["op-2"]),
         )
-        self.assertEqual(set(operations.OPERATION_EXPORT_FIELDS), set(exported[0]))
 
 
 class PlanLockTests(JournalFixture, unittest.TestCase):

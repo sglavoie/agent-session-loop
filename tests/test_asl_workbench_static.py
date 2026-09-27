@@ -896,8 +896,9 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn('shell.setAttribute("data-route"', decoded)
         self.assertIn('shell.setAttribute("data-viewport"', decoded)
         # Desktop detail mode keeps the queue refresh loop running so the
-        # left pane stays current alongside the open plan.
-        self.assertIn("if (desktop) {", decoded)
+        # left pane stays current alongside the open plan -- except for a
+        # question-bound route, which shows only the notification's question.
+        self.assertIn("if (desktop && !next.questionId) {", decoded)
         self.assertIn("function shouldPollQueue()", decoded)
         should_poll_match = _re.search(
             r"function shouldPollQueue\(\)\s*\{.*?"
@@ -929,9 +930,12 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn("scheduleRefresh()", viewport_body)
         self.assertIn("stopQueueTimer()", viewport_body)
         # Mobile detail is a single-pane route; queue-only controls must hide
-        # with the filters and queue rows below the 960px breakpoint.
+        # with the filters and queue rows below the 960px breakpoint, and on a
+        # question-bound route at any width.
         self.assertIn('document.getElementById("wb-controls-bar")', decoded)
-        self.assertIn("if (controlsEl) controlsEl.hidden = !desktop;", decoded)
+        self.assertIn(
+            "if (controlsEl) controlsEl.hidden = questionBound || !desktop;", decoded
+        )
         self.assertIn("if (controlsEl) controlsEl.hidden = false;", decoded)
         # The legacy "hide everything on detail" branch must be gone:
         # applyRoute should no longer unconditionally hide the queue/filters.
@@ -1480,7 +1484,9 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         )
         self.assertIsNotNone(load_match)
         load_body = load_match.group(0)
-        self.assertNotIn("wb-reply-text", load_body)
+        # Focusing the textarea for a notification-linked question is allowed;
+        # writing its value is what would discard an in-progress draft.
+        self.assertNotRegex(load_body, r"textarea\.value\s*=")
         refresh_match = _re.search(
             r"async function refreshDetail\(\)\s*\{.*?\n\}",
             decoded,
@@ -2186,15 +2192,15 @@ class WorkbenchHardeningTests(ShellSourceMixin, unittest.TestCase):
             'restoreSelected.addEventListener("click", handleArchiveRestoreSelected)',
             decoded,
         )
-        # Session 17 split the tally three ways: a restore the far side only
-        # recorded is neither a success nor a failure, and reporting it as
-        # either would be the overclaim the four outcomes exist to prevent.
+        # Bulk restore waits for each entry to settle and stops at the first
+        # one that did not, so nothing is ever counted as restored on the
+        # strength of a restore the far side only recorded.
         self.assertIn('const parts = ["restored " + restored];', decoded)
         self.assertIn(
-            'if (unsettled) parts.push(unsettled + " recorded but not yet run");',
+            'if (failed) parts.push("stopped at the first unconfirmed or failed '
+            'entry");',
             decoded,
         )
-        self.assertIn('if (failed) parts.push(failed + " failed");', decoded)
         # Both row-level and bulk restore keep posting the single-entry payload.
         self.assertIn("archive_id: archiveId", decoded)
         # oldest-activity sort mode + comparator that treats missing
@@ -2215,7 +2221,7 @@ class WorkbenchHardeningTests(ShellSourceMixin, unittest.TestCase):
         ):
             self.assertIn(endpoint, decoded, msg=f"missing endpoint: {endpoint}")
         # Bulk archive posts the selected plan directories.
-        self.assertIn("plan_dirs: planDirs", decoded)
+        self.assertIn("body: { plan_dirs: ids },", decoded)
         # Permanent purge requires a typed confirm_count that must equal the
         # number of selected entries.
         self.assertIn("confirm_count: confirmCount", decoded)

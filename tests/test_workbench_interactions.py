@@ -102,15 +102,9 @@ LOCAL_UNAVAILABLE: frozenset[str] = frozenset({"command-redeem", "ingest"})
 #: change to what the Pi is for, and should have to be typed here.
 REMOTE_UNAVAILABLE: frozenset[str] = frozenset(
     {
-        "archive-delete",
-        "archive-list",
-        "archive-restore",
-        "archive-settings",
         "command-redeem",
         "conversation-recovery",
         "ingest",
-        "launch",
-        "plan-archive",
         "plans-archive",
         "redirect-status",
         "registry",
@@ -123,14 +117,9 @@ REMOTE_UNAVAILABLE: frozenset[str] = frozenset(
 #: refusal under test is the capability one rather than a validation error
 #: reached first. Mapped to the body a caller would have sent.
 UNAVAILABLE_PROBES: tuple[tuple[str, str, dict[str, Any]], ...] = (
-    ("launch", "/api/launch", {}),
     ("registry-pin", "/api/registry/pin", {}),
     ("registry-unpin", "/api/registry/unpin", {}),
-    ("plan-archive", "/api/plan/archive", {}),
     ("plans-archive", "/api/plans/archive", {}),
-    ("archive-restore", "/api/archive/restore", {}),
-    ("archive-delete", "/api/archive/delete", {}),
-    ("archive-settings", "/api/archive/settings", {}),
 )
 
 
@@ -476,7 +465,7 @@ class CapabilityContractTests(InteractionDeploymentTestCase):
     def test_the_pi_declines_exactly_the_operations_it_cannot_reach(self) -> None:
         _, body = _request(self.deployments.remote, "/api/capabilities")
         self.assertEqual(
-            REMOTE_UNAVAILABLE, set(body.get("unavailable_operations") or [])
+            set(REMOTE_UNAVAILABLE), set(body.get("unavailable_operations") or [])
         )
 
     def test_nothing_is_declined_without_a_sentence_to_show_for_it(self) -> None:
@@ -521,9 +510,9 @@ class CapabilityContractTests(InteractionDeploymentTestCase):
         # nothing. This states that dependency rather than relying on it.
         status, refusal = _request(
             self.deployments.remote,
-            "/api/archive/delete",
+            "/api/plans/archive",
             method="POST",
-            body={"archive_ids": "not-a-list", "confirm_count": "not-a-number"},
+            body={"plan_keys": "not-a-list", "confirm_count": "not-a-number"},
         )
         self.assertEqual(503, status, refusal)
         self.assertEqual("operation-unavailable", refusal.get("reason"))
@@ -668,14 +657,13 @@ class ArchiveReviewTests(InteractionDeploymentTestCase):
         self.assertEqual("confirmation-mismatch", body.get("reason"))
         self.assertEqual(before, set(self.listing()))
 
-    def test_the_pi_never_offers_the_archive_at_all(self) -> None:
-        # Not "refuses the purge": the archive lives on the Mac, so even the
-        # listing is unavailable, and the interface has to say that rather than
-        # render an empty archive that reads as an archive with nothing in it.
+    def test_the_pi_lists_the_same_archive_the_mac_holds(self) -> None:
+        # The archive lives on the Mac; remote mode reaches it rather than
+        # serving a copy, so both deployments list exactly the same entries.
         status, body = _request(self.deployments.remote, "/api/archive")
-        self.assertEqual(503, status, body)
-        self.assertEqual("operation-unavailable", body.get("reason"))
-        self.assertTrue(str(body.get("error") or "").strip())
+        self.assertEqual(200, status, body)
+        remote = {str(entry["archive_id"]) for entry in body.get("entries") or ()}
+        self.assertEqual(set(self.listing()), remote)
 
 
 if __name__ == "__main__":

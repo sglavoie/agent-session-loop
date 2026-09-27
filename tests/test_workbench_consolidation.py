@@ -8,6 +8,7 @@ the historical deployment evidence.
 
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 
@@ -16,6 +17,11 @@ from tests import workbench_acceptance
 
 SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
 MONITORING_RELATIVE = Path("services") / "pi-monitoring"
+#: The Pi-side half of the retirement: its presence is what says the Pi
+#: repository has been consolidated, so the audit below has something to judge.
+RETIREMENT_MARKER = MONITORING_RELATIVE / "docs" / "workbench" / "ownership.md"
+#: Set to require the audit, turning a pending Pi-side retirement into a failure.
+REQUIRED_ENV = "ASL_WORKBENCH_CONSOLIDATION"
 CANONICAL_BROWSER_ENTRY_POINT = "scripts:asl_workbench/static/index.html"
 CANONICAL_BROWSER_DIRECTORY = "scripts:asl_workbench/static/"
 CANONICAL_BROWSER_MODULES = Path("asl_workbench/static/modules")
@@ -82,17 +88,44 @@ def _browser_documents(
     )
 
 
+def _required() -> bool:
+    value = os.environ.get(REQUIRED_ENV, "").strip().lower()
+    return value not in ("", "0", "false", "no", "off")
+
+
+def _consolidated_pi_repository() -> Path | None:
+    """The Pi checkout once its half of the retirement exists, else ``None``.
+
+    Located the way the acceptance evidence is, by the override or beside this
+    checkout, but judged by the retirement marker rather than by deployment
+    evidence, which is a different gate with its own lifecycle.
+    """
+    candidates = []
+    if override := os.environ.get(workbench_acceptance.ENV_PI_CHECKOUT):
+        candidates.append(Path(override))
+    candidates.append(
+        SCRIPTS_ROOT.parent / workbench_acceptance.PI_REPOSITORY_RELATIVE_PATH
+    )
+    for candidate in candidates:
+        if (candidate / RETIREMENT_MARKER).is_file():
+            return candidate
+    return None
+
+
 class ConsolidationFixture(unittest.TestCase):
     pi_repository: Path
     monitoring: Path
 
     def setUp(self) -> None:
-        repository = workbench_acceptance.locate_pi_repository(SCRIPTS_ROOT)
+        repository = _consolidated_pi_repository()
         if repository is None:
-            self.fail(
-                "the registered Pi repository is required for the final "
-                "cross-repository consolidation audit"
+            detail = (
+                "the Pi-side Workbench retirement has not landed: no reachable "
+                f"Pi checkout carries {RETIREMENT_MARKER.as_posix()}"
             )
+            if _required():
+                self.fail(f"{REQUIRED_ENV} is set but {detail}")
+            self.skipTest(f"{detail}; set {REQUIRED_ENV}=1 to require this audit")
         self.pi_repository = repository
         self.monitoring = repository / MONITORING_RELATIVE
 

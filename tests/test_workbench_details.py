@@ -74,6 +74,7 @@ DEAD_PID = _WORKBENCH_DEAD_PID
 #: without being added here is a route nobody proved is observational, and the
 #: route-coverage test below fails on exactly that.
 DETAIL_ROUTES: tuple[tuple[str, dict[str, str]], ...] = (
+    ("/api/archive", {}),
     ("/api/plan", {}),
     ("/api/artifacts", {}),
     ("/api/state", {}),
