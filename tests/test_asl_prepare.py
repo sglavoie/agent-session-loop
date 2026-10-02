@@ -427,7 +427,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(plans.PlanError, "location"):
             prepare.parse_validator_output(payload)
 
-    def test_to_be_created_claim_must_not_carry_line(self) -> None:
+    def test_to_be_created_claim_drops_a_supplied_line(self) -> None:
         payload = _validator_payload(
             claims=[
                 {
@@ -439,7 +439,93 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
                 }
             ]
         )
-        with self.assertRaisesRegex(plans.PlanError, "to-be-created"):
+
+        claim = prepare.parse_validator_output(payload).sessions[0].claims[0]
+
+        self.assertTrue(claim.to_be_created)
+        self.assertIsNone(claim.line)
+
+    def test_claim_line_degrades_to_null_or_leading_integer(self) -> None:
+        cases = ((7, 7), ("42", 42), ("42-50", 42), (0, None), (-3, None),
+                 ("n/a", None), (True, None), (1.5, None), (None, None))
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                payload = _validator_payload(
+                    claims=[
+                        {
+                            "claim": "x",
+                            "claim_type": "P",
+                            "location": "a.py",
+                            "line": raw,
+                            "to_be_created": False,
+                        }
+                    ]
+                )
+
+                claim = prepare.parse_validator_output(payload).sessions[0].claims[0]
+
+                self.assertEqual(expected, claim.line)
+
+    def test_registered_contract_problem_accepts_repo(self) -> None:
+        session = _validator_payload(
+            claims=[],
+            contract_checked=True,
+            contract_problems=[{"message": "m", "suggested_fix": "f", "repo": "SVC"}],
+        )["sessions"][0]
+
+        parsed = prepare.parse_validator_output(self._registered_envelope(session))
+
+        self.assertEqual("m", parsed.sessions[0].contract_problems[0].message)
+
+    def _scripted_validator(self, *messages: str) -> tuple[object, list[str]]:
+        prompts: list[str] = []
+        replies = iter(messages)
+
+        def run_harness(name: str, **kwargs: object) -> harnesses.HarnessResult:
+            prompts.append(str(kwargs["prompt"]))
+            return harnesses.HarnessResult(
+                argv=[name], returncode=0, stdout="", stderr="",
+                last_message=next(replies), name=name,
+            )
+
+        packet = mock.Mock(codebase_root="/repo", plan_dir="/plan")
+        packet.render.return_value = "PACKET"
+        launch = mock.patch.object(
+            prepare.harnesses, "run_harness", side_effect=run_harness
+        )
+        return (launch, packet), prompts
+
+    def test_launch_validator_repairs_a_rejected_shape(self) -> None:
+        bad = _validator_payload(issues=[{"issue_type": "bogus"}])
+        good = _validator_payload()
+        (launch, packet), prompts = self._scripted_validator(
+            json.dumps(bad), json.dumps(good)
+        )
+
+        with launch, redirect_stderr(io.StringIO()) as stderr:
+            payload = prepare._launch_validator("claude", packet)
+
+        self.assertEqual(good, payload)
+        self.assertEqual(2, len(prompts))
+        self.assertIn("issue_type", prompts[1])
+        self.assertIn(json.dumps(bad), prompts[1])
+        self.assertIn("repair it (1/2)", stderr.getvalue())
+
+    def test_launch_validator_gives_up_after_bounded_repairs(self) -> None:
+        (launch, packet), prompts = self._scripted_validator("nope", "nope", "nope")
+
+        with launch, redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(plans.PlanError, "invalid JSON"):
+                prepare._launch_validator("claude", packet)
+
+        self.assertEqual(1 + prepare.VALIDATOR_REPAIR_ATTEMPTS, len(prompts))
+
+    def test_legacy_contract_problem_rejects_repo(self) -> None:
+        payload = _validator_payload(
+            contract_checked=True,
+            contract_problems=[{"message": "m", "suggested_fix": "f", "repo": "SVC"}],
+        )
+        with self.assertRaisesRegex(plans.PlanError, "unknown keys: repo"):
             prepare.parse_validator_output(payload)
 
     def test_rejects_unknown_issue_type(self) -> None:

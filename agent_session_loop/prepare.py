@@ -595,11 +595,18 @@ def _require_choice(value: object, *, label: str, choices: tuple[str, ...]) -> s
     return str(value)
 
 
-def _parse_line_number(value: object, *, label: str) -> int | None:
-    if value is None:
-        return None
+def _parse_line_number(value: object) -> int | None:
+    """Read a claim's advisory line pointer, degrading anything unusable to null.
+
+    The line is evidence, not a gate: null is always legal, so a validator that
+    writes ``"42"``, ``"42-50"``, ``0``, or a line on to-be-created code loses
+    only the pointer instead of failing its whole batch.
+    """
+    if isinstance(value, str):
+        match = re.match(r"\s*(\d+)", value)
+        value = int(match.group(1)) if match else None
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise _fail(f"{label} must be a positive integer or null")
+        return None
     return value
 
 
@@ -627,13 +634,12 @@ def _parse_claim(payload: object, *, label: str, repo_required: bool) -> Verifie
         data.get("to_be_created"), label=f"{label} 'to_be_created'"
     )
     if to_be_created:
-        if data.get("line") is not None:
-            raise _fail(f"{label} is to-be-created and must not carry a line")
+        # Code that does not exist yet has no line; drop one if supplied.
         location = str(data.get("location") or TO_BE_CREATED_LOCATION)
         line = None
     else:
         location = _require_text(data.get("location"), label=f"{label} 'location'")
-        line = _parse_line_number(data.get("line"), label=f"{label} 'line'")
+        line = _parse_line_number(data.get("line"))
     return VerifiedClaim(
         claim=_require_text(data.get("claim"), label=f"{label} 'claim'"),
         claim_type=_require_choice(
@@ -733,9 +739,16 @@ def _parse_dependency(
     )
 
 
-def _parse_contract_problem(payload: object, *, label: str) -> ContractProblem:
+def _parse_contract_problem(
+    payload: object, *, label: str, repo_required: bool
+) -> ContractProblem:
+    # Registered contract checks carry a repo, so validators echo it here;
+    # accept it like every other entry, though the problem does not record it.
     data = _require_object(
-        payload, label=label, allowed_keys=("message", "suggested_fix")
+        payload,
+        label=label,
+        allowed_keys=("message", "suggested_fix")
+        + (("repo",) if repo_required else ()),
     )
     return ContractProblem(
         message=_require_text(data.get("message"), label=f"{label} 'message'"),
@@ -820,7 +833,11 @@ def _parse_session_validation(
         data.get("contract_checked"), label=f"{label} 'contract_checked'"
     )
     contract_problems = tuple(
-        _parse_contract_problem(item, label=f"{label} contract problem #{position + 1}")
+        _parse_contract_problem(
+            item,
+            label=f"{label} contract problem #{position + 1}",
+            repo_required=repo_required,
+        )
         for position, item in enumerate(
             _require_list(
                 data.get("contract_problems"), label=f"{label} 'contract_problems'"
@@ -1131,7 +1148,8 @@ class ValidationTaskPacket:
                     "(path/signature/field/dependency/behavior/naming/"
                     "removal). Only include claims you verified against the "
                     "codebase; mark code the session will create with "
-                    "to_be_created=true. An R claim covers behavior the "
+                    "to_be_created=true and line=null. line is otherwise a "
+                    "single positive integer or null. An R claim covers behavior the "
                     "session removes or alters: put the origin rationale "
                     "(commit, blame range, or covering test) in its location, "
                     "and raise removal-unjustified when no rationale can be "
@@ -1171,7 +1189,8 @@ class ValidationTaskPacket:
                     (
                         "- Every claims[], issues[], details[], patterns[], "
                         "dependencies[], and corrections[] entry must carry repo, "
-                        "using one of that session's declared read aliases."
+                        "using one of that session's declared read aliases; "
+                        "contract_problems[] entries may carry it too."
                     ),
                     (
                         "- Use repository-relative locations in those entries. "
@@ -2459,6 +2478,35 @@ def _extract_json_object(text: str) -> object:
         ) from error
 
 
+VALIDATOR_REPAIR_ATTEMPTS = 2
+
+
+def _validator_repair_prompt(
+    packet: ValidationTaskPacket, rejected_text: str, error: PlanError
+) -> str:
+    """Ask a validator to fix only the output shape the parser rejected."""
+    return "\n".join(
+        [
+            packet.render(),
+            "",
+            "## Repair your previous answer",
+            (
+                "Your previous answer, below, was rejected by the fail-closed "
+                f"output parser: {error}"
+            ),
+            (
+                "Do not investigate the codebase again. Return the complete "
+                "corrected JSON object only, changing nothing but what the "
+                "output schema above requires, and check every other entry "
+                "for the same mistake."
+            ),
+            "",
+            "Previous answer:",
+            rejected_text.strip(),
+        ]
+    )
+
+
 def _launch_validator(
     harness_name: str,
     packet: ValidationTaskPacket,
@@ -2467,7 +2515,53 @@ def _launch_validator(
     effort: str | None = None,
     timeout: int | None = None,
 ) -> object:
-    """Run one validator as a read-only harness turn and decode its JSON."""
+    """Run one validator turn, repairing a rejected output shape in place.
+
+    Validators sometimes return sound findings in a slightly wrong shape (a
+    missing ``repo``, a stray key). A rejected answer goes back to the same
+    harness with the parser's exact error, at most
+    :data:`VALIDATOR_REPAIR_ATTEMPTS` times; the last answer is returned either
+    way, so the caller's fail-closed parse still has the final word.
+    """
+    prompt = packet.render()
+    for attempt in range(VALIDATOR_REPAIR_ATTEMPTS + 1):
+        text = _run_validator_turn(
+            harness_name,
+            packet,
+            prompt,
+            model=model,
+            effort=effort,
+            timeout=timeout,
+        )
+        try:
+            payload = _extract_json_object(text)
+            parse_validator_output(payload)
+        except PlanError as error:
+            if attempt == VALIDATOR_REPAIR_ATTEMPTS:
+                raise
+            print(
+                f"asl prepare: validator output rejected ({error}); asking "
+                f"{harness_name} to repair it "
+                f"({attempt + 1}/{VALIDATOR_REPAIR_ATTEMPTS})",
+                file=sys.stderr,
+                flush=True,
+            )
+            prompt = _validator_repair_prompt(packet, text, error)
+            continue
+        return payload
+    raise AssertionError("unreachable")
+
+
+def _run_validator_turn(
+    harness_name: str,
+    packet: ValidationTaskPacket,
+    prompt: str,
+    *,
+    model: str | None,
+    effort: str | None,
+    timeout: int | None,
+) -> str:
+    """Run one read-only validator harness turn and return its last message."""
     read_roots = tuple(
         dict.fromkeys((Path(packet.codebase_root), Path(packet.plan_dir))).keys()
     )
@@ -2478,7 +2572,7 @@ def _launch_validator(
                 harness_name,
                 cwd=Path(packet.codebase_root),
                 plan_dir=None,
-                prompt=packet.render(),
+                prompt=prompt,
                 # Preparation validation is research-only. It must never
                 # inherit the implementation worker's unsafe-bypass setting.
                 unsafe_bypass=False,
@@ -2501,7 +2595,7 @@ def _launch_validator(
         raise PlanError(message)
     if not result.last_message.strip():
         raise PlanError(f"validator harness {harness_name!r} returned no output")
-    return _extract_json_object(result.last_message)
+    return result.last_message
 
 
 def _strip_contract_lines(lines: list[str]) -> list[str]:
