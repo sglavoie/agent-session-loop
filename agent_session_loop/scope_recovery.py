@@ -369,6 +369,15 @@ def _external_proposal(
             _refs(fp)
     if set(current) != set(after) or set(before) - set(after):
         raise RecoveryError("repository topology changed outside the retained incident")
+    state_path = event_path.parent / events.STATE_FILE_NAME
+    run_config = (
+        json.loads(state_path.read_text()).get("run_config", {})
+        if state_path.exists()
+        else {}
+    )
+    # Aliases the operator told the run someone else may change: their
+    # independent dirt and movement are expected, not evidence against the turn.
+    external = frozenset(run_config.get("allow_external_changes") or ())
     owners = {}
     head_refs = {}
     targets = []
@@ -391,14 +400,15 @@ def _external_proposal(
         head_refs[key] = head_ref.stdout.strip() if head_ref.returncode == 0 else None
         if key not in before and linked is None:
             raise RecoveryError("added registered roots cannot be acknowledged")
+        tolerated = repository.alias in external
         if repository.alias in aliases:
-            if repository.alias in scope.reads and _dirty_paths(fp):
+            if repository.alias in scope.reads and _dirty_paths(fp) and not tolerated:
                 blockers.append(f"needed read-only repository {key} is dirty")
             continue
         if repository.alias not in scope.writes:
-            if fp != after[key] or before.get(key) != after[key]:
+            if not tolerated and (fp != after[key] or before.get(key) != after[key]):
                 blockers.append(f"unacknowledged repository changes in {key}")
-            if repository.alias in scope.reads and _dirty_paths(fp):
+            if repository.alias in scope.reads and _dirty_paths(fp) and not tolerated:
                 blockers.append(f"needed read-only repository {key} is dirty")
             continue
         dirty = _dirty_paths(after[key])
@@ -431,15 +441,10 @@ def _external_proposal(
         or any(v.get("alias") not in aliases for v in violations)
     ):
         blockers.append("selected aliases do not cover the original violations")
-    state_path = event_path.parent / events.STATE_FILE_NAME
-    run_config = (
-        json.loads(state_path.read_text()).get("run_config", {})
-        if state_path.exists()
-        else {}
-    )
     run_policy = {
         key: run_config.get(key)
         for key in (
+            "allow_external_changes",
             "commit_mode",
             "review_guard_exclude",
             "review_guard_include_ignored",

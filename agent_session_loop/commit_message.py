@@ -524,12 +524,30 @@ def stage_all(cwd: Path) -> subprocess.CompletedProcess[str]:
 
 
 def stage_paths(cwd: Path, paths: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    """Stage only ``paths``, leaving every other change unstaged."""
+    """Stage only ``paths``, leaving every other change unstaged.
+
+    A path whose deletion is already staged (``git rm``) is in neither the
+    worktree nor the index, so ``git add`` would reject it with "did not match
+    any files" although there is nothing left to stage. Such paths are skipped;
+    the staged deletion is still committed.
+    """
+    paths = [path for path in paths if not _deletion_already_staged(cwd, path)]
     if not paths:
         return subprocess.CompletedProcess(
             ["git", "add", "--"], 0, stdout="", stderr=""
         )
     return _git(cwd, ["add", "--", *paths])
+
+
+def _deletion_already_staged(cwd: Path, path: str) -> bool:
+    target = cwd / path
+    if target.exists() or target.is_symlink():
+        return False
+    in_index = _git(cwd, ["ls-files", "--", path])
+    if in_index.returncode != 0 or in_index.stdout.strip():
+        return False
+    in_head = _git(cwd, ["ls-tree", "--name-only", "HEAD", "--", path])
+    return in_head.returncode == 0 and in_head.stdout.strip() == path
 
 
 def dequalify_paths(qualified: Sequence[str]) -> list[str]:

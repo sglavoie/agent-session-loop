@@ -397,6 +397,29 @@ class GitSurfaceTests(unittest.TestCase):
         self.assertEqual(self.staged_names(), ["also.txt", "keep.txt"])
         self.assertIn("untouched.txt", git_stdout(self.repo, "status", "--porcelain"))
 
+    def test_stage_paths_accepts_a_deletion_already_staged(self) -> None:
+        self.write("gone.txt", "gone\n")
+        self.write("worktree_gone.txt", "gone too\n")
+        commit_message.stage_all(self.repo)
+        git_stdout(self.repo, "commit", "-qm", "seed")
+        git_stdout(self.repo, "rm", "-q", "gone.txt")
+        (self.repo / "worktree_gone.txt").unlink()
+        self.write("changed.txt", "changed\n")
+
+        result = commit_message.stage_paths(
+            self.repo, ["gone.txt", "worktree_gone.txt", "changed.txt"]
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.staged_names(), ["changed.txt", "gone.txt", "worktree_gone.txt"]
+        )
+
+    def test_stage_paths_still_rejects_an_unknown_path(self) -> None:
+        result = commit_message.stage_paths(self.repo, ["never-existed.txt"])
+
+        self.assertNotEqual(result.returncode, 0)
+
     def test_stage_paths_with_no_paths_stages_nothing(self) -> None:
         self.write("keep.txt", "keep\n")
 

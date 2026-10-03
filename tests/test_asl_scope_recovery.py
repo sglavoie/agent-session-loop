@@ -504,6 +504,33 @@ class ExternalRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(1, self.invoke()[0])
 
+    def test_allowed_external_alias_may_be_a_dirty_read(self):
+        self.session.write_text(
+            self.session.read_text().replace(
+                "**Reads repositories**: notes", "**Reads repositories**: notes, pi"
+            )
+        )
+        # The rejected turn read pi too.
+        self.guard["read_aliases"] = ["notes", "pi"]
+        self.pause()
+        _, preview = self.invoke()
+        self.assertIn(
+            "needed read-only repository pi is dirty", preview["remaining_blockers"]
+        )
+        state_path = self.event_path.parent / events.STATE_FILE_NAME
+        state_path.write_text(
+            json.dumps({"run_config": {"allow_external_changes": ["pi"]}})
+        )
+        code, preview = self.invoke()
+        self.assertEqual(0, code, preview)
+        self.assertEqual([], preview["remaining_blockers"])
+        self.assertEqual(["pi"], preview["run_policy"]["allow_external_changes"])
+        code, result = self.invoke(*self.accept_args(preview))
+        self.assertEqual(0, code, result)
+        self.assertEqual(
+            "independent dirt\n", (self.repos["pi"] / "independent.txt").read_text()
+        )
+
     def test_written_tree_cleanliness_and_legacy_end_behavior(self):
         from agent_session_loop import preflight, review_guard, verification
 
@@ -853,3 +880,52 @@ class RecoveryJournalIncidentTests(unittest.TestCase):
             plans.inspect_plan(self.plan_dir), self.state_dir
         )
         self.assertIsNone(payload["external_change_recovery"])
+
+
+class ExternalChangeCommitTargetTests(unittest.TestCase):
+    """An allowed external alias's recorded change is never a commit target."""
+
+    def test_session_commit_ignores_allowed_external_change(self):
+        from agent_session_loop import commit_settlement, verification
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        workspace = root / "workspace"
+        specs = (
+            ("notes", "notes", "git@github.com:example/notes.git"),
+            ("pi", "pi", "git@github.com:example/pi.git"),
+        )
+        repos = init_multi_repo_workspace(workspace, specs)
+        plan = root / "plan"
+        write_multi_repo_plan(plan, ("pending",), specs=specs)
+        registry = plans.read_repository_registry(plan)
+        resolved = workspaces.resolve_workspace(workspace, registry)
+
+        def capture():
+            return repository_evidence.capture_registered_snapshot(
+                workspace, plan, ("notes", "pi")
+            )
+
+        before = capture()
+        (repos["notes"] / "README.md").write_text("session work\n")
+        (repos["pi"] / "independent.txt").write_text("someone else\n")
+        guard = workspace_evidence._workspace_write_guard_evidence(
+            workspace=resolved,
+            scope=plans.SessionScope(reads=("notes", "pi"), writes=("notes",)),
+            comparison=repository_evidence.compare_workspace_snapshots(
+                before, capture()
+            ),
+            exclude=(),
+            include_ignored=False,
+            external_change_aliases=frozenset({"pi"}),
+        )
+        self.assertTrue(guard["passed"])
+        self.assertIn("pi", {r["alias"] for r in guard["changed"].values()})
+
+        targets = commit_settlement._registered_session_commit_targets(
+            verification.VerificationContext(root=resolved.root, workspace=resolved),
+            guard,
+        )
+
+        self.assertEqual(["notes"], [target["alias"] for target in targets])

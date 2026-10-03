@@ -544,13 +544,24 @@ def _registered_session_commit_targets(
     changed = guard.get("changed")
     if not isinstance(changed, Mapping):
         raise RunError("workspace write guard changed evidence is malformed")
-    for raw in changed.values():
+    # The guard keeps recorded-but-not-written changes in `changed` too: an
+    # --allow-external-changes alias someone else edited, and remote-ref-only
+    # drift. Neither is the session's work, so neither is committed here.
+    unowned = {
+        str(key)
+        for field in ("external_changes", "remote_ref_drift")
+        if isinstance(guard.get(field), Mapping)
+        for key in guard[field]
+    }
+    for key, raw in changed.items():
         if not isinstance(raw, Mapping):
             raise RunError("workspace write guard change record is malformed")
         alias = raw.get("alias")
         paths = raw.get("qualified_paths")
         if not isinstance(alias, str) or not isinstance(paths, list):
             raise RunError("workspace write guard change record is malformed")
+        if key in unowned and alias not in aliases:
+            continue
         changed_aliases.add(alias)
         qualified[alias] = [str(path) for path in paths]
         bucket = staging.setdefault(alias, [])
