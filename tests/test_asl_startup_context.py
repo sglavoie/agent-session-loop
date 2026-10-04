@@ -30,7 +30,7 @@ CODEX_DEFAULTS = "\n".join(
 
 CLAUDE_DEFAULTS = "\n".join(
     [
-        "@RTK.md",
+        "`sed` here is GNU `sed`.",
         "",
         "<!-- CODEGRAPH_START -->",
         "## CodeGraph",
@@ -83,7 +83,7 @@ class StartupContextRendererTests(unittest.TestCase):
             self.assertTrue(claude.startswith(CLAUDE_DEFAULTS.rstrip("\n")), claude)
             self.assertIn("<!-- CODEGRAPH_END -->", codex)
             self.assertIn("<!-- CODEGRAPH_END -->", claude)
-            self.assertIn("@RTK.md", claude)
+            self.assertIn("`sed` here is GNU `sed`.", claude)
 
     def test_rerendering_replaces_the_block_without_appending_a_second_one(
         self,
