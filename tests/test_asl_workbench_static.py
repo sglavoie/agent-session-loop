@@ -776,6 +776,29 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn("reconcileSelectedPlan", decoded)
         self.assertIn('row.setAttribute("data-selected"', decoded)
 
+    def test_queue_query_parameters_are_ones_the_server_reads(self) -> None:
+        # The chip once went out as `group=` while the server read `filter=`,
+        # so it was silently dropped: picking "complete" with show-completed
+        # off returned no completed rows while the chip counted them.
+        import inspect
+        import re
+
+        from asl_workbench import overview
+
+        source = (workbench_server.STATIC_DIR / "modules" / "queue.js").read_text(
+            encoding="utf-8"
+        )
+        body = source.split("export function queueQuery", 1)[1].split("\n}\n", 1)[0]
+        sent = set(re.findall(r'params\.set\(\s*"([^"]+)"', body))
+        read = set(
+            re.findall(
+                r'(?:optional_query|non_negative_int|bounded_int)\(\s*"([^"]+)"',
+                inspect.getsource(overview.parse_filters),
+            )
+        )
+        self.assertIn("filter", sent)
+        self.assertEqual(set(), sent - read, f"sent={sorted(sent)} read={sorted(read)}")
+
     def test_app_js_queue_prefs_do_not_persist_reply_text(self) -> None:
         # Privacy regression: the new queue UI preference keys must not
         # accidentally include reply text, and the reply textarea must

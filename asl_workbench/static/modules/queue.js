@@ -71,7 +71,7 @@ export function stopQueueTimer() {
 export function queueQuery(offset = 0) {
   const params = new URLSearchParams();
   if (state.activeFilter && state.activeFilter !== "all") {
-    params.set("group", state.activeFilter);
+    params.set("filter", state.activeFilter);
   }
   if (state.projectFilter) params.set("project", state.projectFilter);
   if (state.searchText) params.set("q", state.searchText);
