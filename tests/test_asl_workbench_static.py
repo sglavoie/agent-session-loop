@@ -9,6 +9,7 @@ import errno
 import io
 import json
 import os
+import re
 import signal
 import tempfile
 import threading
@@ -914,6 +915,32 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn("export const EVENT_SUMMARY_LIMIT = 4;", decoded)
         self.assertIn("details.open = openEventPayloads.has(key);", decoded)
         self.assertIn("export function formatEventTime(value)", decoded)
+
+    def test_detail_jump_bar_links_every_panel(self) -> None:
+        # The detail view runs past 6,000px. A sticky bar under the header
+        # jumps to each panel; every link must name a panel that exists, and
+        # links scroll rather than navigate because the hash is the route.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/")
+        html = body.decode("utf-8")
+        nav = html.split('id="wb-detail-nav"', 1)[1].split("</nav>", 1)[0]
+        targets = re.findall(r'data-nav-target="([^"]+)"', nav)
+        self.assertGreaterEqual(len(targets), 10)
+        for target in targets:
+            self.assertIn(f'id="{target}"', html, msg=target)
+        self.assertNotIn("href=", nav)
+
+        decoded = self._shell_source(server)
+        self.assertIn("export function wireDetailNav()", decoded)
+        self.assertIn("export function syncDetailNav()", decoded)
+        self.assertIn("button.hidden = !isShowing(target);", decoded)
+        self.assertIn("wireDetailNav();", decoded)
+        self.assertIn("    syncDetailNav();\n  }\n}", decoded)
+
+        css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+        bar = css.split(".wb-detail-nav {", 1)[1].split("}", 1)[0]
+        self.assertIn("position: sticky;", bar)
+        self.assertIn("top: var(--wb-header-height, 0px);", bar)
 
     def test_status_badge_does_not_wrap(self) -> None:
         css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")

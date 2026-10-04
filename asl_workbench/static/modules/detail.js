@@ -7,6 +7,7 @@
  */
 
 import { apiRequest, describeError } from "./api.js";
+import { syncDetailNav } from "./detail_nav.js";
 import {
   DETAIL_REFRESH_INTERVAL_MS,
   HARNESS_NAMES,
@@ -166,6 +167,7 @@ export async function refreshDetail() {
     } else {
       restoreDetailScroll(scrollSnapshot);
     }
+    syncDetailNav();
   }
 }
 

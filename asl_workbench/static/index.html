@@ -302,6 +302,21 @@
         </div>
       </div>
 
+      <nav class="wb-detail-nav" id="wb-detail-nav" aria-label="Jump to section">
+        <button type="button" data-nav-target="wb-recovery-panel">recovery</button>
+        <button type="button" data-nav-target="wb-redirect-panel">correction</button>
+        <button type="button" data-nav-target="wb-operations-panel">unconfirmed</button>
+        <button type="button" data-nav-target="wb-controls-panel">controls</button>
+        <button type="button" data-nav-target="wb-profile-panel">profile</button>
+        <button type="button" data-nav-target="wb-sessions-panel">sessions</button>
+        <button type="button" data-nav-target="wb-active-panel">turn</button>
+        <button type="button" data-nav-target="wb-verification-panel">verification</button>
+        <button type="button" data-nav-target="wb-events-panel">events</button>
+        <button type="button" data-nav-target="wb-logs-panel">logs</button>
+        <button type="button" data-nav-target="wb-progress-panel">journal</button>
+        <button type="button" data-nav-target="wb-artifacts-panel">artifacts</button>
+      </nav>
+
       <section
         class="wb-panel wb-recovery"
         id="wb-recovery-panel"
@@ -578,7 +593,7 @@
         <ul class="wb-operations__list" id="wb-operations-list"></ul>
       </section>
 
-      <section class="wb-panel">
+      <section class="wb-panel" id="wb-controls-panel">
         <h2 class="wb-panel__title">Controls</h2>
         <div id="wb-controls-feedback" class="wb-controls__feedback" hidden></div>
         <div class="wb-controls" id="wb-controls">
@@ -817,14 +832,14 @@
         </form>
       </section>
 
-      <section class="wb-panel">
+      <section class="wb-panel" id="wb-sessions-panel">
         <h2 class="wb-panel__title">Sessions</h2>
         <ul class="wb-session-list" id="wb-detail-sessions">
           <li class="wb-empty">loading…</li>
         </ul>
       </section>
 
-      <section class="wb-panel">
+      <section class="wb-panel" id="wb-active-panel">
         <h2 class="wb-panel__title">Active turn</h2>
         <dl id="wb-detail-active" class="wb-kv">
           <div><dt>session</dt><dd data-field="session">-</dd></div>
@@ -838,35 +853,35 @@
         </dl>
       </section>
 
-      <section class="wb-panel">
+      <section class="wb-panel" id="wb-verification-panel">
         <h2 class="wb-panel__title">Verification</h2>
         <div id="wb-detail-verification" class="wb-verification">
           <p class="wb-empty">no active verification</p>
         </div>
       </section>
 
-      <section class="wb-panel">
+      <section class="wb-panel" id="wb-events-panel">
         <h2 class="wb-panel__title">Events</h2>
         <ul class="wb-event-list" id="wb-detail-events">
           <li class="wb-empty">no events yet</li>
         </ul>
       </section>
 
-      <section class="wb-panel">
+      <section class="wb-panel" id="wb-logs-panel">
         <h2 class="wb-panel__title">stdout</h2>
         <pre class="wb-log" id="wb-detail-stdout">(no log)</pre>
         <h2 class="wb-panel__title">stderr</h2>
         <pre class="wb-log" id="wb-detail-stderr">(no log)</pre>
       </section>
 
-      <section class="wb-panel">
+      <section class="wb-panel" id="wb-progress-panel">
         <h2 class="wb-panel__title">Progress journal</h2>
         <ol class="wb-progress-list" id="wb-detail-progress" reversed>
           <li class="wb-empty">no entries</li>
         </ol>
       </section>
 
-      <section class="wb-panel">
+      <section class="wb-panel" id="wb-artifacts-panel">
         <h2 class="wb-panel__title">Artifacts</h2>
         <ul class="wb-artifact-list" id="wb-detail-artifacts">
           <li class="wb-empty">no artifacts yet</li>

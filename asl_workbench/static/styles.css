@@ -757,6 +757,54 @@ a.wb-button {
   margin: 0 auto;
 }
 
+/* The jump bar sticks under the sticky header; `--wb-header-height` is
+   measured by detail_nav.js because the header wraps on a phone. */
+.wb-detail-nav {
+  position: sticky;
+  top: var(--wb-header-height, 0px);
+  z-index: 4;
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  margin: -4px -16px 0;
+  padding: 6px 16px;
+  background: var(--wb-bg);
+  border-bottom: 1px solid var(--wb-border);
+}
+
+.wb-detail-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.wb-detail-nav button {
+  flex: none;
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--wb-text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.wb-detail-nav button:hover {
+  color: var(--wb-text);
+  border-color: var(--wb-border);
+}
+
+.wb-detail-nav button[aria-current="true"] {
+  color: var(--wb-accent);
+  border-color: var(--wb-accent);
+  background: var(--wb-accent-soft);
+}
+
+.wb-detail-nav button[hidden] {
+  display: none;
+}
+
 .wb-detail__head {
   display: flex;
   align-items: flex-start;

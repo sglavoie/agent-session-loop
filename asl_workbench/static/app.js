@@ -24,6 +24,7 @@ import { updateCleanupReview, wireCleanupControls } from "./modules/cleanup.js";
 import { DESKTOP_SHELL_MEDIA_QUERY } from "./modules/constants.js";
 import { wireControls } from "./modules/controls.js";
 import { refreshDetail } from "./modules/detail.js";
+import { wireDetailNav } from "./modules/detail_nav.js";
 import {
   applyChipPressedState,
   wireFilterChips,
@@ -84,6 +85,7 @@ export function init() {
   wireFilterChips();
   wireRefreshButton();
   wireDetailBack();
+  wireDetailNav();
   wireControls();
   wireProfileForm();
   wireReplyForm();
