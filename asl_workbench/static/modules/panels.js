@@ -190,14 +190,108 @@ export function renderEvents(events) {
         li.classList.add("wb-event-row--delivery-failure");
       }
     }
+    const summaryEl = li.querySelector('[data-field="summary"]');
+    if (summaryEl) summaryEl.textContent = summarizeEventPayload(event.payload);
+    const created = li.querySelector('[data-field="created_at"]');
+    if (created && event.created_at) {
+      created.textContent = formatEventTime(event.created_at);
+      created.title = event.created_at;
+    }
     const payloadEl = li.querySelector('[data-field="payload"]');
-    if (payloadEl) {
-      payloadEl.textContent = event.payload
-        ? JSON.stringify(event.payload, null, 2)
-        : "";
+    const details = li.querySelector(".wb-event-row__details");
+    if (payloadEl && details && event.payload) {
+      payloadEl.textContent = JSON.stringify(event.payload, null, 2);
+      details.hidden = false;
+      // The list is rebuilt on every poll; an operator reading a payload
+      // should not have it snap shut under them.
+      const key = eventKey(event);
+      details.open = openEventPayloads.has(key);
+      details.addEventListener("toggle", () => {
+        if (details.open) {
+          openEventPayloads.add(key);
+        } else {
+          openEventPayloads.delete(key);
+        }
+      });
     }
     list.appendChild(li);
   });
+}
+
+/** Payloads the operator has opened, by event, across the poll's redraws. */
+const openEventPayloads = new Set();
+
+function eventKey(event) {
+  return String(event.created_at || "") + "|" + String(event.name || "");
+}
+
+/** Fields worth a glance, in the order they are read. */
+export const EVENT_SUMMARY_FIELDS = [
+  "session_id",
+  "phase",
+  "action",
+  "disposition",
+  "final_status",
+  "agent_mux_event",
+  "harness",
+  "approval_mode",
+  "commit_mode",
+  "elapsed_seconds",
+  "exit_code",
+  "ok",
+  "reason",
+  "detail",
+];
+
+/** How many fields the one-line summary carries before it stops. */
+export const EVENT_SUMMARY_LIMIT = 4;
+
+/**
+ * One line that says what an event was about, so the list can be skimmed.
+ *
+ * Only top-level scalars are used; nested objects, paths and digests are left
+ * to the full payload behind the toggle.
+ */
+export function summarizeEventPayload(payload) {
+  if (!payload || typeof payload !== "object") return "";
+  const parts = [];
+  const session = payload.session_id ?? payload.session;
+  for (const key of EVENT_SUMMARY_FIELDS) {
+    if (parts.length >= EVENT_SUMMARY_LIMIT) break;
+    const value = key === "session_id" ? session : payload[key];
+    if (value === null || value === undefined || value === "") continue;
+    if (typeof value === "object") continue;
+    if (key === "session_id") {
+      parts.push("session " + value);
+    } else if (key === "elapsed_seconds" && typeof value === "number") {
+      parts.push(Math.round(value) + "s elapsed");
+    } else if (typeof value === "boolean" || typeof value === "number") {
+      parts.push(key.replace(/_/g, " ") + " " + value);
+    } else {
+      const text = String(value);
+      // A delivery's status and reason are often the same word.
+      if (parts.indexOf(text) !== -1) continue;
+      parts.push(text.length > 80 ? text.slice(0, 79) + "…" : text);
+    }
+  }
+  return parts.join(" · ");
+}
+
+/** An event's time in local terms, to the second; the ISO stamp is its tooltip. */
+export function formatEventTime(value) {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return String(value);
+  try {
+    return new Date(parsed).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch (err) {
+    return String(value);
+  }
 }
 
 export async function loadAndRenderProgress() {

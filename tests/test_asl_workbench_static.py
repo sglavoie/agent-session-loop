@@ -873,6 +873,48 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn('if (name === "all" && hidden > 0) {', decoded)
         self.assertIn('el.title = hidden + " completed hidden";', decoded)
 
+    def test_recovery_center_says_each_thing_once(self) -> None:
+        # The reply card sat over the reply form it scrolls to, the pause
+        # message came back as an evidence row under the same summary, and
+        # artifact paths ran three lines through a 64-character digest.
+        server = self._start_server()
+        decoded = self._shell_source(server)
+        self.assertIn('card.setAttribute("data-target", target || "");', decoded)
+        self.assertIn('const summaryText = String(recovery.summary || "").trim();', decoded)
+        self.assertIn("export function shortenStatePath(path)", decoded)
+        self.assertIn(
+            'path.textContent = shortenStatePath(artifact.path || "");', decoded
+        )
+        self.assertIn("copyRecoveryCommand(copy, artifact.path);", decoded)
+
+        css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+        self.assertIn(
+            '.wb-recovery:has(#wb-reply-panel:not([hidden]) #wb-reply-form:not([hidden]))',
+            css,
+        )
+        self.assertIn('.wb-recovery__action-card[data-target="reply"]', css)
+        progress_list = css.split(".wb-progress-row__list {", 1)[1].split("}", 1)[0]
+        self.assertIn("overflow-wrap: anywhere;", progress_list)
+
+    def test_events_read_as_one_line_each(self) -> None:
+        # Each event printed its whole payload as indented JSON. It now gets a
+        # one-line summary with the JSON behind a toggle that stays open across
+        # the list's periodic redraw.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/")
+        html = body.decode("utf-8")
+        template = html.split('id="wb-event-row-template"', 1)[1].split(
+            "</template>", 1
+        )[0]
+        self.assertIn('data-field="summary"', template)
+        self.assertIn('<details class="wb-event-row__details" hidden>', template)
+
+        decoded = self._shell_source(server)
+        self.assertIn("export function summarizeEventPayload(payload)", decoded)
+        self.assertIn("export const EVENT_SUMMARY_LIMIT = 4;", decoded)
+        self.assertIn("details.open = openEventPayloads.has(key);", decoded)
+        self.assertIn("export function formatEventTime(value)", decoded)
+
     def test_status_badge_does_not_wrap(self) -> None:
         css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
         badge = css.split(".wb-badge {", 1)[1].split("}", 1)[0]

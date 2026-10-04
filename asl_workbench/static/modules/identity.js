@@ -185,3 +185,24 @@ export function detailHash(address, focus) {
 export function detailHashForPlan(plan, focus) {
   return detailHash(addressOfPlan(plan), focus);
 }
+
+/**
+ * A home-relative path, the way a terminal would print it.
+ *
+ * The whole path stays in the tooltip; the card has one line for it.
+ */
+export function shortenHome(path) {
+  if (typeof path !== "string" || !path) return "";
+  return path.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~");
+}
+
+/**
+ * A state path short enough to read: home-relative, with the 64-character
+ * plan-state digest cut to its first eight characters.
+ *
+ * Every artifact of a plan sits under the same digest, so the first eight are
+ * enough to tell plans apart; the full path stays in the tooltip and the copy.
+ */
+export function shortenStatePath(path) {
+  return shortenHome(path).replace(/\/([0-9a-f]{8})[0-9a-f]{56}(?=\/|$)/, "/$1…");
+}

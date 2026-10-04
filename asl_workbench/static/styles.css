@@ -921,6 +921,13 @@ a.wb-button {
   opacity: 0.72;
 }
 
+/* The reply form sits right below the cards; a card whose only job is to
+   scroll there says the same thing twice while the form is showing. */
+.wb-recovery:has(#wb-reply-panel:not([hidden]) #wb-reply-form:not([hidden]))
+  .wb-recovery__action-card[data-target="reply"] {
+  display: none;
+}
+
 .wb-recovery__action-title,
 .wb-recovery__primary-title {
   margin: 0;
@@ -1008,6 +1015,12 @@ a.wb-button {
   min-width: 0;
   word-break: break-word;
   color: var(--wb-text);
+}
+
+/* A path breaks evenly rather than at its hyphens, which left a ragged
+   first line ending in "agent-session-". */
+.wb-recovery__artifact-path {
+  word-break: break-all;
 }
 
 .wb-recovery__detail,
@@ -1759,6 +1772,21 @@ a.wb-button {
   background: var(--wb-danger-soft);
 }
 
+.wb-event-row__body {
+  min-width: 0;
+}
+
+.wb-event-row__summary {
+  color: var(--wb-text);
+  overflow-wrap: anywhere;
+}
+
+.wb-event-row__details > summary {
+  cursor: pointer;
+  color: var(--wb-text-faint);
+  font-size: 11px;
+}
+
 .wb-event-row__payload {
   margin: 0;
   white-space: pre-wrap;
@@ -1856,6 +1884,9 @@ a.wb-button {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* File paths have no spaces to break at; unbroken, one widened the page
+     on a phone. */
+  overflow-wrap: anywhere;
 }
 
 .wb-progress-row__list:empty {

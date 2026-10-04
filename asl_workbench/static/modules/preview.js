@@ -10,6 +10,7 @@ import {
   planHint,
   planIdOf,
   planLabel,
+  shortenHome,
 } from "./identity.js";
 import { setField } from "./panels.js";
 import { setSelectedPlan } from "./prefs.js";
@@ -238,16 +239,6 @@ export function formatRunId(runId) {
   } catch (err) {
     return runId;
   }
-}
-
-/**
- * A home-relative path, the way a terminal would print it.
- *
- * The whole path stays in the tooltip; the card has one line for it.
- */
-export function shortenHome(path) {
-  if (typeof path !== "string" || !path) return "";
-  return path.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~");
 }
 
 /**

@@ -22,7 +22,7 @@ import {
   RECOVERY_TARGET_LABELS,
 } from "./constants.js";
 import { handleLaunchClick, handleUnlockClick } from "./controls.js";
-import { planUrl, routePlanId } from "./identity.js";
+import { planUrl, routePlanId, shortenStatePath } from "./identity.js";
 import { applyActionAvailability } from "./operations.js";
 import { hideReplyPanel, loadAndRenderReply } from "./panels.js";
 import { redirectStageLine } from "./redirect.js";
@@ -354,9 +354,17 @@ export function renderRecoveryPanel(recovery) {
     actions.length ? actions : primaryAction ? [primaryAction] : []
   );
 
-  const evidence = Array.isArray(recovery.evidence)
-    ? recovery.evidence.slice()
-    : [];
+  // A row that only restates the summary printed just above it adds a second
+  // copy of the same sentence and nothing else.
+  const summaryText = String(recovery.summary || "").trim();
+  const evidence = (Array.isArray(recovery.evidence) ? recovery.evidence : []).filter(
+    (row) =>
+      !row ||
+      row.detail ||
+      !summaryText ||
+      String(row.value === null || row.value === undefined ? "" : row.value).trim() !==
+        summaryText
+  );
   if (Array.isArray(recovery.warnings)) {
     recovery.warnings.forEach((warning) => {
       evidence.push({
@@ -428,6 +436,9 @@ export function createRecoveryActionCard(action, primary) {
   card.appendChild(text);
 
   const target = recoveryActionTarget(action);
+  // Read by the stylesheet: a reply card is folded away while the reply form
+  // it would scroll to is already on screen right below it.
+  card.setAttribute("data-target", target || "");
   const button = document.createElement("button");
   button.className = "wb-button wb-button--primary";
   button.type = "button";
@@ -612,7 +623,8 @@ export function renderRecoveryArtifacts(artifacts) {
 
     const path = document.createElement("code");
     path.className = "wb-recovery__artifact-path";
-    path.textContent = artifact.path || "";
+    path.textContent = shortenStatePath(artifact.path || "");
+    path.title = artifact.path || "";
     li.appendChild(path);
 
     const meta = document.createElement("span");
@@ -624,6 +636,19 @@ export function renderRecoveryArtifacts(artifacts) {
     if (target) {
       if (meta.textContent) meta.appendChild(document.createTextNode(" "));
       meta.appendChild(createRecoveryLink(target));
+    }
+    // The shortened path is for reading; the copy is the whole of it.
+    if (artifact.path) {
+      const copy = document.createElement("button");
+      copy.className = "wb-recovery__link";
+      copy.type = "button";
+      copy.textContent = "copy";
+      copy.title = "Copy the full path";
+      copy.addEventListener("click", () => {
+        copyRecoveryCommand(copy, artifact.path);
+      });
+      if (meta.childNodes.length) meta.appendChild(document.createTextNode(" · "));
+      meta.appendChild(copy);
     }
     li.appendChild(meta);
     list.appendChild(li);

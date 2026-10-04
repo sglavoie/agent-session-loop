@@ -1249,7 +1249,13 @@
       <li class="wb-event-row">
         <time data-field="created_at"></time>
         <span class="wb-event-row__name" data-field="name"></span>
-        <pre class="wb-event-row__payload" data-field="payload"></pre>
+        <div class="wb-event-row__body">
+          <span class="wb-event-row__summary" data-field="summary"></span>
+          <details class="wb-event-row__details" hidden>
+            <summary>payload</summary>
+            <pre class="wb-event-row__payload" data-field="payload"></pre>
+          </details>
+        </div>
       </li>
     </template>
 
