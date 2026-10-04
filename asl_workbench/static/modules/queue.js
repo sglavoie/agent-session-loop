@@ -306,7 +306,12 @@ export function markQueueStale(reason) {
     el.textContent = message;
     return;
   }
-  el.textContent = message + " | stale " + formatQueueMeta(state.lastQueueMeta);
+  // Only a stale queue repeats the time: the header already says when a
+  // healthy one was fetched, and a failed fetch leaves that header behind.
+  el.textContent =
+    message +
+    " | stale " +
+    formatQueueMeta(state.lastQueueMeta, { includeUpdated: true });
 }
 
 /** True when this view is narrower than the whole catalog. */
@@ -319,7 +324,8 @@ export function isNarrowed() {
   );
 }
 
-export function formatQueueMeta(meta) {
+export function formatQueueMeta(meta, options) {
+  const includeUpdated = !!(options && options.includeUpdated);
   const parts = [];
   if (meta.stateRoot) {
     parts.push("state root: " + meta.stateRoot);
@@ -342,7 +348,7 @@ export function formatQueueMeta(meta) {
   if (meta.truncated) {
     parts.push("showing the first page — narrow the filters to see the rest");
   }
-  if (meta.updatedText) {
+  if (includeUpdated && meta.updatedText) {
     parts.push("updated: " + meta.updatedText);
   }
   return parts.join(" | ");

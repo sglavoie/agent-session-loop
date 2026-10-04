@@ -343,7 +343,9 @@
             <summary>resolver prompt</summary>
             <pre id="wb-reply-prompt" class="wb-reply__prompt"></pre>
           </details>
-          <details class="wb-reply__context">
+          <!-- Open from the start: on a reply pause the last message is
+               usually the question being answered. -->
+          <details class="wb-reply__context" id="wb-reply-last-details" open>
             <summary>last message</summary>
             <pre id="wb-reply-last-message" class="wb-reply__last"></pre>
           </details>
@@ -911,9 +913,9 @@
         </header>
         <dl class="wb-preview__facts" id="wb-preview-facts">
           <div><dt>next session</dt><dd data-field="next">-</dd></div>
-          <div><dt>counts</dt><dd data-field="counts">-</dd></div>
+          <div><dt>progress</dt><dd data-field="counts">-</dd></div>
           <div><dt>harness</dt><dd data-field="harness">-</dd></div>
-          <div><dt>run id</dt><dd data-field="run">-</dd></div>
+          <div><dt>run started</dt><dd data-field="run">-</dd></div>
           <div><dt>workspace</dt><dd data-field="workspace">-</dd></div>
           <div><dt>repositories</dt><dd data-field="repositories">-</dd></div>
           <div><dt>last activity</dt><dd data-field="activity">-</dd></div>
@@ -1220,10 +1222,11 @@
           <div><dt>session</dt><dd data-field="session">-</dd></div>
           <div><dt>harness</dt><dd data-field="harness">-</dd></div>
           <div><dt>idle</dt><dd data-field="idle">-</dd></div>
-          <div><dt>run id</dt><dd data-field="run">-</dd></div>
+          <div><dt>run started</dt><dd data-field="run">-</dd></div>
           <div>
-            <dt>counts</dt>
+            <dt>progress</dt>
             <dd data-field="counts">-</dd>
+            <span class="wb-row__meter" data-field="meter" hidden></span>
           </div>
           <div><dt>completed</dt><dd data-field="completed">-</dd></div>
         </dl>

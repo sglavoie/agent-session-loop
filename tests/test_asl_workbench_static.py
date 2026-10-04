@@ -779,6 +779,75 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
             'if (!plan || plan.primary_state === "complete") return null;', decoded
         )
 
+    def test_queue_card_reads_at_a_glance(self) -> None:
+        # Cards cut the label off while the plan path, mostly an id, wrapped
+        # over two lines; counts read "p1 / c10"; the run id was a truncated
+        # UTC stamp; and last-message previews showed raw Markdown.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/")
+        html = body.decode("utf-8")
+        row_template = html.split('id="wb-row-template"', 1)[1].split("</template>", 1)[
+            0
+        ]
+        self.assertIn("<dt>progress</dt>", row_template)
+        self.assertIn('data-field="meter"', row_template)
+        self.assertIn("<dt>run started</dt>", row_template)
+
+        decoded = self._shell_source(server)
+        self.assertIn('parts = [progress.done + " / " + progress.total + " done"]', decoded)
+        self.assertNotIn('parts.push("p" + counts.pending)', decoded)
+        self.assertIn("setProgressMeter(row, plan.counts);", decoded)
+        self.assertIn(
+            'setRowFact(row, "run", formatRunId(plan.run_id), plan.run_id);', decoded
+        )
+        self.assertIn("export function formatRunId", decoded)
+        self.assertIn("path.textContent = shortenHome(plan.plan_dir)", decoded)
+        self.assertIn("path.title = plan.plan_dir", decoded)
+        self.assertIn(
+            "preview.textContent = plainPreview(plan.last_message_preview);", decoded
+        )
+        self.assertIn("lastBody.textContent = plainPreview(lastPreview);", decoded)
+        self.assertIn(
+            'setField(facts, "activity", formatActivityAge(plan.last_activity_at));',
+            decoded,
+        )
+
+        css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+        label = css.split(".wb-row__label {", 1)[1].split("}", 1)[0]
+        self.assertIn("-webkit-line-clamp: 2;", label)
+        self.assertNotIn("white-space: nowrap;", label)
+        path = css.split(".wb-row__path {", 1)[1].split("}", 1)[0]
+        self.assertIn("text-overflow: ellipsis;", path)
+        self.assertNotIn("word-break: break-all;", path)
+        link_button = css.split("a.wb-button {", 1)[1].split("}", 1)[0]
+        self.assertIn("display: inline-flex;", link_button)
+
+    def test_detail_trims_what_cannot_be_acted_on(self) -> None:
+        # The reply's last message is usually the question, so it starts open;
+        # the urgent-correction composer folds away when there is no turn to
+        # interrupt and no draft to keep.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/")
+        html = body.decode("utf-8")
+        self.assertIn(
+            '<details class="wb-reply__context" id="wb-reply-last-details" open>', html
+        )
+
+        decoded = self._shell_source(server)
+        self.assertIn('stateName !== "available" && !hasDraft ? "true" : "false"', decoded)
+        css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+        self.assertIn('.wb-redirect[data-collapsed="true"] .wb-redirect__form', css)
+
+    def test_queue_meta_repeats_the_time_only_when_stale(self) -> None:
+        # The header already shows when the queue was fetched; the meta line
+        # repeats it only once a fetch fails and the header no longer can.
+        server = self._start_server()
+        decoded = self._shell_source(server)
+        self.assertIn("if (includeUpdated && meta.updatedText) {", decoded)
+        self.assertIn(
+            "formatQueueMeta(state.lastQueueMeta, { includeUpdated: true })", decoded
+        )
+
     def test_status_badge_does_not_wrap(self) -> None:
         css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
         badge = css.split(".wb-badge {", 1)[1].split("}", 1)[0]

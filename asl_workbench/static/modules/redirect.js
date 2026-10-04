@@ -261,7 +261,17 @@ export function renderRedirect(payload) {
 
 export function setRedirectAvailability(stateName, label, title) {
   const panel = document.getElementById("wb-redirect-panel");
-  if (panel) panel.setAttribute("data-available", stateName);
+  if (panel) {
+    panel.setAttribute("data-available", stateName);
+    // A draft is never hidden: one typed while a turn was live stays on
+    // screen when the turn ends, so it can still be read and discarded.
+    const textarea = document.getElementById("wb-redirect-text");
+    const hasDraft = !!(textarea && textarea.value.trim());
+    panel.setAttribute(
+      "data-collapsed",
+      stateName !== "available" && !hasDraft ? "true" : "false"
+    );
+  }
   const badge = document.getElementById("wb-redirect-availability");
   if (!badge) return;
   badge.setAttribute("data-state", stateName);

@@ -62,7 +62,10 @@ export function renderPreview(plan) {
   const pathEl = document.getElementById("wb-preview-path");
   // The Pi has no path to show, so it shows the digest it addresses by --
   // blank here would read as "this plan is nowhere".
-  if (pathEl) pathEl.textContent = plan.plan_dir || planIdOf(plan);
+  if (pathEl) {
+    pathEl.textContent = shortenHome(plan.plan_dir) || planIdOf(plan);
+    pathEl.title = plan.plan_dir || planIdOf(plan);
+  }
 
   const stateEl = document.getElementById("wb-preview-state");
   if (stateEl) {
@@ -137,10 +140,12 @@ export function renderPreview(plan) {
     );
     setField(facts, "counts", formatCounts(plan.counts));
     setField(facts, "harness", plan.harness || null);
-    setField(facts, "run", plan.run_id || null);
+    setField(facts, "run", formatRunId(plan.run_id));
+    setFieldTitle(facts, "run", plan.run_id);
     setField(facts, "workspace", plan.workspace_root || plan.cwd || null);
     setField(facts, "repositories", formatRepositoryAliases(plan.repositories));
-    setField(facts, "activity", formatLastActivity(plan.last_activity_at));
+    setField(facts, "activity", formatActivityAge(plan.last_activity_at));
+    setFieldTitle(facts, "activity", formatLastActivity(plan.last_activity_at));
     setField(facts, "completed", formatCompletedAt(plan));
   }
 
@@ -172,7 +177,7 @@ export function renderPreview(plan) {
     lastSection.hidden = !lastPreview;
   }
   if (lastBody) {
-    lastBody.textContent = lastPreview;
+    lastBody.textContent = plainPreview(lastPreview);
   }
 
   const openEl = document.getElementById("wb-preview-open");
@@ -183,6 +188,84 @@ export function renderPreview(plan) {
     );
     openEl.setAttribute("data-plan-dir", planIdOf(plan));
   }
+}
+
+/** Put a hover title on a preview fact, or take a stale one off. */
+function setFieldTitle(root, name, title) {
+  const el = root.querySelector('[data-field="' + name + '"]');
+  if (!el) return;
+  if (title) {
+    el.title = String(title);
+  } else {
+    el.removeAttribute("title");
+  }
+}
+
+/**
+ * How long ago the last activity was, for the preview's narrow fact cell.
+ *
+ * The absolute time goes in the cell's tooltip, as it does on the card.
+ */
+export function formatActivityAge(value, now) {
+  const parsed = typeof value === "string" ? Date.parse(value) : NaN;
+  if (!Number.isFinite(parsed)) return formatLastActivity(value);
+  const reference = typeof now === "number" ? now : Date.now();
+  return formatAge(Math.max(0, (reference - parsed) / 1000)) + " ago";
+}
+
+/**
+ * A run id read as the time it started.
+ *
+ * Run ids lead with a compact UTC stamp (`20261002T233510506873Z-94023`), and
+ * the card only ever had room for that stamp's first half. The local time is
+ * what an operator compares against; the full id stays in the tooltip.
+ */
+export function formatRunId(runId) {
+  if (typeof runId !== "string" || !runId) return null;
+  const match = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})\d*Z/.exec(runId);
+  if (!match) return runId;
+  const started = new Date(
+    Date.UTC(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +match[6])
+  );
+  if (!Number.isFinite(started.getTime())) return runId;
+  try {
+    return started.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch (err) {
+    return runId;
+  }
+}
+
+/**
+ * A home-relative path, the way a terminal would print it.
+ *
+ * The whole path stays in the tooltip; the card has one line for it.
+ */
+export function shortenHome(path) {
+  if (typeof path !== "string" || !path) return "";
+  return path.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~");
+}
+
+/**
+ * A last-message preview with its Markdown markers taken out.
+ *
+ * The preview is plain text in a narrow box, so `**bold**` and backticks read
+ * as noise. It is also cut short server side, which can leave a marker
+ * unpaired, so leftovers are dropped after the pairs are.
+ */
+export function plainPreview(text) {
+  if (typeof text !== "string" || !text) return "";
+  return text
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^(\s*)[-*]\s+/gm, "$1• ")
+    .replace(/\*\*|`/g, "");
 }
 
 export function formatLastActivity(value) {
@@ -502,7 +585,8 @@ export function populateRow(row, plan) {
   label.setAttribute("href", detailHashForPlan(plan));
 
   const path = row.querySelector('[data-field="path"]');
-  path.textContent = plan.plan_dir || planIdOf(plan);
+  path.textContent = shortenHome(plan.plan_dir) || planIdOf(plan);
+  path.title = plan.plan_dir || planIdOf(plan);
 
   setRowFact(
     row,
@@ -511,8 +595,9 @@ export function populateRow(row, plan) {
   );
   setRowFact(row, "harness", plan.harness);
   setRowFact(row, "idle", formatIdle(plan), formatLastActivity(plan.last_activity_at));
-  setRowFact(row, "run", plan.run_id);
+  setRowFact(row, "run", formatRunId(plan.run_id), plan.run_id);
   setRowFact(row, "counts", formatCounts(plan.counts));
+  setProgressMeter(row, plan.counts);
   setRowFact(row, "completed", formatCompletedAt(plan));
 
   const hint = row.querySelector('[data-field="hint"]');
@@ -521,7 +606,7 @@ export function populateRow(row, plan) {
   const preview = row.querySelector('[data-field="preview"]');
   if (plan.last_message_preview) {
     preview.hidden = false;
-    preview.textContent = plan.last_message_preview;
+    preview.textContent = plainPreview(plan.last_message_preview);
   } else {
     preview.hidden = true;
     preview.textContent = "";
@@ -578,18 +663,43 @@ export function displayName(planDir) {
   return parts[parts.length - 1] || planDir;
 }
 
+/** Sessions done out of the plan's total, from the manifest's status counts. */
+export function sessionProgress(counts) {
+  if (!counts || typeof counts !== "object") return null;
+  let total = 0;
+  let seen = false;
+  ["pending", "complete", "empty", "unknown"].forEach((key) => {
+    if (typeof counts[key] === "number") {
+      total += counts[key];
+      seen = true;
+    }
+  });
+  if (!seen || total === 0) return null;
+  const done = typeof counts.complete === "number" ? counts.complete : 0;
+  return { done: done, total: total };
+}
+
 export function formatCounts(counts) {
-  if (!counts || typeof counts !== "object") return "-";
-  const parts = [];
-  if (typeof counts.pending === "number") parts.push("p" + counts.pending);
-  if (typeof counts.complete === "number") parts.push("c" + counts.complete);
+  const progress = sessionProgress(counts);
+  if (!progress) return "-";
+  const parts = [progress.done + " / " + progress.total + " done"];
   if (typeof counts.empty === "number" && counts.empty > 0) {
-    parts.push("e" + counts.empty);
+    parts.push(counts.empty + " empty");
   }
   if (typeof counts.unknown === "number" && counts.unknown > 0) {
-    parts.push("u" + counts.unknown);
+    parts.push(counts.unknown + " unknown");
   }
-  return parts.length ? parts.join(" / ") : "-";
+  return parts.join(", ");
+}
+
+/** The thin bar under a card's progress fact. */
+export function setProgressMeter(row, counts) {
+  const meter = row.querySelector('[data-field="meter"]');
+  if (!meter) return;
+  const progress = sessionProgress(counts);
+  meter.hidden = !progress;
+  const ratio = progress ? progress.done / progress.total : 0;
+  meter.style.setProperty("--wb-meter", String(Math.round(ratio * 100)) + "%");
 }
 
 export function formatRepositoryAliases(repositories) {
