@@ -56,11 +56,10 @@ export const PRIMARY_STATES = [
 // waiting on an operator. Both providers publish `primary_state` on a plan, so
 // deriving staleness from it says the same thing in either mode -- and unlike
 // the per-run `actions` list, it is a field the summary allowlists carry.
-export const PLAN_LIVE_RUN_STATES = [
-  "running",
-  "verifying",
-  "paused-for-reply",
-];
+// A runner still waiting live on a question is summarized as "running";
+// "paused-for-reply" is a run that has exited and holds no lock, so stop,
+// abort and a correction have nothing to reach there.
+export const PLAN_LIVE_RUN_STATES = ["running", "verifying"];
 export const PLAN_REPLY_STATES = ["paused-for-reply"];
 export const FILTER_GROUPS = {
   all: PRIMARY_STATES.slice(),

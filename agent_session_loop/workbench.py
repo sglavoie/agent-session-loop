@@ -5422,11 +5422,32 @@ def build_workbench_summary(
                 reclaim=reclaim,
             )
         except qna.QnAError as error:
+            # Not every pause is a question. A run that stopped on, say, an
+            # unready review repair has no Q&A context, and recovery has
+            # already named what it needs; offering "reply" there sends the
+            # operator to a form that can only refuse them.
+            if recovery.get("kind") not in {"none", "reply-needed"} and recovery.get(
+                "title"
+            ):
+                return base_kwargs(
+                    primary_state="failed",
+                    recommended_action="inspect-failure",
+                    next_action_hint=recovery["title"],
+                    detail=recovery.get("summary") or recovery["title"],
+                    pause_reason=pause_reason,
+                    pause_message=runner_state.get("pause_message") or None,
+                    last_activity_at=paused_activity,
+                    last_activity_source=paused_source,
+                    concise_reason=recovery.get("summary") or recovery["title"],
+                )
             warnings.append(
                 f"paused-q&a context unreadable ({error.reason}): {error.error}"
             )
-            session_label = next_pending.id if next_pending is not None else "?"
-            hint = f"Reply needed for session {session_label}"
+            hint = (
+                f"Reply needed for session {next_pending.id}"
+                if next_pending is not None
+                else "Reply needed"
+            )
             detail = "Paused without readable last-message context"
         else:
             pause_reason = context.pause_reason or pause_reason

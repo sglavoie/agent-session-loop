@@ -848,6 +848,31 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
             "formatQueueMeta(state.lastQueueMeta, { includeUpdated: true })", decoded
         )
 
+    def test_paused_plan_is_not_a_live_run(self) -> None:
+        # A paused-for-reply run has exited and holds no lock: stop, abort and
+        # a correction have nothing to reach, while launch stays shut because
+        # the reply is what resumes it -- and says so, rather than claiming a
+        # run is in flight.
+        server = self._start_server()
+        decoded = self._shell_source(server)
+        self.assertIn(
+            'export const PLAN_LIVE_RUN_STATES = ["running", "verifying"];', decoded
+        )
+        self.assertIn(
+            'paused: "the run is paused waiting for a reply; answering it resumes the run",',
+            decoded,
+        )
+        self.assertIn("if (action.paused && planAwaitsReply(plan)) {", decoded)
+
+    def test_all_chip_counts_only_what_all_shows(self) -> None:
+        # With completed plans hidden, "all 6" sat over a queue of four.
+        server = self._start_server()
+        decoded = self._shell_source(server)
+        self.assertIn("export function completedHiddenCount(counts)", decoded)
+        self.assertIn("if (state.cleanupMode || state.showCompleted) return 0;", decoded)
+        self.assertIn('if (name === "all" && hidden > 0) {', decoded)
+        self.assertIn('el.title = hidden + " completed hidden";', decoded)
+
     def test_status_badge_does_not_wrap(self) -> None:
         css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
         badge = css.split(".wb-badge {", 1)[1].split("}", 1)[0]

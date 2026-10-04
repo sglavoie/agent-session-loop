@@ -64,6 +64,9 @@ export const IN_FLIGHT_MESSAGE =
  *   `idle`   -- a run must NOT be in flight, because this would collide with it
  *   `null`   -- nothing about the run makes this stale; unlock exists for
  *               exactly the case where the run state is not to be trusted
+ *
+ * `paused`, when set, is the reason the action is shut while a paused run
+ * waits for an answer: no run is in flight then, but the reply is the way on.
  */
 export const ACTIONS = {
   launch: {
@@ -71,6 +74,8 @@ export const ACTIONS = {
     subject: "launch",
     requires: "idle",
     stale: "a run is already in flight for this plan; stop it before launching another",
+    // Launching past the question would skip it; the reply is what resumes.
+    paused: "the run is paused waiting for a reply; answering it resumes the run",
   },
   reply: {
     operation: "reply",
@@ -278,6 +283,9 @@ export function actionAvailability(name) {
         (requires === "idle" && live) ||
         (requires === "reply" && !planAwaitsReply(plan));
       if (stale) return { enabled: false, reason: action.stale };
+      if (action.paused && planAwaitsReply(plan)) {
+        return { enabled: false, reason: action.paused };
+      }
     }
   }
   if (operationInFlight(name)) {

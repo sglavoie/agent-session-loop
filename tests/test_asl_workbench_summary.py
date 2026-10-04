@@ -892,6 +892,41 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual(1, len(summary.warnings))
             self.assertIn("paused-q&a context unreadable", summary.warnings[0])
 
+    def test_pause_without_a_question_takes_the_recovery_diagnosis(self) -> None:
+        # A run that stopped on an unready review repair is recorded as paused,
+        # but no session waits on an answer. It was offered as "reply needed
+        # for session ?" with a reply button that could only be refused; the
+        # recovery diagnosis already says what it needs.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = tmp_path / "plan-alpha"
+            write_plan(plan_dir, ("complete", "complete"))
+            state_root = tmp_path / "state"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "not-loop-ready",
+                    "run_id": "20260619T140000Z-1",
+                    "harness": "claude",
+                    "run_started_at": "2026-06-19T14:00:00+00:00",
+                    "run_finished_at": "2026-06-19T14:10:00+00:00",
+                },
+            )
+
+            summary = workbench.build_workbench_summary(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("not-loop-ready", summary.recovery["kind"])
+            self.assertEqual("failed", summary.primary_state)
+            self.assertEqual("inspect-failure", summary.recommended_action)
+            self.assertEqual(summary.recovery["title"], summary.next_action_hint)
+            self.assertNotIn("?", summary.next_action_hint)
+            self.assertEqual((), summary.warnings)
+
     def test_expired_wait_matches_qna_reply_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

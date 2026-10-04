@@ -493,11 +493,26 @@ export function computeCounts(plans) {
 }
 
 export function renderCounts(counts) {
+  const hidden = completedHiddenCount(counts);
   document.querySelectorAll(".wb-chip__count").forEach((el) => {
     const name = el.getAttribute("data-count");
-    const value = counts[name];
-    el.textContent = String(typeof value === "number" ? value : 0);
+    let value = typeof counts[name] === "number" ? counts[name] : 0;
+    // "all" counts what the "all" view shows. With completed plans hidden it
+    // would otherwise promise rows the queue below does not draw.
+    if (name === "all" && hidden > 0) {
+      value = Math.max(0, value - hidden);
+      el.title = hidden + " completed hidden";
+    } else {
+      el.removeAttribute("title");
+    }
+    el.textContent = String(value);
   });
+}
+
+/** How many completed plans the "show completed" toggle is keeping out of "all". */
+export function completedHiddenCount(counts) {
+  if (state.cleanupMode || state.showCompleted) return 0;
+  return counts && typeof counts.complete === "number" ? counts.complete : 0;
 }
 
 export function renderGlobalWarnings(payload) {
