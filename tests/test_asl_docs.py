@@ -62,6 +62,10 @@ from tests.support import (
     REPO_ROOT,
 )
 
+#: The ASL operator guide moved out of the repository README; it carries the
+#: operator-facing summary these tests used to read from `README.md`.
+ASL_GUIDE = "docs/asl-guide.md"
+
 
 class SkillInstructionTests(unittest.TestCase):
     def test_contract_path_rules_distinguish_registered_and_legacy_plans(
@@ -1465,8 +1469,8 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         docs = self._read("docs/agent-session-loop.md")
         commands = docs.split("## Commands", 1)[1].split("\n## ", 1)[0]
         autopilot = docs.split("## Autopilot Skill", 1)[1].split("\n## ", 1)[0]
-        readme = self._read("README.md")
-        supervision = readme.split("### Live ASL supervision", 1)[1].split("\n### ", 1)[
+        guide = self._read(ASL_GUIDE)
+        supervision = guide.split("### Live ASL supervision", 1)[1].split("\n### ", 1)[
             0
         ]
 
@@ -2164,6 +2168,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         """ "Guidance sent" is the exact claim the ledger cannot support."""
         for path in (
             "README.md",
+            ASL_GUIDE,
             "agent_session_loop/README.md",
             "docs/agent-session-loop.md",
             "skills/asl/SKILL.md",
@@ -3002,8 +3007,8 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         ):
             self.assertNotIn(stale_draft, docs)
 
-    def test_readme_and_autopilot_skill_match_live_contract(self) -> None:
-        readme = self._read("README.md")
+    def test_guide_and_autopilot_skill_match_live_contract(self) -> None:
+        guide = self._read(ASL_GUIDE)
         skill = self._read("skills/asl/SKILL.md")
 
         for marker in (
@@ -3016,7 +3021,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "no runner/supervisor thread",
             "no Workbench",
         ):
-            self.assertIn(marker, readme)
+            self.assertIn(marker, guide)
         for marker in (
             "`--no-mailbox` is accepted",
             "polls questions and notices every five seconds",
@@ -3053,27 +3058,27 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         path = REPO_ROOT / relative
         return path.read_text(encoding="utf-8")
 
-    def test_readme_documents_workbench_cli_surface(self) -> None:
-        readme = self._read("README.md")
-        self.assertIn("asl workbench [serve]", readme)
+    def test_guide_documents_workbench_cli_surface(self) -> None:
+        guide = self._read(ASL_GUIDE)
+        self.assertIn("asl workbench [serve]", guide)
         self.assertIn(
             "asl workbench pin PLAN_DIR [--cwd ROOT] [--label LABEL]",
-            readme,
+            guide,
         )
-        self.assertIn("asl workbench unpin PLAN_DIR", readme)
-        self.assertIn("asl workbench registry [--json]", readme)
+        self.assertIn("asl workbench unpin PLAN_DIR", guide)
+        self.assertIn("asl workbench registry [--json]", guide)
         # Reflects the registry plan_roots discovery wiring.
-        self.assertIn("registry `plan_roots`", readme)
+        self.assertIn("registry `plan_roots`", guide)
         # Reflects the tri-state nullable default behavior.
-        self.assertIn("tri-state nullable launch profiles", readme)
+        self.assertIn("tri-state nullable launch profiles", guide)
         # Reflects the dotted session API/frontend rendering.
-        self.assertIn("dotted session IDs", readme)
+        self.assertIn("dotted session IDs", guide)
         # Reflects the Recovery Center docs and read-only API.
-        self.assertIn("Recovery Center", readme)
-        self.assertIn("`/api/recovery` diagnostics", readme)
-        self.assertIn("copy-only repair commands", readme)
+        self.assertIn("Recovery Center", guide)
+        self.assertIn("`/api/recovery` diagnostics", guide)
+        self.assertIn("copy-only repair commands", guide)
         # Reflects Workbench cleanup/archive/retention surface.
-        self.assertIn("cleanup/archive/retention", readme)
+        self.assertIn("cleanup/archive/retention", guide)
 
     def test_docs_describe_workbench_cli_pin_unpin_registry(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
@@ -3620,7 +3625,7 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
     long-form docs against the authoritative package definitions."""
 
     docs: str
-    readme: str
+    guide: str
     justfile: str
 
     @classmethod
@@ -3628,7 +3633,7 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         cls.docs = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(
             encoding="utf-8"
         )
-        cls.readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        cls.guide = (REPO_ROOT / ASL_GUIDE).read_text(encoding="utf-8")
         cls.justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
 
     def test_every_cli_subcommand_is_documented(self) -> None:
@@ -3694,7 +3699,7 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         agent_readme = (REPO_ROOT / "agent_session_loop" / "README.md").read_text(
             encoding="utf-8"
         )
-        for text in (self.readme, agent_readme, self.docs):
+        for text in (self.guide, agent_readme, self.docs):
             self.assertIn("workspace root", text.lower())
             self.assertIn("Alias:path", text)
 
@@ -3715,14 +3720,14 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
     ) -> None:
         self.assertEqual(1, prepare.LEGACY_PREPARE_VALIDATION_VERSION)
         self.assertEqual(2, prepare.PREPARE_VALIDATION_VERSION)
-        for text in (self.readme, self.docs):
+        for text in (self.guide, self.docs):
             self.assertIn("version 1", text)
             self.assertIn("version 2", text)
             self.assertIn("workspace_root", text)
             self.assertIn("--rebind-workspace", text)
         self.assertNotIn(
             "non-dry-run `asl run` refreshes/backfills the association",
-            self.readme,
+            self.guide,
         )
 
     def test_preflight_categories_and_pause_reasons_match_authoritative_tables(
@@ -4080,7 +4085,8 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         self,
     ) -> None:
         surfaces = {
-            "README.md": self.readme,
+            "README.md": (REPO_ROOT / "README.md").read_text(encoding="utf-8"),
+            ASL_GUIDE: self.guide,
             "docs/agent-session-loop.md": self.docs,
             "skills/asl/SKILL.md": (
                 REPO_ROOT / "skills" / "asl" / "SKILL.md"
@@ -4197,15 +4203,18 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         self.assertIn("task_packet.build_task_packet", self.docs)
         self.assertIn("ASL_WORKER_MODE=skill", self.docs)
 
-    def test_docs_and_readme_never_reference_pytest(self) -> None:
+    def test_docs_guide_and_readme_never_reference_pytest(self) -> None:
         self.assertNotIn("pytest", self.docs)
-        self.assertNotIn("pytest", self.readme)
+        self.assertNotIn("pytest", self.guide)
+        self.assertNotIn(
+            "pytest", (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        )
 
     def test_test_recipes_exist_and_are_documented(self) -> None:
         self.assertIn("\ntest-fast:", self.justfile)
         self.assertIn("\ntest-portable:", self.justfile)
         self.assertIn("\ntest-all:", self.justfile)
-        for text in (self.docs, self.readme):
+        for text in (self.docs, self.guide):
             self.assertIn("just test-fast", text)
             self.assertIn("just test-portable", text)
             self.assertIn("just test-all", text)
@@ -4370,7 +4379,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
     """The assurance vocabulary, surface, and storage as documented."""
 
     docs: str
-    readme: str
+    guide: str
     package_readme: str
     asl_skill: str
 
@@ -4379,7 +4388,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
         cls.docs = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(
             encoding="utf-8"
         )
-        cls.readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        cls.guide = (REPO_ROOT / ASL_GUIDE).read_text(encoding="utf-8")
         cls.package_readme = (REPO_ROOT / "agent_session_loop" / "README.md").read_text(
             encoding="utf-8"
         )
@@ -4388,7 +4397,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
         )
 
     def test_every_assurance_state_is_documented_by_name(self) -> None:
-        for text in (self.readme, self.docs, self.package_readme):
+        for text in (self.guide, self.docs, self.package_readme):
             for audit_state in assurance_models.AUDIT_STATES:
                 self.assertIn(
                     f"`{audit_state}`",
@@ -4410,7 +4419,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
             if isinstance(action, argparse._SubParsersAction)
         )
         for name in nested.choices:
-            for text in (self.readme, self.docs):
+            for text in (self.guide, self.docs):
                 self.assertIn(
                     f"asl assurance {name}",
                     text,
@@ -4435,20 +4444,20 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
         )
         for flag in flags:
             self.assertIn(flag, run_help, f"`asl run` no longer offers {flag}")
-            for text in (self.readme, self.docs):
+            for text in (self.guide, self.docs):
                 self.assertIn(flag, text, f"docs omit run flag {flag}")
 
     def test_opting_out_is_documented_as_the_only_way_to_run_no_checks(
         self,
     ) -> None:
-        for text in (self.readme, self.docs):
+        for text in (self.guide, self.docs):
             self.assertIn("--no-supervisor-audit", text)
-        self.assertIn("skipped` and creates no issue", self.readme)
+        self.assertIn("skipped` and creates no issue", self.guide)
         self.assertIn("Opting out is the only way to run no checks at all", self.docs)
 
     def test_issue_references_are_documented_in_the_canonical_form(self) -> None:
         self.assertEqual("ASI-", assurance_models.ISSUE_ID_PREFIX)
-        for text in (self.readme, self.docs, self.package_readme):
+        for text in (self.guide, self.docs, self.package_readme):
             self.assertIn("ASI-", text, "docs never show a canonical issue id")
 
     def test_storage_filenames_match_the_authoritative_constants(self) -> None:
@@ -4471,7 +4480,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
         docs have to say outright that they are different files with different
         scopes, locks, and lifetimes rather than leaving it to be inferred.
         """
-        for text in (self.readme, self.docs, self.package_readme):
+        for text in (self.guide, self.docs, self.package_readme):
             self.assertIn(assurance_ledger.LEDGER_FILE_NAME, text)
             self.assertIn(mailbox.MAILBOX_FILE_NAME, text)
             self.assertIn("separate system", text)
@@ -4479,7 +4488,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
     def test_lifecycle_ordering_puts_the_audit_before_the_terminal_record(
         self,
     ) -> None:
-        self.assertIn("run_finished", self.readme)
+        self.assertIn("run_finished", self.guide)
         self.assertIn(
             "before `run_finished` is appended",
             self.docs,
@@ -4487,15 +4496,15 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
         )
 
     def test_pending_recovery_is_documented_as_operator_driven(self) -> None:
-        for text in (self.readme, self.docs):
+        for text in (self.guide, self.docs):
             self.assertIn(state.ASSURANCE_PENDING_FILE_NAME, text)
             self.assertIn("asl assurance process-pending", text)
-        self.assertIn("idempotent", self.readme)
+        self.assertIn("idempotent", self.guide)
 
     def test_the_improvement_workflow_is_documented_as_human_gated(self) -> None:
-        for text in (self.readme, self.docs):
+        for text in (self.guide, self.docs):
             self.assertIn("asl assurance plan ISSUE --harness NAME --output PATH", text)
-        self.assertIn("no commit, and no repository change", self.readme)
+        self.assertIn("no commit, and no repository change", self.guide)
 
     def test_the_autopilot_skill_reports_assurance_without_driving_it(
         self,
