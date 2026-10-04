@@ -51,11 +51,12 @@ while IFS= read -r -d '' f; do
     is_git_ignored "$f" && continue
     # Skip files that already have an extension
     [[ "$(basename "$f")" == *.* ]] && continue
-    # Check for shell shebang
-    if head -1 "$f" 2>/dev/null | grep -qE '^#!\s*/(usr/)?bin/(env\s+)?(ba)?sh'; then
+    # Check for a shell shebang: `#!/usr/bin/env bash` or any absolute path to
+    # sh/bash, including Homebrew's (`#!/opt/homebrew/bin/bash`)
+    if head -1 "$f" 2>/dev/null | grep -qE '^#!\s*(/usr/bin/env\s+|/\S*/)(ba)?sh(\s|$)'; then
         scripts+=("$f")
     fi
-done < <(find "$SCRIPT_DIR" -path "$SCRIPT_DIR/.git" -prune -o -type f -perm +111 -print0)
+done < <(find "$SCRIPT_DIR" -path "$SCRIPT_DIR/.git" -prune -o -type f -perm -100 -print0)
 
 if [[ ${#scripts[@]} -eq 0 ]]; then
     fail "No shell scripts found"

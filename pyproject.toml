@@ -7,7 +7,7 @@ line-length = 88
 target-version = "py314"
 # Extensionless Python executables are invisible to both gates otherwise: ruff
 # globs *.py and lint.sh only claims files with a shell shebang.
-extend-include = ["bin/.local/bin/claude-lint-hook"]
+extend-include = ["bin/.local/bin/agent-session-loop"]
 
 # The portable half of the Workbench is deployed to a Pi documented at Python
 # 3.13, while everything else here runs on the newer interpreter the repository
