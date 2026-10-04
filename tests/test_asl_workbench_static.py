@@ -738,11 +738,7 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn('return "not recorded";', decoded)
         # Both the preview and row renderers must populate the completed slot.
         self.assertIn('setField(facts, "completed", formatCompletedAt(plan));', decoded)
-        self.assertIn(
-            "row.querySelector('[data-field=\"completed\"]').textContent = "
-            "formatCompletedAt(plan);",
-            decoded,
-        )
+        self.assertIn('setRowFact(row, "completed", formatCompletedAt(plan));', decoded)
         # Oldest comparator selects completed_at for complete plans through a
         # shared timestamp helper; other states stay on last_activity_at.
         self.assertIn("oldestSortTimestampFor", decoded)
@@ -752,6 +748,62 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         # Existing sort modes and other comparators remain untouched.
         self.assertIn("compareByActivity", decoded)
         self.assertIn("comparePlanRowsFor", decoded)
+
+    def test_queue_card_shows_idle_and_hides_empty_facts(self) -> None:
+        # Elapsed and idle were written as "-" on every card regardless of the
+        # plan. Idle is now measured from the last activity, elapsed (which the
+        # queue has no start time for) is gone, and an empty fact hides its
+        # cell instead of printing a dash.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/")
+        html = body.decode("utf-8")
+        row_template = html.split('id="wb-row-template"', 1)[1].split("</template>", 1)[
+            0
+        ]
+        self.assertNotIn('data-field="elapsed"', row_template)
+        self.assertIn('data-field="idle"', row_template)
+
+        decoded = self._shell_source(server)
+        self.assertNotIn(
+            'textContent = "-";',
+            decoded.split("export function populateRow", 1)[1].split("\n}\n", 1)[0],
+        )
+        self.assertIn("export function setRowFact", decoded)
+        self.assertIn("if (el.parentElement) el.parentElement.hidden = empty;", decoded)
+        self.assertIn(
+            'setRowFact(row, "idle", formatIdle(plan), '
+            "formatLastActivity(plan.last_activity_at));",
+            decoded,
+        )
+        self.assertIn(
+            'if (!plan || plan.primary_state === "complete") return null;', decoded
+        )
+
+    def test_status_badge_does_not_wrap(self) -> None:
+        css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+        badge = css.split(".wb-badge {", 1)[1].split("}", 1)[0]
+        self.assertIn("white-space: nowrap;", badge)
+
+    def test_progress_journal_collapses_older_entries(self) -> None:
+        # A long plan's journal, fully expanded, ran past 17,000px and buried
+        # the logs and artifacts. Entries now render newest first inside
+        # <details>, only the newest few open, and an operator's own toggles
+        # survive the detail view's periodic redraw.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/")
+        html = body.decode("utf-8")
+        self.assertIn('id="wb-detail-progress" reversed', html)
+        template = html.split('id="wb-progress-row-template"', 1)[1].split(
+            "</template>", 1
+        )[0]
+        self.assertIn('<details class="wb-progress-row__details">', template)
+        self.assertIn('<summary class="wb-progress-row__head">', template)
+
+        decoded = self._shell_source(server)
+        self.assertIn("export const PROGRESS_OPEN_ENTRIES = 3;", decoded)
+        self.assertIn("const newestFirst = entries.slice().reverse();", decoded)
+        self.assertIn('list.getAttribute("data-plan") === planKey', decoded)
+        self.assertIn(": index < PROGRESS_OPEN_ENTRIES;", decoded)
 
     def test_app_js_queue_visibility_hides_completed_by_default(self) -> None:
         # Needs-attention default: completed plans are filtered out

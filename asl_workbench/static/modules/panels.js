@@ -211,9 +211,28 @@ export async function loadAndRenderProgress() {
   }
 }
 
+/** How many of the newest journal entries open expanded on a plan's first render. */
+export const PROGRESS_OPEN_ENTRIES = 3;
+
+/**
+ * Draw the journal newest first, with only the latest few entries expanded.
+ *
+ * A long plan's journal runs to tens of thousands of pixels when every entry
+ * is open, which buries the logs and artifacts below it. What an operator
+ * opened or closed survives the periodic redraw: it is read back from the
+ * entries already on screen, keyed by session, before they are replaced.
+ */
 export function renderProgress(entries) {
   const list = document.getElementById("wb-detail-progress");
   if (!list) return;
+  const planKey = routePlanId();
+  const previous = new Map();
+  if (list.getAttribute("data-plan") === planKey) {
+    list.querySelectorAll("li[data-session-id] > details").forEach((details) => {
+      previous.set(details.parentElement.getAttribute("data-session-id"), details.open);
+    });
+  }
+  list.setAttribute("data-plan", planKey);
   list.innerHTML = "";
   if (entries.length === 0) {
     const empty = document.createElement("li");
@@ -223,9 +242,18 @@ export function renderProgress(entries) {
     return;
   }
   const tmpl = document.getElementById("wb-progress-row-template");
-  entries.forEach((entry) => {
+  const newestFirst = entries.slice().reverse();
+  newestFirst.forEach((entry, index) => {
     const fragment = tmpl.content.cloneNode(true);
     const li = fragment.querySelector("li");
+    const sessionKey = String(entry.session_id || "?") + "#" + (entries.length - 1 - index);
+    li.setAttribute("data-session-id", sessionKey);
+    const details = li.querySelector("details");
+    if (details) {
+      details.open = previous.has(sessionKey)
+        ? previous.get(sessionKey)
+        : index < PROGRESS_OPEN_ENTRIES;
+    }
     setField(li, "session_id", "session " + (entry.session_id || "?"));
     setField(li, "status", entry.status || "");
     setField(li, "completed_at", entry.completed_at || "");

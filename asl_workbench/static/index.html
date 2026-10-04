@@ -859,7 +859,7 @@
 
       <section class="wb-panel">
         <h2 class="wb-panel__title">Progress journal</h2>
-        <ol class="wb-progress-list" id="wb-detail-progress">
+        <ol class="wb-progress-list" id="wb-detail-progress" reversed>
           <li class="wb-empty">no entries</li>
         </ol>
       </section>
@@ -1219,7 +1219,6 @@
         <dl class="wb-row__facts">
           <div><dt>session</dt><dd data-field="session">-</dd></div>
           <div><dt>harness</dt><dd data-field="harness">-</dd></div>
-          <div><dt>elapsed</dt><dd data-field="elapsed">-</dd></div>
           <div><dt>idle</dt><dd data-field="idle">-</dd></div>
           <div><dt>run id</dt><dd data-field="run">-</dd></div>
           <div>
@@ -1253,16 +1252,18 @@
 
     <template id="wb-progress-row-template">
       <li class="wb-progress-row">
-        <header class="wb-progress-row__head">
-          <span data-field="session_id"></span>
-          <span data-field="status"></span>
-          <time data-field="completed_at"></time>
-        </header>
-        <p class="wb-progress-row__decisions" data-field="key_decisions"></p>
-        <ul class="wb-progress-row__list" data-field="files_modified"></ul>
-        <ul class="wb-progress-row__list" data-field="discovered_facts"></ul>
-        <ul class="wb-progress-row__list" data-field="open_questions"></ul>
-        <p class="wb-progress-row__blockers" data-field="blockers"></p>
+        <details class="wb-progress-row__details">
+          <summary class="wb-progress-row__head">
+            <span data-field="session_id"></span>
+            <span data-field="status"></span>
+            <time data-field="completed_at"></time>
+          </summary>
+          <p class="wb-progress-row__decisions" data-field="key_decisions"></p>
+          <ul class="wb-progress-row__list" data-field="files_modified"></ul>
+          <ul class="wb-progress-row__list" data-field="discovered_facts"></ul>
+          <ul class="wb-progress-row__list" data-field="open_questions"></ul>
+          <p class="wb-progress-row__blockers" data-field="blockers"></p>
+        </details>
       </li>
     </template>
 

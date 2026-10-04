@@ -189,6 +189,28 @@ class WorkbenchServerTests(unittest.TestCase):
             self.assertIn(key, plan_payload)
         self.assertIn(plan_payload["urgency_group"], workbench.URGENCY_GROUPS)
 
+    def test_plan_endpoint_names_the_plan_by_its_manifest_title(self) -> None:
+        # The queue row calls a plan by its manifest's `# H1`; the detail read
+        # once had no title, so opening a plan retitled it with its directory.
+        (self.canonical_plan_dir / "manifest.md").write_text(
+            "# Ship the widget\n", encoding="utf-8"
+        )
+        registry = workbench.upsert_pin(
+            workbench.load_registry(self.registry_path), self.canonical_plan_dir
+        )
+        workbench.save_registry(registry, self.registry_path)
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        _, queue, _ = _http_request(f"{self._base_url(server)}/api/queue")
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/plan?{query}")
+
+        self.assertEqual(200, status)
+        self.assertEqual("Ship the widget", body["plan"]["title"])
+        row = next(
+            r for r in queue["plans"] if r["plan_dir"] == str(self.canonical_plan_dir)
+        )
+        self.assertEqual(row["title"], body["plan"]["title"])
+
     def test_queue_and_plan_expose_compact_recovery_payload(self) -> None:
         _write_state_payload(
             self.canonical_plan_dir,

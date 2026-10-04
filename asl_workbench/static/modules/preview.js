@@ -196,6 +196,53 @@ export function formatLastActivity(value) {
   }
 }
 
+/**
+ * Fill one fact on a queue card, and drop the fact when there is nothing to say.
+ *
+ * A card is read at a glance: a grid where half the cells say "-" pushes the
+ * hint and the last message below the fold for no information at all.
+ */
+export function setRowFact(row, field, value, title) {
+  const el = row.querySelector('[data-field="' + field + '"]');
+  if (!el) return;
+  const empty = value === null || value === undefined || value === "" || value === "-";
+  el.textContent = empty ? "-" : String(value);
+  if (title) {
+    el.title = title;
+  } else {
+    el.removeAttribute("title");
+  }
+  if (el.parentElement) el.parentElement.hidden = empty;
+}
+
+/**
+ * How long a plan that is not finished has gone without activity.
+ *
+ * Complete plans have a completion time instead, and a plan with no recorded
+ * activity has nothing to measure from.
+ */
+export function formatIdle(plan, now) {
+  if (!plan || plan.primary_state === "complete") return null;
+  const value = plan.last_activity_at;
+  if (typeof value !== "string" || !value) return null;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  const reference = typeof now === "number" ? now : Date.now();
+  return formatAge(Math.max(0, (reference - parsed) / 1000));
+}
+
+/** A coarse age: two units at most, since this is read rather than computed with. */
+export function formatAge(seconds) {
+  const total = Math.floor(seconds);
+  if (total < 60) return total + "s";
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return minutes + "m";
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + "h " + (minutes % 60) + "m";
+  const days = Math.floor(hours / 24);
+  return days + "d " + (hours % 24) + "h";
+}
+
 export function formatCompletedAt(plan) {
   // Completion time is only meaningful for complete plans. Non-complete
   // plans show "-"; complete plans with no recorded timestamp show
@@ -457,19 +504,16 @@ export function populateRow(row, plan) {
   const path = row.querySelector('[data-field="path"]');
   path.textContent = plan.plan_dir || planIdOf(plan);
 
-  const session = row.querySelector('[data-field="session"]');
-  session.textContent = plan.next_pending_session_id
-    ? "next " + plan.next_pending_session_id
-    : "-";
-
-  const harness = row.querySelector('[data-field="harness"]');
-  harness.textContent = plan.harness || "-";
-
-  row.querySelector('[data-field="elapsed"]').textContent = "-";
-  row.querySelector('[data-field="idle"]').textContent = "-";
-  row.querySelector('[data-field="run"]').textContent = plan.run_id || "-";
-  row.querySelector('[data-field="counts"]').textContent = formatCounts(plan.counts);
-  row.querySelector('[data-field="completed"]').textContent = formatCompletedAt(plan);
+  setRowFact(
+    row,
+    "session",
+    plan.next_pending_session_id ? "next " + plan.next_pending_session_id : null
+  );
+  setRowFact(row, "harness", plan.harness);
+  setRowFact(row, "idle", formatIdle(plan), formatLastActivity(plan.last_activity_at));
+  setRowFact(row, "run", plan.run_id);
+  setRowFact(row, "counts", formatCounts(plan.counts));
+  setRowFact(row, "completed", formatCompletedAt(plan));
 
   const hint = row.querySelector('[data-field="hint"]');
   hint.textContent = planHint(plan);

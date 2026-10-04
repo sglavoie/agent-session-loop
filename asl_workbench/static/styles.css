@@ -668,6 +668,7 @@ a:hover {
   font-size: 11px;
   letter-spacing: 0.03em;
   text-transform: lowercase;
+  white-space: nowrap;
   border: 1px solid var(--wb-border);
   background: var(--wb-bg-elev);
   color: var(--wb-text-dim);
@@ -1790,6 +1791,25 @@ a:hover {
   gap: 10px;
   flex-wrap: wrap;
   color: var(--wb-text-dim);
+  cursor: pointer;
+  list-style: none;
+}
+
+.wb-progress-row__head::-webkit-details-marker {
+  display: none;
+}
+
+.wb-progress-row__head::before {
+  content: "▸";
+  color: var(--wb-text-faint);
+}
+
+.wb-progress-row__details[open] > .wb-progress-row__head::before {
+  content: "▾";
+}
+
+.wb-progress-row__details > :not(summary) {
+  margin-top: 4px;
 }
 
 .wb-progress-row__list {

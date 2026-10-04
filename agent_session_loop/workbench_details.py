@@ -234,7 +234,11 @@ def read_plan(
         exists=canonical.is_dir(),
     )
     summary = workbench_catalog.build_summary(discovered, state_dir=state_dir)
-    return {"plan": summary.to_payload()}
+    payload = summary.to_payload()
+    # The queue row names a plan by its manifest title; the detail header has
+    # to as well, or opening a plan retitles it with its directory name.
+    payload["title"] = workbench_catalog.read_plan_title(canonical)
+    return {"plan": payload}
 
 
 def artifact_descriptor(path: Path | None) -> _JSONDict:
