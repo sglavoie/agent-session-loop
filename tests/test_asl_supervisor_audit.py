@@ -50,6 +50,9 @@ from agent_session_loop import (
     runner,
     state,
     supervisor_audit,
+    supervisor_audit_agent,
+    supervisor_audit_checks,
+    supervisor_audit_evidence,
     verification,
     verification_transitions,
 )
@@ -904,7 +907,7 @@ class AuditStateProjectionTests(unittest.TestCase):
                         "run_id": RUN_ID,
                         "state": "partial",
                         "eligible": True,
-                        "reason": supervisor_audit.REASON_LANE_EVIDENCE_ABSENT,
+                        "reason": supervisor_audit_agent.REASON_LANE_EVIDENCE_ABSENT,
                         "artifacts": [
                             {"kind": "artifact", "locator": "run/supervisor-audit.json"}
                         ],
@@ -1169,7 +1172,9 @@ class RestrictedAuditTests(unittest.TestCase):
             self.assertEqual("pending", result.state)
             self.assertIsNone(result.workspace_change)
             self.assertFalse(
-                (run_dir / supervisor_audit.WORKSPACE_CHANGE_ARTIFACT_NAME).exists()
+                (
+                    run_dir / supervisor_audit_checks.WORKSPACE_CHANGE_ARTIFACT_NAME
+                ).exists()
             )
 
     def test_a_symlinked_registered_checkout_is_not_audited_as_its_target(
@@ -1332,7 +1337,7 @@ class RestrictedAuditTests(unittest.TestCase):
                 "claude", Path(tmp), fake, workspace, plan_dir, state_dir, run_dir
             )
 
-            artifact = run_dir / supervisor_audit.WORKSPACE_CHANGE_ARTIFACT_NAME
+            artifact = run_dir / supervisor_audit_checks.WORKSPACE_CHANGE_ARTIFACT_NAME
             recorded = json.loads(artifact.read_text(encoding="utf-8"))
             self.assertEqual("unattributed", recorded["attribution"]["status"])
             self.assertEqual(
@@ -1345,7 +1350,7 @@ class RestrictedAuditTests(unittest.TestCase):
             )
             self.assertFalse((state_dir / assurance_ledger.LEDGER_FILE_NAME).exists())
             self.assertFalse(
-                (run_dir / supervisor_audit.MUTATION_ARTIFACT_NAME).exists()
+                (run_dir / supervisor_audit_checks.MUTATION_ARTIFACT_NAME).exists()
             )
 
     def test_operator_process_activity_invalidates_without_attribution(self) -> None:
@@ -1428,7 +1433,9 @@ class RestrictedAuditTests(unittest.TestCase):
             self.assertEqual("pending", result.state)
             self.assertIsNone(result.workspace_change)
             self.assertFalse(
-                (run_dir / supervisor_audit.WORKSPACE_CHANGE_ARTIFACT_NAME).exists()
+                (
+                    run_dir / supervisor_audit_checks.WORKSPACE_CHANGE_ARTIFACT_NAME
+                ).exists()
             )
 
     def test_the_auditor_is_launched_read_only_without_the_plan_directory(
@@ -1704,8 +1711,8 @@ class EvidenceBundleTests(unittest.TestCase):
         state_dir: Path,
         run_dir: Path,
         **overrides: object,
-    ) -> supervisor_audit.AuditInput:
-        return supervisor_audit.collect_audit_input(
+    ) -> supervisor_audit_evidence.AuditInput:
+        return supervisor_audit_evidence.collect_audit_input(
             run_id=RUN_ID,
             run_dir=run_dir,
             state_dir=state_dir,
@@ -1763,12 +1770,12 @@ class EvidenceBundleTests(unittest.TestCase):
             payload = bundle.payload
 
             self.assertLessEqual(
-                len(bundle.to_bytes()), supervisor_audit.AUDIT_INPUT_MAX_BYTES
+                len(bundle.to_bytes()), supervisor_audit_evidence.AUDIT_INPUT_MAX_BYTES
             )
             self.assertTrue(
                 any(
                     entry["section"] == "events"
-                    and entry["reason"] == supervisor_audit.REASON_SIZE_CAP
+                    and entry["reason"] == supervisor_audit_evidence.REASON_SIZE_CAP
                     for entry in payload["omissions"]
                 )
             )
@@ -1803,7 +1810,7 @@ class EvidenceBundleTests(unittest.TestCase):
                 "name": name,
                 "created_at": None,
                 "version": 2,
-                "priority": supervisor_audit._event_priority(name, payload),
+                "priority": supervisor_audit_evidence._event_priority(name, payload),
                 "payload": payload,
             }
 
@@ -1824,8 +1831,8 @@ class EvidenceBundleTests(unittest.TestCase):
             "turns": [],
             "omissions": [],
         }
-        collector = supervisor_audit._Collector(
-            supervisor_audit.EvidenceRoots(roots=())
+        collector = supervisor_audit_evidence._Collector(
+            supervisor_audit_evidence.EvidenceRoots(roots=())
         )
         budget = (
             len(
@@ -1836,13 +1843,13 @@ class EvidenceBundleTests(unittest.TestCase):
             + 2048
         )
 
-        supervisor_audit._shed(payload, collector, max_bytes=budget)
+        supervisor_audit_evidence._shed(payload, collector, max_bytes=budget)
 
         names = [item["name"] for item in payload["events"]["records"]]
         self.assertIn(events.RUN_PAUSED_EVENT, names)
         self.assertIn(events.TURN_REJECTED_EVENT, names)
         self.assertEqual(
-            0, supervisor_audit._event_priority(events.TURN_REJECTED_EVENT, {})
+            0, supervisor_audit_evidence._event_priority(events.TURN_REJECTED_EVENT, {})
         )
 
     def test_tightening_a_bundle_sends_less_of_the_same_evidence(self) -> None:
@@ -1851,7 +1858,7 @@ class EvidenceBundleTests(unittest.TestCase):
             size = len(bundle.to_bytes())
             digest = bundle.sha256
 
-            tightened = supervisor_audit.tighten_audit_input(
+            tightened = supervisor_audit_evidence.tighten_audit_input(
                 bundle, max_bytes=size // 2
             )
 
@@ -1872,7 +1879,7 @@ class EvidenceBundleTests(unittest.TestCase):
                 (entry["section"], entry["reason"]): entry for entry in bundle.omissions
             }
 
-            tightened = supervisor_audit.tighten_audit_input(
+            tightened = supervisor_audit_evidence.tighten_audit_input(
                 bundle, max_bytes=len(bundle.to_bytes()) // 2
             )
             after = {
@@ -1888,13 +1895,13 @@ class EvidenceBundleTests(unittest.TestCase):
             for key, entry in before.items():
                 self.assertGreaterEqual(after[key]["count"], entry["count"], key)
                 self.assertEqual(64, len(after[key]["sha256"]), key)
-            events_cap = ("events", supervisor_audit.REASON_SIZE_CAP)
+            events_cap = ("events", supervisor_audit_evidence.REASON_SIZE_CAP)
             self.assertGreater(after[events_cap]["count"], before[events_cap]["count"])
             # And the second pass gives up in the same order the first would
             # have: previews are trimmed before whole turns are dropped, which
             # only holds because the previews inside the payload were recovered
             # as shrinkable rather than left invisible to it.
-            previews_cap = ("previews", supervisor_audit.REASON_SIZE_CAP)
+            previews_cap = ("previews", supervisor_audit_evidence.REASON_SIZE_CAP)
             self.assertNotIn(previews_cap, before)
             self.assertIn(previews_cap, after)
 
@@ -1904,7 +1911,7 @@ class EvidenceBundleTests(unittest.TestCase):
             text = bundle.to_bytes().decode("utf-8")
 
             self.assertNotIn("transfer_funds", text)
-            self.assertIn(supervisor_audit.REASON_APPLICATION_CONTENT, text)
+            self.assertIn(supervisor_audit_evidence.REASON_APPLICATION_CONTENT, text)
 
     def test_credentials_never_reach_the_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1926,10 +1933,12 @@ class EvidenceBundleTests(unittest.TestCase):
             last_message = payload["turns"][0]["last_message"]
 
             self.assertFalse(last_message["available"])
-            self.assertEqual(supervisor_audit.REASON_MISSING, last_message["reason"])
+            self.assertEqual(
+                supervisor_audit_evidence.REASON_MISSING, last_message["reason"]
+            )
             self.assertTrue(
                 any(
-                    entry["reason"] == supervisor_audit.REASON_MISSING
+                    entry["reason"] == supervisor_audit_evidence.REASON_MISSING
                     and entry["count"] >= 1
                     and len(entry["sha256"]) == 64
                     for entry in payload["omissions"]
@@ -1949,13 +1958,13 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertEqual(
                 1,
                 payload["events"]["summary"][
-                    supervisor_audit.UNPARSABLE_LINE_COUNT_KEY
+                    supervisor_audit_evidence.UNPARSABLE_LINE_COUNT_KEY
                 ],
             )
             self.assertTrue(
                 any(
                     entry["section"] == "events"
-                    and entry["reason"] == supervisor_audit.REASON_MALFORMED
+                    and entry["reason"] == supervisor_audit_evidence.REASON_MALFORMED
                     for entry in payload["omissions"]
                 )
             )
@@ -2014,11 +2023,13 @@ class EvidenceBundleTests(unittest.TestCase):
 
             self.assertEqual([], payload["mailbox"]["records"])
             self.assertFalse(summary["available"])
-            self.assertEqual(supervisor_audit.REASON_MISSING, summary["reason"])
+            self.assertEqual(
+                supervisor_audit_evidence.REASON_MISSING, summary["reason"]
+            )
             self.assertTrue(
                 any(
                     entry["section"] == "mailbox"
-                    and entry["reason"] == supervisor_audit.REASON_MISSING
+                    and entry["reason"] == supervisor_audit_evidence.REASON_MISSING
                     for entry in payload["omissions"]
                 )
             )
@@ -2036,14 +2047,14 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertEqual(
                 1,
                 payload["mailbox"]["summary"][
-                    supervisor_audit.UNPARSABLE_LINE_COUNT_KEY
+                    supervisor_audit_evidence.UNPARSABLE_LINE_COUNT_KEY
                 ],
             )
             self.assertEqual(6, len(payload["mailbox"]["records"]))
             self.assertTrue(
                 any(
                     entry["section"] == "mailbox"
-                    and entry["reason"] == supervisor_audit.REASON_MALFORMED
+                    and entry["reason"] == supervisor_audit_evidence.REASON_MALFORMED
                     and len(entry["sha256"]) == 64
                     for entry in payload["omissions"]
                 )
@@ -2062,7 +2073,7 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertTrue(
                 any(
                     entry["section"] == "mailbox"
-                    and entry["reason"] == supervisor_audit.REASON_SIZE_CAP
+                    and entry["reason"] == supervisor_audit_evidence.REASON_SIZE_CAP
                     for entry in payload["omissions"]
                 )
             )
@@ -2163,7 +2174,8 @@ class EvidenceBundleTests(unittest.TestCase):
 
             self.assertEqual(self.GUIDANCE_ID, guidance["id"])
             self.assertEqual(
-                supervisor_audit.MAILBOX_OWNERSHIP_DELIVERED, guidance["ownership"]
+                supervisor_audit_evidence.MAILBOX_OWNERSHIP_DELIVERED,
+                guidance["ownership"],
             )
             self.assertEqual(1, section["summary"]["delivered_count"])
             self.assertEqual(1, section["summary"]["counts"][mailbox.KIND_GUIDANCE])
@@ -2230,7 +2242,8 @@ class EvidenceBundleTests(unittest.TestCase):
                 )
                 self.assertEqual(self.GUIDANCE_ID, guidance["id"])
                 self.assertEqual(
-                    supervisor_audit.MAILBOX_OWNERSHIP_DELIVERED, guidance["ownership"]
+                    supervisor_audit_evidence.MAILBOX_OWNERSHIP_DELIVERED,
+                    guidance["ownership"],
                 )
                 self.assertEqual(1, section["summary"]["delivered_count"])
                 self.assertEqual(0, section["summary"]["missing_reference_count"])
@@ -2264,7 +2277,7 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertTrue(
                 any(
                     row["section"] == "mailbox"
-                    and row["reason"] == supervisor_audit.REASON_MISSING
+                    and row["reason"] == supervisor_audit_evidence.REASON_MISSING
                     for row in bundle.payload["omissions"]
                 )
             )
@@ -2304,7 +2317,7 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertTrue(status["paused"])
             self.assertEqual("blocked", status["pause_reason"])
             self.assertEqual(
-                supervisor_audit.SUPERSEDED_BY_CONSUMED_RULING,
+                supervisor_audit_evidence.SUPERSEDED_BY_CONSUMED_RULING,
                 superseded["superseded_by"],
             )
             self.assertEqual(signal, superseded["record"])
@@ -2430,7 +2443,7 @@ class EvidenceBundleTests(unittest.TestCase):
             text = bundle.to_bytes().decode("utf-8")
 
             self.assertNotIn("/etc/ssh/secret_config", text)
-            self.assertIn(supervisor_audit.REASON_OUTSIDE_APPROVED_ROOTS, text)
+            self.assertIn(supervisor_audit_evidence.REASON_OUTSIDE_APPROVED_ROOTS, text)
 
     def test_repository_fingerprints_are_reported_as_not_recorded_when_absent(
         self,
@@ -2440,7 +2453,8 @@ class EvidenceBundleTests(unittest.TestCase):
 
             self.assertFalse(payload["repository"]["available"])
             self.assertEqual(
-                supervisor_audit.REASON_NOT_RECORDED, payload["repository"]["reason"]
+                supervisor_audit_evidence.REASON_NOT_RECORDED,
+                payload["repository"]["reason"],
             )
 
     def test_repository_fingerprints_are_copied_when_supplied(self) -> None:
@@ -2525,7 +2539,7 @@ class EvidenceBundleTests(unittest.TestCase):
                 row for row in section["sessions"] if row["session"] == "session-02"
             )
             self.assertFalse(row["available"])
-            self.assertEqual(supervisor_audit.REASON_MALFORMED, row["reason"])
+            self.assertEqual(supervisor_audit_evidence.REASON_MALFORMED, row["reason"])
 
     def test_generated_bytecode_never_moves_a_tree_digest(self) -> None:
         """Running an interpreter over a skill tree must not restate its version."""
@@ -2537,11 +2551,11 @@ class EvidenceBundleTests(unittest.TestCase):
             bytecode.parent.mkdir(parents=True)
             bytecode.write_bytes(b"one")
 
-            before = supervisor_audit._tree_digest(root, patterns=("*",))
+            before = supervisor_audit_evidence._tree_digest(root, patterns=("*",))
             bytecode.write_bytes(b"two-and-rather-longer")
-            after = supervisor_audit._tree_digest(root, patterns=("*",))
+            after = supervisor_audit_evidence._tree_digest(root, patterns=("*",))
             source.write_text("version two\n", encoding="utf-8")
-            edited = supervisor_audit._tree_digest(root, patterns=("*",))
+            edited = supervisor_audit_evidence._tree_digest(root, patterns=("*",))
 
             self.assertEqual(before, after)
             self.assertEqual(1, before["file_count"])
@@ -2581,8 +2595,10 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertEqual(
                 ["app"], result["workspace_write_guard"]["authorized_aliases"]
             )
-            self.assertEqual(supervisor_audit.REDACTED, result["auth_token"])
-            self.assertEqual(supervisor_audit.REDACTED, result["authorization"])
+            self.assertEqual(supervisor_audit_evidence.REDACTED, result["auth_token"])
+            self.assertEqual(
+                supervisor_audit_evidence.REDACTED, result["authorization"]
+            )
 
     def test_a_reply_origin_survives_while_a_remote_is_canonicalized(self) -> None:
         for origin in run_prompts.REPLY_ORIGINS:
@@ -2622,14 +2638,14 @@ class EvidenceBundleTests(unittest.TestCase):
 
                 self.assertEqual(source, status["assurance"]["role"]["source"])
                 self.assertIn(
-                    supervisor_audit.REASON_APPLICATION_CONTENT,
+                    supervisor_audit_evidence.REASON_APPLICATION_CONTENT,
                     status["assurance"]["source"],
                 )
 
     def test_control_plane_signal_sources_survive_under_any_parent(self) -> None:
         # The runner stamps this provenance under several parents, so the
         # exemption is keyed on the value rather than on the parent name.
-        for source in sorted(supervisor_audit._CONTROL_PLANE_SOURCE_VALUES):
+        for source in sorted(supervisor_audit_evidence._CONTROL_PLANE_SOURCE_VALUES):
             with self.subTest(source=source), tempfile.TemporaryDirectory() as tmp:
                 workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
                 self._rewrite_state(
@@ -2659,11 +2675,11 @@ class EvidenceBundleTests(unittest.TestCase):
             ]
 
             self.assertIn(
-                supervisor_audit.REASON_APPLICATION_CONTENT,
+                supervisor_audit_evidence.REASON_APPLICATION_CONTENT,
                 status["action_required"]["source"],
             )
             self.assertIn(
-                supervisor_audit.REASON_APPLICATION_CONTENT,
+                supervisor_audit_evidence.REASON_APPLICATION_CONTENT,
                 status["pause_details"]["source"],
             )
 
@@ -2741,7 +2757,7 @@ class EvidenceBundleTests(unittest.TestCase):
                 [
                     {
                         "section": "review.artifacts",
-                        "reason": supervisor_audit.REASON_MISSING,
+                        "reason": supervisor_audit_evidence.REASON_MISSING,
                         "count": 2,
                         "sha256": mock.ANY,
                     }
@@ -2831,11 +2847,11 @@ class EvidenceBundleTests(unittest.TestCase):
             entry = payload["plan"]["progress"]
 
             self.assertFalse(entry["available"])
-            self.assertEqual(supervisor_audit.REASON_MISSING, entry["reason"])
+            self.assertEqual(supervisor_audit_evidence.REASON_MISSING, entry["reason"])
             self.assertTrue(
                 any(
                     omission["section"] == "plan"
-                    and omission["reason"] == supervisor_audit.REASON_MISSING
+                    and omission["reason"] == supervisor_audit_evidence.REASON_MISSING
                     for omission in payload["omissions"]
                 )
             )
@@ -3067,9 +3083,9 @@ class _RunHistoryFixture:
         history: tuple[Path, Path, Path, Path],
         *,
         workspace_root: Path | None = None,
-    ) -> supervisor_audit.AuditInput:
+    ) -> supervisor_audit_evidence.AuditInput:
         workspace, plan_dir, state_dir, run_dir = history
-        return supervisor_audit.collect_audit_input(
+        return supervisor_audit_evidence.collect_audit_input(
             run_id=RUN_ID,
             run_dir=run_dir,
             state_dir=state_dir,
@@ -3333,7 +3349,7 @@ class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual(1, len(commits["commit_groups"]))
             projected = commits["commits"][0]
             self.assertEqual(
-                supervisor_audit.OBSERVED_COMMIT_ORIGIN, projected["origin"]
+                supervisor_audit_evidence.OBSERVED_COMMIT_ORIGIN, projected["origin"]
             )
             self.assertEqual("app", projected["repository_alias"])
             self.assertEqual(self.HEAD_BEFORE, projected["head_before"])
@@ -3414,7 +3430,7 @@ class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
     ) -> DeterministicResult:
         results = {
             result.check: result
-            for result in supervisor_audit.run_deterministic_checks(
+            for result in supervisor_audit_checks.run_deterministic_checks(
                 self._bundle(history)
             )
         }
@@ -3422,8 +3438,8 @@ class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
 
     def test_snapshot_artifacts_do_not_prove_a_critical_guard_failure(self) -> None:
         for name in (
-            supervisor_audit.MUTATION_ARTIFACT_NAME,
-            supervisor_audit.WORKSPACE_CHANGE_ARTIFACT_NAME,
+            supervisor_audit_checks.MUTATION_ARTIFACT_NAME,
+            supervisor_audit_checks.WORKSPACE_CHANGE_ARTIFACT_NAME,
         ):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
                 history = self._worker_committed(tmp)
@@ -3434,7 +3450,7 @@ class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
                 )
                 verdict = {
                     r.check: r
-                    for r in supervisor_audit.run_deterministic_checks(payload)
+                    for r in supervisor_audit_checks.run_deterministic_checks(payload)
                 }["mutation-commit-guards"]
                 self.assertEqual("unavailable", verdict.status)
                 self.assertIn("identify no writer", verdict.detail)
@@ -3443,7 +3459,7 @@ class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
                     scope["writes"] = []
                 verdict = {
                     r.check: r
-                    for r in supervisor_audit.run_deterministic_checks(payload)
+                    for r in supervisor_audit_checks.run_deterministic_checks(payload)
                 }["mutation-commit-guards"]
                 self.assertEqual("fail", verdict.status)
                 self.assertIn("which no session declares as writable", verdict.detail)
@@ -3511,7 +3527,7 @@ class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
 
             results = {
                 result.check: result
-                for result in supervisor_audit.run_deterministic_checks(
+                for result in supervisor_audit_checks.run_deterministic_checks(
                     self._bundle(history)
                 )
             }
@@ -3644,7 +3660,9 @@ class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
 
             self.assertNotIn("run/commit-0001-session-01-app/stderr.log", locators)
             self.assertEqual(1, len(omitted))
-            self.assertEqual(supervisor_audit.REASON_MISSING, omitted[0]["reason"])
+            self.assertEqual(
+                supervisor_audit_evidence.REASON_MISSING, omitted[0]["reason"]
+            )
             self.assertEqual(2, omitted[0]["count"])
 
     def test_a_successful_commits_streams_are_left_unindexed(self) -> None:
@@ -3850,12 +3868,14 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
             # as application content, and the detail no longer spends its inline
             # budget on the gate's own kilobytes of argv, so the reason arrives
             # whole instead of at the edge of a truncation.
-            self.assertIn(supervisor_audit.REASON_APPLICATION_CONTENT, check["stderr"])
+            self.assertIn(
+                supervisor_audit_evidence.REASON_APPLICATION_CONTENT, check["stderr"]
+            )
             self.assertIn("missing-required-heading", check["detail"])
             self.assertNotIn("path_re", check["detail"])
             self.assertEqual(recorded["detail"], check["detail"])
             self.assertLess(
-                len(check["detail"]), supervisor_audit.MAX_INLINE_STRING_BYTES
+                len(check["detail"]), supervisor_audit_evidence.MAX_INLINE_STRING_BYTES
             )
 
     def test_the_failed_gate_stderr_artifact_is_indexed(self) -> None:
@@ -3963,7 +3983,7 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual(self.GATE, diagnostic["check"])
             self.assertEqual("artifact-unparsable", diagnostic["reason"])
             self.assertIn(
-                supervisor_audit.REASON_APPLICATION_CONTENT,
+                supervisor_audit_evidence.REASON_APPLICATION_CONTENT,
                 diagnostic["customer_payload"],
             )
             self.assertNotIn(self.APPLICATION_TEXT, json.dumps(check))
@@ -4020,7 +4040,7 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
         by recorded evidence the current parser never saw, so it re-derives the
         vocabulary rather than trusting that promotion already checked it.
         """
-        roots = supervisor_audit.EvidenceRoots.build(
+        roots = supervisor_audit_evidence.EvidenceRoots.build(
             run_dir=Path.cwd(), state_dir=Path.cwd(), plan_dir=Path.cwd()
         )
         for field in ("check", "reason"):
@@ -4028,13 +4048,13 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
                 diagnostic = {"check": self.GATE, "reason": "artifact-missing"}
                 diagnostic[field] = self.APPLICATION_TOKEN
 
-                projected = supervisor_audit._Collector(roots).redact(
+                projected = supervisor_audit_evidence._Collector(roots).redact(
                     {"failure_diagnostic": diagnostic}
                 )
 
                 self.assertNotIn(self.APPLICATION_TOKEN, json.dumps(projected))
                 self.assertIn(
-                    supervisor_audit.REASON_APPLICATION_CONTENT,
+                    supervisor_audit_evidence.REASON_APPLICATION_CONTENT,
                     projected["failure_diagnostic"][field],
                 )
 
@@ -4045,11 +4065,11 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
         control-plane field holding a structure has to be withheld rather than
         raising on the membership test that guards it.
         """
-        roots = supervisor_audit.EvidenceRoots.build(
+        roots = supervisor_audit_evidence.EvidenceRoots.build(
             run_dir=Path.cwd(), state_dir=Path.cwd(), plan_dir=Path.cwd()
         )
 
-        projected = supervisor_audit._Collector(roots).redact(
+        projected = supervisor_audit_evidence._Collector(roots).redact(
             {
                 "failure_diagnostic": {
                     "check": {"nested": self.APPLICATION_TEXT},
@@ -4061,7 +4081,7 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
         self.assertNotIn(self.APPLICATION_TEXT, json.dumps(projected))
         for field in ("check", "reason"):
             self.assertIn(
-                supervisor_audit.REASON_APPLICATION_CONTENT,
+                supervisor_audit_evidence.REASON_APPLICATION_CONTENT,
                 projected["failure_diagnostic"][field],
             )
 
@@ -4073,7 +4093,9 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
 
             self.assertIsNone(check["failure_diagnostic"])
             self.assertEqual("command exited 1: python3", check["detail"])
-            self.assertIn(supervisor_audit.REASON_APPLICATION_CONTENT, check["stderr"])
+            self.assertIn(
+                supervisor_audit_evidence.REASON_APPLICATION_CONTENT, check["stderr"]
+            )
             self.assertNotIn(self.APPLICATION_TEXT, json.dumps(check))
 
 
@@ -4082,16 +4104,16 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
 
     def _audit(
         self, history: tuple[Path, Path, Path, Path], *, workspace_root: object = ...
-    ) -> tuple[supervisor_audit.AuditInput, dict[str, DeterministicResult]]:
+    ) -> tuple[supervisor_audit_evidence.AuditInput, dict[str, DeterministicResult]]:
         workspace, plan_dir, state_dir, run_dir = history
-        bundle = supervisor_audit.collect_audit_input(
+        bundle = supervisor_audit_evidence.collect_audit_input(
             run_id=RUN_ID,
             run_dir=run_dir,
             state_dir=state_dir,
             plan_dir=plan_dir,
             workspace_root=workspace if workspace_root is ... else workspace_root,
         )
-        results = supervisor_audit.run_deterministic_checks(bundle)
+        results = supervisor_audit_checks.run_deterministic_checks(bundle)
         return bundle, {result.check: result for result in results}
 
     def _statuses(self, results: dict[str, DeterministicResult]) -> dict[str, str]:
@@ -4104,10 +4126,10 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
         # copies from drifting apart silently.
         self.assertEqual(
             commit_settlement.PAUSED_WORK_COMMIT_KEY,
-            supervisor_audit.PAUSED_WORK_COMMIT_KEY,
+            supervisor_audit_evidence.PAUSED_WORK_COMMIT_KEY,
         )
         source = inspect.getsource(commit_settlement._settle_paused_retained_work)
-        for result in supervisor_audit._PAUSED_WORK_RESULTS:
+        for result in supervisor_audit_checks._PAUSED_WORK_RESULTS:
             self.assertIn(f'result = "{result}"', source)
 
     def test_a_clean_run_passes_every_lane(self) -> None:
@@ -4119,10 +4141,10 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             )
             self.assertEqual(
                 {lane: "pass" for lane in RUBRIC_LANES},
-                supervisor_audit.lane_rollup(results.values()),
+                supervisor_audit_checks.lane_rollup(results.values()),
             )
             self.assertEqual(
-                (), supervisor_audit.findings_from_results(results.values())
+                (), supervisor_audit_checks.findings_from_results(results.values())
             )
             self.assertTrue(bundle.evidence)
 
@@ -4232,7 +4254,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self._write_state(history[2], payload)
 
             _, results = self._audit(history)
-            finding = supervisor_audit.findings_from_results(results.values())
+            finding = supervisor_audit_checks.findings_from_results(results.values())
 
             self.assertEqual("fail", results["root-registry-agreement"].status)
             self.assertIn("kiln", results["root-registry-agreement"].detail)
@@ -4243,7 +4265,9 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual("critical", finding[0].severity)
             self.assertEqual(
                 "fail",
-                supervisor_audit.lane_rollup(results.values())["identity-authority"],
+                supervisor_audit_checks.lane_rollup(results.values())[
+                    "identity-authority"
+                ],
             )
 
     def test_state_and_events_that_disagree_are_a_finding(self) -> None:
@@ -4268,7 +4292,9 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                 "observability.state-event-agreement",
                 [
                     item.invariant_key
-                    for item in supervisor_audit.findings_from_results(results.values())
+                    for item in supervisor_audit_checks.findings_from_results(
+                        results.values()
+                    )
                 ],
             )
             # The pause was never classified, so the lifecycle lane reports what
@@ -4364,7 +4390,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
         payload = self._read_state(history[2])
         resolved = self._settlement_record() if mirror is ... else mirror
         if resolved is not None:
-            payload[supervisor_audit.PAUSED_WORK_COMMIT_KEY] = resolved
+            payload[supervisor_audit_evidence.PAUSED_WORK_COMMIT_KEY] = resolved
         if unresolved is not None:
             payload["unresolved_commit_groups"] = unresolved
         self._write_state(history[2], payload)
@@ -4716,7 +4742,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn("its own work", results["review-independence"].detail)
             self.assertEqual(
                 "fail",
-                supervisor_audit.lane_rollup(results.values())[
+                supervisor_audit_checks.lane_rollup(results.values())[
                     "verification-review-independence"
                 ],
             )
@@ -5075,7 +5101,9 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn("docs", results["scope-guard-catch"].detail)
             findings = {
                 finding.invariant_key: finding
-                for finding in supervisor_audit.findings_from_results(results.values())
+                for finding in supervisor_audit_checks.findings_from_results(
+                    results.values()
+                )
             }
             self.assertNotIn("packet.write-scope-containment", findings)
             caught = findings["packet.write-scope-guard-catch"]
@@ -5087,7 +5115,9 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             # keeps the worse of them.
             self.assertEqual(
                 "fail",
-                supervisor_audit.lane_rollup(results.values())["task-packet-coherence"],
+                supervisor_audit_checks.lane_rollup(results.values())[
+                    "task-packet-coherence"
+                ],
             )
 
     def test_one_caught_write_is_reported_once_across_turn_and_pause(self) -> None:
@@ -5113,7 +5143,9 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual("pass", results["scope-guard-catch"].status)
             findings = {
                 finding.invariant_key: finding
-                for finding in supervisor_audit.findings_from_results(results.values())
+                for finding in supervisor_audit_checks.findings_from_results(
+                    results.values()
+                )
             }
             self.assertNotIn("packet.write-scope-guard-catch", findings)
             self.assertEqual(
@@ -5243,7 +5275,9 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn("scope-escape", detail)
             findings = {
                 finding.invariant_key
-                for finding in supervisor_audit.findings_from_results(results.values())
+                for finding in supervisor_audit_checks.findings_from_results(
+                    results.values()
+                )
             }
             self.assertNotIn("packet.write-scope-guard-catch", findings)
 
@@ -5316,7 +5350,9 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn("1 commit(s) by fast-forward", result.detail)
             findings = {
                 finding.invariant_key: finding
-                for finding in supervisor_audit.findings_from_results(results.values())
+                for finding in supervisor_audit_checks.findings_from_results(
+                    results.values()
+                )
             }
             # The fingerprint is the one the agent lane already reports this
             # under, so a run both lanes grade folds into one issue rather than
@@ -5385,25 +5421,27 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn("mutation-and-commit", result.detail)
             findings = {
                 finding.invariant_key
-                for finding in supervisor_audit.findings_from_results(results.values())
+                for finding in supervisor_audit_checks.findings_from_results(
+                    results.values()
+                )
             }
             self.assertNotIn("guards.commit-after-verification", findings)
 
     def _shed_events(
-        self, bundle: supervisor_audit.AuditInput
+        self, bundle: supervisor_audit_evidence.AuditInput
     ) -> dict[str, DeterministicResult]:
         """Drop the bundle's event records the way the size cap drops them."""
         bundle.payload["events"]["records"] = []
         bundle.payload.setdefault("omissions", []).append(
             {
                 "section": "events",
-                "reason": supervisor_audit.REASON_SIZE_CAP,
+                "reason": supervisor_audit_evidence.REASON_SIZE_CAP,
                 "count": 2,
             }
         )
         return {
             result.check: result
-            for result in supervisor_audit.run_deterministic_checks(bundle)
+            for result in supervisor_audit_checks.run_deterministic_checks(bundle)
         }
 
     def test_a_pause_the_size_cap_dropped_is_not_a_pause_that_never_happened(
@@ -5518,7 +5556,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             # it is the violation as the guard saw it, not a later commit that
             # carried the write forward (ASI-9).
             self.assertIn(
-                supervisor_audit.OBSERVED_COMMIT_ORIGIN,
+                supervisor_audit_evidence.OBSERVED_COMMIT_ORIGIN,
                 [c.get("origin") for c in bundle.payload["commits"]["commits"]],
             )
             self.assertEqual("pass", results["scope-escape"].status)
@@ -5735,7 +5773,9 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             )
             findings = {
                 finding.invariant_key: finding
-                for finding in supervisor_audit.findings_from_results(results.values())
+                for finding in supervisor_audit_checks.findings_from_results(
+                    results.values()
+                )
             }
             self.assertNotIn("packet.write-scope-guard-catch", findings)
             self.assertEqual(
@@ -5849,7 +5889,9 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertNotIn("docs", caught.detail)
             findings = {
                 finding.invariant_key: finding
-                for finding in supervisor_audit.findings_from_results(results.values())
+                for finding in supervisor_audit_checks.findings_from_results(
+                    results.values()
+                )
             }
             self.assertEqual(
                 "critical", findings["packet.write-scope-containment"].severity
@@ -5953,7 +5995,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual("pass", results["scope-guard-catch"].status)
             self.assertEqual(
                 "unavailable",
-                supervisor_audit.lane_rollup(
+                supervisor_audit_checks.lane_rollup(
                     [results["scope-escape"], results["scope-guard-catch"]]
                 )["task-packet-coherence"],
             )
@@ -5961,7 +6003,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
     def test_write_scope_severity_lives_on_the_spec_not_on_the_verdict(self) -> None:
         specs = {
             spec.invariant_key: spec
-            for spec in supervisor_audit.DETERMINISTIC_CHECK_SPECS
+            for spec in supervisor_audit_checks.DETERMINISTIC_CHECK_SPECS
         }
         containment = specs["packet.write-scope-containment"]
         catch = specs["packet.write-scope-guard-catch"]
@@ -5978,12 +6020,14 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             "severity",
             {
                 field.name
-                for field in dataclasses.fields(supervisor_audit._Verdict)  # noqa: SLF001
+                for field in dataclasses.fields(supervisor_audit_checks._Verdict)  # noqa: SLF001
             },
         )
 
     def test_both_write_scope_checks_share_one_analysis_helper(self) -> None:
-        module = ast.parse(Path(supervisor_audit.__file__).read_text(encoding="utf-8"))
+        module = ast.parse(
+            Path(supervisor_audit_checks.__file__).read_text(encoding="utf-8")
+        )
         called = {
             node.name: {
                 child.func.id
@@ -6009,7 +6053,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self._write_result(history[3] / "turn-0001-01", payload)
 
             _, results = self._audit(history)
-            findings = supervisor_audit.findings_from_results(results.values())
+            findings = supervisor_audit_checks.findings_from_results(results.values())
 
             self.assertEqual("fail", results["misleading-success"].status)
             self.assertIn("verification failed", results["misleading-success"].detail)
@@ -6424,7 +6468,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             )
 
             _, results = self._audit(history)
-            findings = supervisor_audit.findings_from_results(results.values())
+            findings = supervisor_audit_checks.findings_from_results(results.values())
 
             self.assertEqual("pass", results["unclassified-anomalies"].status)
             self.assertEqual("fail", results["verification-outcomes"].status)
@@ -6462,7 +6506,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self._write_retry_pair(history)
 
             bundle, results = self._audit(history)
-            findings = supervisor_audit.findings_from_results(results.values())
+            findings = supervisor_audit_checks.findings_from_results(results.values())
 
             self.assertTrue(bundle.payload["turns"][0]["anomalous"])
             self.assertEqual("pass", results["misleading-success"].status)
@@ -6512,7 +6556,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             )
 
     def _checks_without_the_retry(
-        self, bundle: supervisor_audit.AuditInput
+        self, bundle: supervisor_audit_evidence.AuditInput
     ) -> dict[str, DeterministicResult]:
         """Judge ``bundle`` as if the size cap had shed the clean retry.
 
@@ -6524,7 +6568,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
         payload["turns"] = [
             turn for turn in payload["turns"] if turn["name"] != "turn-0002-01"
         ]
-        results = supervisor_audit.run_deterministic_checks(payload)
+        results = supervisor_audit_checks.run_deterministic_checks(payload)
         return {result.check: result for result in results}
 
     def test_supersession_survives_the_retry_being_shed(self) -> None:
@@ -6632,7 +6676,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
 
             self.assertEqual("pass", results["misleading-success"].status)
             self.assertEqual(
-                (), supervisor_audit.findings_from_results(results.values())
+                (), supervisor_audit_checks.findings_from_results(results.values())
             )
 
     def test_a_skipped_required_check_contradicts_success(self) -> None:
@@ -6728,16 +6772,18 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self._write_events(history[2], self._events_recording_only_a_skip())
             bundle, _ = self._audit(history)
 
-            shed = supervisor_audit.tighten_audit_input(bundle, max_bytes=1)
+            shed = supervisor_audit_evidence.tighten_audit_input(bundle, max_bytes=1)
             results = {
                 result.check: result
-                for result in supervisor_audit.run_deterministic_checks(shed.payload)
+                for result in supervisor_audit_checks.run_deterministic_checks(
+                    shed.payload
+                )
             }
 
             self.assertTrue(
                 any(
                     entry["section"] == "events"
-                    and entry["reason"] == supervisor_audit.REASON_SIZE_CAP
+                    and entry["reason"] == supervisor_audit_evidence.REASON_SIZE_CAP
                     for entry in shed.omissions
                 )
             )
@@ -7169,7 +7215,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
     def _restore_checks(self, bundle: dict[str, Any]) -> dict[str, DeterministicResult]:
         return {
             result.check: result
-            for result in supervisor_audit.run_deterministic_checks(bundle)
+            for result in supervisor_audit_checks.run_deterministic_checks(bundle)
         }
 
     def test_a_refused_restore_accounts_for_its_own_failed_exit(self) -> None:
@@ -7305,7 +7351,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             )
 
             _, results = self._audit(history)
-            findings = supervisor_audit.findings_from_results(results.values())
+            findings = supervisor_audit_checks.findings_from_results(results.values())
 
             verdict = results["retryable-transport-failure"]
             self.assertEqual("fail", verdict.status)
@@ -7318,7 +7364,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             )
             self.assertEqual(
                 "fail",
-                supervisor_audit.lane_rollup(results.values())[
+                supervisor_audit_checks.lane_rollup(results.values())[
                     "lifecycle-retry-resume"
                 ],
             )
@@ -7520,7 +7566,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self._aborted_a_turn(history, requested=False)
 
             _, results = self._audit(history)
-            findings = supervisor_audit.findings_from_results(results.values())
+            findings = supervisor_audit_checks.findings_from_results(results.values())
 
             verdict = results["operator-abort"]
             self.assertEqual("fail", verdict.status)
@@ -7568,19 +7614,21 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn("would not parse", results["unclassified-anomalies"].detail)
             self.assertEqual(
                 "fail",
-                supervisor_audit.lane_rollup(results.values())["unknown-anomalies"],
+                supervisor_audit_checks.lane_rollup(results.values())[
+                    "unknown-anomalies"
+                ],
             )
 
     def test_a_bundle_written_before_the_rename_still_reports_its_damage(self) -> None:
         # Every replay proof is drawn from bundles written under schema
         # version 1, which spell the count `rejected_count`. Reading only the
         # new key would silently re-judge a damaged log as an undamaged one.
-        results = supervisor_audit.run_deterministic_checks(
+        results = supervisor_audit_checks.run_deterministic_checks(
             {
                 "events": {
                     "summary": {
                         "available": True,
-                        supervisor_audit.LEGACY_UNPARSABLE_LINE_COUNT_KEY: 2,
+                        supervisor_audit_evidence.LEGACY_UNPARSABLE_LINE_COUNT_KEY: 2,
                     }
                 }
             }
@@ -7598,7 +7646,9 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual("unavailable", results["repository-intent"].status)
             self.assertEqual(
                 "unavailable",
-                supervisor_audit.lane_rollup(results.values())["identity-authority"],
+                supervisor_audit_checks.lane_rollup(results.values())[
+                    "identity-authority"
+                ],
             )
 
     def test_findings_keep_one_fingerprint_across_relocated_runs(self) -> None:
@@ -7614,7 +7664,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                 fingerprints.append(
                     [
                         item.fingerprint
-                        for item in supervisor_audit.findings_from_results(
+                        for item in supervisor_audit_checks.findings_from_results(
                             results.values()
                         )
                     ]
@@ -7632,7 +7682,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             declared = {reference.locator for reference in bundle.evidence}
 
             self.assertEqual(
-                len(supervisor_audit.DETERMINISTIC_CHECK_SPECS), len(results)
+                len(supervisor_audit_checks.DETERMINISTIC_CHECK_SPECS), len(results)
             )
             for result in results.values():
                 self.assertTrue(result.evidence, result.check)
@@ -7700,7 +7750,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
         history: tuple[Path, Path, Path, Path],
         auditor: _ScriptedAuditor,
         *,
-        bundle: supervisor_audit.AuditInput | None = None,
+        bundle: supervisor_audit_evidence.AuditInput | None = None,
         sleeps: list[float] | None = None,
         workspace_root: Path | None = None,
         repositories: tuple[str, ...] = ("app",),
@@ -7765,7 +7815,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
     ) -> str:
         body = json.dumps(
             {
-                "schema_version": supervisor_audit.AGENT_OUTPUT_SCHEMA_VERSION,
+                "schema_version": supervisor_audit_agent.AGENT_OUTPUT_SCHEMA_VERSION,
                 "lanes": lanes,
                 "findings": findings or [],
             }
@@ -7773,7 +7823,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
         return f"{prose}```json\n{body}\n```\n"
 
     def _reports(self, run_dir: Path, audit: object) -> tuple[dict[str, Any], str]:
-        report, markdown = supervisor_audit.write_audit_reports(
+        report, markdown = supervisor_audit_agent.write_audit_reports(
             run_dir, audit, durable=False
         )
         return (
@@ -7878,7 +7928,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual("malformed-output", outcome.audit.reason)
             self.assertEqual(MAX_AUDIT_ATTEMPTS, len(outcome.attempts))
             self.assertEqual(
-                len(supervisor_audit.DETERMINISTIC_CHECK_SPECS),
+                len(supervisor_audit_checks.DETERMINISTIC_CHECK_SPECS),
                 len(outcome.audit.deterministic),
             )
             self.assertTrue(outcome.audit.findings)
@@ -8153,7 +8203,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             history = self._history(Path(tmp))
             # Already shed as far as it goes, so a tighter ceiling changes
             # nothing and a second launch would be refused identically.
-            bundle = supervisor_audit.tighten_audit_input(
+            bundle = supervisor_audit_evidence.tighten_audit_input(
                 self._bundle(history), max_bytes=1
             )
             auditor = _ScriptedAuditor(self._refused_for_size())
@@ -8328,7 +8378,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             self.assertTrue(outcome.agent_covered)
             self.assertEqual("partial", outcome.audit.state)
             self.assertEqual(
-                supervisor_audit.REASON_LANE_EVIDENCE_ABSENT, outcome.audit.reason
+                supervisor_audit_agent.REASON_LANE_EVIDENCE_ABSENT, outcome.audit.reason
             )
             self.assertEqual("unavailable", statuses["resources-stalls"])
             self.assertEqual((), outcome.audit.findings)
@@ -8351,7 +8401,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             # audit can stand behind, so it degrades rather than reading partial.
             self.assertEqual("unavailable", outcome.audit.state)
             self.assertEqual(
-                supervisor_audit.REASON_LANE_COVERAGE, outcome.audit.reason
+                supervisor_audit_agent.REASON_LANE_COVERAGE, outcome.audit.reason
             )
 
     def test_a_legacy_plan_without_a_registry_binding_can_be_all_clear(self) -> None:
@@ -8421,8 +8471,8 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bundle = self._bundle(self._history(Path(tmp)))
 
-            prompt = supervisor_audit.build_audit_prompt(
-                bundle, catalog=supervisor_audit.EMPTY_AGENT_CATALOG
+            prompt = supervisor_audit_agent.build_audit_prompt(
+                bundle, catalog=supervisor_audit_agent.EMPTY_AGENT_CATALOG
             )
 
             self.assertLess(
@@ -8449,7 +8499,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn("A pause never excuses malformed acceptance", prompt)
             for lane in RUBRIC_LANES:
                 self.assertIn(f"- {lane}", prompt)
-            for root in supervisor_audit.LOCALIZATION_ROOTS:
+            for root in supervisor_audit_agent.LOCALIZATION_ROOTS:
                 self.assertIn(f"`{root}`", prompt)
 
     def test_identical_inputs_produce_identical_artifacts(self) -> None:
@@ -8457,7 +8507,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             history = self._history(Path(tmp))
             bundle = self._bundle(history)
             declared = [entry.locator for entry in bundle.evidence]
-            results = supervisor_audit.run_deterministic_checks(bundle)
+            results = supervisor_audit_checks.run_deterministic_checks(bundle)
             reply = self._reply(
                 self._lanes(declared[0], {"identity-authority": "fail"}),
                 [self._finding(declared[0])],
@@ -8466,18 +8516,18 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             for index in range(2):
                 directory = Path(tmp) / f"render-{index}"
                 directory.mkdir()
-                audit = supervisor_audit.render_supervisor_audit(
+                audit = supervisor_audit_agent.render_supervisor_audit(
                     run_id=RUN_ID,
                     bundle=bundle,
                     results=results,
                     generated_at=FIXED_CLOCK.isoformat(),
-                    agent=supervisor_audit.parse_agent_audit(
+                    agent=supervisor_audit_agent.parse_agent_audit(
                         reply,
                         declared=declared,
-                        catalog=supervisor_audit.EMPTY_AGENT_CATALOG,
+                        catalog=supervisor_audit_agent.EMPTY_AGENT_CATALOG,
                     ),
                 )
-                report, markdown = supervisor_audit.write_audit_reports(
+                report, markdown = supervisor_audit_agent.write_audit_reports(
                     directory, audit, durable=False
                 )
                 rendered.append((report.read_bytes(), markdown.read_bytes()))
@@ -8501,7 +8551,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual([], comparison["added"])
             self.assertEqual([], comparison["removed"])
             self.assertFalse(
-                (run_dir / supervisor_audit.MUTATION_ARTIFACT_NAME).exists()
+                (run_dir / supervisor_audit_checks.MUTATION_ARTIFACT_NAME).exists()
             )
 
     def test_every_attempt_is_archived_without_inlining_the_prompt(self) -> None:
@@ -8534,7 +8584,9 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
                 )
 
     def test_every_rubric_lane_owns_at_least_one_check(self) -> None:
-        covered = {spec.lane for spec in supervisor_audit.DETERMINISTIC_CHECK_SPECS}
+        covered = {
+            spec.lane for spec in supervisor_audit_checks.DETERMINISTIC_CHECK_SPECS
+        }
 
         self.assertEqual(set(RUBRIC_LANES), covered)
 
@@ -8736,7 +8788,7 @@ class AgentIdentityDecisionTests(_RunHistoryFixture, unittest.TestCase):
             self.assertFalse(outcome.agent_covered)
             self.assertEqual("malformed-output", outcome.attempts[0].outcome)
             self.assertIn(
-                f"schema_version {supervisor_audit.AGENT_OUTPUT_SCHEMA_VERSION}",
+                f"schema_version {supervisor_audit_agent.AGENT_OUTPUT_SCHEMA_VERSION}",
                 outcome.attempts[0].detail,
             )
 
@@ -8771,9 +8823,9 @@ class AgentIdentityDecisionTests(_RunHistoryFixture, unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
             issue_id = self._open_issue(history[2], invariant="identity.listed")
-            catalog = supervisor_audit.read_agent_catalog(history[2])
+            catalog = supervisor_audit_agent.read_agent_catalog(history[2])
 
-            prompt = supervisor_audit.build_audit_prompt(
+            prompt = supervisor_audit_agent.build_audit_prompt(
                 self._bundle(history), catalog=catalog
             )
 
@@ -8822,14 +8874,14 @@ class AgentIdentityDecisionTests(_RunHistoryFixture, unittest.TestCase):
             state_dir = Path(tmp) / "state"
             (state_dir / assurance_ledger.LEDGER_FILE_NAME).mkdir(parents=True)
 
-            catalog = supervisor_audit.read_agent_catalog(state_dir)
+            catalog = supervisor_audit_agent.read_agent_catalog(state_dir)
 
-            self.assertEqual(supervisor_audit.EMPTY_AGENT_CATALOG, catalog)
+            self.assertEqual(supervisor_audit_agent.EMPTY_AGENT_CATALOG, catalog)
             self.assertEqual((), catalog.entries)
 
     def test_a_missing_ledger_is_an_empty_catalog_rather_than_a_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            catalog = supervisor_audit.read_agent_catalog(Path(tmp) / "absent")
+            catalog = supervisor_audit_agent.read_agent_catalog(Path(tmp) / "absent")
 
             self.assertEqual((), catalog.entries)
             self.assertEqual((), catalog.omitted)
@@ -9087,14 +9139,16 @@ class FailClosedIdentityTests(_RunHistoryFixture, unittest.TestCase):
             self.assertTrue(outcome.agent.decisions[0][1].is_new)
 
     def test_an_identity_source_outside_the_two_is_refused(self) -> None:
-        with self.assertRaises(supervisor_audit.AgentOutputError) as raised:
-            supervisor_audit.IdentityDecision(decision="new", source="guess")
+        with self.assertRaises(supervisor_audit_agent.AgentOutputError) as raised:
+            supervisor_audit_agent.IdentityDecision(decision="new", source="guess")
 
         self.assertEqual("malformed-output", raised.exception.outcome)
 
     def test_resolution_names_every_candidate_it_could_not_settle(self) -> None:
-        resolution = supervisor_audit.IdentityResolution(
-            audit=supervisor_audit.AgentAudit(lanes=(), findings=(), identities=()),
+        resolution = supervisor_audit_agent.IdentityResolution(
+            audit=supervisor_audit_agent.AgentAudit(
+                lanes=(), findings=(), identities=()
+            ),
             candidates=(
                 assurance_projection.IdentityCandidate(
                     issue_id="ASI-3", reasons=("summary",), similarity=0.9
@@ -9148,7 +9202,7 @@ class AgentCatalogTests(unittest.TestCase):
         )
 
     def test_a_small_catalog_is_supplied_whole(self) -> None:
-        supplied = supervisor_audit.build_agent_catalog(self._catalog(5))
+        supplied = supervisor_audit_agent.build_agent_catalog(self._catalog(5))
 
         self.assertEqual(5, len(supplied.entries))
         self.assertEqual((), supplied.omitted)
@@ -9157,11 +9211,12 @@ class AgentCatalogTests(unittest.TestCase):
     def test_a_large_catalog_is_bounded_and_reports_what_it_dropped(self) -> None:
         catalog = self._catalog(1000)
 
-        supplied = supervisor_audit.build_agent_catalog(catalog)
+        supplied = supervisor_audit_agent.build_agent_catalog(catalog)
         rendered = json.dumps(supplied.to_dict(), separators=(",", ":"))
 
         self.assertLessEqual(
-            len(rendered.encode("utf-8")), supervisor_audit.MAX_AGENT_CATALOG_BYTES
+            len(rendered.encode("utf-8")),
+            supervisor_audit_agent.MAX_AGENT_CATALOG_BYTES,
         )
         self.assertTrue(supplied.omitted)
         self.assertEqual(
@@ -9178,20 +9233,22 @@ class AgentCatalogTests(unittest.TestCase):
                 _catalog_entry(3, last_seen_at="2026-03-01T00:00:00+00:00"),
             )
         )
-        whole = supervisor_audit.build_agent_catalog(catalog)
+        whole = supervisor_audit_agent.build_agent_catalog(catalog)
         # Room for the whole listing less one entry and the comma before it.
         bound = len(canonical_json_bytes(whole.to_dict())) - len(
             canonical_json_bytes(whole.entries[0].to_dict())
         )
 
-        with mock.patch.object(supervisor_audit, "MAX_AGENT_CATALOG_BYTES", bound):
-            supplied = supervisor_audit.build_agent_catalog(catalog)
+        with mock.patch.object(
+            supervisor_audit_agent, "MAX_AGENT_CATALOG_BYTES", bound
+        ):
+            supplied = supervisor_audit_agent.build_agent_catalog(catalog)
 
         self.assertEqual(["ASI-2", "ASI-3"], [e.issue_id for e in supplied.entries])
         self.assertEqual(("ASI-1",), supplied.omitted)
 
     def test_supplied_entries_are_listed_in_issue_order(self) -> None:
-        supplied = supervisor_audit.build_agent_catalog(self._catalog(30))
+        supplied = supervisor_audit_agent.build_agent_catalog(self._catalog(30))
 
         self.assertEqual(
             [f"ASI-{number}" for number in range(1, 31)],
@@ -9201,18 +9258,18 @@ class AgentCatalogTests(unittest.TestCase):
     def test_the_digest_names_the_whole_catalog_not_the_sample(self) -> None:
         catalog = self._catalog(1000)
 
-        supplied = supervisor_audit.build_agent_catalog(catalog)
+        supplied = supervisor_audit_agent.build_agent_catalog(catalog)
 
         self.assertTrue(supplied.omitted)
         self.assertEqual(catalog.digest, supplied.digest)
 
     def test_an_omitted_issue_is_refused_without_being_denied(self) -> None:
         catalog = self._catalog(1000)
-        supplied = supervisor_audit.build_agent_catalog(catalog)
+        supplied = supervisor_audit_agent.build_agent_catalog(catalog)
         omitted = supplied.omitted[0]
         reply = json.dumps(
             {
-                "schema_version": supervisor_audit.AGENT_OUTPUT_SCHEMA_VERSION,
+                "schema_version": supervisor_audit_agent.AGENT_OUTPUT_SCHEMA_VERSION,
                 "lanes": [
                     {
                         "lane": lane,
@@ -9238,8 +9295,8 @@ class AgentCatalogTests(unittest.TestCase):
             }
         )
 
-        with self.assertRaises(supervisor_audit.AgentOutputError) as raised:
-            supervisor_audit.parse_agent_audit(
+        with self.assertRaises(supervisor_audit_agent.AgentOutputError) as raised:
+            supervisor_audit_agent.parse_agent_audit(
                 f"```json\n{reply}\n```",
                 declared=["run:supervisor-audit-input.json"],
                 catalog=supplied,
@@ -9251,10 +9308,12 @@ class AgentCatalogTests(unittest.TestCase):
 
     def test_a_candidate_the_bound_dropped_is_promoted_for_the_retry(self) -> None:
         catalog = self._catalog(1000)
-        supplied = supervisor_audit.build_agent_catalog(catalog)
+        supplied = supervisor_audit_agent.build_agent_catalog(catalog)
         omitted = supplied.omitted[0]
 
-        widened = supervisor_audit.widen_agent_catalog(supplied, catalog, [omitted])
+        widened = supervisor_audit_agent.widen_agent_catalog(
+            supplied, catalog, [omitted]
+        )
 
         self.assertIn(omitted, widened.issue_ids)
         self.assertNotIn(omitted, widened.omitted)
@@ -9267,9 +9326,9 @@ class AgentCatalogTests(unittest.TestCase):
 
     def test_widening_restates_the_same_inbox_and_keeps_the_digest(self) -> None:
         catalog = self._catalog(1000)
-        supplied = supervisor_audit.build_agent_catalog(catalog)
+        supplied = supervisor_audit_agent.build_agent_catalog(catalog)
 
-        widened = supervisor_audit.widen_agent_catalog(
+        widened = supervisor_audit_agent.widen_agent_catalog(
             supplied, catalog, list(supplied.omitted[:3])
         )
 
@@ -9280,14 +9339,15 @@ class AgentCatalogTests(unittest.TestCase):
 
     def test_widening_toward_a_listed_or_unknown_issue_changes_nothing(self) -> None:
         catalog = self._catalog(5)
-        supplied = supervisor_audit.build_agent_catalog(catalog)
+        supplied = supervisor_audit_agent.build_agent_catalog(catalog)
 
         self.assertIs(
-            supplied, supervisor_audit.widen_agent_catalog(supplied, catalog, ["ASI-1"])
+            supplied,
+            supervisor_audit_agent.widen_agent_catalog(supplied, catalog, ["ASI-1"]),
         )
         self.assertIs(
             supplied,
-            supervisor_audit.widen_agent_catalog(supplied, catalog, ["ASI-4242"]),
+            supervisor_audit_agent.widen_agent_catalog(supplied, catalog, ["ASI-4242"]),
         )
 
 
@@ -9322,8 +9382,8 @@ class ReportStagingTests(unittest.TestCase):
             self.run_dir / audit_artifact_name(AUDIT_MARKDOWN_FILENAME),
         )
 
-    def stage(self) -> supervisor_audit.StagedAuditReports:
-        return supervisor_audit.stage_audit_reports(
+    def stage(self) -> supervisor_audit_agent.StagedAuditReports:
+        return supervisor_audit_agent.stage_audit_reports(
             self.run_dir, self.audit, durable=False
         )
 
@@ -9400,7 +9460,7 @@ class ReportStagingTests(unittest.TestCase):
             self.assertTrue(path.is_file())
 
     def test_staging_clears_scratch_an_earlier_attempt_left_behind(self) -> None:
-        abandoned = self.run_dir / supervisor_audit.AUDIT_STAGING_DIR_NAME
+        abandoned = self.run_dir / supervisor_audit_agent.AUDIT_STAGING_DIR_NAME
         abandoned.mkdir()
         (abandoned / "half-written.json").write_text("{")
 
@@ -9415,20 +9475,24 @@ class ReportStagingTests(unittest.TestCase):
         blocked.write_text("a file where the run directory should be\n")
 
         with self.assertRaises(AssuranceError) as caught:
-            supervisor_audit.stage_audit_reports(blocked, self.audit, durable=False)
+            supervisor_audit_agent.stage_audit_reports(
+                blocked, self.audit, durable=False
+            )
 
         self.assertIn("could not create audit staging directory", str(caught.exception))
 
     def test_writing_reports_twice_refuses_the_second_attempt(self) -> None:
-        supervisor_audit.write_audit_reports(self.run_dir, self.audit, durable=False)
+        supervisor_audit_agent.write_audit_reports(
+            self.run_dir, self.audit, durable=False
+        )
 
         with self.assertRaises(AssuranceError):
-            supervisor_audit.write_audit_reports(
+            supervisor_audit_agent.write_audit_reports(
                 self.run_dir, self.audit, durable=False
             )
 
         self.assertFalse(
-            (self.run_dir / supervisor_audit.AUDIT_STAGING_DIR_NAME).exists()
+            (self.run_dir / supervisor_audit_agent.AUDIT_STAGING_DIR_NAME).exists()
         )
 
 
@@ -9469,7 +9533,9 @@ class WorkerPauseExitAuditTests(unittest.TestCase):
         }
 
     def checks(self, bundle):
-        return {r.check: r for r in supervisor_audit.run_deterministic_checks(bundle)}
+        return {
+            r.check: r for r in supervisor_audit_checks.run_deterministic_checks(bundle)
+        }
 
     def test_a_held_worker_pause_accounts_only_for_its_exact_exit(self):
         bundle = self.bundle()
@@ -9568,10 +9634,10 @@ class PathKeyedRedactionTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name).resolve()
-        roots = supervisor_audit.EvidenceRoots.build(
+        roots = supervisor_audit_evidence.EvidenceRoots.build(
             run_dir=self.root / "run", state_dir=self.root, plan_dir=self.root
         )
-        self.collector = supervisor_audit._Collector(roots)
+        self.collector = supervisor_audit_evidence._Collector(roots)
 
     def _paths(self, paths: dict[str, Any]) -> dict[str, Any]:
         projected = self.collector.redact(
@@ -9588,7 +9654,9 @@ class PathKeyedRedactionTests(unittest.TestCase):
 
     def test_a_real_secret_field_is_still_redacted(self) -> None:
         projected = self.collector.redact({"config": {"token": "abc"}})
-        self.assertEqual(supervisor_audit.REDACTED, projected["config"]["token"])
+        self.assertEqual(
+            supervisor_audit_evidence.REDACTED, projected["config"]["token"]
+        )
 
     def test_a_secret_value_under_a_path_key_is_still_redacted(self) -> None:
         secret = "ghp_" + "A" * 36
@@ -9598,7 +9666,7 @@ class PathKeyedRedactionTests(unittest.TestCase):
         projected = self._paths({plain: secret, named: "hunter2"})
 
         self.assertNotIn(secret, json.dumps(projected))
-        self.assertEqual(supervisor_audit.REDACTED, projected[named])
+        self.assertEqual(supervisor_audit_evidence.REDACTED, projected[named])
 
     def test_a_path_key_outside_the_approved_roots_is_withheld(self) -> None:
         outside = "/private/var/lib/pi-monitoring/autopilot/ntfy.token"
@@ -9608,7 +9676,9 @@ class PathKeyedRedactionTests(unittest.TestCase):
         self.assertNotIn(outside, json.dumps(projected))
         ((name, value),) = projected.items()
         self.assertTrue(
-            name.startswith(f"[{supervisor_audit.REASON_OUTSIDE_APPROVED_ROOTS}:")
+            name.startswith(
+                f"[{supervisor_audit_evidence.REASON_OUTSIDE_APPROVED_ROOTS}:"
+            )
         )
         self.assertEqual("unclassified", value)
 

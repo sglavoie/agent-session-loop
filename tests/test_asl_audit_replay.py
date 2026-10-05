@@ -9,11 +9,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import audit_replay, supervisor_audit
+from agent_session_loop import audit_replay, supervisor_audit_checks
 
 INVARIANT_KEYS = tuple(
     spec.invariant_key
-    for spec in supervisor_audit.DETERMINISTIC_CHECK_SPECS
+    for spec in supervisor_audit_checks.DETERMINISTIC_CHECK_SPECS
     if spec.replayable
 )
 
@@ -107,7 +107,7 @@ class BundleDiscoveryTests(unittest.TestCase):
     ) -> None:
         unreproducible = tuple(
             spec.invariant_key
-            for spec in supervisor_audit.DETERMINISTIC_CHECK_SPECS
+            for spec in supervisor_audit_checks.DETERMINISTIC_CHECK_SPECS
             if not spec.replayable
         )
         self.assertIn("identity.repository-intent", unreproducible)
@@ -121,7 +121,7 @@ class BundleDiscoveryTests(unittest.TestCase):
             self.assertNotIn(key, replay.invariant_keys)
 
     def test_the_live_audit_still_runs_the_checks_replay_leaves_out(self) -> None:
-        results = supervisor_audit.run_deterministic_checks({})
+        results = supervisor_audit_checks.run_deterministic_checks({})
 
         self.assertIn(
             "identity.repository-intent",
@@ -378,8 +378,8 @@ class WorktreeFidelityTests(unittest.TestCase):
 
     def test_checks_are_taken_from_the_imported_package(self) -> None:
         self.assertIs(
-            audit_replay.supervisor_audit.run_deterministic_checks,
-            supervisor_audit.run_deterministic_checks,
+            audit_replay.supervisor_audit_checks.run_deterministic_checks,
+            supervisor_audit_checks.run_deterministic_checks,
         )
 
 

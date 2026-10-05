@@ -51,7 +51,7 @@ from agent_session_loop import (
     runner,
     startup_context,
     state,
-    supervisor_audit,
+    supervisor_audit_agent,
     task_packet,
     turn_execution,
     verification,
@@ -4538,7 +4538,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
         # `ci` gate as a defect. The observation is true and the fix it asked
         # for would reverse the fence that keeps application output out of
         # control-plane text, so the prompt has to explain the fence instead.
-        prompt = supervisor_audit.AUDIT_PROMPT_TEMPLATE
+        prompt = supervisor_audit_agent.AUDIT_PROMPT_TEMPLATE
 
         self.assertIn("`failure_diagnostic` of `null`", prompt)
         self.assertIn("check ASL did not generate", prompt)

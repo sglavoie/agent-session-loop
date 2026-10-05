@@ -46,7 +46,7 @@ from agent_session_loop import (
     runner,
     session_verification,
     state,
-    supervisor_audit,
+    supervisor_audit_evidence,
     turn_execution,
     turn_postflight,
     turn_preflight,
@@ -2884,21 +2884,21 @@ class TurnAnomalyClassificationTests(unittest.TestCase):
 
     def test_unreadable_handoff_is_anomalous(self) -> None:
         self.assertTrue(
-            supervisor_audit._turn_shows_failure(
+            supervisor_audit_evidence._turn_shows_failure(
                 {"returncode": 0, "plan_error": "session-1.md: no handoff"}
             )
         )
 
     def test_failure_status_result_is_anomalous(self) -> None:
         self.assertTrue(
-            supervisor_audit._turn_shows_failure(
+            supervisor_audit_evidence._turn_shows_failure(
                 {"returncode": 0, "status_result": "no-status-change"}
             )
         )
 
     def test_accepted_turn_is_not_anomalous(self) -> None:
         self.assertFalse(
-            supervisor_audit._turn_shows_failure(
+            supervisor_audit_evidence._turn_shows_failure(
                 {"returncode": 0, "status_result": "complete", "plan_error": None}
             )
         )
@@ -2906,8 +2906,12 @@ class TurnAnomalyClassificationTests(unittest.TestCase):
     def test_turn_without_a_status_result_is_judged_on_the_generic_signals(
         self,
     ) -> None:
-        self.assertFalse(supervisor_audit._turn_shows_failure({"returncode": 0}))
-        self.assertTrue(supervisor_audit._turn_shows_failure({"returncode": 1}))
+        self.assertFalse(
+            supervisor_audit_evidence._turn_shows_failure({"returncode": 0})
+        )
+        self.assertTrue(
+            supervisor_audit_evidence._turn_shows_failure({"returncode": 1})
+        )
 
 
 if __name__ == "__main__":

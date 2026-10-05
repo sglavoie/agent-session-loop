@@ -1,6 +1,6 @@
 """Replay the recorded audit corpus against this working tree's checks.
 
-Almost every deterministic check in :mod:`agent_session_loop.supervisor_audit`
+Almost every deterministic check in :mod:`agent_session_loop.supervisor_audit_checks`
 is a pure function of one recorded evidence bundle, so each
 ``supervisor-audit-input.json`` a run ever wrote is a reusable test case. The
 exceptions are declared, not assumed: a check whose ``CheckSpec`` sets
@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import config, supervisor_audit
+from . import config, supervisor_audit_checks
 from .assurance_models import AUDIT_INPUT_FILENAME
 
 #: Stored matrices carry a version so a baseline written by an incompatible
@@ -161,7 +161,7 @@ def replayable_invariant_keys() -> tuple[str, ...]:
     """
     return tuple(
         spec.invariant_key
-        for spec in supervisor_audit.DETERMINISTIC_CHECK_SPECS
+        for spec in supervisor_audit_checks.DETERMINISTIC_CHECK_SPECS
         if spec.replayable
     )
 
@@ -175,7 +175,7 @@ def replay_bundle(path: Path) -> dict[str, str]:
     reproducible = set(replayable_invariant_keys())
     return {
         result.invariant_key: result.status
-        for result in supervisor_audit.run_deterministic_checks(payload)
+        for result in supervisor_audit_checks.run_deterministic_checks(payload)
         if result.invariant_key in reproducible
     }
 

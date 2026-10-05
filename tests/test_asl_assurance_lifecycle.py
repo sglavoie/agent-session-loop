@@ -39,6 +39,9 @@ from agent_session_loop import (
     runner,
     state,
     supervisor_audit,
+    supervisor_audit_agent,
+    supervisor_audit_checks,
+    supervisor_audit_evidence,
     turn_execution,
     verification_transitions,
 )
@@ -234,9 +237,9 @@ class _RunHistory:
 
     def _bundle(
         self, history: tuple[Path, Path, Path, Path], *, terminal_pending: bool
-    ) -> supervisor_audit.AuditInput:
+    ) -> supervisor_audit_evidence.AuditInput:
         workspace, plan_dir, state_dir, run_dir = history
-        return supervisor_audit.collect_audit_input(
+        return supervisor_audit_evidence.collect_audit_input(
             run_id=RUN_ID,
             run_dir=run_dir,
             state_dir=state_dir,
@@ -246,9 +249,9 @@ class _RunHistory:
         )
 
     def _verdict(
-        self, bundle: supervisor_audit.AuditInput, check: str
+        self, bundle: supervisor_audit_evidence.AuditInput, check: str
     ) -> assurance_models.DeterministicResult:
-        for result in supervisor_audit.run_deterministic_checks(bundle):
+        for result in supervisor_audit_checks.run_deterministic_checks(bundle):
             if result.check == check:
                 return result
         raise AssertionError(f"no deterministic check named {check}")
@@ -368,7 +371,7 @@ def _fast_finalization() -> Callable[..., live_verification._LiveFinalization]:
 def _all_clear_reply(locator: str, *, unjudged: tuple[str, ...] = ()) -> str:
     body = json.dumps(
         {
-            "schema_version": supervisor_audit.AGENT_OUTPUT_SCHEMA_VERSION,
+            "schema_version": supervisor_audit_agent.AGENT_OUTPUT_SCHEMA_VERSION,
             "lanes": [
                 {
                     "lane": lane,
@@ -506,7 +509,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             view = assurance_ledger.read_ledger(state_dir=root)
             self.assertEqual("partial", summary.state, summary.reason)
             self.assertEqual(
-                supervisor_audit.REASON_LANE_EVIDENCE_ABSENT, summary.reason
+                supervisor_audit_agent.REASON_LANE_EVIDENCE_ABSENT, summary.reason
             )
             self.assertEqual(
                 [assurance_ledger.KIND_AUDIT_COMPLETED],
@@ -548,7 +551,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             # what it did judge rather than skipping.
             self.assertEqual("partial", summary.state)
             self.assertEqual(
-                supervisor_audit.REASON_LANE_EVIDENCE_ABSENT, summary.reason
+                supervisor_audit_agent.REASON_LANE_EVIDENCE_ABSENT, summary.reason
             )
             self.assertTrue(summary.artifacts)
             self.assertEqual(
@@ -669,7 +672,9 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             def refuse(**kwargs: object):
                 raise OSError("evidence unreadable")
 
-            with mock.patch.object(supervisor_audit, "collect_audit_input", refuse):
+            with mock.patch.object(
+                supervisor_audit_evidence, "collect_audit_input", refuse
+            ):
                 summary = self._audit(history)
 
             self.assertEqual("unavailable", summary.state)
@@ -830,10 +835,10 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                         severity="critical",
                         summary="An earlier auditor changed repository evidence.",
                         recommendation="Confirm the read-only profile is enforced.",
-                        evidence=(supervisor_audit.MUTATION_ARTIFACT_NAME,),
+                        evidence=(supervisor_audit_checks.MUTATION_ARTIFACT_NAME,),
                     ),
                     observed_at="2026-08-09T10:11:12+00:00",
-                    audit_artifact=supervisor_audit.MUTATION_ARTIFACT_NAME,
+                    audit_artifact=supervisor_audit_checks.MUTATION_ARTIFACT_NAME,
                 ),
                 state_dir=root,
             )
@@ -885,7 +890,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                 (run_dir / assurance_models.AUDIT_MARKDOWN_FILENAME).exists()
             )
             self.assertFalse(
-                (run_dir / supervisor_audit.AUDIT_STAGING_DIR_NAME).exists()
+                (run_dir / supervisor_audit_agent.AUDIT_STAGING_DIR_NAME).exists()
             )
 
     def test_a_failed_append_takes_back_the_promoted_reports(self) -> None:
@@ -912,7 +917,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                 (run_dir / assurance_models.AUDIT_MARKDOWN_FILENAME).exists()
             )
             self.assertFalse(
-                (run_dir / supervisor_audit.AUDIT_STAGING_DIR_NAME).exists()
+                (run_dir / supervisor_audit_agent.AUDIT_STAGING_DIR_NAME).exists()
             )
             projected = assurance_projection.read_projection(state_dir=state_dir)
             self.assertEqual([], list(projected.issues))

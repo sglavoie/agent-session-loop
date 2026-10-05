@@ -465,7 +465,7 @@ REFUSALS: tuple[Refusal, ...] = (
 )
 
 #: The openings of text ASL composes and sends to a harness. Restated here
-#: rather than imported: ``task_packet``, ``run_prompts``, ``supervisor_audit``
+#: rather than imported: ``task_packet``, ``run_prompts``, ``supervisor_audit_agent``
 #: and ``assurance_draft`` are prompt-building modules that pull argparse,
 #: workspaces and verification behind them, and this boundary needs eight
 #: strings from them. ``tests/test_asl_overseer_decisions.py`` compares every

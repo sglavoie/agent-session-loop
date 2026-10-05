@@ -57,7 +57,7 @@ from agent_session_loop import (
     overseer_history,
     overseer_policy_client,
     run_prompts,
-    supervisor_audit,
+    supervisor_audit_agent,
     task_packet,
 )
 from tests.support import assert_no_runner_import
@@ -555,7 +555,7 @@ class PublishedMarkerTests(unittest.TestCase):
             ),
             (
                 overseer_decisions.AUDIT_PROMPT_MARKER,
-                supervisor_audit.AUDIT_PROMPT_TEMPLATE.splitlines()[0],
+                supervisor_audit_agent.AUDIT_PROMPT_TEMPLATE.splitlines()[0],
             ),
             (
                 overseer_decisions.DRAFT_PROMPT_MARKER,

@@ -31,6 +31,8 @@ from agent_session_loop import (
     plans,
     state,
     supervisor_audit,
+    supervisor_audit_agent,
+    supervisor_audit_evidence,
 )
 from agent_session_loop.assurance_models import RUBRIC_LANES, AuditRole
 from agent_session_loop.assurance_projection import AuditPublication
@@ -434,7 +436,7 @@ MANIFEST = (
 def _agent_reply(locator: str) -> str:
     body = json.dumps(
         {
-            "schema_version": supervisor_audit.AGENT_OUTPUT_SCHEMA_VERSION,
+            "schema_version": supervisor_audit_agent.AGENT_OUTPUT_SCHEMA_VERSION,
             "lanes": [
                 {
                     "lane": lane,
@@ -580,7 +582,7 @@ class AdvisoryVerdictTests(unittest.TestCase):
 
     def _audit(self, history: tuple[Path, Path, Path, Path]) -> models.AssuranceSummary:
         workspace, plan_dir, state_dir, run_dir = history
-        bundle = supervisor_audit.collect_audit_input(
+        bundle = supervisor_audit_evidence.collect_audit_input(
             run_id=RUN_ID,
             run_dir=run_dir,
             state_dir=state_dir,
