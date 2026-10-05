@@ -45,6 +45,7 @@ from agent_session_loop import (
 from tests.support import (
     _contract_block,
     assert_no_runner_import,
+    called_names,
     read_jsonl,
     write_plan,
 )
@@ -120,23 +121,6 @@ DURABLE_WRITES: dict[str, frozenset[str]] = {
 }
 
 
-def _called_names(node: ast.AST) -> set[str]:
-    """Every name called under ``node``, whether bare or through an attribute.
-
-    Matched on the parse tree rather than the text, so a name that also occurs
-    as a substring of a longer call does not read as a match.
-    """
-    names: set[str] = set()
-    for child in ast.walk(node):
-        if not isinstance(child, ast.Call):
-            continue
-        if isinstance(child.func, ast.Name):
-            names.add(child.func.id)
-        elif isinstance(child.func, ast.Attribute):
-            names.add(child.func.attr)
-    return names
-
-
 class SessionVerificationBoundaryTests(unittest.TestCase):
     """The module is runner-free, aliased nowhere, and writes in two places."""
 
@@ -191,7 +175,7 @@ class SessionVerificationBoundaryTests(unittest.TestCase):
         for node in self.tree.body:
             if not isinstance(node, ast.FunctionDef):
                 continue
-            writes = _called_names(node) & DURABLE_WRITE_NAMES
+            writes = called_names(node) & DURABLE_WRITE_NAMES
             if writes:
                 observed[node.name] = frozenset(writes)
         self.assertEqual(DURABLE_WRITES, observed)

@@ -61,7 +61,7 @@ from agent_session_loop import (
     state,
 )
 from agent_session_loop.run_errors import RunError
-from tests.support import assert_no_runner_import, write_plan
+from tests.support import assert_no_runner_import, called_names, write_plan
 
 #: The symbols this module took from the runner. The program's no-alias rule
 #: says the runner keeps none of them behind, so a re-export added later to
@@ -100,23 +100,6 @@ DURABLE_WRITE_NAMES = frozenset(
         "write_text",
     }
 )
-
-
-def _called_names(node: ast.AST) -> set[str]:
-    """Every name called under ``node``, whether bare or through an attribute.
-
-    Matched on the parse tree rather than the text, so a name that also occurs
-    as a substring of a longer call does not read as a match.
-    """
-    names: set[str] = set()
-    for child in ast.walk(node):
-        if not isinstance(child, ast.Call):
-            continue
-        if isinstance(child.func, ast.Name):
-            names.add(child.func.id)
-        elif isinstance(child.func, ast.Attribute):
-            names.add(child.func.attr)
-    return names
 
 
 def _parse(tokens: list[str]) -> argparse.Namespace:
@@ -205,7 +188,7 @@ class ExtractionContractTests(unittest.TestCase):
             if not isinstance(node, ast.FunctionDef | ast.ClassDef):
                 continue
             with self.subTest(symbol=node.name):
-                self.assertEqual(frozenset(), _called_names(node) & DURABLE_WRITE_NAMES)
+                self.assertEqual(frozenset(), called_names(node) & DURABLE_WRITE_NAMES)
 
     def test_the_lock_is_taken_once_and_always_released(self) -> None:
         source = inspect.getsource(run_entry.run_from_args)
@@ -226,7 +209,7 @@ class ExtractionContractTests(unittest.TestCase):
             if isinstance(node, ast.Try) and node.finalbody
         ]
         released_in_finally = any(
-            "release_lock" in _called_names(statement)
+            "release_lock" in called_names(statement)
             for node in finallys
             for statement in node.finalbody
         )

@@ -48,6 +48,7 @@ from unittest import mock
 from agent_session_loop import cli, run_doctor, runner
 from tests.support import (
     assert_no_runner_import,
+    called_names,
     install_fake_harness,
     write_multi_repo_plan,
     write_plan,
@@ -83,23 +84,6 @@ DURABLE_WRITE_NAMES = frozenset(
         "write_text",
     }
 )
-
-
-def _called_names(node: ast.AST) -> set[str]:
-    """Every name called under ``node``, whether bare or through an attribute.
-
-    Matched on the parse tree rather than the text, so a name that also occurs
-    as a substring of a longer call does not read as a match.
-    """
-    names: set[str] = set()
-    for child in ast.walk(node):
-        if not isinstance(child, ast.Call):
-            continue
-        if isinstance(child.func, ast.Name):
-            names.add(child.func.id)
-        elif isinstance(child.func, ast.Attribute):
-            names.add(child.func.attr)
-    return names
 
 
 def _stderr_owners(source: str) -> set[str]:
@@ -218,7 +202,7 @@ class ExtractionContractTests(unittest.TestCase):
             if not isinstance(node, ast.FunctionDef | ast.ClassDef):
                 continue
             with self.subTest(symbol=node.name):
-                self.assertEqual(frozenset(), _called_names(node) & DURABLE_WRITE_NAMES)
+                self.assertEqual(frozenset(), called_names(node) & DURABLE_WRITE_NAMES)
 
     def test_only_the_two_report_writers_resolve_sys_stderr(self) -> None:
         # `run_reporting` owns the single handle on stderr while a run is live.

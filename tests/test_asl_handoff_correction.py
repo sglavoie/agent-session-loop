@@ -47,6 +47,7 @@ from agent_session_loop import (
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     assert_no_runner_import,
+    called_names,
     read_jsonl,
     write_multi_repo_plan,
 )
@@ -111,23 +112,6 @@ DURABLE_WRITES: dict[str, frozenset[str]] = {
     ),
     "_repair_paused_handoff_status": frozenset({"append_event"}),
 }
-
-
-def _called_names(node: ast.AST) -> set[str]:
-    """Every name called under ``node``, whether bare or through an attribute.
-
-    Matched on the parse tree rather than the text, so a name that also occurs
-    as a substring of a longer call does not read as a match.
-    """
-    names: set[str] = set()
-    for child in ast.walk(node):
-        if not isinstance(child, ast.Call):
-            continue
-        if isinstance(child.func, ast.Name):
-            names.add(child.func.id)
-        elif isinstance(child.func, ast.Attribute):
-            names.add(child.func.attr)
-    return names
 
 
 def _resolved_workspace(root: Path) -> workspaces.ResolvedWorkspace:
@@ -203,7 +187,7 @@ class HandoffCorrectionBoundaryTests(unittest.TestCase):
         for node in self.tree.body:
             if not isinstance(node, ast.FunctionDef):
                 continue
-            writes = _called_names(node) & DURABLE_WRITE_NAMES
+            writes = called_names(node) & DURABLE_WRITE_NAMES
             if writes:
                 observed[node.name] = frozenset(writes)
         self.assertEqual(DURABLE_WRITES, observed)
@@ -214,7 +198,7 @@ class HandoffCorrectionBoundaryTests(unittest.TestCase):
         # line, and every one of them delegates that write rather than
         # performing it, so a second writer cannot open a window where the
         # status and the note disagree.
-        self.assertNotIn("write_text", _called_names(self.tree))
+        self.assertNotIn("write_text", called_names(self.tree))
         reverts = [
             node
             for node in ast.walk(self.tree)

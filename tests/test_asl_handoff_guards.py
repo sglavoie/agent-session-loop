@@ -61,7 +61,7 @@ from agent_session_loop import (
     turn_execution,
     turn_settlement,
 )
-from tests.support import assert_no_runner_import, write_plan
+from tests.support import assert_no_runner_import, called_names, write_plan
 
 #: The symbols this module took from the runner. The program's no-alias rule
 #: says the runner keeps none of them behind, so a re-export added later to
@@ -121,24 +121,6 @@ DURABLE_WRITES: dict[str, frozenset[str]] = {
 }
 
 
-def _called_names(node: ast.AST) -> set[str]:
-    """Every name called under ``node``, whether bare or through an attribute.
-
-    Matched on the parse tree rather than the text, because the substring
-    ``open(`` also occurs inside ``_capture_review_repo_fingerprint(`` -- the
-    kind of false positive that gets a real assertion deleted rather than fixed.
-    """
-    names: set[str] = set()
-    for child in ast.walk(node):
-        if not isinstance(child, ast.Call):
-            continue
-        if isinstance(child.func, ast.Name):
-            names.add(child.func.id)
-        elif isinstance(child.func, ast.Attribute):
-            names.add(child.func.attr)
-    return names
-
-
 class _RecordingAppender:
     """A ``HandoffNoteAppender`` that records instead of rewriting."""
 
@@ -184,7 +166,7 @@ class HandoffGuardsBoundaryTests(unittest.TestCase):
         for node in self.tree.body:
             if not isinstance(node, ast.FunctionDef):
                 continue
-            writes = _called_names(node) & DURABLE_WRITE_NAMES
+            writes = called_names(node) & DURABLE_WRITE_NAMES
             if writes:
                 observed[node.name] = frozenset(writes)
         self.assertEqual(DURABLE_WRITES, observed)
@@ -682,7 +664,7 @@ class RefusalReopeningTruthTests(_PlanCase):
                 for function in ast.walk(tree):
                     if not isinstance(function, ast.FunctionDef):
                         continue
-                    calls = _called_names(function)
+                    calls = called_names(function)
                     if "_revert_session_status_to_pending" not in calls:
                         continue
                     if "record_turn_rejected" not in calls:

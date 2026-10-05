@@ -51,7 +51,7 @@ from agent_session_loop import (
     state,
 )
 from agent_session_loop.run_errors import RunError
-from tests.support import assert_no_runner_import, write_plan
+from tests.support import assert_no_runner_import, called_names, write_plan
 
 RUN_ID = "20260903T000000Z-run-payloads"
 
@@ -146,23 +146,6 @@ SEEDED_NULLS = (
 #: that got as far as the feature that writes them, so seeding them would put an
 #: empty list in the state of every run that never repaired a commit.
 UNSEEDED_LATE_KEYS = ("repair_commit_preflights", commit_settlement.COMMIT_FAILURES_KEY)
-
-
-def _called_names(node: ast.AST) -> set[str]:
-    """Every name called under ``node``, whether bare or through an attribute.
-
-    Matched on the parse tree rather than the text, so a name that also occurs
-    as a substring of a longer call does not read as a match.
-    """
-    names: set[str] = set()
-    for child in ast.walk(node):
-        if not isinstance(child, ast.Call):
-            continue
-        if isinstance(child.func, ast.Name):
-            names.add(child.func.id)
-        elif isinstance(child.func, ast.Attribute):
-            names.add(child.func.attr)
-    return names
 
 
 def _parse(tokens: list[str]) -> argparse.Namespace:
@@ -274,7 +257,7 @@ class RunPayloadsBoundaryTests(unittest.TestCase):
         # `state.json` belongs to `run_persistence` and the caller performs it,
         # so a builder that learned to persist its own output would be writing
         # outside the run's mutex.
-        self.assertEqual(frozenset(), _called_names(self.tree) & DURABLE_WRITE_NAMES)
+        self.assertEqual(frozenset(), called_names(self.tree) & DURABLE_WRITE_NAMES)
 
 
 class PayloadContractTests(unittest.TestCase):
