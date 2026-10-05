@@ -44,6 +44,7 @@ from agent_session_loop import (
     plans,
     state,
     workbench,
+    workbench_archive,
     workbench_history,
     workbench_remote_reads,
     workbench_server,
@@ -538,13 +539,17 @@ def _seed_shell_archive(state_dir: Path, plans_root: Path) -> None:
     for entry in SHELL_ARCHIVE_ENTRIES:
         archived_at = now - float(entry["archived_ago"])
         expires_at = archived_at + float(entry["retention_days"]) * 24 * 60 * 60
-        entry_dir = workbench.archive_root(state_dir) / str(entry["archive_id"])
-        (entry_dir / workbench.ARCHIVE_PLAN_DIR_NAME).mkdir(parents=True, exist_ok=True)
-        (entry_dir / workbench.ARCHIVE_PLAN_DIR_NAME / "manifest.md").write_text(
+        entry_dir = workbench_archive.archive_root(state_dir) / str(entry["archive_id"])
+        (entry_dir / workbench_archive.ARCHIVE_PLAN_DIR_NAME).mkdir(
+            parents=True, exist_ok=True
+        )
+        (
+            entry_dir / workbench_archive.ARCHIVE_PLAN_DIR_NAME / "manifest.md"
+        ).write_text(
             f"# {str(entry['plan_name']).title()}\n\nOne archived plan.\n",
             encoding="utf-8",
         )
-        (entry_dir / workbench.ARCHIVE_METADATA_FILE_NAME).write_text(
+        (entry_dir / workbench_archive.ARCHIVE_METADATA_FILE_NAME).write_text(
             json.dumps(
                 {
                     "archive_id": entry["archive_id"],

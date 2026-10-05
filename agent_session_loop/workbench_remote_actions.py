@@ -446,7 +446,7 @@ class AslMutationPerformer:
         self, request: MutationRequest, *, now: float
     ) -> MutationResult:
         """Run one archive command through a durable collection journal."""
-        journal_subject = workbench.archive_root(self.state_dir)
+        journal_subject = workbench_archive.archive_root(self.state_dir)
         with _journalled(self, request, journal_subject, now=now) as journal:
             if journal.replayed is not None:
                 return journal.replayed
@@ -493,7 +493,7 @@ class AslMutationPerformer:
         settled: list[dict[str, Any]] = []
         subjects = [
             *self._index.items(now=now),
-            (None, workbench.archive_root(self.state_dir)),
+            (None, workbench_archive.archive_root(self.state_dir)),
         ]
         for plan_key, plan_dir in subjects:
             try:

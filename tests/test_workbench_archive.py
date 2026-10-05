@@ -86,7 +86,7 @@ class PortableArchiveRulesTests(unittest.TestCase):
         assert_no_runner_import(self, portable_archive)
 
     def test_an_archive_id_may_not_leave_the_archive_root(self) -> None:
-        # The rule has one definition; `workbench._is_valid_archive_id` calls
+        # The rule has one definition; `workbench_archive._is_valid_archive_id` calls
         # it. A second copy is how a traversal one surface rejects becomes one
         # another accepts.
         for good in ("20260917T120000Z-abcdef123456", "entry-1"):
@@ -98,7 +98,7 @@ class PortableArchiveRulesTests(unittest.TestCase):
         for candidate in ("..", "../escape", "a/b", "", "entry-1"):
             self.assertEqual(
                 portable_archive.valid_archive_id(candidate),
-                workbench._is_valid_archive_id(candidate),
+                workbench_archive._is_valid_archive_id(candidate),
                 candidate,
             )
 
@@ -213,8 +213,8 @@ class _ArchiveFixture(unittest.TestCase):
 
     def backdate(self, archive_id: str, *, days: float) -> None:
         meta_path = (
-            workbench.archive_entry_dir(archive_id, self.state_dir)
-            / workbench.ARCHIVE_METADATA_FILE_NAME
+            workbench_archive.archive_entry_dir(archive_id, self.state_dir)
+            / workbench_archive.ARCHIVE_METADATA_FILE_NAME
         )
         payload = json.loads(meta_path.read_text(encoding="utf-8"))
         payload["archived_at"] = _iso(days)
@@ -222,7 +222,7 @@ class _ArchiveFixture(unittest.TestCase):
 
     def archive_tree(self) -> dict[str, int]:
         """Every path under the archive root with its size, for exact compare."""
-        root = workbench.archive_root(self.state_dir)
+        root = workbench_archive.archive_root(self.state_dir)
         if not root.exists():
             return {}
         return {
@@ -303,7 +303,7 @@ class RetentionIsAThresholdTests(_ArchiveFixture):
         workbench_archive.set_retention(365, registry_path=self.registry_path)
         self.assertEqual([], list(self.review().review.candidate_ids))
         self.assertTrue(
-            workbench.archive_entry_dir(archive_id, self.state_dir).exists()
+            workbench_archive.archive_entry_dir(archive_id, self.state_dir).exists()
         )
 
     def test_the_retention_window_reported_is_the_live_one(self) -> None:
@@ -316,8 +316,8 @@ class RetentionIsAThresholdTests(_ArchiveFixture):
         # "I cannot tell how old this is" must not resolve to "old enough".
         archive_id = self.archive_one()
         meta_path = (
-            workbench.archive_entry_dir(archive_id, self.state_dir)
-            / workbench.ARCHIVE_METADATA_FILE_NAME
+            workbench_archive.archive_entry_dir(archive_id, self.state_dir)
+            / workbench_archive.ARCHIVE_METADATA_FILE_NAME
         )
         payload = json.loads(meta_path.read_text(encoding="utf-8"))
         payload["archived_at"] = "whenever"
@@ -354,8 +354,12 @@ class ExplicitCleanupTests(_ArchiveFixture):
 
         self.assertEqual(1, result.removed_count)
         self.assertEqual(0, result.failed_count)
-        self.assertFalse(workbench.archive_entry_dir(doomed, self.state_dir).exists())
-        self.assertTrue(workbench.archive_entry_dir(kept, self.state_dir).exists())
+        self.assertFalse(
+            workbench_archive.archive_entry_dir(doomed, self.state_dir).exists()
+        )
+        self.assertTrue(
+            workbench_archive.archive_entry_dir(kept, self.state_dir).exists()
+        )
 
     def test_one_bad_id_in_a_purge_does_not_spare_the_rest(self) -> None:
         # Past the confirmation gate each id is its own outcome: an id that
@@ -442,7 +446,7 @@ class ExplicitCleanupTests(_ArchiveFixture):
         self.assertEqual("restore-conflict", ctx.exception.reason)
         self.assertEqual(409, ctx.exception.status)
         self.assertTrue(
-            workbench.archive_entry_dir(archive_id, self.state_dir).exists()
+            workbench_archive.archive_entry_dir(archive_id, self.state_dir).exists()
         )
 
     def test_a_restore_puts_the_plan_back_where_it_came_from(self) -> None:
@@ -559,7 +563,9 @@ class SurfaceParityTests(_ArchiveFixture):
         # gone from their origins and restorable from the archive.
         self.assertEqual(sorted(legacy.keys()), sorted(modern.keys()))
         self.assertTrue(legacy["plan_archived"])
-        self.assertEqual(2, len(workbench.list_archive_entries(self.state_dir).entries))
+        self.assertEqual(
+            2, len(workbench_archive.list_archive_entries(self.state_dir).entries)
+        )
         workbench_archive.restore_entry(
             legacy["archive_id"],
             state_dir=self.state_dir,
@@ -714,7 +720,7 @@ class SurfaceParityTests(_ArchiveFixture):
             [archive_id], [entry["archive_id"] for entry in listing["entries"]]
         )
         self.assertTrue(
-            workbench.archive_entry_dir(archive_id, self.state_dir).exists()
+            workbench_archive.archive_entry_dir(archive_id, self.state_dir).exists()
         )
 
     def test_the_purge_route_keeps_its_typed_count(self) -> None:
@@ -731,7 +737,7 @@ class SurfaceParityTests(_ArchiveFixture):
         self.assertEqual(400, status)
         self.assertEqual("confirmation-mismatch", body["reason"])
         self.assertTrue(
-            workbench.archive_entry_dir(archive_id, self.state_dir).exists()
+            workbench_archive.archive_entry_dir(archive_id, self.state_dir).exists()
         )
 
 

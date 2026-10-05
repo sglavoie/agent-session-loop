@@ -23,6 +23,7 @@ from agent_session_loop import (
     plans,
     state,
     workbench,
+    workbench_archive,
     workbench_server,
 )
 from tests.support import (
@@ -870,7 +871,7 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertFalse(plan_state.exists())
         self.assertEqual((), workbench.load_registry(self.registry_path).pins)
         # ...but the plan is preserved under a fresh archive entry.
-        listing = workbench.list_archive_entries(self.state_dir)
+        listing = workbench_archive.list_archive_entries(self.state_dir)
         self.assertEqual(1, len(listing.entries))
         self.assertEqual(body["archive_id"], listing.entries[0].archive_id)
         self.assertEqual(
@@ -985,7 +986,7 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertTrue(body["pin_archived"])
         self.assertFalse(plan_state.exists())
         self.assertEqual((), workbench.load_registry(self.registry_path).pins)
-        listing = workbench.list_archive_entries(self.state_dir)
+        listing = workbench_archive.list_archive_entries(self.state_dir)
         self.assertEqual(1, len(listing.entries))
         self.assertTrue(listing.entries[0].state_archived)
         self.assertFalse(listing.entries[0].plan_archived)
@@ -1006,7 +1007,7 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertTrue(body["plan_archived"])
         self.assertIn("archive_id", body)
         self.assertFalse(self.canonical_plan_dir.exists())
-        listing = workbench.list_archive_entries(self.state_dir)
+        listing = workbench_archive.list_archive_entries(self.state_dir)
         self.assertEqual([body["archive_id"]], [e.archive_id for e in listing.entries])
 
     def test_plan_archive_rejects_confirmation_mismatch(self) -> None:
@@ -1096,7 +1097,7 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual("invalid-request", body["reason"])
 
     def test_archive_list_returns_entries_and_retention(self) -> None:
-        result = workbench.archive_plan(
+        result = workbench_archive.archive_plan(
             self.canonical_plan_dir,
             state_dir=self.state_dir,
             registry_path=self.registry_path,
@@ -1125,7 +1126,7 @@ class WorkbenchServerTests(unittest.TestCase):
         # scenario returned `[]` and a removal count. It now returns the entry,
         # flagged, and leaves it on disk for an operator to decide about. See
         # `changes.KEY_EXPLICIT_ARCHIVE_CLEANUP`.
-        result = workbench.archive_plan(
+        result = workbench_archive.archive_plan(
             self.canonical_plan_dir,
             state_dir=self.state_dir,
             registry_path=self.registry_path,
@@ -1133,8 +1134,8 @@ class WorkbenchServerTests(unittest.TestCase):
         )
         # Backdate the archived_at so the entry is well past the 30-day window.
         meta_path = (
-            workbench.archive_entry_dir(result.archive_id, self.state_dir)
-            / workbench.ARCHIVE_METADATA_FILE_NAME
+            workbench_archive.archive_entry_dir(result.archive_id, self.state_dir)
+            / workbench_archive.ARCHIVE_METADATA_FILE_NAME
         )
         raw = json.loads(meta_path.read_text(encoding="utf-8"))
         raw["archived_at"] = "2000-01-01T00:00:00+00:00"
@@ -1151,26 +1152,28 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertTrue(body["entries"][0]["cleanup_candidate"])
         self.assertEqual([result.archive_id], body["archive_cleanup"]["candidate_ids"])
         self.assertTrue(
-            workbench.archive_entry_dir(result.archive_id, self.state_dir).exists()
+            workbench_archive.archive_entry_dir(
+                result.archive_id, self.state_dir
+            ).exists()
         )
 
     def test_repeated_archive_reads_leave_the_archive_tree_unchanged(self) -> None:
         # The property, not one instance of it: reading twice must produce the
         # same tree it started with, expired entry included.
-        result = workbench.archive_plan(
+        result = workbench_archive.archive_plan(
             self.canonical_plan_dir,
             state_dir=self.state_dir,
             registry_path=self.registry_path,
             include_default_dirs=False,
         )
         meta_path = (
-            workbench.archive_entry_dir(result.archive_id, self.state_dir)
-            / workbench.ARCHIVE_METADATA_FILE_NAME
+            workbench_archive.archive_entry_dir(result.archive_id, self.state_dir)
+            / workbench_archive.ARCHIVE_METADATA_FILE_NAME
         )
         raw = json.loads(meta_path.read_text(encoding="utf-8"))
         raw["archived_at"] = "2000-01-01T00:00:00+00:00"
         meta_path.write_text(json.dumps(raw), encoding="utf-8")
-        archive_root = workbench.archive_root(self.state_dir)
+        archive_root = workbench_archive.archive_root(self.state_dir)
 
         def tree() -> list[str]:
             return sorted(
@@ -1186,7 +1189,7 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual(before, tree())
 
     def test_archive_restore_moves_plan_back(self) -> None:
-        result = workbench.archive_plan(
+        result = workbench_archive.archive_plan(
             self.canonical_plan_dir,
             state_dir=self.state_dir,
             registry_path=self.registry_path,
@@ -1204,7 +1207,9 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertTrue(body["plan_restored"])
         self.assertTrue(self.canonical_plan_dir.exists())
-        self.assertEqual((), workbench.list_archive_entries(self.state_dir).entries)
+        self.assertEqual(
+            (), workbench_archive.list_archive_entries(self.state_dir).entries
+        )
 
     def test_archive_restore_missing_entry_returns_404(self) -> None:
         server = self._start_server()
@@ -1218,7 +1223,7 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual("not-found", body["reason"])
 
     def test_archive_delete_purges_with_matching_confirmation(self) -> None:
-        result = workbench.archive_plan(
+        result = workbench_archive.archive_plan(
             self.canonical_plan_dir,
             state_dir=self.state_dir,
             registry_path=self.registry_path,
@@ -1235,10 +1240,12 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertEqual(1, body["removed_count"])
         self.assertEqual(0, body["failed_count"])
-        self.assertEqual((), workbench.list_archive_entries(self.state_dir).entries)
+        self.assertEqual(
+            (), workbench_archive.list_archive_entries(self.state_dir).entries
+        )
 
     def test_archive_delete_rejects_count_mismatch(self) -> None:
-        result = workbench.archive_plan(
+        result = workbench_archive.archive_plan(
             self.canonical_plan_dir,
             state_dir=self.state_dir,
             registry_path=self.registry_path,
@@ -1254,7 +1261,9 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual(400, status)
         self.assertEqual("confirmation-mismatch", body["reason"])
         # Nothing is purged when confirmation does not match.
-        self.assertEqual(1, len(workbench.list_archive_entries(self.state_dir).entries))
+        self.assertEqual(
+            1, len(workbench_archive.list_archive_entries(self.state_dir).entries)
+        )
 
     def test_archive_settings_updates_retention_days(self) -> None:
         server = self._start_server()

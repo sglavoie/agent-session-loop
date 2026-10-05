@@ -8595,6 +8595,10 @@ full-path confirmation through `"confirm_plan_dir"`, refuse arbitrary
 non-plan paths, and return `409` with `reason: "active-lock"` when an
 active lock is present.
 
+The archive storage and its safety gate live in
+`agent_session_loop/workbench_archive.py`, which every surface — the HTTP
+routes, the `asl workbench` CLI, and the remote connector — calls.
+
 Bulk cleanup uses `POST /api/plans/archive` with `plan_dirs`. The server
 archives each entry independently and returns per-entry results plus
 `archived_count` and `failed_count`, so one blocked or invalid plan does

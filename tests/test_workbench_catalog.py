@@ -37,7 +37,13 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from agent_session_loop import bridge, plans, workbench, workbench_catalog
+from agent_session_loop import (
+    bridge,
+    plans,
+    workbench,
+    workbench_archive,
+    workbench_catalog,
+)
 from asl_workbench import catalog
 from tests.support import (
     _WORKBENCH_DEAD_PID,
@@ -630,7 +636,7 @@ class ObservationalReadTests(WorkbenchAPIFixture, unittest.TestCase):
             # has no maintenance result to report.
             self.assertNotIn("archive_maintenance", body)
 
-        entry_dir = workbench.archive_entry_dir(archive_id, self.state_dir)
+        entry_dir = workbench_archive.archive_entry_dir(archive_id, self.state_dir)
         self.assertTrue(
             entry_dir.is_dir(),
             "polling the queue emptied an expired archive entry",
@@ -693,15 +699,15 @@ class ObservationalReadTests(WorkbenchAPIFixture, unittest.TestCase):
         state_dir, registry_path, plan_dir = _seed_archivable_plan(self.workbench_root)
         self.assertEqual(self.state_dir, state_dir)
         self.assertEqual(self.registry_path, registry_path)
-        result = workbench.archive_plan(
+        result = workbench_archive.archive_plan(
             plan_dir,
             state_dir=self.state_dir,
             registry_path=self.registry_path,
             include_default_dirs=False,
         )
         meta_path = (
-            workbench.archive_entry_dir(result.archive_id, self.state_dir)
-            / workbench.ARCHIVE_METADATA_FILE_NAME
+            workbench_archive.archive_entry_dir(result.archive_id, self.state_dir)
+            / workbench_archive.ARCHIVE_METADATA_FILE_NAME
         )
         raw = json.loads(meta_path.read_text(encoding="utf-8"))
         raw["archived_at"] = "2000-01-01T00:00:00+00:00"

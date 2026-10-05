@@ -347,8 +347,10 @@ class WorkbenchArchiveRetentionTests(unittest.TestCase):
 
 
 class WorkbenchArchiveStorageTests(unittest.TestCase):
-    def _metadata(self, tmp_path: Path, archive_id: str) -> workbench.ArchiveMetadata:
-        return workbench.ArchiveMetadata(
+    def _metadata(
+        self, tmp_path: Path, archive_id: str
+    ) -> workbench_archive.ArchiveMetadata:
+        return workbench_archive.ArchiveMetadata(
             archive_id=archive_id,
             original_plan_dir=str(tmp_path / "plans" / "alpha"),
             archived_at="2026-07-03T12:00:00+00:00",
@@ -364,8 +366,8 @@ class WorkbenchArchiveStorageTests(unittest.TestCase):
         )
 
     def test_new_archive_id_is_valid_and_unique(self) -> None:
-        first = workbench.new_archive_id()
-        second = workbench.new_archive_id()
+        first = workbench_archive.new_archive_id()
+        second = workbench_archive.new_archive_id()
         self.assertNotEqual(first, second)
         self.assertNotIn("/", first)
         self.assertTrue(first)
@@ -373,16 +375,16 @@ class WorkbenchArchiveStorageTests(unittest.TestCase):
     def test_archive_paths_live_under_state_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_root = Path(tmp) / "state"
-            root = workbench.archive_root(state_root)
-            entry_dir = workbench.archive_entry_dir("abc123", state_root)
+            root = workbench_archive.archive_root(state_root)
+            entry_dir = workbench_archive.archive_entry_dir("abc123", state_root)
 
             self.assertEqual(
-                state.state_root(state_root) / workbench.ARCHIVE_DIR_NAME, root
+                state.state_root(state_root) / workbench_archive.ARCHIVE_DIR_NAME, root
             )
             self.assertEqual(root / "abc123", entry_dir)
             self.assertEqual(
-                entry_dir / workbench.ARCHIVE_PLAN_DIR_NAME,
-                workbench.archive_plan_path("abc123", state_root),
+                entry_dir / workbench_archive.ARCHIVE_PLAN_DIR_NAME,
+                workbench_archive.archive_plan_path("abc123", state_root),
             )
 
     def test_invalid_archive_id_is_rejected(self) -> None:
@@ -390,7 +392,7 @@ class WorkbenchArchiveStorageTests(unittest.TestCase):
             state_root = Path(tmp) / "state"
             for bad in ("", "..", "a/b", "a\\b"):
                 with self.assertRaises(workbench.WorkbenchError):
-                    workbench.archive_entry_dir(bad, state_root)
+                    workbench_archive.archive_entry_dir(bad, state_root)
 
     def test_save_and_load_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -398,10 +400,12 @@ class WorkbenchArchiveStorageTests(unittest.TestCase):
             state_root = tmp_path / "state"
             metadata = self._metadata(tmp_path, "20260703T120000Z-abcdef123456")
 
-            meta_path = workbench.save_archive_metadata(metadata, state_root)
+            meta_path = workbench_archive.save_archive_metadata(metadata, state_root)
             self.assertTrue(meta_path.is_file())
 
-            loaded = workbench.load_archive_metadata(metadata.archive_id, state_root)
+            loaded = workbench_archive.load_archive_metadata(
+                metadata.archive_id, state_root
+            )
             self.assertIsNotNone(loaded)
             assert loaded is not None
             self.assertEqual(metadata.archive_id, loaded.archive_id)
@@ -413,11 +417,11 @@ class WorkbenchArchiveStorageTests(unittest.TestCase):
             assert loaded.pin is not None
             self.assertEqual("Alpha", loaded.pin.label)
             self.assertEqual(
-                workbench.archive_entry_dir(metadata.archive_id, state_root),
+                workbench_archive.archive_entry_dir(metadata.archive_id, state_root),
                 loaded.archive_dir,
             )
             self.assertEqual(
-                workbench.archive_plan_path(metadata.archive_id, state_root),
+                workbench_archive.archive_plan_path(metadata.archive_id, state_root),
                 loaded.plan_path,
             )
             self.assertEqual((), loaded.warnings)
@@ -425,22 +429,26 @@ class WorkbenchArchiveStorageTests(unittest.TestCase):
     def test_load_missing_entry_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_root = Path(tmp) / "state"
-            self.assertIsNone(workbench.load_archive_metadata("nope", state_root))
+            self.assertIsNone(
+                workbench_archive.load_archive_metadata("nope", state_root)
+            )
 
     def test_list_skips_malformed_entry_with_warning(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp).resolve()
             state_root = tmp_path / "state"
             good = self._metadata(tmp_path, "20260703T120000Z-goodgoodgood")
-            workbench.save_archive_metadata(good, state_root)
+            workbench_archive.save_archive_metadata(good, state_root)
 
-            bad_dir = workbench.archive_root(state_root) / "20260703T130000Z-bad"
+            bad_dir = (
+                workbench_archive.archive_root(state_root) / "20260703T130000Z-bad"
+            )
             bad_dir.mkdir(parents=True)
-            (bad_dir / workbench.ARCHIVE_METADATA_FILE_NAME).write_text(
+            (bad_dir / workbench_archive.ARCHIVE_METADATA_FILE_NAME).write_text(
                 "{ not json", encoding="utf-8"
             )
 
-            listing = workbench.list_archive_entries(state_root)
+            listing = workbench_archive.list_archive_entries(state_root)
 
             self.assertEqual(1, len(listing.entries))
             self.assertEqual(good.archive_id, listing.entries[0].archive_id)
@@ -449,7 +457,7 @@ class WorkbenchArchiveStorageTests(unittest.TestCase):
     def test_list_missing_root_is_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_root = Path(tmp) / "state"
-            listing = workbench.list_archive_entries(state_root)
+            listing = workbench_archive.list_archive_entries(state_root)
             self.assertEqual((), listing.entries)
             self.assertEqual((), listing.warnings)
 
@@ -458,20 +466,22 @@ class WorkbenchArchiveStorageTests(unittest.TestCase):
             tmp_path = Path(tmp).resolve()
             state_root = tmp_path / "state"
             metadata = self._metadata(tmp_path, "20260703T120000Z-removeme1234")
-            workbench.save_archive_metadata(metadata, state_root)
+            workbench_archive.save_archive_metadata(metadata, state_root)
 
             self.assertTrue(
-                workbench.remove_archive_entry(metadata.archive_id, state_root)
+                workbench_archive.remove_archive_entry(metadata.archive_id, state_root)
             )
             self.assertFalse(
-                workbench.archive_entry_dir(metadata.archive_id, state_root).exists()
+                workbench_archive.archive_entry_dir(
+                    metadata.archive_id, state_root
+                ).exists()
             )
             self.assertFalse(
-                workbench.remove_archive_entry(metadata.archive_id, state_root)
+                workbench_archive.remove_archive_entry(metadata.archive_id, state_root)
             )
 
     def test_compute_expires_at_adds_retention_days(self) -> None:
-        expires = workbench.compute_expires_at("2026-07-03T12:00:00+00:00", 30)
+        expires = workbench_archive.compute_expires_at("2026-07-03T12:00:00+00:00", 30)
         self.assertEqual("2026-08-02T12:00:00+00:00", expires)
 
     def test_archived_entries_excluded_from_discovery(self) -> None:
@@ -479,10 +489,10 @@ class WorkbenchArchiveStorageTests(unittest.TestCase):
             tmp_path = Path(tmp).resolve()
             state_root = tmp_path / "state"
             archive_id = "20260703T120000Z-hiddenplan12"
-            archived_plan = workbench.archive_plan_path(archive_id, state_root)
+            archived_plan = workbench_archive.archive_plan_path(archive_id, state_root)
             _write_plan_dir(archived_plan)
             metadata = self._metadata(tmp_path, archive_id)
-            workbench.save_archive_metadata(metadata, state_root)
+            workbench_archive.save_archive_metadata(metadata, state_root)
 
             with patched_env(AGENT_PLANS_DIR=None):
                 result = workbench.discover_plans(
@@ -500,7 +510,7 @@ class WorkbenchArchivePlanTests(unittest.TestCase):
             state_dir, registry_path, canonical = _seed_archivable_plan(tmp_path)
             plan_state = state.plan_state_dir(canonical, state_dir)
 
-            result = workbench.archive_plan(
+            result = workbench_archive.archive_plan(
                 canonical,
                 state_dir=state_dir,
                 registry_path=registry_path,
@@ -513,14 +523,20 @@ class WorkbenchArchivePlanTests(unittest.TestCase):
             self.assertFalse(canonical.exists())
             self.assertFalse(plan_state.exists())
 
-            entry = workbench.archive_entry_dir(result.archive_id, state_dir)
+            entry = workbench_archive.archive_entry_dir(result.archive_id, state_dir)
             self.assertTrue(
-                workbench.archive_plan_path(result.archive_id, state_dir).is_dir()
+                workbench_archive.archive_plan_path(
+                    result.archive_id, state_dir
+                ).is_dir()
             )
             self.assertTrue(
-                workbench.archive_state_path(result.archive_id, state_dir).is_dir()
+                workbench_archive.archive_state_path(
+                    result.archive_id, state_dir
+                ).is_dir()
             )
-            self.assertTrue((entry / workbench.ARCHIVE_METADATA_FILE_NAME).is_file())
+            self.assertTrue(
+                (entry / workbench_archive.ARCHIVE_METADATA_FILE_NAME).is_file()
+            )
             self.assertIsNotNone(result.metadata.pin)
             assert result.metadata.pin is not None
             self.assertEqual("Alpha", result.metadata.pin.label)
@@ -537,7 +553,7 @@ class WorkbenchArchivePlanTests(unittest.TestCase):
             )
             workbench.save_registry(registry, registry_path)
 
-            result = workbench.archive_plan(
+            result = workbench_archive.archive_plan(
                 canonical,
                 state_dir=state_dir,
                 registry_path=registry_path,
@@ -545,7 +561,7 @@ class WorkbenchArchivePlanTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                workbench.compute_expires_at(result.metadata.archived_at, 7),
+                workbench_archive.compute_expires_at(result.metadata.archived_at, 7),
                 result.metadata.expires_at,
             )
 
@@ -565,8 +581,8 @@ class WorkbenchArchivePlanTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaises(workbench.ArchiveError) as ctx:
-                workbench.archive_plan(
+            with self.assertRaises(workbench_archive.ArchiveError) as ctx:
+                workbench_archive.archive_plan(
                     canonical,
                     state_dir=state_dir,
                     registry_path=registry_path,
@@ -586,8 +602,8 @@ class WorkbenchArchivePlanTests(unittest.TestCase):
             target = tmp_path / "not-a-plan"
             target.mkdir()
 
-            with self.assertRaises(workbench.ArchiveError) as ctx:
-                workbench.archive_plan(
+            with self.assertRaises(workbench_archive.ArchiveError) as ctx:
+                workbench_archive.archive_plan(
                     target,
                     state_dir=state_dir,
                     registry_path=registry_path,
@@ -605,7 +621,7 @@ class WorkbenchArchivePlanTests(unittest.TestCase):
             )
             plan_state = state.plan_state_dir(canonical, state_dir)
 
-            result = workbench.archive_plan(
+            result = workbench_archive.archive_plan(
                 canonical,
                 state_dir=state_dir,
                 registry_path=registry_path,
@@ -617,10 +633,14 @@ class WorkbenchArchivePlanTests(unittest.TestCase):
             self.assertTrue(result.pin_archived)
             self.assertFalse(plan_state.exists())
             self.assertFalse(
-                workbench.archive_plan_path(result.archive_id, state_dir).exists()
+                workbench_archive.archive_plan_path(
+                    result.archive_id, state_dir
+                ).exists()
             )
             self.assertTrue(
-                workbench.archive_state_path(result.archive_id, state_dir).is_dir()
+                workbench_archive.archive_state_path(
+                    result.archive_id, state_dir
+                ).is_dir()
             )
             self.assertEqual((), workbench.load_registry(registry_path).pins)
 
@@ -628,7 +648,7 @@ class WorkbenchArchivePlanTests(unittest.TestCase):
 class WorkbenchRestoreArchiveTests(unittest.TestCase):
     def _archive(self, tmp_path: Path) -> tuple[Path, Path, Path, str]:
         state_dir, registry_path, canonical = _seed_archivable_plan(tmp_path)
-        result = workbench.archive_plan(
+        result = workbench_archive.archive_plan(
             canonical,
             state_dir=state_dir,
             registry_path=registry_path,
@@ -642,7 +662,7 @@ class WorkbenchRestoreArchiveTests(unittest.TestCase):
             state_dir, registry_path, canonical, archive_id = self._archive(tmp_path)
             plan_state = state.plan_state_dir(canonical, state_dir)
 
-            result = workbench.restore_archive(
+            result = workbench_archive.restore_archive(
                 archive_id, state_dir=state_dir, registry_path=registry_path
             )
 
@@ -653,7 +673,7 @@ class WorkbenchRestoreArchiveTests(unittest.TestCase):
             self.assertTrue((canonical / "manifest.md").is_file())
             self.assertTrue(plan_state.is_dir())
             self.assertFalse(
-                workbench.archive_entry_dir(archive_id, state_dir).exists()
+                workbench_archive.archive_entry_dir(archive_id, state_dir).exists()
             )
             pins = workbench.load_registry(registry_path).pins
             self.assertEqual(1, len(pins))
@@ -664,8 +684,8 @@ class WorkbenchRestoreArchiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp).resolve()
             state_dir = tmp_path / "state"
-            with self.assertRaises(workbench.ArchiveError) as ctx:
-                workbench.restore_archive(
+            with self.assertRaises(workbench_archive.ArchiveError) as ctx:
+                workbench_archive.restore_archive(
                     "20260703T120000Z-doesnotexist", state_dir=state_dir
                 )
             self.assertEqual("not-found", ctx.exception.reason)
@@ -677,14 +697,16 @@ class WorkbenchRestoreArchiveTests(unittest.TestCase):
             state_dir, registry_path, canonical, archive_id = self._archive(tmp_path)
             _write_plan_dir(canonical)
 
-            with self.assertRaises(workbench.ArchiveError) as ctx:
-                workbench.restore_archive(
+            with self.assertRaises(workbench_archive.ArchiveError) as ctx:
+                workbench_archive.restore_archive(
                     archive_id, state_dir=state_dir, registry_path=registry_path
                 )
 
             self.assertEqual("restore-conflict", ctx.exception.reason)
             self.assertEqual(409, ctx.exception.status)
-            self.assertTrue(workbench.archive_entry_dir(archive_id, state_dir).exists())
+            self.assertTrue(
+                workbench_archive.archive_entry_dir(archive_id, state_dir).exists()
+            )
 
     def test_restore_conflict_on_existing_state_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -693,25 +715,27 @@ class WorkbenchRestoreArchiveTests(unittest.TestCase):
             plan_state = state.plan_state_dir(canonical, state_dir)
             plan_state.mkdir(parents=True, exist_ok=True)
 
-            with self.assertRaises(workbench.ArchiveError) as ctx:
-                workbench.restore_archive(
+            with self.assertRaises(workbench_archive.ArchiveError) as ctx:
+                workbench_archive.restore_archive(
                     archive_id, state_dir=state_dir, registry_path=registry_path
                 )
 
             self.assertEqual("restore-conflict", ctx.exception.reason)
             self.assertFalse(canonical.exists())
-            self.assertTrue(workbench.archive_entry_dir(archive_id, state_dir).exists())
+            self.assertTrue(
+                workbench_archive.archive_entry_dir(archive_id, state_dir).exists()
+            )
 
 
 class WorkbenchPurgeArchiveTests(unittest.TestCase):
     def _metadata(
         self, tmp_path: Path, archive_id: str, archived_at: str
-    ) -> workbench.ArchiveMetadata:
-        return workbench.ArchiveMetadata(
+    ) -> workbench_archive.ArchiveMetadata:
+        return workbench_archive.ArchiveMetadata(
             archive_id=archive_id,
             original_plan_dir=str(tmp_path / "plans" / archive_id),
             archived_at=archived_at,
-            expires_at=workbench.compute_expires_at(archived_at, 30),
+            expires_at=workbench_archive.compute_expires_at(archived_at, 30),
             summary=None,
             pin=None,
             plan_archived=False,
@@ -723,20 +747,24 @@ class WorkbenchPurgeArchiveTests(unittest.TestCase):
             tmp_path = Path(tmp).resolve()
             state_dir = tmp_path / "state"
             archive_id = "20260703T120000Z-purgeme12345"
-            workbench.save_archive_metadata(
+            workbench_archive.save_archive_metadata(
                 self._metadata(tmp_path, archive_id, "2026-07-03T12:00:00+00:00"),
                 state_dir,
             )
 
-            result = workbench.purge_archive_entries([archive_id], state_dir=state_dir)
+            result = workbench_archive.purge_archive_entries(
+                [archive_id], state_dir=state_dir
+            )
             self.assertEqual(1, result.removed_count)
             self.assertEqual(0, result.failed_count)
             self.assertTrue(result.outcomes[0].removed)
             self.assertFalse(
-                workbench.archive_entry_dir(archive_id, state_dir).exists()
+                workbench_archive.archive_entry_dir(archive_id, state_dir).exists()
             )
 
-            again = workbench.purge_archive_entries([archive_id], state_dir=state_dir)
+            again = workbench_archive.purge_archive_entries(
+                [archive_id], state_dir=state_dir
+            )
             self.assertFalse(again.outcomes[0].removed)
             self.assertIsNone(again.outcomes[0].error)
 
@@ -747,12 +775,12 @@ class WorkbenchPurgeArchiveTests(unittest.TestCase):
             good_a = "20260703T120000Z-aaaaaaaaaaaa"
             good_b = "20260703T130000Z-bbbbbbbbbbbb"
             for archive_id in (good_a, good_b):
-                workbench.save_archive_metadata(
+                workbench_archive.save_archive_metadata(
                     self._metadata(tmp_path, archive_id, "2026-07-03T12:00:00+00:00"),
                     state_dir,
                 )
 
-            result = workbench.purge_archive_entries(
+            result = workbench_archive.purge_archive_entries(
                 [good_a, "../escape", good_b], state_dir=state_dir
             )
 
@@ -774,11 +802,11 @@ class WorkbenchPurgeArchiveTests(unittest.TestCase):
             registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
             old_id = "20260524T120000Z-oldoldold123"
             new_id = "20260701T120000Z-newnewnew123"
-            workbench.save_archive_metadata(
+            workbench_archive.save_archive_metadata(
                 self._metadata(tmp_path, old_id, "2026-05-24T12:00:00+00:00"),
                 state_dir,
             )
-            workbench.save_archive_metadata(
+            workbench_archive.save_archive_metadata(
                 self._metadata(tmp_path, new_id, "2026-07-01T12:00:00+00:00"),
                 state_dir,
             )
@@ -790,8 +818,12 @@ class WorkbenchPurgeArchiveTests(unittest.TestCase):
 
             self.assertEqual([old_id], list(view.review.candidate_ids))
             self.assertEqual(1, view.review.candidate_count)
-            self.assertTrue(workbench.archive_entry_dir(old_id, state_dir).exists())
-            self.assertTrue(workbench.archive_entry_dir(new_id, state_dir).exists())
+            self.assertTrue(
+                workbench_archive.archive_entry_dir(old_id, state_dir).exists()
+            )
+            self.assertTrue(
+                workbench_archive.archive_entry_dir(new_id, state_dir).exists()
+            )
             # There is no removal count to report, and that absence is the
             # change: a caller cannot read "0 purged" as "the pass ran".
             self.assertNotIn("removed_count", view.review.to_payload())
@@ -805,7 +837,7 @@ class WorkbenchPurgeArchiveTests(unittest.TestCase):
             state_dir = tmp_path / "state"
             registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
             archive_id = "20260701T120000Z-shortretain1"
-            workbench.save_archive_metadata(
+            workbench_archive.save_archive_metadata(
                 self._metadata(tmp_path, archive_id, "2026-07-01T12:00:00+00:00"),
                 state_dir,
             )
@@ -822,7 +854,9 @@ class WorkbenchPurgeArchiveTests(unittest.TestCase):
             )
 
             self.assertEqual([archive_id], list(after.review.candidate_ids))
-            self.assertTrue(workbench.archive_entry_dir(archive_id, state_dir).exists())
+            self.assertTrue(
+                workbench_archive.archive_entry_dir(archive_id, state_dir).exists()
+            )
 
     def test_an_unreadable_archive_date_is_reported_not_swept(self) -> None:
         # The old pass skipped a malformed `archived_at` with a warning, which
@@ -833,7 +867,7 @@ class WorkbenchPurgeArchiveTests(unittest.TestCase):
             state_dir = tmp_path / "state"
             registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
             archive_id = "20260701T120000Z-baddate12345"
-            meta_path = workbench.save_archive_metadata(
+            meta_path = workbench_archive.save_archive_metadata(
                 self._metadata(tmp_path, archive_id, "2026-07-01T12:00:00+00:00"),
                 state_dir,
             )
@@ -852,7 +886,9 @@ class WorkbenchPurgeArchiveTests(unittest.TestCase):
 
             self.assertEqual(1, view.review.undated_count)
             self.assertEqual([], list(view.review.candidate_ids))
-            self.assertTrue(workbench.archive_entry_dir(archive_id, state_dir).exists())
+            self.assertTrue(
+                workbench_archive.archive_entry_dir(archive_id, state_dir).exists()
+            )
 
 
 class WorkbenchDiscoveryTests(unittest.TestCase):

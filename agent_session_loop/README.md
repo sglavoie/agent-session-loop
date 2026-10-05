@@ -548,3 +548,5 @@ then submits one archive command per selected plan and waits for its receipt
 before continuing. The archive view uses the same per-entry receipt rule for
 restore and purge. A pending command is shown as pending until the Mac reports
 its result; an uncertain result stops the batch for operator review.
+
+The Workbench's local half is split by what each module owns. `workbench.py` owns the registry, plan discovery, the per-plan summary, and launch. `workbench_archive.py` owns everything that moves a plan out of discovery or back into it: the on-disk archive layout under the state root, `archive_plan`, `restore_archive`, `purge_archive_entries`, `list_archive_entries`, `delete_plan`, the `ArchiveError` and `PlanDeleteError` refusals they raise, and the confirmed, surface-neutral wrappers (`archive_one`, `archive_many`, `restore_entry`, `review_archive`, `purge_entries`) that the HTTP routes, the `asl workbench` CLI and the remote connector share. It imports `workbench` for the registry lock and discovery, and `workbench` never imports it back, so call and patch these names at `workbench_archive`; `workbench` keeps no alias for them.
