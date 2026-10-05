@@ -30,7 +30,6 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +37,7 @@ from typing import Any
 
 from . import contracts
 from .contracts import VerifyRecipe
+from .git_subprocess import run_git
 from .plans import canonicalize_path
 
 #: Derived journal filename. Excluded from content/readiness hashes because the
@@ -96,12 +96,7 @@ def normalize_recipe(recipe: VerifyRecipe) -> str:
 
 def _git(root: Path, *args: str) -> str | None:
     try:
-        completed = subprocess.run(
-            ["git", *args],
-            cwd=os.fspath(root),
-            text=True,
-            capture_output=True,
-        )
+        completed = run_git(os.fspath(root), args, chdir=True)
     except OSError, ValueError:
         return None
     if completed.returncode != 0:

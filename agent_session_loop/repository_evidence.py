@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .git_subprocess import run_git_or_raise
+
 __all__ = [
     "GitWorktreeInventory",
     "RepositoryEvidenceError",
@@ -70,37 +72,14 @@ def _run_git(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
     override = _GIT_RUNNER.get()
     if override is not None:
         return override(cwd, args)
-    try:
-        return subprocess.run(
-            ["git", "-C", str(cwd), *args],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except FileNotFoundError as error:
-        raise RepositoryEvidenceError("git executable not found on PATH") from error
-    except OSError as error:
-        raise RepositoryEvidenceError(
-            f"could not run git {' '.join(args)}: {error}"
-        ) from error
+    return run_git_or_raise(cwd, args, error=RepositoryEvidenceError)
 
 
 def _run_git_bytes(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[bytes]:
     override = _GIT_BYTES_RUNNER.get()
     if override is not None:
         return override(cwd, args)
-    try:
-        return subprocess.run(
-            ["git", "-C", str(cwd), *args],
-            capture_output=True,
-            check=False,
-        )
-    except FileNotFoundError as error:
-        raise RepositoryEvidenceError("git executable not found on PATH") from error
-    except OSError as error:
-        raise RepositoryEvidenceError(
-            f"could not run git {' '.join(args)}: {error}"
-        ) from error
+    return run_git_or_raise(cwd, args, error=RepositoryEvidenceError, decode=False)
 
 
 _DIFF_FILE_HEADER_RE = re.compile(r"^diff --git ", re.MULTILINE)

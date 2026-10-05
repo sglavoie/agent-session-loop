@@ -75,6 +75,7 @@ from .contracts import (
     RegexInFileCheck,
     parse_completion_contract,
 )
+from .git_subprocess import run_git
 from .literals import as_optional_literal
 from .plans import (
     HANDOFF_HEADING,
@@ -2790,13 +2791,8 @@ def _check_bound_repository_intent(
 
 def _run_git(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[str] | None:
     try:
-        return subprocess.run(
-            ["git", "-C", str(cwd), *args],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except FileNotFoundError, OSError:
+        return run_git(cwd, args)
+    except OSError:
         return None
 
 

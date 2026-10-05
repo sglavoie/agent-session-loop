@@ -61,10 +61,14 @@ class ReviewGuardBoundaryTests(unittest.TestCase):
             self.assertNotIn(writer, self.source, msg=writer)
 
     def test_git_is_spawned_from_exactly_two_places(self) -> None:
-        # `_run_git` and `_run_git_bytes` are the only spawns, which is what
-        # lets both convert a missing executable and an OS failure into
-        # `RunError`; a third would be a caller that can still meet `OSError`.
-        self.assertEqual(2, self.source.count("subprocess.run("))
+        # `_run_git` and `_run_git_bytes` are the only spawns, both through the
+        # shared runner with `error=RunError`, which is what converts a missing
+        # executable and an OS failure into `RunError`; a direct
+        # `subprocess.run` would be a caller that can still meet `OSError`.
+        self.assertEqual(0, self.source.count("subprocess.run("))
+        self.assertEqual(
+            2, self.source.count("run_git_or_raise(cwd, args, error=RunError")
+        )
 
     def test_the_workspace_evidence_projection_arrives_as_a_seam(self) -> None:
         # The projection that classifies a comparison against a write scope is

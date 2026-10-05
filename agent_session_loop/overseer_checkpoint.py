@@ -117,6 +117,7 @@ from . import (
     overseer_store,
     state,
 )
+from .git_subprocess import run_git_reporting
 
 __all__ = [
     "AUTHORITY_REFUSALS",
@@ -913,18 +914,11 @@ _NAMED_LIMIT = 5
 
 
 def _git(root: Path, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    """Run one git command in ``root``, reporting a failure rather than raising."""
-    argv = ["git", *args]
-    try:
-        return subprocess.run(
-            argv,
-            cwd=root,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except OSError as error:
-        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=str(error))
+    """Run one git command in ``root``, reporting a failure rather than raising.
+
+    Every spawn failure, a missing executable included, reports ``1``.
+    """
+    return run_git_reporting(root, args, missing_returncode=1)
 
 
 def dirty_paths(root: Path) -> tuple[str, ...] | None:

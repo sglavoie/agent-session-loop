@@ -146,6 +146,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.execution_timing",
         "agent_session_loop.external_write_evidence",
         "agent_session_loop.formatting",
+        "agent_session_loop.git_subprocess",
         "agent_session_loop.guard_pretool_hook",
         "agent_session_loop.guards",
         "agent_session_loop.guidance_delivery",

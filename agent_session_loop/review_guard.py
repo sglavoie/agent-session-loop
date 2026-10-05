@@ -11,9 +11,11 @@ git is invoked and how its failures are classified.
 Four things live here:
 
 * **The git shell.** :func:`_run_git` and :func:`_run_git_bytes` are the only
-  places in the run loop that spawn ``git``. Both convert a missing executable
-  or an OS-level failure into :class:`~agent_session_loop.run_errors.RunError`,
-  so no caller above them ever handles a raw :class:`OSError`.
+  entry points through which the run loop spawns ``git``; the spawn itself is
+  :func:`agent_session_loop.git_subprocess.run_git_or_raise`. Both convert a
+  missing executable or an OS-level failure into
+  :class:`~agent_session_loop.run_errors.RunError`, so no caller above them
+  ever handles a raw :class:`OSError`.
 * **Repository fingerprinting.** The compatibility wrappers over
   :mod:`agent_session_loop.repository_evidence` that the review mutation guard
   captures before and after a turn, compares, and renders.
@@ -67,6 +69,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from . import plans, repository_evidence, run_selection, verification, workspaces
+from .git_subprocess import run_git_or_raise
 from .run_errors import RunError
 
 # Repo-relative paths the review mutation guard ignores, on top of any
@@ -178,17 +181,13 @@ def _run_git(
     cwd: Path,
     args: list[str],
 ) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            ["git", "-C", str(cwd), *args],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except FileNotFoundError as error:
-        raise RunError("git executable not found on PATH") from error
-    except OSError as error:
-        raise RunError(f"could not run git {' '.join(args)}: {error}") from error
+    """Run git, raising :class:`RunError` when it cannot be spawned.
+
+    Deliberately not the ``repository_evidence`` runner: this function is what
+    the fingerprint wrappers install as that module's override, so honoring
+    the override here would call itself, and its failures must be ``RunError``.
+    """
+    return run_git_or_raise(cwd, args, error=RunError)
 
 
 def _run_git_bytes(
@@ -200,16 +199,7 @@ def _run_git_bytes(
     Text mode translates ``\\r\\n`` and a lone ``\\r`` to ``\\n``, which collapses
     values differing only in those bytes onto one another.
     """
-    try:
-        return subprocess.run(
-            ["git", "-C", str(cwd), *args],
-            capture_output=True,
-            check=False,
-        )
-    except FileNotFoundError as error:
-        raise RunError("git executable not found on PATH") from error
-    except OSError as error:
-        raise RunError(f"could not run git {' '.join(args)}: {error}") from error
+    return run_git_or_raise(cwd, args, error=RunError, decode=False)
 
 
 def _read_git_head(cwd: Path) -> dict[str, Any]:

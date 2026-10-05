@@ -9,12 +9,13 @@ retired ``skills/gitsummary/scripts/format-commit.py``, plus the API-error guard
 that copy never had.  The ``gitsummary`` skill now calls this module through
 ``asl commit`` rather than carrying its own copy.
 
-The git surface is module-local on purpose: ``asl commit`` runs standalone,
-outside a loop, so it must not pull the runner import graph in behind it.  The
-same rule governs the ASL imports the generation half needs — ``harnesses``,
-``config``, ``harness_failures``, ``retry_hints``, and ``responses`` are
-imported inside the functions that use them, so importing this module still
-costs nothing but the standard library.
+The git surface rests only on :mod:`agent_session_loop.git_subprocess`, which
+imports nothing but the standard library, on purpose: ``asl commit`` runs
+standalone, outside a loop, so it must not pull the runner import graph in
+behind it.  The same rule governs the ASL imports the generation half needs
+— ``harnesses``, ``config``, ``harness_failures``, ``retry_hints``, and
+``responses`` are imported inside the functions that use them, so importing
+this module still costs nothing but the standard library.
 """
 
 from __future__ import annotations
@@ -22,7 +23,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import subprocess
 import sys
@@ -32,6 +32,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+
+from .git_subprocess import run_git_reporting
 
 if TYPE_CHECKING:
     from . import harnesses
@@ -467,21 +469,7 @@ def _git(
     stripping the credentials, locale, and git configuration every other call
     inherits.
     """
-    argv = ["git", *args]
-    try:
-        return subprocess.run(
-            argv,
-            cwd=cwd,
-            text=True,
-            input=stdin_text,
-            capture_output=True,
-            check=False,
-            env=None if env is None else {**os.environ, **env},
-        )
-    except FileNotFoundError as error:
-        return subprocess.CompletedProcess(argv, 127, stdout="", stderr=str(error))
-    except OSError as error:
-        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=str(error))
+    return run_git_reporting(cwd, args, stdin_text=stdin_text, env=env)
 
 
 def find_git_root(start: Path) -> Path | None:
