@@ -19,6 +19,7 @@ from agent_session_loop import (
     review_repair,
     state,
     workbench,
+    workbench_recovery,
 )
 from tests.support import (
     _WORKBENCH_DEAD_PID,
@@ -243,7 +244,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             summary = workbench.build_workbench_summary(
                 _discovered(plan_dir), state_dir=state_root
             )
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -286,7 +287,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             summary = workbench.build_workbench_summary(
                 _discovered(plan_dir), state_dir=state_root
             )
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -395,7 +396,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             summary = workbench.build_workbench_summary(
                 discovered, state_dir=state_root
             )
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 discovered, state_dir=state_root
             )
 
@@ -422,7 +423,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             resumed = workbench.build_workbench_summary(
                 discovered, state_dir=state_root
             )
-            ready_recovery = workbench.build_workbench_recovery(
+            ready_recovery = workbench_recovery.build_workbench_recovery(
                 discovered, state_dir=state_root
             )
 

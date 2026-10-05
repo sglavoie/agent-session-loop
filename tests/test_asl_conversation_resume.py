@@ -37,7 +37,7 @@ from agent_session_loop import (
     run_entry,
     run_flags,
     turn_execution,
-    workbench,
+    workbench_recovery,
     workspaces,
 )
 
@@ -584,9 +584,9 @@ class RecoveryPauseRegistrationTests(unittest.TestCase):
         """
         self.assertEqual(
             "conversation-recovery",
-            workbench.PAUSE_REASON_RECOVERY_KIND_BY_REASON[self.reason],
+            workbench_recovery.PAUSE_REASON_RECOVERY_KIND_BY_REASON[self.reason],
         )
-        self.assertNotIn(self.reason, workbench.GENERIC_RECOVERY_PAUSE_REASONS)
+        self.assertNotIn(self.reason, workbench_recovery.GENERIC_RECOVERY_PAUSE_REASONS)
 
     def test_a_repair_hint_explains_the_two_ways_forward(self) -> None:
         hint = preflight.RUNTIME_REPAIR_HINTS[self.reason]

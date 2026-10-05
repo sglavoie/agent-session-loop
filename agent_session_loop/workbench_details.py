@@ -49,6 +49,7 @@ from . import (
     tail,
     workbench,
     workbench_catalog,
+    workbench_recovery,
     workbench_workspace,
 )
 from . import events as events_module
@@ -972,7 +973,7 @@ def read_recovery(
             details={"plan_dir": str(canonical)},
         ) from error
     discovered = workbench.DiscoveredPlan(plan_dir=snapshot.plan_dir, exists=True)
-    recovery = workbench.build_workbench_recovery(
+    recovery = workbench_recovery.build_workbench_recovery(
         discovered,
         state_dir=state_dir,
         reclaim=False,

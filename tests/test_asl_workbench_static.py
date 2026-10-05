@@ -26,6 +26,7 @@ from agent_session_loop import (
     state,
     workbench,
     workbench_archive,
+    workbench_recovery,
     workbench_server,
 )
 from tests.support import (
@@ -1851,8 +1852,10 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         assert targets_match is not None
         js_targets = tuple(_re.findall(r'"([^"]+)"', targets_match.group(1)))
 
-        self.assertEqual(tuple(get_args(workbench.RecoveryActionTarget)), js_targets)
-        self.assertEqual(workbench.RECOVERY_ACTION_TARGETS, js_targets)
+        self.assertEqual(
+            tuple(get_args(workbench_recovery.RecoveryActionTarget)), js_targets
+        )
+        self.assertEqual(workbench_recovery.RECOVERY_ACTION_TARGETS, js_targets)
 
     def test_root_html_ships_urgent_correction_composer(self) -> None:
         # The composer's promises are made in the markup, so they are pinned

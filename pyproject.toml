@@ -324,10 +324,14 @@ enable_error_code = [
 # `workbench` drives runs — so the one-way dependency the Boundary table
 # enforces is not something either of them could ever satisfy. Both are already
 # clean under the three codes.
+# `workbench_recovery` joined when the Recovery Center cards moved out of
+# `workbench`: it carries that code's two inline `arg-type` ignores, which the
+# Boundary linter forbids, so it keeps the contract it had inside `workbench`.
 [[tool.mypy.overrides]]
 module = [
     "agent_session_loop.compact_state",
     "agent_session_loop.workbench",
+    "agent_session_loop.workbench_recovery",
 ]
 enable_error_code = [
     "arg-type",

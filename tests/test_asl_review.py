@@ -43,7 +43,7 @@ from agent_session_loop import (
     runner,
     session_verification,
     state,
-    workbench,
+    workbench_recovery,
     workspaces,
 )
 from tests.support import (
@@ -5501,7 +5501,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertFalse(projected.eligible)
         self.assertEqual("all-clear", projected.source_disposition)
         self.assertEqual("all-clear", projected.blocker)
-        recovery = workbench.build_workbench_recovery(
+        recovery = workbench_recovery.build_workbench_recovery(
             _discovered(self.plan_dir), state_dir=self.state_dir
         )
         self.assertEqual("none", recovery.kind)
@@ -5640,7 +5640,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertEqual("repair-sessions-missing", payload["review_resume"]["blocker"])
         self.assertIsNone(payload["review_fix_disposition"])
 
-        recovery = workbench.build_workbench_recovery(
+        recovery = workbench_recovery.build_workbench_recovery(
             _discovered(self.plan_dir), state_dir=self.state_dir
         )
         self.assertEqual("review-continuation", recovery.kind)
@@ -6196,7 +6196,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertEqual(1, len(finished_events))
         self.assertIsNone(finished_events[0]["review_fix_disposition"])
 
-        recovery = workbench.build_workbench_recovery(
+        recovery = workbench_recovery.build_workbench_recovery(
             _discovered(self.plan_dir), state_dir=self.state_dir
         )
         self.assertEqual("review-continuation", recovery.kind)
@@ -6267,7 +6267,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         )
         self.assertIsNone(payload["review_fix_disposition"])
 
-        recovery = workbench.build_workbench_recovery(
+        recovery = workbench_recovery.build_workbench_recovery(
             _discovered(self.plan_dir), state_dir=self.state_dir
         )
         self.assertEqual("review-continuation", recovery.kind)

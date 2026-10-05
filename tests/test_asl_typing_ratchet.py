@@ -300,6 +300,7 @@ REQUIRED_CHECKED_MODULES = frozenset(
     {
         "agent_session_loop.compact_state",
         "agent_session_loop.workbench",
+        "agent_session_loop.workbench_recovery",
     }
 )
 

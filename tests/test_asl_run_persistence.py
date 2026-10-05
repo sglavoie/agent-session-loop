@@ -40,7 +40,7 @@ from agent_session_loop import (
     events,
     run_persistence,
     state,
-    workbench,
+    workbench_recovery,
 )
 from tests.support import (
     agent_mux_notify_enabled,
@@ -365,7 +365,7 @@ class PausedWorkCommitProjectionTests(unittest.TestCase):
     def test_the_recovery_centers_pause_details_reader_names_no_key(self) -> None:
         # `/api/recovery` and the paused-Q&A projection both reach the pause
         # details through this one reader, which copies the block wholesale.
-        details = workbench._pause_details(
+        details = workbench_recovery._pause_details(
             {"pause_details": {"paused_work_commit": self.RECORD}}
         )
         self.assertEqual(self.RECORD, details["paused_work_commit"])

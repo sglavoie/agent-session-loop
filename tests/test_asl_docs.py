@@ -56,6 +56,7 @@ from agent_session_loop import (
     turn_execution,
     verification,
     workbench,
+    workbench_recovery,
     workbench_workspace,
 )
 from tests import run_suite
@@ -3096,7 +3097,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "repositories": [{"alias": "API", "path": "api"}],
             "repository_count": 1,
         }
-        recovery_payload = workbench.WorkbenchRecovery(
+        recovery_payload = workbench_recovery.WorkbenchRecovery(
             plan_dir=Path("/plan"),
             kind="none",
             title="No recovery needed",
@@ -3335,11 +3336,11 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         self.assertIn("### Recovery payload examples", docs)
         self.assertIn("`GET /api/recovery?plan_dir=<path>`", docs)
         self.assertIn("`WorkbenchRecovery.compact_payload()`", docs)
-        self.assertIn("`workbench.RECOVERY_KINDS`", docs)
+        self.assertIn("`workbench_recovery.RECOVERY_KINDS`", docs)
         example_start = docs.index("### Recovery payload examples")
         example_end = docs.index("Representative mappings:", example_start)
         examples = docs[example_start:example_end]
-        for kind in workbench.RECOVERY_KINDS:
+        for kind in workbench_recovery.RECOVERY_KINDS:
             self.assertIn(
                 f"`{kind}`",
                 docs,
@@ -3389,7 +3390,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             )
         self.assertIn("`RECOVERY_ACTION_TARGETS`", docs)
         self.assertIn("`RECOVERY_ACTION_TARGETS_BY_ID`", docs)
-        for target in workbench.RECOVERY_ACTION_TARGETS:
+        for target in workbench_recovery.RECOVERY_ACTION_TARGETS:
             self.assertIn(
                 f"`{target}`",
                 docs,
@@ -4057,7 +4058,7 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
             "`unknown-disposition` blocker.",
             self.docs,
         )
-        for recovery_kind in workbench.RECOVERY_KINDS:
+        for recovery_kind in workbench_recovery.RECOVERY_KINDS:
             self.assertIn(f"`{recovery_kind}`", self.docs)
 
     def test_review_metrics_additive_fields_are_documented(self) -> None:
