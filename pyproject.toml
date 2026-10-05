@@ -36,11 +36,6 @@ extend-include = ["bin/.local/bin/agent-session-loop"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
-[tool.ruff.lint.per-file-ignores]
-# Compatibility shim: its imports exist only to re-export historical dotted
-# names such as tests.test_agent_session_loop.VerificationExecutorTests.
-"tests/test_agent_session_loop.py" = ["F401"]
-
 [tool.mypy]
 files = [
     "agent_session_loop",

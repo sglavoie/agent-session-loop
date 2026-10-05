@@ -453,10 +453,7 @@ def _discovered_package_modules() -> set[str]:
     installed program rather than this source tree, so the proxy failed the
     suite for a legitimately unavailable dependency.
 
-    Module names answer the actual question directly. Modules discovery yields
-    no tests from are deliberately absent: ``tests.test_agent_session_loop`` is
-    a name-compatibility shim that contributes none under broad discovery
-    precisely so the split modules are not run twice.
+    Module names answer the actual question directly.
     """
     loader = unittest.defaultTestLoader
     suite = loader.discover(str(REPO_ROOT / "tests"), top_level_dir=str(REPO_ROOT))

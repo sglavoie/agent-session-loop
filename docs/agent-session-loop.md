@@ -10596,11 +10596,7 @@ stdlib `unittest` only) sharing fixtures through `tests/support.py`.
 `just test-fast` runs the unit/schema/parser modules; `just test-all` runs
 everything — including the helper-script suites under `skills/` — as isolated
 parallel shards via `tests/run_suite.py`, which also fails if a test module is
-missing from its shard lists. `tests/test_agent_session_loop.py` remains as a
-compatibility shim so historical dotted names
-(`tests.test_agent_session_loop.SomeTests`) keep resolving; it contributes no
-tests under discovery, so `python3 -m unittest discover -s tests` runs each
-test exactly once. Individual modules still run directly, for example
+missing from its shard lists. Individual modules run directly, for example
 `python3 -m unittest tests.test_asl_verification -q`.
 
 `just test-portable` is a third lane cut for CI rather than for a developer. It
