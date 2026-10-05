@@ -493,22 +493,6 @@ class LeaseEvidence:
         return evidence
 
 
-def lease_evidence(
-    lease: mailbox.MailboxLeaseView | None,
-    *,
-    suspend_skew_seconds: float = 0.0,
-    suspend_lease_grace_seconds: float = 0.0,
-    unsupervised_seconds: float | None = None,
-) -> dict[str, str | float | None]:
-    """Name the lease and clock skew a failing wait saw, so the exit is attributable."""
-    return LeaseEvidence.observed(
-        lease,
-        suspend_skew_seconds=suspend_skew_seconds,
-        suspend_lease_grace_seconds=suspend_lease_grace_seconds,
-        unsupervised_seconds=unsupervised_seconds,
-    ).to_payload()
-
-
 # ---------------------------------------------------------------------------
 # Waiting-for-reply: the durable slot's owner
 # ---------------------------------------------------------------------------

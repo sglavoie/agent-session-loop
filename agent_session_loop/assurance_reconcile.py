@@ -270,20 +270,6 @@ def build_preview(
     )
 
 
-def read_preview(
-    *,
-    state_dir: str | Path | None = None,
-    generated_at: str | None = None,
-    limit: int = MAX_PREVIEW_PAIRS,
-) -> ReconciliationPreview:
-    """Read the inbox and describe its reconciliation, without writing to it."""
-    return build_preview(
-        projection.read_projection(state_dir=state_dir),
-        generated_at=generated_at,
-        limit=limit,
-    )
-
-
 @dataclass(frozen=True)
 class ApplyResult:
     """What one apply wrote, or the fact that it had nothing to write."""

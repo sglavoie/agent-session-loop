@@ -1441,10 +1441,6 @@ def render_completion_contract(
 # ---------------------------------------------------------------------------
 
 
-def context_reference_line() -> str:
-    return CONTEXT_REFERENCE_LINE
-
-
 def previous_session_reference_line(previous_session_id: int | str | SessionId) -> str:
     """Render the ``> **Previous session**`` handoff-reference line."""
     filename = parse_session_id(previous_session_id).filename

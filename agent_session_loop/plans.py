@@ -1755,13 +1755,6 @@ def _session_id_from_cell(value: str) -> SessionId | None:
     return parse_session_id(match.group(1))
 
 
-def _session_number_from_cell(value: str) -> int | None:
-    session_id = _session_id_from_cell(value)
-    if session_id is None or not session_id.is_integer:
-        return None
-    return session_id.as_int()
-
-
 def _replace_cell_content(cell: str, value: str) -> str:
     match = re.fullmatch(r"(\s*)(.*?)(\s*)", cell)
     if match is None:

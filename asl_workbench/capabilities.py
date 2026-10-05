@@ -1441,12 +1441,6 @@ def surface_keys(surface: str) -> frozenset[str]:
     return frozenset(row.identifier for row in by_surface(surface))
 
 
-def owned_by(owner: str) -> tuple[Capability, ...]:
-    if owner not in OWNERS:
-        raise MatrixError(f"no owner named {owner!r}")
-    return tuple(row for row in CAPABILITIES if row.owner == owner)
-
-
 def coverage_gaps() -> tuple[Capability, ...]:
     """Every row whose coverage is a documented manual check, not a test."""
     return tuple(row for row in CAPABILITIES if row.coverage_gap is not None)

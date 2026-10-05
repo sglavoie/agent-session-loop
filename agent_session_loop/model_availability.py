@@ -125,28 +125,6 @@ def availability(
         )
 
 
-def peek_availability(
-    root: str | Path, model: str, *, now: datetime | None = None
-) -> Availability:
-    """Read an atomic ledger snapshot without creating or changing any file."""
-    current = now or _now()
-    payload, warning = _read(Path(root) / LEDGER_FILENAME)
-    if payload is None:
-        return Availability(False, "ledger-unreadable", warning=warning)
-    entry = payload["models"].get(model)
-    if not isinstance(entry, dict):
-        return Availability(True, "available")
-    retry_at = entry.get("retry_at")
-    reset = retry_hints.resolve_retry_at(retry_at, now=current)
-    if reset is not None and reset <= current:
-        return Availability(True, "cooldown-expired")
-    return Availability(
-        False,
-        str(entry.get("reason") or "cooldown"),
-        retry_at=str(retry_at) if reset is not None else None,
-    )
-
-
 def suppress_until(
     root: str | Path,
     model: str,

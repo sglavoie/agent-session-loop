@@ -239,10 +239,6 @@ def _require_finding_str(finding_id: str, value: object, *, label: str) -> str:
     return value.strip()
 
 
-def _validate_evidence(finding_id: str, value: object) -> list[dict[str, Any]]:
-    return _validate_evidence_for_registry(finding_id, value, repository_registry=None)
-
-
 def _validate_repository_alias(
     finding_id: str,
     value: object,

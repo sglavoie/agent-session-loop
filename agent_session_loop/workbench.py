@@ -1752,10 +1752,6 @@ def archive_entry_dir(archive_id: str, state_dir: str | Path | None = None) -> P
     return archive_root(state_dir) / archive_id
 
 
-def archive_metadata_path(archive_id: str, state_dir: str | Path | None = None) -> Path:
-    return archive_entry_dir(archive_id, state_dir) / ARCHIVE_METADATA_FILE_NAME
-
-
 def archive_plan_path(archive_id: str, state_dir: str | Path | None = None) -> Path:
     return archive_entry_dir(archive_id, state_dir) / ARCHIVE_PLAN_DIR_NAME
 

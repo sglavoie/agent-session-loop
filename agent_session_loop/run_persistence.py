@@ -397,13 +397,6 @@ def _append_harness_degradation_event(
     )
 
 
-def _loop_harness(
-    payload: dict[str, Any],
-    active_turn: dict[str, Any] | None = None,
-) -> str | None:
-    return agent_mux_delivery.loop_harness(payload, active_turn)
-
-
 def _agent_mux_loop_payload(
     payload: dict[str, Any],
     *,

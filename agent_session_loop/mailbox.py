@@ -3773,18 +3773,3 @@ def read_lease(
         lease=lease,
         fresh=True,
     )
-
-
-def lease_is_fresh(
-    plan_dir: str | Path,
-    *,
-    state_dir: str | Path | None = None,
-    max_age_seconds: float = MAILBOX_LEASE_FRESH_SECONDS,
-    now: datetime | None = None,
-) -> bool:
-    return read_lease(
-        plan_dir,
-        state_dir=state_dir,
-        max_age_seconds=max_age_seconds,
-        now=now,
-    ).fresh

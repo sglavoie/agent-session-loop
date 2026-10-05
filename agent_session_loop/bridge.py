@@ -1209,17 +1209,6 @@ def bound_redirect_operation(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def project_redirect_operation(
-    operation: redirect_recovery.OperationOutcome,
-    *,
-    live_target: redirect_store.RedirectTarget | None,
-) -> dict[str, Any]:
-    """Project one journal record the way every other reader of it does."""
-    return bound_redirect_operation(
-        redirect_cli.operation_payload(operation, live_target=live_target)
-    )
-
-
 def _project_redirect_operations(
     payloads: Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:

@@ -197,16 +197,6 @@ _REVIEW_EVENT_CACHE: dict[
 ] = {}
 
 
-def clear_review_event_cache() -> None:
-    """Drop every memoized review event log.
-
-    Only needed when a caller cannot rely on ``st_mtime_ns``/``st_size``
-    invalidation -- notably tests that rewrite a log in place to the same size
-    on a filesystem with coarse timestamps.
-    """
-    _REVIEW_EVENT_CACHE.clear()
-
-
 def read_review_events(event_path: str | Path) -> tuple[ReviewEventRecord, ...]:
     """Read cycle/reopen records in append order, skipping malformed lines."""
     path = Path(event_path)

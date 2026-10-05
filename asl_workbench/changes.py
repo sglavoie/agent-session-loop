@@ -192,21 +192,6 @@ def intentional_change(key: str) -> IntentionalChange:
     raise ChangeError(f"no intentional change named {key!r}")
 
 
-def pinned_modules() -> tuple[str, ...]:
-    """The distinct ``alias:path`` modules holding pins that will be rewritten.
-
-    The ``::test_name`` suffix is dropped: what a later session needs is the
-    set of files to open, and the suffix is there so the record names the
-    specific test rather than gesturing at the file.
-    """
-    modules = {
-        reference.partition("::")[0]
-        for record in INTENTIONAL_CHANGES
-        for reference in record.pinned_coverage
-    }
-    return tuple(sorted(modules))
-
-
 def validate_changes(
     known_capabilities: Sequence[str] | None = None,
 ) -> tuple[str, ...]:
