@@ -446,8 +446,17 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
         self.assertIsNone(claim.line)
 
     def test_claim_line_degrades_to_null_or_leading_integer(self) -> None:
-        cases = ((7, 7), ("42", 42), ("42-50", 42), (0, None), (-3, None),
-                 ("n/a", None), (True, None), (1.5, None), (None, None))
+        cases = (
+            (7, 7),
+            ("42", 42),
+            ("42-50", 42),
+            (0, None),
+            (-3, None),
+            ("n/a", None),
+            (True, None),
+            (1.5, None),
+            (None, None),
+        )
         for raw, expected in cases:
             with self.subTest(raw=raw):
                 payload = _validator_payload(
@@ -477,15 +486,21 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
 
         self.assertEqual("m", parsed.sessions[0].contract_problems[0].message)
 
-    def _scripted_validator(self, *messages: str) -> tuple[object, list[str]]:
+    def _scripted_validator(
+        self, *messages: str
+    ) -> tuple[tuple[Any, mock.Mock], list[str]]:
         prompts: list[str] = []
         replies = iter(messages)
 
         def run_harness(name: str, **kwargs: object) -> harnesses.HarnessResult:
             prompts.append(str(kwargs["prompt"]))
             return harnesses.HarnessResult(
-                argv=[name], returncode=0, stdout="", stderr="",
-                last_message=next(replies), name=name,
+                argv=[name],
+                returncode=0,
+                stdout="",
+                stderr="",
+                last_message=next(replies),
+                name=name,
             )
 
         packet = mock.Mock(codebase_root="/repo", plan_dir="/plan")
@@ -514,9 +529,12 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
     def test_launch_validator_gives_up_after_bounded_repairs(self) -> None:
         (launch, packet), prompts = self._scripted_validator("nope", "nope", "nope")
 
-        with launch, redirect_stderr(io.StringIO()):
-            with self.assertRaisesRegex(plans.PlanError, "invalid JSON"):
-                prepare._launch_validator("claude", packet)
+        with (
+            launch,
+            redirect_stderr(io.StringIO()),
+            self.assertRaisesRegex(plans.PlanError, "invalid JSON"),
+        ):
+            prepare._launch_validator("claude", packet)
 
         self.assertEqual(1 + prepare.VALIDATOR_REPAIR_ATTEMPTS, len(prompts))
 

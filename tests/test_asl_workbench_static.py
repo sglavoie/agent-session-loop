@@ -795,7 +795,9 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         self.assertIn("<dt>run started</dt>", row_template)
 
         decoded = self._shell_source(server)
-        self.assertIn('parts = [progress.done + " / " + progress.total + " done"]', decoded)
+        self.assertIn(
+            'parts = [progress.done + " / " + progress.total + " done"]', decoded
+        )
         self.assertNotIn('parts.push("p" + counts.pending)', decoded)
         self.assertIn("setProgressMeter(row, plan.counts);", decoded)
         self.assertIn(
@@ -835,7 +837,9 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         )
 
         decoded = self._shell_source(server)
-        self.assertIn('stateName !== "available" && !hasDraft ? "true" : "false"', decoded)
+        self.assertIn(
+            'stateName !== "available" && !hasDraft ? "true" : "false"', decoded
+        )
         css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
         self.assertIn('.wb-redirect[data-collapsed="true"] .wb-redirect__form', css)
 
@@ -860,7 +864,8 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
             'export const PLAN_LIVE_RUN_STATES = ["running", "verifying"];', decoded
         )
         self.assertIn(
-            'paused: "the run is paused waiting for a reply; answering it resumes the run",',
+            'paused: "the run is paused waiting for a reply; '
+            'answering it resumes the run",',
             decoded,
         )
         self.assertIn("if (action.paused && planAwaitsReply(plan)) {", decoded)
@@ -870,7 +875,9 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         server = self._start_server()
         decoded = self._shell_source(server)
         self.assertIn("export function completedHiddenCount(counts)", decoded)
-        self.assertIn("if (state.cleanupMode || state.showCompleted) return 0;", decoded)
+        self.assertIn(
+            "if (state.cleanupMode || state.showCompleted) return 0;", decoded
+        )
         self.assertIn('if (name === "all" && hidden > 0) {', decoded)
         self.assertIn('el.title = hidden + " completed hidden";', decoded)
 
@@ -881,7 +888,9 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
         server = self._start_server()
         decoded = self._shell_source(server)
         self.assertIn('card.setAttribute("data-target", target || "");', decoded)
-        self.assertIn('const summaryText = String(recovery.summary || "").trim();', decoded)
+        self.assertIn(
+            'const summaryText = String(recovery.summary || "").trim();', decoded
+        )
         self.assertIn("export function shortenStatePath(path)", decoded)
         self.assertIn(
             'path.textContent = shortenStatePath(artifact.path || "");', decoded
@@ -890,7 +899,8 @@ class WorkbenchStaticAssetTests(ShellSourceMixin, unittest.TestCase):
 
         css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
         self.assertIn(
-            '.wb-recovery:has(#wb-reply-panel:not([hidden]) #wb-reply-form:not([hidden]))',
+            ".wb-recovery:has(#wb-reply-panel:not([hidden]) "
+            "#wb-reply-form:not([hidden]))",
             css,
         )
         self.assertIn('.wb-recovery__action-card[data-target="reply"]', css)
