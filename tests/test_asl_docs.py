@@ -56,6 +56,7 @@ from agent_session_loop import (
     turn_execution,
     verification,
     workbench,
+    workbench_workspace,
 )
 from tests import run_suite
 from tests.support import (
@@ -3104,7 +3105,9 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             recoverable=False,
             workspace=workspace,
         ).to_payload()
-        final_review_workspace_payload = workbench._workspace_payload(workspace)
+        final_review_workspace_payload = workbench_workspace._workspace_payload(
+            workspace
+        )
         expected_keys = {
             "cwd",
             "workspace_root",

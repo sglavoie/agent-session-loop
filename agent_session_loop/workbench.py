@@ -45,6 +45,7 @@ from . import (
     run_contention,
     run_inputs,
     state,
+    workbench_workspace,
 )
 
 FINAL_REVIEW_FILE_NAME = "final-review.md"
@@ -52,82 +53,11 @@ FINAL_REVIEW_ARTIFACT_FILE_NAME = "final-review.json"
 LAST_MESSAGE_PREVIEW_CHARS = 280
 
 
-def _repository_rows(value: Any) -> tuple[dict[str, Any], ...]:
-    """Return well-formed repository rows without changing their order."""
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        return ()
-    return tuple(dict(row) for row in value if isinstance(row, Mapping))
-
-
-def _workspace_projection(
-    plan_dir: str | Path,
-    *,
-    runtime: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Project a plan's exact workspace binding for operator-facing APIs.
-
-    Runtime state wins because it records the resolved vector used by the run.
-    Before the first run, prepared workspace metadata plus the manifest
-    registry gives the same ordered, credential-free projection without probing
-    Git. Legacy plans intentionally return an empty mapping so their payloads
-    stay additive.
-    """
-    runtime_payload = runtime or {}
-    workspace_root = runtime_payload.get("workspace_root")
-    repositories = _repository_rows(runtime_payload.get("repositories"))
-    if isinstance(workspace_root, str) and workspace_root and repositories:
-        return {
-            "workspace_root": workspace_root,
-            "registry_digest": runtime_payload.get("registry_digest"),
-            "repositories": [dict(row) for row in repositories],
-            "repository_count": len(repositories),
-        }
-
-    registry = plans.read_repository_registry(plan_dir)
-    metadata = plans.load_plan_metadata(plan_dir)
-    if registry is None or not isinstance(metadata, plans.WorkspacePlanMetadata):
-        return {}
-    root = plans.canonicalize_path(metadata.workspace_root)
-    rows = [
-        {
-            "alias": repository.alias,
-            "path": repository.path,
-            "origin": repository.origin,
-            "resolved_root": str(plans.canonicalize_path(root / repository.path)),
-        }
-        for repository in registry.repositories
-    ]
-    return {
-        "workspace_root": str(root),
-        "registry_digest": metadata.registry_digest,
-        "repositories": rows,
-        "repository_count": len(rows),
-    }
-
-
-def _workspace_payload(
-    workspace: Mapping[str, Any],
-    *,
-    cwd: str | None = None,
-) -> dict[str, Any]:
-    """Return the compatibility and structured workspace API fields."""
-    workspace_root = workspace.get("workspace_root")
-    return {
-        "cwd": cwd if cwd is not None else workspace_root,
-        "workspace_root": workspace_root,
-        "registry_digest": workspace.get("registry_digest"),
-        "repositories": [
-            dict(row) for row in _repository_rows(workspace.get("repositories"))
-        ],
-        "repository_count": int(workspace.get("repository_count") or 0),
-    }
-
-
 def _workspace_launch_profile(
     plan_dir: Path, profile: LaunchProfile
 ) -> tuple[LaunchProfile, dict[str, Any]]:
     """Bind a registered Workbench launch to its prepared workspace root."""
-    workspace = _workspace_projection(plan_dir)
+    workspace = workbench_workspace._workspace_projection(plan_dir)
     bound_root = workspace.get("workspace_root")
     if not isinstance(bound_root, str) or not bound_root:
         return profile, workspace
@@ -370,7 +300,7 @@ class WorkbenchRegistry:
         for pin in self.pins:
             payload = pin.to_payload()
             try:
-                workspace = _workspace_projection(pin.plan_dir)
+                workspace = workbench_workspace._workspace_projection(pin.plan_dir)
             except plans.PlanError, OSError, ValueError:
                 workspace = {}
             if workspace:
@@ -1443,7 +1373,7 @@ class WorkbenchSummary:
             "result_path": str(self.result_path) if self.result_path else None,
             "run_id": self.run_id,
             "harness": self.harness,
-            **_workspace_payload(
+            **workbench_workspace._workspace_payload(
                 {
                     "workspace_root": self.workspace_root,
                     "registry_digest": self.registry_digest,
@@ -1780,7 +1710,7 @@ class WorkbenchRecovery:
             ],
             "review_resume": dict(self.review_resume),
             "workspace": dict(self.workspace),
-            **_workspace_payload(self.workspace),
+            **workbench_workspace._workspace_payload(self.workspace),
             "commit_groups": [dict(group) for group in self.commit_groups],
             "compact": self.compact_payload(),
         }
@@ -2073,7 +2003,7 @@ def _build_recovery_context(
         lock_info=lock_info,
     )
     raw_state, warnings, warning_details = _read_recovery_state_payload(state_path)
-    workspace = _workspace_projection(
+    workspace = workbench_workspace._workspace_projection(
         snapshot.plan_dir,
         runtime=raw_state if raw_state.get("workspace_root") else runner_state,
     )
@@ -3038,7 +2968,9 @@ def _build_recovery_payload(
         warnings=warnings,
         warning_details=warning_details,
         review_resume=review_resume or {},
-        workspace=_workspace_projection(plan_dir, runtime=raw_state),
+        workspace=workbench_workspace._workspace_projection(
+            plan_dir, runtime=raw_state
+        ),
         commit_groups=tuple(
             dict(group)
             for group in raw_state.get("commit_groups", ())
@@ -4104,7 +4036,9 @@ def _build_invalid_summary(
     reclaim: bool = True,
 ) -> WorkbenchSummary:
     try:
-        workspace = _workspace_projection(plan.plan_dir) if exists else {}
+        workspace = (
+            workbench_workspace._workspace_projection(plan.plan_dir) if exists else {}
+        )
     except plans.PlanError, OSError, ValueError:
         workspace = {}
     if state_paths is not None:
@@ -4170,7 +4104,9 @@ def _build_invalid_summary(
         ),
         workspace_root=workspace.get("workspace_root"),
         registry_digest=workspace.get("registry_digest"),
-        repositories=_repository_rows(workspace.get("repositories")),
+        repositories=workbench_workspace._repository_rows(
+            workspace.get("repositories")
+        ),
         repository_count=int(workspace.get("repository_count") or 0),
         pause_reason=None,
         pause_message=None,
@@ -4251,7 +4187,9 @@ def build_workbench_summary(
         include_turn_activity=True,
     )
     try:
-        workspace = _workspace_projection(snapshot.plan_dir, runtime=runner_state)
+        workspace = workbench_workspace._workspace_projection(
+            snapshot.plan_dir, runtime=runner_state
+        )
     except (plans.PlanError, OSError, ValueError) as error:
         return _build_invalid_summary(
             replace(plan, plan_dir=snapshot.plan_dir, exists=True),
@@ -4378,7 +4316,9 @@ def build_workbench_summary(
             cwd=str(summary_cwd) if summary_cwd is not None else None,
             workspace_root=workspace.get("workspace_root"),
             registry_digest=workspace.get("registry_digest"),
-            repositories=_repository_rows(workspace.get("repositories")),
+            repositories=workbench_workspace._repository_rows(
+                workspace.get("repositories")
+            ),
             repository_count=int(workspace.get("repository_count") or 0),
             pause_reason=pause_reason,
             pause_message=pause_message,
@@ -5125,7 +5065,9 @@ def launch_plan(
         cwd=validated.cwd,
         workspace_root=workspace.get("workspace_root"),
         registry_digest=workspace.get("registry_digest"),
-        repositories=_repository_rows(workspace.get("repositories")),
+        repositories=workbench_workspace._repository_rows(
+            workspace.get("repositories")
+        ),
     )
 
 

@@ -49,6 +49,7 @@ from . import (
     tail,
     workbench,
     workbench_catalog,
+    workbench_workspace,
 )
 from . import events as events_module
 
@@ -309,7 +310,9 @@ def read_state(reader: PlanReader) -> _JSONDict:
         lock_info=read_lock(reader),
     )
     try:
-        workspace = workbench._workspace_projection(reader.plan_dir, runtime=payload)
+        workspace = workbench_workspace._workspace_projection(
+            reader.plan_dir, runtime=payload
+        )
     except plans.PlanError, OSError, ValueError:
         workspace = {}
     next_pending = snapshot.next_pending
@@ -321,7 +324,7 @@ def read_state(reader: PlanReader) -> _JSONDict:
         "counts": state._status_counts(snapshot),
         "next_pending_id": next_pending.id if next_pending is not None else None,
         "workspace": workspace,
-        **workbench._workspace_payload(workspace, cwd=payload.get("cwd")),
+        **workbench_workspace._workspace_payload(workspace, cwd=payload.get("cwd")),
     }
 
 
@@ -829,7 +832,7 @@ def read_final_review(
     except (OSError, json.JSONDecodeError) as error:
         structured_error = str(error)
     try:
-        workspace = workbench._workspace_projection(reader.plan_dir)
+        workspace = workbench_workspace._workspace_projection(reader.plan_dir)
     except plans.PlanError, OSError, ValueError:
         workspace = {}
     return {
@@ -839,7 +842,7 @@ def read_final_review(
         "structured_error": structured_error,
         "review_resume": reader.summary.review_resume,
         "workspace": workspace,
-        **workbench._workspace_payload(workspace, cwd=reader.summary.cwd),
+        **workbench_workspace._workspace_payload(workspace, cwd=reader.summary.cwd),
         **payload,
     }
 
