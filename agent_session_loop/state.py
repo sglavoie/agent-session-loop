@@ -29,6 +29,7 @@ from . import (
     artifacts,
     config,
     conversations,
+    durability,
     events,
     harnesses,
     pause_policy,
@@ -714,17 +715,9 @@ def _publish_lock_payload(lock_path: Path, payload: dict[str, Any]) -> None:
     path removes the window: the only states an unsynchronized reader can
     observe are absent and complete.
     """
-    temp_path = lock_path.with_name(f"{lock_path.name}.{os.getpid()}.tmp")
-    try:
-        fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-        with os.fdopen(fd, "w", encoding="utf-8") as lock_file:
-            json.dump(payload, lock_file, sort_keys=True)
-            lock_file.write("\n")
-        os.replace(temp_path, lock_path)
-    except BaseException:
-        with suppress(OSError):
-            temp_path.unlink()
-        raise
+    durability.replace_text(
+        lock_path, json.dumps(payload, sort_keys=True) + "\n", mode=0o644
+    )
 
 
 def acquire_lock(

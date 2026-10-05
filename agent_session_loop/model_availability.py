@@ -6,7 +6,6 @@ import contextlib
 import fcntl
 import json
 import os
-import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -74,22 +73,14 @@ def _read(path: Path) -> tuple[dict[str, Any] | None, str | None]:
 
 def _write(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
-            handle.write("\n")
-            handle.flush()
-            durability.fullsync(handle.fileno())
-        os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            durability.fullsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(temporary)
+    # 0o600: the mode tempfile.mkstemp gave this ledger before it was routed here.
+    durability.replace_text(
+        path,
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        sync_file=True,
+        sync_parent=True,
+        mode=0o600,
+    )
 
 
 def availability(

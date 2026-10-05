@@ -70,6 +70,7 @@ from . import (
     authoring,
     baseline,
     contracts,
+    durability,
     harnesses,
     plans,
     preflight,
@@ -1526,13 +1527,9 @@ def save_prepare_validation_cache(
     """Atomically persist a cache update without coupling it to the aggregate."""
     path = prepare_validation_cache_path(plan_dir)
     text = serialize_prepare_validation_cache(cache)
-    tmp_path = path.with_name(f".{path.name}.tmp")
     try:
-        tmp_path.write_text(text, encoding="utf-8")
-        os.replace(tmp_path, path)
+        durability.replace_text(path, text)
     except OSError as error:
-        with contextlib.suppress(OSError):
-            tmp_path.unlink()
         raise PlanError(f"cannot write {path}: {error}") from error
     return path
 
@@ -1725,13 +1722,9 @@ def save_prepare_validation(
     """Atomically persist the aggregate as ``prepare-validation.json``."""
     path = prepare_validation_path(plan_dir)
     text = serialize_prepare_validation(validation)
-    tmp_path = path.with_name(f".{path.name}.tmp")
     try:
-        tmp_path.write_text(text, encoding="utf-8")
-        os.replace(tmp_path, path)
+        durability.replace_text(path, text)
     except OSError as error:
-        with contextlib.suppress(OSError):
-            tmp_path.unlink()
         raise PlanError(f"cannot write {path}: {error}") from error
     return path
 

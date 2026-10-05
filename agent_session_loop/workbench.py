@@ -20,9 +20,8 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -32,6 +31,7 @@ from . import (
     assurance_report,
     cli_trace,
     config,
+    durability,
     events,
     harnesses,
     plans,
@@ -653,17 +653,10 @@ def save_registry(registry: WorkbenchRegistry, path: str | Path | None = None) -
         "archive_retention_days": registry.archive_retention_days,
     }
     serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=f".{REGISTRY_FILE_NAME}.",
-        dir=str(registry_path.parent),
-    )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(serialized)
-        os.replace(tmp_path, registry_path)
+        # 0o600: the mode tempfile.mkstemp gave the registry before.
+        durability.replace_text(registry_path, serialized, mode=0o600)
     except OSError as error:
-        with suppress(OSError):
-            os.unlink(tmp_path)
         raise WorkbenchError(
             f"cannot write workbench registry {registry_path}: {error}"
         ) from error

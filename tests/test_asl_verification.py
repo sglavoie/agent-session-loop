@@ -3389,7 +3389,7 @@ class ArtifactStorageTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "agent_session_loop.artifacts.os.replace",
+                    "agent_session_loop.durability.os.replace",
                     side_effect=OSError("boom"),
                 ),
                 self.assertRaises(artifacts.ArtifactError),

@@ -1290,7 +1290,7 @@ def _stage_compressed(source: Path, target: Path) -> tuple[Path, str, int]:
     the caller gets the chance to re-read protection while the only thing on
     disk is a dot-prefixed temporary it can discard.
     """
-    temporary = target.with_name(f".{target.name}.tmp")
+    temporary = durability.staging_path(target)
     digest = hashlib.sha256()
     total = 0
     try:

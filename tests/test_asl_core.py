@@ -126,6 +126,33 @@ class EventPersistenceTests(unittest.TestCase):
             self.assertEqual(b"{}\n", target.read_bytes())
             self.assertEqual(2, fullsync.call_count)
 
+    def test_replace_bytes_stages_per_thread_and_cleans_up_on_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "state.json"
+            staging = durability.staging_path(target)
+            self.assertIn(str(os.getpid()), staging.name)
+            self.assertIn(str(threading.get_ident()), staging.name)
+            target.write_bytes(b"old")
+            with (
+                mock.patch.object(durability.os, "replace", side_effect=OSError),
+                self.assertRaises(OSError),
+            ):
+                durability.replace_bytes(target, b"new")
+            self.assertEqual(b"old", target.read_bytes())
+            self.assertEqual(["state.json"], [p.name for p in Path(tmp).iterdir()])
+
+    def test_staging_path_fits_name_max_for_a_maximal_name(self) -> None:
+        target = Path("/nonexistent") / ("a" * 255)
+        staging = durability.staging_path(target)
+        self.assertLessEqual(len(os.fsencode(staging.name)), 255)
+        self.assertNotEqual(staging, durability.staging_path(target.with_name("b")))
+
+    def test_replace_bytes_applies_exact_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "shim"
+            durability.replace_text(target, "#!/bin/sh\n", permissions=0o755)
+            self.assertEqual(0o755, target.stat().st_mode & 0o777)
+
     def test_fullsync_uses_device_barrier_on_darwin(self) -> None:
         with (
             mock.patch.object(durability.sys, "platform", "darwin"),
@@ -6890,7 +6917,7 @@ class LockRepositoryClaimTests(unittest.TestCase):
     def test_a_failed_payload_write_leaves_no_lock_at_the_lock_path(self) -> None:
         with (
             mock.patch.object(
-                state.json, "dump", side_effect=RuntimeError("disk gave up")
+                durability.os, "replace", side_effect=RuntimeError("disk gave up")
             ),
             self.assertRaises(RuntimeError),
         ):

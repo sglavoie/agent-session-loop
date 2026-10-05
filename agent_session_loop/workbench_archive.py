@@ -33,13 +33,10 @@ function here that empties one.
 from __future__ import annotations
 
 import json
-import os
 import secrets
 import shutil
 import sys
-import tempfile
 from collections.abc import Iterable, Mapping, Sequence
-from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -47,7 +44,7 @@ from typing import Any
 
 from asl_workbench import archive as portable_archive
 
-from . import plans, state, workbench
+from . import durability, plans, state, workbench
 
 # --------------------------------------------------------------------------
 # Storage
@@ -564,17 +561,10 @@ def save_archive_metadata(
     serialized = (
         json.dumps(metadata.to_storage_payload(), indent=2, sort_keys=True) + "\n"
     )
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=f".{ARCHIVE_METADATA_FILE_NAME}.",
-        dir=str(entry_dir),
-    )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(serialized)
-        os.replace(tmp_path, meta_path)
+        # 0o600: the mode tempfile.mkstemp gave archive metadata before.
+        durability.replace_text(meta_path, serialized, mode=0o600)
     except OSError as error:
-        with suppress(OSError):
-            os.unlink(tmp_path)
         raise workbench.WorkbenchError(
             f"cannot write archive metadata {meta_path}: {error}"
         ) from error

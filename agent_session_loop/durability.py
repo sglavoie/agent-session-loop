@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import sys
@@ -55,13 +56,90 @@ def append_text(path: Path, text: str) -> None:
         handle.write(text)
 
 
-def _temporary_path(path: Path) -> Path:
+#: The per-component filename byte limit (NAME_MAX) on the filesystems ASL uses.
+_NAME_MAX_BYTES = 255
+
+
+def staging_path(path: Path) -> Path:
     """A per-process, per-thread staging name beside ``path``.
 
     Two threads writing the same artifact must not share a staging file, or
-    one replaces the other's half-written bytes.
+    one replaces the other's half-written bytes. A target whose name leaves no
+    room for the decoration is staged under a digest of its name instead, so a
+    name that fits the directory also has a staging name that does.
     """
-    return path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    suffix = f".{os.getpid()}.{threading.get_ident()}.tmp"
+    name = f".{path.name}{suffix}"
+    if len(os.fsencode(name)) > _NAME_MAX_BYTES:
+        digest = hashlib.sha256(os.fsencode(path.name)).hexdigest()[:16]
+        name = f".{digest}{suffix}"
+    return path.with_name(name)
+
+
+def sync_directory(path: Path) -> None:
+    """Make directory-entry changes under ``path`` durable."""
+    directory_fd = os.open(path, os.O_RDONLY)
+    try:
+        fullsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def replace_bytes(
+    path: Path,
+    payload: bytes,
+    *,
+    sync_file: bool = False,
+    sync_parent: bool = False,
+    mode: int = 0o666,
+    permissions: int | None = None,
+) -> None:
+    """Atomically replace ``path`` with ``payload`` through a unique staging file.
+
+    A reader sees the old file or the new one, never a partial write. The
+    parent directory must already exist. ``sync_file`` fullsyncs the staged
+    bytes before the rename, and ``sync_parent`` fullsyncs the directory after
+    it. ``mode`` is the creation mode (the umask applies, as with
+    :func:`open`); ``permissions`` is set exactly, before the rename, for a
+    file that must never appear with any other mode. On any failure the
+    staging file is removed and the exception propagates unchanged.
+    """
+    temporary_path = staging_path(path)
+    try:
+        fd = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "wb") as temporary_file:
+            temporary_file.write(payload)
+            if permissions is not None:
+                os.fchmod(temporary_file.fileno(), permissions)
+            if sync_file:
+                temporary_file.flush()
+                fullsync(temporary_file.fileno())
+        os.replace(temporary_path, path)
+        if sync_parent:
+            sync_directory(path.parent)
+    finally:
+        with contextlib.suppress(OSError):
+            temporary_path.unlink()
+
+
+def replace_text(
+    path: Path,
+    text: str,
+    *,
+    sync_file: bool = False,
+    sync_parent: bool = False,
+    mode: int = 0o666,
+    permissions: int | None = None,
+) -> None:
+    """:func:`replace_bytes` for UTF-8 text, written without newline translation."""
+    replace_bytes(
+        path,
+        text.encode("utf-8"),
+        sync_file=sync_file,
+        sync_parent=sync_parent,
+        mode=mode,
+        permissions=permissions,
+    )
 
 
 def write_json_file(
@@ -74,28 +152,15 @@ def write_json_file(
     which only holds if both the bytes and the rename survived the crash.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = _temporary_path(path)
-    try:
-        with temporary_path.open("w", encoding="utf-8") as temporary_file:
-            temporary_file.write(json.dumps(payload, sort_keys=True, indent=2) + "\n")
-            if durable:
-                temporary_file.flush()
-                fullsync(temporary_file.fileno())
-        os.replace(temporary_path, path)
-        if durable:
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                fullsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            temporary_path.unlink()
+    replace_text(
+        path,
+        json.dumps(payload, sort_keys=True, indent=2) + "\n",
+        sync_file=durable,
+        sync_parent=durable,
+    )
 
 
 def write_bytes_file(path: Path, payload: bytes) -> None:
-    """Atomically replace ``path`` with ``payload``."""
+    """Atomically replace ``path`` with ``payload``, creating the parent first."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = _temporary_path(path)
-    temporary_path.write_bytes(payload)
-    os.replace(temporary_path, path)
+    replace_bytes(path, payload)

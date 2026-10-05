@@ -67,7 +67,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import artifacts, clock, command_guard
+from . import artifacts, clock, command_guard, durability
 
 #: Directory, under the per-run state directory, that shadows ``PATH``.
 GUARD_BIN_DIR_NAME = "guard-bin"
@@ -904,16 +904,13 @@ def install_shim(*, guard_bin: Path, name: str, policy_file: Path) -> Path:
         name=name,
     )
     destination = guard_bin / name
-    temporary = guard_bin / f".{name}.{uuid.uuid4().hex}.tmp"
-    try:
-        temporary.write_text(source, encoding="utf-8")
-        temporary.chmod(
+    durability.replace_text(
+        destination,
+        source,
+        permissions=(
             stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
-        )
-        os.replace(temporary, destination)
-    except OSError:
-        temporary.unlink(missing_ok=True)
-        raise
+        ),
+    )
     return destination
 
 

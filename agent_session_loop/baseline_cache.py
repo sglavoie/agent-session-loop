@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import contracts
+from . import contracts, durability
 from .contracts import VerifyRecipe
 from .git_subprocess import run_git
 from .plans import canonicalize_path
@@ -292,6 +292,4 @@ class BaselineCache:
     def save(self) -> None:
         """Atomically persist the cache to :attr:`path`."""
         text = json.dumps(self.to_dict(), sort_keys=True, indent=2) + "\n"
-        tmp_path = self.path.with_name(f".{self.path.name}.tmp")
-        tmp_path.write_text(text, encoding="utf-8")
-        os.replace(tmp_path, self.path)
+        durability.replace_text(self.path, text)
