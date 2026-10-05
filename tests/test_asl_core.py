@@ -6917,7 +6917,7 @@ class LockRepositoryClaimTests(unittest.TestCase):
     def test_a_failed_payload_write_leaves_no_lock_at_the_lock_path(self) -> None:
         with (
             mock.patch.object(
-                state.json, "dump", side_effect=RuntimeError("disk gave up")
+                durability.os, "replace", side_effect=RuntimeError("disk gave up")
             ),
             self.assertRaises(RuntimeError),
         ):
