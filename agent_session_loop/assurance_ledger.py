@@ -583,13 +583,8 @@ def _write_index_file(index: LedgerIndex) -> None:
     or a full disk must not turn a recorded truth into an error, so the cache
     write is best effort in every caller.
     """
-    tmp_path = index.path.with_name(f".{index.path.name}.tmp")
-    try:
-        tmp_path.write_bytes(canonical_json_bytes(index.to_payload()))
-        os.replace(tmp_path, index.path)
-    except OSError:
-        with suppress(OSError):
-            tmp_path.unlink()
+    with suppress(OSError):
+        durability.replace_bytes(index.path, canonical_json_bytes(index.to_payload()))
 
 
 # ---------------------------------------------------------------------------

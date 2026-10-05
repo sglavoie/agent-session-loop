@@ -285,7 +285,7 @@ class ProgressJournalTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "agent_session_loop.plans.os.replace",
+                    "agent_session_loop.durability.os.replace",
                     side_effect=OSError("boom"),
                 ),
                 self.assertRaises(plans.PlanError),
@@ -299,8 +299,9 @@ class ProgressJournalTests(unittest.TestCase):
                 )
 
             self.assertEqual(original_bytes, path.read_bytes())
-            self.assertFalse(
-                (plan_dir / ".progress.md.tmp").exists(),
+            self.assertEqual(
+                [],
+                list(plan_dir.glob(".progress.md.*")),
                 "atomic-write temp file should be cleaned up on failure",
             )
 
@@ -562,7 +563,7 @@ class ProgressCliTests(unittest.TestCase):
             progress_file.write_text("old journal contents\n", encoding="utf-8")
 
             with mock.patch(
-                "agent_session_loop.plans.os.replace",
+                "agent_session_loop.durability.os.replace",
                 side_effect=OSError("replace failed"),
             ):
                 code, out, err = self._run_backfill(plan_dir, force=True)
@@ -574,7 +575,7 @@ class ProgressCliTests(unittest.TestCase):
                 "old journal contents\n",
                 progress_file.read_text(encoding="utf-8"),
             )
-            self.assertFalse((plan_dir / ".progress.md.tmp").exists())
+            self.assertEqual([], list(plan_dir.glob(".progress.md.*")))
 
     def test_backfill_dry_run_prints_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -598,7 +599,7 @@ class ProgressCliTests(unittest.TestCase):
             write_plan(plan_dir, ("pending", "pending"))
 
             with mock.patch(
-                "agent_session_loop.plans.os.replace",
+                "agent_session_loop.durability.os.replace",
                 wraps=os.replace,
             ) as replace:
                 code, out, err = self._run_backfill(plan_dir)
@@ -971,7 +972,7 @@ class ProgressRepairHelperTests(unittest.TestCase):
             self._write_completed_plan(plan_dir, ("1", "2"))
 
             with mock.patch(
-                "agent_session_loop.plans.os.replace",
+                "agent_session_loop.durability.os.replace",
                 wraps=os.replace,
             ) as replace:
                 progress_repair.repair_progress_journal(plan_dir)

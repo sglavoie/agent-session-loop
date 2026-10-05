@@ -3,8 +3,8 @@
 Store command/stream output without embedding unbounded strings in JSON. The
 module provides small, independently tested building blocks:
 
-- atomic byte/gzip writers (temp-file + :func:`os.replace`, mirroring the
-  established :func:`agent_session_loop.plans._atomic_write_text` pattern);
+- atomic byte/gzip writers (through :func:`durability.replace_bytes`, the one
+  temp-file + :func:`os.replace` implementation);
 - SHA-256 digests, byte counts, and UTF-8 character counts;
 - bounded UTF-8 previews built from the first and last 8 KiB of a stream;
 - versioned :class:`OutputMetadata` describing a captured stream — preview text,
@@ -92,7 +92,7 @@ def _cleanup(path: Path) -> None:
 
 
 def atomic_write_bytes(path: Path | str, data: bytes, *, durable: bool = False) -> None:
-    """Write ``data`` to ``path`` via temp-file + :func:`os.replace`.
+    """Write ``data`` to ``path`` through :func:`durability.replace_bytes`.
 
     The destination is never left half-written: on any failure the temp file is
     removed and the original destination (if any) is untouched. When
@@ -100,34 +100,10 @@ def atomic_write_bytes(path: Path | str, data: bytes, *, durable: bool = False) 
     replacement and the containing directory is synced afterward.
     """
     path = Path(path)
-    tmp_path = path.with_name(f".{path.name}.tmp")
     try:
-        if durable:
-            with tmp_path.open("wb") as handle:
-                handle.write(data)
-                handle.flush()
-                durability.fullsync(handle.fileno())
-        else:
-            tmp_path.write_bytes(data)
+        durability.replace_bytes(path, data, sync_file=durable, sync_parent=durable)
     except OSError as error:
-        _cleanup(tmp_path)
         raise ArtifactError(f"could not write artifact {path}: {error}") from error
-    try:
-        os.replace(tmp_path, path)
-    except OSError as error:
-        _cleanup(tmp_path)
-        raise ArtifactError(f"could not finalize artifact {path}: {error}") from error
-    if durable:
-        try:
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                durability.fullsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        except OSError as error:
-            raise ArtifactError(
-                f"could not sync artifact directory {path.parent}: {error}"
-            ) from error
 
 
 def gzip_compress(data: bytes) -> bytes:
@@ -344,7 +320,7 @@ def _promote_spool(
         ) from error
     stem = derive_artifact_stem(artifact_name)
     target = directory / f"{stem}.gz"
-    tmp_path = target.with_name(f".{target.name}.tmp")
+    tmp_path = durability.staging_path(target)
     try:
         shutil.move(str(spool_path), str(tmp_path))
         os.replace(tmp_path, target)

@@ -27,7 +27,7 @@ import socket
 import threading
 import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, NoReturn
@@ -974,15 +974,9 @@ def _recover_pending_plan_transaction_locked(
     try:
         for destination, content in entries:
             destination.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = destination.with_name(
-                f".{destination.name}.asl-transaction-recovery.tmp"
+            durability.replace_bytes(
+                destination, content, sync_file=True, sync_parent=True
             )
-            with temp_path.open("wb") as handle:
-                handle.write(content)
-                handle.flush()
-                durability.fullsync(handle.fileno())
-            os.replace(temp_path, destination)
-            _fsync_directory(destination.parent)
         _retire_plan_transaction(canonical_dir, transaction_dir)
     except OSError as error:
         raise PlanError(f"cannot recover pending plan transaction: {error}") from error
@@ -2540,18 +2534,11 @@ def progress_path(plan_dir: str | Path) -> Path:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """Write `text` to `path` via temp-file + `os.replace` so the destination is never "
-    "half-written."""
-    tmp_path = path.with_name(f".{path.name}.tmp")
+    """Write `text` to `path` via temp-file + `os.replace` so the destination is never
+    half-written."""
     try:
-        tmp_path.write_text(text, encoding="utf-8")
+        durability.replace_text(path, text)
     except OSError as error:
-        _raise_read_error(path, error)
-    try:
-        os.replace(tmp_path, path)
-    except OSError as error:
-        with suppress(OSError):
-            tmp_path.unlink()
         _raise_read_error(path, error)
 
 
