@@ -43,7 +43,7 @@ import unittest
 import urllib.parse
 from pathlib import Path
 
-from agent_session_loop import bridge, workbench
+from agent_session_loop import bridge, workbench, workbench_archive
 from asl_workbench import capabilities, changes
 from asl_workbench.compatibility import (
     KIND_FORBIDDEN,
@@ -580,15 +580,15 @@ class LocalAPICharacterizationTests(WorkbenchAPIFixture, unittest.TestCase):
         record = changes.intentional_change(changes.KEY_OBSERVATIONAL_READS)
         self.assertIn("cleanup_state", record.current_behavior)
         self.assertIn("no longer exists", record.current_behavior)
-        result = workbench.archive_plan(
+        result = workbench_archive.archive_plan(
             self.canonical_plan_dir,
             state_dir=self.state_dir,
             registry_path=self.registry_path,
             include_default_dirs=False,
         )
         meta_path = (
-            workbench.archive_entry_dir(result.archive_id, self.state_dir)
-            / workbench.ARCHIVE_METADATA_FILE_NAME
+            workbench_archive.archive_entry_dir(result.archive_id, self.state_dir)
+            / workbench_archive.ARCHIVE_METADATA_FILE_NAME
         )
         raw = json.loads(meta_path.read_text(encoding="utf-8"))
         raw["archived_at"] = "2000-01-01T00:00:00+00:00"
@@ -603,7 +603,9 @@ class LocalAPICharacterizationTests(WorkbenchAPIFixture, unittest.TestCase):
         )
         self.assertEqual("eligible", body["entries"][0]["cleanup_state"])
         self.assertTrue(
-            workbench.archive_entry_dir(result.archive_id, self.state_dir).exists()
+            workbench_archive.archive_entry_dir(
+                result.archive_id, self.state_dir
+            ).exists()
         )
 
     def test_permanently_emptying_the_archive_requires_a_matching_count(
@@ -612,7 +614,7 @@ class LocalAPICharacterizationTests(WorkbenchAPIFixture, unittest.TestCase):
         # The confirmation contract the other intentional change keeps.
         record = changes.intentional_change(changes.KEY_EXPLICIT_ARCHIVE_CLEANUP)
         self.assertIn("confirm_count", record.current_behavior)
-        result = workbench.archive_plan(
+        result = workbench_archive.archive_plan(
             self.canonical_plan_dir,
             state_dir=self.state_dir,
             registry_path=self.registry_path,
@@ -630,7 +632,9 @@ class LocalAPICharacterizationTests(WorkbenchAPIFixture, unittest.TestCase):
             (result.archive_id,),
             tuple(
                 entry.archive_id
-                for entry in workbench.list_archive_entries(self.state_dir).entries
+                for entry in workbench_archive.list_archive_entries(
+                    self.state_dir
+                ).entries
             ),
             "a mismatched confirmation must leave the archive untouched",
         )
@@ -667,7 +671,7 @@ class LocalAPICharacterizationTests(WorkbenchAPIFixture, unittest.TestCase):
         self.assertEqual(200, status)
         self.assertTrue(body["ok"])
         self.assertFalse(self.canonical_plan_dir.exists())
-        entries = workbench.list_archive_entries(self.state_dir).entries
+        entries = workbench_archive.list_archive_entries(self.state_dir).entries
         self.assertEqual(1, len(entries))
 
 

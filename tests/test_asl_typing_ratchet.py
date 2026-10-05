@@ -257,6 +257,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.workbench_remote_actions",
         "agent_session_loop.workbench_remote_reads",
         "agent_session_loop.workbench_server",
+        "agent_session_loop.workbench_workspace",
         "agent_session_loop.workspace_evidence",
         "agent_session_loop.workspaces",
         "agent_session_loop.write_guards",
@@ -302,6 +303,7 @@ REQUIRED_CHECKED_MODULES = frozenset(
     {
         "agent_session_loop.compact_state",
         "agent_session_loop.workbench",
+        "agent_session_loop.workbench_recovery",
     }
 )
 

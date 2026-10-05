@@ -95,6 +95,7 @@ from agent_session_loop import (
     state,
     workbench,
     workbench_actions,
+    workbench_archive,
     workbench_connector,
     workbench_operations,
     workbench_remote_actions,
@@ -1251,7 +1252,9 @@ class ArchiveMutationTests(FullStackCase):
             operations.OPERATION_CONSUMED, self.settle("op-purge-echo")["status"]
         )
         self.assertFalse(
-            (workbench.archive_root(self.corpus.state_dir) / archive_id).exists()
+            (
+                workbench_archive.archive_root(self.corpus.state_dir) / archive_id
+            ).exists()
         )
 
         status, body = self.request(

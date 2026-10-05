@@ -15,10 +15,12 @@ from agent_session_loop import (
     intervention,
     preflight,
     redirect_cli,
+    review_continuation,
     review_repair,
     run_inputs,
     state,
     workbench,
+    workbench_recovery,
 )
 from tests.support import (
     _WORKBENCH_DEAD_PID,
@@ -41,7 +43,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
         plan_name: str,
         lock_pid: int | None = None,
         pid_running=None,
-    ) -> workbench.WorkbenchRecovery:
+    ) -> workbench_recovery.WorkbenchRecovery:
         plan_dir = _make_workbench_plan(tmp_path, plan_name)
         state_root = tmp_path / "state"
         if payload is not None:
@@ -50,16 +52,20 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             _write_lock_file(plan_dir, state_root, pid=lock_pid)
         discovered = _discovered(plan_dir)
         if pid_running is None:
-            return workbench.build_workbench_recovery(discovered, state_dir=state_root)
+            return workbench_recovery.build_workbench_recovery(
+                discovered, state_dir=state_root
+            )
         with mock.patch.object(state, "is_pid_running", side_effect=pid_running):
-            return workbench.build_workbench_recovery(discovered, state_dir=state_root)
+            return workbench_recovery.build_workbench_recovery(
+                discovered, state_dir=state_root
+            )
 
     def test_ready_plan_has_no_recovery_needed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             plan_dir = _make_workbench_plan(tmp_path)
 
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=tmp_path / "state"
             )
 
@@ -89,7 +95,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 },
             )
 
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -149,7 +155,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -165,7 +171,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             tmp_path = Path(tmp)
             plan_dir = _make_workbench_plan(tmp_path, "ready-continuation")
             required_cap = run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES + 1
-            resume = workbench.review_continuation.ReviewResume(
+            resume = review_continuation.ReviewResume(
                 source_cycle=2,
                 review_session_id="2",
                 source_disposition="cycles-disabled",
@@ -178,11 +184,11 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                workbench.review_continuation,
+                review_continuation,
                 "evaluate_review_continuation",
                 return_value=resume,
             ):
-                recovery = workbench.build_workbench_recovery(
+                recovery = workbench_recovery.build_workbench_recovery(
                     _discovered(plan_dir), state_dir=tmp_path / "state"
                 )
 
@@ -200,7 +206,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             tmp_path = Path(tmp)
             plan_dir = _make_workbench_plan(tmp_path, "ready-continuation-exhausted")
             required_cap = run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES + 1
-            resume = workbench.review_continuation.ReviewResume(
+            resume = review_continuation.ReviewResume(
                 source_cycle=2,
                 review_session_id="2",
                 source_disposition="cycle-cap-exhausted",
@@ -222,11 +228,11 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                workbench.review_continuation,
+                review_continuation,
                 "evaluate_review_continuation",
                 return_value=resume,
             ):
-                recovery = workbench.build_workbench_recovery(
+                recovery = workbench_recovery.build_workbench_recovery(
                     _discovered(plan_dir), state_dir=tmp_path / "state"
                 )
 
@@ -245,7 +251,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             tmp_path = Path(tmp)
             plan_dir = _make_workbench_plan(tmp_path, "ready-rereview")
             required_cap = run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES + 1
-            resume = workbench.review_continuation.ReviewResume(
+            resume = review_continuation.ReviewResume(
                 source_cycle=2,
                 review_session_id="2",
                 source_disposition="repairs-materialized",
@@ -258,11 +264,11 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                workbench.review_continuation,
+                review_continuation,
                 "evaluate_review_continuation",
                 return_value=resume,
             ):
-                recovery = workbench.build_workbench_recovery(
+                recovery = workbench_recovery.build_workbench_recovery(
                     _discovered(plan_dir), state_dir=tmp_path / "state"
                 )
 
@@ -306,7 +312,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                     state_path.parent.mkdir(parents=True, exist_ok=True)
                     write_state(state_path)
 
-                    recovery = workbench.build_workbench_recovery(
+                    recovery = workbench_recovery.build_workbench_recovery(
                         _discovered(plan_dir), state_dir=state_root
                     )
                     payload = recovery.to_payload()
@@ -357,7 +363,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 mock.patch.object(Path, "exists", new=exists_with_state_race),
                 mock.patch.object(Path, "read_text", new=read_text_with_state_race),
             ):
-                recovery = workbench.build_workbench_recovery(
+                recovery = workbench_recovery.build_workbench_recovery(
                     _discovered(plan_dir), state_dir=state_root
                 )
 
@@ -633,13 +639,13 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                     "max_review_fix_cycles": 0,
                 },
             )
-            continuation = workbench.build_workbench_recovery(
+            continuation = workbench_recovery.build_workbench_recovery(
                 _discovered(continuation_plan), state_dir=tmp_path / "state"
             )
             self.assertEqual("review-continuation", continuation.kind)
             observed.add(continuation.kind)
 
-            self.assertEqual(set(workbench.RECOVERY_KINDS), observed)
+            self.assertEqual(set(workbench_recovery.RECOVERY_KINDS), observed)
 
     def test_conversation_recovery_reports_the_decision_and_its_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -741,18 +747,19 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             )
 
     def test_registered_pause_reasons_have_explicit_recovery_mapping(self) -> None:
-        mapped_reasons = set(workbench.PAUSE_REASON_RECOVERY_KIND_BY_REASON)
-        generic_reasons = set(workbench.GENERIC_RECOVERY_PAUSE_REASONS)
+        mapped_reasons = set(workbench_recovery.PAUSE_REASON_RECOVERY_KIND_BY_REASON)
+        generic_reasons = set(workbench_recovery.GENERIC_RECOVERY_PAUSE_REASONS)
         registered_reasons = set(events.PAUSE_REASONS)
 
         self.assertFalse(mapped_reasons & generic_reasons)
         self.assertEqual(registered_reasons, mapped_reasons | generic_reasons)
         self.assertNotIn(
-            "generic", set(workbench.PAUSE_REASON_RECOVERY_KIND_BY_REASON.values())
+            "generic",
+            set(workbench_recovery.PAUSE_REASON_RECOVERY_KIND_BY_REASON.values()),
         )
         self.assertLessEqual(
-            set(workbench.PAUSE_REASON_RECOVERY_KIND_BY_REASON.values()),
-            set(workbench.RECOVERY_KINDS) - {"generic"},
+            set(workbench_recovery.PAUSE_REASON_RECOVERY_KIND_BY_REASON.values()),
+            set(workbench_recovery.RECOVERY_KINDS) - {"generic"},
         )
         self.assertIn(
             events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
@@ -786,7 +793,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 },
             )
 
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -861,7 +868,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                     plan_dir = _make_workbench_plan(tmp_path, name=f"unknown-{name}")
                     _write_state_payload(plan_dir, state_root, payload)
 
-                    recovery = workbench.build_workbench_recovery(
+                    recovery = workbench_recovery.build_workbench_recovery(
                         _discovered(plan_dir), state_dir=state_root
                     )
 
@@ -907,7 +914,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 },
             )
 
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -971,7 +978,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 },
             )
 
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -1015,7 +1022,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 "is_pid_running",
                 side_effect=lambda pid: pid == os.getpid(),
             ):
-                recovery = workbench.build_workbench_recovery(
+                recovery = workbench_recovery.build_workbench_recovery(
                     _discovered(plan_dir), state_dir=state_root
                 )
 
@@ -1047,7 +1054,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 },
             )
 
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -1086,7 +1093,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 "is_pid_running",
                 side_effect=lambda pid: pid == os.getpid(),
             ):
-                recovery = workbench.build_workbench_recovery(
+                recovery = workbench_recovery.build_workbench_recovery(
                     _discovered(plan_dir), state_dir=state_root
                 )
 
@@ -1128,7 +1135,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             )
             _write_lock_file(plan_dir, state_root, pid=os.getpid())
 
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -1201,7 +1208,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 },
             )
 
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -1294,7 +1301,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 },
             )
 
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -1370,7 +1377,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 },
             )
 
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -1435,7 +1442,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 },
             )
 
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -1570,7 +1577,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 },
             )
 
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -1637,7 +1644,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 },
             )
 
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -1713,7 +1720,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                         },
                     )
 
-                    recovery = workbench.build_workbench_recovery(
+                    recovery = workbench_recovery.build_workbench_recovery(
                         _discovered(plan_dir), state_dir=state_root
                     )
 
@@ -1760,7 +1767,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 },
             )
 
-            recovery = workbench.build_workbench_recovery(
+            recovery = workbench_recovery.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 

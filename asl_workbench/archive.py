@@ -212,9 +212,9 @@ _ARCHIVE_ID_FORBIDDEN = ("/", "\\", "\0")
 def valid_archive_id(archive_id: Any) -> bool:
     """Whether ``archive_id`` names an entry without escaping the archive root.
 
-    The single definition of the rule. ``agent_session_loop.workbench`` calls
-    this rather than keeping its own copy, so a traversal the provider would
-    reject cannot be one a remote caller is allowed to submit.
+    The single definition of the rule. ``agent_session_loop.workbench_archive``
+    calls this rather than keeping its own copy, so a traversal the provider
+    would reject cannot be one a remote caller is allowed to submit.
     """
     if not isinstance(archive_id, str) or not archive_id.strip():
         return False

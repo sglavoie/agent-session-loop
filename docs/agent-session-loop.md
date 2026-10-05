@@ -8595,6 +8595,10 @@ full-path confirmation through `"confirm_plan_dir"`, refuse arbitrary
 non-plan paths, and return `409` with `reason: "active-lock"` when an
 active lock is present.
 
+The archive storage and its safety gate live in
+`agent_session_loop/workbench_archive.py`, which every surface — the HTTP
+routes, the `asl workbench` CLI, and the remote connector — calls.
+
 Bulk cleanup uses `POST /api/plans/archive` with `plan_dirs`. The server
 archives each entry independently and returns per-entry results plus
 `archived_count` and `failed_count`, so one blocked or invalid plan does
@@ -9164,7 +9168,7 @@ plan files, runner state, lock state, commit artifacts, verification
 payloads, and preflight repair hints on every refresh; no harness/model
 is called to summarize failures, and no recovery state is persisted.
 
-`workbench.RECOVERY_KINDS` is the source-of-truth vocabulary:
+`workbench_recovery.RECOVERY_KINDS` is the source-of-truth vocabulary:
 `none`, `review-continuation`, `reply-needed`, `not-loop-ready`, `verify-failed`,
 `no-contract`, `malformed-contract`, `stale-lock`, `stale-state`,
 `commit-preflight`, `commit-failed`, `conversation-recovery`, and
