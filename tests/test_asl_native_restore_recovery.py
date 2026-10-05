@@ -56,6 +56,7 @@ from agent_session_loop import (
     conversations,
     events,
     handoff_guards,
+    harness_claude,
     harness_codex,
     harnesses,
     redirect_ack,
@@ -462,7 +463,7 @@ class ClaudeRestoreRefusalTests(_TurnTestCase):
         stdin: _FakePipe | None = None,
         **hooks: Any,
     ) -> Any:
-        adapter = harnesses.ClaudeAdapter(executable="claude")
+        adapter = harness_claude.ClaudeAdapter(executable="claude")
         process = _FakeProcess(running=False)
         process.returncode = returncode
         process.stdout = _FakePipe(stdout)
@@ -1410,7 +1411,7 @@ class ClaudeRefusedRestoreRunTests(_NativeRestoreRun):
 
     def _refused_turn(self, name: str, **kwargs: Any) -> harnesses.HarnessResult:
         """One real claude turn against that CLI, wired to this run's callbacks."""
-        adapter = harnesses.ClaudeAdapter(executable="claude")
+        adapter = harness_claude.ClaudeAdapter(executable="claude")
 
         def submitted() -> None:
             self.submissions.append(name)

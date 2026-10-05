@@ -32,6 +32,7 @@ from agent_session_loop import (
     commit_settlement,
     contracts,
     events,
+    harness_claude,
     harness_failures,
     harnesses,
     mailbox,
@@ -1463,7 +1464,7 @@ class RestrictedAuditTests(unittest.TestCase):
                 source="explicit",
                 timeout_seconds=30.0,
             )
-            unenforceable = harnesses.ClaudeAdapter
+            unenforceable = harness_claude.ClaudeAdapter
             self.addCleanup(setattr, unenforceable, "enforces_audit_read_only", True)
             unenforceable.enforces_audit_read_only = False
 

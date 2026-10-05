@@ -27,6 +27,7 @@ from agent_session_loop import assurance_projection as projection
 from agent_session_loop import (
     assurance_report,
     events,
+    harness_claude,
     harnesses,
     plans,
     state,
@@ -385,8 +386,8 @@ class AuditAccessProfileTests(unittest.TestCase):
             self.assertEqual(
                 ["plan"], claude[claude.index("--permission-mode") + 1 :][:1]
             )
-            self.assertIn(harnesses.CLAUDE_AUDIT_DENIED_TOOLS, claude)
-            for tool in harnesses.CLAUDE_AUDIT_TOOLS.split(","):
+            self.assertIn(harness_claude.CLAUDE_AUDIT_DENIED_TOOLS, claude)
+            for tool in harness_claude.CLAUDE_AUDIT_TOOLS.split(","):
                 self.assertNotIn(tool, ("Bash", "Edit", "Write"))
 
             copilot = self._audit_argv("copilot", root / "evidence", root / "workdir")

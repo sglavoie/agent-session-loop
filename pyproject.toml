@@ -159,6 +159,7 @@ module = [
     "agent_session_loop.guidance_delivery",
     "agent_session_loop.handoff_correction",
     "agent_session_loop.handoff_guards",
+    "agent_session_loop.harness_claude",
     "agent_session_loop.harness_codex",
     "agent_session_loop.harness_compatibility",
     "agent_session_loop.harness_failures",

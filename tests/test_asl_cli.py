@@ -32,6 +32,7 @@ from agent_session_loop import (
     control_queue,
     events,
     handoff_guards,
+    harness_claude,
     harness_codex,
     harnesses,
     mailbox,
@@ -170,7 +171,7 @@ class CommandAndConfigTests(unittest.TestCase):
         cwd = Path("/tmp/repo")
         plan_dir = Path("/tmp/plan")
 
-        claude = harnesses.ClaudeAdapter(executable="claude").build_argv(
+        claude = harness_claude.ClaudeAdapter(executable="claude").build_argv(
             cwd=cwd,
             plan_dir=plan_dir,
             prompt="/session-run /tmp/plan/",
@@ -184,7 +185,7 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertIn("--include-partial-messages", claude)
         self.assertIn("--add-dir", claude)
 
-        claude_unsafe = harnesses.ClaudeAdapter(executable="claude").build_argv(
+        claude_unsafe = harness_claude.ClaudeAdapter(executable="claude").build_argv(
             cwd=cwd,
             plan_dir=plan_dir,
             prompt="/session-run /tmp/plan/",
@@ -232,7 +233,7 @@ class CommandAndConfigTests(unittest.TestCase):
         cwd = Path("/tmp/repo")
         plan_dir = Path("/tmp/plan")
 
-        claude = harnesses.ClaudeAdapter(executable="claude").build_argv(
+        claude = harness_claude.ClaudeAdapter(executable="claude").build_argv(
             cwd=cwd,
             plan_dir=plan_dir,
             prompt="/session-run /tmp/plan/",
@@ -346,7 +347,7 @@ class CommandAndConfigTests(unittest.TestCase):
             fake_claude.chmod(fake_claude.stat().st_mode | stat.S_IXUSR)
             callbacks: list[tuple[harnesses.StreamName, str]] = []
 
-            result = harnesses.ClaudeAdapter(executable=str(fake_claude)).run(
+            result = harness_claude.ClaudeAdapter(executable=str(fake_claude)).run(
                 cwd=tmp_dir,
                 plan_dir=tmp_dir,
                 prompt="/session-run plan/",

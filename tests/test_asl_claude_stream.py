@@ -26,7 +26,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from agent_session_loop import claude_stream, guidance_delivery, harnesses
+from agent_session_loop import (
+    claude_stream,
+    guidance_delivery,
+    harness_claude,
+    harnesses,
+)
 
 GUIDANCE_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -314,7 +319,7 @@ class StreamSessionPromptTests(TempDirTestCase):
     def test_background_reviews_require_a_followup_result_before_eof(self) -> None:
         session, stdin = session_with()
         session.send_prompt()
-        processor = harnesses._ClaudeStreamJsonOutputProcessor(session)
+        processor = harness_claude._ClaudeStreamJsonOutputProcessor(session)
 
         def emit(record: dict[str, Any]) -> None:
             processor.process_chunk("stdout", json.dumps(record) + "\n")
@@ -347,7 +352,7 @@ class StreamSessionPromptTests(TempDirTestCase):
         # the idle root sat for 5142s. The result is terminal regardless.
         session, stdin = session_with()
         session.send_prompt()
-        processor = harnesses._ClaudeStreamJsonOutputProcessor(session)
+        processor = harness_claude._ClaudeStreamJsonOutputProcessor(session)
         self.assertIsNone(session.stdin_hold_reason)
 
         def emit(record: dict[str, Any]) -> None:
@@ -433,7 +438,7 @@ class StreamSessionPromptTests(TempDirTestCase):
         script.chmod(0o755)
         fired: list[bool] = []
         message = self.tmp / "last-message.txt"
-        result = harnesses.ClaudeAdapter(executable=str(script)).run(
+        result = harness_claude.ClaudeAdapter(executable=str(script)).run(
             cwd=self.tmp,
             plan_dir=self.tmp,
             prompt="review the work",
@@ -928,7 +933,7 @@ class StreamOutputProcessorTests(unittest.TestCase):
     """The one stdout reader is also the session's acknowledgement channel."""
 
     def processor(self, session: claude_stream.ClaudeStreamSession) -> Any:
-        return harnesses._ClaudeStreamJsonOutputProcessor(session)
+        return harness_claude._ClaudeStreamJsonOutputProcessor(session)
 
     def test_a_user_echo_confirms_without_being_rendered(self) -> None:
         session, _ = session_with()
@@ -985,7 +990,7 @@ class StreamOutputProcessorTests(unittest.TestCase):
         self.assertTrue(stdin.closed_by_asl)
 
     def test_a_new_request_invalidates_the_prior_terminal_result(self) -> None:
-        processor = harnesses._ClaudeStreamJsonOutputProcessor()
+        processor = harness_claude._ClaudeStreamJsonOutputProcessor()
 
         processor.process_chunk(
             "stdout", json.dumps({"type": "result", "subtype": "success"}) + "\n"
@@ -1102,7 +1107,7 @@ class StreamOutputProcessorTests(unittest.TestCase):
         self.assertIsNone(session.session_mismatch)
 
     def test_normalization_still_works_without_a_session(self) -> None:
-        processor = harnesses._ClaudeStreamJsonOutputProcessor()
+        processor = harness_claude._ClaudeStreamJsonOutputProcessor()
 
         rendered = processor.process_chunk(
             "stdout",
@@ -1276,8 +1281,8 @@ class GuidanceHookScriptTests(TempDirTestCase):
 class ClaudeAdapterTransportTests(TempDirTestCase):
     """What the adapter puts on argv, on disk, and behind the seam."""
 
-    def adapter(self) -> harnesses.ClaudeAdapter:
-        return harnesses.ClaudeAdapter(executable="claude")
+    def adapter(self) -> harness_claude.ClaudeAdapter:
+        return harness_claude.ClaudeAdapter(executable="claude")
 
     def invocation(self, **overrides: Any) -> harnesses.HarnessInvocation:
         fields: dict[str, Any] = {
@@ -1304,7 +1309,7 @@ class ClaudeAdapterTransportTests(TempDirTestCase):
             prompt="do the work",
         )
 
-        self.assertIsInstance(transport, harnesses._ClaudeStreamTransport)
+        self.assertIsInstance(transport, harness_claude._ClaudeStreamTransport)
         self.assertEqual([claude_stream.user_message("do the work")], stdin.messages())
         self.assertIsNotNone(transport.guidance_transport())
 

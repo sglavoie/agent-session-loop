@@ -32,6 +32,7 @@ from agent_session_loop import (
     contracts,
     durability,
     events,
+    harness_claude,
     harness_codex,
     harnesses,
     mailbox,
@@ -7175,7 +7176,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
 class HarnessSkillInvocationTests(unittest.TestCase):
     def test_skill_prefixes_derive_from_adapter_classes(self) -> None:
         codex = harness_codex.CodexAdapter
-        claude = harnesses.ClaudeAdapter
+        claude = harness_claude.ClaudeAdapter
         copilot = harnesses.CopilotAdapter
         prefixes = harnesses.skill_prefixes()
         self.assertEqual(

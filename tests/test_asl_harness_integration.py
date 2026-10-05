@@ -42,6 +42,7 @@ from agent_session_loop import (
     control_queue,
     durability,
     events,
+    harness_claude,
     harness_codex,
     harness_failures,
     harnesses,
@@ -8003,7 +8004,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         )
         fired: list[int] = []
 
-        result = harnesses.ClaudeAdapter(executable=str(fake_claude)).run(
+        result = harness_claude.ClaudeAdapter(executable=str(fake_claude)).run(
             cwd=self.tmp_dir,
             plan_dir=self.tmp_dir,
             prompt="noop",
@@ -8117,7 +8118,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
 
         live_turn.start()
         with mock.patch.object(harnesses, "_ABANDONED_READER_JOIN_SECONDS", 0.5):
-            result = harnesses.ClaudeAdapter(executable=str(fake_claude)).run(
+            result = harness_claude.ClaudeAdapter(executable=str(fake_claude)).run(
                 cwd=self.tmp_dir,
                 plan_dir=self.tmp_dir,
                 prompt="noop",

@@ -24,7 +24,12 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_session_loop import conversations, guidance_delivery, harnesses
+from agent_session_loop import (
+    conversations,
+    guidance_delivery,
+    harness_claude,
+    harnesses,
+)
 
 #: Every bounded wait in this module. Long enough that a loaded machine does
 #: not fail a correct implementation, short enough that a wrong one fails
@@ -1119,8 +1124,8 @@ class ConversationCaptureTurnTests(_TurnTestCase):
 class ClaudeContinuityTurnTests(_TurnTestCase):
     """A whole claude turn, from the identifier on argv to the result."""
 
-    def adapter(self) -> harnesses.ClaudeAdapter:
-        return harnesses.ClaudeAdapter(executable="claude")
+    def adapter(self) -> harness_claude.ClaudeAdapter:
+        return harness_claude.ClaudeAdapter(executable="claude")
 
     def init_record(self, session_id: str) -> str:
         return (
