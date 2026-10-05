@@ -32,6 +32,7 @@ from agent_session_loop import (
     control_queue,
     events,
     handoff_guards,
+    harness_codex,
     harnesses,
     mailbox,
     mailbox_cli,
@@ -86,7 +87,7 @@ from tests.support import (
 class CommandAndConfigTests(unittest.TestCase):
     def test_codex_turn_plan_uses_workspace_write_or_unsafe_bypass(self) -> None:
         """The sandbox choice moved from argv into the app-server turn plan."""
-        adapter = harnesses.CodexAdapter(executable="codex")
+        adapter = harness_codex.CodexAdapter(executable="codex")
         cwd = Path("/tmp/repo")
         plan_dir = Path("/tmp/plan")
 
@@ -106,7 +107,7 @@ class CommandAndConfigTests(unittest.TestCase):
         self,
     ) -> None:
         """The one-shot argv kept for the pre-acceptance fallback is unchanged."""
-        adapter = harnesses.CodexAdapter(executable="codex")
+        adapter = harness_codex.CodexAdapter(executable="codex")
         cwd = Path("/tmp/repo")
         plan_dir = Path("/tmp/plan")
         last_message = Path("/tmp/state/last-message-1.txt")
@@ -133,7 +134,7 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertNotIn("workspace-write", unsafe)
 
     def test_codex_command_includes_model_and_reasoning_effort_config(self) -> None:
-        adapter = harnesses.CodexAdapter(executable="codex")
+        adapter = harness_codex.CodexAdapter(executable="codex")
         cwd = Path("/tmp/repo")
         plan_dir = Path("/tmp/plan")
         prompt = "$session-run /tmp/plan/"
@@ -1056,7 +1057,7 @@ class CommandAndConfigTests(unittest.TestCase):
                 self.assertEqual(list(harnesses.HARNESS_NAMES), list(invocations))
                 for name, invocation in invocations.items():
                     self.assertTrue(
-                        invocation.startswith(harnesses.SKILL_PREFIXES[name]),
+                        invocation.startswith(harnesses.skill_prefixes()[name]),
                         invocation,
                     )
 

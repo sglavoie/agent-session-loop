@@ -36,6 +36,7 @@ from unittest import mock
 
 from agent_session_loop import (
     events,
+    harness_codex,
     harnesses,
     redirect_recovery,
     redirect_store,
@@ -70,7 +71,7 @@ def codex_lost_response_result(tmp: Path) -> harnesses.HarnessResult:
     executable = tmp / "codex-app-server"
     shutil.copyfile(FAKE_APP_SERVER_FIXTURE, executable)
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
-    adapter = harnesses.CodexAdapter(executable=str(executable))
+    adapter = harness_codex.CodexAdapter(executable=str(executable))
     plan_dir = tmp / "plan"
     plan_dir.mkdir(exist_ok=True)
     last_message = tmp / "last-message.txt"

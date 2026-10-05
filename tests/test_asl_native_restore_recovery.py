@@ -56,6 +56,7 @@ from agent_session_loop import (
     conversations,
     events,
     handoff_guards,
+    harness_codex,
     harnesses,
     redirect_ack,
     redirect_recovery,
@@ -187,7 +188,7 @@ def codex_resume_result(
     """
     tmp.mkdir(parents=True, exist_ok=True)
     executable = _install(FAKE_APP_SERVER_FIXTURE, tmp / "codex-app-server")
-    adapter = harnesses.CodexAdapter(executable=str(executable))
+    adapter = harness_codex.CodexAdapter(executable=str(executable))
     plan_dir = tmp / "plan"
     plan_dir.mkdir(exist_ok=True)
     last_message = tmp / "last-message.txt"
@@ -245,7 +246,7 @@ class CodexRestoreRefusalTests(unittest.TestCase):
     def _run(self, mode: str, *, resume: str | None = THREAD_ID) -> Any:
         os.environ["FAKE_APP_SERVER_MODE"] = mode
         executable = _install(FAKE_APP_SERVER_FIXTURE, self.tmp / "codex-app-server")
-        adapter = harnesses.CodexAdapter(executable=str(executable))
+        adapter = harness_codex.CodexAdapter(executable=str(executable))
         options: dict[str, Any] = {}
         if resume is not None:
             options["invocation"] = adapter.build_invocation(

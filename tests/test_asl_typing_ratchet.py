@@ -152,6 +152,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.guidance_delivery",
         "agent_session_loop.handoff_correction",
         "agent_session_loop.handoff_guards",
+        "agent_session_loop.harness_codex",
         "agent_session_loop.harness_compatibility",
         "agent_session_loop.harness_failures",
         "agent_session_loop.harnesses",

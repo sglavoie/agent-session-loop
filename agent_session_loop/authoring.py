@@ -2363,8 +2363,8 @@ def _resolve_skill_prefix(skill_prefix: str) -> str:
                 "could not auto-detect the invoking harness; pass "
                 "--skill-prefix {codex,claude,copilot}"
             )
-        return harnesses.SKILL_PREFIXES[detected]
-    prefix = harnesses.SKILL_PREFIXES.get(skill_prefix)
+        return harnesses.skill_prefixes()[detected]
+    prefix = harnesses.skill_prefixes().get(skill_prefix)
     if prefix is None:
         raise ValueError(f"unknown skill prefix harness: {skill_prefix}")
     return prefix

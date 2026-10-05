@@ -42,6 +42,7 @@ from agent_session_loop import (
     control_queue,
     durability,
     events,
+    harness_codex,
     harness_failures,
     harnesses,
     live_verification,
@@ -9258,7 +9259,7 @@ class AuditAccessProfileTests(unittest.TestCase):
                 "/work/last.txt",
                 "prompt",
             ],
-            harnesses.CodexAdapter().build_exec_argv(
+            harness_codex.CodexAdapter().build_exec_argv(
                 cwd=Path("/work"),
                 plan_dir=Path("/plan"),
                 prompt="prompt",
@@ -9381,9 +9382,9 @@ class AuditAccessProfileTests(unittest.TestCase):
         self,
     ) -> None:
         self.addCleanup(
-            setattr, harnesses.CodexAdapter, "enforces_audit_read_only", True
+            setattr, harness_codex.CodexAdapter, "enforces_audit_read_only", True
         )
-        harnesses.CodexAdapter.enforces_audit_read_only = False
+        harness_codex.CodexAdapter.enforces_audit_read_only = False
 
         with self.assertRaises(harnesses.HarnessError) as refused:
             harnesses.get_adapter("codex").build_invocation(

@@ -30,7 +30,12 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_session_loop import codex_app_server, guidance_delivery, harnesses
+from agent_session_loop import (
+    codex_app_server,
+    guidance_delivery,
+    harness_codex,
+    harnesses,
+)
 from tests.support import REPO_ROOT, install_fake_codex
 
 FAKE_APP_SERVER_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "fake_codex_app_server.py"
@@ -1288,14 +1293,14 @@ class AdapterTransportTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
 
-    def _adapter(self, mode: str = "success") -> harnesses.CodexAdapter:
+    def _adapter(self, mode: str = "success") -> harness_codex.CodexAdapter:
         os.environ["FAKE_APP_SERVER_MODE"] = mode
         executable = self.tmp / "codex-app-server"
         shutil.copyfile(FAKE_APP_SERVER_FIXTURE, executable)
         executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
-        return harnesses.CodexAdapter(executable=str(executable))
+        return harness_codex.CodexAdapter(executable=str(executable))
 
-    def _run(self, adapter: harnesses.CodexAdapter, **kwargs: Any) -> Any:
+    def _run(self, adapter: harness_codex.CodexAdapter, **kwargs: Any) -> Any:
         return adapter.run(
             cwd=self.tmp,
             plan_dir=self.plan_dir,
@@ -1370,7 +1375,7 @@ class AdapterTransportTests(unittest.TestCase):
         self.assertIn("applied sandbox", result.stderr)
 
     def _resume_invocation(
-        self, adapter: harnesses.CodexAdapter, native_id: str
+        self, adapter: harness_codex.CodexAdapter, native_id: str
     ) -> Any:
         return adapter.build_invocation(
             cwd=self.tmp,
@@ -1604,7 +1609,7 @@ class AdapterFallbackTests(unittest.TestCase):
 
     def test_a_harness_without_an_app_server_runs_the_legacy_turn(self) -> None:
         executable = install_fake_codex(self.tmp)
-        adapter = harnesses.CodexAdapter(executable=str(executable))
+        adapter = harness_codex.CodexAdapter(executable=str(executable))
         chunks: list[tuple[str, str]] = []
 
         result = adapter.run(
@@ -1627,7 +1632,7 @@ class AdapterFallbackTests(unittest.TestCase):
 
     def test_the_declined_attempt_leaves_the_stream_accounting_honest(self) -> None:
         executable = install_fake_codex(self.tmp)
-        adapter = harnesses.CodexAdapter(executable=str(executable))
+        adapter = harness_codex.CodexAdapter(executable=str(executable))
 
         result = adapter.run(
             cwd=self.tmp,
@@ -1644,7 +1649,7 @@ class AdapterFallbackTests(unittest.TestCase):
         # The app-server dies after accepting the turn, and `exec` would run it
         # a second time if the adapter let it.
         executable = self._dual_mode_codex("die-after-accept")
-        adapter = harnesses.CodexAdapter(executable=str(executable))
+        adapter = harness_codex.CodexAdapter(executable=str(executable))
 
         result = adapter.run(
             cwd=self.tmp,
@@ -1669,7 +1674,7 @@ class AdapterFallbackTests(unittest.TestCase):
         which is a second execution of work the provider may already be doing.
         """
         executable = self._dual_mode_codex("die-before-turn-response")
-        adapter = harnesses.CodexAdapter(executable=str(executable))
+        adapter = harness_codex.CodexAdapter(executable=str(executable))
 
         result = adapter.run(
             cwd=self.tmp,
@@ -1687,7 +1692,7 @@ class AdapterFallbackTests(unittest.TestCase):
 
     def test_a_fallback_reruns_the_legacy_argv_exactly_once(self) -> None:
         executable = install_fake_codex(self.tmp)
-        adapter = harnesses.CodexAdapter(executable=str(executable))
+        adapter = harness_codex.CodexAdapter(executable=str(executable))
         legacy = adapter.build_exec_argv(
             cwd=self.tmp,
             plan_dir=self.plan_dir,
@@ -1721,7 +1726,7 @@ class LegacyContinuityTests(unittest.TestCase):
         sweep = mock.patch.object(harnesses, "sweep_enabled", return_value=False)
         sweep.start()
         self.addCleanup(sweep.stop)
-        self.adapter = harnesses.CodexAdapter(
+        self.adapter = harness_codex.CodexAdapter(
             executable=str(install_fake_codex(self.tmp))
         )
 

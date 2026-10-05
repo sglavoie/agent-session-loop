@@ -32,6 +32,7 @@ from agent_session_loop import (
     contracts,
     durability,
     events,
+    harness_codex,
     harnesses,
     mailbox,
     mailbox_rendering,
@@ -7173,17 +7174,21 @@ class ResolvePlanReferenceTests(unittest.TestCase):
 
 class HarnessSkillInvocationTests(unittest.TestCase):
     def test_skill_prefixes_derive_from_adapter_classes(self) -> None:
+        codex = harness_codex.CodexAdapter
+        claude = harnesses.ClaudeAdapter
+        copilot = harnesses.CopilotAdapter
+        prefixes = harnesses.skill_prefixes()
         self.assertEqual(
             {
-                harnesses.CodexAdapter.name: harnesses.CodexAdapter.skill_prefix,
-                harnesses.ClaudeAdapter.name: harnesses.ClaudeAdapter.skill_prefix,
-                harnesses.CopilotAdapter.name: harnesses.CopilotAdapter.skill_prefix,
+                codex.name: codex.skill_prefix,
+                claude.name: claude.skill_prefix,
+                copilot.name: copilot.skill_prefix,
             },
-            harnesses.SKILL_PREFIXES,
+            prefixes,
         )
-        self.assertEqual("$", harnesses.SKILL_PREFIXES["codex"])
-        self.assertEqual("/", harnesses.SKILL_PREFIXES["claude"])
-        self.assertEqual("/", harnesses.SKILL_PREFIXES["copilot"])
+        self.assertEqual("$", prefixes["codex"])
+        self.assertEqual("/", prefixes["claude"])
+        self.assertEqual("/", prefixes["copilot"])
 
     def test_detect_invoking_harness_matches_single_marker(self) -> None:
         self.assertEqual(
