@@ -46,7 +46,7 @@ from agent_session_loop import (
     runner,
     session_verification,
 )
-from tests.support import assert_no_runner_import, read_jsonl
+from tests.support import assert_no_runner_import, called_names, read_jsonl
 
 #: The symbols this module took from the runner. The program's no-alias rule
 #: says the runner keeps none of them behind, so a re-export added later to
@@ -75,24 +75,6 @@ def _call_receivers(source: str, *attributes: str) -> set[str]:
             continue
         receivers.add(ast.unparse(node.func.value))
     return receivers
-
-
-def _called_names(source: str) -> set[str]:
-    """Every name this module calls, whether bare or through an attribute.
-
-    Matched on the parse tree rather than the text, because the substring
-    ``open(`` also occurs inside ``_record_review_reopen(`` — the kind of false
-    positive that gets a real assertion deleted rather than fixed.
-    """
-    names: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Call):
-            continue
-        if isinstance(node.func, ast.Name):
-            names.add(node.func.id)
-        elif isinstance(node.func, ast.Attribute):
-            names.add(node.func.attr)
-    return names
 
 
 def _resume(**overrides: Any) -> review_continuation.ReviewResume:
@@ -133,7 +115,7 @@ class ReviewCycleBoundaryTests(unittest.TestCase):
         # `review_repair`/`readiness_gate` rather than directly. Any file this
         # module learned to open would be a durable write outside the lock that
         # serializes every other record the run keeps.
-        called = _called_names(self.source)
+        called = called_names(ast.parse(self.source))
         for reach in (
             "open",
             "write_text",

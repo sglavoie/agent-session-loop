@@ -26,7 +26,7 @@ from agent_session_loop import (
     runner,
     workspaces,
 )
-from tests.support import assert_no_runner_import
+from tests.support import assert_no_runner_import, called_names
 
 #: The symbols this module took from the runner. The program's no-alias rule
 #: says the runner keeps none of them behind, so a re-export added later to
@@ -73,24 +73,6 @@ DURABLE_WRITE_NAMES = frozenset(
 )
 
 
-def _called_names(tree: ast.AST) -> set[str]:
-    """Every name called under ``tree``, whether bare or through an attribute.
-
-    Matched on the parse tree rather than the text, because the substring
-    ``open(`` also occurs inside ``_external_control_plane_paths(`` -- the kind
-    of false positive that gets a real assertion deleted rather than fixed.
-    """
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if isinstance(node.func, ast.Name):
-            names.add(node.func.id)
-        elif isinstance(node.func, ast.Attribute):
-            names.add(node.func.attr)
-    return names
-
-
 def _resolved(
     path: Path | None,
     *,
@@ -126,7 +108,7 @@ class ExternalWriteEvidenceBoundaryTests(unittest.TestCase):
                 self.assertTrue(hasattr(external_write_evidence, name))
 
     def test_the_boundary_makes_no_durable_write_at_all(self) -> None:
-        self.assertEqual(set(), _called_names(self.tree) & DURABLE_WRITE_NAMES)
+        self.assertEqual(set(), called_names(self.tree) & DURABLE_WRITE_NAMES)
 
     def test_every_classification_the_classifier_returns_is_enumerated(
         self,

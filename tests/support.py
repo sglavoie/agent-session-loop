@@ -106,6 +106,25 @@ def assert_no_runner_import(case: unittest.TestCase, module: ModuleType) -> None
     )
 
 
+def called_names(node: ast.AST) -> set[str]:
+    """Every name called under ``node``, whether bare or through an attribute.
+
+    Matched on the parse tree rather than the text, because a name can occur as
+    a substring of a longer call -- ``open(`` inside ``_record_review_reopen(``
+    -- and that false positive is the kind that gets a real assertion deleted
+    rather than fixed.
+    """
+    names: set[str] = set()
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call):
+            continue
+        if isinstance(child.func, ast.Name):
+            names.add(child.func.id)
+        elif isinstance(child.func, ast.Attribute):
+            names.add(child.func.attr)
+    return names
+
+
 FAKE_CODEX_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "fake_codex.py"
 
 

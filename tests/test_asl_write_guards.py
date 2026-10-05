@@ -46,7 +46,7 @@ from agent_session_loop import (
     workspaces,
     write_guards,
 )
-from tests.support import assert_no_runner_import, write_plan
+from tests.support import assert_no_runner_import, called_names, write_plan
 
 #: The symbols this module took from the runner. The program's no-alias rule
 #: says the runner keeps none of them behind, so a re-export added later to
@@ -114,23 +114,6 @@ DURABLE_WRITES: dict[str, frozenset[str]] = {
     "_enforce_legacy_implementation_write_guard": frozenset({"write_json_file"}),
     "_enforce_protected_path_guard": frozenset({"write_json_file"}),
 }
-
-
-def _called_names(node: ast.AST) -> set[str]:
-    """Every name called under ``node``, whether bare or through an attribute.
-
-    Matched on the parse tree rather than the text, so a name that also occurs
-    as a substring of a longer call does not read as a match.
-    """
-    names: set[str] = set()
-    for child in ast.walk(node):
-        if not isinstance(child, ast.Call):
-            continue
-        if isinstance(child.func, ast.Name):
-            names.add(child.func.id)
-        elif isinstance(child.func, ast.Attribute):
-            names.add(child.func.attr)
-    return names
 
 
 def _workspace(*aliases: str) -> workspaces.ResolvedWorkspace:
@@ -205,7 +188,7 @@ class WriteGuardsBoundaryTests(unittest.TestCase):
         for node in self.tree.body:
             if not isinstance(node, ast.FunctionDef):
                 continue
-            writes = _called_names(node) & DURABLE_WRITE_NAMES
+            writes = called_names(node) & DURABLE_WRITE_NAMES
             if writes:
                 observed[node.name] = frozenset(writes)
         self.assertEqual(DURABLE_WRITES, observed)

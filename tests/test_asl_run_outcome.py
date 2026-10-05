@@ -55,7 +55,7 @@ from agent_session_loop import (
     runner,
     state,
 )
-from tests.support import assert_no_runner_import, write_plan
+from tests.support import assert_no_runner_import, called_names, write_plan
 
 RUN_ID = "20260903T000000Z-run-outcome"
 
@@ -112,23 +112,6 @@ INDEXED_ON_SUCCESS = frozenset({"final_snapshot"})
 #: Keys indexed only inside an `is not None` guard on the same key, so a
 #: payload that omits them prints one line fewer rather than raising.
 INDEXED_UNDER_GUARD = frozenset({"harness", "run_dir", "state_path", "events_path"})
-
-
-def _called_names(node: ast.AST) -> set[str]:
-    """Every name called under ``node``, whether bare or through an attribute.
-
-    Matched on the parse tree rather than the text, so a name that also occurs
-    as a substring of a longer call does not read as a match.
-    """
-    names: set[str] = set()
-    for child in ast.walk(node):
-        if not isinstance(child, ast.Call):
-            continue
-        if isinstance(child.func, ast.Name):
-            names.add(child.func.id)
-        elif isinstance(child.func, ast.Attribute):
-            names.add(child.func.attr)
-    return names
 
 
 def _stderr_owners(source: str) -> set[str]:
@@ -298,7 +281,7 @@ class RunOutcomeBoundaryTests(unittest.TestCase):
         # The run's durable record is written before this module is reached.
         # A printer that learned to persist its own output would be writing
         # after the run released its mutex.
-        self.assertEqual(frozenset(), _called_names(self.tree) & DURABLE_WRITE_NAMES)
+        self.assertEqual(frozenset(), called_names(self.tree) & DURABLE_WRITE_NAMES)
 
 
 class StderrOwnershipTests(unittest.TestCase):
