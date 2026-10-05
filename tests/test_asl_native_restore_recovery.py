@@ -58,6 +58,7 @@ from agent_session_loop import (
     handoff_guards,
     harness_claude,
     harness_codex,
+    harness_copilot,
     harnesses,
     redirect_ack,
     redirect_recovery,
@@ -366,7 +367,7 @@ class CopilotRestoreRefusalTests(unittest.TestCase):
     def _run(self, mode: str) -> Any:
         os.environ["FAKE_ACP_MODE"] = mode
         executable = _install(FAKE_ACP_FIXTURE, self.tmp / "copilot")
-        adapter = harnesses.CopilotAdapter(executable=str(executable))
+        adapter = harness_copilot.CopilotAdapter(executable=str(executable))
         return adapter.run(
             cwd=self.tmp,
             plan_dir=self.plan_dir,

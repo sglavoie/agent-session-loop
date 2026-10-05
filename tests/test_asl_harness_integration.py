@@ -44,6 +44,7 @@ from agent_session_loop import (
     events,
     harness_claude,
     harness_codex,
+    harness_copilot,
     harness_failures,
     harnesses,
     live_verification,
@@ -163,7 +164,7 @@ OBSERVED_LAUNCH_CLOSURE = (
 )
 
 
-class _PythonScriptCopilotAdapter(harnesses.CopilotAdapter):
+class _PythonScriptCopilotAdapter(harness_copilot.CopilotAdapter):
     """Run a synthetic Copilot harness through Python instead of direct exec.
 
     macOS attaches ``com.apple.provenance`` to locally generated executables

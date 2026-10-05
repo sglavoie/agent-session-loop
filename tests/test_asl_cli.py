@@ -34,6 +34,7 @@ from agent_session_loop import (
     handoff_guards,
     harness_claude,
     harness_codex,
+    harness_copilot,
     harnesses,
     mailbox,
     mailbox_cli,
@@ -196,7 +197,7 @@ class CommandAndConfigTests(unittest.TestCase):
             claude_unsafe[claude_unsafe.index("--permission-mode") + 1],
         )
 
-        copilot_safe = harnesses.CopilotAdapter(executable="copilot").build_argv(
+        copilot_safe = harness_copilot.CopilotAdapter(executable="copilot").build_argv(
             cwd=cwd,
             plan_dir=plan_dir,
             prompt="/session-run /tmp/plan/",
@@ -217,7 +218,9 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertNotIn("-p", copilot_safe)
         self.assertNotIn("/session-run /tmp/plan/", copilot_safe)
 
-        copilot_unsafe = harnesses.CopilotAdapter(executable="copilot").build_argv(
+        copilot_unsafe = harness_copilot.CopilotAdapter(
+            executable="copilot"
+        ).build_argv(
             cwd=cwd,
             plan_dir=plan_dir,
             prompt="/session-run /tmp/plan/",
@@ -248,7 +251,7 @@ class CommandAndConfigTests(unittest.TestCase):
         # trailing argument any more -- and is nowhere on argv at all.
         self.assertNotIn("/session-run /tmp/plan/", claude)
 
-        copilot = harnesses.CopilotAdapter(executable="copilot").build_argv(
+        copilot = harness_copilot.CopilotAdapter(executable="copilot").build_argv(
             cwd=cwd,
             plan_dir=plan_dir,
             prompt="/session-run /tmp/plan/",

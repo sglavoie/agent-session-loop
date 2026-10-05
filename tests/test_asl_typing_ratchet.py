@@ -155,6 +155,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.harness_claude",
         "agent_session_loop.harness_codex",
         "agent_session_loop.harness_compatibility",
+        "agent_session_loop.harness_copilot",
         "agent_session_loop.harness_failures",
         "agent_session_loop.harnesses",
         "agent_session_loop.install_verify",

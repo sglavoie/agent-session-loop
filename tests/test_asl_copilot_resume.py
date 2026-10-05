@@ -26,7 +26,13 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_session_loop import conversations, copilot_acp, guidance_delivery, harnesses
+from agent_session_loop import (
+    conversations,
+    copilot_acp,
+    guidance_delivery,
+    harness_copilot,
+    harnesses,
+)
 from tests.support import wait_until
 from tests.test_asl_copilot_acp import (
     FAKE_ACP_FIXTURE,
@@ -580,7 +586,7 @@ class AdapterContinuityTests(unittest.TestCase):
     """What the copilot adapter now claims, and what it still refuses."""
 
     def setUp(self) -> None:
-        self.adapter = harnesses.CopilotAdapter()
+        self.adapter = harness_copilot.CopilotAdapter()
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)
@@ -661,16 +667,16 @@ class AdapterResumeTransportTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def _adapter(self, mode: str = "success") -> harnesses.CopilotAdapter:
+    def _adapter(self, mode: str = "success") -> harness_copilot.CopilotAdapter:
         os.environ["FAKE_ACP_MODE"] = mode
         executable = self.tmp / "copilot"
         shutil.copyfile(FAKE_ACP_FIXTURE, executable)
         executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
-        return harnesses.CopilotAdapter(executable=str(executable))
+        return harness_copilot.CopilotAdapter(executable=str(executable))
 
     def _run(
         self,
-        adapter: harnesses.CopilotAdapter,
+        adapter: harness_copilot.CopilotAdapter,
         *,
         resume: str | None = SESSION_ID,
         **kwargs: Any,
@@ -768,7 +774,7 @@ class AdapterResumeTransportTests(unittest.TestCase):
             # Read off the transport the adapter actually opened, because the
             # cancellation has to wait for the submission the driver thread
             # makes and there is no other way to see it happen.
-            assert isinstance(transport, harnesses._CopilotAcpTransport)
+            assert isinstance(transport, harness_copilot._CopilotAcpTransport)
             session = transport.session
 
             def stop() -> None:

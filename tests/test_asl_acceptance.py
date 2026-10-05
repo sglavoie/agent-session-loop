@@ -28,6 +28,7 @@ from agent_session_loop import (
     assurance_report,
     events,
     harness_claude,
+    harness_copilot,
     harnesses,
     plans,
     state,
@@ -391,7 +392,7 @@ class AuditAccessProfileTests(unittest.TestCase):
                 self.assertNotIn(tool, ("Bash", "Edit", "Write"))
 
             copilot = self._audit_argv("copilot", root / "evidence", root / "workdir")
-            for denied in harnesses.COPILOT_AUDIT_DENIED_TOOLS:
+            for denied in harness_copilot.COPILOT_AUDIT_DENIED_TOOLS:
                 self.assertIn(f"--deny-tool={denied}", copilot)
 
     def test_no_adapter_accepts_a_writable_plan_dir_for_an_audit(self) -> None:

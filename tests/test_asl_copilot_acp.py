@@ -27,7 +27,12 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_session_loop import copilot_acp, guidance_delivery, harnesses
+from agent_session_loop import (
+    copilot_acp,
+    guidance_delivery,
+    harness_copilot,
+    harnesses,
+)
 from tests.support import REPO_ROOT, wait_until
 
 FAKE_ACP_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "fake_copilot_acp.py"
@@ -747,14 +752,14 @@ class AdapterTransportTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
 
-    def _adapter(self, mode: str = "success") -> harnesses.CopilotAdapter:
+    def _adapter(self, mode: str = "success") -> harness_copilot.CopilotAdapter:
         os.environ["FAKE_ACP_MODE"] = mode
         executable = self.tmp / "copilot"
         shutil.copyfile(FAKE_ACP_FIXTURE, executable)
         executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
-        return harnesses.CopilotAdapter(executable=str(executable))
+        return harness_copilot.CopilotAdapter(executable=str(executable))
 
-    def _run(self, adapter: harnesses.CopilotAdapter, **kwargs: Any) -> Any:
+    def _run(self, adapter: harness_copilot.CopilotAdapter, **kwargs: Any) -> Any:
         options: dict[str, Any] = {
             "cwd": self.tmp,
             "plan_dir": self.plan_dir,
@@ -860,7 +865,9 @@ class AdapterTransportTests(unittest.TestCase):
         self.assertNotIn("--acp", result.argv)
         self.assertIn("-p", result.argv)
         self.assertEqual(PROMPT, result.argv[-1])
-        self.assertIn(f"--available-tools={harnesses.COPILOT_AUDIT_TOOLS}", result.argv)
+        self.assertIn(
+            f"--available-tools={harness_copilot.COPILOT_AUDIT_TOOLS}", result.argv
+        )
         self.assertIn("--deny-tool=shell", result.argv)
         # Nothing spoke ACP, so the process recorded no handshake at all.
         self.assertIsNone(self._recorded()["client_capabilities"])

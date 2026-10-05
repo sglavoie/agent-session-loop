@@ -30,6 +30,7 @@ from agent_session_loop import (
     claude_stream,
     guidance_delivery,
     harness_claude,
+    harness_copilot,
     harnesses,
 )
 
@@ -1500,7 +1501,7 @@ class CopilotSteerRefusalTests(unittest.TestCase):
         The worker profile's ACP transport gives the same answers, proved
         against a live conversation in ``tests/test_asl_copilot_acp.py``.
         """
-        adapter = harnesses.CopilotAdapter(executable="copilot")
+        adapter = harness_copilot.CopilotAdapter(executable="copilot")
         transport = adapter.open_transport(
             process=SimpleNamespace(stdin=None),
             invocation=harnesses.HarnessInvocation(
@@ -1525,7 +1526,9 @@ class CopilotSteerRefusalTests(unittest.TestCase):
         self.assertFalse(outcome.retriable_in_turn)
 
     def test_a_copilot_worker_turn_speaks_acp_and_still_refuses_a_steer(self) -> None:
-        invocation = harnesses.CopilotAdapter(executable="copilot").build_invocation(
+        invocation = harness_copilot.CopilotAdapter(
+            executable="copilot"
+        ).build_invocation(
             cwd=Path("/tmp"), plan_dir=Path("/tmp/plan"), prompt="do the work"
         )
 
@@ -1536,7 +1539,9 @@ class CopilotSteerRefusalTests(unittest.TestCase):
         self.assertNotIn("do the work", invocation.argv)
 
     def test_an_audit_turn_stays_a_one_shot_process(self) -> None:
-        invocation = harnesses.CopilotAdapter(executable="copilot").build_invocation(
+        invocation = harness_copilot.CopilotAdapter(
+            executable="copilot"
+        ).build_invocation(
             cwd=Path("/tmp"),
             plan_dir=None,
             prompt="read the evidence",
