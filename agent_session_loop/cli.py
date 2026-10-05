@@ -262,13 +262,10 @@ def _group_epilogue(
     return "\n".join(lines)
 
 
-def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
-    parser = _AgentSessionLoopArgumentParser(
-        prog=prog,
-        description="Run split agent session plans one session at a time.",
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
+def _add_run_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """`asl run`, the loop itself."""
     run_parser = subparsers.add_parser(
         "run",
         help="Run pending session IDs from a split plan directory.",
@@ -276,6 +273,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     run_flags.add_run_arguments(run_parser, mode="cli")
     run_parser.set_defaults(handler_ref="runner:run_from_args")
 
+
+def _add_run_inspection_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """Read-only views of a run: guide, questions, verdict, status, tail, sessions."""
     supervisor_guide_parser = subparsers.add_parser(
         "supervisor-guide",
         help=(
@@ -429,6 +431,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     sessions_parser.set_defaults(handler_ref="session_overview:sessions_from_args")
 
+
+def _add_check_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """Checks: doctor, verify, contract-check, harness-compat, baseline."""
     doctor_parser = subparsers.add_parser(
         "doctor",
         help="Check harness and path prerequisites.",
@@ -632,6 +639,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     baseline_parser.set_defaults(handler_ref="baseline:baseline_from_args")
 
+
+def _add_plan_authoring_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """Authoring: split, prepare, expand-ingest, register-repositories, preflight."""
     split_parser = subparsers.add_parser(
         "split",
         help=(
@@ -1035,6 +1047,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     preflight_parser.set_defaults(handler_ref="preflight:preflight_from_args")
 
+
+def _add_storage_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """On-demand storage reclamation: compact-state and gc."""
     compact_state_parser = subparsers.add_parser(
         "compact-state",
         help=(
@@ -1107,6 +1124,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     gc_parser.set_defaults(handler_ref="retention:gc_from_args")
 
+
+def _add_maintenance_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """The nested `asl maintenance` group."""
     maintenance_parser = subparsers.add_parser(
         "maintenance",
         help=(
@@ -1300,6 +1322,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="maintenance:uninstall_from_args"
     )
 
+
+def _add_state_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """State-corpus commands: migrate-state and metrics."""
     migrate_state_parser = subparsers.add_parser(
         "migrate-state",
         help=(
@@ -1380,6 +1407,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     metrics_parser.set_defaults(handler_ref="metrics:metrics_from_args")
 
+
+def _add_workspace_recovery_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """Workspace recovery: commit, external changes, ref updates, unlock."""
     commit_parser = subparsers.add_parser(
         "commit",
         help=(
@@ -1557,6 +1589,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     unlock_parser.set_defaults(handler_ref="state:unlock_from_args")
 
+
+def _add_progress_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """Progress journal and plan listing: backfill-progress, progress, plans."""
     backfill_parser = subparsers.add_parser(
         "backfill-progress",
         help=(
@@ -1639,6 +1676,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     plans_parser.set_defaults(handler_ref="workbench:plans_from_args")
 
+
+def _add_bridge_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """The nested `asl bridge` group."""
     bridge_parser = subparsers.add_parser(
         "bridge",
         help="Serve the read-only NDJSON run projection to a supervision client.",
@@ -1679,6 +1721,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     bridge_serve_parser.set_defaults(handler_ref="bridge:bridge_serve_from_args")
 
+
+def _add_agent_mux_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """The nested `asl agent-mux` group."""
     agent_mux_parser = subparsers.add_parser(
         "agent-mux",
         help="Report and prepare this installation for the Agent Mux cockpit.",
@@ -1720,6 +1767,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     pairing_parser.set_defaults(handler_ref="agent_mux_pairing:pairing_from_args")
 
+
+def _add_diagnostics_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """The nested `asl diagnostics` group."""
     diagnostics_parser = subparsers.add_parser(
         "diagnostics",
         help="Publish this installation's sanitized diagnostics for other tools.",
@@ -1778,6 +1830,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="diagnostics_export:export_from_args"
     )
 
+
+def _add_overseer_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """The nested `asl overseer` group."""
     overseer_parser = subparsers.add_parser(
         "overseer",
         help="Watch authorized runs on behalf of an invoked overseer host agent.",
@@ -2280,6 +2337,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="overseer_cli:reconcile_from_args"
     )
 
+
+def _add_workbench_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """The nested `asl workbench` group."""
     workbench_parser = subparsers.add_parser(
         "workbench",
         help="Run the local Workbench HTTP control plane.",
@@ -2427,6 +2489,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="workbench:workbench_registry_from_args",
     )
 
+
+def _add_control_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """The nested `asl control` group."""
     control_parser = subparsers.add_parser(
         "control",
         help=(
@@ -2769,6 +2836,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="redirect_cli:control_recover_conversation_from_args",
     )
 
+
+def _add_inbox_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """The nested `asl inbox` group."""
     inbox_parser = subparsers.add_parser(
         "inbox",
         help="Write supervisor messages or read pending worker guidance.",
@@ -2919,6 +2991,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="mailbox_cli:inbox_acknowledge_from_args",
     )
 
+
+def _add_worker_message_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """Worker-side mailbox writes: ask and notify."""
     ask_parser = subparsers.add_parser(
         "ask",
         help=(
@@ -2971,6 +3048,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     notify_parser.set_defaults(handler_ref="mailbox_cli:notify_from_args")
 
+
+def _add_outbox_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """The nested `asl outbox` group."""
     outbox_parser = subparsers.add_parser(
         "outbox",
         help="Read worker questions or notices from the supervisor side.",
@@ -3048,6 +3130,11 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="mailbox_cli:outbox_supervise_from_args",
     )
 
+
+def _add_assurance_commands(
+    subparsers: argparse._SubParsersAction[_AgentSessionLoopArgumentParser],
+) -> None:
+    """The nested `asl assurance` group."""
     assurance_parser = subparsers.add_parser(
         "assurance",
         help="Browse the assurance inbox of audited runs and open issues.",
@@ -3383,6 +3470,34 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     assurance_reconcile_parser.set_defaults(
         handler_ref="assurance_cli:assurance_reconcile_from_args",
     )
+
+
+def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
+    parser = _AgentSessionLoopArgumentParser(
+        prog=prog,
+        description="Run split agent session plans one session at a time.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    _add_run_commands(subparsers)
+    _add_run_inspection_commands(subparsers)
+    _add_check_commands(subparsers)
+    _add_plan_authoring_commands(subparsers)
+    _add_storage_commands(subparsers)
+    _add_maintenance_commands(subparsers)
+    _add_state_commands(subparsers)
+    _add_workspace_recovery_commands(subparsers)
+    _add_progress_commands(subparsers)
+    _add_bridge_commands(subparsers)
+    _add_agent_mux_commands(subparsers)
+    _add_diagnostics_commands(subparsers)
+    _add_overseer_commands(subparsers)
+    _add_workbench_commands(subparsers)
+    _add_control_commands(subparsers)
+    _add_inbox_commands(subparsers)
+    _add_worker_message_commands(subparsers)
+    _add_outbox_commands(subparsers)
+    _add_assurance_commands(subparsers)
 
     return parser
 
