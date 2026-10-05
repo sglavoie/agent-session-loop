@@ -1312,14 +1312,12 @@ def _read_bytes_or_none(path: Path) -> bytes | None:
 
 def _write_publication_journal(directory: Path, journal: Mapping[str, Any]) -> None:
     """Publish the journal itself atomically, payloads already durable."""
-    temp_path = directory / f".{REPAIR_PUBLICATION_JOURNAL_NAME}.tmp"
-    with temp_path.open("w", encoding="utf-8") as handle:
-        json.dump(dict(journal), handle, sort_keys=True, separators=(",", ":"))
-        handle.write("\n")
-        handle.flush()
-        durability.fullsync(handle.fileno())
-    os.replace(temp_path, directory / REPAIR_PUBLICATION_JOURNAL_NAME)
-    plans._fsync_directory(directory)
+    durability.replace_text(
+        directory / REPAIR_PUBLICATION_JOURNAL_NAME,
+        json.dumps(dict(journal), sort_keys=True, separators=(",", ":")) + "\n",
+        sync_file=True,
+        sync_parent=True,
+    )
 
 
 def _open_publication_window(
@@ -1421,15 +1419,8 @@ def _restore_publication_image(
                     removed.append(relative)
                 continue
             content = (directory / str(payload)).read_bytes()
-            temp_path = destination.with_name(
-                f".{destination.name}.asl-repair-rollback.tmp"
-            )
             destination.parent.mkdir(parents=True, exist_ok=True)
-            with temp_path.open("wb") as handle:
-                handle.write(content)
-                handle.flush()
-                durability.fullsync(handle.fileno())
-            os.replace(temp_path, destination)
+            durability.replace_bytes(destination, content, sync_file=True)
             restored.append(relative)
         except OSError as error:
             errors.append(f"{relative}: {error}")
