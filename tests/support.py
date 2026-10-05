@@ -7,6 +7,7 @@ tests/test_asl_*.py subsystem modules.
 from __future__ import annotations
 
 import ast
+import atexit
 import errno
 import importlib.util
 import io
@@ -18,6 +19,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -318,44 +320,62 @@ def fake_commit_harness_env(
     return env
 
 
+_GIT_TEMPLATE_LOCK = threading.Lock()
+_git_template_dir: Path | None = None
+#: Passed on the command line, not written to the repository's config, so the
+#: copies stay identical to what ``git init`` produced. Without them ``git
+#: commit`` may start detached auto-maintenance in the template, whose lock
+#: files appear and vanish under a concurrent copy.
+_TEMPLATE_GIT_OPTIONS = ("-c", "maintenance.auto=false", "-c", "gc.auto=0")
+
+
+def _build_git_template() -> Path:
+    """The one-commit repository every ``init_git_repo`` call copies.
+
+    Five git subprocesses per repository dominated the suite's system time, so
+    they run once per process and each caller gets a copy. The template lives
+    in its own temporary directory, removed when the process exits.
+    """
+    global _git_template_dir
+    with _GIT_TEMPLATE_LOCK:
+        if _git_template_dir is not None:
+            return _git_template_dir
+        root = Path(tempfile.mkdtemp(prefix="asl-test-git-template-"))
+        atexit.register(shutil.rmtree, root, ignore_errors=True)
+        repo_dir = root / "repo"
+        repo_dir.mkdir()
+        for args in (
+            ["init"],
+            ["config", "user.email", "agent-session-loop@example.com"],
+            ["config", "user.name", "Agent Session Loop Tests"],
+        ):
+            subprocess.run(
+                ["git", *_TEMPLATE_GIT_OPTIONS, *args],
+                cwd=repo_dir,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+        (repo_dir / "README.md").write_text("test repo\n", encoding="utf-8")
+        for args in (["add", "README.md"], ["commit", "-m", "Initial commit"]):
+            subprocess.run(
+                ["git", *_TEMPLATE_GIT_OPTIONS, *args],
+                cwd=repo_dir,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+        _git_template_dir = repo_dir
+        return repo_dir
+
+
 def init_git_repo(repo_dir: Path) -> None:
-    repo_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["git", "init"],
-        cwd=repo_dir,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "agent-session-loop@example.com"],
-        cwd=repo_dir,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Agent Session Loop Tests"],
-        cwd=repo_dir,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    (repo_dir / "README.md").write_text("test repo\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "add", "README.md"],
-        cwd=repo_dir,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "Initial commit"],
-        cwd=repo_dir,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
+    """Make ``repo_dir`` a git repository with one commit of ``README.md``.
+
+    Copies a per-process template, so every repository a process creates has
+    the same initial commit SHA.
+    """
+    shutil.copytree(_build_git_template(), repo_dir, symlinks=True, dirs_exist_ok=True)
 
 
 DEFAULT_MULTI_REPO_SPECS: tuple[tuple[str, str, str], ...] = (
