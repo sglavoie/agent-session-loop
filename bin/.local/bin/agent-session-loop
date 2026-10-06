@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/homebrew/bin/python3
 """Repository wrapper for agent_session_loop.cli."""
 
 from __future__ import annotations
