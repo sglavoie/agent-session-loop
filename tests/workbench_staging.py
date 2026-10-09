@@ -207,6 +207,8 @@ def staging_site(site: IntegrationSite = PI_SITE) -> IntegrationSite:
         legacy_group_headings=(),
         notifications=None,
         deployment=DEPLOYMENT_STAGING,
+        # Production's bridge forwards to production's bind port only.
+        container_origin=None,
     )
 
 

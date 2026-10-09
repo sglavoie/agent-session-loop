@@ -162,9 +162,9 @@ class IntegrationSite:
     The fields split three ways, and the split is the point:
 
     * **Endpoint** -- ``host``, ``port``, ``bind_host``, ``bind_port``,
-      ``public_origin`` and the three paths. These describe a service that
-      already exists and are checked against its configuration before anything
-      is applied.
+      ``public_origin``, ``container_origin`` and the three paths. These
+      describe a service that already exists and are checked against its
+      configuration before anything is applied.
     * **Owned identity** -- ``publisher_user``, ``publisher_topic``, ``marker``,
       ``owned_group_headings`` and ``legacy_monitor_names``. These are how an
       already-installed resource is recognised. Changing one orphans a resource
@@ -205,6 +205,18 @@ class IntegrationSite:
     notifications: NotificationSite | None = None
     #: Which deployment this is, in :mod:`asl_workbench.notifications`' terms.
     deployment: str = DEPLOYMENT_PRODUCTION
+    #: Where the Homepage container reaches the service, when that is not
+    #: ``public_origin``. Since Tailscale 1.104 a Serve listener accepts only
+    #: connections arriving on ``tailscale0``, so a container on a Docker
+    #: bridge is refused at the tailnet address and goes through a bridge the
+    #: host's operator owns instead. ``None`` means the container uses
+    #: ``public_origin`` through the ``extra_hosts`` mapping written below.
+    container_origin: str | None = None
+
+    @property
+    def widget_origin(self) -> str:
+        """The origin the Homepage container's requests are made to."""
+        return self.container_origin or self.public_origin
 
     @property
     def authority(self) -> str:
@@ -284,6 +296,9 @@ PI_SITE = IntegrationSite(
     legacy_group_headings=("ASL companion",),
     notifications=PI_NOTIFICATION_SITE,
     deployment=DEPLOYMENT_PRODUCTION,
+    # The asl-companion-bridge sidecar in the Pi's homepage/compose.yaml
+    # (sglavoie_raspberry_pi), on the docker0 gateway, to 127.0.0.1:8766.
+    container_origin="http://host.docker.internal:8768",
 )
 
 
@@ -382,21 +397,25 @@ def homepage_documents(
     the tailnet address, because the container resolves neither. It is refused
     unless there is exactly one Homepage service and it has no ``extra_hosts``
     of its own: merging into an existing mapping is a decision an operator
-    makes, not one a tool makes silently.
+    makes, not one a tool makes silently. A site with a ``container_origin``
+    gets no compose edit at all: the container never uses the tailnet name,
+    and whatever routes it to that origin belongs to the operator.
     """
     if site.marker in compose or site.marker in services:
         raise IntegrationError("unowned Homepage configuration carries our marker")
     if any(heading + ":" in services for heading in site.owned_group_headings):
         raise IntegrationError("unowned Homepage group heading")
-    anchor = f"    container_name: {site.homepage_container}\n"
-    if compose.count(anchor) != 1 or "extra_hosts:" in compose:
-        raise IntegrationError(
-            "Homepage compose needs an explicitly reviewed host mapping"
+    if site.container_origin is None:
+        anchor = f"    container_name: {site.homepage_container}\n"
+        if compose.count(anchor) != 1 or "extra_hosts:" in compose:
+            raise IntegrationError(
+                "Homepage compose needs an explicitly reviewed host mapping"
+            )
+        compose = compose.replace(
+            anchor,
+            anchor
+            + f'    {site.marker}\n    extra_hosts:\n      - "{site.host}:{ip}"\n',
         )
-    compose = compose.replace(
-        anchor,
-        anchor + f'    {site.marker}\n    extra_hosts:\n      - "{site.host}:{ip}"\n',
-    )
     # A JSON quoted scalar is also a YAML scalar. Only a summary token enters
     # Homepage; it cannot authorize browser reads or connector writes.
     services += f"""\n{site.marker}
@@ -407,7 +426,7 @@ def homepage_documents(
         description: {site.entry_description}
         widget:
           type: customapi
-          url: {site.public_origin}{site.summary_path}
+          url: {site.widget_origin}{site.summary_path}
           refreshInterval: 15000
           headers:
             Authorization: {json.dumps("Bearer " + token)}
@@ -1027,7 +1046,7 @@ class Integrations:
                 "-e",
                 container_access_script(self.site),
             ],
-            data=json.dumps({"origin": self.site.public_origin, "token": token}).encode(
+            data=json.dumps({"origin": self.site.widget_origin, "token": token}).encode(
                 "utf-8"
             ),
         )
@@ -1247,6 +1266,7 @@ class Integrations:
             },
             COMPONENT_HOMEPAGE: {
                 "card": site.group_heading,
+                "widget_origin": site.widget_origin,
                 "files": [site.homepage_compose, site.homepage_services],
                 "token_role": ROLE_SUMMARY,
                 "restart": site.homepage_container,

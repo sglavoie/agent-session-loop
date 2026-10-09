@@ -427,6 +427,7 @@ class IntegrationCase(unittest.TestCase):
             self.integration.execute("apply", "homepage")
 
     def test_homepage_refuses_an_ambiguous_or_foreign_document(self) -> None:
+        tailnet = replace(PI_SITE, container_origin=None)
         for compose, services in (
             (COMPOSE + "    extra_hosts: []\n", SERVICES),
             (COMPOSE, SERVICES + PI_SITE.marker + "\n"),
@@ -436,7 +437,40 @@ class IntegrationCase(unittest.TestCase):
                 self.subTest(services=services),
                 self.assertRaises(IntegrationError),
             ):
-                homepage_documents(PI_SITE, compose, services, "100.1.2.3", "token")
+                homepage_documents(tailnet, compose, services, "100.1.2.3", "token")
+
+    def test_homepage_widget_uses_the_container_origin(self) -> None:
+        # Since Tailscale 1.104 a container is refused at the tailnet address,
+        # so the widget and the container check go through the host's bridge,
+        # and the compose file the bridge lives in is left to its operator.
+        compose = (
+            COMPOSE + "    extra_hosts:\n      - host.docker.internal:host-gateway\n"
+        )
+        after_compose, after_services = homepage_documents(
+            PI_SITE, compose, SERVICES, "100.1.2.3", "token"
+        )
+        self.assertEqual(compose, after_compose)
+        self.assertIn(
+            f"url: {PI_SITE.container_origin}{PI_SITE.summary_path}\n", after_services
+        )
+        self.assertIn(f"href: {PI_SITE.public_origin}\n", after_services)
+        self.integration.execute("apply", "homepage")
+        self.integration.execute("verify", "homepage")
+        checks = [
+            data
+            for argv, data in self.pi.calls
+            if argv[:4] == ["docker", "exec", "-i", PI_SITE.homepage_container]
+        ]
+        payload = json.loads(checks[-1] or b"")
+        self.assertEqual(PI_SITE.container_origin, payload["origin"])
+
+    def test_homepage_without_a_container_origin_maps_the_tailnet_name(self) -> None:
+        tailnet = replace(PI_SITE, container_origin=None)
+        compose, services = homepage_documents(
+            tailnet, COMPOSE, SERVICES, "100.1.2.3", "token"
+        )
+        self.assertIn(f'- "{PI_SITE.host}:100.1.2.3"\n', compose)
+        self.assertIn(f"url: {PI_SITE.public_origin}{PI_SITE.summary_path}\n", services)
 
     def test_homepage_recognises_the_heading_the_companion_installed(self) -> None:
         # The visible name changed; a card installed under the old one is still
