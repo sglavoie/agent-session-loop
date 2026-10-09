@@ -224,6 +224,7 @@ class PreflightTestCase(unittest.TestCase):
         review_base: Any = None,
         retained_scope_repair: dict[str, Any] | None = None,
         regenerated_write_scope: dict[str, Any] | None = None,
+        authorized_external_roots: tuple[Path, ...] = (),
     ) -> turn_preflight.TurnBaselines:
         return turn_preflight.capture_turn_baselines(
             self.ctx,
@@ -244,6 +245,7 @@ class PreflightTestCase(unittest.TestCase):
             active_turn={"turn_index": 1},
             live_turn=mock.Mock(),
             paths=self.paths(),
+            authorized_external_roots=authorized_external_roots,
         )
 
     def patch_digests(self, digests: dict[str, dict[str, Any]] | None = None) -> Any:
@@ -522,6 +524,30 @@ class ActiveTurnTests(PreflightTestCase):
 
 
 class LegacyBaselineTests(PreflightTestCase):
+    def test_explicit_external_roots_have_pre_turn_digests(self) -> None:
+        snapshot = self.snapshot()
+        approved = self.cwd.parent / "trial-data"
+        approved.mkdir()
+        record = approved / "trial.json"
+        record.write_text("{}")
+        with (
+            mock.patch.object(
+                handoff_guards,
+                "_capture_legacy_implementation_snapshot",
+                return_value=repository_evidence.WorkspaceSnapshot(),
+            ),
+            mock.patch.object(
+                workspace_evidence, "_workspace_snapshot_unavailable", return_value={}
+            ),
+        ):
+            baselines = self.baselines(
+                snapshot,
+                classification=self.classification(),
+                authorized_external_roots=(approved.resolve(),),
+            )
+        self.assertIn(str(approved.resolve()), baselines.external_digests)
+        self.assertIn(str(record.resolve()), baselines.external_digests)
+
     """The single-repository mode: one snapshot, or one fingerprint."""
 
     def test_an_implementation_turn_captures_the_legacy_snapshot(self) -> None:

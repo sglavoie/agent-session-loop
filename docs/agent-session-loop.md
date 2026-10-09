@@ -7415,6 +7415,20 @@ Common pause reasons:
   the `control_plane_mutated` list — so a permitted control-plane mutation is
   evidenced rather than assumed, and an audit-store write can no longer pass as
   workspace-clean silence.
+  When the task intentionally writes external data, an operator can relaunch
+  with repeatable `--external-write-root /absolute/directory` flags. Roots must
+  already exist and cannot be relative, globs, the home directory, or an
+  ancestor of the working directory. ASL pins canonical roots at admission,
+  persists them in `run_config` for `--resume`, and records bounded before/after
+  digests under `external_writes.authorized` and the
+  `authorized-external-data` classification. Root redirection and unreadable
+  roots remain unavailable; a symlink child pointing outside an approved root
+  receives no authority from that root. Repository and control-plane
+  classifications take precedence, and read-only reviews gain no write access.
+  An explicit flag on resume replaces the saved root list. Unlisted paths and
+  all existing repository/protected-path guards remain enforced. Approval does
+  not retroactively clear a rejected turn, commit retained work, or complete a
+  session; the next run uses a fresh guarded baseline.
 - `guard-protected-path-changed`: an implementation turn finished with a path
   an operator froze through `asl control guard add --protect-path` differing
   from its turn-start state. Checked after `workspace-write-scope-violation`

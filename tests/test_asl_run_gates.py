@@ -2751,6 +2751,31 @@ class LegacyImplementationGuardTests(unittest.TestCase):
             [entry["ref"] for entry in changes["refs_added"]],
         )
 
+    def test_authorized_external_data_survives_the_full_run_guard(self) -> None:
+        trial = self.tmp_path.resolve() / "trial"
+        trial.mkdir()
+        evidence = trial / "evidence.json"
+        evidence.write_text("before\n", encoding="utf-8")
+        args = self._args()
+        args.external_write_root = [str(trial)]
+
+        def edit_trial(*_args: object, **_kwargs: object) -> Any:
+            evidence.write_text("after\n", encoding="utf-8")
+            return dataclasses.replace(
+                self._mark_complete(), last_message=f"Updated `{evidence}`.\n"
+            )
+
+        with (
+            mock.patch.object(self, "_args", return_value=args),
+            mock.patch.object(harnesses, "run_harness", side_effect=edit_trial),
+        ):
+            exit_code, payload = self._invoke("authorized-external-data")
+        self.assertEqual(0, exit_code)
+        guard = payload["turns"][0]["workspace_write_guard"]
+        self.assertTrue(guard["passed"])
+        record = guard["external_writes"]["authorized"][str(evidence)]
+        self.assertNotEqual(record["before"]["sha256"], record["after"]["sha256"])
+
     def test_a_write_into_an_unobserved_repository_fails_the_guard_closed(
         self,
     ) -> None:

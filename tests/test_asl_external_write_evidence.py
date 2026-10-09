@@ -442,6 +442,65 @@ class UnclassifiedLaneTests(unittest.TestCase):
             unavailable[self._canonical(self.foreign_record)]["reason"],
         )
 
+    def test_explicit_data_root_records_writes_but_does_not_authorize_siblings(
+        self,
+    ) -> None:
+        sibling = self.root / "audit-store-other"
+        sibling.mkdir()
+        other = sibling / "record.json"
+        other.write_text("{}")
+        before = external_write_evidence._capture_external_write_digests(
+            (self.foreign_store,)
+        )
+        self.foreign_record.write_text('{"changed":true}')
+        evidence = self._evidence(
+            f"Wrote `{self.foreign_record}` and `{other}`.",
+            authorized_roots=(self.foreign_store,),
+            digests_before=before,
+        )
+        record = evidence["authorized"][str(self.foreign_record)]
+        self.assertNotEqual(record["before"], record["after"])
+        self.assertEqual(
+            "authorized-external-data", evidence["paths"][str(self.foreign_record)]
+        )
+        self.assertNotIn(str(self.foreign_record), evidence["control_plane"])
+        self.assertEqual({str(other)}, set(evidence["unclassified"]))
+
+    def test_symlink_beneath_authorized_root_cannot_escape(self) -> None:
+        outside = self.root / "outside.json"
+        outside.write_text("{}")
+        link = self.foreign_store / "escape.json"
+        link.symlink_to(outside)
+        evidence = self._evidence(
+            f"Wrote `{link}`.", authorized_roots=(self.foreign_store,)
+        )
+        self.assertIn(str(outside), evidence["unclassified"])
+
+    def test_redirecting_the_authorized_root_fails_closed(self) -> None:
+        approved = self.root / "approved"
+        approved.mkdir()
+        before = external_write_evidence._capture_external_write_digests((approved,))
+        approved.rmdir()
+        approved.symlink_to(self.foreign_store, target_is_directory=True)
+        evidence = self._evidence(
+            "No paths mentioned.", authorized_roots=(approved,), digests_before=before
+        )
+        self.assertEqual(
+            "external-write-root-unavailable",
+            evidence["unclassified"][str(approved)]["reason"],
+        )
+
+    def test_authorization_does_not_replace_repository_classification(self) -> None:
+        result = external_write_evidence._classify_external_path(
+            _resolved(self.foreign_record, git_root=self.foreign_store),
+            control_plane_roots=(),
+            repository_roots=(self.foreign_store,),
+            workspace_root=self.workspace_root,
+            ephemeral_roots=(),
+            authorized_roots=(self.foreign_store,),
+        )
+        self.assertEqual("workspace-repository", result)
+
     def test_a_path_named_but_not_written_this_turn_is_counted_not_charged(
         self,
     ) -> None:

@@ -366,6 +366,7 @@ def capture_turn_baselines(
     active_turn: dict[str, Any],
     live_turn: turn_execution.LiveTurn,
     paths: dict[str, Path],
+    authorized_external_roots: tuple[Path, ...] = (),
 ) -> TurnBaselines:
     """Capture the turn's before-images and arm the crash-path guard.
 
@@ -380,8 +381,11 @@ def capture_turn_baselines(
     # mutation there has no other evidence.
     turn_started_ns = time.time_ns()
     external_digests_before = external_write_evidence._capture_external_write_digests(
-        external_write_evidence._control_plane_digest_roots(
-            snapshot.plan_dir, state_dir_arg, run_dir=ctx.run_dir
+        (
+            *external_write_evidence._control_plane_digest_roots(
+                snapshot.plan_dir, state_dir_arg, run_dir=ctx.run_dir
+            ),
+            *authorized_external_roots,
         ),
         shallow_roots=(
             external_write_evidence._control_plane_shallow_digest_roots(state_dir_arg)

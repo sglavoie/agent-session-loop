@@ -291,6 +291,12 @@ def _enforce_workspace_write_guard(
             run_dir=run_dir,
             digests_before=external_digests_before,
             turn_started_ns=turn_started_ns,
+            authorized_roots=tuple(
+                Path(value)
+                for value in payload.get("run_config", {}).get(
+                    "external_write_root", ()
+                )
+            ),
         ),
         external_change_aliases=external_change_aliases,
     )
@@ -456,6 +462,12 @@ def _enforce_legacy_implementation_write_guard(
             run_dir=run_dir,
             digests_before=external_digests_before,
             turn_started_ns=turn_started_ns,
+            authorized_roots=tuple(
+                Path(value)
+                for value in payload.get("run_config", {}).get(
+                    "external_write_root", ()
+                )
+            ),
         ),
     )
     if evidence["passed"]:

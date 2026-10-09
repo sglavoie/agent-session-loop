@@ -354,6 +354,11 @@ def _apply_resume_config(
             command=_reconstruct_resume_command(args.plan_dir, state_dir_arg, payload),
         )
     explicit = _explicit_resume_dests(run_argv)
+    args._restored_external_write_roots = (
+        run_config.get("external_write_root", [])
+        if "external_write_root" not in explicit
+        else []
+    )
     args._resume_workspace_config = {
         "workspace_root": run_config.get("workspace_root"),
         "registry_digest": run_config.get("registry_digest"),

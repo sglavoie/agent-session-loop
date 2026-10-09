@@ -2629,6 +2629,12 @@ def run_locked(
                 active_turn=active_turn,
                 live_turn=live_turn,
                 paths=paths,
+                authorized_external_roots=tuple(
+                    Path(value)
+                    for value in ctx.payload["run_config"].get(
+                        "external_write_root", ()
+                    )
+                ),
             )
             if baselines.paused:
                 _release_carried_corrections(

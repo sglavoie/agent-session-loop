@@ -1353,6 +1353,22 @@ class ExternalWriteEvidenceTests(unittest.TestCase):
         self.assertEqual([], guard["violations"])
         self.assertEqual({}, guard["changed"])
 
+    def test_explicit_external_data_authority_clears_only_that_write(self) -> None:
+        evidence = self._evidence(
+            f"Wrote `{self.foreign_record}`.",
+            authorized_roots=(self.foreign_store.resolve(),),
+        )
+        self.assertTrue(self._legacy_guard(external_writes=evidence)["passed"])
+        unapproved = self.root / "another-store.json"
+        unapproved.write_text("{}")
+        evidence = self._evidence(
+            f"Wrote `{self.foreign_record}` and `{unapproved}`.",
+            authorized_roots=(self.foreign_store.resolve(),),
+        )
+        guard = self._legacy_guard(external_writes=evidence)
+        self.assertFalse(guard["passed"])
+        self.assertEqual({str(unapproved.resolve())}, set(guard["unavailable"]))
+
     def test_a_path_named_but_not_written_this_turn_is_not_charged(self) -> None:
         started = time.time_ns()
         os.utime(self.foreign_record, ns=(started - 10**9, started - 10**9))

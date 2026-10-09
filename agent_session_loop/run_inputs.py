@@ -190,6 +190,26 @@ def _validate_run_inputs(
 
     resolve_review_guard_excludes(args)
 
+    # Pin operator-selected data roots before any worker runs. Relative paths,
+    # broad ancestors and glob patterns cannot silently widen this authority.
+    external_roots: set[str] = set()
+    for value in getattr(args, "external_write_root", None) or ():
+        path = Path(value).expanduser()
+        if not path.is_absolute() or any(char in str(path) for char in "*?[]"):
+            raise RunError("--external-write-root requires an absolute directory path")
+        canonical = workspaces.canonicalize_filesystem_path(path)
+        if (
+            value in getattr(args, "_restored_external_write_roots", ())
+            and str(canonical) != value
+        ):
+            raise RunError(f"saved external write root changed its target: {path}")
+        if not canonical.is_dir():
+            raise RunError(f"external write root is not an existing directory: {path}")
+        if canonical == Path.home().resolve() or cwd.is_relative_to(canonical):
+            raise RunError(f"external write root is too broad: {path}")
+        external_roots.add(str(canonical))
+    args.external_write_root = sorted(external_roots)
+
     timeout = getattr(args, "timeout", None)
     max_sessions = getattr(args, "max_sessions", None)
     return cwd, timeout, max_sessions, commit_mode

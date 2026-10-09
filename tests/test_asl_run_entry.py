@@ -296,6 +296,20 @@ class LockedRunSeamTests(unittest.TestCase):
 class ResumeOverlayTests(unittest.TestCase):
     """Explicit flags win; a dest the persisted block omits is skipped."""
 
+    def test_external_data_roots_resume_and_explicit_roots_replace_them(self) -> None:
+        fixture = _EntryFixture(self, ("pending",))
+        fixture.write_state_payload(
+            {"run_config": {"external_write_root": ["/old/trial"]}}
+        )
+        tokens = fixture.tokens("--resume")
+        args = run_entry._apply_resume_config(_parse(tokens), tokens[1:])
+        self.assertEqual(["/old/trial"], args.external_write_root)
+        self.assertEqual(["/old/trial"], args._restored_external_write_roots)
+        tokens = fixture.tokens("--resume", "--external-write-root", "/new/trial")
+        args = run_entry._apply_resume_config(_parse(tokens), tokens[1:])
+        self.assertEqual(["/new/trial"], args.external_write_root)
+        self.assertEqual([], args._restored_external_write_roots)
+
     def test_the_overlay_dests_are_derived_from_the_flag_spec(self) -> None:
         expected: list[str] = []
         for flag in run_flags.RUN_FLAG_SPEC:

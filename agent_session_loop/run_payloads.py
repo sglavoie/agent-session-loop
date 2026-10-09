@@ -169,6 +169,7 @@ def _run_config_payload(
         "allow_external_changes": sorted(
             set(getattr(args, "allow_external_changes", None) or ())
         ),
+        "external_write_root": list(getattr(args, "external_write_root", None) or ()),
         "commit_mode": commit_mode,
         "repair_commit_mode": run_selection.REPAIR_COMMIT_MODE_PER_CHILD,
         "unsafe_bypass": run_selection._unsafe_bypass(args),

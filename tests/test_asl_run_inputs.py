@@ -106,6 +106,43 @@ class RunInputsBoundaryTests(unittest.TestCase):
 class RunAdmissionTests(unittest.TestCase):
     """``_validate_run_inputs`` refuses in a fixed order, for stated reasons."""
 
+    def test_external_roots_are_explicit_canonical_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            repo = root / "repo"
+            repo.mkdir()
+            data = root / "trial"
+            data.mkdir()
+            link = root / "trial-link"
+            link.symlink_to(data, target_is_directory=True)
+            args = _args(cwd=str(repo), external_write_root=[str(link), str(data)])
+            run_inputs._validate_run_inputs(
+                args, resolve_review_guard_excludes=_RecordingResolver()
+            )
+            self.assertEqual([str(data)], args.external_write_root)
+            with self.assertRaisesRegex(RunError, "changed its target"):
+                run_inputs._validate_run_inputs(
+                    _args(
+                        cwd=str(repo),
+                        external_write_root=[str(link)],
+                        _restored_external_write_roots=[str(link)],
+                    ),
+                    resolve_review_guard_excludes=_RecordingResolver(),
+                )
+            for invalid in (
+                "relative",
+                str(root),
+                str(repo),
+                str(root / "missing"),
+                str(root / "*"),
+                str(Path.home()),
+            ):
+                with self.subTest(invalid=invalid), self.assertRaises(RunError):
+                    run_inputs._validate_run_inputs(
+                        _args(cwd=str(repo), external_write_root=[invalid]),
+                        resolve_review_guard_excludes=_RecordingResolver(),
+                    )
+
     def test_a_valid_namespace_resolves_the_canonical_cwd_and_flags(self) -> None:
         resolver = _RecordingResolver()
         with tempfile.TemporaryDirectory() as tmp:

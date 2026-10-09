@@ -1,5 +1,14 @@
 # Agent Session Loop (ASL)
 
+Implementation runs can explicitly authorize an external data directory with
+`--external-write-root /absolute/directory` (repeatable). Admission pins existing,
+narrow canonical roots; `run_config` retains them for `--resume`. The external
+write guard records their before/after digests as `authorized-external-data`,
+including roots omitted from the worker's message. Other paths remain subject
+to the existing guard; this grants no repository or review write authority.
+Symlink escapes and redirected or unreadable roots fail closed. This option
+does not waive a prior incident or mark a session complete.
+
 The bridge's bounded snapshot reserves space for running and verifying work,
 then the freshest dated blockers, before undated backlog. The selected rows
 retain normal urgency order. The 200-row and frame-size ceilings still apply;

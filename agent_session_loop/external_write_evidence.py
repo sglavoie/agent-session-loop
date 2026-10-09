@@ -114,6 +114,7 @@ EXTERNAL_WRITE_CLASSES: tuple[str, ...] = (
     "unregistered-repository",
     "plan-provenance",
     "system-path",
+    "authorized-external-data",
     "ephemeral-path",
     "unresolved",
     EXTERNAL_WRITE_UNCLASSIFIED,
@@ -268,6 +269,7 @@ def _classify_external_path(
     repository_roots: Sequence[Path],
     workspace_root: Path,
     ephemeral_roots: Sequence[Path],
+    authorized_roots: Sequence[Path] = (),
 ) -> str:
     """Name the authority a path answers to, or report it unclassified.
 
@@ -316,6 +318,8 @@ def _classify_external_path(
         # An ancestor of the workspace: `$HOME` itself when a repository is
         # registered beneath it. Naming a container is not writing into it.
         return "workspace-unregistered-path"
+    if any(path.is_relative_to(root) for root in authorized_roots):
+        return "authorized-external-data"
     if any(
         workspaces.is_descendant(path, root, allow_equal=True)
         for root in ephemeral_roots
@@ -335,6 +339,7 @@ def _external_write_evidence(
     digests_before: Mapping[str, Mapping[str, Any]],
     turn_started_ns: int | None,
     ephemeral_roots: Sequence[Path] | None = None,
+    authorized_roots: Sequence[Path] = (),
     limit: int = EXTERNAL_WRITE_MANIFEST_MAX_ENTRIES,
 ) -> dict[str, Any]:
     """Classify and digest every external path this turn named.
@@ -378,6 +383,7 @@ def _external_write_evidence(
 
     counts = dict.fromkeys(EXTERNAL_WRITE_CLASSES, 0)
     control_plane: dict[str, dict[str, Any]] = {}
+    authorized: dict[str, dict[str, Any]] = {}
     unclassified: dict[str, dict[str, Any]] = {}
     unclassified_unwritten: dict[str, dict[str, Any]] = {}
     mentioned: dict[str, str] = {}
@@ -389,6 +395,7 @@ def _external_write_evidence(
             repository_roots=known_repositories,
             workspace_root=workspace_root,
             ephemeral_roots=ephemeral_roots,
+            authorized_roots=authorized_roots,
         )
         assert resolved.resolved is not None or classification == "unresolved"
         key = repository_intent.redact_credentials(
@@ -401,8 +408,9 @@ def _external_write_evidence(
         seen.add(key)
         counts[classification] += 1
         mentioned[key] = classification
-        if classification == "control-plane":
-            control_plane[key] = {
+        if classification in ("control-plane", "authorized-external-data"):
+            records = control_plane if classification == "control-plane" else authorized
+            records[key] = {
                 "before": dict(digests_before.get(key, {"observed": False})),
                 "after": _external_path_digest(Path(str(resolved.resolved))),
                 "surface": resolved.candidate.surface,
@@ -437,16 +445,43 @@ def _external_write_evidence(
     # Roots the turn never named are still compared, because the whole point is
     # that a control-plane write leaves no trace in the paths a turn declares.
     for key, before in digests_before.items():
-        if key in control_plane:
+        if key in control_plane or key in authorized:
             continue
         after = _external_path_digest(Path(key))
         if after == dict(before):
             continue
-        control_plane[key] = {
+        is_authorized = any(Path(key).is_relative_to(root) for root in authorized_roots)
+        is_control = any(Path(key).is_relative_to(root) for root in control_plane_roots)
+        records = authorized if is_authorized and not is_control else control_plane
+        records[key] = {
             "before": dict(before),
             "after": after,
-            "surface": "control-plane-root",
+            "surface": "authorized-root"
+            if records is authorized
+            else "control-plane-root",
         }
+
+    # A worker must not redirect an approved root or turn an unreadable digest
+    # into proof of an authorized write. Approval is pinned to the canonical
+    # root selected before the turn, not to a mutable symlink spelling.
+    for root in authorized_roots:
+        key = repository_intent.redact_credentials(str(root))
+        after = _external_path_digest(root)
+        if workspaces.canonicalize_filesystem_path(root) != root or after.get(
+            "unavailable"
+        ):
+            unclassified[key] = {
+                "reason": "external-write-root-unavailable",
+                "after": after,
+            }
+        authorized.setdefault(
+            key,
+            {
+                "before": dict(digests_before.get(key, {"observed": False})),
+                "after": after,
+                "surface": "authorized-root",
+            },
+        )
 
     mutated_control_plane = sorted(
         key
@@ -462,6 +497,9 @@ def _external_write_evidence(
         "classified": {name: counts[name] for name in EXTERNAL_WRITE_CLASSES},
         "control_plane": {key: control_plane[key] for key in reported},
         "control_plane_mutated": mutated_control_plane[:limit],
+        "authorized_roots": [str(root) for root in authorized_roots],
+        "authorized": {key: authorized[key] for key in sorted(authorized)[:limit]},
+        "authorized_omitted": max(0, len(authorized) - limit),
         "unclassified": unclassified,
         "unclassified_unwritten": {
             key: unclassified_unwritten[key]
@@ -531,6 +569,7 @@ def _turn_external_write_evidence(
     run_dir: Path | None,
     digests_before: Mapping[str, Mapping[str, Any]] | None,
     turn_started_ns: int | None,
+    authorized_roots: Sequence[Path] = (),
 ) -> dict[str, Any]:
     """Build one turn's external-write verdict for either guard mode."""
     return _external_write_evidence(
@@ -544,4 +583,5 @@ def _turn_external_write_evidence(
         provenance_roots=preflight.plan_provenance_exempt_roots(plan_dir),
         digests_before=digests_before if digests_before is not None else {},
         turn_started_ns=turn_started_ns,
+        authorized_roots=authorized_roots,
     )
