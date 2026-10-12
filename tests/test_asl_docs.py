@@ -60,6 +60,7 @@ from agent_session_loop import (
     workbench_workspace,
 )
 from tests import run_suite
+from tests.asl_docs_support import read_asl_reference, read_repo_text
 from tests.support import (
     REPO_ROOT,
 )
@@ -73,7 +74,7 @@ class SkillInstructionTests(unittest.TestCase):
     def test_contract_path_rules_distinguish_registered_and_legacy_plans(
         self,
     ) -> None:
-        docs = (REPO_ROOT / "docs/agent-session-loop.md").read_text(encoding="utf-8")
+        docs = read_asl_reference()
         split_skill = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
             encoding="utf-8"
         )
@@ -290,7 +291,7 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("never raises this finding", surfaces["split"])
 
     def test_docs_describe_the_automatic_registry_migration(self) -> None:
-        docs = (REPO_ROOT / "docs/agent-session-loop.md").read_text(encoding="utf-8")
+        docs = read_asl_reference()
         readme = (REPO_ROOT / "agent_session_loop/README.md").read_text(
             encoding="utf-8"
         )
@@ -393,7 +394,7 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("one `line <N>: <category>` line per repair", text)
 
     def test_docs_document_split_check_lint_contract(self) -> None:
-        text = (REPO_ROOT / "docs/agent-session-loop.md").read_text(encoding="utf-8")
+        text = read_asl_reference()
 
         self.assertIn("`split --check` lints a source plan's session headings", text)
         self.assertIn("It needs no `--contracts-file`", text)
@@ -409,7 +410,7 @@ class SkillInstructionTests(unittest.TestCase):
         )
 
     def test_docs_name_every_lint_category(self) -> None:
-        text = (REPO_ROOT / "docs/agent-session-loop.md").read_text(encoding="utf-8")
+        text = read_asl_reference()
 
         categories = [
             value
@@ -421,7 +422,7 @@ class SkillInstructionTests(unittest.TestCase):
             self.assertIn(f"`{category}`", text)
 
     def test_docs_name_every_preflight_category_and_no_retired_one(self) -> None:
-        text = (REPO_ROOT / "docs/agent-session-loop.md").read_text(encoding="utf-8")
+        text = read_asl_reference()
 
         for category in preflight.PREFLIGHT_CATEGORIES:
             self.assertIn(f"`{category}`", text)
@@ -431,7 +432,7 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertNotIn("env-spec", text)
 
     def test_docs_document_every_asl_commit_mode(self) -> None:
-        text = (REPO_ROOT / "docs/agent-session-loop.md").read_text(encoding="utf-8")
+        text = read_asl_reference()
 
         self.assertIn(
             "asl commit [PATH] [--yes] [--verify|--no-verify] [--staged] [--dry-run]",
@@ -898,8 +899,7 @@ class HarnessDocsRegressionTests(unittest.TestCase):
     """Lock harness documentation expectations."""
 
     def _read(self, relative: str) -> str:
-        path = REPO_ROOT / relative
-        return path.read_text(encoding="utf-8")
+        return read_repo_text(relative)
 
     def test_docs_describe_copilot_no_unsafe_bypass_noninteractive_expectation(
         self,
@@ -1446,7 +1446,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
     """Lock the final mailbox/model-control public contract."""
 
     def _read(self, relative: str) -> str:
-        return (REPO_ROOT / relative).read_text(encoding="utf-8")
+        return read_repo_text(relative)
 
     def test_command_synopsis_exposes_final_mailbox_surface(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
@@ -3057,8 +3057,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
     """
 
     def _read(self, relative: str) -> str:
-        path = REPO_ROOT / relative
-        return path.read_text(encoding="utf-8")
+        return read_repo_text(relative)
 
     def test_guide_documents_workbench_cli_surface(self) -> None:
         guide = self._read(ASL_GUIDE)
@@ -3634,9 +3633,7 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.docs = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(
-            encoding="utf-8"
-        )
+        cls.docs = read_asl_reference()
         cls.guide = (REPO_ROOT / ASL_GUIDE).read_text(encoding="utf-8")
         cls.justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
 
@@ -4389,9 +4386,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.docs = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(
-            encoding="utf-8"
-        )
+        cls.docs = read_asl_reference()
         cls.guide = (REPO_ROOT / ASL_GUIDE).read_text(encoding="utf-8")
         cls.package_readme = (REPO_ROOT / "agent_session_loop" / "README.md").read_text(
             encoding="utf-8"
@@ -4568,9 +4563,7 @@ class TimingComparisonDocsRegressionTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.docs = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(
-            encoding="utf-8"
-        )
+        cls.docs = read_asl_reference()
 
     def test_docs_name_the_json_paths_a_comparison_reads(self) -> None:
         # A comparison procedure that names a path the report does not emit is

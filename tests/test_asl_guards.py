@@ -33,7 +33,8 @@ from agent_session_loop import (
     run_coordination,
     state,
 )
-from tests.support import REPO_ROOT, _write_lock_file, _write_state_payload, write_plan
+from tests.asl_docs_support import read_asl_reference
+from tests.support import _write_lock_file, _write_state_payload, write_plan
 
 FAKE_GIT_SOURCE = """#!/bin/sh
 echo "fake git $*"
@@ -1918,9 +1919,7 @@ class GuardDocumentationTests(unittest.TestCase):
     """Every stable reason a guard can produce is documented."""
 
     def test_guard_reasons_are_documented(self) -> None:
-        text = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(
-            encoding="utf-8"
-        )
+        text = read_asl_reference()
         reasons = [
             guards.REJECT_NO_ACTIVE_RUN,
             guards.REJECT_RUN_CHANGED,
@@ -1956,9 +1955,7 @@ class GuardDocumentationTests(unittest.TestCase):
         harness says it cannot enforce something. A reason with no
         documentation turns that honesty back into a mystery string.
         """
-        text = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(
-            encoding="utf-8"
-        )
+        text = read_asl_reference()
         reasons = [
             value
             for name, value in vars(guards).items()
@@ -1970,9 +1967,7 @@ class GuardDocumentationTests(unittest.TestCase):
                 self.assertIn(f"`{reason}`", text)
 
     def test_the_pause_reasons_a_path_guard_raises_are_documented(self) -> None:
-        text = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(
-            encoding="utf-8"
-        )
+        text = read_asl_reference()
         for reason in (
             events.PAUSE_REASON_GUARD_PROTECTED_PATH_CHANGED,
             events.PAUSE_REASON_GUARD_PROTECTED_PATH_UNAVAILABLE,
@@ -1981,9 +1976,7 @@ class GuardDocumentationTests(unittest.TestCase):
                 self.assertIn(f"`{reason}`", text)
 
     def test_protected_path_coverage_is_documented(self) -> None:
-        text = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(
-            encoding="utf-8"
-        )
+        text = read_asl_reference()
         self.assertIn("asl control guard add", text)
         self.assertIn("--protect-path", text)
         for claim in (
@@ -1994,9 +1987,7 @@ class GuardDocumentationTests(unittest.TestCase):
                 self.assertIn(claim, text)
 
     def test_bypasses_are_documented(self) -> None:
-        text = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(
-            encoding="utf-8"
-        )
+        text = read_asl_reference()
         self.assertIn("asl control guard add", text)
         for bypass in guards.COMMAND_GATE_COVERAGE["does_not_cover"]:
             with self.subTest(bypass=bypass):
