@@ -3,7 +3,8 @@
 The behavioural coverage of each ending already lives where it always has —
 ``tests/test_asl_assurance_lifecycle.py`` drives the terminal path and reads its
 audit back, ``tests/test_asl_pause_ux.py`` owns what a pause tells an operator,
-and ``tests/test_asl_control.py`` owns the stop and abort a supervisor asks for.
+and ``tests/test_asl_control_abort_turn.py`` owns the stop and abort a supervisor
+asks for.
 What is asserted here is the contract those modules cannot state, because they
 exercise the run rather than the boundary:
 

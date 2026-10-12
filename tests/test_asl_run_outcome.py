@@ -3,8 +3,8 @@
 The behavioural coverage of the outcome printer already exists and stays where
 it is: `tests/test_asl_pause_ux.py` owns the paused text output and the
 questions hint, `tests/test_asl_cli.py` owns the `--dry-run` preview lines, and
-`tests/test_asl_control.py` drives a real run through `_emit_run_payload` while
-the lock is held open. None of them can cheaply state what this module actually
+`tests/test_asl_control_signal.py` drives a real run through `_emit_run_payload`
+while the lock is held open. None of them can cheaply state what this module actually
 owns, which is *the last thing a run says on the one path where nothing else
 can be said*, so that is what is stated here.
 

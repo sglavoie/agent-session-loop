@@ -196,6 +196,7 @@ _BRIDGE_TESTS = "scripts:tests/test_asl_bridge_server.py"
 _DOCS_TESTS = "scripts:tests/test_asl_docs.py"
 _CLI_TESTS = "scripts:tests/test_asl_cli.py"
 _CONTROL_TESTS = "scripts:tests/test_workbench_controls.py"
+_CONTROL_CLI_TESTS = "scripts:tests/test_asl_control_cli_1.py"
 _STORE_TESTS = "scripts:tests/test_workbench_store.py"
 _TRANSPORT_TESTS = "scripts:tests/test_workbench_transport_contract.py"
 _CONNECTOR_TESTS = "scripts:tests/test_workbench_connector.py"
@@ -515,17 +516,17 @@ CAPABILITIES: tuple[Capability, ...] = (
     _http(
         "POST /api/control/stop-after-current",
         "Queue a stop that lands after the in-flight turn settles.",
-        coverage=(_SERVER_TESTS, "scripts:tests/test_asl_control.py", _CONTROL_TESTS),
+        coverage=(_SERVER_TESTS, _CONTROL_CLI_TESTS, _CONTROL_TESTS),
     ),
     _http(
         "POST /api/control/abort",
         "Abort the in-flight turn under ASL's default grace.",
-        coverage=(_SERVER_TESTS, "scripts:tests/test_asl_control.py", _CONTROL_TESTS),
+        coverage=(_SERVER_TESTS, _CONTROL_CLI_TESTS, _CONTROL_TESTS),
     ),
     _http(
         "POST /api/control/select-harness",
         "Choose the harness a paused run resumes under.",
-        coverage=(_SERVER_TESTS, "scripts:tests/test_asl_control.py", _CONTROL_TESTS),
+        coverage=(_SERVER_TESTS, _CONTROL_CLI_TESTS, _CONTROL_TESTS),
     ),
     _http(
         "POST /api/control/redirect",
@@ -975,7 +976,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         authority=AUTHORITY_ASL,
         regression_coverage=(
             _BRIDGE_TESTS,
-            "scripts:tests/test_asl_control.py",
+            _CONTROL_CLI_TESTS,
             _CONTROL_TESTS,
         ),
     ),
