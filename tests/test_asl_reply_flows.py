@@ -58,7 +58,7 @@ from tests.support import (
 # This module's shard has been measured at 426s there against 190s bare, and
 # the former inline 5-10s windows were close enough to real latency to fail as
 # a timeout rather than as the assertion each test actually makes. Like the
-# bounds in tests/test_asl_harness_integration.py this is a hang backstop, not
+# bounds in tests/test_asl_harness_*.py this is a hang backstop, not
 # a latency assertion: it exists so a runner that never publishes surfaces as a
 # failure instead of running out the suite's own clock.
 QUESTION_PUBLISH_TIMEOUT_SECONDS = 120
@@ -69,7 +69,7 @@ HELPER_THREAD_JOIN_TIMEOUT_SECONDS = 120
 
 # A full ``agent_session_loop`` invocation driven as a subprocess. Same
 # reasoning as the bound above, and the same value as the constant of this name
-# in tests/test_asl_harness_integration.py: these invocations take a few
+# in tests/test_asl_harness_*.py: these invocations take a few
 # seconds idle and half again that under the parallel shards, so the former
 # 10-30s bounds were latency assertions by accident.
 LOOP_RUN_TIMEOUT_SECONDS = 120

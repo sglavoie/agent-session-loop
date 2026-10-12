@@ -2,7 +2,7 @@
 
 The behavioural coverage of these decisions lives where it always has —
 ``tests/test_asl_spark.py`` routes whole runs through Spark precedence,
-``tests/test_asl_harness_integration.py`` drives real harness preflight, and
+``tests/test_asl_harness_*.py`` drives real harness preflight, and
 ``tests/test_asl_control_run_control.py`` exercises live overrides. What is asserted
 here is the boundary those modules cannot state, because they exercise the loop
 rather than the seam:

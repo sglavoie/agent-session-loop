@@ -1,7 +1,7 @@
 """The run's terminal surface: one stderr handle, one lock, one voice.
 
 The behavioural coverage of what an operator is *told* lives where it always
-has — ``tests/test_asl_harness_integration.py`` drives whole runs and reads
+has — ``tests/test_asl_harness_*.py`` drives whole runs and reads
 their progress lines back, and ``tests/test_asl_turn_commit.py`` owns the
 sentences a refused commit prints. What is asserted here is the contract those
 modules cannot state, because they exercise the run rather than the seam:

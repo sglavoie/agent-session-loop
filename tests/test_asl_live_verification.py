@@ -1,7 +1,7 @@
 """The two live records a run publishes when no turn is in flight.
 
 The behavioural coverage of what those records *say* lives where it always has
-— ``tests/test_asl_harness_integration.py`` drives whole verification recipes
+— ``tests/test_asl_harness_*.py`` drives whole verification recipes
 and reads their state, events and progress lines back, and
 ``tests/test_asl_assurance_lifecycle.py`` owns the terminal phase an audit runs
 inside. What is asserted here is the contract those modules cannot state,
