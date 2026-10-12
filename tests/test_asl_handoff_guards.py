@@ -1,9 +1,9 @@
 """What a turn's completion claim has to survive, asserted at the boundary.
 
 The behavioural coverage of the guards themselves already lives where it always
-has — ``tests/test_asl_run_gates.py`` drives real runs into the plan-artifact
-and mailbox refusals, ``tests/test_asl_review.py`` and
-``tests/test_asl_review_lifecycle.py`` own the review-mutation guard's run-level
+has — ``tests/test_asl_run_handoff_status.py`` drives real runs into the plan-artifact
+and mailbox refusals, ``tests/test_asl_review_*.py`` and
+``tests/test_asl_review_lifecycle_*.py`` own the review-mutation guard's run-level
 accounting, and ``tests/test_asl_progress.py`` owns what an operator reads out
 of ``progress.md``. What is asserted here is the contract those modules cannot
 state, because they exercise the run rather than the boundary:

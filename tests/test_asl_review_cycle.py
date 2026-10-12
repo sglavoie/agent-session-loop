@@ -1,8 +1,8 @@
 """What survives a review verdict, asserted at the boundary rather than a run.
 
 The behavioural coverage of the repair/rereview loop already lives where it
-always has — ``tests/test_asl_review.py`` owns the cycle accounting,
-``tests/test_asl_review_lifecycle.py`` drives real runs through reopen,
+always has — ``tests/test_asl_review_*.py`` owns the cycle accounting,
+``tests/test_asl_review_lifecycle_*.py`` drives real runs through reopen,
 materialization and pause, and ``tests/test_asl_cli.py`` owns the run JSON
 those paths publish. What is asserted here is the contract those modules
 cannot state, because they exercise the run rather than the boundary:

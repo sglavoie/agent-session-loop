@@ -1649,7 +1649,7 @@ class VerificationExecutorTests(unittest.TestCase):
         from the artifact they rejected, so the extra field survives on the
         record — where the run's own artifacts already hold the whole stream —
         and the audit boundary is what withholds it (see
-        ``test_asl_supervisor_audit``). ``detail`` crosses that boundary
+        ``test_asl_supervisor_audit_*``). ``detail`` crosses that boundary
         inline, so it is rendered from the two vocabulary values alone.
         """
         with tempfile.TemporaryDirectory() as tmp:

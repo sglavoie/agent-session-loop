@@ -1,11 +1,11 @@
 """Boundary tests for `agent_session_loop.run_entry`.
 
 The behavioural coverage of this boundary already exists and stays where it is:
-`tests/test_asl_supervisor_audit.py` owns the reconstructed `asl run` command
+`tests/test_asl_supervisor_audit_run_config.py` owns the reconstructed `asl run` command
 and the audit flags it recovers, `tests/test_asl_cli.py` and
 `tests/test_asl_spark.py` own the resume overlay's effect on individual flags,
-`tests/test_asl_run_gates.py` owns the restored workspace binding, and
-`tests/test_asl_pause_ux.py`, `tests/test_asl_reply_flows.py` and
+`tests/test_asl_run_workspace_guard_exceptions.py` owns the restored workspace binding,
+and `tests/test_asl_pause_ux.py`, `tests/test_asl_reply_flows.py` and
 `tests/test_asl_harness_*.py` drive whole runs through it. None of
 them can cheaply state what this module actually owns, which is *the outside of
 a run*: the flags it rehydrates and the ordered gate a run passes before a loop

@@ -1,9 +1,9 @@
 """Boundary tests for `agent_session_loop.session_verification`.
 
 The behavioural coverage of the two gates is end to end and lives where it
-always has: `tests/test_asl_run_gates.py` drives real contracts through real
-checks and asserts what an operator sees after a failure,
-`tests/test_asl_review_lifecycle.py` owns the review-verdict retry and
+always has: `tests/test_asl_run_verification_enforcement.py` drives real contracts
+through real checks and asserts what an operator sees after a failure,
+`tests/test_asl_review_lifecycle_*.py` owns the review-verdict retry and
 exhaustion accounting, and `tests/test_asl_e2e.py` owns the verification repair
 budget. None of them can cheaply state the things this module owns, so they are
 stated here: the extraction contract (runner-free, no alias left behind, the one

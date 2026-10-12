@@ -3,8 +3,8 @@
 The behavioural coverage of the two guard projections lives in
 `tests/test_asl_repository_evidence.py`, which drives them through the write
 guard and needs real Git checkouts to do it, and the call-ordering assertions
-live in `tests/test_asl_run_gates.py` against the loop that makes the calls.
-This module owns what neither can: the extraction contract (runner-free, no
+live in `tests/test_asl_run_workspace_guard_exceptions.py` against the loop that makes
+the calls. This module owns what neither can: the extraction contract (runner-free, no
 alias left behind, exactly one durable write), and the functions whose only
 inputs are payloads -- the two bounded pause suffixes, the expansion
 fingerprint, the event-log lookup, and the freshness rule. None of them spawns

@@ -1,7 +1,7 @@
 """The generated review body's boundary: what it renders, and what it writes.
 
 The heavy behavioural coverage of this module lives where it always has —
-``tests/test_asl_review.py`` and ``tests/test_asl_review_lifecycle.py`` drive
+``tests/test_asl_review_*.py`` and ``tests/test_asl_review_lifecycle_*.py`` drive
 whole review cycles through it. What is asserted here is the boundary itself,
 which those integration modules cannot state because they exercise the loop
 rather than the seam:

@@ -3,8 +3,8 @@
 The per-function behavioural coverage of this boundary already exists and stays
 where it is: `tests/test_asl_turn_finalization.py` owns the defect
 classification table, the preserved-artifact digests and the attempt counter,
-and `tests/test_asl_run_gates.py` drives a real malformed handoff through a real
-run and asserts what an operator sees afterwards. Neither of them can cheaply
+and `tests/test_asl_run_handoff_status.py` drives a real malformed handoff through a
+real run and asserts what an operator sees afterwards. Neither of them can cheaply
 state the things this module owns, so they are stated here: the extraction
 contract (runner-free, no alias left behind, exactly the symbols the session
 moved), the per-function durable-write list, the import direction that keeps

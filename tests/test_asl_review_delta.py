@@ -1,9 +1,9 @@
 """How much a re-review must read, asserted at the seam rather than through a run.
 
 The behavioural coverage of delta scoping already lives where it always has —
-``tests/test_asl_review_lifecycle.py`` drives a real run through every
+``tests/test_asl_review_lifecycle_*.py`` drives a real run through every
 degradation reason a single repository can produce, ``tests/test_asl_cli.py``
-owns the registered combined delta, and ``tests/test_asl_review.py`` owns the
+owns the registered combined delta, and ``tests/test_asl_review_*.py`` owns the
 cycle accounting these readers sit on top of. What is asserted here is the
 contract those modules cannot state, because they exercise the run rather than
 the boundary:

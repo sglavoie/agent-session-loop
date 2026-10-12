@@ -1,9 +1,9 @@
 """The run-admission boundary: what a run is allowed to start on, and reach.
 
 The behavioural coverage of these refusals lives where it always has —
-``tests/test_asl_run_gates.py`` drives the flag cross-checks through both the
+``tests/test_asl_run_launch_gates.py`` drives the flag cross-checks through both the
 runner and the supervisor helper, ``tests/test_asl_workspaces.py`` resolves
-real registries, and ``tests/test_asl_review.py`` routes whole runs through
+real registries, and ``tests/test_asl_review_*.py`` routes whole runs through
 the cycle caps. What is asserted here is the boundary those modules cannot
 state, because they exercise the loop rather than the seam:
 

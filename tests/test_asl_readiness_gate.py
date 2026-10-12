@@ -1,9 +1,9 @@
 """Whether a plan may run at all, asserted at the seam rather than through a run.
 
 The behavioural coverage of the gate already lives where it always has —
-``tests/test_asl_run_gates.py`` drives a run into every refusal the gate can
-issue, ``tests/test_asl_review.py`` owns the re-gate a grown plan must pass, and
-``tests/test_asl_review_lifecycle.py`` owns what the auto-repair rewrote. What is
+``tests/test_asl_run_readiness_hard_gate.py`` drives a run into every refusal the gate
+can issue, ``tests/test_asl_review_*.py`` owns the re-gate a grown plan must pass, and
+``tests/test_asl_review_lifecycle_*.py`` owns what the auto-repair rewrote. What is
 asserted here is the contract those modules cannot state, because they exercise
 the run rather than the boundary:
 

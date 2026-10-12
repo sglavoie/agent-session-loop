@@ -64,8 +64,8 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests.test_asl_prepare:"
             "LegacyRepositoryIntentPrepareTests."
             "test_build_validation_packet_refuses_a_multi_repo_intent",
-            "tests.test_asl_run_gates:"
-            "RunReadinessGateTests."
+            "tests.test_asl_run_readiness_hard_gate:"
+            "RunReadinessHardGateTests."
             "test_allow_not_loop_ready_does_not_bypass_repository_intent",
             "tests.test_asl_e2e:"
             "KilnTwinCloneRegressionTests."
@@ -111,7 +111,7 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
             "TerminalAuditTests.test_an_agent_that_never_answers_still_publishes_the_checks",
             "tests.test_asl_assurance_lifecycle:"
             "TerminalAuditTests.test_a_failed_publication_leaves_no_report_behind",
-            "tests.test_asl_supervisor_audit:"
+            "tests.test_asl_supervisor_audit_run_config:"
             "AuditPlanTests.test_opting_out_is_persisted_as_skipped_immediately",
         ),
     ),
@@ -119,21 +119,21 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
         "The auditor evaluates operational behavior only and runs under an "
         "enforceable read-only profile.",
         (
-            "tests.test_asl_supervisor_audit:"
+            "tests.test_asl_supervisor_audit_evidence_determinism:"
             "EvidenceBundleTests.test_application_source_and_diffs_are_excluded",
-            "tests.test_asl_supervisor_audit:"
+            "tests.test_asl_supervisor_audit_evidence_determinism:"
             "EvidenceBundleTests.test_credentials_never_reach_the_bundle",
-            "tests.test_asl_supervisor_audit:"
+            "tests.test_asl_supervisor_audit_agent_engine_answers:"
             "AgentAuditEngineTests.test_the_prompt_orders_evidence_before_any_source_reading",
-            "tests.test_asl_supervisor_audit:"
+            "tests.test_asl_supervisor_audit_restricted:"
             "RestrictedAuditTests.test_the_auditor_is_launched_read_only_without_the_plan_directory",
             "tests.test_asl_assurance_lifecycle:"
             "TerminalAuditTests.test_a_harness_that_cannot_enforce_the_profile_never_runs",
             "tests.test_asl_assurance_lifecycle:"
             "TerminalAuditTests.test_an_auditor_that_touched_the_workspace_is_unavailable",
-            "tests.test_asl_supervisor_audit:"
+            "tests.test_asl_supervisor_audit_agent_engine_delivery:"
             "AgentAuditEngineTests.test_a_malformed_answer_is_retried_in_a_fresh_invocation",
-            "tests.test_asl_supervisor_audit:"
+            "tests.test_asl_supervisor_audit_agent_engine_delivery:"
             "AgentAuditEngineTests.test_two_malformed_answers_keep_the_deterministic_findings",
             "tests.test_asl_acceptance:"
             "AuditAccessProfileTests.test_no_audit_argv_carries_a_worker_write_grant",
@@ -170,7 +170,7 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Run, status, Autopilot, Workbench, and metrics expose assurance "
         "without driving implementation or changing results.",
         (
-            "tests.test_asl_supervisor_audit:"
+            "tests.test_asl_supervisor_audit_run_output_state:"
             "AuditStateProjectionTests.test_status_projects_the_audit_without_launching_one",
             "tests.test_asl_assurance_lifecycle:"
             "TerminalizationCoordinatorTests.test_the_exit_code_survives_the_coordinator_unchanged",
@@ -180,8 +180,8 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
             "WorkbenchSummaryTests.test_assurance_summary_carries_no_audit_controls",
             "tests.test_asl_assurance_metrics:"
             "CoverageMetricsTests.test_coverage_separates_graded_runs_from_merely_recorded_ones",
-            "skills/asl/scripts/test_asl_autopilot.py:"
-            "RunAutopilotReviewTest.test_run_result_omits_assurance_when_no_audit_ran",
+            "skills/asl/scripts/test_asl_autopilot_review_verdict.py:"
+            "RunAutopilotReviewAuditTest.test_run_result_omits_assurance_when_no_audit_ran",
             "tests.test_asl_acceptance:"
             "ObservationalStatusTests.test_the_operator_read_path_cannot_reach_a_harness",
             "tests.test_asl_acceptance:AdvisoryVerdictTests.test_auditing_rewrites_nothing_the_run_recorded",
@@ -208,7 +208,7 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
             "MultiRepositoryEndToEndQATests.test_four_repository_public_core_lifecycle",
             "tests.test_asl_e2e:"
             "EndToEndQATests.test_full_lifecycle_repairs_legacy_plan_and_runs_to_completion",
-            "tests.test_asl_supervisor_audit:"
+            "tests.test_asl_supervisor_audit_run_config:"
             "AuditRunConfigPersistenceTests.test_resume_restores_persisted_audit_settings",
             "tests.test_asl_assurance_lifecycle:"
             "PendingAuditCatchupTests.test_an_abandoned_run_is_audited_after_the_fact",

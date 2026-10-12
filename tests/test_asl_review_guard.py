@@ -1,9 +1,9 @@
 """The review-guard boundary: every git the loop shells out to, and its refusals.
 
 The behavioural coverage of the review mutation guard lives where it always has
-— ``tests/test_asl_review_lifecycle.py`` captures and compares real repository
+— ``tests/test_asl_review_lifecycle_*.py`` captures and compares real repository
 fingerprints, ``tests/test_asl_turn_commit.py`` drives auto-commit through real
-checkouts, and ``tests/test_asl_run_gates.py`` runs the repair-child preflight
+checkouts, and ``tests/test_asl_repair_dispatch.py`` runs the repair-child preflight
 inside a whole run. What is asserted here is the boundary those modules cannot
 state, because they exercise the loop rather than the seam:
 

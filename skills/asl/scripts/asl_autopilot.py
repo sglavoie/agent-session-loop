@@ -308,7 +308,8 @@ HANG_NEXT_STEPS = (
 # source of truth for which pauses are recoverable, which require a human, the
 # same-session retry budget, and the transport backoff schedule. These names are
 # re-exported under their historical public identifiers so the supervision loop,
-# `test_asl_autopilot.py`, and the helper's JSON contract keep resolving them.
+# the `test_asl_autopilot_*.py` suites, and the helper's JSON contract keep
+# resolving them.
 # The runner attaches `pause_policy.classify_pause(reason)` to its pause
 # payloads; the supervisor prefers that payload block (see
 # `_effective_pause_policy`) and falls back to these constants for older state.

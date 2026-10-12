@@ -1,7 +1,7 @@
 """Boundary tests for `agent_session_loop.write_guards`.
 
 The behavioural coverage of these guards is end to end and lives elsewhere:
-`tests/test_asl_run_gates.py` drives real runs against real checkouts and
+`tests/test_asl_run_protected_path_guard.py` drives real runs against real checkouts and
 asserts what an operator sees after a violation, and `tests/test_asl_turn_commit.py`
 pins that the commit happens after every guard. Neither can cheaply state the
 things this module owns, so they are stated here: the extraction contract

@@ -2,8 +2,8 @@
 
 The behaviour of a run is covered where it always has been — whole runs against
 a fake harness in ``tests/test_asl_harness_*.py``, the gate sequence
-in ``tests/test_asl_run_gates.py``, and one file per delegate boundary for the
-work Sessions 31-36 moved out. Those suites drive the loop; none of them can
+in ``tests/test_asl_run_disposition_source.py``, and one file per delegate boundary for
+the work Sessions 31-36 moved out. Those suites drive the loop; none of them can
 state what this file states, because each is scoped to one behaviour rather
 than to the module's shape.
 
