@@ -38,10 +38,10 @@ from agent_session_loop import (
     run_completion,
     run_control,
     run_coordination,
-    run_loop,
     run_termination,
 )
 from agent_session_loop.run_errors import RunError
+from tests import support_asl_run_loop_view as run_loop_view
 
 from .support import assert_no_runner_import, write_plan
 
@@ -258,7 +258,7 @@ class RunLoopDelegationTests(unittest.TestCase):
     """The loop's no-pending branch is a delegation and nothing else."""
 
     def branch(self) -> ast.If:
-        source = Path(run_loop.__file__ or "").read_text(encoding="utf-8")
+        source = run_loop_view.assembled_source()
         branches = [
             node
             for node in ast.walk(ast.parse(source))

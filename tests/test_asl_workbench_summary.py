@@ -18,6 +18,7 @@ from agent_session_loop import (
     review,
     review_repair,
     state,
+    state_status,
     workbench,
     workbench_recovery,
 )
@@ -205,7 +206,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             summary = workbench.build_workbench_summary(
                 _discovered(plan_dir), state_dir=state_root
             )
-            status_payload = state.status_payload(
+            status_payload = state_status.status_payload(
                 plans.inspect_plan(plan_dir), state_root
             )
 

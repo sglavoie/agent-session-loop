@@ -15,6 +15,7 @@ from agent_session_loop import (
     preflight_environment,
     preflight_models,
     state,
+    state_locks,
 )
 from tests.support import (
     _write_loop_ready_plan,
@@ -232,13 +233,13 @@ class PreflightEnvironmentTests(unittest.TestCase):
         self.assertIn("stale lock", lock_findings[0].message)
 
     def test_env_lock_active_emits_red(self) -> None:
-        lock_info = state.acquire_lock(self.plan_dir, self.xdg_state)
+        lock_info = state_locks.acquire_lock(self.plan_dir, self.xdg_state)
         try:
             report = preflight.run_environment_preflight(
                 self.plan_dir, state_dir=self.xdg_state
             )
         finally:
-            state.release_lock(self.plan_dir, self.xdg_state)
+            state_locks.release_lock(self.plan_dir, self.xdg_state)
         lock_findings = [f for f in report.findings if f.category == "env-lock"]
         self.assertEqual(1, len(lock_findings))
         self.assertEqual("red", lock_findings[0].severity)

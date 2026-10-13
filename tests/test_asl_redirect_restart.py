@@ -13,7 +13,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import cli, durability, redirect_restart, redirect_store, state
+from agent_session_loop import (
+    cli,
+    durability,
+    redirect_restart,
+    redirect_store,
+    state,
+    state_locks,
+)
 from tests import test_asl_lost_submission_response as lost_tests
 from tests import test_asl_redirect_continuation as t
 
@@ -268,12 +275,12 @@ class ResolutionTests(unittest.TestCase):
         )
 
     def test_live_runner_excludes_resolution(self):
-        state.acquire_lock(self.plan, self.state_dir)
+        state_locks.acquire_lock(self.plan, self.state_dir)
         try:
             with self.assertRaises(state.StateError):
                 self.resolve("submitted")
         finally:
-            state.release_lock(self.plan, self.state_dir)
+            state_locks.release_lock(self.plan, self.state_dir)
 
     def test_a_decision_is_idempotent_but_cannot_be_contradicted(self):
         for outcome in ("submitted",):

@@ -50,6 +50,7 @@ from . import (
     model_availability,
     repository_evidence,
     state,
+    supervisor_audit_vocabulary,
 )
 from . import supervisor_audit_agent as audit_agent
 from . import supervisor_audit_checks as audit_checks
@@ -544,7 +545,7 @@ def _record_workspace_change(
     with contextlib.suppress(OSError, assurance_models.AssuranceError):
         assurance_models.write_audit_json(
             run_dir,
-            audit_checks.WORKSPACE_CHANGE_ARTIFACT_NAME,
+            supervisor_audit_vocabulary.WORKSPACE_CHANGE_ARTIFACT_NAME,
             {
                 "run_id": run_id,
                 "observed_at": observed_at,

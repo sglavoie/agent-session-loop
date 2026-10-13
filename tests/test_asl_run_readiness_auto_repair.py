@@ -4,12 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent_session_loop import (
-    baseline,
-    events,
-    plans,
-    state,
-)
+from agent_session_loop import baseline, events, plans, state
 from tests.support import (
     read_jsonl,
 )

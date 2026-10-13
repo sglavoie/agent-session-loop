@@ -11,7 +11,7 @@ from . import (
     harnesses,
     plans,
     repository_evidence,
-    state,
+    state_locks,
     workspaces,
 )
 from .git_subprocess import run_git
@@ -298,7 +298,7 @@ def _check_env_lock(
     state_dir: str | Path | None,
 ) -> tuple[PreflightFinding, ...]:
     try:
-        lock_info = state.read_lock_info(plan_dir, state_dir)
+        lock_info = state_locks.read_lock_info(plan_dir, state_dir)
     except OSError as error:
         return (
             _finding(

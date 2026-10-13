@@ -21,7 +21,7 @@ from agent_session_loop import (
     review_guard,
     review_session_body,
     run_loop,
-    state,
+    state_locks,
 )
 from tests.support import (
     REPO_ROOT,
@@ -142,7 +142,7 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
                 side_effect=fingerprints,
             ),
         ):
-            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
             try:
                 _exit_code, payload = run_loop.run_locked(
                     args=args,
@@ -154,7 +154,7 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
                     run_id="test-run-guard-unavailable",
                 )
             finally:
-                state.release_lock(self.plan_dir, self.state_dir)
+                state_locks.release_lock(self.plan_dir, self.state_dir)
         return payload, harness_calls
 
     def test_unavailable_before_capture_pauses_without_spending_the_turn(

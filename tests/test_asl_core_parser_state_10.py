@@ -22,7 +22,8 @@ from agent_session_loop import (
     mailbox_validation,
     mailbox_vocabulary,
     plans,
-    state,
+    state_status,
+    state_status_text,
 )
 from tests.asl_core_support import ParserAndStateTestsBase
 from tests.support import (
@@ -383,7 +384,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
             self.assertEqual(resolution_question.id, resolution.to)
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
             status = payload["mailbox"]
             self.assertFalse(status["full"])
             self.assertFalse(status["accepts_questions"])
@@ -392,7 +395,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
 
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                state._print_text_status(payload)
+                state_status_text._print_text_status(payload)
             output = buffer.getvalue()
             self.assertIn(
                 "Mailbox: active, non-closure writes refused "
@@ -467,14 +470,16 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 mailbox_constants.ERROR_MAILBOX_FULL, raised.exception.reason
             )
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
             status = payload["mailbox"]
             self.assertFalse(status["full"])
             self.assertFalse(status["accepts_replies"])
             self.assertFalse(status["accepts_resolutions"])
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                state._print_text_status(payload)
+                state_status_text._print_text_status(payload)
             output = buffer.getvalue()
             self.assertIn("reply and resolution capacity exhausted", output)
             self.assertNotIn("still accepted", output)
@@ -502,7 +507,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 path=mailbox_path,
             )
             with mock.patch.object(mailbox, "read_mailbox", side_effect=read_error):
-                payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+                payload = state_status.status_payload(
+                    plans.inspect_plan(plan_dir), state_dir
+                )
 
             status = payload["mailbox"]
             self.assertTrue(status["present"])

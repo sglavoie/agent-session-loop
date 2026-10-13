@@ -64,7 +64,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from . import control_signal, intervention, plans, redirect_store, state
+from . import control_signal, intervention, plans, redirect_store, state_locks
 
 #: The urgent window, and the single number both halves of it are derived from.
 #: It bounds what a producer waits for an answer *and* what the runner's own
@@ -326,7 +326,7 @@ def inspect_target(
     if session_kind in TERMINAL_AUDIT_SESSION_KINDS:
         return _refused(partial, REFUSE_TERMINAL_AUDIT)
 
-    lock = state.inspect_lock_info(canonical, state_dir)
+    lock = state_locks.inspect_lock_info(canonical, state_dir)
     if lock is None:
         return _refused(partial, REFUSE_NO_ACTIVE_RUN)
     # Ordered most specific first. `LockInfo.active` is defined as `not stale`

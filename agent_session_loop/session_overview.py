@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import plans, responses, state, workspaces
+from . import plans, responses, state, state_locks, state_payloads, workspaces
 from .formatting import format_duration_seconds
 
 __all__ = [
@@ -729,7 +729,7 @@ def scan_running_rows(
                 )
             )
             continue
-        lock_info = state._read_lock_path(
+        lock_info = state_locks._read_lock_path(
             lock_path, canonical_plan_dir, reclaim=reclaim
         )
         if lock_info is None:
@@ -748,7 +748,7 @@ def scan_running_rows(
                 )
             )
             continue
-        state_payload = state._runner_state_payload(
+        state_payload = state_payloads._runner_state_payload(
             state_dir / STATE_JSON_NAME,
             lock_info=lock_info,
         )

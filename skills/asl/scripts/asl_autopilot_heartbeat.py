@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from agent_session_loop import state as _state
+from agent_session_loop import state_payloads
 
 
 def _heartbeat_detail(
@@ -139,7 +139,7 @@ def _heartbeat_detail(
             if snapshot.get("unsupervised_deadline_at") is None
             else "unsupervised ceiling"
         )
-        ceiling_deadline = _state.waiting_for_reply_ceiling(snapshot)
+        ceiling_deadline = state_payloads.waiting_for_reply_ceiling(snapshot)
         if ceiling_deadline is None:
             return True, with_outbox(f"{detail}: invalid {ceiling_label} (no output)")
         current = datetime.now(UTC) if now is None else now

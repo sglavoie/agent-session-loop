@@ -16,7 +16,7 @@ from agent_session_loop import (
     prepare_models,
     prepare_packet,
     prepare_results,
-    state,
+    state_locks,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -196,7 +196,7 @@ class PrepareRebindAndCorrectionTests(PrepareEndToEndFixtures):
                 )
                 self.assertEqual(before, self._plan_file_bytes(first.plan_dir))
                 self.assertIsNone(
-                    state.inspect_lock_info(first.plan_dir, self.state_dir)
+                    state_locks.inspect_lock_info(first.plan_dir, self.state_dir)
                 )
 
     def test_rebind_rejects_unchanged_legacy_and_active_bindings(self) -> None:
@@ -234,7 +234,7 @@ class PrepareRebindAndCorrectionTests(PrepareEndToEndFixtures):
             )
 
         before = self._plan_file_bytes(registered.plan_dir)
-        state.acquire_lock(registered.plan_dir, self.state_dir, owner="test")
+        state_locks.acquire_lock(registered.plan_dir, self.state_dir, owner="test")
         try:
             with self.assertRaisesRegex(plans.PlanError, "active lock"):
                 self._prepare(
@@ -245,7 +245,7 @@ class PrepareRebindAndCorrectionTests(PrepareEndToEndFixtures):
                     rebind_workspace=True,
                 )
         finally:
-            state.release_lock(registered.plan_dir, self.state_dir)
+            state_locks.release_lock(registered.plan_dir, self.state_dir)
         self.assertEqual(before, self._plan_file_bytes(registered.plan_dir))
 
     def test_rebind_accepts_a_legacy_binding_once_a_registry_appears(self) -> None:

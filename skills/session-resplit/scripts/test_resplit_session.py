@@ -24,7 +24,7 @@ SPEC.loader.exec_module(resplit)
 from agent_session_loop import (  # noqa: E402 - sys.path insert above
     contracts,
     plans,
-    state,
+    state_locks,
 )
 
 
@@ -499,7 +499,7 @@ class ResplitSessionTest(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_resplit_plan(plan_dir)
-            state.acquire_lock(plan_dir, state_dir)
+            state_locks.acquire_lock(plan_dir, state_dir)
             try:
                 with self.assertRaises(resplit.ResplitError) as raised:
                     resplit.resplit_session(
@@ -509,7 +509,7 @@ class ResplitSessionTest(unittest.TestCase):
                         state_dir=state_dir,
                     )
             finally:
-                state.release_lock(plan_dir, state_dir)
+                state_locks.release_lock(plan_dir, state_dir)
 
             self.assertEqual("lock-contention", raised.exception.reason)
             self.assertTrue((plan_dir / "session-2.md").is_file())
@@ -524,7 +524,7 @@ class ResplitSessionTest(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_resplit_plan(plan_dir)
-            state.acquire_lock(plan_dir, state_dir, owner="other-runner")
+            state_locks.acquire_lock(plan_dir, state_dir, owner="other-runner")
             try:
                 json_out = io.StringIO()
                 with redirect_stdout(json_out):
@@ -554,7 +554,7 @@ class ResplitSessionTest(unittest.TestCase):
                         ]
                     )
             finally:
-                state.release_lock(plan_dir, state_dir)
+                state_locks.release_lock(plan_dir, state_dir)
 
             self.assertEqual(1, json_code)
             self.assertEqual(1, text_code)

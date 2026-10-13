@@ -13,7 +13,7 @@ from agent_session_loop import (
     review,
     review_continuation,
     review_repair,
-    state,
+    state_locks,
 )
 from tests.review_materialization_support import MaterializationFixtures
 from tests.support import (
@@ -55,8 +55,8 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
 
     def test_active_lock_pauses_malformed(self) -> None:
         self._write_plan([self._finding("F1", "a")])
-        state.acquire_lock(self.plan_dir, self.state_dir)
-        self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+        state_locks.acquire_lock(self.plan_dir, self.state_dir)
+        self.addCleanup(state_locks.release_lock, self.plan_dir, self.state_dir)
         result = self._materialize()
 
         self.assertFalse(result.ok)

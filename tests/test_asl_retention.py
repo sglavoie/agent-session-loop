@@ -23,7 +23,7 @@ from pathlib import Path
 from agent_session_loop import assurance_ledger as ledger
 from agent_session_loop import assurance_models as models
 from agent_session_loop import assurance_projection as projection
-from agent_session_loop import plans, retention, state
+from agent_session_loop import plans, retention, state, state_locks
 
 NOW = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
 DEAD_PID = 4_242_424
@@ -662,7 +662,7 @@ class DryRunPurityTests(RetentionTestBase):
         # Without this the tests below could pass against a lock nothing
         # reclaims, which is exactly what the pre-repair suite did.
         with redirect_stderr(io.StringIO()):
-            lock_info = state.read_lock_info(self.plan_dir, self.state_root)
+            lock_info = state_locks.read_lock_info(self.plan_dir, self.state_root)
 
         self.assertIsNotNone(lock_info)
         self.assertFalse(self.lock_path.exists())

@@ -11,13 +11,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from agent_session_loop import (
-    config,
-    events,
-    plans,
-    state,
-    verification,
-)
+from agent_session_loop import config, events, plans, state, verification
 from tests.support import (
     REPO_ROOT,
     _contract_block,

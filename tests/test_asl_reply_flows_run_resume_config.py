@@ -13,14 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 import tests.reply_flow_support as rfs
-from agent_session_loop import (
-    cli,
-    events,
-    harnesses,
-    plans,
-    runner,
-    state,
-)
+from agent_session_loop import cli, events, harnesses, plans, runner, state
 from tests.support import (
     write_plan,
 )

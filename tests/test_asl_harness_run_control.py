@@ -19,6 +19,7 @@ from agent_session_loop import (
     run_loop,
     run_selection,
     state,
+    state_locks,
 )
 from tests.harness_integration_base import FakeHarnessIntegrationBase
 from tests.support import (
@@ -239,7 +240,7 @@ class RunControlTests(FakeHarnessIntegrationBase):
                     side_effect=fake_for_run,
                 ),
             ):
-                lock_info = state.acquire_lock(plan_dir, state_dir)
+                lock_info = state_locks.acquire_lock(plan_dir, state_dir)
                 try:
                     exit_code, payload = run_loop.run_locked(
                         args=args,
@@ -251,7 +252,7 @@ class RunControlTests(FakeHarnessIntegrationBase):
                         run_id="test-run",
                     )
                 finally:
-                    state.release_lock(plan_dir, state_dir)
+                    state_locks.release_lock(plan_dir, state_dir)
 
         self.assertEqual(0, exit_code, payload)
         self.assertEqual("stopped", payload["reason"])

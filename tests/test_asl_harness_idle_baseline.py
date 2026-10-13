@@ -8,13 +8,8 @@ import tempfile
 from pathlib import Path
 from types import ModuleType
 
-from agent_session_loop import (
-    clock,
-    events,
-    run_commit,
-    run_loop,
-    run_reporting,
-)
+from agent_session_loop import clock, events, run_commit, run_reporting
+from tests import support_asl_run_loop_view as run_loop_view
 from tests.harness_integration_base import FakeHarnessIntegrationBase
 from tests.harness_integration_support import IDLE_BASELINE_DELEGATES
 from tests.support import (
@@ -264,7 +259,7 @@ class IdleBaselineTests(FakeHarnessIntegrationBase):
         self.assertGreaterEqual(self.idle_started_at(turns[2]), retried_at)
 
     def loop_source(self) -> str:
-        return Path(run_loop.__file__ or "").read_text(encoding="utf-8")
+        return run_loop_view.assembled_source()
 
     def names_loop_state(self, node: ast.AST, field: str) -> bool:
         """Is this node the loop's ``field``, held bare or on the run context?

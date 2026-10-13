@@ -24,6 +24,10 @@ from agent_session_loop import (
     mailbox_vocabulary,
     plans,
     state,
+    state_abandonment,
+    state_mailbox_status,
+    state_status,
+    state_status_text,
 )
 from tests.asl_core_support import ParserAndStateTestsBase
 from tests.support import (
@@ -70,7 +74,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 state_dir=state_dir,
             )
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             first, second = payload["mailbox"]["guidance"]
             self.assertEqual(mailbox_vocabulary.GUIDANCE_STATE_DEFERRED, first["state"])
@@ -108,7 +114,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                state._print_text_status(payload)
+                state_status_text._print_text_status(payload)
             self.assertIn("delivered live to claude", buffer.getvalue())
 
     def test_status_guidance_projection_never_carries_a_body(self) -> None:
@@ -120,7 +126,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 plan_dir, "a body nobody else may read", state_dir=state_dir
             )
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             self.assertNotIn(
                 "a body nobody else may read", json.dumps(payload["mailbox"])
@@ -135,13 +143,17 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 mailbox_appenders.append_guidance(
                     plan_dir, f"note {index}", state_dir=state_dir
                 )
-                for index in range(state.MAILBOX_STATUS_GUIDANCE_CAP + 4)
+                for index in range(state_mailbox_status.MAILBOX_STATUS_GUIDANCE_CAP + 4)
             ]
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             entries = payload["mailbox"]["guidance"]
-            self.assertEqual(state.MAILBOX_STATUS_GUIDANCE_CAP, len(entries))
+            self.assertEqual(
+                state_mailbox_status.MAILBOX_STATUS_GUIDANCE_CAP, len(entries)
+            )
             # The recent end is kept: "did what I just said get through?".
             self.assertEqual(appended[-1].id, entries[-1]["id"])
 
@@ -197,7 +209,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
             _write_lock_file(plan_dir, state_dir, pid=os.getpid())
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             status = payload["mailbox"]
             self.assertEqual(3, status["unanswered_questions"])
@@ -206,7 +220,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertEqual(1, status["notices"])
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                state._print_text_status(payload)
+                state_status_text._print_text_status(payload)
             output = buffer.getvalue()
             self.assertIn("1 open questions (2 unanswered historical)", output)
             self.assertIn("1 resolutions, 1 notices", output)
@@ -224,7 +238,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 state_dir=state_dir,
             )
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             status = payload["mailbox"]
             self.assertEqual(1, status["supervision_ends"])
@@ -232,7 +248,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertIsNone(status["error"])
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                state._print_text_status(payload)
+                state_status_text._print_text_status(payload)
             output = buffer.getvalue()
             self.assertIn("0 notices, 1 supervision ends", output)
 
@@ -264,7 +280,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 _write_state_payload(plan_dir, state_dir, runner_payload)
                 _write_lock_file(plan_dir, state_dir, pid=os.getpid())
 
-                payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+                payload = state_status.status_payload(
+                    plans.inspect_plan(plan_dir), state_dir
+                )
 
                 status = payload["mailbox"]
                 self.assertEqual(1, status["unanswered_questions"])
@@ -285,19 +303,25 @@ class ParserAndStateTests(ParserAndStateTestsBase):
         stale = dataclasses.replace(active, stale=True, reason="stale")
         live = {"present": True, "error": None, "run_id": "RUN-LIVE"}
 
-        self.assertEqual("RUN-LIVE", state._live_run_id(live, active))
-        self.assertIsNone(state._live_run_id(live, stale))
-        self.assertIsNone(state._live_run_id(live, None))
-        self.assertIsNone(state._live_run_id({**live, "paused": True}, active))
+        self.assertEqual("RUN-LIVE", state_abandonment._live_run_id(live, active))
+        self.assertIsNone(state_abandonment._live_run_id(live, stale))
+        self.assertIsNone(state_abandonment._live_run_id(live, None))
         self.assertIsNone(
-            state._live_run_id(
+            state_abandonment._live_run_id({**live, "paused": True}, active)
+        )
+        self.assertIsNone(
+            state_abandonment._live_run_id(
                 {**live, "run_finished_at": "2026-07-29T01:00:00+00:00"},
                 active,
             )
         )
-        self.assertIsNone(state._live_run_id({**live, "error": "unreadable"}, active))
-        self.assertIsNone(state._live_run_id({**live, "present": False}, active))
-        self.assertIsNone(state._live_run_id({"present": True}, active))
+        self.assertIsNone(
+            state_abandonment._live_run_id({**live, "error": "unreadable"}, active)
+        )
+        self.assertIsNone(
+            state_abandonment._live_run_id({**live, "present": False}, active)
+        )
+        self.assertIsNone(state_abandonment._live_run_id({"present": True}, active))
 
     def test_min_append_bytes_matches_generated_acknowledgement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

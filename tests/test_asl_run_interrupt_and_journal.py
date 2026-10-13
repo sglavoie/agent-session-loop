@@ -20,6 +20,7 @@ from agent_session_loop import (
     plans,
     run_loop,
     state,
+    state_locks,
     turn_execution,
     verification,
 )
@@ -92,7 +93,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
         }
         args = self._make_args()
         with patched_env(**env_updates):
-            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
             try:
                 exit_code, payload = run_loop.run_locked(
                     args=args,
@@ -104,7 +105,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
                     run_id="test-run",
                 )
             finally:
-                state.release_lock(self.plan_dir, self.state_dir)
+                state_locks.release_lock(self.plan_dir, self.state_dir)
         return exit_code, payload
 
     def test_keyboard_interrupt_during_verification_pauses_cleanly(

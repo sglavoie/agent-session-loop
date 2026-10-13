@@ -13,7 +13,15 @@ import json
 from pathlib import Path
 from typing import Any
 
-from . import events, plans, repository_evidence, state, workspace_evidence, workspaces
+from . import (
+    events,
+    plans,
+    repository_evidence,
+    state,
+    state_locks,
+    workspace_evidence,
+    workspaces,
+)
 
 
 class RecoveryError(ValueError):
@@ -200,7 +208,7 @@ def accept_ref_updates(
     if accept is not None and (reason is None or not reason.strip()):
         raise RecoveryError("acceptance requires an explicit operator reason")
     plan_dir = plans.canonicalize_path(plan_dir)
-    state.acquire_lock(plan_dir, state_dir, owner="asl-accept-ref-updates")
+    state_locks.acquire_lock(plan_dir, state_dir, owner="asl-accept-ref-updates")
     try:
         event_path = state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME
         proposal = _proposal(plan_dir, session_id, event_path)
@@ -228,7 +236,7 @@ def accept_ref_updates(
             )
         return {"ok": True, "accepted": accept is not None, **proposal}
     finally:
-        state.release_lock(plan_dir, state_dir)
+        state_locks.release_lock(plan_dir, state_dir)
 
 
 def accept_ref_updates_from_args(args: argparse.Namespace) -> int:
@@ -694,7 +702,9 @@ def acknowledge_external_changes(
     if accept is not None and (reason is None or not reason.strip()):
         raise RecoveryError("acceptance requires an explicit operator reason")
     plan_dir = plans.canonicalize_path(plan_dir)
-    state.acquire_lock(plan_dir, state_dir, owner="asl-acknowledge-external-changes")
+    state_locks.acquire_lock(
+        plan_dir, state_dir, owner="asl-acknowledge-external-changes"
+    )
     try:
         state_root = state.plan_state_dir(plan_dir, state_dir)
         event_path = state_root / events.EVENTS_FILE_NAME
@@ -894,7 +904,7 @@ def acknowledge_external_changes(
                 resume_argv=resume,
             )
     finally:
-        state.release_lock(plan_dir, state_dir)
+        state_locks.release_lock(plan_dir, state_dir)
 
 
 def acknowledge_external_changes_from_args(args: argparse.Namespace) -> int:

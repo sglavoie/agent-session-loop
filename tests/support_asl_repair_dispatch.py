@@ -18,6 +18,7 @@ from agent_session_loop import (
     review_repair,
     run_loop,
     state,
+    state_locks,
     verification,
 )
 from tests.support import (
@@ -181,7 +182,7 @@ class GeneratedRepairDispatchFixture(unittest.TestCase):
         context = verification.VerificationContext.from_plan(
             self.plan_dir, self.workspace_root
         )
-        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
         try:
             with (
                 patched_env(**self.commit_env),
@@ -198,4 +199,4 @@ class GeneratedRepairDispatchFixture(unittest.TestCase):
                     verification_context=context,
                 )
         finally:
-            state.release_lock(self.plan_dir, self.state_dir)
+            state_locks.release_lock(self.plan_dir, self.state_dir)

@@ -18,6 +18,7 @@ from agent_session_loop import (
     review,
     run_loop,
     state,
+    state_locks,
     verification,
 )
 from tests.support import (
@@ -96,7 +97,7 @@ class HandoffCorrectionTests(unittest.TestCase):
         )
 
     def _invoke(self, run_id: str) -> tuple[int, dict[str, Any]]:
-        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
         try:
             return run_loop.run_locked(
                 args=self._args(),
@@ -109,7 +110,7 @@ class HandoffCorrectionTests(unittest.TestCase):
                 verification_context=self.context,
             )
         finally:
-            state.release_lock(self.plan_dir, self.state_dir)
+            state_locks.release_lock(self.plan_dir, self.state_dir)
 
     def _records(self) -> list[dict[str, Any]]:
         event_path = (
@@ -353,7 +354,7 @@ class PausedHandoffStatusTests(unittest.TestCase):
         )
 
     def _invoke(self, run_id: str) -> tuple[int, dict[str, Any]]:
-        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
         try:
             return run_loop.run_locked(
                 args=self._args(),
@@ -365,7 +366,7 @@ class PausedHandoffStatusTests(unittest.TestCase):
                 run_id=run_id,
             )
         finally:
-            state.release_lock(self.plan_dir, self.state_dir)
+            state_locks.release_lock(self.plan_dir, self.state_dir)
 
     def _payloads(self, name: str) -> list[dict[str, Any]]:
         event_path = (

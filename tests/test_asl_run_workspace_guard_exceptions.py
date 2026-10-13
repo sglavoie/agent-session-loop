@@ -18,6 +18,7 @@ from agent_session_loop import (
     plans,
     run_loop,
     state,
+    state_locks,
     turn_execution,
     verification,
 )
@@ -94,7 +95,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
         )
 
     def _invoke(self, run_id: str) -> tuple[int, dict[str, Any]]:
-        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
         try:
             return run_loop.run_locked(
                 args=self._args(),
@@ -107,7 +108,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
                 verification_context=self.context,
             )
         finally:
-            state.release_lock(self.plan_dir, self.state_dir)
+            state_locks.release_lock(self.plan_dir, self.state_dir)
 
     def _pause_reasons(self) -> list[str]:
         event_path = (

@@ -18,7 +18,7 @@ from agent_session_loop import (
     mailbox_validation,
     mailbox_vocabulary,
     plans,
-    state,
+    state_status,
 )
 from tests.asl_core_support import ParserAndStateTestsBase
 from tests.support import (
@@ -96,7 +96,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                     raised.exception.reason,
                 )
 
-            full_payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            full_payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             full_status = full_payload["mailbox"]
             self.assertTrue(full_status["full"])
@@ -114,7 +116,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             lease_path = mailbox_cursors.lease_path_for_plan(plan_dir, state_dir)
             lease_path.write_text("not-json\n", encoding="utf-8")
 
-            malformed_payload = state.status_payload(
+            malformed_payload = state_status.status_payload(
                 plans.inspect_plan(plan_dir), state_dir
             )
 

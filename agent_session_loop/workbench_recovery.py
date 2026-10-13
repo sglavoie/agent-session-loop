@@ -34,6 +34,9 @@ from . import (
     review_continuation,
     run_inputs,
     state,
+    state_abandonment,
+    state_locks,
+    state_payloads,
     workbench_workspace,
 )
 
@@ -517,8 +520,10 @@ def _build_recovery_context(
         snapshot.plan_dir, state_dir
     )
     lock_path = state.lock_path_for_plan(snapshot.plan_dir, state_dir)
-    lock_info = state._read_lock_path(lock_path, snapshot.plan_dir, reclaim=reclaim)
-    runner_state = state._runner_state_payload(
+    lock_info = state_locks._read_lock_path(
+        lock_path, snapshot.plan_dir, reclaim=reclaim
+    )
+    runner_state = state_payloads._runner_state_payload(
         state_path,
         lock_info=lock_info,
     )
@@ -527,7 +532,9 @@ def _build_recovery_context(
         snapshot.plan_dir,
         runtime=raw_state if raw_state.get("workspace_root") else runner_state,
     )
-    stale_unfinished, stale_reason = state._stale_runner_state(runner_state, lock_info)
+    stale_unfinished, stale_reason = state_abandonment._stale_runner_state(
+        runner_state, lock_info
+    )
     base_artifacts = _recovery_base_artifacts(
         state_path=state_path,
         events_path=events_path,
@@ -577,7 +584,7 @@ def _expired_wait_qna_context(
         return None
     if (
         runner_state.get("waiting_for_reply_status")
-        != state.WAITING_FOR_REPLY_STATUS_EXPIRED
+        != state_payloads.WAITING_FOR_REPLY_STATUS_EXPIRED
     ):
         return None
     try:

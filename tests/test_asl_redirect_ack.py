@@ -48,7 +48,7 @@ from agent_session_loop import (
     redirect_ack,
     redirect_continuation,
     redirect_store,
-    run_loop,
+    run_loop_carried_corrections,
 )
 
 from .support import write_plan
@@ -1254,7 +1254,7 @@ class RunLoopBoundaryTests(RedirectAckTestCase):
         session_id: str = SESSION_ID,
         turn_index: int = 2,
     ) -> redirect_ack.CarriedCorrections | None:
-        return run_loop._carried_corrections(
+        return run_loop_carried_corrections._carried_corrections(
             self.ctx,
             plan_dir=self.plan_dir,
             state_dir_arg=self.state_dir,

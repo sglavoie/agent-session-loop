@@ -14,12 +14,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from agent_session_loop import (
-    events,
-    run_reporting,
-    state,
-    tail,
-)
+from agent_session_loop import events, run_reporting, state, tail
 from tests.support import (
     wait_until,
     write_plan,

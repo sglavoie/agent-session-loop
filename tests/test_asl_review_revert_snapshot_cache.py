@@ -17,7 +17,7 @@ from agent_session_loop import (
     plans,
     run_loop,
     session_verification,
-    state,
+    state_locks,
 )
 from tests.support import (
     REPO_ROOT,
@@ -135,7 +135,7 @@ class RevertSnapshotCacheIntegrationTests(unittest.TestCase):
                 session_verification, "_reinspect_after_revert", recording_reinspect
             ),
         ):
-            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
             try:
                 _exit_code, payload = run_loop.run_locked(
                     args=args,
@@ -147,7 +147,7 @@ class RevertSnapshotCacheIntegrationTests(unittest.TestCase):
                     run_id="test-run-revert-cache",
                 )
             finally:
-                state.release_lock(self.plan_dir, self.state_dir)
+                state_locks.release_lock(self.plan_dir, self.state_dir)
         return payload, inspected, counts_after_revert
 
     def test_verification_revert_leaves_final_review_projection_cached(

@@ -18,6 +18,7 @@ from agent_session_loop import (
     run_loop,
     run_selection,
     state,
+    state_locks,
     verification,
 )
 from tests.support import (
@@ -143,7 +144,7 @@ class SettledPauseCommitGateTests(unittest.TestCase):
             note=None,
             allow_not_loop_ready=True,
         )
-        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
         try:
             with (
                 patched_env(**self.commit_env),
@@ -160,7 +161,7 @@ class SettledPauseCommitGateTests(unittest.TestCase):
                     verification_context=self.context,
                 )
         finally:
-            state.release_lock(self.plan_dir, self.state_dir)
+            state_locks.release_lock(self.plan_dir, self.state_dir)
 
     def _git(self, alias: str, *args: str) -> str:
         return git_stdout(self.repositories[alias], *args)

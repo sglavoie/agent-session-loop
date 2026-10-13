@@ -20,6 +20,7 @@ from agent_session_loop import (
     run_commit,
     runner,
     state,
+    state_locks,
 )
 from tests.harness_integration_base import FakeHarnessIntegrationBase
 from tests.support import (
@@ -334,7 +335,7 @@ class ProcessSweepAndLeafRecoveryTests(FakeHarnessIntegrationBase):
                 ["complete", "complete"],
                 [session.status for session in plans.inspect_plan(plan_dir).sessions],
             )
-            lock = state.read_lock_info(plan_dir, state_dir)
+            lock = state_locks.read_lock_info(plan_dir, state_dir)
             self.assertIsNone(lock)
             records = read_jsonl(
                 state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME

@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent_session_loop import (
-    cli,
-    commit_message,
-)
+from agent_session_loop import cli, commit_message
 
 
 class CommitCliTests(unittest.TestCase):

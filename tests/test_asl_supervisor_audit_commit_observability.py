@@ -13,6 +13,7 @@ from agent_session_loop import (
     state,
     supervisor_audit_checks,
     supervisor_audit_evidence,
+    supervisor_audit_vocabulary,
 )
 from agent_session_loop.assurance_models import (
     DeterministicResult,
@@ -167,8 +168,8 @@ class CommitObservabilityTests(RunHistoryFixture, unittest.TestCase):
 
     def test_snapshot_artifacts_do_not_prove_a_critical_guard_failure(self) -> None:
         for name in (
-            supervisor_audit_checks.MUTATION_ARTIFACT_NAME,
-            supervisor_audit_checks.WORKSPACE_CHANGE_ARTIFACT_NAME,
+            supervisor_audit_vocabulary.MUTATION_ARTIFACT_NAME,
+            supervisor_audit_vocabulary.WORKSPACE_CHANGE_ARTIFACT_NAME,
         ):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
                 history = self._worker_committed(tmp)

@@ -106,6 +106,7 @@ from . import (
     run_outcome,
     run_prompts,
     state,
+    state_locks,
     supervisor_audit,
     turn_execution,
     verification,
@@ -585,7 +586,7 @@ def run_from_args(
         ) as redirect_endpoint,
     ):
         try:
-            lock_info = state.acquire_lock(
+            lock_info = state_locks.acquire_lock(
                 initial_snapshot.plan_dir,
                 args.state_dir,
                 repository_roots=claimed_repository_roots,
@@ -652,7 +653,7 @@ def run_from_args(
                     redirect_wakeup=redirect_wakeup,
                 )
             finally:
-                state.release_lock(initial_snapshot.plan_dir, args.state_dir)
+                state_locks.release_lock(initial_snapshot.plan_dir, args.state_dir)
         except KeyboardInterrupt:
             payload = run_outcome._error_payload(
                 args,

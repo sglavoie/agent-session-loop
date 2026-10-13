@@ -20,6 +20,8 @@ from agent_session_loop import (
     run_persistence,
     run_termination,
     state,
+    state_locks,
+    state_status,
 )
 from tests.asl_core_support import ParserAndStateTestsBase
 from tests.support import (
@@ -398,11 +400,11 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             snapshot = plans.inspect_plan(plan_dir)
             # A run with a turn in flight holds its lock; without one the
             # status backfill would (correctly) declare the run abandoned.
-            state.acquire_lock(plan_dir, state_dir)
+            state_locks.acquire_lock(plan_dir, state_dir)
             try:
-                payload = state.status_payload(snapshot, state_dir)
+                payload = state_status.status_payload(snapshot, state_dir)
             finally:
-                state.release_lock(plan_dir, state_dir)
+                state_locks.release_lock(plan_dir, state_dir)
 
         self.assertEqual("legacy-run", payload["runner_state"]["run_id"])
         self.assertEqual(1, payload["active_turn"]["session"])

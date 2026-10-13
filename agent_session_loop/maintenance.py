@@ -75,7 +75,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import durability, retention, state
+from . import durability, retention, state, state_locks
 
 __all__ = [
     "CORPUS_BUDGET_BYTES",
@@ -509,7 +509,7 @@ class _SafetyReading:
     def blocker(self, *, plan_dir: str, plan_state_dir: str, run_id: str) -> str:
         """Return why this run may not be touched now, or ``""`` when it may."""
         if plan_dir not in self._locks:
-            info = state.inspect_lock_info(Path(plan_dir), self._root)
+            info = state_locks.inspect_lock_info(Path(plan_dir), self._root)
             self._locks[plan_dir] = retention.lock_blocker(info)
         if self._locks[plan_dir]:
             return self._locks[plan_dir]

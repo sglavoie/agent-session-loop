@@ -50,7 +50,13 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_session_loop import plans, state, workbench, workbench_operations
+from agent_session_loop import (
+    plans,
+    state,
+    state_locks,
+    workbench,
+    workbench_operations,
+)
 from asl_workbench import operations
 from tests.support import (
     _http_request,
@@ -721,9 +727,9 @@ class PlanLockTests(JournalFixture, unittest.TestCase):
         self.assertFalse(lock_path.exists())
 
     def test_admission_leaves_an_existing_lock_untouched(self) -> None:
-        handle = state.acquire_lock(self.canonical, state_dir=self.state_dir)
+        handle = state_locks.acquire_lock(self.canonical, state_dir=self.state_dir)
         self.addCleanup(
-            lambda: state.release_lock(self.canonical, state_dir=self.state_dir)
+            lambda: state_locks.release_lock(self.canonical, state_dir=self.state_dir)
         )
         del handle
         lock_path = state.lock_path_for_plan(self.canonical, self.state_dir)
@@ -736,7 +742,7 @@ class PlanLockTests(JournalFixture, unittest.TestCase):
         # Classifying the lock is how reconciliation gets its evidence.
         # Reclaiming it would make validating an action the thing that changes
         # the corpus being validated.
-        state.acquire_lock(self.canonical, state_dir=self.state_dir)
+        state_locks.acquire_lock(self.canonical, state_dir=self.state_dir)
         lock_path = state.lock_path_for_plan(self.canonical, self.state_dir)
         payload = json.loads(lock_path.read_text(encoding="utf-8"))
         payload["pid"] = DEAD_PID

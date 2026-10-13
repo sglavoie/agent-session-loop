@@ -12,6 +12,8 @@ from typing import Any
 from agent_session_loop import (
     events,
     supervisor_audit_checks,
+    supervisor_audit_models,
+    supervisor_audit_write_scope,
     verification,
 )
 from tests import support_supervisor_audit_checks as checks_support
@@ -111,13 +113,13 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
             "severity",
             {
                 field.name
-                for field in dataclasses.fields(supervisor_audit_checks._Verdict)  # noqa: SLF001
+                for field in dataclasses.fields(supervisor_audit_models._Verdict)  # noqa: SLF001
             },
         )
 
     def test_both_write_scope_checks_share_one_analysis_helper(self) -> None:
         module = ast.parse(
-            Path(supervisor_audit_checks.__file__).read_text(encoding="utf-8")
+            Path(supervisor_audit_write_scope.__file__).read_text(encoding="utf-8")
         )
         called = {
             node.name: {

@@ -8,12 +8,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from agent_session_loop import (
-    events,
-    plans,
-    state,
-    supervisor_audit_checks,
-)
+from agent_session_loop import events, plans, state, supervisor_audit_checks
 from tests import support_supervisor_audit_checks as checks_support
 from tests.support_supervisor_audit import RUN_ID
 

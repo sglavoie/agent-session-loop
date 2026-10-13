@@ -25,6 +25,7 @@ from agent_session_loop import (
     install_verify,
     plans,
     state,
+    state_locks,
 )
 from tests.support import write_plan
 
@@ -77,13 +78,13 @@ class PairingTestBase(unittest.TestCase):
                 json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8"
             )
         if locked:
-            state.acquire_lock(plan_dir, self.state_dir)
+            state_locks.acquire_lock(plan_dir, self.state_dir)
             self.addCleanup(self._release, plan_dir)
         return plan_dir
 
     def _release(self, plan_dir: Path) -> None:
         with suppress(state.StateError):
-            state.release_lock(plan_dir, self.state_dir)
+            state_locks.release_lock(plan_dir, self.state_dir)
 
     def _survey(self, **kwargs: Any) -> dict[str, Any]:
         return agent_mux_pairing.survey(state_dir=self.state_dir, **kwargs)

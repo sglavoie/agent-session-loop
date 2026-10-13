@@ -11,11 +11,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import (
-    authoring,
-    cli,
-    repository_registration,
-)
+from agent_session_loop import authoring, cli, repository_registration
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     _contract_block,

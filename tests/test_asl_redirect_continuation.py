@@ -69,9 +69,11 @@ from agent_session_loop import (
     run_commit,
     run_control,
     run_loop,
+    run_loop_control_redirects,
     run_selection,
     run_termination,
     state,
+    state_locks,
     turn_dispositions,
     workspaces,
 )
@@ -1214,7 +1216,7 @@ class RedirectedHarnessTests(unittest.TestCase):
         selected: str = "claude",
         session_id: str = SESSION_ID,
     ) -> str:
-        return run_loop._redirected_turn_harness(
+        return run_loop_control_redirects._redirected_turn_harness(
             self.ctx,
             pending=pending,
             selected=selected,
@@ -1558,7 +1560,7 @@ class _RedirectedRun(unittest.TestCase):
                 run_control.RunControlListener, "for_run", side_effect=fake_for_run
             ),
         ):
-            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
             try:
                 exit_code, payload = run_loop.run_locked(
                     args=args,
@@ -1571,7 +1573,7 @@ class _RedirectedRun(unittest.TestCase):
                     redirect_wakeup=self.wakeup,
                 )
             finally:
-                state.release_lock(self.plan_dir, self.state_dir)
+                state_locks.release_lock(self.plan_dir, self.state_dir)
         self.assertEqual(expect_exit_code, exit_code, payload)
         return payload
 

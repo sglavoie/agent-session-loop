@@ -21,6 +21,9 @@ from agent_session_loop import (
     harnesses,
     plans,
     state,
+    state_abandonment,
+    state_assurance_pending,
+    state_locks,
 )
 from tests.support import (
     read_jsonl,
@@ -109,7 +112,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.lock_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
     def read_lock_info(self) -> state.LockInfo:
-        lock_info = state.read_lock_info(self.plan_dir, self.state_dir)
+        lock_info = state_locks.read_lock_info(self.plan_dir, self.state_dir)
         assert lock_info is not None
         return lock_info
 
@@ -130,14 +133,14 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.assertTrue(lock_info.stale)
 
         self.assertTrue(
-            state.mark_run_abandoned(
+            state_abandonment.mark_run_abandoned(
                 self.plan_state, lock_info=lock_info, trigger="test"
             )
         )
 
         persisted = self.persisted_state()
         self.assertFalse(persisted["ok"])
-        self.assertEqual(state.ABANDONED_REASON, persisted["reason"])
+        self.assertEqual(state_abandonment.ABANDONED_REASON, persisted["reason"])
         self.assertIsNotNone(persisted["run_finished_at"])
         self.assertIsNone(persisted["active_turn"])
         self.assertIsNone(persisted["active_verification"])
@@ -157,7 +160,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         )
 
         self.assertFalse(
-            state.mark_run_abandoned(
+            state_abandonment.mark_run_abandoned(
                 self.plan_state, lock_info=lock_info, trigger="test"
             )
         )
@@ -175,13 +178,13 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.write_lock(pid=self.dead_pid(), hostname=socket.gethostname())
 
         self.assertTrue(
-            state.mark_run_abandoned(
+            state_abandonment.mark_run_abandoned(
                 self.plan_state, lock_info=self.read_lock_info(), trigger="test"
             )
         )
 
         reclaimed = self.persisted_state()
-        self.assertEqual(state.ABANDONED_REASON, reclaimed["reason"])
+        self.assertEqual(state_abandonment.ABANDONED_REASON, reclaimed["reason"])
         self.assertEqual("stopped", reclaimed["abandoned"]["prior_reason"])
         self.assertIsNone(reclaimed["active_finalization"])
 
@@ -194,7 +197,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         # each one step from the recheck, which is the interleaving that used
         # to let both of them publish a terminal record.
         barrier = threading.Barrier(2)
-        real_is_proven = state._abandonment_is_proven
+        real_is_proven = state_abandonment._abandonment_is_proven
 
         def barriered_proof(*args: object, **kwargs: object) -> bool:
             proven = real_is_proven(*args, **kwargs)
@@ -205,13 +208,15 @@ class MarkRunAbandonedTests(unittest.TestCase):
         results_lock = threading.Lock()
 
         def probe() -> None:
-            marked = state.mark_run_abandoned(
+            marked = state_abandonment.mark_run_abandoned(
                 self.plan_state, lock_info=lock_info, trigger="test"
             )
             with results_lock:
                 results.append(marked)
 
-        with mock.patch.object(state, "_abandonment_is_proven", barriered_proof):
+        with mock.patch.object(
+            state_abandonment, "_abandonment_is_proven", barriered_proof
+        ):
             threads = [threading.Thread(target=probe) for _ in range(2)]
             for thread in threads:
                 thread.start()
@@ -221,7 +226,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
 
         self.assertEqual([False, True], sorted(results))
         persisted = self.persisted_state()
-        self.assertEqual(state.ABANDONED_REASON, persisted["reason"])
+        self.assertEqual(state_abandonment.ABANDONED_REASON, persisted["reason"])
         records = read_jsonl(self.events_path)
         self.assertEqual([events.RUN_FINISHED_EVENT], [r["name"] for r in records])
         # The loser wrote neither a second event nor a competing timestamp.
@@ -236,7 +241,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.write_unfinished_state()
         self.write_lock(pid=self.dead_pid(), hostname=socket.gethostname())
         lock_info = self.read_lock_info()
-        claim_path = self.plan_state / state.ABANDON_CLAIM_FILE_NAME
+        claim_path = self.plan_state / state_abandonment.ABANDON_CLAIM_FILE_NAME
 
         holder = subprocess.Popen(
             [sys.executable, "-c", _HOLD_ABANDON_CLAIM_SOURCE, str(claim_path)],
@@ -252,7 +257,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.assertEqual("held\n", holder.stdout.readline())
 
         self.assertFalse(
-            state.mark_run_abandoned(
+            state_abandonment.mark_run_abandoned(
                 self.plan_state, lock_info=lock_info, trigger="test"
             )
         )
@@ -262,7 +267,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.assertEqual(0, holder.wait(timeout=30))
 
         self.assertTrue(
-            state.mark_run_abandoned(
+            state_abandonment.mark_run_abandoned(
                 self.plan_state, lock_info=lock_info, trigger="test"
             )
         )
@@ -275,7 +280,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.assertTrue(lock_info.active)
 
         self.assertFalse(
-            state.mark_run_abandoned(
+            state_abandonment.mark_run_abandoned(
                 self.plan_state, lock_info=lock_info, trigger="test"
             )
         )
@@ -288,7 +293,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.write_lock(pid=self.dead_pid(), hostname="some-other-host")
 
         self.assertFalse(
-            state.mark_run_abandoned(
+            state_abandonment.mark_run_abandoned(
                 self.plan_state, lock_info=self.read_lock_info(), trigger="test"
             )
         )
@@ -302,7 +307,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.assertIsNone(lock_info.pid)
 
         self.assertFalse(
-            state.mark_run_abandoned(
+            state_abandonment.mark_run_abandoned(
                 self.plan_state, lock_info=lock_info, trigger="test"
             )
         )
@@ -311,13 +316,17 @@ class MarkRunAbandonedTests(unittest.TestCase):
     def test_missing_lock_marks_abandoned_only_after_the_grace_window(self) -> None:
         self.write_unfinished_state(run_started_at=datetime.now(UTC).isoformat())
         self.assertFalse(
-            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
+            state_abandonment.mark_run_abandoned(
+                self.plan_state, lock_info=None, trigger="test"
+            )
         )
         self.assertUntouched()
 
         self.write_unfinished_state()
         self.assertTrue(
-            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
+            state_abandonment.mark_run_abandoned(
+                self.plan_state, lock_info=None, trigger="test"
+            )
         )
         self.assertIsNone(self.persisted_state()["abandoned"]["lock_reason"])
 
@@ -326,7 +335,9 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.write_lock(pid=os.getpid(), hostname=socket.gethostname())
 
         self.assertFalse(
-            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
+            state_abandonment.mark_run_abandoned(
+                self.plan_state, lock_info=None, trigger="test"
+            )
         )
         self.assertUntouched()
 
@@ -344,7 +355,9 @@ class MarkRunAbandonedTests(unittest.TestCase):
         )
 
         self.assertFalse(
-            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
+            state_abandonment.mark_run_abandoned(
+                self.plan_state, lock_info=None, trigger="test"
+            )
         )
         self.assertFalse(self.events_path.exists())
 
@@ -357,7 +370,9 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.write_unfinished_state(run_id="run-dead")
 
         self.assertTrue(
-            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
+            state_abandonment.mark_run_abandoned(
+                self.plan_state, lock_info=None, trigger="test"
+            )
         )
 
         after = self.events_path.read_bytes()
@@ -373,26 +388,30 @@ class MarkRunAbandonedTests(unittest.TestCase):
 
         # The terminal state is durable even when the event cannot be appended.
         self.assertTrue(
-            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
+            state_abandonment.mark_run_abandoned(
+                self.plan_state, lock_info=None, trigger="test"
+            )
         )
-        self.assertEqual(state.ABANDONED_REASON, self.persisted_state()["reason"])
+        self.assertEqual(
+            state_abandonment.ABANDONED_REASON, self.persisted_state()["reason"]
+        )
         self.assertEqual("", self.events_path.read_text(encoding="utf-8"))
 
     def test_acquire_lock_takeover_marks_abandoned_and_records_hostname(self) -> None:
         self.write_unfinished_state(run_id="run-dead")
         self.write_lock(pid=self.dead_pid(), hostname=socket.gethostname())
 
-        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
-        self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+        lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
+        self.addCleanup(state_locks.release_lock, self.plan_dir, self.state_dir)
 
         self.assertEqual(os.getpid(), lock_info.pid)
         self.assertEqual(socket.gethostname(), lock_info.raw["hostname"])
         self.assertEqual(4, lock_info.raw["version"])
 
         persisted = self.persisted_state()
-        self.assertEqual(state.ABANDONED_REASON, persisted["reason"])
+        self.assertEqual(state_abandonment.ABANDONED_REASON, persisted["reason"])
         self.assertEqual(
-            state.ABANDONED_TRIGGER_LOCK_TAKEOVER,
+            state_abandonment.ABANDONED_TRIGGER_LOCK_TAKEOVER,
             persisted["abandoned"]["trigger"],
         )
         records = read_jsonl(self.events_path)
@@ -405,10 +424,12 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.write_unfinished_state(run_id="run-legacy")
         self.write_lock(pid=self.dead_pid(), hostname=None)
 
-        state.acquire_lock(self.plan_dir, self.state_dir)
-        self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+        state_locks.acquire_lock(self.plan_dir, self.state_dir)
+        self.addCleanup(state_locks.release_lock, self.plan_dir, self.state_dir)
 
-        self.assertEqual(state.ABANDONED_REASON, self.persisted_state()["reason"])
+        self.assertEqual(
+            state_abandonment.ABANDONED_REASON, self.persisted_state()["reason"]
+        )
         records = read_jsonl(self.events_path)
         self.assertEqual(["run-legacy"], [r["payload"]["run_id"] for r in records])
 
@@ -421,7 +442,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         lock_bytes = self.lock_path.read_bytes()
 
         with self.assertRaises(state.StateError) as raised:
-            state.acquire_lock(self.plan_dir, self.state_dir)
+            state_locks.acquire_lock(self.plan_dir, self.state_dir)
 
         message = str(raised.exception)
         # The prefix is what `run_outcome._state_error_reason` reads as
@@ -437,8 +458,8 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.write_unfinished_state()
         self.lock_path.write_text("not json", encoding="utf-8")
 
-        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
-        self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+        lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
+        self.addCleanup(state_locks.release_lock, self.plan_dir, self.state_dir)
 
         self.assertEqual(os.getpid(), lock_info.pid)
         self.assertUntouched()
@@ -451,8 +472,8 @@ class MarkRunAbandonedTests(unittest.TestCase):
             run_started_at=datetime.now(UTC).isoformat(),
         )
 
-        state.acquire_lock(self.plan_dir, self.state_dir)
-        self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+        state_locks.acquire_lock(self.plan_dir, self.state_dir)
+        self.addCleanup(state_locks.release_lock, self.plan_dir, self.state_dir)
 
         self.assertUntouched()
 
@@ -461,7 +482,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
             self.plan_state
             / state.RUNS_DIR_NAME
             / run_id
-            / state.ASSURANCE_PENDING_FILE_NAME
+            / state_assurance_pending.ASSURANCE_PENDING_FILE_NAME
         )
         return json.loads(path.read_text(encoding="utf-8"))
 
@@ -473,12 +494,15 @@ class MarkRunAbandonedTests(unittest.TestCase):
         )
 
         self.assertTrue(
-            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
+            state_abandonment.mark_run_abandoned(
+                self.plan_state, lock_info=None, trigger="test"
+            )
         )
 
         record = self.pending_record("run-owing")
         self.assertEqual(
-            state.ASSURANCE_PENDING_SCHEMA_VERSION, record["schema_version"]
+            state_assurance_pending.ASSURANCE_PENDING_SCHEMA_VERSION,
+            record["schema_version"],
         )
         self.assertEqual("run-owing", record["run_id"])
         self.assertIsNone(record["skip"])
@@ -509,11 +533,14 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.write_unfinished_state(run_id="run-old")
 
         self.assertTrue(
-            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
+            state_abandonment.mark_run_abandoned(
+                self.plan_state, lock_info=None, trigger="test"
+            )
         )
 
         self.assertEqual(
-            state.ASSURANCE_SKIP_PREDATES, self.pending_record("run-old")["skip"]
+            state_assurance_pending.ASSURANCE_SKIP_PREDATES,
+            self.pending_record("run-old")["skip"],
         )
 
     def test_settled_assurance_is_recorded_as_owing_nothing(self) -> None:
@@ -525,13 +552,14 @@ class MarkRunAbandonedTests(unittest.TestCase):
                 self.write_unfinished_state(run_id=label, assurance=assurance)
 
                 self.assertTrue(
-                    state.mark_run_abandoned(
+                    state_abandonment.mark_run_abandoned(
                         self.plan_state, lock_info=None, trigger="test"
                     )
                 )
 
                 self.assertEqual(
-                    state.ASSURANCE_SKIP_SETTLED, self.pending_record(label)["skip"]
+                    state_assurance_pending.ASSURANCE_SKIP_SETTLED,
+                    self.pending_record(label)["skip"],
                 )
 
     def test_abandonment_records_the_debt_without_launching_a_harness(self) -> None:
@@ -549,7 +577,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
             side_effect=AssertionError("abandonment launched a harness"),
         ):
             self.assertTrue(
-                state.mark_run_abandoned(
+                state_abandonment.mark_run_abandoned(
                     self.plan_state, lock_info=None, trigger="test"
                 )
             )
@@ -563,10 +591,12 @@ class MarkRunAbandonedTests(unittest.TestCase):
         (runs_dir / "run-blocked").write_text("not a directory", encoding="utf-8")
 
         self.assertTrue(
-            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
+            state_abandonment.mark_run_abandoned(
+                self.plan_state, lock_info=None, trigger="test"
+            )
         )
 
         persisted = self.persisted_state()
-        self.assertEqual(state.ABANDONED_REASON, persisted["reason"])
+        self.assertEqual(state_abandonment.ABANDONED_REASON, persisted["reason"])
         self.assertNotIn("assurance_pending", persisted)
         self.assertEqual(1, len(read_jsonl(self.events_path)))

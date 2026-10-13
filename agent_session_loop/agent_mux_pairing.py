@@ -39,6 +39,9 @@ from . import (
     plans,
     responses,
     state,
+    state_locks,
+    state_plan_refs,
+    state_schema_upgrade,
 )
 
 COMMAND_NAME = "agent-mux-pairing"
@@ -124,7 +127,7 @@ def _plan_dir_for_state_dir(state_dir: Path) -> str | None:
     one.
     """
     for name in (events.STATE_FILE_NAME, state.LOCK_FILE_NAME):
-        obj = state._read_json_object_safe(state_dir / name)
+        obj = state_plan_refs._read_json_object_safe(state_dir / name)
         if obj is None:
             continue
         value = _nonempty_str(obj.get("plan_dir"))
@@ -146,7 +149,7 @@ def _lock_for(state_dir: Path, plan_dir: str | None) -> state.LockInfo | None:
     if not lock_path.exists():
         return None
     expected = plans.canonicalize_path(plan_dir) if plan_dir else state_dir
-    return state._read_lock_path(lock_path, expected, reclaim=False)
+    return state_locks._read_lock_path(lock_path, expected, reclaim=False)
 
 
 def _classify(state_dir: Path) -> dict[str, Any]:
@@ -165,7 +168,7 @@ def _classify(state_dir: Path) -> dict[str, Any]:
         entry["detail"] = "no state record"
         return entry
 
-    state_obj = state._read_json_object_safe(state_path)
+    state_obj = state_plan_refs._read_json_object_safe(state_path)
     if state_obj is None:
         entry["classification"] = CLASS_UNREADABLE
         entry["detail"] = f"state file is not a JSON object: {state_path}"
@@ -176,7 +179,7 @@ def _classify(state_dir: Path) -> dict[str, Any]:
     )
     entry["plan_dir"] = plan_dir
     entry["run_id"] = _nonempty_str(state_obj.get("run_id"))
-    version = state.state_schema_version(state_obj)
+    version = state_schema_upgrade.state_schema_version(state_obj)
     entry["schema_version"] = version
 
     current = agent_mux_projection.STATE_SCHEMA_VERSION
@@ -247,10 +250,10 @@ def _migrate_entry(entry: dict[str, Any], state_dir: str | None) -> dict[str, An
         record["detail"] = "state record names no plan directory"
         return record
     try:
-        report = state.upgrade_plan_state_schema(
+        report = state_schema_upgrade.upgrade_plan_state_schema(
             plan_dir, state_dir=state_dir, apply=True
         )
-    except state.MigrationError as error:
+    except state_schema_upgrade.MigrationError as error:
         record["reason"] = error.reason
         record["detail"] = str(error)
         return record
@@ -302,7 +305,7 @@ def survey(
 
     entries: list[dict[str, Any]] = []
     try:
-        for plan_state in state.iter_plan_state_dirs(root):
+        for plan_state in state_plan_refs.iter_plan_state_dirs(root):
             entries.append(_classify(plan_state))
     except state.StateError as error:
         payload["reason"] = REASON_STATE_ROOT_ERROR

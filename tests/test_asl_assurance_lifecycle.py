@@ -38,10 +38,13 @@ from agent_session_loop import (
     run_termination,
     runner,
     state,
+    state_abandonment,
+    state_assurance_pending,
     supervisor_audit,
     supervisor_audit_agent,
     supervisor_audit_checks,
     supervisor_audit_evidence,
+    supervisor_audit_vocabulary,
     turn_execution,
     verification_transitions,
 )
@@ -835,10 +838,10 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                         severity="critical",
                         summary="An earlier auditor changed repository evidence.",
                         recommendation="Confirm the read-only profile is enforced.",
-                        evidence=(supervisor_audit_checks.MUTATION_ARTIFACT_NAME,),
+                        evidence=(supervisor_audit_vocabulary.MUTATION_ARTIFACT_NAME,),
                     ),
                     observed_at="2026-08-09T10:11:12+00:00",
-                    audit_artifact=supervisor_audit_checks.MUTATION_ARTIFACT_NAME,
+                    audit_artifact=supervisor_audit_vocabulary.MUTATION_ARTIFACT_NAME,
                 ),
                 state_dir=root,
             )
@@ -1713,7 +1716,9 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
             payload["assurance"] = assurance
         state_path.write_text(json.dumps(payload), encoding="utf-8")
         self.assertTrue(
-            state.mark_run_abandoned(state_dir, lock_info=None, trigger="test")
+            state_abandonment.mark_run_abandoned(
+                state_dir, lock_info=None, trigger="test"
+            )
         )
 
     def _process(
@@ -1763,7 +1768,7 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
             self._process(history)
 
             after = json.loads(state_path.read_text(encoding="utf-8"))
-            self.assertEqual(state.ABANDONED_REASON, after["reason"])
+            self.assertEqual(state_abandonment.ABANDONED_REASON, after["reason"])
             self.assertEqual(before, after)
             records = read_jsonl(history[2] / events.EVENTS_FILE_NAME)
             self.assertEqual(
@@ -1811,7 +1816,9 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
 
             result = report.results[0]
             self.assertEqual(assurance_catchup.OUTCOME_SKIPPED, result.outcome)
-            self.assertEqual(state.ASSURANCE_SKIP_PREDATES, result.reason)
+            self.assertEqual(
+                state_assurance_pending.ASSURANCE_SKIP_PREDATES, result.reason
+            )
             self.assertEqual(
                 0, len(assurance_ledger.read_ledger(state_dir=root).records)
             )

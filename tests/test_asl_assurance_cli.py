@@ -12,7 +12,13 @@ from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import assurance_cli, cli, harnesses, state
+from agent_session_loop import (
+    assurance_cli,
+    cli,
+    harnesses,
+    state,
+    state_assurance_pending,
+)
 from agent_session_loop import assurance_draft as draft
 from agent_session_loop import assurance_ledger as ledger
 from agent_session_loop import assurance_models as models
@@ -948,7 +954,7 @@ class AssuranceProcessPendingTests(AssuranceCliTestCase):
         plan_name: str,
         run_id: str,
         *,
-        skip: str | None = state.ASSURANCE_SKIP_PREDATES,
+        skip: str | None = state_assurance_pending.ASSURANCE_SKIP_PREDATES,
     ) -> Path:
         """Record that one run of ``plan_name`` died still owing an audit."""
         plan_dir = self.seed_run_directory(plan_name, run_id)
@@ -957,10 +963,11 @@ class AssuranceProcessPendingTests(AssuranceCliTestCase):
             / state.RUNS_DIR_NAME
             / run_id
         )
-        (run_dir / state.ASSURANCE_PENDING_FILE_NAME).write_text(
+        pending_schema = state_assurance_pending.ASSURANCE_PENDING_SCHEMA_VERSION
+        (run_dir / state_assurance_pending.ASSURANCE_PENDING_FILE_NAME).write_text(
             json.dumps(
                 {
-                    "schema_version": state.ASSURANCE_PENDING_SCHEMA_VERSION,
+                    "schema_version": pending_schema,
                     "run_id": run_id,
                     "recorded_at": TIMESTAMP,
                     "trigger": "test",
@@ -1014,7 +1021,7 @@ class AssuranceProcessPendingTests(AssuranceCliTestCase):
                     "outcome": "skipped",
                     "plan_id": "alpha",
                     "state": None,
-                    "reason": state.ASSURANCE_SKIP_PREDATES,
+                    "reason": state_assurance_pending.ASSURANCE_SKIP_PREDATES,
                     "issue_ids": [],
                     "archived_artifacts": [],
                 }
@@ -1031,7 +1038,7 @@ class AssuranceProcessPendingTests(AssuranceCliTestCase):
         self.assertEqual(0, code, err)
         self.assertIn("1 recorded, 0 audited (limit 20)", out)
         self.assertIn(RUN_ID, out)
-        self.assertIn(state.ASSURANCE_SKIP_PREDATES, out)
+        self.assertIn(state_assurance_pending.ASSURANCE_SKIP_PREDATES, out)
 
     def test_a_non_positive_limit_is_refused_before_anything_runs(self) -> None:
         self.seed_pending_run("alpha", RUN_ID)
@@ -1586,6 +1593,7 @@ class AssurancePlanTests(AssuranceCliTestCase):
                 "assurance_projection",
                 "harnesses",
                 "state",
+                "state_plan_refs",
             },
             siblings,
         )

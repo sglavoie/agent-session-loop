@@ -69,6 +69,8 @@ from . import (
     redirect_recovery,
     redirect_store,
     state,
+    state_locks,
+    state_payloads,
     workbench,
     workbench_actions,
     workbench_controls,
@@ -502,7 +504,7 @@ def _question_projection(
 
     waiting_status = _bounded_text(runner_state.get("waiting_for_reply_status"))
     if context_kind == CONTEXT_KIND_WAITING and waiting_status is None:
-        waiting_status = state.WAITING_FOR_REPLY_STATUS_LIVE
+        waiting_status = state_payloads.WAITING_FOR_REPLY_STATUS_LIVE
 
     projection = {
         "context_kind": context_kind,
@@ -564,11 +566,11 @@ def project_row(
     rather than misapplied.
     """
     plan_dir = str(summary.plan_dir)
-    lock_info = state.inspect_lock_info(summary.plan_dir, state_dir)
+    lock_info = state_locks.inspect_lock_info(summary.plan_dir, state_dir)
     state_path = (
         state.plan_state_dir(summary.plan_dir, state_dir) / events.STATE_FILE_NAME
     )
-    runner_state = state._runner_state_payload(state_path, lock_info=lock_info)
+    runner_state = state_payloads._runner_state_payload(state_path, lock_info=lock_info)
     question, open_ids = _question_projection(
         summary.plan_dir, runner_state, state_dir=state_dir
     )

@@ -90,6 +90,7 @@ from . import (
     repository_scope,
     review,
     state,
+    state_locks,
     verification,
     workspaces,
 )
@@ -1768,12 +1769,12 @@ def materialize_review_repair_sessions(
     lock_info: state.LockInfo | None = None
     if hold_lock:
         try:
-            lock_info = state.acquire_lock(canonical_dir, state_dir)
+            lock_info = state_locks.acquire_lock(canonical_dir, state_dir)
             lock_acquired = True
         except state.StateError as error:
             return _malformed(None, f"could not acquire plan lock: {error}")
     else:
-        lock_info = state.read_lock_info(canonical_dir, state_dir)
+        lock_info = state_locks.read_lock_info(canonical_dir, state_dir)
     try:
         # An earlier publication that died mid-flight owns this plan's files
         # until it is rolled back. Recover before planning so the plan being
@@ -1799,7 +1800,7 @@ def materialize_review_repair_sessions(
         )
     finally:
         if lock_acquired:
-            state.release_lock(canonical_dir, state_dir)
+            state_locks.release_lock(canonical_dir, state_dir)
 
 
 def _materialize(

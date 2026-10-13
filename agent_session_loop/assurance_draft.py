@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from . import assurance_ledger as ledger
-from . import assurance_models, harnesses, state
+from . import assurance_models, harnesses, state, state_plan_refs
 from . import assurance_projection as projection
 from .assurance_models import (
     HARNESS_NAMES,
@@ -147,7 +147,7 @@ def evidence_run_dirs(
     """
     found: list[Path] = []
     for run_id in run_ids:
-        for location in state.find_run_locations(run_id, state_dir=state_dir):
+        for location in state_plan_refs.find_run_locations(run_id, state_dir=state_dir):
             run_dir = location.state_dir / state.RUNS_DIR_NAME / run_id
             if run_dir.is_dir():
                 found.append(run_dir.resolve())

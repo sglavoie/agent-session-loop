@@ -47,12 +47,13 @@ from agent_session_loop import (
     plans,
     repository_evidence,
     review_guard,
-    run_loop,
+    run_loop_context,
     run_prompts,
     turn_preflight,
     turn_preparation,
     workspace_evidence,
 )
+from tests import support_asl_run_loop_view as run_loop_view
 
 from .support import assert_no_runner_import, write_plan
 
@@ -334,11 +335,13 @@ class PreflightBoundaryTests(unittest.TestCase):
             name for name in vars(turn_preflight.RunContext) if not name.startswith("_")
         }
         self.assertTrue(declared)
-        fields = {field.name for field in dataclasses.fields(run_loop.RunContext)}
+        fields = {
+            field.name for field in dataclasses.fields(run_loop_context.RunContext)
+        }
         for name in sorted(declared):
             with self.subTest(member=name):
                 self.assertTrue(
-                    name in fields or hasattr(run_loop.RunContext, name),
+                    name in fields or hasattr(run_loop_context.RunContext, name),
                     f"turn_preflight.RunContext declares {name!r}, which the "
                     "run loop's own context does not provide",
                 )
@@ -348,7 +351,7 @@ class RunLoopDelegationTests(unittest.TestCase):
     """The run loop reaches this boundary and keeps none of its work."""
 
     def loop_source(self) -> str:
-        return Path(run_loop.__file__ or "").read_text(encoding="utf-8")
+        return run_loop_view.assembled_source()
 
     def test_the_loop_reaches_exactly_the_declared_entry_points(self) -> None:
         calls = {

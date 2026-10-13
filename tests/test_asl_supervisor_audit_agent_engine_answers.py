@@ -13,6 +13,7 @@ from agent_session_loop import (
     supervisor_audit,
     supervisor_audit_agent,
     supervisor_audit_checks,
+    supervisor_audit_vocabulary,
 )
 from agent_session_loop.assurance_models import (
     RUBRIC_LANES,
@@ -305,7 +306,7 @@ class AgentAuditEngineTests(checks_support.AgentAuditEngineFixture):
             self.assertEqual([], comparison["added"])
             self.assertEqual([], comparison["removed"])
             self.assertFalse(
-                (run_dir / supervisor_audit_checks.MUTATION_ARTIFACT_NAME).exists()
+                (run_dir / supervisor_audit_vocabulary.MUTATION_ARTIFACT_NAME).exists()
             )
 
     def test_every_attempt_is_archived_without_inlining_the_prompt(self) -> None:

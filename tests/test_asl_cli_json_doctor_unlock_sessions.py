@@ -10,13 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import (
-    config,
-    harnesses,
-    plans,
-    state,
-    task_packet,
-)
+from agent_session_loop import config, harnesses, plans, state_locks, task_packet
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
@@ -377,7 +371,7 @@ class JsonDoctorUnlockSessionsCliTests(JsonCliHelpers, unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
-            lock_info = state.acquire_lock(plan_dir, state_dir)
+            lock_info = state_locks.acquire_lock(plan_dir, state_dir)
 
             try:
                 completed = subprocess.run(
@@ -397,7 +391,7 @@ class JsonDoctorUnlockSessionsCliTests(JsonCliHelpers, unittest.TestCase):
                     check=False,
                 )
             finally:
-                state.release_lock(plan_dir, state_dir)
+                state_locks.release_lock(plan_dir, state_dir)
 
             self.assertEqual(1, completed.returncode)
             self.assertEqual("", completed.stderr)

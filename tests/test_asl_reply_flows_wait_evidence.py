@@ -22,6 +22,7 @@ from agent_session_loop import (
     run_coordination,
     run_persistence,
     state,
+    state_payloads,
 )
 from tests.support import (
     read_jsonl,
@@ -458,16 +459,16 @@ class MailboxWaitEvidenceTests(rfs.ReplyResumeFlowCase):
         )
         post_wake_now = detection_wall + timedelta(seconds=1.0)
         self.assertEqual(
-            state.WAITING_FOR_REPLY_STATUS_EXPIRED,
-            state.waiting_for_reply_status(
+            state_payloads.WAITING_FOR_REPLY_STATUS_EXPIRED,
+            state_payloads.waiting_for_reply_status(
                 waiting,
                 lock_info=lock_info,
                 now=post_wake_now,
             ),
         )
         self.assertEqual(
-            state.WAITING_FOR_REPLY_STATUS_LIVE,
-            state.waiting_for_reply_status(
+            state_payloads.WAITING_FOR_REPLY_STATUS_LIVE,
+            state_payloads.waiting_for_reply_status(
                 rebased,
                 lock_info=lock_info,
                 now=post_wake_now,

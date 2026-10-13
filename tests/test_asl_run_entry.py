@@ -429,7 +429,7 @@ class AdmissionOrderTests(unittest.TestCase):
 
     def test_contention_is_checked_only_after_the_lock_is_acquired(self) -> None:
         source = inspect.getsource(run_entry.run_from_args)
-        acquired = source.index("state.acquire_lock(")
+        acquired = source.index("state_locks.acquire_lock(")
         contended = source.index("run_contention.detect_conflicts(")
         # A check before the acquire leaves two racing starters blind to each
         # other and both proceed; checking under our own published claim means

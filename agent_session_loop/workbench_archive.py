@@ -44,7 +44,7 @@ from typing import Any
 
 from asl_workbench import archive as portable_archive
 
-from . import durability, plans, state, workbench
+from . import durability, plans, state, state_locks, workbench
 
 # --------------------------------------------------------------------------
 # Storage
@@ -341,7 +341,7 @@ def _validate_plan_for_mutation(
         )
 
     try:
-        lock_info = state.read_lock_info(canonical, state_dir)
+        lock_info = state_locks.read_lock_info(canonical, state_dir)
     except (OSError, ValueError) as error:
         raise error_cls(
             "state-error",
@@ -1393,7 +1393,7 @@ def unlock(
     in sessions 2 and 4, which left this as the path an operator asks for.
     """
     try:
-        return state.unlock_plan(plan_dir, state_dir, force=force)
+        return state_locks.unlock_plan(plan_dir, state_dir, force=force)
     except plans.PlanError as error:
         raise ArchiveRefused(
             portable_archive.REASON_MALFORMED_PLAN,

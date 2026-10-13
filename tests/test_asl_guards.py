@@ -32,6 +32,7 @@ from agent_session_loop import (
     intervention,
     run_coordination,
     state,
+    state_status,
 )
 from tests.asl_docs_support import read_asl_reference
 from tests.support import _write_lock_file, _write_state_payload, write_plan
@@ -1595,7 +1596,9 @@ class GuardStatusTests(unittest.TestCase):
     def status(self) -> dict[str, Any]:
         from agent_session_loop import plans
 
-        return state.status_payload(plans.inspect_plan(self.plan_dir), self.state_dir)
+        return state_status.status_payload(
+            plans.inspect_plan(self.plan_dir), self.state_dir
+        )
 
     def test_no_run_reports_an_empty_gate_with_its_coverage(self) -> None:
         payload = self.status()

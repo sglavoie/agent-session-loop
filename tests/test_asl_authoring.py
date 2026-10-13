@@ -19,14 +19,7 @@ from pathlib import Path
 from types import ModuleType
 from unittest import mock
 
-from agent_session_loop import (
-    authoring,
-    cli,
-    contracts,
-    harnesses,
-    plans,
-    workspaces,
-)
+from agent_session_loop import authoring, cli, contracts, harnesses, plans, workspaces
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     _load_script_module,

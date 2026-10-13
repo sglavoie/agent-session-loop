@@ -9,11 +9,8 @@ import unittest
 from pathlib import Path
 from typing import cast
 
-from agent_session_loop import (
-    handoff_guards,
-    run_loop,
-    turn_postflight,
-)
+from agent_session_loop import handoff_guards, turn_postflight
+from tests import support_asl_run_loop_view as run_loop_view
 
 #: The modules the session loop hands a step of the turn's finalization to. A
 #: step that moved into one of these still runs where the loop calls it, so the
@@ -97,7 +94,7 @@ class DispositionSourceFixture(unittest.TestCase):
     )
 
     def setUp(self) -> None:
-        self.source = Path(run_loop.__file__ or "").read_text(encoding="utf-8")
+        self.source = run_loop_view.assembled_source()
         self.tree = ast.parse(self.source)
         # The dispatch lives in `run_loop`; the disposition it dispatches on
         # moved to `handoff_guards`, so the two are read from separate trees

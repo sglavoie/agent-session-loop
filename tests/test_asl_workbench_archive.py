@@ -11,13 +11,7 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 
-from agent_session_loop import (
-    config,
-    plans,
-    state,
-    workbench,
-    workbench_archive,
-)
+from agent_session_loop import config, plans, state, workbench, workbench_archive
 from tests.support import (
     _seed_archivable_plan,
     _write_plan_dir,

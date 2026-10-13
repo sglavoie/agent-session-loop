@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from . import harnesses, plans, state, workspaces
+from . import harnesses, plans, state, state_locks, workspaces
 from .authoring import PlanTransaction
 from .baseline_cache import BASELINE_RESULTS_FILENAME, BaselineCache
 from .plans import PlanError, canonicalize_path, inspect_plan, parse_session_id
@@ -234,7 +234,7 @@ def _prepare_workspace_rebind(
         raise PlanError("--rebind-workspace requires an existing workspace binding")
 
     unresolved_new_workspace = _workspace_rebind_summary(cwd, registry)
-    lock_info = state.inspect_lock_info(plan_dir, state_dir)
+    lock_info = state_locks.inspect_lock_info(plan_dir, state_dir)
     if lock_info is not None and lock_info.active:
         raise _WorkspaceRebindConcurrencyError(
             "--rebind-workspace is unavailable while the plan has an active lock",
@@ -278,7 +278,7 @@ def _prepare_workspace_rebind(
     )
 
     try:
-        state.acquire_lock(plan_dir, state_dir, owner="asl-prepare-rebind")
+        state_locks.acquire_lock(plan_dir, state_dir, owner="asl-prepare-rebind")
     except state.StateError as error:
         raise _WorkspaceRebindConcurrencyError(
             f"cannot lock plan for workspace rebind: {error}",
@@ -474,7 +474,7 @@ def _prepare_workspace_rebind(
                 baseline_summary=staged_result.baseline,
             )
     finally:
-        state.release_lock(plan_dir, state_dir)
+        state_locks.release_lock(plan_dir, state_dir)
 
     published_files = tuple(relative_paths)
     return PrepareResult(

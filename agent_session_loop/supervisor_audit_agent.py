@@ -30,6 +30,8 @@ from . import (
     assurance_models,
     assurance_projection,
     durability,
+    supervisor_audit_models,
+    supervisor_audit_vocabulary,
 )
 from . import supervisor_audit_checks as audit_checks
 from . import supervisor_audit_evidence as audit_evidence
@@ -361,7 +363,9 @@ class AgentAudit:
 
 def _inline(text: str, *, limit: int = assurance_models.MAX_TEXT_CHARS) -> str:
     """Collapse validated text to one line so it can be rendered into a cell."""
-    collapsed = " ".join(audit_checks._CONTROL_CHAR_RE.sub(" ", str(text)).split())
+    collapsed = " ".join(
+        supervisor_audit_vocabulary._CONTROL_CHAR_RE.sub(" ", str(text)).split()
+    )
     return collapsed[:limit]
 
 
@@ -737,7 +741,7 @@ def _identity_decision(
         raise AgentOutputError(
             "malformed-output",
             f"{label} 'identity' has unknown key(s) {', '.join(unknown)}; only "
-            f"{audit_checks._names(sorted(_IDENTITY_KEYS))} are read",
+            f"{supervisor_audit_models._names(sorted(_IDENTITY_KEYS))} are read",
         )
     decision = payload.get("decision")
     if decision not in IDENTITY_DECISIONS:
@@ -849,21 +853,25 @@ def _validate_agent_references(
         raise AgentOutputError(
             "invalid-reference",
             "the agent cited evidence the bundle never declared: "
-            f"{audit_checks._names(unknown)}",
+            f"{supervisor_audit_models._names(unknown)}",
         )
     outside = sorted(
         {
             ref
             for finding in findings
             for ref in finding.localization
-            if not any(audit_checks._inside(ref, root) for root in LOCALIZATION_ROOTS)
+            if not any(
+                supervisor_audit_models._inside(ref, root)
+                for root in LOCALIZATION_ROOTS
+            )
         }
     )
     if outside:
         raise AgentOutputError(
             "invalid-reference",
             f"the agent localized outside the read-only source roots "
-            f"{', '.join(LOCALIZATION_ROOTS)}: {audit_checks._names(outside)}",
+            f"{', '.join(LOCALIZATION_ROOTS)}: "
+            f"{supervisor_audit_models._names(outside)}",
         )
 
 
@@ -911,7 +919,9 @@ class IdentityResolution:
             f"{self.ambiguous} finding(s) requested a new allocation for a defect "
             f"the catalog already names a candidate for: "
             f"{
-                audit_checks._names(candidate.issue_id for candidate in self.candidates)
+                supervisor_audit_models._names(
+                    candidate.issue_id for candidate in self.candidates
+                )
             }"
         )
 
@@ -967,7 +977,10 @@ def resolve_identities(
 
 
 def _worst(*statuses: CheckStatus) -> CheckStatus:
-    return max(statuses, key=lambda status: audit_checks._STATUS_PRECEDENCE[status])
+    return max(
+        statuses,
+        key=lambda status: supervisor_audit_vocabulary._STATUS_PRECEDENCE[status],
+    )
 
 
 def _status_counts(results: Sequence[assurance_models.DeterministicResult]) -> str:
@@ -980,8 +993,8 @@ def _status_counts(results: Sequence[assurance_models.DeterministicResult]) -> s
 
 
 def _anchor(declared: Sequence[str]) -> tuple[str, ...]:
-    if audit_checks.RUN_ANCHOR in declared:
-        return (audit_checks.RUN_ANCHOR,)
+    if supervisor_audit_vocabulary.RUN_ANCHOR in declared:
+        return (supervisor_audit_vocabulary.RUN_ANCHOR,)
     return (declared[0],) if declared else ()
 
 

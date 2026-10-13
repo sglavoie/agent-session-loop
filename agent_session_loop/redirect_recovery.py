@@ -75,7 +75,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from . import clock, conversations, redirect_store, state
+from . import clock, conversations, redirect_store, state, state_locks
 
 # ---------------------------------------------------------------------------
 # Status vocabulary
@@ -201,7 +201,7 @@ def inspect_owner(
     about to write and wrong for a question about what happened.
     """
     try:
-        lock = state.inspect_lock_info(plan_dir, state_dir)
+        lock = state_locks.inspect_lock_info(plan_dir, state_dir)
     except (OSError, ValueError) as error:
         # An unreadable lock is not an absent one. Failing closed here keeps a
         # transient stat error from being read as "nobody owns this plan".

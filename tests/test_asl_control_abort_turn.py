@@ -25,6 +25,7 @@ from agent_session_loop import (
     run_control,
     run_loop,
     state,
+    state_locks,
     turn_execution,
     turn_postflight,
 )
@@ -275,7 +276,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
                 side_effect=fake_for_run,
             ),
         ):
-            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
             try:
                 exit_code, payload = run_loop.run_locked(
                     args=args,
@@ -287,7 +288,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
                     run_id="test-run",
                 )
             finally:
-                state.release_lock(self.plan_dir, self.state_dir)
+                state_locks.release_lock(self.plan_dir, self.state_dir)
         self.assertEqual(expected_exit_code, exit_code, payload)
         return payload, harness_calls
 
@@ -565,7 +566,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
                 side_effect=fake_for_run,
             ),
         ):
-            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
             try:
                 exit_code, payload = run_loop.run_locked(
                     args=args,
@@ -577,7 +578,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
                     run_id="test-run",
                 )
             finally:
-                state.release_lock(self.plan_dir, self.state_dir)
+                state_locks.release_lock(self.plan_dir, self.state_dir)
 
         self.assertEqual(0, exit_code, payload)
         # The fake codex declines `app-server` before reading a byte, so the

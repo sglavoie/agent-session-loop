@@ -46,6 +46,8 @@ from . import (
     plans,
     qna,
     state,
+    state_locks,
+    state_payloads,
     tail,
     workbench,
     workbench_catalog,
@@ -207,7 +209,7 @@ def read_lock(reader: PlanReader) -> state.LockInfo | None:
     lock says must not be the thing that releases it. ``POST /api/unlock`` is
     where a release is asked for.
     """
-    return state._read_lock_path(reader.lock_path, reader.plan_dir, reclaim=False)
+    return state_locks._read_lock_path(reader.lock_path, reader.plan_dir, reclaim=False)
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +308,7 @@ def read_state(reader: PlanReader) -> _JSONDict:
             str(error),
             details={"plan_dir": str(reader.plan_dir)},
         ) from error
-    payload = state._runner_state_payload(
+    payload = state_payloads._runner_state_payload(
         reader.state_path,
         lock_info=read_lock(reader),
     )
@@ -321,8 +323,8 @@ def read_state(reader: PlanReader) -> _JSONDict:
         "plan_dir": str(reader.plan_dir),
         "state_path": str(reader.state_path),
         "state": payload,
-        "sessions": [state._session_payload(s) for s in snapshot.sessions],
-        "counts": state._status_counts(snapshot),
+        "sessions": [state_payloads._session_payload(s) for s in snapshot.sessions],
+        "counts": state_payloads._status_counts(snapshot),
         "next_pending_id": next_pending.id if next_pending is not None else None,
         "workspace": workspace,
         **workbench_workspace._workspace_payload(workspace, cwd=payload.get("cwd")),
@@ -331,7 +333,7 @@ def read_state(reader: PlanReader) -> _JSONDict:
 
 def read_verification(reader: PlanReader) -> _JSONDict:
     """The active verification's position, read off the same state file."""
-    runner_state = state._runner_state_payload(
+    runner_state = state_payloads._runner_state_payload(
         reader.state_path,
         lock_info=read_lock(reader),
     )

@@ -12,11 +12,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from agent_session_loop import (
-    cli,
-    events,
-    plans,
-)
+from agent_session_loop import cli, events, plans
 from tests.support import (
     REPO_ROOT,
     write_plan,

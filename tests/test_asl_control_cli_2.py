@@ -9,12 +9,7 @@ import json
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
-from agent_session_loop import (
-    cli,
-    control_cli,
-    control_queue,
-    plans,
-)
+from agent_session_loop import cli, control_cli, control_queue, plans
 from tests.asl_control_cli_support import ControlCliTestsBase
 from tests.support import (
     _write_state_payload,

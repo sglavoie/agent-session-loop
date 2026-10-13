@@ -10,13 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import (
-    config,
-    harnesses,
-    plans,
-    responses,
-    state,
-)
+from agent_session_loop import config, harnesses, plans, responses, state_status
 from tests.support import (
     REPO_ROOT,
     write_plan,
@@ -35,7 +29,7 @@ class JsonStatusAndDryRunCliTests(JsonCliHelpers, unittest.TestCase):
             state_dir = tmp_dir / "state"
             write_plan_with_ids(plan_dir, (("1", "complete"), ("1.1", "pending")))
 
-            status_payload = state.status_payload(
+            status_payload = state_status.status_payload(
                 plans.inspect_plan(plan_dir), state_dir
             )
             self.assertEqual("1.1", status_payload["next_pending"])
@@ -90,7 +84,9 @@ class JsonStatusAndDryRunCliTests(JsonCliHelpers, unittest.TestCase):
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("complete", "pending"))
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
             next_command = payload["next_command"]
             self.assertFalse(next_command["complete"])
             self.assertEqual("2", next_command["next_pending_id"])
@@ -113,7 +109,9 @@ class JsonStatusAndDryRunCliTests(JsonCliHelpers, unittest.TestCase):
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("complete", "complete"))
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
             self.assertEqual(
                 {
                     "complete": True,

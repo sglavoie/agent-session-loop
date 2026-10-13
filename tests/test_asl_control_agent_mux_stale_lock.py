@@ -23,6 +23,7 @@ from agent_session_loop import (
     plans,
     run_persistence,
     state,
+    state_locks,
 )
 from tests.support import (
     write_plan,
@@ -94,7 +95,7 @@ class StaleLockReclamationTests(unittest.TestCase):
     def read_lock_info(self) -> tuple[state.LockInfo, str]:
         buffer = io.StringIO()
         with redirect_stderr(buffer):
-            lock_info = state.read_lock_info(self.plan_dir, self.state_dir)
+            lock_info = state_locks.read_lock_info(self.plan_dir, self.state_dir)
         assert lock_info is not None
         return lock_info, buffer.getvalue()
 
@@ -167,7 +168,7 @@ class StaleLockReclamationTests(unittest.TestCase):
         # publishes its own over the freed path. Unserialized, the stalled
         # unlink lands on that replacement and two runners drive one plan.
         self.write_lock(pid=self.DEAD_PID, hostname=socket.gethostname())
-        real_read_json = state._read_json_object_safe
+        real_read_json = state_locks._read_json_object_safe
         window_open = threading.Event()
         competitor_done = threading.Event()
         failures: list[BaseException] = []
@@ -185,14 +186,14 @@ class StaleLockReclamationTests(unittest.TestCase):
 
         def stalled_reclaimer() -> None:
             try:
-                state.read_lock_info(self.plan_dir, self.state_dir)
+                state_locks.read_lock_info(self.plan_dir, self.state_dir)
             except BaseException as error:  # pragma: no cover - reported below
                 failures.append(error)
 
         def competitor() -> None:
             try:
-                state.read_lock_info(self.plan_dir, self.state_dir)
-                state.acquire_lock(self.plan_dir, self.state_dir)
+                state_locks.read_lock_info(self.plan_dir, self.state_dir)
+                state_locks.acquire_lock(self.plan_dir, self.state_dir)
             except BaseException as error:  # pragma: no cover - reported below
                 failures.append(error)
             finally:
@@ -204,7 +205,7 @@ class StaleLockReclamationTests(unittest.TestCase):
         buffer = io.StringIO()
         with (
             mock.patch.object(
-                state, "_read_json_object_safe", stall_after_the_equality_read
+                state_locks, "_read_json_object_safe", stall_after_the_equality_read
             ),
             redirect_stderr(buffer),
         ):
@@ -218,13 +219,13 @@ class StaleLockReclamationTests(unittest.TestCase):
         self.assertFalse(reclaimer.is_alive())
         self.assertFalse(rival.is_alive())
 
-        surviving = state.read_lock_info(self.plan_dir, self.state_dir)
+        surviving = state_locks.read_lock_info(self.plan_dir, self.state_dir)
         self.assertIsNotNone(surviving)
         assert surviving is not None
         self.assertTrue(surviving.active)
         self.assertEqual(os.getpid(), surviving.pid)
         with self.assertRaises(state.StateError) as raised:
-            state.acquire_lock(self.plan_dir, self.state_dir)
+            state_locks.acquire_lock(self.plan_dir, self.state_dir)
         self.assertIn("plan is locked by pid", str(raised.exception))
         # The dead lock is removed exactly once, by whichever reclaimer held
         # the mutex; the other finds nothing left to prove stale.
@@ -233,12 +234,12 @@ class StaleLockReclamationTests(unittest.TestCase):
     def test_lock_mutations_queue_behind_a_sidecar_that_outlives_the_lock(
         self,
     ) -> None:
-        mutex_path = self.lock_path.parent / state.LOCK_MUTEX_FILE_NAME
+        mutex_path = self.lock_path.parent / state_locks.LOCK_MUTEX_FILE_NAME
         taken = threading.Event()
         held_results: list[bool] = []
 
         def hold_the_mutex() -> None:
-            with state._plan_lock_mutex(self.lock_path) as held:
+            with state_locks._plan_lock_mutex(self.lock_path) as held:
                 held_results.append(held)
                 taken.set()
                 time.sleep(self.MUTEX_HOLD_SECONDS)
@@ -255,13 +256,13 @@ class StaleLockReclamationTests(unittest.TestCase):
             return result, waited
 
         lock_info, acquire_waited = elapsed_while_blocked(
-            lambda: state.acquire_lock(self.plan_dir, self.state_dir)
+            lambda: state_locks.acquire_lock(self.plan_dir, self.state_dir)
         )
         self.assertEqual(os.getpid(), lock_info.pid)
         self.assertGreaterEqual(acquire_waited, self.MUTEX_HOLD_SECONDS / 2)
 
         unlocked, unlock_waited = elapsed_while_blocked(
-            lambda: state.unlock_plan(self.plan_dir, self.state_dir, force=True)
+            lambda: state_locks.unlock_plan(self.plan_dir, self.state_dir, force=True)
         )
         self.assertTrue(unlocked.removed)
         self.assertGreaterEqual(unlock_waited, self.MUTEX_HOLD_SECONDS / 2)
@@ -286,7 +287,7 @@ class StaleLockReclamationTests(unittest.TestCase):
         held_results: list[bool] = []
 
         def hold_the_mutex() -> None:
-            with state._plan_lock_mutex(self.lock_path) as held:
+            with state_locks._plan_lock_mutex(self.lock_path) as held:
                 held_results.append(held)
                 holding.set()
                 # Held until the release under test has returned, so the claim
@@ -301,11 +302,11 @@ class StaleLockReclamationTests(unittest.TestCase):
             started = time.monotonic()
             with (
                 mock.patch.object(
-                    state, "LOCK_MUTEX_WAIT_SECONDS", self.CONTENDED_BOUND_SECONDS
+                    state_locks, "LOCK_MUTEX_WAIT_SECONDS", self.CONTENDED_BOUND_SECONDS
                 ),
                 redirect_stderr(buffer),
             ):
-                state.release_lock(self.plan_dir, self.state_dir)
+                state_locks.release_lock(self.plan_dir, self.state_dir)
             waited = time.monotonic() - started
         finally:
             release_returned.set()
@@ -318,14 +319,14 @@ class StaleLockReclamationTests(unittest.TestCase):
         self.assertIn(str(self.lock_path), buffer.getvalue())
         # The surviving owner is live, so the plan stays single-runner.
         with self.assertRaises(state.StateError) as raised:
-            state.acquire_lock(self.plan_dir, self.state_dir)
+            state_locks.acquire_lock(self.plan_dir, self.state_dir)
         self.assertIn("plan is locked by pid", str(raised.exception))
         # Fail-closed, not fail-always: an uncontended release still removes it.
-        state.release_lock(self.plan_dir, self.state_dir)
+        state_locks.release_lock(self.plan_dir, self.state_dir)
         self.assertFalse(self.lock_path.exists())
 
     def test_every_lock_mutation_path_branches_on_the_mutex_claim(self) -> None:
-        tree = ast.parse(inspect.getsource(state))
+        tree = ast.parse(inspect.getsource(state_locks))
         mutators = {
             node.name: node
             for node in ast.walk(tree)

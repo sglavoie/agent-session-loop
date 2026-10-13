@@ -22,6 +22,7 @@ from agent_session_loop import (
     verification,
     workspace_evidence,
 )
+from tests import support_asl_run_loop_view as run_loop_view
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     _structured_review_finding,
@@ -281,6 +282,7 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
             )
             for module in self.TURN_PATH_MODULES
         }
+        self.trees["run_loop"] = ast.parse(run_loop_view.assembled_source())
         self.tree = self.trees["run_loop"]
         self.preparation_tree = self.trees["turn_preparation"]
         self.run_locked = self._function("run_locked")

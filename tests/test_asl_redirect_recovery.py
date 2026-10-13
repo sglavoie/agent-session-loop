@@ -55,7 +55,8 @@ from agent_session_loop import (
     redirect_ack,
     redirect_recovery,
     redirect_store,
-    run_loop,
+    run_loop_carried_corrections,
+    run_loop_control_redirects,
     state,
 )
 
@@ -1413,7 +1414,7 @@ class RunLoopRecoveryTests(RecoveryTestCase):
         self.snapshot = plans.inspect_plan(self.plan_dir)
 
     def start_run(self, *, dry_run: bool = False) -> None:
-        run_loop._reconcile_stranded_redirects(
+        run_loop_control_redirects._reconcile_stranded_redirects(
             self.ctx,
             args=argparse.Namespace(dry_run=dry_run, state_dir=self.state_dir),
             snapshot=self.snapshot,
@@ -1425,7 +1426,7 @@ class RunLoopRecoveryTests(RecoveryTestCase):
     def carried(
         self, *, pending: Any = None, turn_index: int = 1
     ) -> redirect_ack.CarriedCorrections | None:
-        return run_loop._carried_corrections(
+        return run_loop_carried_corrections._carried_corrections(
             self.ctx,
             plan_dir=self.plan_dir,
             state_dir_arg=self.state_dir,

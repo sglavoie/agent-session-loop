@@ -12,14 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import (
-    cli_trace,
-    config,
-    events,
-    plans,
-    state,
-    workbench,
-)
+from agent_session_loop import cli_trace, config, events, plans, state, workbench
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,

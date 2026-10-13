@@ -38,7 +38,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import assurance_ledger, assurance_report, plans, session_overview, state
+from . import (
+    assurance_ledger,
+    assurance_report,
+    plans,
+    session_overview,
+    state,
+    state_locks,
+)
 
 __all__ = [
     "DEFAULT_MAX_AGE_DAYS",
@@ -379,7 +386,7 @@ def plan_retention(
     return _plan_report(
         plan_dir=canonical_plan_dir,
         plan_state=state.plan_state_dir(canonical_plan_dir, state_dir),
-        lock_info=state.inspect_lock_info(canonical_plan_dir, state_dir),
+        lock_info=state_locks.inspect_lock_info(canonical_plan_dir, state_dir),
         max_age_days=max_age_days,
         now=now if now is not None else datetime.now(UTC),
         live_runs=live_runs if live_runs is not None else live_run_keys(state_dir),
@@ -435,7 +442,7 @@ def corpus_retention(
             _plan_report(
                 plan_dir=plan_dir,
                 plan_state=plan_state,
-                lock_info=state.inspect_lock_info(plan_dir, root),
+                lock_info=state_locks.inspect_lock_info(plan_dir, root),
                 max_age_days=max_age_days,
                 now=moment,
                 live_runs=live,

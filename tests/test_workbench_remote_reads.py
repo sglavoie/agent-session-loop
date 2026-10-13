@@ -47,12 +47,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from agent_session_loop import (
-    events,
-    plans,
-    state,
-    workbench_remote_reads,
-)
+from agent_session_loop import events, plans, state, workbench_remote_reads
 from asl_workbench import catalog, details, remote_reads
 from asl_workbench import connector as portable
 from asl_workbench.transport import (

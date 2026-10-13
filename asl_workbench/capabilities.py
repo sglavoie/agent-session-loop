@@ -185,7 +185,9 @@ _SUMMARY_TESTS = "scripts:tests/test_asl_workbench_summary.py"
 _RECOVERY_TESTS = "scripts:tests/test_asl_workbench_recovery.py"
 _REDIRECT_TESTS = "scripts:tests/test_asl_workbench_redirect.py"
 _LAUNCH_TESTS = "scripts:tests/test_asl_workbench_launch.py"
-_STATIC_TESTS = "scripts:tests/test_asl_workbench_static.py"
+_STATIC_SHELL_TESTS = "scripts:tests/test_asl_workbench_static_shell.py"
+_STATIC_ASSET_TESTS = "scripts:tests/test_asl_workbench_static_assets.py"
+_STATIC_CLEANUP_TESTS = "scripts:tests/test_asl_workbench_hardening_cleanup.py"
 _FOUNDATION_TESTS = "scripts:tests/test_workbench_foundations.py"
 _CATALOG_TESTS = "scripts:tests/test_workbench_catalog.py"
 _DETAIL_TESTS = "scripts:tests/test_workbench_details.py"
@@ -548,7 +550,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
-        regression_coverage=(_STATIC_TESTS,),
+        regression_coverage=(_STATIC_SHELL_TESTS,),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_STATIC}:GET /static/",
@@ -557,7 +559,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_NONE,
-        regression_coverage=(_STATIC_TESTS,),
+        regression_coverage=(_STATIC_ASSET_TESTS,),
     ),
     # -- Workbench CLI ------------------------------------------------------
     Capability(
@@ -745,7 +747,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         # control, with no request and no feedback. Both halves are driven at
         # all three widths: a poll that changed nothing performs no scroll at
         # all, and a poll that shortened the page still puts the operator back.
-        regression_coverage=(_STATIC_TESTS, _SHELL_BROWSER_TESTS),
+        regression_coverage=(_STATIC_SHELL_TESTS, _SHELL_BROWSER_TESTS),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_BROWSER}:plan-detail",
@@ -824,7 +826,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         regression_coverage=(
             _DOCS_TESTS,
             _ARCHIVE_TESTS,
-            _STATIC_TESTS,
+            _STATIC_CLEANUP_TESTS,
             _INTERACTION_TESTS,
             _INTERACTION_BROWSER_TESTS,
         ),

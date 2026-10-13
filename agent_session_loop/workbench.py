@@ -40,6 +40,9 @@ from . import (
     review_continuation,
     run_contention,
     state,
+    state_abandonment,
+    state_locks,
+    state_payloads,
     workbench_recovery,
     workbench_workspace,
 )
@@ -1664,8 +1667,10 @@ def build_workbench_summary(
         snapshot, events_path
     ).to_payload()
     lock_path = state.lock_path_for_plan(snapshot.plan_dir, state_dir)
-    lock_info = state._read_lock_path(lock_path, snapshot.plan_dir, reclaim=reclaim)
-    runner_state = state._runner_state_payload(
+    lock_info = state_locks._read_lock_path(
+        lock_path, snapshot.plan_dir, reclaim=reclaim
+    )
+    runner_state = state_payloads._runner_state_payload(
         state_path,
         lock_info=lock_info,
         include_turn_activity=True,
@@ -1694,7 +1699,9 @@ def build_workbench_summary(
         state_dir,
         reclaim=reclaim,
     )
-    stale_unfinished, stale_reason = state._stale_runner_state(runner_state, lock_info)
+    stale_unfinished, stale_reason = state_abandonment._stale_runner_state(
+        runner_state, lock_info
+    )
     recovery = workbench_recovery.build_workbench_recovery(
         replace(plan, plan_dir=snapshot.plan_dir, exists=True),
         state_dir=state_dir,
@@ -1894,7 +1901,7 @@ def build_workbench_summary(
         and lock_info.active
         and isinstance(waiting_for_reply, dict)
         and runner_state.get("waiting_for_reply_status")
-        == state.WAITING_FOR_REPLY_STATUS_LIVE
+        == state_payloads.WAITING_FOR_REPLY_STATUS_LIVE
     ):
         session_label = (
             workbench_recovery._session_identifier_from_payload(waiting_for_reply)

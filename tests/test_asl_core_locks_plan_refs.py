@@ -17,6 +17,8 @@ from agent_session_loop import (
     events,
     plans,
     state,
+    state_locks,
+    state_plan_refs,
 )
 from tests.support import (
     write_plan,
@@ -41,12 +43,12 @@ class LockRepositoryClaimTests(unittest.TestCase):
     def test_lock_publishes_a_current_version_sorted_repository_claim(
         self,
     ) -> None:
-        lock_info = state.acquire_lock(
+        lock_info = state_locks.acquire_lock(
             self.plan_dir,
             self.state_dir,
             repository_roots=("/w/zebra", "/w/apple", "/w/zebra"),
         )
-        self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+        self.addCleanup(state_locks.release_lock, self.plan_dir, self.state_dir)
 
         payload = self.read_payload()
         # 3 adds `wakeup_endpoint` to 2's repository claim; 4 adds
@@ -59,8 +61,8 @@ class LockRepositoryClaimTests(unittest.TestCase):
         self.assertEqual(("/w/apple", "/w/zebra"), lock_info.repository_roots)
 
     def test_lock_without_a_claim_publishes_an_empty_registry(self) -> None:
-        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
-        self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+        lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
+        self.addCleanup(state_locks.release_lock, self.plan_dir, self.state_dir)
 
         self.assertEqual([], self.read_payload()["repositories"])
         self.assertEqual((), lock_info.repository_roots)
@@ -82,7 +84,7 @@ class LockRepositoryClaimTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        lock_info = state.read_lock_info(self.plan_dir, self.state_dir)
+        lock_info = state_locks.read_lock_info(self.plan_dir, self.state_dir)
 
         assert lock_info is not None
         self.assertTrue(lock_info.active)
@@ -109,19 +111,19 @@ class LockRepositoryClaimTests(unittest.TestCase):
         def observing_replace(src: str | Path, dst: str | Path) -> None:
             # Whatever a concurrent reader sees at the lock path, it sees it
             # here: everything before this call happened on the sibling.
-            observed.append(state.read_lock_info(self.plan_dir, self.state_dir))
+            observed.append(state_locks.read_lock_info(self.plan_dir, self.state_dir))
             real_replace(src, dst)
 
         with mock.patch.object(state.os, "replace", observing_replace):
-            state.acquire_lock(
+            state_locks.acquire_lock(
                 self.plan_dir, self.state_dir, repository_roots=("/w/apple",)
             )
-        self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+        self.addCleanup(state_locks.release_lock, self.plan_dir, self.state_dir)
 
         self.assertEqual([None], observed)
         self.assertEqual(["/w/apple"], self.read_payload()["repositories"])
         self.assertEqual(
-            [state.LOCK_FILE_NAME, state.LOCK_MUTEX_FILE_NAME],
+            [state.LOCK_FILE_NAME, state_locks.LOCK_MUTEX_FILE_NAME],
             sorted(path.name for path in self.lock_path.parent.iterdir()),
         )
 
@@ -132,11 +134,11 @@ class LockRepositoryClaimTests(unittest.TestCase):
             ),
             self.assertRaises(RuntimeError),
         ):
-            state.acquire_lock(self.plan_dir, self.state_dir)
+            state_locks.acquire_lock(self.plan_dir, self.state_dir)
 
         self.assertFalse(self.lock_path.exists())
         self.assertEqual(
-            [state.LOCK_MUTEX_FILE_NAME],
+            [state_locks.LOCK_MUTEX_FILE_NAME],
             sorted(path.name for path in self.lock_path.parent.iterdir()),
         )
 
@@ -201,7 +203,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             not_a_dir = root / "state-file"
             not_a_dir.write_text("not a dir", encoding="utf-8")
 
-            resolved = state.resolve_plan_reference(str(plan_dir), not_a_dir)
+            resolved = state_plan_refs.resolve_plan_reference(str(plan_dir), not_a_dir)
 
             self.assertEqual(plans.canonicalize_path(plan_dir), resolved)
 
@@ -213,7 +215,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             plan_dir.mkdir(parents=True)
             _write_state_json_entry(state_root, plan_dir)
 
-            resolved = state.resolve_plan_reference("abc123", state_root)
+            resolved = state_plan_refs.resolve_plan_reference("abc123", state_root)
 
             self.assertEqual(plan_dir, resolved)
 
@@ -225,7 +227,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             plan_dir.mkdir(parents=True)
             _write_lock_json_entry(state_root, plan_dir)
 
-            resolved = state.resolve_plan_reference("lock-label", state_root)
+            resolved = state_plan_refs.resolve_plan_reference("lock-label", state_root)
 
             self.assertEqual(plan_dir, resolved)
 
@@ -237,7 +239,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             plan_dir.mkdir(parents=True)
             _write_result_json_entry(state_root, plan_dir, section="after")
 
-            resolved = state.resolve_plan_reference("res-label", state_root)
+            resolved = state_plan_refs.resolve_plan_reference("res-label", state_root)
 
             self.assertEqual(plan_dir, resolved)
 
@@ -249,7 +251,9 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             plan_dir.mkdir(parents=True)
             _write_result_json_entry(state_root, plan_dir, section="before")
 
-            resolved = state.resolve_plan_reference("before-label", state_root)
+            resolved = state_plan_refs.resolve_plan_reference(
+                "before-label", state_root
+            )
 
             self.assertEqual(plan_dir, resolved)
 
@@ -264,7 +268,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             _write_lock_json_entry(state_root, plan_dir)
             _write_result_json_entry(state_root, plan_dir)
 
-            resolved = state.resolve_plan_reference("dedup", state_root)
+            resolved = state_plan_refs.resolve_plan_reference("dedup", state_root)
 
             self.assertEqual(plan_dir, resolved)
 
@@ -276,7 +280,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             plan_dir.mkdir(parents=True)
             _write_state_json_entry(state_root, plan_dir)
 
-            resolved = state.resolve_plan_reference("alpha", state_root)
+            resolved = state_plan_refs.resolve_plan_reference("alpha", state_root)
 
             # No case-insensitive match: falls back to the canonical argument.
             self.assertEqual(plans.canonicalize_path("alpha"), resolved)
@@ -289,7 +293,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             plan_dir.mkdir(parents=True)
             _write_state_json_entry(state_root, plan_dir)
 
-            resolved = state.resolve_plan_reference("foo/bar", state_root)
+            resolved = state_plan_refs.resolve_plan_reference("foo/bar", state_root)
 
             # Directory component present: keep path-only behavior.
             self.assertEqual(plans.canonicalize_path("foo/bar"), resolved)
@@ -298,7 +302,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             state_root = Path(tmp) / "absent"
 
-            resolved = state.resolve_plan_reference("whatever", state_root)
+            resolved = state_plan_refs.resolve_plan_reference("whatever", state_root)
 
             self.assertEqual(plans.canonicalize_path("whatever"), resolved)
 
@@ -310,7 +314,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             plan_dir.mkdir(parents=True)
             _write_state_json_entry(state_root, plan_dir)
 
-            resolved = state.resolve_plan_reference("missing", state_root)
+            resolved = state_plan_refs.resolve_plan_reference("missing", state_root)
 
             self.assertEqual(plans.canonicalize_path("missing"), resolved)
 
@@ -322,7 +326,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             # Register metadata but never create the plan directory itself.
             _write_state_json_entry(state_root, plans.canonicalize_path(plan_dir))
 
-            resolved = state.resolve_plan_reference("gone", state_root)
+            resolved = state_plan_refs.resolve_plan_reference("gone", state_root)
 
             self.assertEqual(plans.canonicalize_path("gone"), resolved)
 
@@ -338,7 +342,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             _write_lock_json_entry(state_root, second)
 
             with self.assertRaises(state.AmbiguousPlanError) as caught:
-                state.resolve_plan_reference("dup", state_root)
+                state_plan_refs.resolve_plan_reference("dup", state_root)
 
             error = caught.exception
             self.assertIsInstance(error, state.StateError)
@@ -358,7 +362,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             (entry / events.STATE_FILE_NAME).write_text("{ not json", encoding="utf-8")
             _write_result_json_entry(state_root, plan_dir)
 
-            resolved = state.resolve_plan_reference("good", state_root)
+            resolved = state_plan_refs.resolve_plan_reference("good", state_root)
 
             self.assertEqual(plan_dir, resolved)
 
@@ -368,7 +372,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             state_root.write_text("not a directory", encoding="utf-8")
 
             with self.assertRaises(state.StateError):
-                state.resolve_plan_reference("label", state_root)
+                state_plan_refs.resolve_plan_reference("label", state_root)
 
     def test_unenumerable_state_root_raises_state_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -379,4 +383,4 @@ class ResolvePlanReferenceTests(unittest.TestCase):
                 mock.patch.object(Path, "iterdir", side_effect=OSError("boom")),
                 self.assertRaises(state.StateError),
             ):
-                state.resolve_plan_reference("label", state_root)
+                state_plan_refs.resolve_plan_reference("label", state_root)

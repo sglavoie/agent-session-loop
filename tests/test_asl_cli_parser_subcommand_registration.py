@@ -13,6 +13,7 @@ from unittest import mock
 from agent_session_loop import (
     bridge,
     cli,
+    cli_defaults,
     commit_message,
     control_cli,
     control_queue,
@@ -192,62 +193,70 @@ class ParserSubcommandRegistrationTests(unittest.TestCase):
         # cli.py mirrors these defaults locally so building the parser does not
         # import the heavy `workbench_server`/`metrics` modules. Keep the copies
         # honest against their authoritative definitions.
-        self.assertEqual(workbench_server.DEFAULT_HOST, cli._WORKBENCH_DEFAULT_HOST)
-        self.assertEqual(workbench_server.DEFAULT_PORT, cli._WORKBENCH_DEFAULT_PORT)
-        self.assertEqual(metrics.DEFAULT_SINCE_DAYS, cli._METRICS_DEFAULT_SINCE_DAYS)
         self.assertEqual(
-            retention.DEFAULT_MAX_AGE_DAYS, cli._RETENTION_DEFAULT_MAX_AGE_DAYS
+            workbench_server.DEFAULT_HOST, cli_defaults._WORKBENCH_DEFAULT_HOST
+        )
+        self.assertEqual(
+            workbench_server.DEFAULT_PORT, cli_defaults._WORKBENCH_DEFAULT_PORT
+        )
+        self.assertEqual(
+            metrics.DEFAULT_SINCE_DAYS, cli_defaults._METRICS_DEFAULT_SINCE_DAYS
+        )
+        self.assertEqual(
+            retention.DEFAULT_MAX_AGE_DAYS, cli_defaults._RETENTION_DEFAULT_MAX_AGE_DAYS
         )
         self.assertEqual(
             prepare_models.DEFAULT_VALIDATOR_JOBS,
-            cli._PREPARE_DEFAULT_VALIDATOR_JOBS,
+            cli_defaults._PREPARE_DEFAULT_VALIDATOR_JOBS,
         )
         self.assertEqual(
             prepare_models.DEFAULT_VALIDATOR_TIMEOUT_SECONDS,
-            cli._PREPARE_DEFAULT_VALIDATOR_TIMEOUT_SECONDS,
+            cli_defaults._PREPARE_DEFAULT_VALIDATOR_TIMEOUT_SECONDS,
         )
         self.assertEqual(
             prepare_models.DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
-            cli._PREPARE_DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
+            cli_defaults._PREPARE_DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
         )
         self.assertEqual(
             control_queue.DEFAULT_ABORT_GRACE_SECONDS,
-            cli._CONTROL_DEFAULT_ABORT_GRACE_SECONDS,
+            cli_defaults._CONTROL_DEFAULT_ABORT_GRACE_SECONDS,
         )
         self.assertEqual(
             control_cli.DEFAULT_CONTROL_WAIT_TIMEOUT_SECONDS,
-            cli._CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS,
+            cli_defaults._CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS,
         )
         self.assertEqual(
             commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS,
-            cli._COMMIT_DEFAULT_GENERATION_TIMEOUT_SECONDS,
+            cli_defaults._COMMIT_DEFAULT_GENERATION_TIMEOUT_SECONDS,
         )
         self.assertEqual(
             redirect_store.REDIRECT_DEFAULT_TTL_SECONDS,
-            cli._REDIRECT_DEFAULT_TTL_SECONDS,
+            cli_defaults._REDIRECT_DEFAULT_TTL_SECONDS,
         )
         self.assertEqual(
             redirect_store.REDIRECT_MAX_TTL_SECONDS,
-            cli._REDIRECT_MAX_TTL_SECONDS,
+            cli_defaults._REDIRECT_MAX_TTL_SECONDS,
         )
         self.assertEqual(
             redirect_admission.ACCEPTANCE_WAIT_SECONDS,
-            cli._REDIRECT_ACCEPTANCE_WAIT_SECONDS,
+            cli_defaults._REDIRECT_ACCEPTANCE_WAIT_SECONDS,
         )
         self.assertEqual(
             redirect_admission.MAX_ACCEPTANCE_WAIT_SECONDS,
-            cli._REDIRECT_MAX_ACCEPTANCE_WAIT_SECONDS,
+            cli_defaults._REDIRECT_MAX_ACCEPTANCE_WAIT_SECONDS,
         )
         self.assertEqual(
             redirect_ack.DEFAULT_ACK_WAIT_SECONDS,
-            cli._REDIRECT_DEFAULT_ACK_WAIT_SECONDS,
+            cli_defaults._REDIRECT_DEFAULT_ACK_WAIT_SECONDS,
         )
         self.assertEqual(
             redirect_ack.MAX_ACK_WAIT_SECONDS,
-            cli._REDIRECT_MAX_ACK_WAIT_SECONDS,
+            cli_defaults._REDIRECT_MAX_ACK_WAIT_SECONDS,
         )
-        self.assertEqual(turn_execution.INTERRUPTED_EXIT, cli._INTERRUPTED_EXIT)
-        self.assertEqual(bridge.PROTOCOL_VERSION, cli._BRIDGE_PROTOCOL_VERSION)
+        self.assertEqual(
+            turn_execution.INTERRUPTED_EXIT, cli_defaults._INTERRUPTED_EXIT
+        )
+        self.assertEqual(bridge.PROTOCOL_VERSION, cli_defaults._BRIDGE_PROTOCOL_VERSION)
 
     def test_main_returns_interrupted_exit_on_keyboard_interrupt(self) -> None:
         def interrupted(_args: argparse.Namespace) -> int:

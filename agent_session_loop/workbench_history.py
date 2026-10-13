@@ -54,7 +54,7 @@ from asl_workbench.history import (
     SourceRead,
 )
 
-from . import state
+from . import state, state_plan_refs
 
 #: Seven days, the window the Companion retains history for. A caller that
 #: wants a different window passes one; the default is here so the two
@@ -108,7 +108,7 @@ def discover_sources(state_dir: str | Path | None = None) -> tuple[HistorySource
     """
     root = state.state_root(state_dir)
     sources: list[HistorySource] = []
-    for child in state.iter_plan_state_dirs(root):
+    for child in state_plan_refs.iter_plan_state_dirs(root):
         try:
             if not (child / portable_history.EVENTS_FILE_NAME).is_file():
                 continue

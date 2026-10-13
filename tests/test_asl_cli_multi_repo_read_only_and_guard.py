@@ -10,11 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import (
-    events,
-    plans,
-    state,
-)
+from agent_session_loop import events, plans, state_status
 from tests.support import (
     REPO_ROOT,
 )
@@ -291,7 +287,7 @@ class MultiRepoReadOnlyAndGuardTests(MultiRepoRunnerHelpers, unittest.TestCase):
             legacy = json.loads(metadata_path.read_text(encoding="utf-8"))
             legacy["workspace_inventory_excludes"] = ["Library/Protected.dv"]
             metadata_path.write_text(json.dumps(legacy), encoding="utf-8")
-            before_run = state.status_payload(
+            before_run = state_status.status_payload(
                 plans.inspect_plan(plan_dir),
                 state_dir,
             )

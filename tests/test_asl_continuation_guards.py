@@ -51,7 +51,6 @@ from agent_session_loop import (
     review_guard,
     review_transitions,
     run_commit,
-    run_loop,
     run_persistence,
     run_selection,
     turn_postflight,
@@ -59,6 +58,7 @@ from agent_session_loop import (
     verification_transitions,
     write_guards,
 )
+from tests import support_asl_run_loop_view as run_loop_view
 
 from .support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -1082,11 +1082,11 @@ class InterruptionEarnsNothingTests(unittest.TestCase):
         # `interrupted` is a terminating disposition that breaks the loop before
         # `settle_turn`, so there is no path on which it publishes a turn. The
         # runner body is the proof: the branch pauses and breaks.
-        source = Path(run_loop.__file__).read_text(encoding="utf-8")
-        self.assertIn(
-            'if terminating_disposition == "interrupted":\n'
-            "                turn_dispositions.pause_interrupted_run(",
+        source = run_loop_view.assembled_source()
+        self.assertRegex(
             source,
+            r"if terminating_disposition == ['\"]interrupted['\"]:\s+"
+            r"turn_dispositions\.pause_interrupted_run\(",
         )
 
 
@@ -1121,7 +1121,7 @@ class ContinuationBoundaryTests(unittest.TestCase):
         # The ledger's meaning depends on where it is written: an attempt joins
         # it exactly where retained work is armed, which is the one place every
         # post-turn write guard has already cleared.
-        source = Path(run_loop.__file__).read_text(encoding="utf-8")
+        source = run_loop_view.assembled_source()
         self.assertEqual(1, source.count("ctx.retained_work = commit_settlement."))
         self.assertEqual(1, source.count("ctx.session_attempts.record("))
 

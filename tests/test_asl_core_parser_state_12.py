@@ -19,6 +19,9 @@ from agent_session_loop import (
     plans,
     run_persistence,
     state,
+    state_abandonment,
+    state_locks,
+    state_status,
 )
 from tests.asl_core_support import ParserAndStateTestsBase
 from tests.support import (
@@ -41,7 +44,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                exit_code = state.status_from_args(args)
+                exit_code = state_status.status_from_args(args)
 
             self.assertEqual(0, exit_code)
             output = buffer.getvalue()
@@ -58,7 +61,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
 
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                exit_code = state.status_from_args(args)
+                exit_code = state_status.status_from_args(args)
 
             self.assertEqual(0, exit_code)
             output = buffer.getvalue()
@@ -106,7 +109,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             self.assertIsNone(payload["next_pending"])
             self.assertIsNone(payload["next_pending_id"])
@@ -120,10 +125,12 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertFalse(runner_state["stale_unfinished"])
             self.assertIsNone(runner_state["stale_reason"])
             self.assertFalse(runner_state["ok"])
-            self.assertEqual(state.ABANDONED_REASON, runner_state["reason"])
+            self.assertEqual(state_abandonment.ABANDONED_REASON, runner_state["reason"])
             self.assertIsNotNone(runner_state["run_finished_at"])
             abandoned = runner_state["abandoned"]
-            self.assertEqual(state.ABANDONED_TRIGGER_STATUS, abandoned["trigger"])
+            self.assertEqual(
+                state_abandonment.ABANDONED_TRIGGER_STATUS, abandoned["trigger"]
+            )
             self.assertEqual(os.getpid(), abandoned["detected_by_pid"])
             self.assertIsNone(abandoned["lock_reason"])
 
@@ -166,7 +173,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             runner_state = payload["runner_state"]
             self.assertTrue(runner_state["stale_unfinished"])
@@ -200,7 +209,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             runner_state = payload["runner_state"]
             self.assertTrue(runner_state["present"])
@@ -231,11 +242,13 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 ),
                 encoding="utf-8",
             )
-            lock_info = state.acquire_lock(plan_dir, state_dir)
+            lock_info = state_locks.acquire_lock(plan_dir, state_dir)
             try:
-                payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+                payload = state_status.status_payload(
+                    plans.inspect_plan(plan_dir), state_dir
+                )
             finally:
-                state.release_lock(plan_dir, state_dir)
+                state_locks.release_lock(plan_dir, state_dir)
 
             self.assertTrue(payload["lock"]["active"])
             self.assertEqual(lock_info.pid, payload["lock"]["pid"])
@@ -290,11 +303,13 @@ class ParserAndStateTests(ParserAndStateTestsBase):
 
             # A run with a check in flight holds its lock; without one the
             # status backfill would (correctly) declare the run abandoned.
-            state.acquire_lock(plan_dir, state_dir)
+            state_locks.acquire_lock(plan_dir, state_dir)
             try:
-                payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+                payload = state_status.status_payload(
+                    plans.inspect_plan(plan_dir), state_dir
+                )
             finally:
-                state.release_lock(plan_dir, state_dir)
+                state_locks.release_lock(plan_dir, state_dir)
 
             self.assertEqual(active_verification, payload["active_verification"])
             self.assertEqual(
@@ -328,7 +343,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             self.assertIsNone(payload["active_verification"])
             self.assertIsNone(payload["runner_state"]["active_verification"])
@@ -389,12 +406,12 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             buffer = io.StringIO()
             # A run with a check in flight holds its lock; without one the
             # status backfill would (correctly) declare the run abandoned.
-            state.acquire_lock(plan_dir, state_dir)
+            state_locks.acquire_lock(plan_dir, state_dir)
             try:
                 with redirect_stdout(buffer):
-                    exit_code = state.status_from_args(args)
+                    exit_code = state_status.status_from_args(args)
             finally:
-                state.release_lock(plan_dir, state_dir)
+                state_locks.release_lock(plan_dir, state_dir)
 
             self.assertEqual(0, exit_code)
             output = buffer.getvalue()
@@ -442,7 +459,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                exit_code = state.status_from_args(args)
+                exit_code = state_status.status_from_args(args)
 
             self.assertEqual(0, exit_code)
             output = buffer.getvalue()

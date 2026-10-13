@@ -65,11 +65,12 @@ from agent_session_loop import (
     model_availability,
     plans,
     run_coordination,
-    run_loop,
+    run_loop_context,
     run_termination,
     turn_dispositions,
     turn_execution,
 )
+from tests import support_asl_run_loop_view as run_loop_view
 
 from .support import assert_no_runner_import, write_plan
 
@@ -256,7 +257,9 @@ class BoundaryTests(unittest.TestCase):
         )
 
     def test_the_context_protocol_matches_the_runner_s_own_context(self) -> None:
-        fields = {field.name for field in dataclasses.fields(run_loop.RunContext)}
+        fields = {
+            field.name for field in dataclasses.fields(run_loop_context.RunContext)
+        }
         for name in turn_dispositions.RunContext.__annotations__:
             with self.subTest(member=name):
                 self.assertIn(name, fields)
@@ -269,7 +272,7 @@ class RunLoopDelegationTests(unittest.TestCase):
     """The run loop reaches this boundary and keeps none of the branch work."""
 
     def loop_calls(self) -> set[str]:
-        source = Path(run_loop.__file__ or "").read_text(encoding="utf-8")
+        source = run_loop_view.assembled_source()
         return {
             ast.unparse(node.func)
             for node in ast.walk(ast.parse(source))
@@ -296,7 +299,7 @@ class RunLoopDelegationTests(unittest.TestCase):
         # attribute of its owning module and passes it in, which is what makes
         # a caller's patch on ``run_coordination`` take effect; binding them to
         # a module-level name here would freeze the pre-patch function instead.
-        source = Path(run_loop.__file__ or "").read_text(encoding="utf-8")
+        source = run_loop_view.assembled_source()
         tree = ast.parse(source)
         loaded = {
             ast.unparse(node)

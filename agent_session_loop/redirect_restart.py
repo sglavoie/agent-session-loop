@@ -14,7 +14,7 @@ import socket
 from pathlib import Path
 from typing import Any
 
-from . import durability, process_tree, redirect_store, state
+from . import durability, process_tree, redirect_store, state, state_locks
 
 
 def evidence_dir(
@@ -153,7 +153,7 @@ def resolve_submission(
     """
     if outcome not in ("submitted", "not-submitted") or not reason.strip():
         raise ValueError("an explicit outcome and reason are required")
-    state.acquire_lock(plan_dir, state_dir, owner="redirect-resolution")
+    state_locks.acquire_lock(plan_dir, state_dir, owner="redirect-resolution")
     try:
         request = redirect_store.read_journal(plan_dir, state_dir=state_dir).request(
             operation_id
@@ -189,7 +189,7 @@ def resolve_submission(
             )
         return payload
     finally:
-        state.release_lock(plan_dir, state_dir)
+        state_locks.release_lock(plan_dir, state_dir)
 
 
 def restart_blocker(

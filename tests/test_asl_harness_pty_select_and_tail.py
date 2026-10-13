@@ -7,13 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from agent_session_loop import (
-    config,
-    events,
-    run_selection,
-    state,
-    task_packet,
-)
+from agent_session_loop import config, events, run_selection, state, task_packet
 from tests.harness_integration_pty import PtyRunHarnessBase
 from tests.harness_integration_support import STREAM_GATE_TIMEOUT_SECONDS
 from tests.support import (

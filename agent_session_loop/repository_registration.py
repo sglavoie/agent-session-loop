@@ -56,7 +56,7 @@ from . import (
     repository_intent,
     repository_scope,
     responses,
-    state,
+    state_locks,
 )
 from . import (
     contracts as _contracts,
@@ -921,7 +921,7 @@ def _register_plan_dir_from_args(args: Any) -> int:
 
     # The migration rewrites every session file, and PlanTransaction leaves
     # serializing writers to its caller, so a live runner owns the plan first.
-    lock_info = state.inspect_lock_info(plan_dir, args.state_dir)
+    lock_info = state_locks.inspect_lock_info(plan_dir, args.state_dir)
     if lock_info is not None and lock_info.active:
         return _emit_error(
             REGISTER_REASON_LOCK_CONTENTION,

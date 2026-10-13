@@ -16,7 +16,7 @@ from agent_session_loop import (
     events,
     harnesses,
     run_loop,
-    state,
+    state_locks,
     verification,
     workspaces,
 )
@@ -67,7 +67,7 @@ class LegacyImplementationGuardTests(unittest.TestCase):
         )
 
     def _invoke(self, run_id: str) -> tuple[int, dict[str, Any]]:
-        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
         try:
             return run_loop.run_locked(
                 args=self._args(),
@@ -80,7 +80,7 @@ class LegacyImplementationGuardTests(unittest.TestCase):
                 verification_context=self.context,
             )
         finally:
-            state.release_lock(self.plan_dir, self.state_dir)
+            state_locks.release_lock(self.plan_dir, self.state_dir)
 
     def _mark_complete(self) -> harnesses.HarnessResult:
         session_path = self.plan_dir / "session-1.md"

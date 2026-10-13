@@ -22,6 +22,11 @@ from agent_session_loop import (
     plans,
     redirect_store,
     state,
+    state_abandonment,
+    state_migration,
+    state_schema_upgrade,
+    state_status,
+    state_status_text,
     workspaces,
 )
 from tests.support import read_jsonl, write_plan
@@ -122,7 +127,9 @@ class StateMigrationTestBase(unittest.TestCase):
 class OrphanGuardTests(StateMigrationTestBase):
     def test_guard_fires_on_moved_plan(self) -> None:
         self._write_orphan_state()
-        candidates = state.orphaned_state_candidates(self.snapshot, self.state_dir)
+        candidates = state_abandonment.orphaned_state_candidates(
+            self.snapshot, self.state_dir
+        )
         self.assertEqual(1, len(candidates))
         candidate = candidates[0]
         self.assertEqual(str(self.old_plan), candidate["old_plan_dir"])
@@ -140,13 +147,15 @@ class OrphanGuardTests(StateMigrationTestBase):
             json.dumps({"plan_dir": str(self.new_plan)}), encoding="utf-8"
         )
         self.assertEqual(
-            [], state.orphaned_state_candidates(self.snapshot, self.state_dir)
+            [],
+            state_abandonment.orphaned_state_candidates(self.snapshot, self.state_dir),
         )
 
     def test_guard_silent_when_content_hash_differs(self) -> None:
         self._write_orphan_state(content_sha256="0" * 64)
         self.assertEqual(
-            [], state.orphaned_state_candidates(self.snapshot, self.state_dir)
+            [],
+            state_abandonment.orphaned_state_candidates(self.snapshot, self.state_dir),
         )
 
     def test_guard_fires_from_final_snapshot_after_completion(self) -> None:
@@ -156,7 +165,9 @@ class OrphanGuardTests(StateMigrationTestBase):
             content_sha256="0" * 64,
             final_content_sha256=self.content_sha256,
         )
-        candidates = state.orphaned_state_candidates(self.snapshot, self.state_dir)
+        candidates = state_abandonment.orphaned_state_candidates(
+            self.snapshot, self.state_dir
+        )
         self.assertEqual(1, len(candidates))
         self.assertEqual(str(self.old_plan), candidates[0]["old_plan_dir"])
 
@@ -168,7 +179,8 @@ class OrphanGuardTests(StateMigrationTestBase):
             final_content_sha256="0" * 64,
         )
         self.assertEqual(
-            [], state.orphaned_state_candidates(self.snapshot, self.state_dir)
+            [],
+            state_abandonment.orphaned_state_candidates(self.snapshot, self.state_dir),
         )
 
     def test_guard_silent_when_old_plan_still_exists(self) -> None:
@@ -176,20 +188,21 @@ class OrphanGuardTests(StateMigrationTestBase):
         write_plan(self.old_plan, ("pending",))
         self._write_orphan_state()
         self.assertEqual(
-            [], state.orphaned_state_candidates(self.snapshot, self.state_dir)
+            [],
+            state_abandonment.orphaned_state_candidates(self.snapshot, self.state_dir),
         )
 
     def test_guard_surfaced_in_status_payload(self) -> None:
         self._write_orphan_state()
-        payload = state.status_payload(self.snapshot, self.state_dir)
+        payload = state_status.status_payload(self.snapshot, self.state_dir)
         self.assertEqual(1, len(payload["orphaned_state_candidates"]))
 
     def test_migrate_state_included_in_status_text(self) -> None:
         self._write_orphan_state()
-        payload = state.status_payload(self.snapshot, self.state_dir)
+        payload = state_status.status_payload(self.snapshot, self.state_dir)
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            state._print_text_status(payload)
+            state_status_text._print_text_status(payload)
         text = buffer.getvalue()
         self.assertIn("Orphaned state:", text)
         self.assertIn("migrate with:", text)
@@ -199,7 +212,7 @@ class MigrateStateTests(StateMigrationTestBase):
     def test_dry_run_does_not_touch_disk(self) -> None:
         self._write_orphan_state()
         self._add_result_artifact()
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -216,7 +229,7 @@ class MigrateStateTests(StateMigrationTestBase):
 
     def test_apply_renames_and_rewrites_paths(self) -> None:
         self._write_orphan_state()
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -250,7 +263,7 @@ class MigrateStateTests(StateMigrationTestBase):
 
     def test_apply_appends_state_migrated_event(self) -> None:
         self._write_orphan_state()
-        state.migrate_plan_state(
+        state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -270,8 +283,8 @@ class MigrateStateTests(StateMigrationTestBase):
     def test_refuses_active_lock(self) -> None:
         self._write_orphan_state()
         self._write_active_lock()
-        with self.assertRaises(state.MigrationError) as caught:
-            state.migrate_plan_state(
+        with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
+            state_migration.migrate_plan_state(
                 self.new_plan,
                 from_plan_dir=self.old_plan,
                 state_dir=self.state_dir,
@@ -287,8 +300,8 @@ class MigrateStateTests(StateMigrationTestBase):
         (self.new_state_dir / events.STATE_FILE_NAME).write_text(
             json.dumps({"plan_dir": str(self.new_plan)}), encoding="utf-8"
         )
-        with self.assertRaises(state.MigrationError) as caught:
-            state.migrate_plan_state(
+        with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
+            state_migration.migrate_plan_state(
                 self.new_plan,
                 from_plan_dir=self.old_plan,
                 state_dir=self.state_dir,
@@ -298,8 +311,8 @@ class MigrateStateTests(StateMigrationTestBase):
         self.assertTrue(self.old_state_dir.is_dir())
 
     def test_refuses_missing_source_state(self) -> None:
-        with self.assertRaises(state.MigrationError) as caught:
-            state.migrate_plan_state(
+        with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
+            state_migration.migrate_plan_state(
                 self.new_plan,
                 from_plan_dir=self.old_plan,
                 state_dir=self.state_dir,
@@ -314,7 +327,7 @@ class MigrateStateTests(StateMigrationTestBase):
             content_sha256="0" * 64,
             final_content_sha256=self.content_sha256,
         )
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -329,8 +342,8 @@ class MigrateStateTests(StateMigrationTestBase):
         self._write_orphan_state(
             recorded_plan_dir=str(self.tmp_path / "plans" / "gamma"),
         )
-        with self.assertRaises(state.MigrationError) as caught:
-            state.migrate_plan_state(
+        with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
+            state_migration.migrate_plan_state(
                 self.new_plan,
                 from_plan_dir=self.old_plan,
                 state_dir=self.state_dir,
@@ -342,8 +355,8 @@ class MigrateStateTests(StateMigrationTestBase):
 
     def test_refuses_content_mismatch_on_apply(self) -> None:
         self._write_orphan_state(content_sha256="0" * 64)
-        with self.assertRaises(state.MigrationError) as caught:
-            state.migrate_plan_state(
+        with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
+            state_migration.migrate_plan_state(
                 self.new_plan,
                 from_plan_dir=self.old_plan,
                 state_dir=self.state_dir,
@@ -356,8 +369,8 @@ class MigrateStateTests(StateMigrationTestBase):
     def test_refuses_content_mismatch_on_dry_run(self) -> None:
         # The dry-run must reject an incompatible source too, not just --apply.
         self._write_orphan_state(content_sha256="0" * 64)
-        with self.assertRaises(state.MigrationError) as caught:
-            state.migrate_plan_state(
+        with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
+            state_migration.migrate_plan_state(
                 self.new_plan,
                 from_plan_dir=self.old_plan,
                 state_dir=self.state_dir,
@@ -375,8 +388,8 @@ class MigrateStateTests(StateMigrationTestBase):
             self.content_sha256, plans.inspect_plan(self.old_plan).content_sha256
         )
         self._write_orphan_state()
-        with self.assertRaises(state.MigrationError) as caught:
-            state.migrate_plan_state(
+        with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
+            state_migration.migrate_plan_state(
                 self.new_plan,
                 from_plan_dir=self.old_plan,
                 state_dir=self.state_dir,
@@ -390,8 +403,8 @@ class MigrateStateTests(StateMigrationTestBase):
         # The dry-run must reject a still-existing source too, not just --apply.
         write_plan(self.old_plan, ("pending",))
         self._write_orphan_state()
-        with self.assertRaises(state.MigrationError) as caught:
-            state.migrate_plan_state(
+        with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
+            state_migration.migrate_plan_state(
                 self.new_plan,
                 from_plan_dir=self.old_plan,
                 state_dir=self.state_dir,
@@ -406,7 +419,7 @@ class MigrateStateTests(StateMigrationTestBase):
         not_a_plan = self.tmp_path / "plans" / "empty"
         not_a_plan.mkdir(parents=True, exist_ok=True)
         with self.assertRaises(plans.PlanError):
-            state.migrate_plan_state(
+            state_migration.migrate_plan_state(
                 not_a_plan,
                 from_plan_dir=self.old_plan,
                 state_dir=self.state_dir,
@@ -416,14 +429,14 @@ class MigrateStateTests(StateMigrationTestBase):
 
     def test_status_works_post_migration(self) -> None:
         self._write_orphan_state()
-        state.migrate_plan_state(
+        state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
             apply=True,
         )
         snapshot = plans.inspect_plan(self.new_plan)
-        payload = state.status_payload(snapshot, self.state_dir)
+        payload = state_status.status_payload(snapshot, self.state_dir)
         # State is now keyed under the new path: no orphan, runner state reads.
         self.assertEqual([], payload["orphaned_state_candidates"])
         self.assertTrue(payload["runner_state"]["present"])
@@ -451,13 +464,13 @@ class RelocationSchemaUpgradeTests(StateMigrationTestBase):
 
     def test_apply_upgrades_the_relocated_record(self) -> None:
         self._write_projectable_orphan_state()
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
             apply=True,
         )
-        self.assertEqual(state.MIGRATION_MODE_RELOCATE, report.mode)
+        self.assertEqual(state_schema_upgrade.MIGRATION_MODE_RELOCATE, report.mode)
         self.assertTrue(report.schema_upgraded)
         self.assertTrue(report.projection_written)
         self.assertEqual(2, report.schema_version_before)
@@ -478,7 +491,7 @@ class RelocationSchemaUpgradeTests(StateMigrationTestBase):
 
     def test_apply_records_the_upgrade_in_the_migration_event(self) -> None:
         self._write_projectable_orphan_state()
-        state.migrate_plan_state(
+        state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -498,7 +511,7 @@ class RelocationSchemaUpgradeTests(StateMigrationTestBase):
     def test_dry_run_reports_the_upgrade_without_writing(self) -> None:
         state_path = self._write_projectable_orphan_state()
         before = state_path.read_bytes()
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -513,7 +526,7 @@ class RelocationSchemaUpgradeTests(StateMigrationTestBase):
         # stranded directory's paths is worth doing whether or not the record
         # can carry a projection, so this relocates and reports the shortfall.
         self._write_orphan_state()
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -530,7 +543,7 @@ class RelocationSchemaUpgradeTests(StateMigrationTestBase):
 
     def test_relocation_leaves_an_unrecognised_version_alone(self) -> None:
         self._write_projectable_orphan_state(version=99)
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -604,8 +617,8 @@ class UpgradeStateSchemaTests(StateMigrationTestBase):
         )
         return lock_path
 
-    def _upgrade(self, *, apply: bool = True) -> state.MigrationReport:
-        return state.migrate_plan_state(
+    def _upgrade(self, *, apply: bool = True) -> state_schema_upgrade.MigrationReport:
+        return state_migration.migrate_plan_state(
             self.new_plan, state_dir=self.state_dir, apply=apply
         )
 
@@ -617,7 +630,7 @@ class UpgradeStateSchemaTests(StateMigrationTestBase):
     def test_absent_version_upgrades(self) -> None:
         self._write_own_state()
         report = self._upgrade()
-        self.assertEqual(state.MIGRATION_MODE_UPGRADE, report.mode)
+        self.assertEqual(state_schema_upgrade.MIGRATION_MODE_UPGRADE, report.mode)
         self.assertIsNone(report.from_plan_dir)
         self.assertIsNone(report.schema_version_before)
         self.assertTrue(report.schema_upgraded)
@@ -711,7 +724,7 @@ class UpgradeStateSchemaTests(StateMigrationTestBase):
         state_path = self._write_own_state(version=2)
         before = state_path.read_bytes()
         self._write_own_active_lock()
-        with self.assertRaises(state.MigrationError) as caught:
+        with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
             self._upgrade()
         self.assertEqual("incompatible-active-run", caught.exception.reason)
         self.assertTrue(caught.exception.details["incompatible_active_run"])
@@ -728,27 +741,29 @@ class UpgradeStateSchemaTests(StateMigrationTestBase):
 
     def test_refuses_an_unrecognised_version(self) -> None:
         self._write_own_state(version=99)
-        with self.assertRaises(state.MigrationError) as caught:
+        with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
             self._upgrade()
         self.assertEqual("unknown-schema-version", caught.exception.reason)
         self.assertEqual(99, self._read()["version"])
 
     def test_refuses_a_record_with_no_run_identity(self) -> None:
         self._write_own_state(version=2, projectable=False)
-        with self.assertRaises(state.MigrationError) as caught:
+        with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
             self._upgrade()
         self.assertEqual("unprojectable-state", caught.exception.reason)
         self.assertEqual(2, self._read()["version"])
 
     def test_refuses_when_there_is_no_state_to_upgrade(self) -> None:
-        with self.assertRaises(state.MigrationError) as caught:
+        with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
             self._upgrade()
         self.assertEqual("no-source-state", caught.exception.reason)
 
     def test_state_schema_version_reads_every_spelling(self) -> None:
-        self.assertIsNone(state.state_schema_version({}))
-        self.assertEqual(2, state.state_schema_version({"version": 2}))
-        self.assertEqual(-1, state.state_schema_version({"version": "two"}))
+        self.assertIsNone(state_schema_upgrade.state_schema_version({}))
+        self.assertEqual(2, state_schema_upgrade.state_schema_version({"version": 2}))
+        self.assertEqual(
+            -1, state_schema_upgrade.state_schema_version({"version": "two"})
+        )
 
 
 class MigrateStateCliTests(StateMigrationTestBase):
@@ -853,7 +868,7 @@ class ConversationRelocationTests(StateMigrationTestBase):
         self._seed_conversation()
         ledger_path = conversations.conversation_ledger_path(self.old_state_dir)
         before = ledger_path.read_bytes()
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -867,7 +882,7 @@ class ConversationRelocationTests(StateMigrationTestBase):
     def test_apply_repoints_the_ledger_and_keeps_it_resumable(self) -> None:
         self._write_orphan_state()
         self._seed_conversation()
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -890,7 +905,7 @@ class ConversationRelocationTests(StateMigrationTestBase):
     def test_migrated_event_records_the_conversation_counts(self) -> None:
         self._write_orphan_state()
         self._seed_conversation()
-        state.migrate_plan_state(
+        state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -910,8 +925,8 @@ class ConversationRelocationTests(StateMigrationTestBase):
         self._write_orphan_state()
         stranger = plans.canonicalize_path(self.tmp_path / "plans" / "stranger")
         self._seed_conversation(plan_dir=stranger)
-        with self.assertRaises(state.MigrationError) as caught:
-            state.migrate_plan_state(
+        with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
+            state_migration.migrate_plan_state(
                 self.new_plan,
                 from_plan_dir=self.old_plan,
                 state_dir=self.state_dir,
@@ -928,7 +943,7 @@ class ConversationRelocationTests(StateMigrationTestBase):
         ledger_path = conversations.conversation_ledger_path(self.old_state_dir)
         with ledger_path.open("ab") as handle:
             handle.write(b"{not json}\n")
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -952,8 +967,8 @@ class ConversationRelocationTests(StateMigrationTestBase):
         self.addCleanup(ledger_path.chmod, 0o600)
         if os.access(ledger_path, os.R_OK):
             self.skipTest("running as a user that ignores file permissions")
-        with self.assertRaises(state.MigrationError) as caught:
-            state.migrate_plan_state(
+        with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
+            state_migration.migrate_plan_state(
                 self.new_plan,
                 from_plan_dir=self.old_plan,
                 state_dir=self.state_dir,
@@ -965,7 +980,7 @@ class ConversationRelocationTests(StateMigrationTestBase):
 
     def test_a_plan_with_no_ledger_migrates_unchanged(self) -> None:
         self._write_orphan_state()
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -978,7 +993,7 @@ class ConversationRelocationTests(StateMigrationTestBase):
     def test_report_dict_carries_the_conversation_fields(self) -> None:
         self._write_orphan_state()
         self._seed_conversation()
-        payload = state.migrate_plan_state(
+        payload = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -1034,7 +1049,7 @@ class RedirectJournalMigrationTests(StateMigrationTestBase):
         self._write_orphan_state()
         self._seed_redirect()
         before = self._old_journal().read_bytes()
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -1049,7 +1064,7 @@ class RedirectJournalMigrationTests(StateMigrationTestBase):
         self._write_orphan_state()
         request = self._seed_redirect(accept=True)
         before = self._old_journal().read_bytes()
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -1074,7 +1089,7 @@ class RedirectJournalMigrationTests(StateMigrationTestBase):
             reason=redirect_store.REASON_RUN_ENDED,
             state_dir=self.state_dir,
         )
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -1087,7 +1102,7 @@ class RedirectJournalMigrationTests(StateMigrationTestBase):
     def test_migrated_event_records_the_redirect_counts(self) -> None:
         self._write_orphan_state()
         self._seed_redirect()
-        state.migrate_plan_state(
+        state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -1106,7 +1121,7 @@ class RedirectJournalMigrationTests(StateMigrationTestBase):
     def test_the_event_never_carries_the_operator_words(self) -> None:
         self._write_orphan_state()
         self._seed_redirect()
-        state.migrate_plan_state(
+        state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -1122,7 +1137,7 @@ class RedirectJournalMigrationTests(StateMigrationTestBase):
         self._seed_redirect()
         with self._old_journal().open("a", encoding="utf-8") as handle:
             handle.write('{"version":1,"kind":"acce')
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -1146,8 +1161,8 @@ class RedirectJournalMigrationTests(StateMigrationTestBase):
         self.addCleanup(journal.chmod, 0o600)
         if os.access(journal, os.R_OK):
             self.skipTest("running as a user that ignores file permissions")
-        with self.assertRaises(state.MigrationError) as caught:
-            state.migrate_plan_state(
+        with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
+            state_migration.migrate_plan_state(
                 self.new_plan,
                 from_plan_dir=self.old_plan,
                 state_dir=self.state_dir,
@@ -1159,7 +1174,7 @@ class RedirectJournalMigrationTests(StateMigrationTestBase):
 
     def test_a_plan_with_no_journal_migrates_unchanged(self) -> None:
         self._write_orphan_state()
-        report = state.migrate_plan_state(
+        report = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,
@@ -1172,7 +1187,7 @@ class RedirectJournalMigrationTests(StateMigrationTestBase):
     def test_report_dict_carries_the_redirect_fields(self) -> None:
         self._write_orphan_state()
         self._seed_redirect()
-        payload = state.migrate_plan_state(
+        payload = state_migration.migrate_plan_state(
             self.new_plan,
             from_plan_dir=self.old_plan,
             state_dir=self.state_dir,

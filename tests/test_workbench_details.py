@@ -51,6 +51,7 @@ from agent_session_loop import (
     plans,
     qna,
     state,
+    state_locks,
     workbench_details,
 )
 from asl_workbench import catalog, details
@@ -723,7 +724,7 @@ class ObservationalDetailTests(_DetailFixture, unittest.TestCase):
         # The control. Without it the four assertions below would pass just as
         # happily against a lock nothing would ever have reclaimed.
         plan_dir, lock_path, _ = self._locked_plan()
-        info = state._read_lock_path(lock_path, plan_dir, reclaim=True)
+        info = state_locks._read_lock_path(lock_path, plan_dir, reclaim=True)
         self.assertIsNotNone(info)
         self.assertFalse(
             lock_path.is_file(),

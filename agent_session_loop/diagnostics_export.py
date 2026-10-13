@@ -55,6 +55,8 @@ from . import (
     plans,
     responses,
     state,
+    state_plan_refs,
+    state_schema_upgrade,
 )
 
 COMMAND_NAME = "diagnostics-export"
@@ -749,7 +751,9 @@ def _run_record(state_dir: Path, omissions: Omissions) -> dict[str, Any]:
         "assurance": None,
     }
 
-    state_obj = state._read_json_object_safe(state_dir / events.STATE_FILE_NAME)
+    state_obj = state_plan_refs._read_json_object_safe(
+        state_dir / events.STATE_FILE_NAME
+    )
     if state_obj is None:
         exists = (state_dir / events.STATE_FILE_NAME).exists()
         reason = OMISSION_MALFORMED if exists else OMISSION_MISSING
@@ -763,7 +767,9 @@ def _run_record(state_dir: Path, omissions: Omissions) -> dict[str, Any]:
     record["plan_dir"] = _bounded_str(state_obj.get("plan_dir"))
     run_id = _bounded_str(state_obj.get("run_id"))
     record["run_id"] = run_id
-    record["state_schema_version"] = state.state_schema_version(state_obj)
+    record["state_schema_version"] = state_schema_upgrade.state_schema_version(
+        state_obj
+    )
 
     status, projection = _projection_section(state_obj, omissions)
     record["projection_status"] = status
@@ -887,7 +893,7 @@ def build_export(
     }
 
     try:
-        state_dirs = list(state.iter_plan_state_dirs(root))
+        state_dirs = list(state_plan_refs.iter_plan_state_dirs(root))
     except state.StateError as error:
         document["ok"] = False
         document["reason"] = REASON_STATE_ROOT_ERROR

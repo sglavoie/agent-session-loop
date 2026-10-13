@@ -39,7 +39,7 @@ from agent_session_loop import (
     compact_state,
     events,
     run_persistence,
-    state,
+    state_payloads,
     workbench_recovery,
 )
 from tests.support import (
@@ -388,7 +388,9 @@ class PausedWorkCommitProjectionTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            projection = state._runner_state_payload(state_path, lock_info=None)
+            projection = state_payloads._runner_state_payload(
+                state_path, lock_info=None
+            )
         self.assertNotIn("pause_details", projection)
         self.assertNotIn("details", projection)
         self.assertNotIn("paused_work_commit", projection)

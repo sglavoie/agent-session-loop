@@ -10,7 +10,7 @@ from agent_session_loop import (
     assurance_models,
     cli,
     mailbox_constants,
-    state,
+    state_assurance_pending,
     supervisor_audit_agent,
 )
 from tests.asl_docs_support import ASL_GUIDE, read_asl_reference
@@ -112,7 +112,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
             assurance_ledger.LEDGER_INDEX_FILE_NAME,
         ):
             self.assertIn(name, self.docs, f"docs omit ledger file {name}")
-        self.assertIn(state.ASSURANCE_PENDING_FILE_NAME, self.docs)
+        self.assertIn(state_assurance_pending.ASSURANCE_PENDING_FILE_NAME, self.docs)
         for name in assurance_models.CANONICAL_AUDIT_ARTIFACTS:
             self.assertIn(name, self.docs, f"docs omit audit artifact {name}")
 
@@ -142,7 +142,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
 
     def test_pending_recovery_is_documented_as_operator_driven(self) -> None:
         for text in (self.guide, self.docs):
-            self.assertIn(state.ASSURANCE_PENDING_FILE_NAME, text)
+            self.assertIn(state_assurance_pending.ASSURANCE_PENDING_FILE_NAME, text)
             self.assertIn("asl assurance process-pending", text)
         self.assertIn("idempotent", self.guide)
 

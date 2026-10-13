@@ -70,13 +70,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import (
-    preflight_footprint,
-    repository_intent,
-    run_inputs,
-    state,
-    workspaces,
-)
+from . import preflight_footprint, repository_intent, run_inputs, state, workspaces
 
 #: A file larger than this is digested by size and mtime rather than by
 #: content. The cap keeps the guard's cost bounded on a turn that names a

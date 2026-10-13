@@ -18,6 +18,8 @@ from agent_session_loop import (
     repository_evidence,
     scope_recovery,
     state,
+    state_locks,
+    state_status,
     turn_preflight,
     workspace_evidence,
     workspaces,
@@ -231,14 +233,16 @@ class RefRecoveryTests(unittest.TestCase):
             self.assertEqual(1, self.invoke()[0])
 
     def test_active_runner_lock_is_preserved(self):
-        state.acquire_lock(self.plan, self.state_dir)
+        state_locks.acquire_lock(self.plan, self.state_dir)
         try:
             code, result = self.invoke()
             self.assertEqual(1, code, result)
-            self.assertTrue(state.inspect_lock_info(self.plan, self.state_dir).active)
+            self.assertTrue(
+                state_locks.inspect_lock_info(self.plan, self.state_dir).active
+            )
             self.assertIsNotNone(self.retained())
         finally:
-            state.release_lock(self.plan, self.state_dir)
+            state_locks.release_lock(self.plan, self.state_dir)
 
     def test_rebinding_origin_cannot_reuse_original_failure(self):
         manifest = self.plan / "manifest.md"
@@ -489,11 +493,11 @@ class ExternalRecoveryTests(unittest.TestCase):
                 0
             ],
         )
-        state.acquire_lock(self.plan, self.state_dir)
+        state_locks.acquire_lock(self.plan, self.state_dir)
         try:
             self.assertEqual(1, self.invoke(*self.accept_args(preview))[0])
         finally:
-            state.release_lock(self.plan, self.state_dir)
+            state_locks.release_lock(self.plan, self.state_dir)
 
     def test_writable_alias_and_changed_scope_binding_fail_closed(self):
         self.assertEqual(1, self.invoke("--repository", "notes")[0])
@@ -874,7 +878,7 @@ class RecoveryJournalIncidentTests(unittest.TestCase):
 
     def test_status_fallback_does_not_project_a_finished_journal(self) -> None:
         self.journal(guard=self.guard_9, run_id="run-9", complete=True)
-        payload = state.status_payload(
+        payload = state_status.status_payload(
             plans.inspect_plan(self.plan_dir), self.state_dir
         )
         recovery = payload["external_change_recovery"]
@@ -883,13 +887,13 @@ class RecoveryJournalIncidentTests(unittest.TestCase):
 
     def test_status_fallback_still_projects_an_unfinished_recovery(self) -> None:
         self.journal(guard=self.guard_9, run_id="run-9", complete=False)
-        payload = state.status_payload(
+        payload = state_status.status_payload(
             plans.inspect_plan(self.plan_dir), self.state_dir
         )
         self.assertFalse(payload["external_change_recovery"]["progress"]["complete"])
 
     def test_status_without_a_journal_reports_no_recovery(self) -> None:
-        payload = state.status_payload(
+        payload = state_status.status_payload(
             plans.inspect_plan(self.plan_dir), self.state_dir
         )
         self.assertIsNone(payload["external_change_recovery"])

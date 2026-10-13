@@ -11,13 +11,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_session_loop import (
-    agent_mux_contract,
-    cli,
-    contracts,
-    plans,
-    verification,
-)
+from agent_session_loop import agent_mux_contract, cli, contracts, plans, verification
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     _contract_block,

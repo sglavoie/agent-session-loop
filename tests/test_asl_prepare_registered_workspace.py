@@ -19,7 +19,7 @@ from agent_session_loop import (
     prepare_packet,
     prepare_validation_cache,
     prepare_validation_store,
-    state,
+    state_locks,
     verification,
 )
 from tests.support import (
@@ -247,7 +247,7 @@ class PrepareRegisteredWorkspaceTests(PrepareEndToEndFixtures):
         self.assertNotIn("git@", json.dumps(rebound.workspace_rebind))
         self.assertIn("--cwd " + str(new_workspace.resolve()), rebound.run_command)
         self.assertIn("--rebind-workspace", rebound.resume_command)
-        self.assertIsNone(state.inspect_lock_info(first.plan_dir, self.state_dir))
+        self.assertIsNone(state_locks.inspect_lock_info(first.plan_dir, self.state_dir))
 
     def test_interrupted_rebind_publication_rolls_forward_on_next_read(self) -> None:
         specs = DEFAULT_MULTI_REPO_SPECS[:2]
@@ -298,7 +298,7 @@ class PrepareRegisteredWorkspaceTests(PrepareEndToEndFixtures):
         assert validation is not None
         self.assertEqual(str(new_workspace.resolve()), validation.workspace_root)
         self.assertFalse((first.plan_dir / plans.PLAN_TRANSACTION_DIR_NAME).exists())
-        self.assertIsNone(state.inspect_lock_info(first.plan_dir, self.state_dir))
+        self.assertIsNone(state_locks.inspect_lock_info(first.plan_dir, self.state_dir))
 
     def test_rebind_staging_is_external_preserves_symlinks_and_rebases_paths(
         self,

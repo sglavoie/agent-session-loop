@@ -22,7 +22,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import events, mailbox_vocabulary, pause_policy, plans, responses, state
+from . import (
+    events,
+    mailbox_vocabulary,
+    pause_policy,
+    plans,
+    responses,
+    state,
+    state_locks,
+    state_payloads,
+)
 
 REASON_NO_PAUSED_RUN = "no-paused-run"
 REASON_MISSING_QUESTION_CONTEXT = "missing-question-context"
@@ -185,16 +194,16 @@ def build_qna_context(
     side effect.
     """
     if waiting_for_reply is not None:
-        lock_info = state._read_lock_path(
+        lock_info = state_locks._read_lock_path(
             plan_state / state.LOCK_FILE_NAME,
             snapshot.plan_dir,
             reclaim=reclaim,
         )
-        wait_status = state.waiting_for_reply_status(
+        wait_status = state_payloads.waiting_for_reply_status(
             waiting_for_reply,
             lock_info=lock_info,
         )
-        if wait_status == state.WAITING_FOR_REPLY_STATUS_INVALID:
+        if wait_status == state_payloads.WAITING_FOR_REPLY_STATUS_INVALID:
             raise QnAError(
                 REASON_MISSING_QUESTION_CONTEXT,
                 "waiting-for-reply state has an invalid unsupervised ceiling",
@@ -204,7 +213,7 @@ def build_qna_context(
                     **_wait_ceiling_details(waiting_for_reply),
                 },
             )
-        if wait_status == state.WAITING_FOR_REPLY_STATUS_EXPIRED:
+        if wait_status == state_payloads.WAITING_FOR_REPLY_STATUS_EXPIRED:
             payload = _expired_wait_recovery_payload(
                 payload,
                 waiting_for_reply,

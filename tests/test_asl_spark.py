@@ -33,6 +33,7 @@ from agent_session_loop import (
     runner,
     spark_status,
     state,
+    state_status,
 )
 from tests.support import (
     _validator_payload,
@@ -541,5 +542,7 @@ class SparkFallbackIntegrationTests(unittest.TestCase):
                 "quota-exhausted",
                 payload["turns"][0]["spark_route"]["fallback_reason"],
             )
-            status = state.status_payload(plans.inspect_plan(plan_dir), state_root)
+            status = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_root
+            )
             self.assertEqual("complete", status["sessions"][0]["status"])

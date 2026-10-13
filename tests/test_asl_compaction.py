@@ -20,6 +20,7 @@ from agent_session_loop import (
     plans,
     run_persistence,
     state,
+    state_status,
     turn_execution,
 )
 from tests.support import (
@@ -491,7 +492,7 @@ class StateCompactionTests(unittest.TestCase):
             self.plan_dir, state_dir=self.state_dir, apply=True
         )
 
-        payload = state.status_payload(
+        payload = state_status.status_payload(
             plans.inspect_plan(self.plan_dir), self.state_dir
         )
         self.assertTrue(payload["ok"])

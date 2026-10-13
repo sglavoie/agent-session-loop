@@ -60,7 +60,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from . import plans, run_contention, session_overview, state
+from . import plans, run_contention, session_overview, state, state_locks
 
 __all__ = [
     "ACCESS_MUTATION",
@@ -406,7 +406,7 @@ def recover_stale_lock(
             ),
         )
 
-    lock_info = state.inspect_lock_info(canonical_plan_dir, state_dir)
+    lock_info = state_locks.inspect_lock_info(canonical_plan_dir, state_dir)
     if lock_info is None:
         return Recovery(
             plan_dir=canonical_plan_dir,
@@ -446,7 +446,7 @@ def recover_stale_lock(
             ),
         )
 
-    state._reclaim_dead_local_lock(lock_info.path, lock_info.raw)
+    state_locks._reclaim_dead_local_lock(lock_info.path, lock_info.raw)
     if lock_info.path.exists():
         return Recovery(
             plan_dir=canonical_plan_dir,

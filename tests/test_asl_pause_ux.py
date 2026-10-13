@@ -40,6 +40,7 @@ from agent_session_loop import (
     run_termination,
     runner,
     state,
+    state_payloads,
     task_packet,
     turn_execution,
 )
@@ -621,16 +622,16 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 raw={},
             )
             self.assertEqual(
-                state.WAITING_FOR_REPLY_STATUS_LIVE,
-                state.waiting_for_reply_status(
+                state_payloads.WAITING_FOR_REPLY_STATUS_LIVE,
+                state_payloads.waiting_for_reply_status(
                     rebased,
                     lock_info=lock_info,
                     now=wake,
                 ),
             )
             self.assertEqual(
-                state.WAITING_FOR_REPLY_STATUS_EXPIRED,
-                state.waiting_for_reply_status(
+                state_payloads.WAITING_FOR_REPLY_STATUS_EXPIRED,
+                state_payloads.waiting_for_reply_status(
                     waiting,
                     lock_info=lock_info,
                     now=wake,
@@ -903,7 +904,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             )
             plan_state = state.plan_state_dir(plan_dir, state_dir)
             state_path = plan_state / events.STATE_FILE_NAME
-            runner_state = state._runner_state_payload(
+            runner_state = state_payloads._runner_state_payload(
                 state_path,
                 lock_info=None,
             )
@@ -931,7 +932,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             }
             raw["pause_policy"] = persisted
             state_path.write_text(json.dumps(raw), encoding="utf-8")
-            runner_state = state._runner_state_payload(
+            runner_state = state_payloads._runner_state_payload(
                 state_path,
                 lock_info=None,
             )
@@ -949,7 +950,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 json.dumps({"ok": True, "paused": False, "reason": None}),
                 encoding="utf-8",
             )
-            runner_state = state._runner_state_payload(
+            runner_state = state_payloads._runner_state_payload(
                 state_path,
                 lock_info=None,
             )

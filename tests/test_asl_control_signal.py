@@ -27,6 +27,7 @@ from agent_session_loop import (
     plans,
     process_tree,
     state,
+    state_locks,
     turn_execution,
 )
 from tests.asl_control_support import LIVE_WAKEUP
@@ -247,8 +248,10 @@ class ControlSignalTests(unittest.TestCase):
             ) as endpoint,
         ):
             self.assertIsNone(endpoint)
-            state.acquire_lock(self.plan_dir, self.state_dir, wakeup_endpoint=endpoint)
-            self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+            state_locks.acquire_lock(
+                self.plan_dir, self.state_dir, wakeup_endpoint=endpoint
+            )
+            self.addCleanup(state_locks.release_lock, self.plan_dir, self.state_dir)
 
             self.assertEqual(
                 control_signal.NotifyResult(False, "no-endpoint"),
@@ -261,10 +264,12 @@ class ControlSignalTests(unittest.TestCase):
         # No fixture: the lock `acquire_lock` writes is the one a producer has
         # to be able to wake, and the endpoint in it is the one being read.
         endpoint, woken = self.serve_endpoint()
-        state.acquire_lock(self.plan_dir, self.state_dir, wakeup_endpoint=endpoint)
-        self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+        state_locks.acquire_lock(
+            self.plan_dir, self.state_dir, wakeup_endpoint=endpoint
+        )
+        self.addCleanup(state_locks.release_lock, self.plan_dir, self.state_dir)
 
-        lock = state.inspect_lock_info(self.plan_dir, self.state_dir)
+        lock = state_locks.inspect_lock_info(self.plan_dir, self.state_dir)
 
         self.assertIsNotNone(lock)
         assert lock is not None
@@ -370,7 +375,7 @@ with control_signal.open_wakeup_endpoint(sys.argv[2], event) as path:
 
         # Every field a producer used to authenticate on agrees with the live
         # process, so this is the case that used to pass the check and signal.
-        lock = state.inspect_lock_info(self.plan_dir, self.state_dir)
+        lock = state_locks.inspect_lock_info(self.plan_dir, self.state_dir)
         self.assertIsNotNone(lock)
         assert lock is not None
         self.assertFalse(lock.stale)
@@ -445,7 +450,7 @@ import sys
 import time
 
 sys.path.insert(0, sys.argv[1])
-from agent_session_loop import cli, run_outcome, state
+from agent_session_loop import cli, run_outcome, state_locks
 
 WATCHED = (signal.SIGUSR1, signal.SIGUSR2, signal.SIGINT, signal.SIGTERM)
 before = {number: signal.getsignal(number) for number in WATCHED}
@@ -454,7 +459,7 @@ locked = pathlib.Path(sys.argv[2])
 window = float(sys.argv[3])
 emitting = pathlib.Path(sys.argv[4])
 emit_delay = float(sys.argv[5])
-real_acquire = state.acquire_lock
+real_acquire = state_locks.acquire_lock
 real_emit = run_outcome._emit_run_payload
 
 
@@ -471,7 +476,7 @@ def delayed_emit(*args, **kwargs):
     return real_emit(*args, **kwargs)
 
 
-state.acquire_lock = widened_acquire
+state_locks.acquire_lock = widened_acquire
 if emit_delay:
     run_outcome._emit_run_payload = delayed_emit
 code = cli.main(sys.argv[6:])
@@ -605,7 +610,7 @@ sys.exit(code)
             state.plan_state_dir(self.plan_dir, self.state_dir) / state.LOCK_FILE_NAME
         )
 
-        lock = state.inspect_lock_info(self.plan_dir, self.state_dir)
+        lock = state_locks.inspect_lock_info(self.plan_dir, self.state_dir)
         self.assertIsNotNone(lock)
         assert lock is not None
         self.assertEqual(child.pid, lock.pid)

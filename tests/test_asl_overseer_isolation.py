@@ -37,6 +37,7 @@ from agent_session_loop import (
     run_entry,
     session_overview,
     state,
+    state_locks,
 )
 from tests.support import assert_no_runner_import
 
@@ -577,7 +578,7 @@ class RecoveryAuthorizationTests(unittest.TestCase):
         replacement = self.corpus.local_lock(
             os.getpid(), (self.corpus.root_of("shared"),)
         )
-        original = state.inspect_lock_info(self.target, self.corpus.state_root)
+        original = state_locks.inspect_lock_info(self.target, self.corpus.state_root)
         self.assertIsNotNone(original)
 
         def _swap(plan_dir: Any, state_dir: Any = None) -> Any:
@@ -587,7 +588,7 @@ class RecoveryAuthorizationTests(unittest.TestCase):
             )
             return original
 
-        with mock.patch.object(state, "inspect_lock_info", side_effect=_swap):
+        with mock.patch.object(state_locks, "inspect_lock_info", side_effect=_swap):
             recovery = self._recover(self._grant())
 
         self.assertFalse(recovery.performed)

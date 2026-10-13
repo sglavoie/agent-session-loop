@@ -17,6 +17,7 @@ from agent_session_loop import (
     state,
     supervisor_audit_checks,
     supervisor_audit_evidence,
+    supervisor_audit_vocabulary,
 )
 from agent_session_loop.assurance_models import (
     RUBRIC_LANES,
@@ -165,7 +166,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
             supervisor_audit_evidence.PAUSED_WORK_COMMIT_KEY,
         )
         source = inspect.getsource(commit_settlement._settle_paused_retained_work)
-        for result in supervisor_audit_checks._PAUSED_WORK_RESULTS:
+        for result in supervisor_audit_vocabulary._PAUSED_WORK_RESULTS:
             self.assertIn(f'result = "{result}"', source)
 
     def test_a_clean_run_passes_every_lane(self) -> None:

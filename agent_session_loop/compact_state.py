@@ -28,14 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import (
-    artifacts,
-    events,
-    plans,
-    run_persistence,
-    state,
-    turn_execution,
-)
+from . import artifacts, events, plans, run_persistence, state, turn_execution
 
 # Subdirectory (relative to a turn artifact directory) where failed-command
 # gzip artifacts live, matching the runner-managed verification convention.

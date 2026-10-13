@@ -9,12 +9,7 @@ import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from agent_session_loop import (
-    events,
-    plans,
-    state,
-    tail,
-)
+from agent_session_loop import events, plans, state_status, state_status_text, tail
 from agent_session_loop.formatting import (
     format_duration_seconds,
     format_turn_finished_message,
@@ -461,10 +456,10 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
 
             snapshot = plans.inspect_plan(plan_dir)
-            payload = state.status_payload(snapshot, state_dir)
+            payload = state_status.status_payload(snapshot, state_dir)
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                state._print_text_status(payload)
+                state_status_text._print_text_status(payload)
 
             self.assertEqual("Durable plan title", snapshot.plan_title)
             self.assertEqual("Durable plan title", payload["plan_title"])

@@ -13,15 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 import tests.reply_flow_support as rfs
-from agent_session_loop import (
-    cli,
-    events,
-    harnesses,
-    qna,
-    run_prompts,
-    runner,
-    state,
-)
+from agent_session_loop import cli, events, harnesses, qna, run_prompts, runner, state
 from tests.support import (
     REPO_ROOT,
     read_jsonl,

@@ -64,28 +64,34 @@ from agent_session_loop import (
     pause_policy,
     run_entry,
     run_loop,
+    run_loop_commit_settlement,
+    run_loop_context,
+    run_loop_control_redirects,
+    run_loop_terminal,
     run_selection,
     run_termination,
     runner,
 )
+from tests import support_asl_run_loop_view as run_loop_view
 
 from .support import assert_no_runner_import
 
-#: Everything Session 37 carried out of ``runner.py``. Each has to exist here
-#: and be absent there: an alias left behind would let a caller keep the old
+#: Everything Session 37 carried out of ``runner.py``, with the ``run_loop*``
+#: module that owns it now. Each has to exist at its owner and be absent from
+#: the runner: an alias left behind would let a caller keep the old
 #: spelling and would make the move reversible by accident.
 MOVED_SYMBOLS = (
-    "run_locked",
-    "RunContext",
-    "MULTI_REPO_IMPLEMENTATION_TURNS_ENABLED",
-    "_finish_run_locked",
-    "_terminalize",
-    "_soft_fail_commit",
-    "_settle_owed_commit_group",
-    "_handle_run_control_action",
-    "_handle_run_control_status",
-    "_expire_run_guards",
-    "_abandon_turn",
+    ("run_locked", run_loop),
+    ("RunContext", run_loop_context),
+    ("MULTI_REPO_IMPLEMENTATION_TURNS_ENABLED", run_loop_context),
+    ("_finish_run_locked", run_loop_terminal),
+    ("_terminalize", run_loop_terminal),
+    ("_soft_fail_commit", run_loop_commit_settlement),
+    ("_settle_owed_commit_group", run_loop_commit_settlement),
+    ("_handle_run_control_action", run_loop_control_redirects),
+    ("_handle_run_control_status", run_loop_control_redirects),
+    ("_expire_run_guards", run_loop_terminal),
+    ("_abandon_turn", run_loop_control_redirects),
 )
 
 #: The names the loop resolves at their owning module instead of through a
@@ -105,7 +111,7 @@ OWNED_ELSEWHERE = (
 
 
 def _loop_tree() -> ast.Module:
-    return ast.parse(Path(run_loop.__file__ or "").read_text(encoding="utf-8"))
+    return ast.parse(run_loop_view.assembled_source())
 
 
 class BoundaryTests(unittest.TestCase):
@@ -128,13 +134,13 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(set(), reached)
 
     def test_every_moved_symbol_lives_here_and_nowhere_in_the_runner(self) -> None:
-        for name in MOVED_SYMBOLS:
+        for name, owner in MOVED_SYMBOLS:
             with self.subTest(name=name):
-                self.assertTrue(hasattr(run_loop, name))
+                self.assertTrue(hasattr(owner, name))
                 self.assertFalse(hasattr(runner, name))
 
     def test_the_names_it_borrows_are_read_at_their_owners(self) -> None:
-        source = Path(run_loop.__file__ or "").read_text(encoding="utf-8")
+        source = run_loop_view.assembled_source()
         for name in OWNED_ELSEWHERE:
             with self.subTest(name=name):
                 self.assertIn(name, source)
@@ -161,15 +167,17 @@ class SingularityTests(unittest.TestCase):
         self.assertEqual(["run_locked"], public)
 
     def test_the_context_is_a_dataclass_the_delegates_can_satisfy(self) -> None:
-        self.assertTrue(dataclasses.is_dataclass(run_loop.RunContext))
-        fields = {field.name for field in dataclasses.fields(run_loop.RunContext)}
+        self.assertTrue(dataclasses.is_dataclass(run_loop_context.RunContext))
+        fields = {
+            field.name for field in dataclasses.fields(run_loop_context.RunContext)
+        }
         # The three lifetimes the docstring names, one witness each.
         for name in ("run_id", "completed_count", "last_session_details"):
             with self.subTest(field=name):
                 self.assertIn(name, fields)
 
     def test_the_private_helpers_are_reached_from_nowhere_else(self) -> None:
-        private = {name for name in MOVED_SYMBOLS if name.startswith("_")}
+        private = {name for name, _ in MOVED_SYMBOLS if name.startswith("_")}
         package = Path(run_loop.__file__ or "").parent
         for path in sorted(package.glob("*.py")):
             if path.name == "run_loop.py":
@@ -253,8 +261,8 @@ class PausedRetainedWorkGateTests(unittest.TestCase):
     """Which pauses owe the work they retained a commit, and which never do."""
 
     def setUp(self) -> None:
-        self.loop_source = inspect.getsource(run_loop.run_locked)
-        self.module_source = Path(run_loop.__file__ or "").read_text(encoding="utf-8")
+        self.loop_source = run_loop_view.run_locked_source()
+        self.module_source = run_loop_view.assembled_source()
         self.fresh()
 
     def fresh(self) -> None:
@@ -313,7 +321,9 @@ class PausedRetainedWorkGateTests(unittest.TestCase):
         with mock.patch.object(
             commit_settlement, "_settle_paused_retained_work", recorder
         ):
-            run_loop._settle_paused_retained_work(self.ctx, commit_mode=commit_mode)
+            run_loop_commit_settlement._settle_paused_retained_work(
+                self.ctx, commit_mode=commit_mode
+            )
 
     def test_a_recoverable_pause_under_per_session_settles_the_retained_work(
         self,
@@ -529,10 +539,10 @@ class CommitGroupBarrierTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.ctx = BarrierRunContext()
-        self.loop_source = inspect.getsource(run_loop.run_locked)
+        self.loop_source = run_loop_view.run_locked_source()
 
     def soft_fail(self, *, group: Mapping[str, Any] | None = FAILING_GROUP) -> None:
-        run_loop._soft_fail_commit(
+        run_loop_commit_settlement._soft_fail_commit(
             self.ctx,  # type: ignore[arg-type]
             scope="session",
             session_id="5",
@@ -543,7 +553,7 @@ class CommitGroupBarrierTests(unittest.TestCase):
         )
 
     def barrier(self) -> bool:
-        return run_loop._pause_for_unsettled_commit_group(
+        return run_loop_commit_settlement._pause_for_unsettled_commit_group(
             self.ctx,  # type: ignore[arg-type]
             snapshot="the-plan-image",  # type: ignore[arg-type]
         )
@@ -583,7 +593,7 @@ class CommitGroupBarrierTests(unittest.TestCase):
         # ASI-160: the commit-failed remediation points at this file rather
         # than asking the operator to reproduce the error.
         for _ in range(commit_settlement.MAX_COMMIT_GROUP_RETRIES + 1):
-            run_loop._soft_fail_commit(
+            run_loop_commit_settlement._soft_fail_commit(
                 self.ctx,  # type: ignore[arg-type]
                 scope="session",
                 session_id="5",

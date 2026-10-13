@@ -18,6 +18,7 @@ from agent_session_loop import (
     run_control,
     run_loop,
     state,
+    state_locks,
     task_packet,
     turn_execution,
 )
@@ -127,7 +128,7 @@ class ExternalQueueAndSelectionTests(FakeHarnessIntegrationBase):
                     side_effect=fake_for_run,
                 ),
             ):
-                lock_info = state.acquire_lock(plan_dir, state_dir)
+                lock_info = state_locks.acquire_lock(plan_dir, state_dir)
                 try:
                     exit_code, payload = run_loop.run_locked(
                         args=args,
@@ -139,7 +140,7 @@ class ExternalQueueAndSelectionTests(FakeHarnessIntegrationBase):
                         run_id="test-run",
                     )
                 finally:
-                    state.release_lock(plan_dir, state_dir)
+                    state_locks.release_lock(plan_dir, state_dir)
 
         self.assertEqual(0, exit_code, payload)
         self.assertEqual("all-complete", payload["reason"])
@@ -259,7 +260,7 @@ class ExternalQueueAndSelectionTests(FakeHarnessIntegrationBase):
                     0.01,
                 ),
             ):
-                lock_info = state.acquire_lock(plan_dir, state_dir)
+                lock_info = state_locks.acquire_lock(plan_dir, state_dir)
                 try:
                     exit_code, _payload = run_loop.run_locked(
                         args=args,
@@ -271,7 +272,7 @@ class ExternalQueueAndSelectionTests(FakeHarnessIntegrationBase):
                         run_id="test-run",
                     )
                 finally:
-                    state.release_lock(plan_dir, state_dir)
+                    state_locks.release_lock(plan_dir, state_dir)
 
         self.assertEqual(0, exit_code)
         self.assertTrue(stop_state_during_call[0])

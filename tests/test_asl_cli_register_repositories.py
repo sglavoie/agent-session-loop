@@ -11,12 +11,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from agent_session_loop import (
-    cli,
-    plans,
-    repository_registration,
-    state,
-)
+from agent_session_loop import cli, plans, repository_registration, state_locks
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     _contract_block,
@@ -186,8 +181,8 @@ class RegisterRepositoriesCommandTests(unittest.TestCase):
         self,
     ) -> None:
         self._write_legacy_plan()
-        state.acquire_lock(self.plan_dir, self.state_dir)
-        self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+        state_locks.acquire_lock(self.plan_dir, self.state_dir)
+        self.addCleanup(state_locks.release_lock, self.plan_dir, self.state_dir)
 
         code, stdout, _stderr = self._register("--json")
 

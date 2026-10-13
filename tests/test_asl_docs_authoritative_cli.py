@@ -18,7 +18,7 @@ from agent_session_loop import (
     review,
     review_continuation,
     run_inputs,
-    state,
+    state_locks,
 )
 from tests.asl_docs_support import ASL_GUIDE, read_asl_reference
 from tests.support import (
@@ -250,7 +250,7 @@ class AuthoritativeCliDocsTests(unittest.TestCase):
             self.docs,
         )
         self.assertIn(
-            f"an\nexclusive `flock` on a `{state.LOCK_MUTEX_FILE_NAME}` sidecar",
+            f"an\nexclusive `flock` on a `{state_locks.LOCK_MUTEX_FILE_NAME}` sidecar",
             self.docs,
         )
         self.assertIn("No mutator ever\nunlinks without holding the claim", self.docs)

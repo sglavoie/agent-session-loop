@@ -20,7 +20,7 @@ from agent_session_loop import (
     harness_failures,
     harnesses,
     supervisor_audit,
-    supervisor_audit_checks,
+    supervisor_audit_vocabulary,
 )
 from agent_session_loop.assurance_models import (
     AuditRole,
@@ -245,7 +245,7 @@ class RestrictedAuditTests(unittest.TestCase):
             self.assertIsNone(result.workspace_change)
             self.assertFalse(
                 (
-                    run_dir / supervisor_audit_checks.WORKSPACE_CHANGE_ARTIFACT_NAME
+                    run_dir / supervisor_audit_vocabulary.WORKSPACE_CHANGE_ARTIFACT_NAME
                 ).exists()
             )
 
@@ -409,7 +409,9 @@ class RestrictedAuditTests(unittest.TestCase):
                 "claude", Path(tmp), fake, workspace, plan_dir, state_dir, run_dir
             )
 
-            artifact = run_dir / supervisor_audit_checks.WORKSPACE_CHANGE_ARTIFACT_NAME
+            artifact = (
+                run_dir / supervisor_audit_vocabulary.WORKSPACE_CHANGE_ARTIFACT_NAME
+            )
             recorded = json.loads(artifact.read_text(encoding="utf-8"))
             self.assertEqual("unattributed", recorded["attribution"]["status"])
             self.assertEqual(
@@ -422,7 +424,7 @@ class RestrictedAuditTests(unittest.TestCase):
             )
             self.assertFalse((state_dir / assurance_ledger.LEDGER_FILE_NAME).exists())
             self.assertFalse(
-                (run_dir / supervisor_audit_checks.MUTATION_ARTIFACT_NAME).exists()
+                (run_dir / supervisor_audit_vocabulary.MUTATION_ARTIFACT_NAME).exists()
             )
 
     def test_operator_process_activity_invalidates_without_attribution(self) -> None:
@@ -506,7 +508,7 @@ class RestrictedAuditTests(unittest.TestCase):
             self.assertIsNone(result.workspace_change)
             self.assertFalse(
                 (
-                    run_dir / supervisor_audit_checks.WORKSPACE_CHANGE_ARTIFACT_NAME
+                    run_dir / supervisor_audit_vocabulary.WORKSPACE_CHANGE_ARTIFACT_NAME
                 ).exists()
             )
 

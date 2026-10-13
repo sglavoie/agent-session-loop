@@ -44,6 +44,8 @@ from . import (
     plans,
     qna,
     state,
+    state_locks,
+    state_payloads,
 )
 
 ACTION_REPLY = "question.reply"
@@ -323,9 +325,9 @@ def unanswered_question_ids(
             state_path = (
                 state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
             )
-            run_id = state._runner_state_payload(state_path, lock_info=None).get(
-                "run_id"
-            )
+            run_id = state_payloads._runner_state_payload(
+                state_path, lock_info=None
+            ).get("run_id")
         unanswered = mailbox.unanswered_questions_for_run(
             plan_dir, run_id, state_dir=state_dir
         )
@@ -348,9 +350,9 @@ def inspect_run(
     thing that changes the corpus being validated.
     """
     canonical = _canonical_plan_dir(plan_dir)
-    lock_info = state.inspect_lock_info(canonical, state_dir)
+    lock_info = state_locks.inspect_lock_info(canonical, state_dir)
     state_path = state.plan_state_dir(canonical, state_dir) / events.STATE_FILE_NAME
-    runner_state = state._runner_state_payload(state_path, lock_info=lock_info)
+    runner_state = state_payloads._runner_state_payload(state_path, lock_info=lock_info)
     run_id = runner_state.get("run_id")
     mailbox_view: mailbox_snapshot.MailboxView | None = None
     unanswered: tuple[mailbox_models.MailboxMessage, ...] = ()

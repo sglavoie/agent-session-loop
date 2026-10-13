@@ -23,6 +23,10 @@ from agent_session_loop import (
     run_coordination,
     run_persistence,
     state,
+    state_locks,
+    state_payloads,
+    state_status,
+    state_status_text,
 )
 from tests.support import (
     REPO_ROOT,
@@ -147,13 +151,13 @@ class QnAContextLoaderTests(unittest.TestCase):
                 },
             )
             self._write_last_message(last_message_path, "Choose blue or green?\n")
-            state.acquire_lock(plan_dir, state_dir)
+            state_locks.acquire_lock(plan_dir, state_dir)
 
             try:
                 context = qna.load_qna_context(plan_dir, state_dir=state_dir)
                 payload = qna.questions_payload(context)
             finally:
-                state.release_lock(plan_dir, state_dir)
+                state_locks.release_lock(plan_dir, state_dir)
 
             self.assertEqual("waiting", context.context_kind)
             self.assertEqual("question-1", context.question_id)
@@ -237,23 +241,23 @@ class QnAContextLoaderTests(unittest.TestCase):
                 },
             )
             self._write_last_message(last_message_path, "Choose blue or green?\n")
-            state.acquire_lock(plan_dir, state_dir)
+            state_locks.acquire_lock(plan_dir, state_dir)
 
             try:
                 context = qna.load_qna_context(plan_dir, state_dir=state_dir)
                 payload = qna.questions_payload(context)
-                status_payload = state.status_payload(
+                status_payload = state_status.status_payload(
                     plans.inspect_plan(plan_dir),
                     state_dir,
                 )
             finally:
-                state.release_lock(plan_dir, state_dir)
+                state_locks.release_lock(plan_dir, state_dir)
 
             self.assertEqual("waiting", context.context_kind)
             self.assertEqual("question-1", context.question_id)
             self.assertEqual(waiting, payload["waiting_for_reply"])
             self.assertEqual(
-                state.WAITING_FOR_REPLY_STATUS_LIVE,
+                state_payloads.WAITING_FOR_REPLY_STATUS_LIVE,
                 status_payload["waiting_for_reply_status"],
             )
             self.assertIn(
@@ -295,12 +299,12 @@ class QnAContextLoaderTests(unittest.TestCase):
                 },
             )
             self._write_last_message(last_message_path, "Choose blue or green?\n")
-            state.acquire_lock(plan_dir, state_dir)
+            state_locks.acquire_lock(plan_dir, state_dir)
 
             try:
                 context = qna.load_qna_context(plan_dir, state_dir=state_dir)
             finally:
-                state.release_lock(plan_dir, state_dir)
+                state_locks.release_lock(plan_dir, state_dir)
 
             self.assertEqual("pause", context.context_kind)
             self.assertEqual(
@@ -364,12 +368,12 @@ class QnAContextLoaderTests(unittest.TestCase):
                 },
             )
             self._write_last_message(last_message_path, "Choose blue or green?\n")
-            state.acquire_lock(plan_dir, state_dir)
+            state_locks.acquire_lock(plan_dir, state_dir)
 
             try:
                 context = qna.load_qna_context(plan_dir, state_dir=state_dir)
             finally:
-                state.release_lock(plan_dir, state_dir)
+                state_locks.release_lock(plan_dir, state_dir)
 
             self.assertEqual("waiting", context.context_kind)
             self.assertEqual("question-1", context.question_id)
@@ -399,13 +403,13 @@ class QnAContextLoaderTests(unittest.TestCase):
                     }
                 },
             )
-            state.acquire_lock(plan_dir, state_dir)
+            state_locks.acquire_lock(plan_dir, state_dir)
 
             try:
                 with self.assertRaises(qna.QnAError) as ctx:
                     qna.load_qna_context(plan_dir, state_dir=state_dir)
             finally:
-                state.release_lock(plan_dir, state_dir)
+                state_locks.release_lock(plan_dir, state_dir)
 
             self.assertEqual(
                 qna.REASON_REPLY_CONTEXT_MISMATCH,
@@ -844,21 +848,21 @@ class QnAQuestionsCliTests(unittest.TestCase):
                 payload["rendered_prompt"],
             )
 
-            status_payload = state.status_payload(
+            status_payload = state_status.status_payload(
                 plans.inspect_plan(plan_dir),
                 state_dir,
             )
             self.assertEqual(
-                state.WAITING_FOR_REPLY_STATUS_EXPIRED,
+                state_payloads.WAITING_FOR_REPLY_STATUS_EXPIRED,
                 status_payload["waiting_for_reply_status"],
             )
             self.assertEqual(
-                state.WAITING_FOR_REPLY_STATUS_EXPIRED,
+                state_payloads.WAITING_FOR_REPLY_STATUS_EXPIRED,
                 status_payload["runner_state"]["waiting_for_reply_status"],
             )
             status_output = io.StringIO()
             with redirect_stdout(status_output):
-                state._print_text_status(status_payload)
+                state_status_text._print_text_status(status_payload)
             self.assertIn("Status: expired", status_output.getvalue())
 
     def test_json_output_recovers_from_orphaned_future_wait(self) -> None:
@@ -905,13 +909,13 @@ class QnAQuestionsCliTests(unittest.TestCase):
             self.assertIn("--resume", payload["resume_command"])
             self.assertIn("--reply TEXT", payload["resume_command"])
 
-            status_payload = state.status_payload(
+            status_payload = state_status.status_payload(
                 plans.inspect_plan(plan_dir),
                 state_dir,
             )
             self.assertFalse(status_payload["lock"]["present"])
             self.assertEqual(
-                state.WAITING_FOR_REPLY_STATUS_EXPIRED,
+                state_payloads.WAITING_FOR_REPLY_STATUS_EXPIRED,
                 status_payload["waiting_for_reply_status"],
             )
 

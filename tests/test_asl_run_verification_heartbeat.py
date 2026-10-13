@@ -22,6 +22,8 @@ from agent_session_loop import (
     run_loop,
     session_verification,
     state,
+    state_locks,
+    state_status,
 )
 from tests.support import (
     REPO_ROOT,
@@ -98,7 +100,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
         }
         args = self._make_args()
         with patched_env(**env_updates):
-            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
             try:
                 exit_code, payload = run_loop.run_locked(
                     args=args,
@@ -110,7 +112,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
                     run_id="test-run-heartbeat",
                 )
             finally:
-                state.release_lock(self.plan_dir, self.state_dir)
+                state_locks.release_lock(self.plan_dir, self.state_dir)
         return exit_code, payload
 
     def test_long_verification_command_emits_heartbeats_and_orders_post_turn_events(
@@ -396,7 +398,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
         )
 
         snapshot = plans.inspect_plan(self.plan_dir)
-        payload = state.status_payload(snapshot, self.state_dir)
+        payload = state_status.status_payload(snapshot, self.state_dir)
 
         # Top-level shape mirrors `runner_state` and defaults missing keys.
         self.assertIsNone(payload["active_turn"])
@@ -420,7 +422,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
             json=False,
         )
         with redirect_stdout(buffer):
-            exit_code = state.status_from_args(args)
+            exit_code = state_status.status_from_args(args)
         self.assertEqual(0, exit_code)
         rendered = buffer.getvalue()
         self.assertNotIn("Active verification:", rendered)

@@ -45,6 +45,7 @@ from agent_session_loop import (  # noqa: E402 - import needs the sys.path inser
     plans,
     responses,
     state,
+    state_locks,
 )
 from agent_session_loop.workspaces import (  # noqa: E402 - needs the sys.path insert above
     RepositoryRegistry,
@@ -1082,7 +1083,7 @@ def resplit_session(
 
     lock_acquired = False
     try:
-        state.acquire_lock(snapshot.plan_dir, state_dir, owner="session-resplit")
+        state_locks.acquire_lock(snapshot.plan_dir, state_dir, owner="session-resplit")
         lock_acquired = True
     except state.StateError as error:
         raise ResplitError("lock-contention", str(error)) from error
@@ -1197,7 +1198,7 @@ def resplit_session(
         }
     finally:
         if lock_acquired:
-            state.release_lock(snapshot.plan_dir, state_dir)
+            state_locks.release_lock(snapshot.plan_dir, state_dir)
 
 
 def _walk_up_for_plan_dir(start: Path) -> Path | None:

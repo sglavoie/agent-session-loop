@@ -7,13 +7,7 @@ import json
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
-from agent_session_loop import (
-    cli,
-    harnesses,
-    mailbox_cli,
-    run_entry,
-    supervisor_guide,
-)
+from agent_session_loop import cli, harnesses, mailbox_cli, run_entry, supervisor_guide
 
 
 class ParserDefaultsAndSupervisorGuideTests(unittest.TestCase):

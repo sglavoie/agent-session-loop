@@ -36,7 +36,12 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_session_loop import overseer_policy_client, overseer_store, state
+from agent_session_loop import (
+    overseer_policy_client,
+    overseer_store,
+    state,
+    state_plan_refs,
+)
 from tests.support import assert_no_runner_import
 
 PLAN = "/state/agent-session-loop/plan-abc"
@@ -175,7 +180,7 @@ class LedgerLocationTests(_LedgerCase):
         )
         self.assertTrue(self.ledger.path.is_file())
         self.assertEqual(
-            list(state.iter_plan_state_dirs(state.state_root(self.root))), []
+            list(state_plan_refs.iter_plan_state_dirs(state.state_root(self.root))), []
         )
 
 

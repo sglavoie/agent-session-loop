@@ -21,6 +21,7 @@ from agent_session_loop import (
     plans,
     run_coordination,
     state,
+    state_status,
 )
 from tests.support import (
     _write_lock_file,
@@ -206,7 +207,9 @@ class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
             )
             _write_lock_file(plan_dir, state_dir, pid=os.getpid())
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             status = payload["mailbox"]
             self.assertEqual(1, status["unanswered_questions"])

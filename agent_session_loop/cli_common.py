@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-from . import plans, responses, state
+from . import plans, responses, state, state_plan_refs, state_status
 
 
 @dataclass(frozen=True)
@@ -90,11 +90,11 @@ def resolve_plan_context(
 ) -> PlanCommandContext | None:
     """Resolve and inspect ``args.plan_dir``, reporting failures in place."""
     try:
-        resolved_plan_dir = state.resolve_plan_reference(
+        resolved_plan_dir = state_plan_refs.resolve_plan_reference(
             args.plan_dir, state.state_root(args.state_dir)
         )
         snapshot = plans.inspect_plan(resolved_plan_dir)
-        status = state.status_payload(snapshot, args.state_dir)
+        status = state_status.status_payload(snapshot, args.state_dir)
     except state.AmbiguousPlanError as error:
         print_error(
             args,

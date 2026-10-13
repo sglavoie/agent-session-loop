@@ -4,13 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent_session_loop import (
-    events,
-    mailbox,
-    qna,
-    run_coordination,
-    state,
-)
+from agent_session_loop import events, mailbox, qna, run_coordination, state_payloads
 from tests.asl_docs_support import ASL_GUIDE, read_repo_text
 
 #: The ASL operator guide moved out of the repository README; it carries the
@@ -124,7 +118,7 @@ class LiveContractDocsTests(unittest.TestCase):
         )[0]
 
         self.assertIn("`waiting_for_reply_status`", status_docs)
-        for waiting_status in state.WAITING_FOR_REPLY_STATUSES:
+        for waiting_status in state_payloads.WAITING_FOR_REPLY_STATUSES:
             self.assertIn(
                 f"`{waiting_status}`",
                 status_docs,

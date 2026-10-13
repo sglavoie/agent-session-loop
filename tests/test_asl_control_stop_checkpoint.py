@@ -22,6 +22,7 @@ from agent_session_loop import (
     run_control,
     run_loop,
     state,
+    state_locks,
     turn_execution,
 )
 from tests.support import (
@@ -178,7 +179,7 @@ class PreTurnStopCheckpointTests(unittest.TestCase):
                 side_effect=fake_for_run,
             ),
         ):
-            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
             try:
                 exit_code, payload = run_loop.run_locked(
                     args=args,
@@ -190,7 +191,7 @@ class PreTurnStopCheckpointTests(unittest.TestCase):
                     run_id="test-run",
                 )
             finally:
-                state.release_lock(self.plan_dir, self.state_dir)
+                state_locks.release_lock(self.plan_dir, self.state_dir)
         self.assertEqual(0, exit_code, payload)
         return payload, harness_calls
 

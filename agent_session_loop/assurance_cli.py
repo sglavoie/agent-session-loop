@@ -57,7 +57,7 @@ from typing import Any
 from . import assurance_ledger as ledger
 from . import assurance_projection as projection
 from . import assurance_reconcile as reconcile
-from . import responses, state
+from . import responses, state, state_plan_refs
 from .assurance_models import (
     CLOSEOUT_OUTCOMES,
     DECISION_MERGE,
@@ -909,7 +909,7 @@ def assurance_merge_from_args(args: argparse.Namespace) -> int:
 
 def _resolve_run_location(
     args: argparse.Namespace, run_id: str
-) -> tuple[state.RunLocation | None, int | None]:
+) -> tuple[state_plan_refs.RunLocation | None, int | None]:
     """Locate ``run_id`` in the state corpus, or explain why it cannot be.
 
     Returns the location and ``None`` on success, or ``None`` and an exit code
@@ -932,7 +932,7 @@ def _resolve_run_location(
     plan_dir = None
     if args.plan is not None:
         try:
-            plan_dir = state.resolve_plan_reference(
+            plan_dir = state_plan_refs.resolve_plan_reference(
                 args.plan, state.state_root(args.state_dir)
             )
         except state.AmbiguousPlanError as error:
@@ -945,7 +945,7 @@ def _resolve_run_location(
             return None, refuse(REASON_INPUT_ERROR, str(error))
 
     try:
-        located = state.find_run_locations(
+        located = state_plan_refs.find_run_locations(
             run_id, state_dir=args.state_dir, plan_dir=plan_dir
         )
     except state.StateError as error:
@@ -1143,7 +1143,7 @@ def assurance_process_pending_from_args(args: argparse.Namespace) -> int:
     plan_dir = None
     if args.plan is not None:
         try:
-            plan_dir = state.resolve_plan_reference(
+            plan_dir = state_plan_refs.resolve_plan_reference(
                 args.plan, state.state_root(args.state_dir)
             )
         except state.AmbiguousPlanError as error:

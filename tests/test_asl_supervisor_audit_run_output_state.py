@@ -16,6 +16,9 @@ from agent_session_loop import (
     run_selection,
     runner,
     state,
+    state_payloads,
+    state_status,
+    state_status_text,
     supervisor_audit,
     supervisor_audit_agent,
 )
@@ -207,7 +210,7 @@ class AuditStateProjectionTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            payload = state._runner_state_payload(state_path, lock_info=None)
+            payload = state_payloads._runner_state_payload(state_path, lock_info=None)
 
             self.assertTrue(payload["supervisor_audit"])
             self.assertEqual("pending", payload["assurance"]["state"])
@@ -217,7 +220,7 @@ class AuditStateProjectionTests(unittest.TestCase):
             state_path = Path(tmp) / events.STATE_FILE_NAME
             state_path.write_text(json.dumps({"run_id": RUN_ID}), encoding="utf-8")
 
-            payload = state._runner_state_payload(state_path, lock_info=None)
+            payload = state_payloads._runner_state_payload(state_path, lock_info=None)
 
             self.assertIsNone(payload["assurance"])
             self.assertIsNone(payload["supervisor_audit"])
@@ -249,7 +252,7 @@ class AuditStateProjectionTests(unittest.TestCase):
             encoding="utf-8",
         )
         return (
-            state.status_payload(plans.inspect_plan(plan_dir), state_dir),
+            state_status.status_payload(plans.inspect_plan(plan_dir), state_dir),
             plan_state,
         )
 
@@ -277,7 +280,7 @@ class AuditStateProjectionTests(unittest.TestCase):
 
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                state._print_text_status(payload)
+                state_status_text._print_text_status(payload)
             output = buffer.getvalue()
 
             self.assertIn("Supervisor audit: findings", output)
@@ -325,7 +328,7 @@ class AuditStateProjectionTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        return state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+        return state_status.status_payload(plans.inspect_plan(plan_dir), state_dir)
 
     def test_a_partial_audit_reports_which_lanes_had_no_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -334,7 +337,7 @@ class AuditStateProjectionTests(unittest.TestCase):
             report = payload["assurance_report"]
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                state._print_text_status(payload)
+                state_status_text._print_text_status(payload)
 
             self.assertEqual(6, report["lanes_judged"])
             self.assertEqual(8, report["lanes_total"])
@@ -353,12 +356,12 @@ class AuditStateProjectionTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             write_plan(plan_dir, ("pending",))
 
-            payload = state.status_payload(
+            payload = state_status.status_payload(
                 plans.inspect_plan(plan_dir), Path(tmp) / "state"
             )
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                state._print_text_status(payload)
+                state_status_text._print_text_status(payload)
 
             self.assertIsNone(payload["assurance"])
             self.assertIsNone(payload["assurance_report"])

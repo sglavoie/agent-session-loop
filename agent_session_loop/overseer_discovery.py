@@ -73,7 +73,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from . import clock, events, plans, state
+from . import clock, events, plans, state, state_plan_refs
 
 #: Name of the contract a run record publishes for this boundary. Carried in
 #: prose rather than in the record itself; the version below is the field.
@@ -276,7 +276,7 @@ def build_inventory(*, state_dir: str | Path | None = None) -> Inventory:
     complete = True
 
     try:
-        state_dirs = list(state.iter_plan_state_dirs(root))
+        state_dirs = list(state_plan_refs.iter_plan_state_dirs(root))
     except state.StateError as error:
         return Inventory(
             state_root=root,

@@ -11,12 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agent_session_loop import (
-    cli,
-    plans,
-    state,
-    workbench,
-)
+from agent_session_loop import cli, plans, state, workbench
 from tests.support import (
     patched_env,
     write_plan,

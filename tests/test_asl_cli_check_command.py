@@ -7,10 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import (
-    cli,
-    plans,
-)
+from agent_session_loop import cli, plans
 from tests.support_asl_cli_split import SplitCliHelpers
 
 

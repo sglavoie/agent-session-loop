@@ -36,7 +36,7 @@ from agent_session_loop import (
     review_continuation,
     review_cycle,
     review_guard,
-    run_loop,
+    run_loop_finalization,
     run_prompts,
     run_termination,
     runner,
@@ -284,7 +284,7 @@ class SeamTests(unittest.TestCase):
         # each is counted on its own, so a call that merely moved between them
         # cannot pass by keeping the total.
         calls: dict[str, int] = {}
-        for module in (run_loop, turn_postflight):
+        for module in (run_loop_finalization, turn_postflight):
             tree = ast.parse(Path(module.__file__ or "").read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
@@ -307,7 +307,7 @@ class SeamTests(unittest.TestCase):
         # path each reach all three.
         self.assertEqual(
             {
-                "agent_session_loop.run_loop": 3,
+                "agent_session_loop.run_loop_finalization": 3,
                 "agent_session_loop.turn_postflight": 3,
             },
             calls,

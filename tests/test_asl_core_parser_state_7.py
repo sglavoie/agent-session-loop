@@ -20,6 +20,9 @@ from agent_session_loop import (
     mailbox_vocabulary,
     plans,
     state,
+    state_locks,
+    state_status,
+    state_status_text,
 )
 from tests.asl_core_support import ParserAndStateTestsBase
 from tests.support import (
@@ -293,11 +296,11 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
 
-            lock_info = state.acquire_lock(plan_dir, state_dir)
+            lock_info = state_locks.acquire_lock(plan_dir, state_dir)
             self.assertTrue(lock_info.active)
             with self.assertRaises(state.StateError):
-                state.acquire_lock(plan_dir, state_dir)
-            state.release_lock(plan_dir, state_dir)
+                state_locks.acquire_lock(plan_dir, state_dir)
+            state_locks.release_lock(plan_dir, state_dir)
 
             lock_path = state.lock_path_for_plan(plan_dir, state_dir)
             lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -307,9 +310,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 ),
                 encoding="utf-8",
             )
-            replaced = state.acquire_lock(plan_dir, state_dir)
+            replaced = state_locks.acquire_lock(plan_dir, state_dir)
             self.assertTrue(replaced.active)
-            state.release_lock(plan_dir, state_dir)
+            state_locks.release_lock(plan_dir, state_dir)
 
     def test_status_payload_includes_json_artifact_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -317,7 +320,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             self.assertTrue(payload["state_path"].endswith("/state.json"))
             self.assertTrue(payload["events_path"].endswith("/events.jsonl"))
@@ -338,7 +343,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             write_plan(plan_dir, ("pending",))
             plan_state = state.plan_state_dir(plan_dir, state_dir)
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             status = payload["mailbox"]
             self.assertFalse(status["present"])
@@ -384,7 +391,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             mailbox_before = mailbox_path.read_bytes()
             lease_before = lease_path.read_bytes()
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             status = payload["mailbox"]
             self.assertTrue(status["present"])
@@ -414,7 +423,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertEqual(lease_before, lease_path.read_bytes())
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                state._print_text_status(payload)
+                state_status_text._print_text_status(payload)
             output = buffer.getvalue()
             self.assertIn("Mailbox: active", output)
             self.assertIn("1 pending guidance", output)
@@ -430,7 +439,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 plan_dir, "keep the API small", state_dir=state_dir
             )
 
-            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            payload = state_status.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             [entry] = payload["mailbox"]["guidance"]
             self.assertEqual(guidance.id, entry["id"])
@@ -440,7 +451,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertIsNone(entry["latest_attempt"])
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                state._print_text_status(payload)
+                state_status_text._print_text_status(payload)
             self.assertIn(
                 f"Latest guidance: {guidance.id} (seq {guidance.seq}) "
                 "queued but not delivered",

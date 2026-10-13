@@ -48,6 +48,7 @@ from agent_session_loop import (
     runner,
     turn_execution,
 )
+from tests import support_asl_run_loop_view as run_loop_view
 from tests.support import assert_no_runner_import
 
 #: The functions in the runner and its run loop that write ``sys.stderr``
@@ -137,7 +138,7 @@ class StderrOwnershipTests(unittest.TestCase):
         # `run_control.RunControlListener` and `tail.TailFollower` both default
         # to the real `sys.stderr`; the run never lets them, because a second
         # unserialized writer is exactly what tears a line.
-        source = Path(run_loop.__file__ or "").read_text(encoding="utf-8")
+        source = run_loop_view.assembled_source()
         self.assertIn("stderr=output.stream", source)
         reporting_source = Path(run_reporting.__file__ or "").read_text(
             encoding="utf-8"

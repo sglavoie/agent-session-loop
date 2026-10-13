@@ -38,7 +38,7 @@ from . import (
     redirect_ack,
     redirect_store,
     responses,
-    state,
+    state_status,
     supervision_liveness,
 )
 
@@ -487,7 +487,7 @@ def _supervision_run_evidence(
     a status read that fails must not be allowed to manufacture a death.
     """
     try:
-        status = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+        status = state_status.status_payload(plans.inspect_plan(plan_dir), state_dir)
     except Exception:  # noqa: BLE001 - unreadable status is unprovable, not dead
         return None
     lock = status.get("lock")

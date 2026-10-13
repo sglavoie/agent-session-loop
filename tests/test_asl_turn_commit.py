@@ -46,6 +46,7 @@ from agent_session_loop import (
     runner,
     session_verification,
     state,
+    state_locks,
     supervisor_audit_evidence,
     turn_execution,
     turn_postflight,
@@ -55,6 +56,7 @@ from agent_session_loop import (
     verification,
 )
 from agent_session_loop import verification as verification_module
+from tests import support_asl_run_loop_view as run_loop_view
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     GENERATION_TIMEOUT_PROBE_SECONDS,
@@ -1250,6 +1252,7 @@ class RunLoopGuardOrderTests(unittest.TestCase):
             module.__name__.rsplit(".", 1)[-1]: _module_tree(module)
             for module in TURN_PATH_MODULES
         }
+        self.trees["run_loop"] = ast.parse(run_loop_view.assembled_source())
         self.run_locked = self._function("run_locked", self.trees["run_loop"])
         self.entry_points = self._entry_points()
 
@@ -1431,7 +1434,7 @@ class TurnCommitRunTests(unittest.TestCase):
             note=None,
             allow_not_loop_ready=True,
         )
-        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
         try:
             return run_loop.run_locked(
                 args=args,
@@ -1444,7 +1447,7 @@ class TurnCommitRunTests(unittest.TestCase):
                 verification_context=self.context,
             )
         finally:
-            state.release_lock(self.plan_dir, self.state_dir)
+            state_locks.release_lock(self.plan_dir, self.state_dir)
 
     def _records(self) -> list[dict[str, Any]]:
         event_path = (
@@ -2406,7 +2409,7 @@ class CommitFailureSoftFailTests(unittest.TestCase):
             max_pending_sessions=30,
             allow_not_loop_ready=True,
         )
-        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
         try:
             with (
                 mock.patch.dict(os.environ, env),
@@ -2423,7 +2426,7 @@ class CommitFailureSoftFailTests(unittest.TestCase):
                     verification_context=self.context,
                 )
         finally:
-            state.release_lock(self.plan_dir, self.state_dir)
+            state_locks.release_lock(self.plan_dir, self.state_dir)
         self.exit_code = exit_code
         return payload
 

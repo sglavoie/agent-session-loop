@@ -25,7 +25,7 @@ from agent_session_loop import (
     review_session_body,
     run_coordination,
     run_loop,
-    state,
+    state_locks,
     turn_execution,
 )
 from tests.support import (
@@ -181,7 +181,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
                         ),
                     )
                 )
-            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)
             try:
                 _exit_code, payload = run_loop.run_locked(
                     args=args,
@@ -193,7 +193,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
                     run_id="test-run-guard-turn-outcome",
                 )
             finally:
-                state.release_lock(self.plan_dir, self.state_dir)
+                state_locks.release_lock(self.plan_dir, self.state_dir)
         return payload
 
     def _assert_guard_pause(self, payload: dict[str, Any]) -> dict[str, Any]:

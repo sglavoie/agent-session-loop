@@ -42,7 +42,14 @@ from pathlib import Path
 from typing import Any
 
 from . import assurance_projection as projection
-from . import events, plans, state, supervisor_audit
+from . import (
+    events,
+    plans,
+    state,
+    state_assurance_pending,
+    state_plan_refs,
+    supervisor_audit,
+)
 from .assurance_models import (
     ATTEMPT_DIR_PREFIX,
     CANONICAL_AUDIT_ARTIFACTS,
@@ -179,7 +186,7 @@ class CatchupReport:
 
 def record_path(run_dir: Path | str) -> Path:
     """Return where one run's pending-audit record lives."""
-    return Path(run_dir) / state.ASSURANCE_PENDING_FILE_NAME
+    return Path(run_dir) / state_assurance_pending.ASSURANCE_PENDING_FILE_NAME
 
 
 def _path_or_none(value: Any) -> Path | None:
@@ -258,7 +265,7 @@ def iter_pending_runs(
     if plan_dir is not None:
         plan_state_dirs = [state.plan_state_dir(plan_dir, state_dir)]
     else:
-        plan_state_dirs = list(state.iter_plan_state_dirs(root))
+        plan_state_dirs = list(state_plan_refs.iter_plan_state_dirs(root))
     found: list[PendingRun] = []
     for plan_state_dir in plan_state_dirs:
         for run_directory in _run_dirs(plan_state_dir, run_id):
