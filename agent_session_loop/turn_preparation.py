@@ -91,7 +91,12 @@ from . import (
     events,
     handoff_guards,
     mailbox_models,
-    plans,
+    plans_errors,
+    plans_models,
+    plans_payloads,
+    plans_progress,
+    plans_session_scope,
+    plans_snapshot,
     preflight_footprint,
     readiness_gate,
     redirect_ack,
@@ -148,12 +153,12 @@ class RunContext(Protocol):
     def persistence(self) -> run_persistence._RunPersistence: ...
 
     @property
-    def plan_cache(self) -> plans.PlanSnapshotCache: ...
+    def plan_cache(self) -> plans_snapshot.PlanSnapshotCache: ...
 
     @property
     def verification_context(self) -> verification.VerificationContext: ...
 
-    def record_final_snapshot(self, snapshot: plans.PlanSnapshot) -> None: ...
+    def record_final_snapshot(self, snapshot: plans_models.PlanSnapshot) -> None: ...
 
     def pause(
         self,
@@ -195,9 +200,9 @@ def classify_session(session_path: Path) -> SessionClassification:
             session_path
         ),
         session_kind=(
-            plans.SESSION_KIND_REVIEW
+            plans_payloads.SESSION_KIND_REVIEW
             if is_review_session
-            else plans.SESSION_KIND_IMPLEMENTATION
+            else plans_payloads.SESSION_KIND_IMPLEMENTATION
         ),
     )
 
@@ -218,7 +223,7 @@ class ReviewPreparation:
     session file cannot disagree about which commit "before" means.
     """
 
-    snapshot: plans.PlanSnapshot
+    snapshot: plans_models.PlanSnapshot
     workspace_snapshot: repository_evidence.WorkspaceSnapshot | None
     session_version: int | None
     paused: bool
@@ -227,8 +232,8 @@ class ReviewPreparation:
 def prepare_review_session(
     ctx: RunContext,
     *,
-    session: plans.SessionStatus,
-    snapshot: plans.PlanSnapshot,
+    session: plans_models.SessionStatus,
+    snapshot: plans_models.PlanSnapshot,
     classification: SessionClassification,
     cwd: Path,
     review_guard_excludes: tuple[str, ...],
@@ -289,7 +294,7 @@ def prepare_review_session(
                     )
                 )
             except repository_evidence.RepositoryEvidenceError as error:
-                raise plans.PlanError(
+                raise plans_errors.PlanError(
                     f"combined workspace review base capture failed: {error}"
                 ) from error
             unavailable = workspace_evidence._workspace_snapshot_unavailable(
@@ -300,7 +305,7 @@ def prepare_review_session(
                 ),
             )
             if unavailable:
-                raise plans.PlanError(
+                raise plans_errors.PlanError(
                     "combined workspace review base is unavailable: "
                     + json.dumps(unavailable, sort_keys=True)
                 )
@@ -320,14 +325,14 @@ def prepare_review_session(
                 ctx.payload, snapshot.plan_dir, ctx.persistence
             )
             snapshot = ctx.plan_cache.get_fresh(snapshot.plan_dir)
-    except (plans.PlanError, OSError) as error:
+    except (plans_errors.PlanError, OSError) as error:
         ctx.record_final_snapshot(snapshot)
         ctx.pause(
             reason="malformed-plan",
             message="the pending review session's scope could not be "
             f"re-derived from current Git evidence: {error}",
             details={
-                **plans.session_details_payload(session.id),
+                **plans_payloads.session_details_payload(session.id),
                 "error": str(error),
             },
         )
@@ -356,13 +361,13 @@ def prepare_review_session(
 def prepare_turn_continuation(
     ctx: RunContext,
     *,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     args: argparse.Namespace,
     cwd: Path,
     harness: str,
     session_id: str,
     session_details: dict[str, Any],
-    session_scope: plans.SessionScope | None,
+    session_scope: plans_session_scope.SessionScope | None,
     workspace: workspaces.ResolvedWorkspace | None,
     authorization: conversation_resume.FreshConversationAuthorization,
     interrupted_operations: Sequence[str] = (),
@@ -410,7 +415,7 @@ def prepare_turn_continuation(
         events.CONVERSATION_CONTINUATION_EVENT,
         {
             "run_id": ctx.run_id,
-            **plans.session_identity_payload(session_id),
+            **plans_payloads.session_identity_payload(session_id),
             **continuation.describe(),
         },
     )
@@ -444,7 +449,7 @@ class RepairResumption:
     turn's own evidence can state that the scope it ran under was rewritten.
     """
 
-    session_scope: plans.SessionScope | None
+    session_scope: plans_session_scope.SessionScope | None
     regenerated_write_scope: dict[str, Any] | None
     paused: bool
 
@@ -452,13 +457,13 @@ class RepairResumption:
 def resume_repair_session(
     ctx: RunContext,
     *,
-    session: plans.SessionStatus,
-    snapshot: plans.PlanSnapshot,
+    session: plans_models.SessionStatus,
+    snapshot: plans_models.PlanSnapshot,
     classification: SessionClassification,
     args: argparse.Namespace,
     cwd: Path,
     workspace: workspaces.ResolvedWorkspace | None,
-    session_scope: plans.SessionScope | None,
+    session_scope: plans_session_scope.SessionScope | None,
     session_label: str,
     session_identity: dict[str, Any],
     session_details: dict[str, Any],
@@ -606,7 +611,7 @@ class PacketInputs:
 def collect_packet_inputs(
     ctx: RunContext,
     *,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     classification: SessionClassification,
     args: argparse.Namespace,
     session_id: str,
@@ -634,7 +639,7 @@ def collect_packet_inputs(
         worker_mode=task_packet._worker_mode(),
         predecessor_id=task_packet._predecessor_session_id(snapshot, session_id),
         has_expansion=task_packet._session_has_expansion(snapshot.plan_dir, session_id),
-        has_progress=(snapshot.plan_dir / plans.PROGRESS_FILE_NAME).is_file(),
+        has_progress=(snapshot.plan_dir / plans_progress.PROGRESS_FILE_NAME).is_file(),
         repair_references=repair_references,
         pending_guidance=run_selection._pending_guidance_snapshot(
             enabled=mailbox_enabled,
@@ -666,7 +671,7 @@ class TurnPrompt:
 def prepare_turn_prompt(
     ctx: RunContext,
     *,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     classification: SessionClassification,
     inputs: PacketInputs,
     args: argparse.Namespace,
@@ -675,7 +680,7 @@ def prepare_turn_prompt(
     session_id: str,
     session_label: str,
     session_details: dict[str, Any],
-    session_scope: plans.SessionScope | None,
+    session_scope: plans_session_scope.SessionScope | None,
     workspace: workspaces.ResolvedWorkspace | None,
     mailbox_enabled: bool,
     reply: run_prompts._PendingReply | None,

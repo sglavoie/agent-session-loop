@@ -67,7 +67,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import plans, state, state_locks
+from . import plans_errors, state, state_locks
 
 ENDPOINT_FILENAME = "control-wakeup.fifo"
 REDIRECT_ENDPOINT_FILENAME = "redirect-wakeup.fifo"
@@ -289,7 +289,7 @@ def _notify_endpoint(
 ) -> NotifyResult:
     try:
         lock = state_locks.inspect_lock_info(plan_dir, state_dir)
-    except plans.PlanError, state.StateError, OSError:
+    except plans_errors.PlanError, state.StateError, OSError:
         return NotifyResult(False, REASON_NO_RUNNER)
 
     if lock is None:

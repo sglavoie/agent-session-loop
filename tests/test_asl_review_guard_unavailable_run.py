@@ -16,7 +16,7 @@ from agent_session_loop import (
     config,
     events,
     harnesses,
-    plans,
+    plans_handoff,
     review,
     review_guard,
     review_session_body,
@@ -170,7 +170,7 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
         self.assertEqual([], payload["turns"])
         self.assertEqual(
             "pending",
-            plans.read_session_status(self.review_session).status,
+            plans_handoff.read_session_status(self.review_session).status,
         )
         guard = payload["pause_details"]["review_mutation_guard"]
         self.assertFalse(guard["passed"])
@@ -190,7 +190,7 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
         self.assertFalse(payload["review_completed"])
         self.assertEqual(
             "pending",
-            plans.read_session_status(self.review_session).status,
+            plans_handoff.read_session_status(self.review_session).status,
         )
         guard = payload["turns"][0]["review_mutation_guard"]
         self.assertFalse(guard["passed"])

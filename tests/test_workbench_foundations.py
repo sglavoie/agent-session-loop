@@ -43,7 +43,7 @@ import unittest
 import urllib.parse
 from pathlib import Path
 
-from agent_session_loop import bridge, workbench, workbench_archive
+from agent_session_loop import bridge, plans_files, workbench, workbench_archive
 from asl_workbench import capabilities, changes
 from asl_workbench.compatibility import (
     KIND_FORBIDDEN,
@@ -493,7 +493,7 @@ class LocalAPICharacterizationTests(WorkbenchAPIFixture, unittest.TestCase):
         self.install_workbench_api(Path(self._tmp.name))
         self.plan_dir = self.plans_root / "alpha"
         write_plan(self.plan_dir, ("pending", "pending"))
-        self.canonical_plan_dir = workbench.plans.canonicalize_path(self.plan_dir)
+        self.canonical_plan_dir = plans_files.canonicalize_path(self.plan_dir)
 
     def test_health_answers_without_a_token(self) -> None:
         server = self.start_workbench_server()

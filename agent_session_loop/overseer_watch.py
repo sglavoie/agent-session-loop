@@ -97,7 +97,7 @@ from . import (
     overseer_policy_client,
     overseer_store,
     pause_policy,
-    plans,
+    plans_files,
 )
 
 __all__ = [
@@ -796,6 +796,6 @@ def _canonical(path: str | None) -> Path | None:
     if not path:
         return None
     try:
-        return plans.canonicalize_path(path)
+        return plans_files.canonicalize_path(path)
     except OSError, ValueError:
         return None

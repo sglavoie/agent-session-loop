@@ -90,7 +90,9 @@ from . import (
     mailbox_vocabulary,
     mailbox_waits,
     pause_policy,
-    plans,
+    plans_models,
+    plans_payloads,
+    plans_session_ids,
     qna,
     run_control,
     supervisor_audit,
@@ -337,7 +339,7 @@ class WaitingForReply:
     def __post_init__(self) -> None:
         if not isinstance(self.question_id, str) or not self.question_id:
             raise ValueError("question_id must be a non-empty string")
-        plans.parse_session_id(self.session_id)
+        plans_session_ids.parse_session_id(self.session_id)
         if (
             isinstance(self.turn_index, bool)
             or not isinstance(self.turn_index, int)
@@ -380,7 +382,7 @@ class WaitingForReply:
         """
         return {
             "question_id": self.question_id,
-            **plans.session_identity_payload(self.session_id),
+            **plans_payloads.session_identity_payload(self.session_id),
             "turn_index": self.turn_index,
             "started_at": clock.isoformat(self.started_at),
             "base_deadline": clock.isoformat(self.base_deadline),
@@ -761,7 +763,7 @@ def record_mailbox_reply_wait_preparation_failed(
         events.MAILBOX_EVENT,
         {
             "run_id": payload.get("run_id"),
-            **plans.session_identity_payload(session_id),
+            **plans_payloads.session_identity_payload(session_id),
             "turn_index": turn_index,
             "reason": reason,
             "action": events.MAILBOX_ACTION_WAIT_PREPARATION_FAILED,
@@ -1297,7 +1299,7 @@ def ensure_mailbox_question(
 
 def prepare_mailbox_reply_wait(
     *,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     payload: dict[str, Any],
     plan_state: Path,
     state_path: Path,

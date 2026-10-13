@@ -4,7 +4,7 @@ import unittest
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_snapshot,
     review,
     review_continuation,
     review_session_body,
@@ -63,7 +63,7 @@ class ReviewCycleCapTests(RepairCycleFixtures, unittest.TestCase):
         )
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir),
+            plans_snapshot.inspect_plan(self.plan_dir),
             self._events_path(),
             max_review_fix_cycles=2,
         )
@@ -351,7 +351,7 @@ class ReviewCycleCapTests(RepairCycleFixtures, unittest.TestCase):
         )
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir),
+            plans_snapshot.inspect_plan(self.plan_dir),
             event_path,
             max_review_fix_cycles=1,
         )

@@ -11,7 +11,7 @@ from typing import Any
 from agent_session_loop import (
     contracts,
     events,
-    plans,
+    plans_session_ids,
     review,
     review_session_contract,
     supervisor_audit_evidence,
@@ -350,7 +350,7 @@ class ValidatorDiagnosticProjectionTests(RunHistoryFixture, unittest.TestCase):
         )
         contract = review_session_contract._authenticated_generated_review_contract(
             contracts.CompletionContract(
-                session_id=plans.parse_session_id("1"),
+                session_id=plans_session_ids.parse_session_id("1"),
                 done_when=("reviewed",),
                 verify=contracts.VerifyRecipe(
                     checks=(

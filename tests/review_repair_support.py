@@ -9,7 +9,8 @@ from unittest import mock
 
 from agent_session_loop import (
     authoring,
-    plans,
+    plans_models,
+    plans_session_ids,
     progress_repair,
     review,
     review_repair,
@@ -78,14 +79,16 @@ def _write_repair_ready_plan(
             content_sha256="csha",
             sessions=(
                 authoring.ManifestSession(
-                    plans.parse_session_id("1"), "One", "complete"
+                    plans_session_ids.parse_session_id("1"), "One", "complete"
                 ),
                 authoring.ManifestSession(
-                    plans.parse_session_id("2"), "Review", "complete"
+                    plans_session_ids.parse_session_id("2"), "Review", "complete"
                 ),
             ),
             split_date="2026-01-01",
-            readiness=plans.ReadinessMetadata("draft", "sha", "2026-01-01T00:00:00Z"),
+            readiness=plans_models.ReadinessMetadata(
+                "draft", "sha", "2026-01-01T00:00:00Z"
+            ),
         )
     )
     if registered:
@@ -138,7 +141,7 @@ def _write_repair_ready_plan(
     (plan_dir / "session-1.md").write_text("\n".join(session_one), encoding="utf-8")
 
     review_body = review_session_body.build_generated_review_session_body(
-        plans.parse_session_id("2"),
+        plans_session_ids.parse_session_id("2"),
         review_harness="codex",
         plan_dir=plan_dir,
     ).replace("- **Status**: pending", "- **Status**: complete")

@@ -40,7 +40,9 @@ from typing import Any
 from agent_session_loop import (
     events,
     handoff_guards,
-    plans,
+    plans_models,
+    plans_session_ids,
+    plans_snapshot,
     review,
     review_continuation,
     review_delta,
@@ -666,7 +668,7 @@ class PendingScopeRefreshTests(_DeltaHarness):
         path = self.plan_dir / "session-3.md"
         path.write_text(
             review_session_body.build_generated_review_session_body(
-                plans.parse_session_id("3"),
+                plans_session_ids.parse_session_id("3"),
                 review_harness="codex",
                 plan_dir=self.plan_dir,
                 delta=delta,
@@ -675,8 +677,8 @@ class PendingScopeRefreshTests(_DeltaHarness):
         )
         return path
 
-    def _session_status(self, session_id: str) -> plans.SessionStatus:
-        snapshot = plans.inspect_plan(self.plan_dir)
+    def _session_status(self, session_id: str) -> plans_models.SessionStatus:
+        snapshot = plans_snapshot.inspect_plan(self.plan_dir)
         return next(
             session for session in snapshot.sessions if session.id == session_id
         )

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from . import responses
-from .plans import PlanError
+from .plans_errors import PlanError
 from .prepare import prepare_plan
 from .prepare_models import (
     DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,

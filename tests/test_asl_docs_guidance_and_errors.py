@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import ast
 import unittest
+from pathlib import Path
 
 from agent_session_loop import (
     control_queue,
-    mailbox_cli,
+    mailbox_cli_constants,
     mailbox_constants,
     mailbox_rendering,
 )
@@ -205,26 +206,30 @@ class GuidanceAndErrorDocsTests(unittest.TestCase):
     def test_docs_enumerate_mailbox_command_error_reasons(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
         mailbox_docs = docs.split("### Mailbox commands", 1)[1].split("\n### ", 1)[0]
-        mailbox_cli_source = self._read("agent_session_loop/mailbox_cli.py")
+        mailbox_cli_paths = sorted(
+            Path(mailbox_cli_constants.__file__).parent.glob("mailbox_cli_*.py")
+        )
+        constants_modules = {
+            "mailbox_constants": mailbox_constants,
+            "mailbox_cli_constants": mailbox_cli_constants,
+        }
 
         def resolve_reason(node: ast.expr) -> str | None:
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 return node.value
-            if isinstance(node, ast.Name):
-                value = getattr(mailbox_cli, node.id, None)
-                return value if isinstance(value, str) else None
             if (
                 isinstance(node, ast.Attribute)
                 and isinstance(node.value, ast.Name)
-                and node.value.id == "mailbox_constants"
+                and node.value.id in constants_modules
             ):
-                value = getattr(mailbox_constants, node.attr, None)
+                value = getattr(constants_modules[node.value.id], node.attr, None)
                 return value if isinstance(value, str) else None
             return None
 
         cli_reasons = {
             reason
-            for call in ast.walk(ast.parse(mailbox_cli_source))
+            for path in mailbox_cli_paths
+            for call in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
             if isinstance(call, ast.Call)
             for keyword in call.keywords
             if keyword.arg == "reason"

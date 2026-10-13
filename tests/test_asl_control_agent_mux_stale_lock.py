@@ -20,7 +20,7 @@ from unittest import mock
 
 from agent_session_loop import (
     agent_mux_delivery,
-    plans,
+    plans_files,
     run_persistence,
     state,
     state_locks,
@@ -85,7 +85,7 @@ class StaleLockReclamationTests(unittest.TestCase):
             "version": 1,
             "owner": "agent-session-loop",
             "pid": pid,
-            "plan_dir": str(plans.canonicalize_path(self.plan_dir)),
+            "plan_dir": str(plans_files.canonicalize_path(self.plan_dir)),
             "created_at": "2026-07-30T22:50:34.651504+00:00",
         }
         if hostname is not None:

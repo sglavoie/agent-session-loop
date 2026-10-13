@@ -7,7 +7,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import agent_mux_projection, artifacts, conversations, events, plans
+from . import (
+    agent_mux_projection,
+    artifacts,
+    conversations,
+    events,
+    plans_files,
+    plans_snapshot,
+)
 from .state import (
     LOCK_FILE_NAME,
     RUNS_DIR_NAME,
@@ -76,9 +83,9 @@ def migrate_plan_state(
     # Inspecting the target validates it is a real plan (raising PlanError,
     # surfaced as ``malformed-plan``) and yields the content hash the source
     # state must be compatible with.
-    target_snapshot = plans.inspect_plan(plan_dir)
+    target_snapshot = plans_snapshot.inspect_plan(plan_dir)
     new_plan_dir = target_snapshot.plan_dir
-    old_plan_dir = plans.canonicalize_path(from_plan_dir)
+    old_plan_dir = plans_files.canonicalize_path(from_plan_dir)
     old_state_dir = plan_state_dir(old_plan_dir, state_dir)
     new_state_dir = plan_state_dir(new_plan_dir, state_dir)
 
@@ -148,7 +155,7 @@ def migrate_plan_state(
     if recorded_plan_dir is not None:
         try:
             recorded_matches = (
-                plans.canonicalize_path(recorded_plan_dir) == old_plan_dir
+                plans_files.canonicalize_path(recorded_plan_dir) == old_plan_dir
             )
         except OSError, ValueError:
             recorded_matches = False

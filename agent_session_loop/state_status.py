@@ -8,7 +8,17 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from . import events, harnesses, plans, responses
+from . import (
+    events,
+    harnesses,
+    plans_errors,
+    plans_files,
+    plans_metadata,
+    plans_models,
+    plans_registry,
+    plans_snapshot,
+    responses,
+)
 from .state import (
     RUNS_DIR_NAME,
     AmbiguousPlanError,
@@ -38,7 +48,7 @@ from .state_plan_refs import resolve_plan_reference
 from .state_status_text import _print_text_status
 
 
-def _next_command(snapshot: plans.PlanSnapshot) -> dict[str, Any]:
+def _next_command(snapshot: plans_models.PlanSnapshot) -> dict[str, Any]:
     """Describe what to run next for ``asl status``.
 
     When a pending session remains, returns per-harness ``session-run``
@@ -101,7 +111,7 @@ def _command_guard_payload(
 
 
 def status_payload(
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     state_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     # Local imports avoid module cycles: repair planning depends on state for
@@ -160,10 +170,12 @@ def status_payload(
         if runner_state.get(key) is not None
     }
     if not workspace_fields:
-        registry = plans.read_repository_registry(snapshot.plan_dir)
-        metadata = plans.load_plan_metadata(snapshot.plan_dir)
-        if registry is not None and isinstance(metadata, plans.WorkspacePlanMetadata):
-            workspace_root = plans.canonicalize_path(metadata.workspace_root)
+        registry = plans_registry.read_repository_registry(snapshot.plan_dir)
+        metadata = plans_metadata.load_plan_metadata(snapshot.plan_dir)
+        if registry is not None and isinstance(
+            metadata, plans_metadata.WorkspacePlanMetadata
+        ):
+            workspace_root = plans_files.canonicalize_path(metadata.workspace_root)
             workspace_fields = {
                 "workspace_root": str(workspace_root),
                 "registry_digest": metadata.registry_digest,
@@ -173,7 +185,9 @@ def status_payload(
                         "path": repository.path,
                         "origin": repository.origin,
                         "resolved_root": str(
-                            plans.canonicalize_path(workspace_root / repository.path)
+                            plans_files.canonicalize_path(
+                                workspace_root / repository.path
+                            )
                         ),
                     }
                     for repository in registry.repositories
@@ -252,7 +266,7 @@ def status_from_args(args: argparse.Namespace) -> int:
         resolved_plan_dir = resolve_plan_reference(
             args.plan_dir, state_root(args.state_dir)
         )
-        snapshot = plans.inspect_plan(resolved_plan_dir)
+        snapshot = plans_snapshot.inspect_plan(resolved_plan_dir)
         payload = status_payload(snapshot, args.state_dir)
     except AmbiguousPlanError as error:
         if args.json:
@@ -278,11 +292,11 @@ def status_from_args(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         return 1
-    except (plans.PlanError, StateError) as error:
+    except (plans_errors.PlanError, StateError) as error:
         if args.json:
             reason = (
                 "malformed-plan"
-                if isinstance(error, plans.PlanError)
+                if isinstance(error, plans_errors.PlanError)
                 else "state-error"
             )
             responses.print_json(

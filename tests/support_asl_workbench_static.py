@@ -8,11 +8,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from agent_session_loop import (
-    plans,
-    state,
-    workbench_server,
-)
+from agent_session_loop import plans_files, state, workbench_server
 from tests.support import (
     _http_request_raw,
     write_plan,
@@ -102,7 +98,7 @@ class WorkbenchHardeningCase(ShellSourceMixin, unittest.TestCase):
         self.registry_path = self.tmp_path / "workbench.json"
         self.plan_dir = self.tmp_path / "plans" / "alpha"
         write_plan(self.plan_dir, ("pending", "pending"))
-        self.canonical_plan_dir = plans.canonicalize_path(self.plan_dir)
+        self.canonical_plan_dir = plans_files.canonicalize_path(self.plan_dir)
         self.plan_state_dir = state.plan_state_dir(
             self.canonical_plan_dir, self.state_dir
         )

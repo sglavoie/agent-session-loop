@@ -23,7 +23,7 @@ from pathlib import Path
 from agent_session_loop import assurance_ledger as ledger
 from agent_session_loop import assurance_models as models
 from agent_session_loop import assurance_projection as projection
-from agent_session_loop import plans, retention, state, state_locks
+from agent_session_loop import plans_files, retention, state, state_locks
 
 NOW = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
 DEAD_PID = 4_242_424
@@ -55,7 +55,7 @@ class RetentionTestBase(unittest.TestCase):
         plan_state = state.plan_state_dir(plan_dir, self.state_root)
         plan_state.mkdir(parents=True)
         payload = {
-            "plan_dir": str(plans.canonicalize_path(plan_dir)),
+            "plan_dir": str(plans_files.canonicalize_path(plan_dir)),
             **state_fields,
         }
         (plan_state / "state.json").write_text(
@@ -67,7 +67,7 @@ class RetentionTestBase(unittest.TestCase):
         target = plan_dir if plan_dir is not None else self.plan_dir
         lock_path = state.plan_state_dir(target, self.state_root) / state.LOCK_FILE_NAME
         payload = {
-            "plan_dir": str(plans.canonicalize_path(target)),
+            "plan_dir": str(plans_files.canonicalize_path(target)),
             "created_at": "2026-08-01T00:00:00+00:00",
             **fields,
         }
@@ -219,7 +219,7 @@ class RetentionSelectionTests(RetentionTestBase):
         payload = self._report().to_dict()
 
         self.assertEqual(
-            payload["plan_dir"], str(plans.canonicalize_path(self.plan_dir))
+            payload["plan_dir"], str(plans_files.canonicalize_path(self.plan_dir))
         )
         self.assertEqual(payload["state_dir"], str(self.plan_state))
         self.assertEqual(payload["run_count"], 2)
@@ -381,7 +381,7 @@ class CorpusRetentionTests(RetentionTestBase):
         report = retention.corpus_retention(self.state_root, now=NOW)
 
         self.assertEqual(
-            report.unresolved_state_dirs, (str(plans.canonicalize_path(orphan)),)
+            report.unresolved_state_dirs, (str(plans_files.canonicalize_path(orphan)),)
         )
         self.assertEqual(report.reclaimable_bytes, 0)
 
@@ -389,14 +389,15 @@ class CorpusRetentionTests(RetentionTestBase):
         impostor = self.state_root / ("f" * 64)
         impostor.mkdir(parents=True)
         (impostor / "state.json").write_text(
-            json.dumps({"plan_dir": str(plans.canonicalize_path(self.plan_dir))}),
+            json.dumps({"plan_dir": str(plans_files.canonicalize_path(self.plan_dir))}),
             encoding="utf-8",
         )
 
         report = retention.corpus_retention(self.state_root, now=NOW)
 
         self.assertEqual(
-            report.unresolved_state_dirs, (str(plans.canonicalize_path(impostor)),)
+            report.unresolved_state_dirs,
+            (str(plans_files.canonicalize_path(impostor)),),
         )
 
     def test_missing_state_root_is_empty(self) -> None:
@@ -655,7 +656,7 @@ class DryRunPurityTests(RetentionTestBase):
 
     def _corpus_report(self, **kwargs: object) -> retention.PlanRetention:
         corpus = retention.corpus_retention(self.state_root, now=NOW, **kwargs)
-        canonical = str(plans.canonicalize_path(self.plan_dir))
+        canonical = str(plans_files.canonicalize_path(self.plan_dir))
         return next(entry for entry in corpus.plans if entry.plan_dir == canonical)
 
     def test_the_ordinary_read_would_have_removed_this_lock(self) -> None:

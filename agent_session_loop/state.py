@@ -20,10 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import (
-    config,
-    plans,
-)
+from . import config, plans_files
 
 LOCK_FILE_NAME = "lock.json"
 
@@ -167,11 +164,11 @@ class UnlockResult:
 def state_root(state_dir: str | Path | None = None) -> Path:
     if state_dir is None:
         return config.default_state_root()
-    return plans.canonicalize_path(state_dir)
+    return plans_files.canonicalize_path(state_dir)
 
 
 def plan_state_dir(plan_dir: str | Path, state_dir: str | Path | None = None) -> Path:
-    return state_root(state_dir) / plans.path_sha256(plan_dir)
+    return state_root(state_dir) / plans_files.path_sha256(plan_dir)
 
 
 def lock_path_for_plan(

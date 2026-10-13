@@ -10,7 +10,7 @@ from agent_session_loop import (
     cli,
     contracts,
     events,
-    plans,
+    plans_session_ids,
     preflight_models,
     prepare_models,
     repository_registration,
@@ -270,7 +270,7 @@ class AuthoritativeCliDocsTests(unittest.TestCase):
             "### Verify\n\n```json\n" + json_text + "\n```\n"
         )
         contract = contracts.parse_completion_contract(
-            contract_text, session_id=plans.parse_session_id("1")
+            contract_text, session_id=plans_session_ids.parse_session_id("1")
         )
         self.assertEqual(1, len(contract.verify.checks))
 

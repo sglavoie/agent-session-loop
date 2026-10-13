@@ -10,7 +10,8 @@ from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
-    plans,
+    plans_content_hash,
+    plans_errors,
     prepare_models,
     prepare_packet,
     prepare_parsing,
@@ -48,7 +49,7 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
         with (
             launch,
             redirect_stderr(io.StringIO()),
-            self.assertRaisesRegex(plans.PlanError, "invalid JSON"),
+            self.assertRaisesRegex(plans_errors.PlanError, "invalid JSON"),
         ):
             prepare_validator._launch_validator("claude", packet)
 
@@ -59,7 +60,7 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
             contract_checked=True,
             contract_problems=[{"message": "m", "suggested_fix": "f", "repo": "SVC"}],
         )
-        with self.assertRaisesRegex(plans.PlanError, "unknown keys: repo"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "unknown keys: repo"):
             prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_unknown_issue_type(self) -> None:
@@ -74,7 +75,7 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
                 }
             ]
         )
-        with self.assertRaisesRegex(plans.PlanError, "issue_type"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "issue_type"):
             prepare_parsing.parse_validator_output(payload)
 
     def test_accepts_removal_taxonomy_in_legacy_payload(self) -> None:
@@ -126,7 +127,7 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
                     if path.is_file()
                 }
 
-                with self.assertRaisesRegex(plans.PlanError, label):
+                with self.assertRaisesRegex(plans_errors.PlanError, label):
                     prepare_validation_store.ingest_validator_output(plan_dir, payload)
 
                 after = {
@@ -140,7 +141,7 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
                     **self._removal_overrides(repo="SVC")
                 )["sessions"][0]
                 mutate(registered_session)
-                with self.assertRaisesRegex(plans.PlanError, label):
+                with self.assertRaisesRegex(plans_errors.PlanError, label):
                     prepare_parsing.parse_validator_output(
                         self._registered_envelope(registered_session)
                     )
@@ -150,7 +151,7 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
         payload = _validator_payload(
             patterns=[pattern, dict(pattern), dict(pattern), dict(pattern)]
         )
-        with self.assertRaisesRegex(plans.PlanError, "at most 3"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "at most 3"):
             prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_correction_with_identical_texts(self) -> None:
@@ -159,7 +160,7 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
                 {"expected_text": "same", "replacement_text": "same", "reason": "r"}
             ]
         )
-        with self.assertRaisesRegex(plans.PlanError, "must differ"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "must differ"):
             prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_contract_problems_without_contract_checked(self) -> None:
@@ -167,7 +168,7 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
             contract_checked=False,
             contract_problems=[{"message": "m", "suggested_fix": "f"}],
         )
-        with self.assertRaisesRegex(plans.PlanError, "contract_checked"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "contract_checked"):
             prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_invalid_dependency_direction(self) -> None:
@@ -176,7 +177,7 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
                 {"direction": "blocks", "session_id": "2", "description": "d"}
             ]
         )
-        with self.assertRaisesRegex(plans.PlanError, "direction"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "direction"):
             prepare_parsing.parse_validator_output(payload)
 
     def test_batch_sessions_bounds_batch_size(self) -> None:
@@ -184,7 +185,7 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
         self.assertEqual((("1", "2"), ("2.1", "3"), ("4",)), batches)
 
     def test_batch_sessions_rejects_nonpositive_batch_size(self) -> None:
-        with self.assertRaisesRegex(plans.PlanError, "batch size"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "batch size"):
             prepare_packet.batch_sessions(["1"], 0)
 
     def test_build_validation_packet_references_paths_not_content(self) -> None:
@@ -249,7 +250,7 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             _write_prepare_plan(plan_dir, ("1",))
-            with self.assertRaisesRegex(plans.PlanError, "missing session file"):
+            with self.assertRaisesRegex(plans_errors.PlanError, "missing session file"):
                 prepare_packet.build_validation_packet(
                     plan_dir, ["1", "9"], codebase_root="/repo"
                 )
@@ -291,7 +292,7 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
         other = _validator_payload()
         other["codebase_root"] = "/elsewhere"
         update = prepare_parsing.parse_validator_output(other)
-        with self.assertRaisesRegex(plans.PlanError, "codebase root"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "codebase root"):
             prepare_validation_store.merge_validations(base, update)
 
     def test_load_returns_none_when_absent_and_fails_closed_on_garbage(self) -> None:
@@ -305,7 +306,7 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
             (plan_dir / prepare_models.PREPARE_VALIDATION_FILENAME).write_text(
                 "{not json", encoding="utf-8"
             )
-            with self.assertRaisesRegex(plans.PlanError, "not valid JSON"):
+            with self.assertRaisesRegex(plans_errors.PlanError, "not valid JSON"):
                 prepare_validation_store.load_prepare_validation(plan_dir)
 
     def test_unknown_validation_cache_version_is_a_safe_cache_miss(self) -> None:
@@ -354,7 +355,7 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
             payload = _validator_payload()
             payload["sessions"][0]["claims"] = [{"claim": ""}]
 
-            with self.assertRaises(plans.PlanError):
+            with self.assertRaises(plans_errors.PlanError):
                 prepare_validation_store.ingest_validator_output(plan_dir, payload)
 
             after = {path.name: path.read_bytes() for path in plan_dir.iterdir()}
@@ -367,11 +368,13 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             _write_prepare_plan(plan_dir)
-            before = plans.stable_readiness_sha256(plan_dir)
+            before = plans_content_hash.stable_readiness_sha256(plan_dir)
             prepare_validation_store.ingest_validator_output(
                 plan_dir, _validator_payload()
             )
             prepare_validation_cache.save_prepare_validation_cache(
                 plan_dir, prepare_models.PrepareValidationCache()
             )
-            self.assertEqual(before, plans.stable_readiness_sha256(plan_dir))
+            self.assertEqual(
+                before, plans_content_hash.stable_readiness_sha256(plan_dir)
+            )

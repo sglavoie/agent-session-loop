@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from . import preflight_footprint
-from .plans import PlanError, SessionId, parse_session_id
+from .plans_errors import PlanError
+from .plans_session_ids import SessionId, parse_session_id
 
 LEGACY_PREPARE_VALIDATION_VERSION = 1
 PREPARE_VALIDATION_VERSION = 2

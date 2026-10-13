@@ -8,7 +8,11 @@ from agent_session_loop import (
     authoring,
     events,
     pause_policy,
-    plans,
+    plans_content_hash,
+    plans_models,
+    plans_readiness,
+    plans_session_ids,
+    plans_snapshot,
     review,
     review_continuation,
     review_delta,
@@ -39,7 +43,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
         )
 
         pending = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
         self.assertEqual("run-repairs", pending.action)
         # The children exist and look runnable, but the gate that refused them
@@ -67,7 +71,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
             ),
         )
         deduped = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
         self.assertEqual(1, deduped.historical_materializations)
         self.assertEqual(
@@ -76,7 +80,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
 
         event_path.unlink()
         crashed = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
         self.assertEqual("run-repairs", crashed.action)
         self.assertEqual(1, crashed.historical_materializations)
@@ -88,7 +92,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
             encoding="utf-8",
         )
         rereview = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
         self.assertEqual("rereview", rereview.action)
         self.assertTrue(rereview.eligible)
@@ -106,17 +110,19 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
                 "max_review_fix_cycles": 1,
             }
         )
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-08-17T00:00:00Z",
             ),
         )
 
         resume = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
 
         self.assertEqual("run-repairs", resume.action)
@@ -132,7 +138,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
                 self._append_run(event_path, "run-1", paused=reason)
 
                 resume = review_continuation.evaluate_review_continuation(
-                    plans.inspect_plan(self.plan_dir), event_path
+                    plans_snapshot.inspect_plan(self.plan_dir), event_path
                 )
 
                 # The children are on disk and runnable, but the precondition the
@@ -149,7 +155,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
         self._append_run(event_path, "run-2", paused=None)
 
         resume = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
 
         # Rerunning the plan after fixing the workspace is the whole remedy, and
@@ -167,7 +173,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
         )
 
         resume = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
 
         # The runner closes paused runs with run_finished too, so treating that
@@ -184,7 +190,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
         )
 
         resume = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
 
         # A pause waiting on a mailbox answer says nothing about whether the
@@ -203,9 +209,9 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
                 "max_review_fix_cycles": 1,
             }
         )
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256="0" * 64,
                 checked_at="2026-08-17T00:00:00Z",
@@ -213,7 +219,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
         )
 
         resume = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
 
         self.assertFalse(resume.eligible)
@@ -232,7 +238,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
         )
 
         resume = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
 
         self.assertEqual("run-repairs", resume.action)
@@ -263,7 +269,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
         )
 
         review_body = review_session_body.build_generated_review_session_body(
-            plans.parse_session_id("3"),
+            plans_session_ids.parse_session_id("3"),
             review_harness="codex",
             plan_dir=self.plan_dir,
         ).replace("- **Status**: pending", "- **Status**: complete")
@@ -301,7 +307,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
         )
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
 
         self.assertEqual("terminal", projected.action)
@@ -398,7 +404,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
                     ),
                 ):
                     terminal = review_continuation.evaluate_review_continuation(
-                        plans.inspect_plan(self.plan_dir), event_path
+                        plans_snapshot.inspect_plan(self.plan_dir), event_path
                     )
                 self.assertEqual("terminal", terminal.action)
                 self.assertFalse(terminal.eligible)
@@ -414,7 +420,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
         self._write_plan([self._finding("F1", "runner")])
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), self._withdrawn_cycle_events()
+            plans_snapshot.inspect_plan(self.plan_dir), self._withdrawn_cycle_events()
         )
 
         self.assertEqual("materialize-repairs", projected.action)
@@ -429,7 +435,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
         authoring.refresh_readiness_metadata(self.plan_dir, state="loop-ready")
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), self._withdrawn_cycle_events()
+            plans_snapshot.inspect_plan(self.plan_dir), self._withdrawn_cycle_events()
         )
 
         self.assertEqual("materialize-repairs", projected.action)
@@ -452,7 +458,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
         )
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
 
         self.assertEqual("terminal", projected.action)

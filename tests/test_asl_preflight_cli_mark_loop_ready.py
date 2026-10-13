@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 
 from agent_session_loop import (
-    plans,
+    plans_content_hash,
+    plans_models,
+    plans_progress,
+    plans_readiness,
     preflight_environment,
 )
 from tests.support import (
@@ -53,8 +56,8 @@ class PreflightCliMarkLoopReadyTests(PreflightCliFixtures):
     def test_preflight_mark_loop_ready_writes_manifest(self) -> None:
         # The fixture is already loop-ready; --mark-loop-ready refreshes the
         # checked_at timestamp once preflight succeeds.
-        original_sha = plans.stable_readiness_sha256(self.plan_dir)
-        original = plans.read_readiness_metadata(self.plan_dir)
+        original_sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        original = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertIsNotNone(original)
         self.assertEqual("loop-ready", original.state)
         self.assertEqual(original_sha, original.readiness_sha256)
@@ -72,7 +75,7 @@ class PreflightCliMarkLoopReadyTests(PreflightCliFixtures):
         self.assertEqual("loop-ready-marked", payload["reason"])
         self.assertTrue(payload["mark_loop_ready_requested"])
         self.assertTrue(payload["marked_loop_ready"])
-        refreshed = plans.read_readiness_metadata(self.plan_dir)
+        refreshed = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertIsNotNone(refreshed)
         self.assertEqual("loop-ready", refreshed.state)
         self.assertEqual(original_sha, refreshed.readiness_sha256)
@@ -104,7 +107,7 @@ class PreflightCliMarkLoopReadyTests(PreflightCliFixtures):
                 self.assertEqual("loop-ready", payload["readiness"]["state"])
                 self.assertEqual(0, payload["findings_by_severity"]["red"])
                 self.assertEqual(0, payload["findings_by_severity"]["yellow"])
-                metadata = plans.read_readiness_metadata(self.plan_dir)
+                metadata = plans_readiness.read_readiness_metadata(self.plan_dir)
                 self.assertIsNotNone(metadata)
                 self.assertEqual("loop-ready", metadata.state)
 
@@ -128,18 +131,18 @@ class PreflightCliMarkLoopReadyTests(PreflightCliFixtures):
         self.assertEqual("loop-ready-marked", payload["reason"])
         self.assertTrue(payload["marked_loop_ready"])
         self.assertEqual("loop-ready", payload["readiness"]["state"])
-        metadata = plans.read_readiness_metadata(self.plan_dir)
+        metadata = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertIsNotNone(metadata)
         self.assertEqual("loop-ready", metadata.state)
         self.assertEqual(
-            plans.stable_readiness_sha256(self.plan_dir),
+            plans_content_hash.stable_readiness_sha256(self.plan_dir),
             metadata.readiness_sha256,
         )
 
     def test_preflight_mark_loop_ready_repairs_stale_readiness_sha(self) -> None:
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256="00" * 32,
                 checked_at="2026-06-19T00:00:00Z",
@@ -168,11 +171,13 @@ class PreflightCliMarkLoopReadyTests(PreflightCliFixtures):
             text.replace("Instructions.", "Instructions. TODO: revisit later"),
             encoding="utf-8",
         )
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="draft",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
@@ -186,7 +191,7 @@ class PreflightCliMarkLoopReadyTests(PreflightCliFixtures):
         self.assertTrue(payload["mark_loop_ready_requested"])
         self.assertFalse(payload["marked_loop_ready"])
         self.assertIn("non-readiness", payload["mark_error"])
-        readiness = plans.read_readiness_metadata(self.plan_dir)
+        readiness = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertIsNotNone(readiness)
         self.assertEqual("draft", readiness.state)
 
@@ -221,7 +226,7 @@ class PreflightCliMarkLoopReadyTests(PreflightCliFixtures):
         ]
         self.assertEqual(1, len(command_findings))
         self.assertEqual("red", command_findings[0]["severity"])
-        readiness = plans.read_readiness_metadata(self.plan_dir)
+        readiness = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertIsNotNone(readiness)
         self.assertEqual("draft", readiness.state)
 
@@ -238,7 +243,7 @@ class PreflightCliMarkLoopReadyTests(PreflightCliFixtures):
                 )
             },
         )
-        progress_file = plans.progress_path(self.plan_dir)
+        progress_file = plans_progress.progress_path(self.plan_dir)
         self.assertFalse(progress_file.exists())
 
         completed = self._run_preflight(mark_loop_ready=True)
@@ -262,7 +267,7 @@ class PreflightCliMarkLoopReadyTests(PreflightCliFixtures):
         self.assertTrue(progress_file.exists())
         categories = {finding["category"] for finding in payload["findings"]}
         self.assertNotIn("progress-journal-missing", categories)
-        entries = plans.read_progress_entries(self.plan_dir)
+        entries = plans_progress.read_progress_entries(self.plan_dir)
         self.assertEqual(("1",), tuple(entry.session_id.value for entry in entries))
 
     def test_preflight_mark_loop_ready_refuses_when_progress_plus_other_blocker(
@@ -288,15 +293,17 @@ class PreflightCliMarkLoopReadyTests(PreflightCliFixtures):
             text.replace("Instructions.", "Instructions. TODO: revisit later"),
             encoding="utf-8",
         )
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
-        progress_file = plans.progress_path(self.plan_dir)
+        progress_file = plans_progress.progress_path(self.plan_dir)
         self.assertFalse(progress_file.exists())
 
         completed = self._run_preflight(mark_loop_ready=True)

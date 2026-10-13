@@ -14,7 +14,7 @@ from unittest import mock
 from agent_session_loop import (
     agent_mux_delivery,
     config,
-    plans,
+    plans_files,
     run_persistence,
     turn_execution,
 )
@@ -184,7 +184,7 @@ class AgentMuxNotificationTests(FakeHarnessIntegrationBase):
             self.assertEqual(0, completed.returncode, completed.stderr)
             self.assertTrue(payload["ok"])
             self.assertEqual("copilot", payload["harness"])
-            expected_cwd = str(plans.canonicalize_path(project_dir))
+            expected_cwd = str(plans_files.canonicalize_path(project_dir))
             self.assertEqual(expected_cwd, payload["cwd"])
 
             amx_records = read_jsonl(amx_log)
@@ -198,7 +198,7 @@ class AgentMuxNotificationTests(FakeHarnessIntegrationBase):
                 [record["argv"][-1] for record in amx_records],
             )
             self.assertEqual(
-                {str(plans.canonicalize_path(caller_dir))},
+                {str(plans_files.canonicalize_path(caller_dir))},
                 {record["cwd"] for record in amx_records},
             )
 

@@ -9,7 +9,11 @@ from pathlib import Path
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_content_hash,
+    plans_metadata,
+    plans_models,
+    plans_readiness,
+    plans_registry,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -110,11 +114,13 @@ class MultiRepoScopeViolationTests(MultiRepoRunnerHelpers, unittest.TestCase):
             (plan_dir / "session-1.expand.md").write_text(
                 "# Refreshed expansion\n", encoding="utf-8"
             )
-            plans.write_readiness_metadata(
+            plans_readiness.write_readiness_metadata(
                 plan_dir,
-                plans.ReadinessMetadata(
+                plans_models.ReadinessMetadata(
                     state="loop-ready",
-                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                        plan_dir
+                    ),
                     checked_at="2026-08-08T00:00:00Z",
                 ),
             )
@@ -192,18 +198,20 @@ class MultiRepoScopeViolationTests(MultiRepoRunnerHelpers, unittest.TestCase):
                 "# Refreshed expansion after registering a repository\n",
                 encoding="utf-8",
             )
-            registry = plans.read_repository_registry(plan_dir)
+            registry = plans_registry.read_repository_registry(plan_dir)
             assert registry is not None
-            plans.save_workspace_plan_metadata(
+            plans_metadata.save_workspace_plan_metadata(
                 plan_dir,
                 workspace_root,
                 registry.digest,
             )
-            plans.write_readiness_metadata(
+            plans_readiness.write_readiness_metadata(
                 plan_dir,
-                plans.ReadinessMetadata(
+                plans_models.ReadinessMetadata(
                     state="loop-ready",
-                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                        plan_dir
+                    ),
                     checked_at="2026-08-08T00:00:00Z",
                 ),
             )

@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import unittest
 
-from agent_session_loop import baseline, events, plans, state
+from agent_session_loop import (
+    baseline,
+    events,
+    plans_content_hash,
+    plans_models,
+    plans_progress,
+    plans_readiness,
+    state,
+)
 from tests.support import (
     read_jsonl,
 )
@@ -16,7 +24,7 @@ class RunReadinessAutoRepairTests(RunReadinessGateFixture):
 
     def test_run_auto_repairs_missing_progress_journal_and_proceeds(self) -> None:
         self._write_plan(("complete", "pending"), readiness="loop-ready")
-        progress_file = plans.progress_path(self.plan_dir)
+        progress_file = plans_progress.progress_path(self.plan_dir)
         self.assertFalse(progress_file.exists())
 
         completed, payload = self._run()
@@ -46,7 +54,7 @@ class RunReadinessAutoRepairTests(RunReadinessGateFixture):
 
         self.assertTrue(payload["readiness_gate"]["ok"])
         self.assertTrue(progress_file.exists())
-        entries = plans.read_progress_entries(self.plan_dir)
+        entries = plans_progress.read_progress_entries(self.plan_dir)
         self.assertEqual(["1", "2"], [entry.session_id.value for entry in entries])
 
         event_path = (
@@ -81,8 +89,8 @@ class RunReadinessAutoRepairTests(RunReadinessGateFixture):
         self.assertTrue(repair_payload["ok"])
         categories = [repair["category"] for repair in repair_payload["auto_repairs"]]
         self.assertEqual(["progress-journal-missing", "manifest-readiness"], categories)
-        self.assertTrue(plans.progress_path(self.plan_dir).exists())
-        metadata = plans.read_readiness_metadata(self.plan_dir)
+        self.assertTrue(plans_progress.progress_path(self.plan_dir).exists())
+        metadata = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertIsNotNone(metadata)
 
     def test_allow_not_loop_ready_skips_auto_repair(self) -> None:
@@ -95,7 +103,7 @@ class RunReadinessAutoRepairTests(RunReadinessGateFixture):
         # The bypass path never runs auto-repair, so the field is absent.
         self.assertNotIn("readiness_gate_repair", payload)
         # Readiness metadata was not synthesised on behalf of the bypass.
-        self.assertIsNone(plans.read_readiness_metadata(self.plan_dir))
+        self.assertIsNone(plans_readiness.read_readiness_metadata(self.plan_dir))
 
     def test_run_pauses_when_non_repairable_finding_remains(self) -> None:
         self._write_plan(("complete", "pending"), readiness="loop-ready")
@@ -108,15 +116,17 @@ class RunReadinessAutoRepairTests(RunReadinessGateFixture):
             text.replace("Instructions.", "Instructions. TODO: revisit later"),
             encoding="utf-8",
         )
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
-        progress_file = plans.progress_path(self.plan_dir)
+        progress_file = plans_progress.progress_path(self.plan_dir)
         self.assertFalse(progress_file.exists())
 
         completed, payload = self._run()

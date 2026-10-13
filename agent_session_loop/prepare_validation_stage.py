@@ -6,8 +6,8 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 
-from . import harnesses, plans
-from .plans import PlanError
+from . import harnesses, plans_registry
+from .plans_errors import PlanError
 from .prepare_corrections import CorrectionOutcome
 from .prepare_expand_ingest import ingest_expand_batch
 from .prepare_models import (
@@ -87,7 +87,7 @@ def _run_validation_stage(
         raise _fail("no validator output was produced for this plan")
     expected_schema_version = (
         PREPARE_VALIDATION_VERSION
-        if plans.read_repository_registry(plan_dir) is not None
+        if plans_registry.read_repository_registry(plan_dir) is not None
         else LEGACY_PREPARE_VALIDATION_VERSION
     )
     identities, reusable = _validation_cache_identities(

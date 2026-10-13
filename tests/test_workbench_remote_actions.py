@@ -63,7 +63,7 @@ from agent_session_loop import (
     events,
     intervention,
     mailbox_appenders,
-    plans,
+    plans_files,
     state,
     workbench,
     workbench_archive,
@@ -1243,7 +1243,7 @@ class PerformerTestCase(unittest.TestCase):
     def make_plan(self, name: str, statuses: tuple[str, ...] = ("pending",)) -> Path:
         plan_dir = self.plans_root / name
         write_plan(plan_dir, statuses)
-        return plans.canonicalize_path(plan_dir)
+        return plans_files.canonicalize_path(plan_dir)
 
     def write_state(self, target: Path | None = None, **overrides: Any) -> None:
         target = target or self.plan_dir

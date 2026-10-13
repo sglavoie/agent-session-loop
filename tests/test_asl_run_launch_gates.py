@@ -20,7 +20,10 @@ from agent_session_loop import (
     config,
     events,
     harnesses,
-    plans,
+    plans_files,
+    plans_metadata,
+    plans_models,
+    plans_registry,
     preflight,
     preflight_models,
     readiness_gate,
@@ -134,7 +137,7 @@ class ResumeGateTests(unittest.TestCase):
     ) -> preflight_models.PreflightReport:
         readiness = None
         if state is not None:
-            readiness = plans.ReadinessMetadata(
+            readiness = plans_models.ReadinessMetadata(
                 state=state,
                 readiness_sha256="0" * 64,
                 checked_at="2026-06-19T00:00:00Z",
@@ -220,9 +223,9 @@ class RunRepositoryContentionGateTests(unittest.TestCase):
                 )
             },
         )
-        registry = plans.read_repository_registry(self.plan_dir)
+        registry = plans_registry.read_repository_registry(self.plan_dir)
         assert registry is not None
-        plans.save_workspace_plan_metadata(
+        plans_metadata.save_workspace_plan_metadata(
             self.plan_dir,
             self.workspace_root,
             registry.digest,
@@ -236,11 +239,11 @@ class RunRepositoryContentionGateTests(unittest.TestCase):
         )
 
     def _root(self, path: Path) -> str:
-        return str(plans.canonicalize_path(path))
+        return str(plans_files.canonicalize_path(path))
 
     def _publish_rival_claim(self, roots: tuple[Path, ...], *, pid: int) -> None:
-        canonical = plans.canonicalize_path(self.other_plan_dir)
-        rival_state = self.state_dir / plans.path_sha256(canonical)
+        canonical = plans_files.canonicalize_path(self.other_plan_dir)
+        rival_state = self.state_dir / plans_files.path_sha256(canonical)
         rival_state.mkdir(parents=True, exist_ok=True)
         (rival_state / session_overview.STATE_JSON_NAME).write_text(
             json.dumps(

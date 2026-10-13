@@ -2,7 +2,7 @@
 
 The behavioural coverage of the review mutation guard lives where it always has
 — ``tests/test_asl_review_lifecycle_*.py`` captures and compares real repository
-fingerprints, ``tests/test_asl_turn_commit.py`` drives auto-commit through real
+fingerprints, ``tests/test_asl_turn_commit_*.py`` drives auto-commit through real
 checkouts, and ``tests/test_asl_repair_dispatch.py`` runs the repair-child preflight
 inside a whole run. What is asserted here is the boundary those modules cannot
 state, because they exercise the loop rather than the seam:
@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_session_loop import plans, review_guard, verification
+from agent_session_loop import plans_snapshot, review_guard, verification
 from agent_session_loop.run_errors import RunError
 from tests.support import assert_no_runner_import, init_git_repo, write_plan
 
@@ -378,7 +378,7 @@ class CommitAtEndScopeTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.plan_dir = Path(self._tmp.name) / "plan"
         write_plan(self.plan_dir, ("pending", "pending", "complete"))
-        self.snapshot = plans.inspect_plan(self.plan_dir)
+        self.snapshot = plans_snapshot.inspect_plan(self.plan_dir)
 
     def test_no_session_cap_is_always_in_scope(self) -> None:
         review_guard._validate_commit_at_end_scope(

@@ -11,7 +11,8 @@ from . import (
     commit_groups,
     commit_settlement,
     durability,
-    plans,
+    plans_models,
+    plans_session_scope,
     review_guard,
     run_selection,
 )
@@ -99,7 +100,7 @@ def _soft_fail_commit(
 
 
 def _pause_for_unsettled_commit_group(
-    ctx: RunContext, *, snapshot: plans.PlanSnapshot
+    ctx: RunContext, *, snapshot: plans_models.PlanSnapshot
 ) -> bool:
     """Stop the run before it selects work on top of a commit it never made.
 
@@ -270,7 +271,7 @@ def _commit_preflight_refusal(
     ctx: RunContext,
     *,
     cwd: Path,
-    session_scope: plans.SessionScope | None,
+    session_scope: plans_session_scope.SessionScope | None,
 ) -> RunError | None:
     """Ask the per-session commit gate whether it would refuse, without pausing.
 

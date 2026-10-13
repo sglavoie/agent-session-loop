@@ -7,8 +7,10 @@ import json
 import re
 from pathlib import Path
 
-from . import durability, plans
-from .plans import PlanError, canonicalize_path, parse_session_id
+from . import durability, plans_transaction
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
+from .plans_session_ids import parse_session_id
 from .prepare_models import (
     LEGACY_PREPARE_VALIDATION_VERSION,
     PREPARE_VALIDATION_CACHE_FILENAME,
@@ -170,7 +172,7 @@ def load_prepare_validation_cache(
     validator-output schema does the same. Malformed data in the current
     schema remains a fail-closed error.
     """
-    plans.recover_pending_plan_transaction(plan_dir)
+    plans_transaction.recover_pending_plan_transaction(plan_dir)
     path = prepare_validation_cache_path(plan_dir)
     try:
         text = path.read_text(encoding="utf-8")

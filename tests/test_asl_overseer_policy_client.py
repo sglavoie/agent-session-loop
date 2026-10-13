@@ -27,7 +27,7 @@ import subprocess
 import unittest
 from typing import Any
 
-from agent_session_loop import overseer_discovery, overseer_policy_client, plans
+from agent_session_loop import overseer_discovery, overseer_policy_client, plans_files
 from tests.support import assert_no_runner_import
 
 PLAN = "/state/agent-session-loop/plan-abc"
@@ -243,7 +243,7 @@ class PolicyAnswerTests(unittest.TestCase):
         """``Authorization.permits`` is the mutation question specifically, so a
         ``context`` grant converts into an authorization that permits nothing --
         which is the point of naming the category in the request at all."""
-        canonical = plans.canonicalize_path(PLAN)
+        canonical = plans_files.canonicalize_path(PLAN)
 
         mutation, _ = _authorize(
             payload=_payload(access=overseer_policy_client.ACCESS_MUTATION),
@@ -254,7 +254,7 @@ class PolicyAnswerTests(unittest.TestCase):
         assert authorization is not None
         self.assertTrue(authorization.permits(canonical))
         self.assertFalse(
-            authorization.permits(plans.canonicalize_path(f"{PLAN}-other"))
+            authorization.permits(plans_files.canonicalize_path(f"{PLAN}-other"))
         )
 
         context, _ = _authorize(payload=_payload())

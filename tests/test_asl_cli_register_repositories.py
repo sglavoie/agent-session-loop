@@ -11,7 +11,13 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from agent_session_loop import cli, plans, repository_registration, state_locks
+from agent_session_loop import (
+    cli,
+    plans_content_hash,
+    plans_registry,
+    repository_registration,
+    state_locks,
+)
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     _contract_block,
@@ -118,7 +124,7 @@ class RegisterRepositoriesCommandTests(unittest.TestCase):
         self.assertIn(rerun, stdout)
         self.assertLess(stdout.index(rebind), stdout.index(rerun))
 
-        registry = plans.read_repository_registry(self.plan_dir)
+        registry = plans_registry.read_repository_registry(self.plan_dir)
         self.assertEqual(("tundra_OAK", "tundra_svc"), registry.aliases)
 
     def test_json_output_serializes_the_whole_registration_result(self) -> None:
@@ -143,7 +149,8 @@ class RegisterRepositoriesCommandTests(unittest.TestCase):
         self.assertEqual(["1", "2"], payload["sessions_changed"])
         self.assertIn(str(self.plan_dir / "manifest.md"), payload["files"])
         self.assertEqual(
-            plans.stable_readiness_sha256(self.plan_dir), payload["readiness"]
+            plans_content_hash.stable_readiness_sha256(self.plan_dir),
+            payload["readiness"],
         )
         self.assertEqual(
             [
@@ -175,7 +182,7 @@ class RegisterRepositoriesCommandTests(unittest.TestCase):
         self.assertIn("'stray'", payload["detail"])
         self.assertIn("missing fact: contract-path-outside-registry", payload["error"])
         self.assertEqual([], payload["files"])
-        self.assertIsNone(plans.read_repository_registry(self.plan_dir))
+        self.assertIsNone(plans_registry.read_repository_registry(self.plan_dir))
 
     def test_active_lock_refuses_before_any_session_file_is_rewritten(
         self,
@@ -189,7 +196,7 @@ class RegisterRepositoriesCommandTests(unittest.TestCase):
         self.assertEqual(1, code)
         payload = json.loads(stdout)
         self.assertEqual("lock-contention", payload["reason"])
-        self.assertIsNone(plans.read_repository_registry(self.plan_dir))
+        self.assertIsNone(plans_registry.read_repository_registry(self.plan_dir))
 
 
 if __name__ == "__main__":

@@ -8,7 +8,8 @@ from typing import Any
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_session_ids,
+    plans_snapshot,
     review,
     review_continuation,
     review_cycle,
@@ -35,7 +36,7 @@ class ReviewCycleBaselineTests(RepairCycleFixtures, unittest.TestCase):
             self.plan_dir,
             review_ids=("2", "3", "4"),
         )
-        snapshot = plans.inspect_plan(self.plan_dir)
+        snapshot = plans_snapshot.inspect_plan(self.plan_dir)
 
         def write_history(
             name: str,
@@ -118,7 +119,7 @@ class ReviewCycleBaselineTests(RepairCycleFixtures, unittest.TestCase):
             self.plan_dir,
             review_ids=("2", "4"),
         )
-        snapshot = plans.inspect_plan(self.plan_dir)
+        snapshot = plans_snapshot.inspect_plan(self.plan_dir)
         for review_id in ("2", "4"):
             (self.plan_dir / f"session-{review_id}.md").unlink()
         self.assertEqual({}, review_continuation._generated_review_statuses(snapshot))
@@ -208,7 +209,7 @@ class ReviewCycleBaselineTests(RepairCycleFixtures, unittest.TestCase):
             (("1", "complete"), ("2", "complete"), ("2.1", "pending")),
         )
         review_body = review_session_body.build_generated_review_session_body(
-            plans.parse_session_id("2"),
+            plans_session_ids.parse_session_id("2"),
             review_harness="claude",
             plan_dir=self.plan_dir,
         ).replace("- **Status**: pending", "- **Status**: complete")
@@ -242,7 +243,7 @@ class ReviewCycleBaselineTests(RepairCycleFixtures, unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        snapshot = plans.inspect_plan(self.plan_dir)
+        snapshot = plans_snapshot.inspect_plan(self.plan_dir)
 
         event_only = review_continuation.review_cycle_state(event_path)
         reconciled = review_continuation.review_cycle_state(event_path, snapshot)
@@ -273,7 +274,7 @@ class ReviewCycleBaselineTests(RepairCycleFixtures, unittest.TestCase):
         )
         for review_id in ("2", "3"):
             review_body = review_session_body.build_generated_review_session_body(
-                plans.parse_session_id(review_id),
+                plans_session_ids.parse_session_id(review_id),
                 review_harness="claude",
                 plan_dir=self.plan_dir,
             ).replace("- **Status**: pending", "- **Status**: complete")
@@ -305,7 +306,7 @@ class ReviewCycleBaselineTests(RepairCycleFixtures, unittest.TestCase):
         )
         self.state_dir.mkdir(parents=True, exist_ok=True)
         event_path = self.state_dir / "events.jsonl"
-        snapshot = plans.inspect_plan(self.plan_dir)
+        snapshot = plans_snapshot.inspect_plan(self.plan_dir)
         projected_before = review_continuation.evaluate_review_continuation(
             snapshot, event_path, max_review_fix_cycles=1
         )
@@ -338,7 +339,7 @@ class ReviewCycleBaselineTests(RepairCycleFixtures, unittest.TestCase):
                 }
             },
             max_review_fix_cycles=1,
-            plan_cache=plans.PlanSnapshotCache(),
+            plan_cache=plans_snapshot.PlanSnapshotCache(),
             reinspect=session_verification._reinspect_after_plan_mutation,
         )
 

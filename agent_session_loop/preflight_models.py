@@ -13,10 +13,7 @@ from . import (
 from .contracts import (
     CompletionContract,
 )
-from .plans import (
-    PlanSnapshot,
-    ReadinessMetadata,
-)
+from .plans_models import PlanSnapshot, ReadinessMetadata
 from .repository_intent import RepositoryIntent
 from .verification import (
     VerificationContext,

@@ -9,7 +9,9 @@ import unittest
 from pathlib import Path
 
 from agent_session_loop import (
-    plans,
+    plans_content_hash,
+    plans_models,
+    plans_readiness,
     preflight,
 )
 from tests.support import (
@@ -103,13 +105,13 @@ class PreflightPlanStructureTests(PreflightCoreFixtures):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             _write_loop_ready_plan(plan_dir, ("pending",))
-            stored = plans.parse_readiness_metadata(
+            stored = plans_readiness.parse_readiness_metadata(
                 (plan_dir / "manifest.md").read_text(encoding="utf-8")
             )
             assert stored is not None
-            plans.write_readiness_metadata(
+            plans_readiness.write_readiness_metadata(
                 plan_dir,
-                plans.ReadinessMetadata(
+                plans_models.ReadinessMetadata(
                     state=stored.state,
                     readiness_sha256="00" * 32,
                     checked_at=stored.checked_at,
@@ -149,11 +151,13 @@ class PreflightPlanStructureTests(PreflightCoreFixtures):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_plan(plan_dir, ("pending",))
-            plans.write_readiness_metadata(
+            plans_readiness.write_readiness_metadata(
                 plan_dir,
-                plans.ReadinessMetadata(
+                plans_models.ReadinessMetadata(
                     state="loop-ready",
-                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                        plan_dir
+                    ),
                     checked_at="2026-06-19T00:00:00Z",
                 ),
             )
@@ -189,11 +193,13 @@ class PreflightPlanStructureTests(PreflightCoreFixtures):
                 ]
             )
             write_plan(plan_dir, ("pending",), contracts_by_id={"1": broken_contract})
-            plans.write_readiness_metadata(
+            plans_readiness.write_readiness_metadata(
                 plan_dir,
-                plans.ReadinessMetadata(
+                plans_models.ReadinessMetadata(
                     state="loop-ready",
-                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                        plan_dir
+                    ),
                     checked_at="2026-06-19T00:00:00Z",
                 ),
             )
@@ -265,10 +271,10 @@ class PreflightPlanStructureTests(PreflightCoreFixtures):
                 ),
                 encoding="utf-8",
             )
-            current_sha = plans.stable_readiness_sha256(plan_dir)
-            plans.write_readiness_metadata(
+            current_sha = plans_content_hash.stable_readiness_sha256(plan_dir)
+            plans_readiness.write_readiness_metadata(
                 plan_dir,
-                plans.ReadinessMetadata(
+                plans_models.ReadinessMetadata(
                     state="loop-ready",
                     readiness_sha256=current_sha,
                     checked_at="2026-06-19T00:00:00Z",
@@ -306,11 +312,13 @@ class PreflightPlanStructureTests(PreflightCoreFixtures):
             text = session_path.read_text(encoding="utf-8")
             text = text.replace("Instructions.", "Instructions. TODO finalize.")
             session_path.write_text(text, encoding="utf-8")
-            plans.write_readiness_metadata(
+            plans_readiness.write_readiness_metadata(
                 plan_dir,
-                plans.ReadinessMetadata(
+                plans_models.ReadinessMetadata(
                     state="loop-ready",
-                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                        plan_dir
+                    ),
                     checked_at="2026-06-19T00:00:00Z",
                 ),
             )
@@ -342,11 +350,13 @@ class PreflightPlanStructureTests(PreflightCoreFixtures):
                 ),
                 encoding="utf-8",
             )
-            plans.write_readiness_metadata(
+            plans_readiness.write_readiness_metadata(
                 plan_dir,
-                plans.ReadinessMetadata(
+                plans_models.ReadinessMetadata(
                     state="loop-ready",
-                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                        plan_dir
+                    ),
                     checked_at="2026-06-19T00:00:00Z",
                 ),
             )
@@ -370,11 +380,13 @@ class PreflightPlanStructureTests(PreflightCoreFixtures):
                 text + "\n- **Notes**: TODO follow up here\n",
                 encoding="utf-8",
             )
-            plans.write_readiness_metadata(
+            plans_readiness.write_readiness_metadata(
                 plan_dir,
-                plans.ReadinessMetadata(
+                plans_models.ReadinessMetadata(
                     state="loop-ready",
-                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                        plan_dir
+                    ),
                     checked_at="2026-06-19T00:00:00Z",
                 ),
             )
@@ -411,11 +423,13 @@ class PreflightPlanStructureTests(PreflightCoreFixtures):
                     text.replace("Instructions.", reference),
                     encoding="utf-8",
                 )
-                plans.write_readiness_metadata(
+                plans_readiness.write_readiness_metadata(
                     plan_dir,
-                    plans.ReadinessMetadata(
+                    plans_models.ReadinessMetadata(
                         state="loop-ready",
-                        readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                        readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                            plan_dir
+                        ),
                         checked_at="2026-06-19T00:00:00Z",
                     ),
                 )
@@ -450,11 +464,13 @@ class PreflightPlanStructureTests(PreflightCoreFixtures):
                     text.replace("Instructions.", marker),
                     encoding="utf-8",
                 )
-                plans.write_readiness_metadata(
+                plans_readiness.write_readiness_metadata(
                     plan_dir,
-                    plans.ReadinessMetadata(
+                    plans_models.ReadinessMetadata(
                         state="loop-ready",
-                        readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                        readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                            plan_dir
+                        ),
                         checked_at="2026-06-19T00:00:00Z",
                     ),
                 )

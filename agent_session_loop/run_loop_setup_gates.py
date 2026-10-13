@@ -6,7 +6,8 @@ from typing import Any
 
 from . import (
     events,
-    plans,
+    plans_payloads,
+    plans_session_scope,
     preflight,
     readiness_gate,
     review_continuation,
@@ -89,7 +90,7 @@ def _prepare_review_and_resume(frame: RunFrame) -> RunResult | None:
                 reason="no-pending-but-incomplete",
                 message="no pending session was found, but not every session is "
                 "complete",
-                details={"snapshot": plans.snapshot_payload(frame.snapshot)},
+                details={"snapshot": plans_payloads.snapshot_payload(frame.snapshot)},
             )
             return _terminalize(frame.ctx, 1)
         if not frame.review_requested:
@@ -280,7 +281,7 @@ def _pass_readiness_gate(frame: RunFrame) -> RunResult | None:
     ):
         frame.session_id = frame.snapshot.next_pending.id
         frame.details = {
-            **plans.session_details_payload(frame.session_id),
+            **plans_payloads.session_details_payload(frame.session_id),
             "readiness_gate": frame.ctx.gate_payload,
             "workspace_write_guard": initial_workspace_scope_repair,
         }
@@ -293,8 +294,9 @@ def _pass_readiness_gate(frame: RunFrame) -> RunResult | None:
         frame.ctx.record_final_snapshot(frame.snapshot)
         frame.ctx.pause(
             reason=events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
-            message=f"{plans.session_label(frame.session_id)} has retained changes to "
-            "registered repositories outside its write aliases; restore the "
+            message=f"{plans_payloads.session_label(frame.session_id)} "
+            "has retained changes to registered repositories outside its write "
+            "aliases; restore the "
             "unauthorized changes to the recorded pre-turn state, or explicitly "
             "authorize a durable scope change and rerun expansion plus "
             "preflight before continuing",
@@ -379,7 +381,7 @@ def _pass_readiness_gate(frame: RunFrame) -> RunResult | None:
                 frame.cwd,
                 verification_context=frame.ctx.verification_context,
                 needed_aliases=(
-                    plans.needed_repository_aliases(
+                    plans_session_scope.needed_repository_aliases(
                         frame.snapshot,
                         frame.ctx.verification_context.workspace.registry,
                     )
@@ -387,7 +389,7 @@ def _pass_readiness_gate(frame: RunFrame) -> RunResult | None:
                     else None
                 ),
                 clean_aliases=(
-                    plans.commit_repository_aliases(
+                    plans_session_scope.commit_repository_aliases(
                         frame.snapshot,
                         frame.ctx.verification_context.workspace.registry,
                     )
@@ -405,7 +407,9 @@ def _pass_readiness_gate(frame: RunFrame) -> RunResult | None:
             details={
                 "commit_mode": frame.commit_mode,
                 "max_sessions": frame.max_sessions,
-                "pending_sessions": plans.status_counts(frame.snapshot)["pending"],
+                "pending_sessions": plans_payloads.status_counts(frame.snapshot)[
+                    "pending"
+                ],
             },
         )
         return _terminalize(frame.ctx, 1)

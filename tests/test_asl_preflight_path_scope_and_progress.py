@@ -7,7 +7,11 @@ import tempfile
 from pathlib import Path
 
 from agent_session_loop import (
-    plans,
+    plans_content_hash,
+    plans_models,
+    plans_progress,
+    plans_readiness,
+    plans_session_ids,
     preflight,
 )
 from tests.support import (
@@ -47,11 +51,13 @@ class PreflightPathScopeAndProgressTests(PreflightCoreFixtures):
                 session="1",
             )
             write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
-            plans.write_readiness_metadata(
+            plans_readiness.write_readiness_metadata(
                 plan_dir,
-                plans.ReadinessMetadata(
+                plans_models.ReadinessMetadata(
                     state="loop-ready",
-                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                        plan_dir
+                    ),
                     checked_at="2026-06-19T00:00:00Z",
                 ),
             )
@@ -74,11 +80,13 @@ class PreflightPathScopeAndProgressTests(PreflightCoreFixtures):
                 session="1",
             )
             write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
-            plans.write_readiness_metadata(
+            plans_readiness.write_readiness_metadata(
                 plan_dir,
-                plans.ReadinessMetadata(
+                plans_models.ReadinessMetadata(
                     state="loop-ready",
-                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                        plan_dir
+                    ),
                     checked_at="2026-06-19T00:00:00Z",
                 ),
             )
@@ -103,11 +111,13 @@ class PreflightPathScopeAndProgressTests(PreflightCoreFixtures):
                 session="1",
             )
             write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
-            plans.write_readiness_metadata(
+            plans_readiness.write_readiness_metadata(
                 plan_dir,
-                plans.ReadinessMetadata(
+                plans_models.ReadinessMetadata(
                     state="loop-ready",
-                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                        plan_dir
+                    ),
                     checked_at="2026-06-19T00:00:00Z",
                 ),
             )
@@ -133,11 +143,13 @@ class PreflightPathScopeAndProgressTests(PreflightCoreFixtures):
                 session="1",
             )
             write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
-            plans.write_readiness_metadata(
+            plans_readiness.write_readiness_metadata(
                 plan_dir,
-                plans.ReadinessMetadata(
+                plans_models.ReadinessMetadata(
                     state="loop-ready",
-                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                        plan_dir
+                    ),
                     checked_at="2026-06-19T00:00:00Z",
                 ),
             )
@@ -166,11 +178,13 @@ class PreflightPathScopeAndProgressTests(PreflightCoreFixtures):
                 ),
                 encoding="utf-8",
             )
-            plans.write_readiness_metadata(
+            plans_readiness.write_readiness_metadata(
                 plan_dir,
-                plans.ReadinessMetadata(
+                plans_models.ReadinessMetadata(
                     state="loop-ready",
-                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                        plan_dir
+                    ),
                     checked_at="2026-06-19T00:00:00Z",
                 ),
             )
@@ -198,7 +212,7 @@ class PreflightPathScopeAndProgressTests(PreflightCoreFixtures):
             finding = journal_findings[0]
             self.assertEqual("yellow", finding.severity)
             self.assertIn("backfill-progress", finding.message)
-            self.assertEqual(str(plans.progress_path(plan_dir)), finding.path)
+            self.assertEqual(str(plans_progress.progress_path(plan_dir)), finding.path)
             self.assertFalse(report.ok)
 
     def test_progress_journal_missing_yellow_when_header_only_with_completed_sessions(
@@ -207,7 +221,7 @@ class PreflightPathScopeAndProgressTests(PreflightCoreFixtures):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             _write_loop_ready_plan(plan_dir, ("complete", "complete"))
-            plans.write_progress_journal(plan_dir, ())
+            plans_progress.write_progress_journal(plan_dir, ())
 
             report = preflight.run_core_preflight(plan_dir)
 
@@ -242,7 +256,7 @@ class PreflightPathScopeAndProgressTests(PreflightCoreFixtures):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             _write_loop_ready_plan(plan_dir, ("pending",))
-            plans.write_progress_journal(plan_dir, ())
+            plans_progress.write_progress_journal(plan_dir, ())
 
             report = preflight.run_core_preflight(plan_dir)
 
@@ -254,8 +268,8 @@ class PreflightPathScopeAndProgressTests(PreflightCoreFixtures):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             _write_loop_ready_plan(plan_dir, ("complete",))
-            entry = plans.ProgressEntry(
-                session_id=plans.parse_session_id("1"),
+            entry = plans_models.ProgressEntry(
+                session_id=plans_session_ids.parse_session_id("1"),
                 status="complete",
                 completed_at="2026-06-19T15:00:00Z",
                 files_modified=(),
@@ -264,7 +278,7 @@ class PreflightPathScopeAndProgressTests(PreflightCoreFixtures):
                 open_questions=(),
                 blockers=None,
             )
-            plans.append_progress_entry(plan_dir, entry)
+            plans_progress.append_progress_entry(plan_dir, entry)
 
             report = preflight.run_core_preflight(plan_dir)
 
@@ -281,7 +295,9 @@ class PreflightPathScopeAndProgressTests(PreflightCoreFixtures):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             _write_loop_ready_plan(plan_dir, ("complete", "complete"))
-            plans.write_progress_journal(plan_dir, (self._progress_entry("1"),))
+            plans_progress.write_progress_journal(
+                plan_dir, (self._progress_entry("1"),)
+            )
 
             report = preflight.run_core_preflight(plan_dir)
 
@@ -306,7 +322,7 @@ class PreflightPathScopeAndProgressTests(PreflightCoreFixtures):
                 entries = tuple(
                     self._progress_entry(session_id) for session_id in observed_ids
                 )
-                plans.write_progress_journal(plan_dir, entries)
+                plans_progress.write_progress_journal(plan_dir, entries)
 
                 report = preflight.run_core_preflight(plan_dir)
 
@@ -324,7 +340,7 @@ class PreflightPathScopeAndProgressTests(PreflightCoreFixtures):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             _write_loop_ready_plan(plan_dir, ("complete",))
-            plans.write_progress_journal(
+            plans_progress.write_progress_journal(
                 plan_dir,
                 (self._progress_entry("1", status="pending"),),
             )
@@ -344,7 +360,7 @@ class PreflightPathScopeAndProgressTests(PreflightCoreFixtures):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             _write_loop_ready_plan(plan_dir, ("complete",))
-            plans.progress_path(plan_dir).write_text(
+            plans_progress.progress_path(plan_dir).write_text(
                 "# Progress Journal\n"
                 "<!-- agent-session-loop progress-journal v999 -->\n",
                 encoding="utf-8",

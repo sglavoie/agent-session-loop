@@ -33,7 +33,7 @@ from typing import Any
 from agent_session_loop import assurance_ledger as ledger
 from agent_session_loop import assurance_models as models
 from agent_session_loop import assurance_projection as projection
-from agent_session_loop import maintenance, plans, retention, state
+from agent_session_loop import maintenance, plans_files, retention, state
 
 NOW = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
 AUDIT_STAMP = "2026-06-01T00:00:00+00:00"
@@ -69,7 +69,7 @@ class MaintenanceTestBase(unittest.TestCase):
         plan_dir.mkdir()
         plan_state = state.plan_state_dir(plan_dir, self.state_root)
         plan_state.mkdir(parents=True)
-        payload = {"plan_dir": str(plans.canonicalize_path(plan_dir))}
+        payload = {"plan_dir": str(plans_files.canonicalize_path(plan_dir))}
         (plan_state / "state.json").write_text(
             json.dumps(payload, sort_keys=True), encoding="utf-8"
         )
@@ -79,7 +79,7 @@ class MaintenanceTestBase(unittest.TestCase):
         target = plan_dir if plan_dir is not None else self.plan_dir
         lock_path = state.plan_state_dir(target, self.state_root) / state.LOCK_FILE_NAME
         payload = {
-            "plan_dir": str(plans.canonicalize_path(target)),
+            "plan_dir": str(plans_files.canonicalize_path(target)),
             "created_at": "2026-08-01T00:00:00+00:00",
             **fields,
         }

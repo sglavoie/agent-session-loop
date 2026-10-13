@@ -9,7 +9,8 @@ from pathlib import Path
 from . import authoring, contracts
 from .authoring import PlanTransaction
 from .contracts import COMPLETION_CONTRACT_HEADING
-from .plans import PlanError, ReadinessMetadata
+from .plans_errors import PlanError
+from .plans_models import ReadinessMetadata
 from .prepare_results import PREPARE_STAGE_STRUCTURE, PrepareBlocker
 
 

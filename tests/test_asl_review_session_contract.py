@@ -29,7 +29,12 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from agent_session_loop import plans, review, review_session_contract
+from agent_session_loop import (
+    plans_errors,
+    plans_session_ids,
+    review,
+    review_session_contract,
+)
 from tests.support import assert_no_runner_import
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "generated_review_gates"
@@ -180,10 +185,10 @@ class ReviewSessionContractBoundaryTests(unittest.TestCase):
             self.assertNotIn(writer, source, msg=writer)
 
     def test_a_missing_contract_section_is_a_plan_error(self) -> None:
-        with self.assertRaises(plans.PlanError):
+        with self.assertRaises(plans_errors.PlanError):
             review_session_contract.refreshed_generated_review_contract(
                 f"{review.REVIEW_SESSION_MARKER}\n\nNo contract here.\n",
-                plans.parse_session_id("9"),
+                plans_session_ids.parse_session_id("9"),
                 plan_dir=Path("/tmp"),
             )
 

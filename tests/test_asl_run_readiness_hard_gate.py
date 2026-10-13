@@ -7,7 +7,11 @@ import unittest
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_content_hash,
+    plans_files,
+    plans_models,
+    plans_readiness,
+    plans_snapshot,
 )
 from tests.support import (
     _contract_block,
@@ -42,7 +46,7 @@ class RunReadinessHardGateTests(RunReadinessGateFixture):
         # No readiness existed, so the lifecycle never engages.
         self.assertIsNone(payload["readiness_state_initial"])
         self.assertIsNone(payload["readiness_state_final"])
-        self.assertIsNone(plans.read_readiness_metadata(self.plan_dir))
+        self.assertIsNone(plans_readiness.read_readiness_metadata(self.plan_dir))
 
     def test_allow_not_loop_ready_does_not_bypass_repository_footprint(
         self,
@@ -115,7 +119,7 @@ class RunReadinessHardGateTests(RunReadinessGateFixture):
         self.assertEqual(2, report["git_root_count"])
         self.assertEqual(
             sorted(
-                str(plans.canonicalize_path(path))
+                str(plans_files.canonicalize_path(path))
                 for path in (self.repo_root, other_repo)
             ),
             sorted(report["git_roots"]),
@@ -156,7 +160,7 @@ class RunReadinessHardGateTests(RunReadinessGateFixture):
         self.assertIsNone(report["bound_git_root"])
         self.assertEqual(1, report["git_root_count"])
         self.assertEqual(
-            [str(plans.canonicalize_path(target_repository))],
+            [str(plans_files.canonicalize_path(target_repository))],
             report["git_roots"],
         )
 
@@ -179,7 +183,7 @@ class RunReadinessHardGateTests(RunReadinessGateFixture):
         registration = payload["pause_details"]["repository_registration"]
         self.assertEqual("applied", registration["status"])
         self.assertEqual(
-            str(plans.canonicalize_path(self.tmp_path)),
+            str(plans_files.canonicalize_path(self.tmp_path)),
             registration["workspace_root"],
         )
         self.assertEqual(2, len(registration["repositories"]))
@@ -188,7 +192,7 @@ class RunReadinessHardGateTests(RunReadinessGateFixture):
         self.assertEqual("repository-registry", repairs[0]["action"])
         self.assertEqual("repository-registry-required", repairs[0]["category"])
         self.assertEqual(
-            str(plans.canonicalize_path(self.plan_dir)), repairs[0]["path"]
+            str(plans_files.canonicalize_path(self.plan_dir)), repairs[0]["path"]
         )
         self.assertEqual(len(registration["files"]), repairs[0]["entries_written"])
         # The files are migrated, so only the rebind and the re-run are left.
@@ -274,10 +278,10 @@ class RunReadinessHardGateTests(RunReadinessGateFixture):
             ),
             encoding="utf-8",
         )
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -353,11 +357,11 @@ class RunReadinessHardGateTests(RunReadinessGateFixture):
         )
         self.assertEqual([], payload["turns"])
         self.assertEqual(
-            [str(plans.canonicalize_path(store))],
+            [str(plans_files.canonicalize_path(store))],
             payload["pause_details"]["plan_store_state_root"]["required_state_roots"],
         )
         self.assertEqual(
-            "pending", plans.inspect_plan(self.plan_dir).sessions[0].status
+            "pending", plans_snapshot.inspect_plan(self.plan_dir).sessions[0].status
         )
         self.assertFalse(store.exists())
 

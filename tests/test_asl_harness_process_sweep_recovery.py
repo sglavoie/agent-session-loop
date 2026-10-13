@@ -16,7 +16,7 @@ from agent_session_loop import (
     cli,
     config,
     events,
-    plans,
+    plans_snapshot,
     run_commit,
     runner,
     state,
@@ -333,7 +333,10 @@ class ProcessSweepAndLeafRecoveryTests(FakeHarnessIntegrationBase):
             self.assertTrue((control_dir / "leaf-termed").exists())
             self.assertEqual(
                 ["complete", "complete"],
-                [session.status for session in plans.inspect_plan(plan_dir).sessions],
+                [
+                    session.status
+                    for session in plans_snapshot.inspect_plan(plan_dir).sessions
+                ],
             )
             lock = state_locks.read_lock_info(plan_dir, state_dir)
             self.assertIsNone(lock)

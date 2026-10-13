@@ -15,7 +15,9 @@ from agent_session_loop import (
     events,
     harnesses,
     intervention,
-    plans,
+    plans_metadata,
+    plans_registry,
+    plans_session_ids,
     repository_evidence,
     review_guard,
     review_session_body,
@@ -117,7 +119,7 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
         session_path = self.plan_dir / "session-1.md"
         session_path.write_text(
             review_session_body.build_generated_review_session_body(
-                plans.parse_session_id("1"),
+                plans_session_ids.parse_session_id("1"),
                 review_harness="claude",
                 plan_dir=self.plan_dir,
             ),
@@ -161,9 +163,9 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        registry = plans.read_repository_registry(self.plan_dir)
+        registry = plans_registry.read_repository_registry(self.plan_dir)
         assert registry is not None
-        plans.save_workspace_plan_metadata(
+        plans_metadata.save_workspace_plan_metadata(
             self.plan_dir,
             self.workspace_root,
             registry.digest,

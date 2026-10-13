@@ -14,7 +14,8 @@ from agent_session_loop import (
     commit_groups,
     events,
     harnesses,
-    plans,
+    plans_metadata,
+    plans_registry,
     run_loop,
     run_selection,
     state,
@@ -96,9 +97,9 @@ class SettledPauseCommitGateTests(unittest.TestCase):
             specs=self.SPECS,
             contracts_by_id={"1": _contract_block(check, session="1")},
         )
-        registry = plans.read_repository_registry(self.plan_dir)
+        registry = plans_registry.read_repository_registry(self.plan_dir)
         assert registry is not None
-        plans.save_workspace_plan_metadata(
+        plans_metadata.save_workspace_plan_metadata(
             self.plan_dir,
             self.workspace_root,
             registry.digest,

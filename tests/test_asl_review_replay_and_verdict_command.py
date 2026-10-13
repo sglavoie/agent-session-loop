@@ -12,7 +12,7 @@ from typing import Any
 
 from agent_session_loop import (
     contracts,
-    plans,
+    plans_session_ids,
     review,
     review_session_body,
     review_session_contract,
@@ -91,7 +91,7 @@ class GeneratedReviewReplayTests(unittest.TestCase):
         self,
     ) -> None:
         self._write_replay_plan()
-        session_id = plans.parse_session_id("3")
+        session_id = plans_session_ids.parse_session_id("3")
         current = review_session_body.build_generated_review_session_body(
             session_id,
             review_harness="claude",

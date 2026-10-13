@@ -7,7 +7,12 @@ import json
 from agent_session_loop import (
     contracts,
     events,
-    plans,
+    plans_content_hash,
+    plans_discovery,
+    plans_files,
+    plans_models,
+    plans_payloads,
+    plans_readiness,
     review,
     review_continuation,
     review_delta,
@@ -65,11 +70,13 @@ class RunReviewRescopeAndOptionTests(RunReviewHarnessLifecycleBase):
             self.plan_dir, review_harness="claude", delta=delta
         )
         self.assertTrue(created)
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
@@ -96,7 +103,7 @@ class RunReviewRescopeAndOptionTests(RunReviewHarnessLifecycleBase):
         # generated contract before the harness sees them.
         self._write_plan(("complete",), readiness=None)
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
-        review_id = plans.next_top_level_session_id(self.plan_dir)
+        review_id = plans_discovery.next_top_level_session_id(self.plan_dir)
         v1_contract = {
             "session": review_id.value,
             "checks": [
@@ -113,7 +120,7 @@ class RunReviewRescopeAndOptionTests(RunReviewHarnessLifecycleBase):
                             "sys.exit(0 if text.strip() else 1)"
                         ),
                     ],
-                    "cwd": str(plans.canonicalize_path(self.plan_dir)),
+                    "cwd": str(plans_files.canonicalize_path(self.plan_dir)),
                     "timeout_seconds": 60,
                 }
             ],
@@ -154,10 +161,10 @@ class RunReviewRescopeAndOptionTests(RunReviewHarnessLifecycleBase):
             ),
             encoding="utf-8",
         )
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -211,7 +218,10 @@ class RunReviewRescopeAndOptionTests(RunReviewHarnessLifecycleBase):
         self.assertTrue(payload["review_completed"])
         self.assertIsNone(payload.get("action_required"))
         self.assertEqual(
-            [plans.SESSION_KIND_IMPLEMENTATION, plans.SESSION_KIND_REVIEW],
+            [
+                plans_payloads.SESSION_KIND_IMPLEMENTATION,
+                plans_payloads.SESSION_KIND_REVIEW,
+            ],
             [turn["session_kind"] for turn in payload["turns"]],
         )
         for turn in payload["turns"]:
@@ -244,7 +254,8 @@ class RunReviewRescopeAndOptionTests(RunReviewHarnessLifecycleBase):
         # before the review turn starts.
         self.assertEqual(1, len(payload["turns"]))
         self.assertEqual(
-            plans.SESSION_KIND_IMPLEMENTATION, payload["turns"][0]["session_kind"]
+            plans_payloads.SESSION_KIND_IMPLEMENTATION,
+            payload["turns"][0]["session_kind"],
         )
         # A review session was appended (so it's recorded for resume) even
         # though the review turn could not start.
@@ -272,7 +283,7 @@ class RunReviewRescopeAndOptionTests(RunReviewHarnessLifecycleBase):
         self.assertEqual(
             str(
                 review_session_contract.final_review_output_path(
-                    plans.canonicalize_path(self.plan_dir)
+                    plans_files.canonicalize_path(self.plan_dir)
                 )
             ),
             payload["review_output_path"],
@@ -305,7 +316,7 @@ class RunReviewRescopeAndOptionTests(RunReviewHarnessLifecycleBase):
         self.assertEqual("1", turns[0]["session_id"])
         self.assertEqual("1.1", turns[1]["session_id"])
         self.assertEqual("2", turns[2]["session_id"])
-        self.assertEqual(plans.SESSION_KIND_REVIEW, turns[2]["session_kind"])
+        self.assertEqual(plans_payloads.SESSION_KIND_REVIEW, turns[2]["session_kind"])
 
     def test_commit_per_session_skips_review_turn(self) -> None:
         # --commit-per-session must commit after implementation sessions but
@@ -361,7 +372,9 @@ class RunReviewRescopeAndOptionTests(RunReviewHarnessLifecycleBase):
         # All turns are implementation, never review.
         self.assertTrue(payload["turns"])
         for turn in payload["turns"]:
-            self.assertEqual(plans.SESSION_KIND_IMPLEMENTATION, turn["session_kind"])
+            self.assertEqual(
+                plans_payloads.SESSION_KIND_IMPLEMENTATION, turn["session_kind"]
+            )
         # No generated review session file should exist.
         review_candidates = [
             path

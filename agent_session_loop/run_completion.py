@@ -86,7 +86,10 @@ from . import (
     events,
     guards,
     handoff_guards,
-    plans,
+    plans_errors,
+    plans_models,
+    plans_payloads,
+    plans_snapshot,
     readiness_gate,
     repository_evidence,
     review_continuation,
@@ -151,7 +154,7 @@ class RunContext(Protocol):
     def guard_controller(self) -> guards.GuardController: ...
 
     @property
-    def plan_cache(self) -> plans.PlanSnapshotCache: ...
+    def plan_cache(self) -> plans_snapshot.PlanSnapshotCache: ...
 
     @property
     def verification_context(self) -> verification.VerificationContext: ...
@@ -168,7 +171,7 @@ class RunContext(Protocol):
     commit_at_end_attempted: bool
     review_appended: bool
 
-    def record_final_snapshot(self, snapshot: plans.PlanSnapshot) -> None: ...
+    def record_final_snapshot(self, snapshot: plans_models.PlanSnapshot) -> None: ...
 
     def pause(
         self,
@@ -228,15 +231,15 @@ class CompletionOutcome:
     """
 
     action: CompletionAction
-    snapshot: plans.PlanSnapshot
+    snapshot: plans_models.PlanSnapshot
 
     @classmethod
-    def again(cls, snapshot: plans.PlanSnapshot) -> CompletionOutcome:
+    def again(cls, snapshot: plans_models.PlanSnapshot) -> CompletionOutcome:
         """Grow the run: the loop takes another pass over this plan."""
         return cls(action=ACTION_CONTINUE, snapshot=snapshot)
 
     @classmethod
-    def stop(cls, snapshot: plans.PlanSnapshot) -> CompletionOutcome:
+    def stop(cls, snapshot: plans_models.PlanSnapshot) -> CompletionOutcome:
         """End the run: the loop leaves and terminalization takes over."""
         return cls(action=ACTION_BREAK, snapshot=snapshot)
 
@@ -249,7 +252,7 @@ class CompletionOutcome:
 def complete_plan(
     ctx: RunContext,
     *,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     args: argparse.Namespace,
     cwd: Path,
     commit_mode: str | None,
@@ -283,7 +286,7 @@ def complete_plan(
         ctx.pause(
             reason="no-pending-but-incomplete",
             message="no pending session was found, but not every session is complete",
-            details={"snapshot": plans.snapshot_payload(snapshot)},
+            details={"snapshot": plans_payloads.snapshot_payload(snapshot)},
         )
         return CompletionOutcome.stop(snapshot)
 
@@ -367,7 +370,9 @@ def complete_plan(
                 ctx.payload["review_fix_disposition"] = (
                     review_resume.source_disposition if terminal_disposition else None
                 )
-                ctx.payload["final_snapshot"] = plans.snapshot_payload(snapshot)
+                ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(
+                    snapshot
+                )
             if terminal_disposition:
                 with ctx.persistence.lock:
                     ctx.payload["reason"] = review_cycle._terminal_review_reason(
@@ -394,7 +399,9 @@ def complete_plan(
                     ctx.payload["review_fix_disposition"] = (
                         review_resume.source_disposition
                     )
-                    ctx.payload["final_snapshot"] = plans.snapshot_payload(snapshot)
+                    ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(
+                        snapshot
+                    )
                 if review_resume.blocker == "higher-cap-required":
                     with ctx.persistence.lock:
                         ctx.payload["reason"] = review_cycle._terminal_review_reason(
@@ -530,7 +537,7 @@ def complete_plan(
 
             try:
                 snapshot = ctx.plan_cache.get_fresh(snapshot.plan_dir)
-            except plans.PlanError as error:
+            except plans_errors.PlanError as error:
                 ctx.pause(
                     reason="malformed-plan",
                     message="plan could not be inspected after "
@@ -552,7 +559,9 @@ def complete_plan(
                 ctx.payload["review_fix_disposition"] = (
                     review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS
                 )
-                ctx.payload["final_snapshot"] = plans.snapshot_payload(snapshot)
+                ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(
+                    snapshot
+                )
 
             if (
                 repair_result.reason
@@ -709,7 +718,7 @@ def complete_plan(
                     review_bases=review_bases,
                 )
             )
-        except (plans.PlanError, OSError) as error:
+        except (plans_errors.PlanError, OSError) as error:
             ctx.record_final_snapshot(snapshot)
             ctx.pause(
                 reason="malformed-plan",
@@ -768,7 +777,7 @@ def complete_plan(
             )
         try:
             snapshot = ctx.plan_cache.get_fresh(snapshot.plan_dir)
-        except plans.PlanError as error:
+        except plans_errors.PlanError as error:
             ctx.pause(
                 reason="malformed-plan",
                 message="plan could not be inspected after appending the "
@@ -821,6 +830,6 @@ def complete_plan(
         return CompletionOutcome.again(snapshot)
 
     with ctx.persistence.lock:
-        ctx.payload["final_snapshot"] = plans.snapshot_payload(snapshot)
+        ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot)
         ctx.payload["reason"] = "all-complete"
     return CompletionOutcome.stop(snapshot)

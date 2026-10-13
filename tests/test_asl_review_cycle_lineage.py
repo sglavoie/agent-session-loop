@@ -4,7 +4,8 @@ import unittest
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_payloads,
+    plans_snapshot,
     review_continuation,
     review_repair,
     review_transitions,
@@ -65,7 +66,7 @@ class ReviewCycleLineageTests(RepairCycleFixtures, unittest.TestCase):
                     )
 
                 projected = review_continuation.evaluate_review_continuation(
-                    plans.inspect_plan(plan_dir),
+                    plans_snapshot.inspect_plan(plan_dir),
                     self.tmp_path / f"eventless-{name}.jsonl",
                 )
 
@@ -106,7 +107,7 @@ class ReviewCycleLineageTests(RepairCycleFixtures, unittest.TestCase):
         )
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir),
+            plans_snapshot.inspect_plan(self.plan_dir),
             event_path,
             max_review_fix_cycles=1,
         )
@@ -168,7 +169,7 @@ class ReviewCycleLineageTests(RepairCycleFixtures, unittest.TestCase):
         )
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir),
+            plans_snapshot.inspect_plan(self.plan_dir),
             self._append_repair_lineage(("2.1",)),
             max_review_fix_cycles=1,
         )
@@ -194,7 +195,7 @@ class ReviewCycleLineageTests(RepairCycleFixtures, unittest.TestCase):
         )
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir),
+            plans_snapshot.inspect_plan(self.plan_dir),
             self._append_repair_lineage(("2.1",)),
             max_review_fix_cycles=1,
         )
@@ -215,7 +216,7 @@ class ReviewCycleLineageTests(RepairCycleFixtures, unittest.TestCase):
         (self.plan_dir / "session-2.1.md").unlink()
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir),
+            plans_snapshot.inspect_plan(self.plan_dir),
             self._append_repair_lineage(("2.1",)),
             max_review_fix_cycles=1,
         )
@@ -252,7 +253,7 @@ class ReviewCycleLineageTests(RepairCycleFixtures, unittest.TestCase):
         )
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir),
+            plans_snapshot.inspect_plan(self.plan_dir),
             self._append_repair_lineage(("2.1",)),
             max_review_fix_cycles=1,
         )
@@ -279,10 +280,10 @@ class ReviewCycleLineageTests(RepairCycleFixtures, unittest.TestCase):
         )
         self.assertEqual(
             [
-                plans.SESSION_KIND_IMPLEMENTATION,
-                plans.SESSION_KIND_REVIEW,
-                plans.SESSION_KIND_IMPLEMENTATION,
-                plans.SESSION_KIND_REVIEW,
+                plans_payloads.SESSION_KIND_IMPLEMENTATION,
+                plans_payloads.SESSION_KIND_REVIEW,
+                plans_payloads.SESSION_KIND_IMPLEMENTATION,
+                plans_payloads.SESSION_KIND_REVIEW,
             ],
             [turn["session_kind"] for turn in payload["turns"]],
         )

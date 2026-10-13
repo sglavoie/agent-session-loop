@@ -42,7 +42,13 @@ from agent_session_loop import (  # noqa: E402 - import needs the sys.path inser
     authoring,
     contracts,
     harnesses,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_models,
+    plans_registry,
+    plans_session_ids,
+    plans_session_scope,
+    plans_snapshot,
     responses,
     state,
     state_locks,
@@ -129,11 +135,11 @@ class ResplitError(Exception):
 class ChildSpec:
     """One generated child session."""
 
-    session_id: plans.SessionId
+    session_id: plans_session_ids.SessionId
     title: str
     instructions: str
     contract: contracts.CompletionContract
-    previous_session_id: plans.SessionId | None
+    previous_session_id: plans_session_ids.SessionId | None
 
     @property
     def filename(self) -> str:
@@ -149,7 +155,7 @@ class ParentDetails:
     had_expansion: bool
     prior_session_file: str | None
     contract: contracts.CompletionContract | None
-    scope: plans.SessionScope | None
+    scope: plans_session_scope.SessionScope | None
     registry: RepositoryRegistry | None
 
 
@@ -157,19 +163,23 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _session_sort_key(session_id: plans.SessionId) -> tuple[int, ...]:
+def _session_sort_key(session_id: plans_session_ids.SessionId) -> tuple[int, ...]:
     return session_id.sort_key
 
 
-def _is_descendant(candidate: plans.SessionId, parent: plans.SessionId) -> bool:
+def _is_descendant(
+    candidate: plans_session_ids.SessionId, parent: plans_session_ids.SessionId
+) -> bool:
     return (
         len(candidate.components) > len(parent.components)
         and candidate.components[: len(parent.components)] == parent.components
     )
 
 
-def _child_id(parent: plans.SessionId, index: int) -> plans.SessionId:
-    return plans.SessionId(parent.components + (index,))
+def _child_id(
+    parent: plans_session_ids.SessionId, index: int
+) -> plans_session_ids.SessionId:
+    return plans_session_ids.SessionId(parent.components + (index,))
 
 
 def _validate_parts(value: int) -> int:
@@ -181,17 +191,19 @@ def _validate_parts(value: int) -> int:
     return value
 
 
-def _status_by_id(snapshot: plans.PlanSnapshot) -> dict[str, plans.SessionStatus]:
+def _status_by_id(
+    snapshot: plans_models.PlanSnapshot,
+) -> dict[str, plans_models.SessionStatus]:
     return {session.id: session for session in snapshot.sessions}
 
 
 def _select_parent(
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     requested_session_id: str | None,
-) -> plans.SessionId:
+) -> plans_session_ids.SessionId:
     if requested_session_id is not None:
         try:
-            return plans.parse_session_id(requested_session_id)
+            return plans_session_ids.parse_session_id(requested_session_id)
         except ValueError as error:
             raise ResplitError(
                 "ambiguous-input", f"invalid session id: {requested_session_id}"
@@ -204,10 +216,10 @@ def _select_parent(
 
 
 def _validate_snapshot(
-    snapshot: plans.PlanSnapshot,
-    parent_id: plans.SessionId,
+    snapshot: plans_models.PlanSnapshot,
+    parent_id: plans_session_ids.SessionId,
     parts: int,
-) -> plans.SessionStatus:
+) -> plans_models.SessionStatus:
     for session in snapshot.sessions:
         if session.status == "unknown":
             raise ResplitError(
@@ -266,7 +278,9 @@ def _split_before_final_handoff(text: str, filename: str) -> str:
     raise ResplitError("malformed-plan", f"{filename} has no final handoff block")
 
 
-def _extract_parent_title(parent_id: plans.SessionId, before_handoff: str) -> str:
+def _extract_parent_title(
+    parent_id: plans_session_ids.SessionId, before_handoff: str
+) -> str:
     for line in before_handoff.splitlines():
         match = re.match(r"^#\s+Session\s+\S+\s*:\s*(.+?)\s*$", line)
         if match:
@@ -313,8 +327,8 @@ def _extract_instruction_body(before_handoff: str) -> str:
 
     while index < len(lines) and (
         not lines[index].strip()
-        or lines[index].startswith(plans.READS_REPOSITORIES_PREFIX)
-        or lines[index].startswith(plans.WRITES_REPOSITORIES_PREFIX)
+        or lines[index].startswith(plans_session_scope.READS_REPOSITORIES_PREFIX)
+        or lines[index].startswith(plans_session_scope.WRITES_REPOSITORIES_PREFIX)
     ):
         index += 1
 
@@ -344,7 +358,7 @@ def _strip_horizontal_rules(text: str) -> str:
 
 
 def _parse_parent_details(
-    parent_status: plans.SessionStatus,
+    parent_status: plans_models.SessionStatus,
     parent_expansion_path: Path,
 ) -> ParentDetails:
     parent_text = _read_text(parent_status.path)
@@ -359,14 +373,14 @@ def _parse_parent_details(
             f"above handoff",
         )
 
-    registry = plans.read_repository_registry(parent_status.path.parent)
+    registry = plans_registry.read_repository_registry(parent_status.path.parent)
     try:
         contract = contracts.parse_completion_contract(
             parent_text,
             session_id=parent_status.session_id,
             repository_registry=registry,
         )
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         raise ResplitError(
             "malformed-plan",
             f"{parent_status.session.filename} has a malformed completion contract: "
@@ -375,11 +389,11 @@ def _parse_parent_details(
 
     try:
         scope = (
-            plans.parse_session_scope(parent_text, registry.aliases)
+            plans_session_scope.parse_session_scope(parent_text, registry.aliases)
             if registry is not None
             else None
         )
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         raise ResplitError(
             "malformed-plan",
             f"{parent_status.session.filename} has a malformed repository scope: "
@@ -660,7 +674,7 @@ def _normalize_child_specs(children: list[Any]) -> list[dict[str, Any]]:
 
 
 def _allocate_explicit_contract(
-    child_session_id: plans.SessionId,
+    child_session_id: plans_session_ids.SessionId,
     spec: dict[str, Any],
     parent_checks: dict[str, contracts.VerificationCheck],
     *,
@@ -692,7 +706,7 @@ def _allocate_explicit_contract(
             {"session": child_session_id.value, "checks": check_payloads},
             repository_registry=repository_registry,
         )
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         raise ResplitError(
             "ambiguous-contract", f"child spec {index} has invalid checks: {error}"
         ) from error
@@ -727,7 +741,7 @@ def _validate_parent_check_allocation(
 
 
 def _derive_fallback_contract(
-    child_session_id: plans.SessionId,
+    child_session_id: plans_session_ids.SessionId,
     child_title: str,
     parent_contract: contracts.CompletionContract,
     *,
@@ -745,14 +759,16 @@ def _derive_fallback_contract(
     )
 
 
-def _previous_session_id_from_filename(filename: str | None) -> plans.SessionId | None:
+def _previous_session_id_from_filename(
+    filename: str | None,
+) -> plans_session_ids.SessionId | None:
     if filename is None:
         return None
-    return plans.session_id_from_filename(filename)
+    return plans_session_ids.session_id_from_filename(filename)
 
 
 def _build_child_specs(
-    parent_id: plans.SessionId,
+    parent_id: plans_session_ids.SessionId,
     parent_details: ParentDetails,
     parts: int,
     explicit_specs: list[dict[str, Any]] | None,
@@ -866,7 +882,7 @@ def _instruction_summary(instructions: str) -> str | None:
 
 
 def _child_body_lines(
-    parent_id: plans.SessionId,
+    parent_id: plans_session_ids.SessionId,
     child: ChildSpec,
     archive_relative_path: str,
     parent_details: ParentDetails,
@@ -919,7 +935,7 @@ def _child_body_lines(
 
 
 def _render_child_session(
-    parent_id: plans.SessionId,
+    parent_id: plans_session_ids.SessionId,
     child: ChildSpec,
     archive_relative_path: str,
     parent_details: ParentDetails,
@@ -940,10 +956,10 @@ def _render_child_session(
 
 
 def _preceding_session_file(
-    snapshot: plans.PlanSnapshot,
-    parent_id: plans.SessionId,
+    snapshot: plans_models.PlanSnapshot,
+    parent_id: plans_session_ids.SessionId,
 ) -> str | None:
-    previous: plans.SessionStatus | None = None
+    previous: plans_models.SessionStatus | None = None
     for session in snapshot.sessions:
         if session.session_id == parent_id:
             return previous.session.filename if previous is not None else None
@@ -952,9 +968,9 @@ def _preceding_session_file(
 
 
 def _next_session_after(
-    snapshot: plans.PlanSnapshot,
-    parent_id: plans.SessionId,
-) -> plans.SessionStatus | None:
+    snapshot: plans_models.PlanSnapshot,
+    parent_id: plans_session_ids.SessionId,
+) -> plans_models.SessionStatus | None:
     for index, session in enumerate(snapshot.sessions):
         if session.session_id != parent_id:
             continue
@@ -966,7 +982,7 @@ def _next_session_after(
 
 def _append_resplit_notes(
     text: str,
-    parent_id: plans.SessionId,
+    parent_id: plans_session_ids.SessionId,
     children: list[ChildSpec],
     archive_relative_path: str,
 ) -> str:
@@ -999,7 +1015,7 @@ def _manifest_replacements(
 
 def _updated_manifest_text(
     manifest_path: Path,
-    parent_id: plans.SessionId,
+    parent_id: plans_session_ids.SessionId,
     children: list[ChildSpec],
     total_sessions: int,
     archive_relative_path: str,
@@ -1015,7 +1031,7 @@ def _updated_manifest_text(
 
 def _updated_context_text(
     context_path: Path,
-    parent_id: plans.SessionId,
+    parent_id: plans_session_ids.SessionId,
     children: list[ChildSpec],
 ) -> tuple[str, bool]:
     text = _read_text(context_path)
@@ -1065,7 +1081,7 @@ def resplit_session(
     elif parts is not None:
         parts = _validate_parts(parts)
 
-    snapshot = plans.inspect_plan(plan_dir)
+    snapshot = plans_snapshot.inspect_plan(plan_dir)
     parent_id = _select_parent(snapshot, session_id)
     parent_status = _status_by_id(snapshot).get(parent_id.value)
     if parent_status is None:
@@ -1090,7 +1106,7 @@ def resplit_session(
 
     try:
         timestamp = now or datetime.now(UTC)
-        locked_snapshot = plans.inspect_plan(snapshot.plan_dir)
+        locked_snapshot = plans_snapshot.inspect_plan(snapshot.plan_dir)
         locked_parent_status = _validate_snapshot(locked_snapshot, parent_id, parts)
         parent_details = _parse_parent_details(
             locked_parent_status,
@@ -1170,7 +1186,7 @@ def resplit_session(
 
         try:
             transaction.commit()
-        except plans.PlanError:
+        except plans_errors.PlanError:
             _rollback_archive(archive_moves, archive_dir)
             raise
 
@@ -1202,7 +1218,7 @@ def resplit_session(
 
 
 def _walk_up_for_plan_dir(start: Path) -> Path | None:
-    current = plans.canonicalize_path(start)
+    current = plans_files.canonicalize_path(start)
     if current.is_file():
         current = current.parent
     while True:
@@ -1210,7 +1226,8 @@ def _walk_up_for_plan_dir(start: Path) -> Path | None:
             (current / "context.md").is_file()
             and (current / "manifest.md").is_file()
             and any(
-                plans.session_id_from_filename(path.name) for path in current.iterdir()
+                plans_session_ids.session_id_from_filename(path.name)
+                for path in current.iterdir()
             )
         ):
             return current
@@ -1229,8 +1246,8 @@ def _resolve_cli_target(args: argparse.Namespace) -> tuple[Path, str | None]:
             )
         return inferred, args.session
 
-    target = plans.canonicalize_path(args.target)
-    direct_session_id = plans.session_id_from_filename(target.name)
+    target = plans_files.canonicalize_path(args.target)
+    direct_session_id = plans_session_ids.session_id_from_filename(target.name)
     if direct_session_id is not None:
         if args.session is not None:
             raise ResplitError(
@@ -1324,7 +1341,7 @@ def main(argv: list[str] | None = None) -> int:
             state_dir=args.state_dir,
             skill_prefix=args.skill_prefix,
         )
-    except (plans.PlanError, ResplitError) as error:
+    except (plans_errors.PlanError, ResplitError) as error:
         reason = error.reason if isinstance(error, ResplitError) else "malformed-plan"
         detail = error.detail if isinstance(error, ResplitError) else str(error)
         remediation = PAUSE_REMEDIATION.get(reason)

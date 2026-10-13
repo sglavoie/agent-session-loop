@@ -35,7 +35,11 @@ from agent_session_loop import (
     config,
     control_signal,
     events,
-    plans,
+    plans_content_hash,
+    plans_files,
+    plans_models,
+    plans_readiness,
+    plans_session_ids,
     prepare_models,
     prepare_packet,
     process_tree,
@@ -218,7 +222,7 @@ def write_plan_with_ids(
     (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
     contracts_by_id = contracts_by_id or {}
     for session_id, status_value in statuses:
-        display_label = plans.session_id_display_label(session_id)
+        display_label = plans_session_ids.session_id_display_label(session_id)
         contract_block = contracts_by_id.get(session_id, "")
         body = [
             f"# {display_label}: Test",
@@ -240,7 +244,7 @@ def write_plan_with_ids(
                 "",
             ]
         )
-        (plan_dir / plans.session_id_to_filename(session_id)).write_text(
+        (plan_dir / plans_session_ids.session_id_to_filename(session_id)).write_text(
             "\n".join(body),
             encoding="utf-8",
         )
@@ -487,11 +491,11 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def fail_open_for_path(target: Path):
-    canonical_target = plans.canonicalize_path(target)
+    canonical_target = plans_files.canonicalize_path(target)
     original_open = Path.open
 
     def failing_open(path: Path, *args, **kwargs):
-        if plans.canonicalize_path(path) == canonical_target:
+        if plans_files.canonicalize_path(path) == canonical_target:
             raise PermissionError(
                 errno.EACCES, "permission denied", os.fspath(canonical_target)
             )
@@ -744,8 +748,8 @@ def _write_loop_ready_plan(
     statuses: tuple[str, ...],
     *,
     contracts_by_id: dict[str, str] | None = None,
-    state: plans.ReadinessState = "loop-ready",
-) -> plans.ReadinessMetadata:
+    state: plans_models.ReadinessState = "loop-ready",
+) -> plans_models.ReadinessMetadata:
     """Write a plan with valid contracts and a synced readiness block."""
     contract_blocks: dict[str, str] = {}
     for number in range(1, len(statuses) + 1):
@@ -759,13 +763,13 @@ def _write_loop_ready_plan(
             ),
         )
     write_plan(plan_dir, statuses, contracts_by_id=contract_blocks)
-    expected = plans.stable_readiness_sha256(plan_dir)
-    metadata = plans.ReadinessMetadata(
+    expected = plans_content_hash.stable_readiness_sha256(plan_dir)
+    metadata = plans_models.ReadinessMetadata(
         state=state,
         readiness_sha256=expected,
         checked_at="2026-06-19T00:00:00Z",
     )
-    plans.write_readiness_metadata(plan_dir, metadata)
+    plans_readiness.write_readiness_metadata(plan_dir, metadata)
     return metadata
 
 
@@ -822,7 +826,7 @@ def write_completed_review_plan(
         contracts_by_id=contracts_by_id,
     )
     review_body = review_session_body.build_generated_review_session_body(
-        plans.parse_session_id("2"),
+        plans_session_ids.parse_session_id("2"),
         review_harness="codex",
         plan_dir=plan_dir,
     ).replace("- **Status**: pending", "- **Status**: complete")
@@ -845,7 +849,7 @@ def write_completed_review_plan(
         json.dumps({"version": 2, "outcome": outcome, "findings": findings}),
         encoding="utf-8",
     )
-    return plans.canonicalize_path(plan_dir)
+    return plans_files.canonicalize_path(plan_dir)
 
 
 def write_review_cycle_event(
@@ -882,7 +886,7 @@ def _seed_archivable_plan(
     plan_dir = tmp_path / "plans" / "alpha"
     if create_plan:
         _write_plan_dir(plan_dir)
-    canonical = plans.canonicalize_path(plan_dir)
+    canonical = plans_files.canonicalize_path(plan_dir)
     if with_pin:
         seeded = workbench.upsert_pin(
             workbench.load_registry(registry_path),
@@ -906,7 +910,7 @@ _WORKBENCH_DEAD_PID = 4_242_424
 def _make_workbench_plan(tmp_path: Path, name: str = "plan-alpha") -> Path:
     plan_dir = tmp_path / name
     write_plan(plan_dir, ("pending", "pending"))
-    return plans.canonicalize_path(plan_dir)
+    return plans_files.canonicalize_path(plan_dir)
 
 
 def _write_state_payload(
@@ -1215,7 +1219,7 @@ def _write_prepare_plan(plan_dir: Path, session_ids: tuple[str, ...] = ("1",)) -
     for session_id in session_ids:
         body = "\n".join(
             [
-                f"# {plans.session_id_display_label(session_id)}: Test",
+                f"# {plans_session_ids.session_id_display_label(session_id)}: Test",
                 "",
                 authoring.CONTEXT_REFERENCE_LINE,
                 "",
@@ -1250,7 +1254,7 @@ def _write_prepare_plan(plan_dir: Path, session_ids: tuple[str, ...] = ("1",)) -
                 "",
             ]
         )
-        (plan_dir / plans.session_id_to_filename(session_id)).write_text(
+        (plan_dir / plans_session_ids.session_id_to_filename(session_id)).write_text(
             body, encoding="utf-8"
         )
 

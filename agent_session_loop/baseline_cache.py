@@ -38,7 +38,7 @@ from typing import Any
 from . import contracts, durability
 from .contracts import VerifyRecipe
 from .git_subprocess import run_git
-from .plans import canonicalize_path
+from .plans_files import canonicalize_path
 
 #: Derived journal filename. Excluded from content/readiness hashes because the
 #: hashers only walk context.md, manifest.md, session files, and expansion files.

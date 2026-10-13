@@ -16,7 +16,10 @@ from agent_session_loop import (
     events,
     handoff_correction,
     pause_policy,
-    plans,
+    plans_discovery,
+    plans_handoff,
+    plans_session_ids,
+    plans_snapshot,
     review,
     review_continuation,
     review_session_body,
@@ -111,7 +114,7 @@ class MechanicalHandoffDefectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_multi_repo_plan(plan_dir, ("pending",))
-            snapshot = plans.inspect_plan(plan_dir)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
             set_handoff(
                 plan_dir / "session-1.md",
                 status=status,
@@ -176,7 +179,7 @@ class MechanicalHandoffDefectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_multi_repo_plan(plan_dir, ("pending",))
-            snapshot = plans.inspect_plan(plan_dir)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
             self.assertIsNone(
                 handoff_correction._classify_mechanical_handoff_defect(
                     snapshot, "9", registry_aliases=ALIASES
@@ -398,7 +401,7 @@ class CommandFailureDetailTests(unittest.TestCase):
 class GeneratedReviewValidatorDiagnosticTests(unittest.TestCase):
     def run_checks(self, plan_dir: Path) -> dict[str, subprocess.CompletedProcess[str]]:
         payload = review_session_contract._generated_review_contract_payload(
-            plans.parse_session_id("2"), plan_dir=plan_dir
+            plans_session_ids.parse_session_id("2"), plan_dir=plan_dir
         )
         results: dict[str, subprocess.CompletedProcess[str]] = {}
         for check in payload["checks"]:
@@ -589,7 +592,7 @@ class GeneratedReviewValidatorDiagnosticTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             write_completed_review_plan(plan_dir, [])
             payload = review_session_contract._generated_review_contract_payload(
-                plans.parse_session_id("2"),
+                plans_session_ids.parse_session_id("2"),
                 plan_dir=plan_dir,
                 repository_aliases=("SVC", "OAK"),
             )
@@ -631,21 +634,21 @@ class BroadReviewGateTests(unittest.TestCase):
         contracts_by_id: dict[str, str],
         *,
         prior_review: bool,
-    ) -> plans.SessionId:
+    ) -> plans_session_ids.SessionId:
         write_plan_with_ids(
             plan_dir,
             tuple((session, "complete") for session in sorted(contracts_by_id)),
             contracts_by_id=contracts_by_id,
         )
         if prior_review:
-            prior_id = plans.next_top_level_session_id(plan_dir)
+            prior_id = plans_discovery.next_top_level_session_id(plan_dir)
             (plan_dir / prior_id.filename).write_text(
                 review_session_body.build_generated_review_session_body(
                     prior_id, review_harness="codex", plan_dir=plan_dir
                 ),
                 encoding="utf-8",
             )
-        return plans.next_top_level_session_id(plan_dir)
+        return plans_discovery.next_top_level_session_id(plan_dir)
 
     def review_checks(
         self,
@@ -836,7 +839,9 @@ class BroadReviewGateTests(unittest.TestCase):
 class ReviewArtifactProjectionTests(unittest.TestCase):
     def review_session_text(self, plan_dir: Path, files_modified: str) -> str:
         body = review_session_body.build_generated_review_session_body(
-            plans.parse_session_id("2"), review_harness="codex", plan_dir=plan_dir
+            plans_session_ids.parse_session_id("2"),
+            review_harness="codex",
+            plan_dir=plan_dir,
         ).replace("- **Status**: pending", "- **Status**: complete")
         return re.sub(
             r"- \*\*Files modified\*\*: .*",
@@ -845,17 +850,17 @@ class ReviewArtifactProjectionTests(unittest.TestCase):
             count=1,
         )
 
-    def project(self, files_modified: str) -> plans._ReviewArtifactProjection:
+    def project(self, files_modified: str) -> plans_handoff._ReviewArtifactProjection:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             plan_dir.mkdir(parents=True)
             text = self.review_session_text(plan_dir, files_modified)
-            return plans._project_generated_review_handoff_artifacts(text)
+            return plans_handoff._project_generated_review_handoff_artifacts(text)
 
     def files_line(self, text: str) -> str:
         for line in text.splitlines():
-            if line.startswith(plans.HANDOFF_FILES_PREFIX):
-                return line[len(plans.HANDOFF_FILES_PREFIX) :].strip()
+            if line.startswith(plans_handoff.HANDOFF_FILES_PREFIX):
+                return line[len(plans_handoff.HANDOFF_FILES_PREFIX) :].strip()
         raise AssertionError("no Files modified line")
 
     def test_review_only_entries_project_to_none_and_are_exclusive(self) -> None:
@@ -891,7 +896,9 @@ class ReviewArtifactProjectionTests(unittest.TestCase):
                 encoding="utf-8",
             )
             before = session_path.read_text(encoding="utf-8")
-            changed = plans.normalize_generated_review_handoff_artifacts(plan_dir)
+            changed = plans_handoff.normalize_generated_review_handoff_artifacts(
+                plan_dir
+            )
             self.assertEqual((), changed)
             self.assertEqual(before, session_path.read_text(encoding="utf-8"))
 
@@ -904,7 +911,9 @@ class ReviewArtifactProjectionTests(unittest.TestCase):
                 self.review_session_text(plan_dir, review.FINAL_REVIEW_FILENAME),
                 encoding="utf-8",
             )
-            changed = plans.normalize_generated_review_handoff_artifacts(plan_dir)
+            changed = plans_handoff.normalize_generated_review_handoff_artifacts(
+                plan_dir
+            )
             self.assertEqual(["session-2.md"], [path.name for path in changed])
             self.assertEqual(
                 "(none)", self.files_line(session_path.read_text(encoding="utf-8"))

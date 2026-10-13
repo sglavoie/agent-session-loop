@@ -18,7 +18,8 @@ from pathlib import Path
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_files,
+    plans_snapshot,
     qna,
     run_coordination,
     run_persistence,
@@ -123,7 +124,7 @@ class QnAContextLoaderTests(unittest.TestCase):
             self.assertEqual(Path(last_message_path), context.last_message_path)
             self.assertEqual("Which option, 1a or 1b?\n", context.last_message)
             self.assertEqual(state_path, context.state_path)
-            self.assertEqual(plans.canonicalize_path(plan_dir), context.plan_dir)
+            self.assertEqual(plans_files.canonicalize_path(plan_dir), context.plan_dir)
 
     def test_load_qna_context_accepts_live_waiting_question(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -170,7 +171,7 @@ class QnAContextLoaderTests(unittest.TestCase):
             self.assertEqual(waiting, payload["waiting_for_reply"])
             self.assertNotIn("resume_command", payload)
             self.assertNotIn("pause_reason", payload)
-            plan = str(plans.canonicalize_path(plan_dir))
+            plan = str(plans_files.canonicalize_path(plan_dir))
             self.assertEqual(
                 f"asl inbox reply {plan} --to question-1 "
                 f"--state-dir {state_dir} --text TEXT "
@@ -247,7 +248,7 @@ class QnAContextLoaderTests(unittest.TestCase):
                 context = qna.load_qna_context(plan_dir, state_dir=state_dir)
                 payload = qna.questions_payload(context)
                 status_payload = state_status.status_payload(
-                    plans.inspect_plan(plan_dir),
+                    plans_snapshot.inspect_plan(plan_dir),
                     state_dir,
                 )
             finally:
@@ -435,7 +436,7 @@ class QnAContextLoaderTests(unittest.TestCase):
             self.assertEqual("1", decoded["next_pending_id"])
             self.assertEqual(last_message_path, decoded["last_message_path"])
             self.assertEqual(
-                str(plans.canonicalize_path(plan_dir)), decoded["plan_dir"]
+                str(plans_files.canonicalize_path(plan_dir)), decoded["plan_dir"]
             )
 
     def test_questions_payload_carries_resume_commands(self) -> None:
@@ -455,7 +456,7 @@ class QnAContextLoaderTests(unittest.TestCase):
             context = qna.load_qna_context(plan_dir, state_dir=state_dir)
             payload = qna.questions_payload(context)
 
-            plan = str(plans.canonicalize_path(plan_dir))
+            plan = str(plans_files.canonicalize_path(plan_dir))
             self.assertNotIn("context_kind", payload)
             self.assertNotIn("waiting_for_reply", payload)
             self.assertNotIn("question_id", payload)
@@ -483,7 +484,7 @@ class QnAContextLoaderTests(unittest.TestCase):
             context = qna.load_qna_context(plan_dir, state_dir=state_dir)
             payload = qna.questions_payload(context)
 
-            plan = str(plans.canonicalize_path(plan_dir))
+            plan = str(plans_files.canonicalize_path(plan_dir))
             self.assertEqual(
                 f"asl run {plan} --resume --reply TEXT",
                 payload["resume_command"],
@@ -849,7 +850,7 @@ class QnAQuestionsCliTests(unittest.TestCase):
             )
 
             status_payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir),
+                plans_snapshot.inspect_plan(plan_dir),
                 state_dir,
             )
             self.assertEqual(
@@ -910,7 +911,7 @@ class QnAQuestionsCliTests(unittest.TestCase):
             self.assertIn("--reply TEXT", payload["resume_command"])
 
             status_payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir),
+                plans_snapshot.inspect_plan(plan_dir),
                 state_dir,
             )
             self.assertFalse(status_payload["lock"]["present"])

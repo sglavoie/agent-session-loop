@@ -119,7 +119,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from . import events, plans, session_overview
+from . import events, plans_payloads, session_overview
 
 #: Appended by ``turn_execution.TurnRunner.launch`` as a bare string rather
 #: than through an ``events`` constant. It is the only evidence that a turn
@@ -293,9 +293,9 @@ class TurnAttempt:
 
     @property
     def phase(self) -> str:
-        if self.session_kind == plans.SESSION_KIND_IMPLEMENTATION:
+        if self.session_kind == plans_payloads.SESSION_KIND_IMPLEMENTATION:
             return PHASE_WORKER_EXECUTION
-        if self.session_kind == plans.SESSION_KIND_REVIEW:
+        if self.session_kind == plans_payloads.SESSION_KIND_REVIEW:
             return PHASE_REVIEW
         return PHASE_TURN_UNCLASSIFIED
 

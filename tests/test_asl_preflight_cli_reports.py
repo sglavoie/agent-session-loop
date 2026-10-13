@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import json
 
-from agent_session_loop import (
-    plans,
-)
+from agent_session_loop import plans_content_hash, plans_models, plans_readiness
 from tests.support import (
     _contract_block,
     _write_loop_ready_plan,
@@ -55,9 +53,9 @@ class PreflightCliReportTests(PreflightCliFixtures):
 
     def test_preflight_json_red_when_readiness_breaks(self) -> None:
         # Break readiness sha to produce a red manifest-readiness finding.
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256="00" * 32,
                 checked_at="2026-06-19T00:00:00Z",
@@ -112,10 +110,10 @@ class PreflightCliReportTests(PreflightCliFixtures):
         text = text.replace("Instructions.", "Instructions. TODO: revisit later")
         session_path.write_text(text, encoding="utf-8")
         # Recompute readiness so manifest-readiness stays green.
-        expected = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        expected = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=expected,
                 checked_at="2026-06-19T00:00:00Z",
@@ -185,9 +183,9 @@ class PreflightCliReportTests(PreflightCliFixtures):
         self.assertIn("[GREEN] env-turn-budget", completed.stdout)
 
     def test_preflight_text_output_failure_routes_summary_to_stderr(self) -> None:
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256="00" * 32,
                 checked_at="2026-06-19T00:00:00Z",
@@ -203,9 +201,9 @@ class PreflightCliReportTests(PreflightCliFixtures):
     ) -> None:
         # Break readiness to force a red manifest-readiness finding so we have
         # at least one finding to align a repair hint with.
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256="00" * 32,
                 checked_at="2026-06-19T00:00:00Z",

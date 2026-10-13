@@ -12,7 +12,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import plans, run_contention, session_overview, state
+from agent_session_loop import plans_files, run_contention, session_overview, state
 
 DEAD_PID = 4_242_424
 
@@ -32,8 +32,8 @@ def _make_lock(
     run_id: str = "20260812T000000Z-1",
 ) -> Path:
     """Publish a lock (and matching state.json) for ``plan_dir``."""
-    canonical_plan_dir = plans.canonicalize_path(plan_dir)
-    state_dir = state_root / plans.path_sha256(canonical_plan_dir)
+    canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
+    state_dir = state_root / plans_files.path_sha256(canonical_plan_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
     payload: dict[str, object] = {
         "plan_dir": str(canonical_plan_dir),
@@ -97,7 +97,7 @@ class DetectConflictsTests(unittest.TestCase):
         (self.workspace / "theirs-only").mkdir(parents=True)
 
     def _root(self, name: str) -> str:
-        return str(plans.canonicalize_path(self.workspace / name))
+        return str(plans_files.canonicalize_path(self.workspace / name))
 
     def _detect(self) -> tuple[run_contention.RepositoryConflict, ...]:
         return run_contention.detect_conflicts(
@@ -121,7 +121,7 @@ class DetectConflictsTests(unittest.TestCase):
         self.assertEqual(1, len(conflicts))
         conflict = conflicts[0]
         self.assertEqual(
-            plans.canonicalize_path(self.other_plan_dir), conflict.plan_dir
+            plans_files.canonicalize_path(self.other_plan_dir), conflict.plan_dir
         )
         self.assertEqual(os.getpid(), conflict.pid)
         self.assertEqual(socket.gethostname(), conflict.hostname)
@@ -145,7 +145,7 @@ class DetectConflictsTests(unittest.TestCase):
             self.state_root,
             self.other_plan_dir,
             lock={"pid": os.getpid(), "hostname": socket.gethostname()},
-            workspace_root=str(plans.canonicalize_path(self.workspace)),
+            workspace_root=str(plans_files.canonicalize_path(self.workspace)),
             repositories=(
                 {
                     "alias": "Shared",
@@ -169,7 +169,7 @@ class DetectConflictsTests(unittest.TestCase):
             self.other_plan_dir,
             lock=_local_lock(
                 os.getpid(),
-                (str(plans.canonicalize_path(other_workspace / "shared")),),
+                (str(plans_files.canonicalize_path(other_workspace / "shared")),),
             ),
         )
 

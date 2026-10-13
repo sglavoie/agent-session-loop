@@ -11,7 +11,14 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_session_loop import agent_mux_contract, cli, contracts, plans, verification
+from agent_session_loop import (
+    agent_mux_contract,
+    cli,
+    contracts,
+    plans_files,
+    plans_session_ids,
+    verification,
+)
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     _contract_block,
@@ -26,7 +33,7 @@ class ContractPayloadRoundTripTests(unittest.TestCase):
 
     def round_trip(self, payload: dict[str, Any]) -> dict[str, Any]:
         parsed = contracts._parse_check(
-            payload, index=0, session_id=plans.parse_session_id("1")
+            payload, index=0, session_id=plans_session_ids.parse_session_id("1")
         )
         return contracts.check_payload(parsed)
 
@@ -131,7 +138,7 @@ class ContractCheckCliTests(unittest.TestCase):
             # The state root is reported canonicalized, the same way every
             # other ASL surface resolves `--state-dir`.
             self.assertEqual(
-                str(plans.canonicalize_path(state_dir)), block["state_root"]
+                str(plans_files.canonicalize_path(state_dir)), block["state_root"]
             )
             self.assertEqual(
                 list(agent_mux_contract.COMPONENTS),
@@ -245,7 +252,7 @@ class ContractCheckCliTests(unittest.TestCase):
 
     def test_static_contract_row_reports_repository_alias(self) -> None:
         contract = contracts.CompletionContract(
-            session_id=plans.parse_session_id("1"),
+            session_id=plans_session_ids.parse_session_id("1"),
             done_when=("done",),
             verify=contracts.VerifyRecipe(
                 checks=(
@@ -262,7 +269,7 @@ class ContractCheckCliTests(unittest.TestCase):
             verification, "read_completion_contract", return_value=contract
         ):
             rows = verification._contract_check_rows(
-                "/plan", plans.parse_session_id("1"), repo_root=Path(".")
+                "/plan", plans_session_ids.parse_session_id("1"), repo_root=Path(".")
             )
 
         self.assertEqual("SVC", rows[0]["repo"])

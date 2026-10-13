@@ -18,7 +18,10 @@ from agent_session_loop import (
     events,
     mailbox,
     mailbox_appenders,
-    mailbox_cli,
+    mailbox_cli_constants,
+    mailbox_cli_guidance,
+    mailbox_cli_notify,
+    mailbox_cli_replies,
     mailbox_constants,
     mailbox_cursors,
     mailbox_leases,
@@ -64,7 +67,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
 
         with mock.patch.object(agent_mux_delivery, "notify") as notify:
             code, _payload = self.payload_from(
-                mailbox_cli.inbox_reply_from_args,
+                mailbox_cli_replies.inbox_reply_from_args,
                 self.args(text="Second answer.", to=second.id),
             )
 
@@ -106,7 +109,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
 
         with mock.patch.object(agent_mux_delivery, "notify") as notify:
             code, _payload = self.payload_from(
-                mailbox_cli.inbox_reply_from_args,
+                mailbox_cli_replies.inbox_reply_from_args,
                 self.args(text="Use one object.", to=question.id),
             )
 
@@ -137,7 +140,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
             side_effect=RuntimeError("AgentMux unavailable"),
         ):
             code, payload = self.payload_from(
-                mailbox_cli.inbox_reply_from_args,
+                mailbox_cli_replies.inbox_reply_from_args,
                 self.args(text="Proceed.", to=question.id),
             )
 
@@ -149,7 +152,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
         body = "first line\nsecond line\n"
         with mock.patch("sys.stdin", io.StringIO(body)):
             code, payload = self.payload_from(
-                mailbox_cli.inbox_guidance_from_args,
+                mailbox_cli_guidance.inbox_guidance_from_args,
                 self.args(text_stdin=True),
             )
         self.assertEqual(0, code)
@@ -223,7 +226,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
         body = "phase one\nphase two\n"
         with mock.patch("sys.stdin", io.StringIO(body)):
             code, payload = self.payload_from(
-                mailbox_cli.notify_from_args,
+                mailbox_cli_notify.notify_from_args,
                 self.args(text_stdin=True),
             )
         self.assertEqual(0, code)
@@ -271,11 +274,13 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
                     runner_state,
                 )
                 code, error = self.payload_from(
-                    mailbox_cli.notify_from_args,
+                    mailbox_cli_notify.notify_from_args,
                     self.args(text="must not publish"),
                 )
                 self.assertEqual(1, code)
-                self.assertEqual(mailbox_cli.ERROR_NO_ACTIVE_RUN, error["reason"])
+                self.assertEqual(
+                    mailbox_cli_constants.ERROR_NO_ACTIVE_RUN, error["reason"]
+                )
 
         self.assertEqual(
             1,
@@ -287,12 +292,12 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
 
     def test_notify_rejects_when_no_active_run_exists(self) -> None:
         code, payload = self.payload_from(
-            mailbox_cli.notify_from_args,
+            mailbox_cli_notify.notify_from_args,
             self.args(text="must not publish"),
         )
 
         self.assertEqual(1, code)
-        self.assertEqual(mailbox_cli.ERROR_NO_ACTIVE_RUN, payload["reason"])
+        self.assertEqual(mailbox_cli_constants.ERROR_NO_ACTIVE_RUN, payload["reason"])
         self.assertFalse(
             mailbox_cursors.mailbox_path_for_plan(
                 self.plan_dir,
@@ -317,12 +322,12 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
         )
 
         code, payload = self.payload_from(
-            mailbox_cli.notify_from_args,
+            mailbox_cli_notify.notify_from_args,
             self.args(text="must not publish"),
         )
 
         self.assertEqual(1, code)
-        self.assertEqual(mailbox_cli.ERROR_NO_ACTIVE_RUN, payload["reason"])
+        self.assertEqual(mailbox_cli_constants.ERROR_NO_ACTIVE_RUN, payload["reason"])
         mailbox_path = mailbox_cursors.mailbox_path_for_plan(
             self.plan_dir,
             self.state_dir,
@@ -333,12 +338,12 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
         state_path.write_text("{", encoding="utf-8")
 
         code, payload = self.payload_from(
-            mailbox_cli.notify_from_args,
+            mailbox_cli_notify.notify_from_args,
             self.args(text="must not publish"),
         )
 
         self.assertEqual(1, code)
-        self.assertEqual(mailbox_cli.ERROR_NO_ACTIVE_RUN, payload["reason"])
+        self.assertEqual(mailbox_cli_constants.ERROR_NO_ACTIVE_RUN, payload["reason"])
         self.assertFalse(mailbox_path.exists())
 
     def test_notify_append_failure_is_an_ordinary_command_error(self) -> None:
@@ -362,7 +367,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
             redirect_stdout(stdout),
             redirect_stderr(stderr),
         ):
-            code = mailbox_cli.notify_from_args(self.args(text="checkpoint"))
+            code = mailbox_cli_notify.notify_from_args(self.args(text="checkpoint"))
 
         self.assertEqual(1, code)
         payload = json.loads(stdout.getvalue())
@@ -377,17 +382,17 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
         cases = (
             (
                 "guidance",
-                mailbox_cli.inbox_guidance_from_args,
+                mailbox_cli_guidance.inbox_guidance_from_args,
                 self.args(text_stdin=True),
             ),
             (
                 "reply",
-                mailbox_cli.inbox_reply_from_args,
+                mailbox_cli_replies.inbox_reply_from_args,
                 self.args(text_stdin=True, to=str(uuid.uuid4())),
             ),
             (
                 "notify",
-                mailbox_cli.notify_from_args,
+                mailbox_cli_notify.notify_from_args,
                 self.args(text_stdin=True),
             ),
         )
@@ -415,7 +420,9 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
                     self.assertEqual("", stderr.getvalue())
                     payload = json.loads(stdout.getvalue())
                     self.assertFalse(payload["ok"])
-                    self.assertEqual(mailbox_cli.ERROR_STDIN_READ, payload["reason"])
+                    self.assertEqual(
+                        mailbox_cli_constants.ERROR_STDIN_READ, payload["reason"]
+                    )
                     self.assertNotIn("Traceback", payload["error"])
                     self.assertEqual(str(self.plan_dir), payload["plan_reference"])
 
@@ -439,7 +446,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
                     "inline",
                     "--text-stdin",
                 ],
-                mailbox_cli.ERROR_INVALID_TEXT_SOURCE,
+                mailbox_cli_constants.ERROR_INVALID_TEXT_SOURCE,
             ),
             (
                 "reply-missing-text",
@@ -464,7 +471,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
                     "inline",
                     "--text-stdin",
                 ],
-                mailbox_cli.ERROR_INVALID_TEXT_SOURCE,
+                mailbox_cli_constants.ERROR_INVALID_TEXT_SOURCE,
             ),
             (
                 "notify-missing-text",
@@ -479,7 +486,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
                     "inline",
                     "--text-stdin",
                 ],
-                mailbox_cli.ERROR_INVALID_TEXT_SOURCE,
+                mailbox_cli_constants.ERROR_INVALID_TEXT_SOURCE,
             ),
         )
         for label, argv, expected_reason in cases:

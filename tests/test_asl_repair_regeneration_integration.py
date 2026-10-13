@@ -10,7 +10,11 @@ from typing import Any
 from agent_session_loop import (
     events,
     harnesses,
-    plans,
+    plans_content_hash,
+    plans_models,
+    plans_progress,
+    plans_readiness,
+    plans_session_ids,
     review,
     workspace_evidence,
 )
@@ -83,22 +87,24 @@ class RepairScopeRegenerationIntegrationTests(GeneratedRepairDispatchFixture):
     def _stamp_ready(self) -> None:
         # The retained-violation branch only runs once the pre-loop readiness
         # gate passes, and that gate needs both a journal and a fresh stamp.
-        plans.write_progress_journal(
+        plans_progress.write_progress_journal(
             self.plan_dir,
             tuple(
-                plans.ProgressEntry(
-                    session_id=plans.parse_session_id(session_id),
+                plans_models.ProgressEntry(
+                    session_id=plans_session_ids.parse_session_id(session_id),
                     status="complete",
                     completed_at="2026-06-19T00:00:00Z",
                 )
                 for session_id in ("1", "2")
             ),
         )
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )

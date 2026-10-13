@@ -34,7 +34,10 @@ from unittest import mock
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_errors,
+    plans_models,
+    plans_payloads,
+    plans_snapshot,
     run_completion,
     run_control,
     run_coordination,
@@ -88,17 +91,17 @@ class FakeRunContext:
         self.persistence = RecordingPersistence()
         self.progress = None
         self.guard_controller = None
-        self.plan_cache = plans.PlanSnapshotCache()
+        self.plan_cache = plans_snapshot.PlanSnapshotCache()
         self.verification_context = None
         self.commit_generation = None
         self.control_payload: dict[str, Any] = {}
         self.seen_external_command_ids: set[str] = set()
         self.commit_at_end_attempted = False
         self.review_appended = False
-        self.final_snapshots: list[plans.PlanSnapshot] = []
+        self.final_snapshots: list[plans_models.PlanSnapshot] = []
         self.pauses: list[dict[str, Any]] = []
 
-    def record_final_snapshot(self, snapshot: plans.PlanSnapshot) -> None:
+    def record_final_snapshot(self, snapshot: plans_models.PlanSnapshot) -> None:
         self.final_snapshots.append(snapshot)
 
     def pause(
@@ -144,9 +147,9 @@ class CompletionTestCase(unittest.TestCase):
         self.run_control_lock = threading.RLock()
         self.soft_fail = RecordingSoftFail()
 
-    def snapshot(self, statuses: tuple[str, ...]) -> plans.PlanSnapshot:
+    def snapshot(self, statuses: tuple[str, ...]) -> plans_models.PlanSnapshot:
         write_plan(self.plan_dir, statuses)
-        return plans.inspect_plan(self.plan_dir)
+        return plans_snapshot.inspect_plan(self.plan_dir)
 
     def args(self, **overrides: Any) -> argparse.Namespace:
         values: dict[str, Any] = {
@@ -159,7 +162,7 @@ class CompletionTestCase(unittest.TestCase):
 
     def complete(
         self,
-        snapshot: plans.PlanSnapshot,
+        snapshot: plans_models.PlanSnapshot,
         **overrides: Any,
     ) -> run_completion.CompletionOutcome:
         kwargs: dict[str, Any] = {
@@ -354,7 +357,7 @@ class AllCompleteTests(CompletionTestCase):
         self.assertIs(snapshot, outcome.snapshot)
         self.assertEqual("all-complete", self.ctx.payload["reason"])
         self.assertEqual(
-            plans.snapshot_payload(snapshot),
+            plans_payloads.snapshot_payload(snapshot),
             self.ctx.payload["final_snapshot"],
         )
         self.assertEqual([], self.ctx.pauses)
@@ -447,7 +450,7 @@ class EndCommitTests(CompletionTestCase):
         self.run_end_commit(side_effect=RunError("no repository"))
         self.assertTrue(self.ctx.commit_at_end_attempted)
 
-        snapshot = plans.inspect_plan(self.plan_dir)
+        snapshot = plans_snapshot.inspect_plan(self.plan_dir)
         with mock.patch.object(
             run_completion.commit_settlement, "_run_commit_group"
         ) as never:
@@ -522,7 +525,7 @@ class StopBeforeReviewTests(CompletionTestCase):
             mock.patch.object(
                 run_completion.review_session_body,
                 "ensure_generated_review_session",
-                side_effect=plans.PlanError("cannot write"),
+                side_effect=plans_errors.PlanError("cannot write"),
             ),
         ):
             outcome = self.complete(snapshot, review_requested=True)

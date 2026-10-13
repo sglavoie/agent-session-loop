@@ -36,8 +36,8 @@ exists to race, because no run is live.
 Nothing here imports the runner, and this boundary needs no ``Protocol`` seam:
 the parsed namespace is the only thing that enters, and every collaborator is
 read at its true owner — the plan snapshot, the registry and the session-kind
-constants at ``plans``, the workspace binding and its bounded rows at
-``workspaces``, the verification context at ``verification``, the worker mode
+constants at the ``plans_*`` modules, the workspace binding and its bounded
+rows at ``workspaces``, the verification context at ``verification``, the worker mode
 and the packet at ``task_packet``, the review-session test at
 ``review_session_contract``, the prompt and the invocation at ``run_prompts``,
 the model, effort and unsafe-bypass selection at ``run_selection``, the
@@ -78,7 +78,13 @@ from typing import Any
 from . import (
     config,
     harnesses,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_metadata,
+    plans_payloads,
+    plans_progress,
+    plans_registry,
+    plans_snapshot,
     responses,
     review_session_contract,
     run_commit,
@@ -129,19 +135,21 @@ def _print_doctor_error(
 def doctor_from_args(args: argparse.Namespace) -> int:
     """Check local harness prerequisites from CLI arguments."""
     try:
-        cwd = plans.canonicalize_path(args.cwd)
+        cwd = plans_files.canonicalize_path(args.cwd)
         if not cwd.is_dir():
-            raise plans.PlanError(f"cwd does not exist or is not a directory: {cwd}")
-    except (plans.PlanError, OSError) as error:
+            raise plans_errors.PlanError(
+                f"cwd does not exist or is not a directory: {cwd}"
+            )
+    except (plans_errors.PlanError, OSError) as error:
         return _print_doctor_error(args, reason="input-error", error=error)
 
     try:
-        repository_registry = plans.read_repository_registry(args.plan_dir)
-        snapshot = plans.inspect_plan(
+        repository_registry = plans_registry.read_repository_registry(args.plan_dir)
+        snapshot = plans_snapshot.inspect_plan(
             args.plan_dir,
             repository_registry=repository_registry,
         )
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         return _print_doctor_error(
             args,
             reason="malformed-plan",
@@ -164,16 +172,16 @@ def doctor_from_args(args: argparse.Namespace) -> int:
                 plan_dir=snapshot.plan_dir,
                 details={"registry_digest": repository_registry.digest},
             )
-        metadata = plans.load_plan_metadata(snapshot.plan_dir)
+        metadata = plans_metadata.load_plan_metadata(snapshot.plan_dir)
         if metadata is not None and (
-            not isinstance(metadata, plans.WorkspacePlanMetadata)
+            not isinstance(metadata, plans_metadata.WorkspacePlanMetadata)
             or metadata.workspace_root != str(verification_context.root)
             or metadata.registry_digest != repository_registry.digest
         ):
             return _print_doctor_error(
                 args,
                 reason="workspace-error",
-                error=plans.PlanError(
+                error=plans_errors.PlanError(
                     "doctor workspace does not match the prepared workspace binding"
                 ),
                 cwd=cwd,
@@ -200,11 +208,11 @@ def doctor_from_args(args: argparse.Namespace) -> int:
             snapshot.plan_dir,
             session_id=snapshot.next_pending.id,
             session_kind=(
-                plans.SESSION_KIND_REVIEW
+                plans_payloads.SESSION_KIND_REVIEW
                 if review_session_contract.is_generated_review_session_file(
                     snapshot.next_pending.path
                 )
-                else plans.SESSION_KIND_IMPLEMENTATION
+                else plans_payloads.SESSION_KIND_IMPLEMENTATION
             ),
             predecessor_id=task_packet._predecessor_session_id(
                 snapshot, snapshot.next_pending.id
@@ -212,7 +220,9 @@ def doctor_from_args(args: argparse.Namespace) -> int:
             has_expansion=task_packet._session_has_expansion(
                 snapshot.plan_dir, snapshot.next_pending.id
             ),
-            has_progress=(snapshot.plan_dir / plans.PROGRESS_FILE_NAME).is_file(),
+            has_progress=(
+                snapshot.plan_dir / plans_progress.PROGRESS_FILE_NAME
+            ).is_file(),
             workspace=prompt_workspace,
             session_scope=prompt_scope,
         ).render()
@@ -300,7 +310,7 @@ def doctor_from_args(args: argparse.Namespace) -> int:
                 cwd=str(cwd),
                 plan_dir=str(snapshot.plan_dir),
                 next_pending=(
-                    plans.session_compat_value(snapshot.next_pending.id)
+                    plans_payloads.session_compat_value(snapshot.next_pending.id)
                     if snapshot.next_pending is not None
                     else None
                 ),

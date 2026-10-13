@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import pause_policy, plans
+from . import pause_policy, plans_models, plans_session_ids
 from .state import LockInfo, _coerce_pid
 
 WAITING_FOR_REPLY_STATUS_LIVE = "live"
@@ -27,7 +27,7 @@ WAITING_FOR_REPLY_STATUSES: tuple[str, ...] = (
 )
 
 
-def _status_counts(snapshot: plans.PlanSnapshot) -> dict[str, int]:
+def _status_counts(snapshot: plans_models.PlanSnapshot) -> dict[str, int]:
     counts = {"pending": 0, "complete": 0, "empty": 0, "unknown": 0}
     for session in snapshot.sessions:
         counts[session.status] += 1
@@ -35,7 +35,7 @@ def _status_counts(snapshot: plans.PlanSnapshot) -> dict[str, int]:
 
 
 def _session_number_alias(session_id: str) -> int | None:
-    parsed = plans.parse_session_id(session_id)
+    parsed = plans_session_ids.parse_session_id(session_id)
     return parsed.as_int() if parsed.is_integer else None
 
 
@@ -44,7 +44,7 @@ def _session_compat_value(session_id: str) -> int | str:
     return number if number is not None else session_id
 
 
-def _session_payload(session: plans.SessionStatus) -> dict[str, Any]:
+def _session_payload(session: plans_models.SessionStatus) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": session.id,
         "status": session.status,

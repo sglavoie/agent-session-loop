@@ -97,7 +97,11 @@ from . import (
     external_write_evidence,
     guards,
     handoff_guards,
-    plans,
+    plans_errors,
+    plans_models,
+    plans_payloads,
+    plans_session_scope,
+    plans_snapshot,
     preflight_footprint,
     readiness_gate,
     repository_evidence,
@@ -119,7 +123,7 @@ REPAIR_SCOPE_STALE_BLOCKER = "repair-scope-stale"
 
 def _regenerate_stale_repair_child_scopes(
     *,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     workspace: workspaces.ResolvedWorkspace,
     gaps: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -139,7 +143,7 @@ def _regenerate_stale_repair_child_scopes(
             continue
         try:
             scope = run_prompts._session_scope(session, workspace)
-        except plans.PlanError:
+        except plans_errors.PlanError:
             # Fail open exactly like the regeneration helper: a child whose
             # scope cannot be read keeps the blocker rather than being rewritten
             # from a scope nobody could parse.
@@ -157,7 +161,7 @@ def _regenerate_stale_repair_child_scopes(
 
 def _pending_repair_child_continuation(
     *,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     event_path: Path,
     payload: dict[str, Any],
     persistence: run_persistence._RunPersistence,
@@ -215,9 +219,9 @@ def _enforce_workspace_write_guard(
     payload: dict[str, Any],
     persistence: run_persistence._RunPersistence,
     workspace: workspaces.ResolvedWorkspace,
-    scope: plans.SessionScope,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot | None,
+    scope: plans_session_scope.SessionScope,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot | None,
     snapshot_before: repository_evidence.WorkspaceSnapshot,
     exclude: tuple[str, ...],
     include_ignored: bool,
@@ -226,7 +230,7 @@ def _enforce_workspace_write_guard(
     session_details: dict[str, Any],
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
-    plan_cache: plans.PlanSnapshotCache,
+    plan_cache: plans_snapshot.PlanSnapshotCache,
     append_handoff_note: handoff_guards.HandoffNoteAppender,
     reinspect: run_termination.SnapshotReinspector,
     state_dir_arg: str | None = None,
@@ -364,7 +368,7 @@ def _enforce_workspace_write_guard(
             workspace_evidence._session_expansion_evidence(before.plan_dir, session_id)
         )
     with persistence.lock:
-        payload["final_snapshot"] = plans.snapshot_payload(inspected)
+        payload["final_snapshot"] = plans_payloads.snapshot_payload(inspected)
         turn_payload["workspace_write_guard"] = guard_record
         durability.write_json_file(paths["result"], turn_payload)
     turn_execution.record_turn_rejected(
@@ -403,8 +407,8 @@ def _enforce_legacy_implementation_write_guard(
     payload: dict[str, Any],
     persistence: run_persistence._RunPersistence,
     cwd: Path,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot | None,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot | None,
     snapshot_before: repository_evidence.WorkspaceSnapshot,
     exclude: tuple[str, ...],
     include_ignored: bool,
@@ -413,7 +417,7 @@ def _enforce_legacy_implementation_write_guard(
     session_details: dict[str, Any],
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
-    plan_cache: plans.PlanSnapshotCache,
+    plan_cache: plans_snapshot.PlanSnapshotCache,
     append_handoff_note: handoff_guards.HandoffNoteAppender,
     reinspect: run_termination.SnapshotReinspector,
     state_dir_arg: str | None,
@@ -497,7 +501,7 @@ def _enforce_legacy_implementation_write_guard(
         "reverted_to_pending": handoff_guards._reopened(reverted),
     }
     with persistence.lock:
-        payload["final_snapshot"] = plans.snapshot_payload(inspected)
+        payload["final_snapshot"] = plans_payloads.snapshot_payload(inspected)
         turn_payload["workspace_write_guard"] = guard_record
         durability.write_json_file(paths["result"], turn_payload)
     turn_execution.record_turn_rejected(
@@ -616,14 +620,14 @@ def _enforce_protected_path_guard(
     payload: dict[str, Any],
     persistence: run_persistence._RunPersistence,
     guard_controller: guards.GuardController | None,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot | None,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot | None,
     session_id: str,
     session_label: str,
     session_details: dict[str, Any],
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
-    plan_cache: plans.PlanSnapshotCache,
+    plan_cache: plans_snapshot.PlanSnapshotCache,
     append_handoff_note: handoff_guards.HandoffNoteAppender,
     reinspect: run_termination.SnapshotReinspector,
     changed_paths: tuple[str, ...] | None,
@@ -812,7 +816,7 @@ def _enforce_protected_path_guard(
     inspected = reinspect(before.plan_dir, revert_target, reverted, plan_cache)
     guard_record["reverted_to_pending"] = handoff_guards._reopened(reverted)
     with persistence.lock:
-        payload["final_snapshot"] = plans.snapshot_payload(inspected)
+        payload["final_snapshot"] = plans_payloads.snapshot_payload(inspected)
         turn_payload["protected_path_guard"] = guard_record
         durability.write_json_file(paths["result"], turn_payload)
     turn_execution.record_turn_rejected(

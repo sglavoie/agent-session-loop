@@ -7,8 +7,10 @@ import sys
 import time
 from pathlib import Path
 
-from . import plans, repository_evidence, workspaces
-from .plans import PlanError, canonicalize_path, parse_session_id
+from . import plans_registry, plans_session_scope, repository_evidence, workspaces
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
+from .plans_session_ids import parse_session_id
 from .prepare_models import (
     PREPARE_VALIDATION_CACHE_VERSION,
     PrepareValidation,
@@ -64,7 +66,7 @@ def _validation_repository_identity(
     fingerprint: a probe failure must cause a fresh validator run, not make
     two unknown repository states compare equal.
     """
-    registry = plans.read_repository_registry(plan_dir)
+    registry = plans_registry.read_repository_registry(plan_dir)
     canonical_root = canonicalize_path(codebase_root)
     if registry is None:
         fingerprint = repository_evidence.capture_repository_fingerprint(
@@ -130,7 +132,7 @@ def _validation_cache_identities(
 ) -> tuple[dict[str, dict[str, object]], bool]:
     """Snapshot all per-session cache identities before workers launch."""
     context_text = _read_validation_text(plan_dir / "context.md", label="context")
-    registry = plans.read_repository_registry(plan_dir)
+    registry = plans_registry.read_repository_registry(plan_dir)
     repository_identity, reusable = _validation_repository_identity(
         plan_dir, codebase_root
     )
@@ -142,7 +144,9 @@ def _validation_cache_identities(
         session_text = _read_validation_text(session_path, label="session")
         scope: dict[str, object] | None = None
         if registry is not None:
-            parsed_scope = plans.parse_session_scope(session_text, registry.aliases)
+            parsed_scope = plans_session_scope.parse_session_scope(
+                session_text, registry.aliases
+            )
             scope = {
                 "reads": list(parsed_scope.reads),
                 "writes": list(parsed_scope.writes),

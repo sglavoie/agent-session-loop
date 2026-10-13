@@ -26,7 +26,9 @@ from . import (
     events,
     mailbox_vocabulary,
     pause_policy,
-    plans,
+    plans_errors,
+    plans_models,
+    plans_snapshot,
     responses,
     state,
     state_locks,
@@ -118,7 +120,7 @@ def load_qna_context(
     - ``reply-context-mismatch`` when the selected turn's session id no longer
       matches the plan's current ``next_pending_id``.
     """
-    snapshot = plans.inspect_plan(plan_dir)
+    snapshot = plans_snapshot.inspect_plan(plan_dir)
     plan_state = state.plan_state_dir(snapshot.plan_dir, state_dir)
     state_path = plan_state / events.STATE_FILE_NAME
     payload = _read_state_payload(state_path)
@@ -177,7 +179,7 @@ def _wait_ceiling_details(waiting_for_reply: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_qna_context(
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     payload: dict[str, Any],
     *,
     plan_state: Path,
@@ -1205,7 +1207,7 @@ def questions_from_args(args: argparse.Namespace) -> int:
             plan_dir=plan_dir_arg,
             details=error.details,
         )
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         return _emit_questions_error(
             want_json=want_json,
             reason="malformed-plan",

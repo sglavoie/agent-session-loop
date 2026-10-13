@@ -1594,10 +1594,10 @@ class GuardStatusTests(unittest.TestCase):
         self.state_dir = self.root / "state"
 
     def status(self) -> dict[str, Any]:
-        from agent_session_loop import plans
+        from agent_session_loop import plans_snapshot
 
         return state_status.status_payload(
-            plans.inspect_plan(self.plan_dir), self.state_dir
+            plans_snapshot.inspect_plan(self.plan_dir), self.state_dir
         )
 
     def test_no_run_reports_an_empty_gate_with_its_coverage(self) -> None:

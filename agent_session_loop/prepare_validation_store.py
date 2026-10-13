@@ -6,9 +6,19 @@ import json
 from collections.abc import Iterable
 from pathlib import Path
 
-from . import durability, plans, workspaces
+from . import (
+    durability,
+    plans_metadata,
+    plans_registry,
+    plans_session_scope,
+    plans_transaction,
+    workspaces,
+)
 from .authoring import PlanTransaction
-from .plans import PlanError, canonicalize_path, inspect_plan, parse_session_id
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
+from .plans_session_ids import parse_session_id
+from .plans_snapshot import inspect_plan
 from .prepare_models import (
     LEGACY_PREPARE_VALIDATION_VERSION,
     PREPARE_VALIDATION_FILENAME,
@@ -30,7 +40,7 @@ def prepare_validation_path(plan_dir: str | Path) -> Path:
 
 def load_prepare_validation(plan_dir: str | Path) -> PrepareValidation | None:
     """Load the stored aggregate, ``None`` when absent, fail-closed when malformed."""
-    plans.recover_pending_plan_transaction(plan_dir)
+    plans_transaction.recover_pending_plan_transaction(plan_dir)
     path = prepare_validation_path(plan_dir)
     try:
         text = path.read_text(encoding="utf-8")
@@ -60,7 +70,7 @@ def serialize_prepare_validation(validation: PrepareValidation) -> str:
 def _serialize_workspace_metadata(
     validation: PrepareValidation, registry_digest: str
 ) -> str:
-    metadata = plans.WorkspacePlanMetadata(
+    metadata = plans_metadata.WorkspacePlanMetadata(
         workspace_root=validation.workspace_root,
         registry_digest=registry_digest,
     )
@@ -97,7 +107,7 @@ def _validate_validation_authority(
     first binding behind.
     """
     canonical_dir = canonicalize_path(plan_dir)
-    registry = plans.read_repository_registry(canonical_dir)
+    registry = plans_registry.read_repository_registry(canonical_dir)
     snapshot = inspect_plan(canonical_dir)
     authoritative_ids = {status.id for status in snapshot.sessions}
     returned_ids = set(validation.session_ids)
@@ -160,7 +170,7 @@ def _validate_validation_authority(
     for session in validation.sessions:
         session_path = canonical_dir / session.session_id.filename
         try:
-            scope = plans.parse_session_scope(
+            scope = plans_session_scope.parse_session_scope(
                 session_path.read_text(encoding="utf-8"), registry.aliases
             )
         except OSError as error:
@@ -195,10 +205,10 @@ def _validate_validation_authority(
                             f"attributed to {repo!r} crosses repository {alias!r}"
                         )
 
-    metadata = plans.load_plan_metadata(canonical_dir)
+    metadata = plans_metadata.load_plan_metadata(canonical_dir)
     if metadata is None:
         return _serialize_workspace_metadata(validation, registry.digest)
-    if not isinstance(metadata, plans.WorkspacePlanMetadata):
+    if not isinstance(metadata, plans_metadata.WorkspacePlanMetadata):
         raise _fail("registered plan has incompatible legacy workspace metadata")
     if metadata.workspace_root != validation.workspace_root:
         raise _fail(
@@ -231,7 +241,7 @@ def ensure_plan_metadata(
 ) -> Path:
     """Persist prepare's workspace without silently rebinding an existing plan."""
     canonical_cwd = canonicalize_path(cwd)
-    registry = plans.read_repository_registry(plan_dir)
+    registry = plans_registry.read_repository_registry(plan_dir)
     validation = load_prepare_validation(plan_dir)
     if validation is not None:
         validation_cwd = canonicalize_path(validation.codebase_root)
@@ -241,10 +251,10 @@ def ensure_plan_metadata(
                 f"{canonical_cwd} != {validation_cwd}"
             )
 
-    metadata = plans.load_plan_metadata(plan_dir)
+    metadata = plans_metadata.load_plan_metadata(plan_dir)
     if registry is None:
         if metadata is not None and (
-            not isinstance(metadata, plans.PlanMetadata)
+            not isinstance(metadata, plans_metadata.PlanMetadata)
             or canonicalize_path(metadata.cwd) != canonical_cwd
         ):
             bound = getattr(metadata, "workspace_root", "incompatible metadata")
@@ -252,21 +262,21 @@ def ensure_plan_metadata(
                 "prepare cwd does not match stored plan metadata: "
                 f"{canonical_cwd} != {bound}"
             )
-        return plans.save_plan_metadata(plan_dir, canonical_cwd)
+        return plans_metadata.save_plan_metadata(plan_dir, canonical_cwd)
 
     try:
         workspace = workspaces.resolve_workspace(canonical_cwd, registry)
     except workspaces.WorkspaceError as error:
         raise PlanError(f"invalid preparation workspace: {error}") from error
     if metadata is not None and (
-        not isinstance(metadata, plans.WorkspacePlanMetadata)
+        not isinstance(metadata, plans_metadata.WorkspacePlanMetadata)
         or metadata.workspace_root != str(workspace.root)
         or metadata.registry_digest != registry.digest
     ):
         raise PlanError("prepare workspace does not match stored plan metadata")
     if metadata is None and defer_registered_binding:
-        return plans.plan_metadata_path(plan_dir)
-    return plans.save_workspace_plan_metadata(
+        return plans_metadata.plan_metadata_path(plan_dir)
+    return plans_metadata.save_workspace_plan_metadata(
         plan_dir,
         workspace.root,
         registry.digest,
@@ -318,7 +328,7 @@ def ingest_validator_output(plan_dir: str | Path, payload: object) -> PrepareVal
     aggregate = merge_validations(load_prepare_validation(plan_dir), update)
     transaction = PlanTransaction(canonicalize_path(plan_dir))
     if metadata_text is not None:
-        transaction.stage(plans.PLAN_METADATA_FILE_NAME, metadata_text)
+        transaction.stage(plans_metadata.PLAN_METADATA_FILE_NAME, metadata_text)
     transaction.stage(
         PREPARE_VALIDATION_FILENAME, serialize_prepare_validation(aggregate)
     )

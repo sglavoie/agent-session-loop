@@ -15,7 +15,7 @@ from unittest import mock
 from agent_session_loop import (
     durability,
     events,
-    plans,
+    plans_files,
     state,
     state_locks,
     state_plan_refs,
@@ -76,7 +76,7 @@ class LockRepositoryClaimTests(unittest.TestCase):
                     "owner": "agent-session-loop",
                     "pid": os.getpid(),
                     "hostname": socket.gethostname(),
-                    "plan_dir": str(plans.canonicalize_path(self.plan_dir)),
+                    "plan_dir": str(plans_files.canonicalize_path(self.plan_dir)),
                     "created_at": "2026-06-19T12:00:00+00:00",
                 },
                 sort_keys=True,
@@ -144,7 +144,7 @@ class LockRepositoryClaimTests(unittest.TestCase):
 
 
 def _plan_state_dir(state_root: Path, plan_dir: Path) -> Path:
-    entry = state_root / plans.path_sha256(plan_dir)
+    entry = state_root / plans_files.path_sha256(plan_dir)
     entry.mkdir(parents=True, exist_ok=True)
     return entry
 
@@ -205,13 +205,13 @@ class ResolvePlanReferenceTests(unittest.TestCase):
 
             resolved = state_plan_refs.resolve_plan_reference(str(plan_dir), not_a_dir)
 
-            self.assertEqual(plans.canonicalize_path(plan_dir), resolved)
+            self.assertEqual(plans_files.canonicalize_path(plan_dir), resolved)
 
     def test_unique_match_from_state_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state_root = root / "state"
-            plan_dir = plans.canonicalize_path(root / "plans" / "abc123")
+            plan_dir = plans_files.canonicalize_path(root / "plans" / "abc123")
             plan_dir.mkdir(parents=True)
             _write_state_json_entry(state_root, plan_dir)
 
@@ -223,7 +223,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state_root = root / "state"
-            plan_dir = plans.canonicalize_path(root / "plans" / "lock-label")
+            plan_dir = plans_files.canonicalize_path(root / "plans" / "lock-label")
             plan_dir.mkdir(parents=True)
             _write_lock_json_entry(state_root, plan_dir)
 
@@ -235,7 +235,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state_root = root / "state"
-            plan_dir = plans.canonicalize_path(root / "plans" / "res-label")
+            plan_dir = plans_files.canonicalize_path(root / "plans" / "res-label")
             plan_dir.mkdir(parents=True)
             _write_result_json_entry(state_root, plan_dir, section="after")
 
@@ -247,7 +247,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state_root = root / "state"
-            plan_dir = plans.canonicalize_path(root / "plans" / "before-label")
+            plan_dir = plans_files.canonicalize_path(root / "plans" / "before-label")
             plan_dir.mkdir(parents=True)
             _write_result_json_entry(state_root, plan_dir, section="before")
 
@@ -261,7 +261,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state_root = root / "state"
-            plan_dir = plans.canonicalize_path(root / "plans" / "dedup")
+            plan_dir = plans_files.canonicalize_path(root / "plans" / "dedup")
             plan_dir.mkdir(parents=True)
             # Same plan referenced by all three sources in one state dir.
             _write_state_json_entry(state_root, plan_dir)
@@ -276,27 +276,27 @@ class ResolvePlanReferenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state_root = root / "state"
-            plan_dir = plans.canonicalize_path(root / "plans" / "Alpha")
+            plan_dir = plans_files.canonicalize_path(root / "plans" / "Alpha")
             plan_dir.mkdir(parents=True)
             _write_state_json_entry(state_root, plan_dir)
 
             resolved = state_plan_refs.resolve_plan_reference("alpha", state_root)
 
             # No case-insensitive match: falls back to the canonical argument.
-            self.assertEqual(plans.canonicalize_path("alpha"), resolved)
+            self.assertEqual(plans_files.canonicalize_path("alpha"), resolved)
 
     def test_path_like_nonexistent_argument_bypasses_lookup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state_root = root / "state"
-            plan_dir = plans.canonicalize_path(root / "plans" / "bar")
+            plan_dir = plans_files.canonicalize_path(root / "plans" / "bar")
             plan_dir.mkdir(parents=True)
             _write_state_json_entry(state_root, plan_dir)
 
             resolved = state_plan_refs.resolve_plan_reference("foo/bar", state_root)
 
             # Directory component present: keep path-only behavior.
-            self.assertEqual(plans.canonicalize_path("foo/bar"), resolved)
+            self.assertEqual(plans_files.canonicalize_path("foo/bar"), resolved)
 
     def test_missing_state_root_retains_original(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -304,19 +304,19 @@ class ResolvePlanReferenceTests(unittest.TestCase):
 
             resolved = state_plan_refs.resolve_plan_reference("whatever", state_root)
 
-            self.assertEqual(plans.canonicalize_path("whatever"), resolved)
+            self.assertEqual(plans_files.canonicalize_path("whatever"), resolved)
 
     def test_unknown_label_retains_original(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state_root = root / "state"
-            plan_dir = plans.canonicalize_path(root / "plans" / "known")
+            plan_dir = plans_files.canonicalize_path(root / "plans" / "known")
             plan_dir.mkdir(parents=True)
             _write_state_json_entry(state_root, plan_dir)
 
             resolved = state_plan_refs.resolve_plan_reference("missing", state_root)
 
-            self.assertEqual(plans.canonicalize_path("missing"), resolved)
+            self.assertEqual(plans_files.canonicalize_path("missing"), resolved)
 
     def test_nonexistent_candidate_plan_dir_is_discarded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -324,18 +324,18 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             state_root = root / "state"
             plan_dir = root / "plans" / "gone"
             # Register metadata but never create the plan directory itself.
-            _write_state_json_entry(state_root, plans.canonicalize_path(plan_dir))
+            _write_state_json_entry(state_root, plans_files.canonicalize_path(plan_dir))
 
             resolved = state_plan_refs.resolve_plan_reference("gone", state_root)
 
-            self.assertEqual(plans.canonicalize_path("gone"), resolved)
+            self.assertEqual(plans_files.canonicalize_path("gone"), resolved)
 
     def test_ambiguous_matches_raise_sorted_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state_root = root / "state"
-            first = plans.canonicalize_path(root / "b-parent" / "dup")
-            second = plans.canonicalize_path(root / "a-parent" / "dup")
+            first = plans_files.canonicalize_path(root / "b-parent" / "dup")
+            second = plans_files.canonicalize_path(root / "a-parent" / "dup")
             first.mkdir(parents=True)
             second.mkdir(parents=True)
             _write_state_json_entry(state_root, first)
@@ -354,7 +354,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state_root = root / "state"
-            plan_dir = plans.canonicalize_path(root / "plans" / "good")
+            plan_dir = plans_files.canonicalize_path(root / "plans" / "good")
             plan_dir.mkdir(parents=True)
             # A malformed state.json in the same entry must not block the
             # valid result.json fallback.

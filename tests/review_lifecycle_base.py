@@ -15,7 +15,12 @@ from agent_session_loop import (
     config,
     control_queue,
     events,
-    plans,
+    plans_content_hash,
+    plans_files,
+    plans_models,
+    plans_progress,
+    plans_readiness,
+    plans_session_ids,
     review,
     review_session_body,
     review_session_contract,
@@ -88,10 +93,10 @@ class RunReviewHarnessLifecycleBase(unittest.TestCase):
         write_plan(self.plan_dir, statuses, contracts_by_id=contracts_by_id)
         for index, status_value in enumerate(statuses, start=1):
             if status_value == "complete":
-                plans.append_progress_entry(
+                plans_progress.append_progress_entry(
                     self.plan_dir,
-                    plans.ProgressEntry(
-                        session_id=plans.parse_session_id(str(index)),
+                    plans_models.ProgressEntry(
+                        session_id=plans_session_ids.parse_session_id(str(index)),
                         status="complete",
                         completed_at=f"2026-06-19T15:00:{index:02d}Z",
                         files_modified=(),
@@ -103,10 +108,10 @@ class RunReviewHarnessLifecycleBase(unittest.TestCase):
                 )
         if readiness is None:
             return
-        sha = sha_override or plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = sha_override or plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state=readiness,
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -140,7 +145,7 @@ class RunReviewHarnessLifecycleBase(unittest.TestCase):
     def _valid_final_review_artifact_body(self) -> str:
         return json.dumps({"version": 2, "outcome": "all-clear", "findings": []})
 
-    def _write_pending_review_session(self) -> plans.SessionFile:
+    def _write_pending_review_session(self) -> plans_models.SessionFile:
         return review_session_body.ensure_generated_review_session(
             self.plan_dir, review_harness="claude"
         )[0]
@@ -226,8 +231,8 @@ class RunReviewHarnessLifecycleBase(unittest.TestCase):
         return completed, payload
 
     def _events_path(self) -> Path:
-        plan_state = self.state_dir / plans.path_sha256(
-            plans.canonicalize_path(self.plan_dir)
+        plan_state = self.state_dir / plans_files.path_sha256(
+            plans_files.canonicalize_path(self.plan_dir)
         )
         return plan_state / events.EVENTS_FILE_NAME
 
@@ -246,11 +251,13 @@ class RunReviewHarnessLifecycleBase(unittest.TestCase):
         self._write_plan(("complete",), readiness=None)
         self._commit_gitignore("__pycache__/\n")
         self._write_pending_review_session()
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
@@ -273,10 +280,10 @@ class RunReviewHarnessLifecycleBase(unittest.TestCase):
         write_plan_with_ids(self.plan_dir, statuses, contracts_by_id=contracts_by_id)
         if readiness is None:
             return
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state=readiness,
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -301,15 +308,15 @@ class RunReviewHarnessLifecycleBase(unittest.TestCase):
         log_path = self.tmp_path / "fake-commit.jsonl"
         return log_path, {"FAKE_CODEX_COMMIT_LOG": str(log_path)}
 
-    def _setup_complete_plan_with_pending_review(self) -> plans.SessionFile:
+    def _setup_complete_plan_with_pending_review(self) -> plans_models.SessionFile:
         """Author a complete plan carrying a pending generated review session."""
         self._write_plan(("complete",), readiness=None)
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
         review_session = self._write_pending_review_session()
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -319,7 +326,7 @@ class RunReviewHarnessLifecycleBase(unittest.TestCase):
 
     def _setup_review_with_broad_gate_waiting_for_repair(
         self,
-    ) -> plans.SessionFile:
+    ) -> plans_models.SessionFile:
         """Create a broad gate that fails until the first repair child exists."""
         repair_path = self.plan_dir / "session-2.1.md"
         check = {
@@ -341,10 +348,10 @@ class RunReviewHarnessLifecycleBase(unittest.TestCase):
             ("complete",),
             contracts_by_id={"1": _contract_block(json.dumps(check), session="1")},
         )
-        plans.append_progress_entry(
+        plans_progress.append_progress_entry(
             self.plan_dir,
-            plans.ProgressEntry(
-                session_id=plans.parse_session_id("1"),
+            plans_models.ProgressEntry(
+                session_id=plans_session_ids.parse_session_id("1"),
                 status="complete",
                 completed_at="2026-06-19T15:00:01Z",
                 files_modified=(),
@@ -355,11 +362,13 @@ class RunReviewHarnessLifecycleBase(unittest.TestCase):
             ),
         )
         review_session = self._write_pending_review_session()
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
@@ -385,11 +394,13 @@ class RunReviewHarnessLifecycleBase(unittest.TestCase):
             },
         )
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="complete",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )

@@ -36,7 +36,11 @@ from agent_session_loop import (
     events,
     execution_timing,
     metrics,
-    plans,
+    plans_content_hash,
+    plans_files,
+    plans_models,
+    plans_readiness,
+    plans_session_ids,
     review_continuation,
     review_delta,
     review_session_body,
@@ -109,11 +113,13 @@ class CappedReviewRepairRereleaseTests(unittest.TestCase):
                 )
             },
         )
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
@@ -168,8 +174,8 @@ class CappedReviewRepairRereleaseTests(unittest.TestCase):
         return completed, json.loads(completed.stdout)
 
     def _events_path(self) -> Path:
-        plan_state = self.state_dir / plans.path_sha256(
-            plans.canonicalize_path(self.plan_dir)
+        plan_state = self.state_dir / plans_files.path_sha256(
+            plans_files.canonicalize_path(self.plan_dir)
         )
         return plan_state / events.EVENTS_FILE_NAME
 
@@ -326,13 +332,13 @@ class CappedReviewRepairRereleaseTests(unittest.TestCase):
         self.assertEqual(recorded_delta, recovered_delta)
         self.assertEqual(
             review_session_body.build_generated_review_session_body(
-                plans.parse_session_id(second["review_session_id"]),
+                plans_session_ids.parse_session_id(second["review_session_id"]),
                 review_harness="claude",
                 plan_dir=self.plan_dir,
                 delta=recorded_delta,
             ),
             review_session_body.build_generated_review_session_body(
-                plans.parse_session_id(second["review_session_id"]),
+                plans_session_ids.parse_session_id(second["review_session_id"]),
                 review_harness="claude",
                 plan_dir=self.plan_dir,
                 delta=recovered_delta,
@@ -399,7 +405,7 @@ class CappedReviewRepairRereleaseTests(unittest.TestCase):
         self.assertEqual(1, len(plan_rows))
         self.assertEqual(2, plan_rows[0]["runs"])
         self.assertEqual(
-            str(plans.canonicalize_path(self.plan_dir)), plan_rows[0]["plan_dir"]
+            str(plans_files.canonicalize_path(self.plan_dir)), plan_rows[0]["plan_dir"]
         )
 
 

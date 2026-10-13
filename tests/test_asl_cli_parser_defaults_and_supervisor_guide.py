@@ -7,7 +7,14 @@ import json
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
-from agent_session_loop import cli, harnesses, mailbox_cli, run_entry, supervisor_guide
+from agent_session_loop import (
+    cli,
+    harnesses,
+    mailbox_cli_notify,
+    mailbox_cli_outbox,
+    run_entry,
+    supervisor_guide,
+)
 
 
 class ParserDefaultsAndSupervisorGuideTests(unittest.TestCase):
@@ -98,11 +105,11 @@ class ParserDefaultsAndSupervisorGuideTests(unittest.TestCase):
         self.assertEqual("checkpoint", notify_args.text)
         self.assertFalse(notify_args.text_stdin)
         self.assertEqual(
-            "mailbox_cli:notify_from_args",
+            "mailbox_cli_notify:notify_from_args",
             notify_args.handler_ref,
         )
         self.assertIs(
-            mailbox_cli.notify_from_args,
+            mailbox_cli_notify.notify_from_args,
             cli.resolve_handler(notify_args),
         )
 
@@ -135,11 +142,11 @@ class ParserDefaultsAndSupervisorGuideTests(unittest.TestCase):
         self.assertEqual(launch, supervise_args.supervision_id)
         self.assertEqual(550.0, supervise_args.timeout)
         self.assertEqual(
-            "mailbox_cli:outbox_supervise_from_args",
+            "mailbox_cli_outbox:outbox_supervise_from_args",
             supervise_args.handler_ref,
         )
         self.assertIs(
-            mailbox_cli.outbox_supervise_from_args,
+            mailbox_cli_outbox.outbox_supervise_from_args,
             cli.resolve_handler(supervise_args),
         )
         # The cursor is persisted and the mode is fixed, so neither knob exists.

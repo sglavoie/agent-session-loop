@@ -10,7 +10,9 @@ from pathlib import Path
 
 from agent_session_loop import (
     harness_compatibility,
-    plans,
+    plans_files,
+    plans_models,
+    plans_readiness,
     preflight,
     preflight_environment,
     preflight_models,
@@ -212,7 +214,7 @@ class PreflightEnvironmentTests(unittest.TestCase):
         plan_state = state.plan_state_dir(self.plan_dir, self.xdg_state)
         plan_state.mkdir(parents=True, exist_ok=True)
         lock_path = state.lock_path_for_plan(self.plan_dir, self.xdg_state)
-        canonical_plan = plans.canonicalize_path(self.plan_dir)
+        canonical_plan = plans_files.canonicalize_path(self.plan_dir)
         lock_path.write_text(
             json.dumps(
                 {
@@ -338,9 +340,9 @@ class PreflightEnvironmentTests(unittest.TestCase):
 
     def test_run_environment_preflight_emits_no_core_findings(self) -> None:
         # Break readiness so core would emit a red. Environment-only must skip it.
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256="00" * 32,
                 checked_at="2026-06-19T00:00:00Z",

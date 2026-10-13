@@ -15,7 +15,9 @@ from agent_session_loop import (
     events,
     external_write_evidence,
     harnesses,
-    plans,
+    plans_metadata,
+    plans_registry,
+    plans_snapshot,
     run_loop,
     state,
     state_locks,
@@ -64,9 +66,9 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        registry = plans.read_repository_registry(self.plan_dir)
+        registry = plans_registry.read_repository_registry(self.plan_dir)
         assert registry is not None
-        plans.save_workspace_plan_metadata(
+        plans_metadata.save_workspace_plan_metadata(
             self.plan_dir,
             self.workspace_root,
             registry.digest,
@@ -213,7 +215,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
             self.assertIn("external paths have unresolved write authority", message)
             self.assertNotIn("repository evidence could not be captured", message)
         self.assertEqual(
-            "pending", plans.inspect_plan(self.plan_dir).sessions[0].status
+            "pending", plans_snapshot.inspect_plan(self.plan_dir).sessions[0].status
         )
 
     def test_harness_exception_records_scope_violation_and_blocks_rerun(
@@ -454,9 +456,9 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-        registry = plans.read_repository_registry(self.plan_dir)
+        registry = plans_registry.read_repository_registry(self.plan_dir)
         assert registry is not None
-        plans.save_workspace_plan_metadata(
+        plans_metadata.save_workspace_plan_metadata(
             self.plan_dir,
             self.workspace_root,
             registry.digest,

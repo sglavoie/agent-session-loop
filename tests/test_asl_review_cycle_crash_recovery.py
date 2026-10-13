@@ -4,7 +4,10 @@ import json
 import unittest
 
 from agent_session_loop import (
-    plans,
+    plans_content_hash,
+    plans_models,
+    plans_readiness,
+    plans_snapshot,
     review,
     review_continuation,
     review_repair,
@@ -102,7 +105,7 @@ class ReviewCycleCrashRecoveryTests(RepairCycleFixtures, unittest.TestCase):
                 self.assertEqual([], self._review_reopen_events())
 
                 projected = review_continuation.evaluate_review_continuation(
-                    plans.inspect_plan(self.plan_dir),
+                    plans_snapshot.inspect_plan(self.plan_dir),
                     self._events_path(),
                     max_review_fix_cycles=1,
                 )
@@ -154,11 +157,13 @@ class ReviewCycleCrashRecoveryTests(RepairCycleFixtures, unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )

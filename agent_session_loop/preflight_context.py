@@ -8,11 +8,9 @@ from . import (
     repository_evidence,
     workspaces,
 )
-from .plans import (
-    PlanError,
-    canonicalize_path,
-    read_repository_registry,
-)
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
+from .plans_registry import read_repository_registry
 from .preflight_models import (
     PreflightCategory,
     PreflightFinding,

@@ -90,7 +90,9 @@ from . import (
     events,
     external_write_evidence,
     handoff_guards,
-    plans,
+    plans_models,
+    plans_payloads,
+    plans_session_scope,
     repository_evidence,
     review_guard,
     run_persistence,
@@ -139,7 +141,7 @@ class RunContext(Protocol):
     @property
     def runner_work_finished_at(self) -> datetime | None: ...
 
-    def record_final_snapshot(self, snapshot: plans.PlanSnapshot) -> None: ...
+    def record_final_snapshot(self, snapshot: plans_models.PlanSnapshot) -> None: ...
 
     def pause(
         self,
@@ -160,7 +162,7 @@ def retained_scope_restored(
     record: Mapping[str, Any],
     workspace: workspaces.ResolvedWorkspace | None,
     plan_dir: Path,
-    scope: plans.SessionScope | None,
+    scope: plans_session_scope.SessionScope | None,
     exclude: tuple[str, ...],
     include_ignored: bool,
 ) -> bool:
@@ -236,7 +238,7 @@ class ActiveTurn:
 def build_active_turn(
     ctx: RunContext,
     *,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     classification: turn_preparation.SessionClassification,
     prompt: turn_preparation.TurnPrompt,
     session_identity: dict[str, Any],
@@ -263,7 +265,7 @@ def build_active_turn(
         if ctx.runner_work_finished_at is None
         else clock.duration_seconds(ctx.runner_work_finished_at, started_at)
     )
-    total_sessions = sum(plans.status_counts(snapshot).values())
+    total_sessions = sum(plans_payloads.status_counts(snapshot).values())
     payload: dict[str, Any] = {
         "run_id": ctx.run_id,
         "turn_index": turn_index,
@@ -349,12 +351,12 @@ class TurnBaselines:
 def capture_turn_baselines(
     ctx: RunContext,
     *,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     state_dir_arg: str | None,
     cwd: Path,
     classification: turn_preparation.SessionClassification,
     workspace: workspaces.ResolvedWorkspace | None,
-    session_scope: plans.SessionScope | None,
+    session_scope: plans_session_scope.SessionScope | None,
     review_base: repository_evidence.WorkspaceSnapshot | None,
     retained_scope_repair: dict[str, Any] | None,
     regenerated_write_scope: dict[str, Any] | None,

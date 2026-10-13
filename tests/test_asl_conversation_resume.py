@@ -32,7 +32,7 @@ from agent_session_loop import (
     events,
     harnesses,
     pause_policy,
-    plans,
+    plans_files,
     preflight_runtime_hints,
     run_entry,
     run_flags,
@@ -77,7 +77,7 @@ class ContinuationTestBase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.tmp_path = plans.canonicalize_path(self._tmp.name)
+        self.tmp_path = plans_files.canonicalize_path(self._tmp.name)
         self.plan_dir = self.tmp_path / "plan"
         self.plan_dir.mkdir()
         self.cwd = self.tmp_path / "repo"

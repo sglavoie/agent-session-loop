@@ -58,7 +58,10 @@ from agent_session_loop import (
     handoff_guards,
     harnesses,
     pause_policy,
-    plans,
+    plans_handoff,
+    plans_models,
+    plans_session_ids,
+    plans_snapshot,
     redirect_ack,
     redirect_admission,
     redirect_continuation,
@@ -944,8 +947,8 @@ class SettleRedirectedTurnTests(JournalTestCase):
         self.event_path = self.run_dir / events.EVENTS_FILE_NAME
         self.ctx = FakeRunContext(event_path=self.event_path)
         write_plan(self.plan_dir, ("pending",))
-        self.before = plans.inspect_plan(self.plan_dir)
-        self.after = plans.inspect_plan(self.plan_dir)
+        self.before = plans_snapshot.inspect_plan(self.plan_dir)
+        self.after = plans_snapshot.inspect_plan(self.plan_dir)
         self.turn_payload: dict[str, Any] = {"turn_index": 1}
         self.session_details: dict[str, Any] = {"session_id": SESSION_ID}
         self.listener = mock.Mock()
@@ -972,7 +975,7 @@ class SettleRedirectedTurnTests(JournalTestCase):
     def settle(
         self,
         *,
-        after: plans.PlanSnapshot | None | object = UNCHANGED,
+        after: plans_models.PlanSnapshot | None | object = UNCHANGED,
         redirect: redirect_continuation.TurnRedirect | None = None,
         pending: redirect_continuation.PendingRedirect | None = None,
         returncode: int = 137,
@@ -1008,13 +1011,13 @@ class SettleRedirectedTurnTests(JournalTestCase):
             if name == events.REDIRECT_CONTINUATION_EVENT
         ]
 
-    def claimed_complete(self) -> plans.PlanSnapshot:
+    def claimed_complete(self) -> plans_models.PlanSnapshot:
         write_plan(self.plan_dir, ("complete",))
-        return plans.inspect_plan(self.plan_dir)
+        return plans_snapshot.inspect_plan(self.plan_dir)
 
     def plan_status(self) -> str:
         """What the session file says now, rather than what a snapshot said."""
-        return plans.inspect_plan(self.plan_dir).sessions[0].status
+        return plans_snapshot.inspect_plan(self.plan_dir).sessions[0].status
 
     def test_the_correction_becomes_the_next_attempt_of_the_same_session(self) -> None:
         outcome = self.settle()
@@ -1293,15 +1296,15 @@ class _RedirectedRun(unittest.TestCase):
     # -- the fakes -----------------------------------------------------------
 
     def _session_status(self) -> str:
-        return plans.read_session_status(
-            plans.SessionFile(
-                plans.parse_session_id(SESSION_ID),
-                self.plan_dir / plans.session_id_to_filename(SESSION_ID),
+        return plans_handoff.read_session_status(
+            plans_models.SessionFile(
+                plans_session_ids.parse_session_id(SESSION_ID),
+                self.plan_dir / plans_session_ids.session_id_to_filename(SESSION_ID),
             )
         ).status
 
     def _complete_session(self) -> None:
-        path = self.plan_dir / plans.session_id_to_filename(SESSION_ID)
+        path = self.plan_dir / plans_session_ids.session_id_to_filename(SESSION_ID)
         text = path.read_text(encoding="utf-8")
         path.write_text(
             text.replace("- **Status**: pending", "- **Status**: complete", 1),

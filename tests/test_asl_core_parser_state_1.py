@@ -9,7 +9,17 @@ import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from agent_session_loop import events, plans, state_status, state_status_text, tail
+from agent_session_loop import (
+    events,
+    plans_errors,
+    plans_files,
+    plans_payloads,
+    plans_session_ids,
+    plans_snapshot,
+    state_status,
+    state_status_text,
+    tail,
+)
 from agent_session_loop.formatting import (
     format_duration_seconds,
     format_turn_finished_message,
@@ -48,7 +58,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 {
                     "session_id": "7",
                     "total_sessions": 7,
-                    "session_kind": plans.SESSION_KIND_REVIEW,
+                    "session_kind": plans_payloads.SESSION_KIND_REVIEW,
                 }
             ),
         )
@@ -58,7 +68,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 {
                     "session_id": "7",
                     "total_sessions": 7,
-                    "session_kind": plans.SESSION_KIND_IMPLEMENTATION,
+                    "session_kind": plans_payloads.SESSION_KIND_IMPLEMENTATION,
                 }
             ),
         )
@@ -105,7 +115,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 {
                     "session_id": "7",
                     "total_sessions": 7,
-                    "session_kind": plans.SESSION_KIND_REVIEW,
+                    "session_kind": plans_payloads.SESSION_KIND_REVIEW,
                 },
             ),
         )
@@ -350,7 +360,8 @@ class ParserAndStateTests(ParserAndStateTestsBase):
 
     def test_session_id_helpers_parse_sort_and_reject_invalid_ids(self) -> None:
         parsed = [
-            plans.parse_session_id(value) for value in ("2.10", "2", "10", "2.1", "2.2")
+            plans_session_ids.parse_session_id(value)
+            for value in ("2.10", "2", "10", "2.1", "2.2")
         ]
 
         self.assertEqual(
@@ -360,34 +371,46 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 for session_id in sorted(parsed, key=lambda item: item.sort_key)
             ],
         )
-        self.assertEqual((2, 1), plans.parse_session_id("2.1").components)
-        self.assertEqual("session-2.1.md", plans.session_id_to_filename("2.1"))
+        self.assertEqual((2, 1), plans_session_ids.parse_session_id("2.1").components)
+        self.assertEqual(
+            "session-2.1.md", plans_session_ids.session_id_to_filename("2.1")
+        )
         self.assertEqual(
             "session-2.1.expand.md",
-            plans.session_id_to_expansion_filename("2.1"),
+            plans_session_ids.session_id_to_expansion_filename("2.1"),
         )
-        self.assertEqual("Session 2.1", plans.session_id_display_label("2.1"))
+        self.assertEqual(
+            "Session 2.1", plans_session_ids.session_id_display_label("2.1")
+        )
 
         for value in ("0", "01", "1.0", "1.", "1..2", "1.a", "a"):
             with self.subTest(value=value):
-                self.assertFalse(plans.is_valid_session_id(value))
+                self.assertFalse(plans_session_ids.is_valid_session_id(value))
                 with self.assertRaises(ValueError):
-                    plans.parse_session_id(value)
+                    plans_session_ids.parse_session_id(value)
 
     def test_session_filename_helpers_match_dotted_files_exactly(self) -> None:
-        session_id = plans.session_id_from_filename("session-2.1.md")
-        expansion_id = plans.session_id_from_expansion_filename("session-2.1.expand.md")
+        session_id = plans_session_ids.session_id_from_filename("session-2.1.md")
+        expansion_id = plans_session_ids.session_id_from_expansion_filename(
+            "session-2.1.expand.md"
+        )
 
         self.assertIsNotNone(session_id)
         self.assertIsNotNone(expansion_id)
         self.assertEqual("2.1", session_id.value)
         self.assertEqual("2.1", expansion_id.value)
 
-        self.assertIsNone(plans.session_id_from_filename("session-2.1.expand.md"))
-        self.assertIsNone(plans.session_id_from_filename("session-02.md"))
-        self.assertIsNone(plans.session_id_from_expansion_filename("session-2.1.md"))
         self.assertIsNone(
-            plans.session_id_from_expansion_filename("session-2.01.expand.md")
+            plans_session_ids.session_id_from_filename("session-2.1.expand.md")
+        )
+        self.assertIsNone(plans_session_ids.session_id_from_filename("session-02.md"))
+        self.assertIsNone(
+            plans_session_ids.session_id_from_expansion_filename("session-2.1.md")
+        )
+        self.assertIsNone(
+            plans_session_ids.session_id_from_expansion_filename(
+                "session-2.01.expand.md"
+            )
         )
 
     def test_inspect_plan_reports_noncanonical_leading_zero_session_files(
@@ -410,8 +433,8 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 "ignored for session discovery\n", encoding="utf-8"
             )
 
-            with self.assertRaises(plans.PlanError) as raised:
-                plans.inspect_plan(plan_dir)
+            with self.assertRaises(plans_errors.PlanError) as raised:
+                plans_snapshot.inspect_plan(plan_dir)
 
             message = str(raised.exception)
             self.assertIn("no canonical session-<id>.md files found", message)
@@ -433,7 +456,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            snapshot = plans.inspect_plan(plan_dir)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
 
             self.assertEqual(
                 [1, 2, 3, 10], [session.number for session in snapshot.sessions]
@@ -443,7 +466,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 [session.status for session in snapshot.sessions],
             )
             self.assertEqual(2, snapshot.next_pending.number)
-            self.assertEqual(plans.path_sha256(plan_dir), snapshot.path_hash)
+            self.assertEqual(plans_files.path_sha256(plan_dir), snapshot.path_hash)
 
     def test_inspect_plan_uses_manifest_title_for_status_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -455,7 +478,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 "# Durable plan title\n", encoding="utf-8"
             )
 
-            snapshot = plans.inspect_plan(plan_dir)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
             payload = state_status.status_payload(snapshot, state_dir)
             buffer = io.StringIO()
             with redirect_stdout(buffer):
@@ -466,7 +489,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertEqual(
                 [
                     "Plan title: Durable plan title",
-                    f"Plan: {plans.canonicalize_path(plan_dir)}",
+                    f"Plan: {plans_files.canonicalize_path(plan_dir)}",
                 ],
                 buffer.getvalue().splitlines()[:2],
             )
@@ -477,6 +500,6 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             write_plan(plan_dir, ("pending",))
             (plan_dir / "manifest.md").write_text("**Sessions**: 1\n", encoding="utf-8")
 
-            snapshot = plans.inspect_plan(plan_dir)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
 
             self.assertEqual("legacy-plan", snapshot.plan_title)

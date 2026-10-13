@@ -24,7 +24,7 @@ from agent_session_loop import (
     control_queue,
     control_signal,
     events,
-    plans,
+    plans_files,
     process_tree,
     state,
     state_locks,
@@ -74,7 +74,7 @@ class ControlSignalTests(unittest.TestCase):
             "version": 3,
             "owner": "agent-session-loop",
             "pid": pid,
-            "plan_dir": str(plans.canonicalize_path(self.plan_dir)),
+            "plan_dir": str(plans_files.canonicalize_path(self.plan_dir)),
             "created_at": "2026-08-13T00:00:00+00:00",
         }
         if hostname is not None:

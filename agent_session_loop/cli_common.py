@@ -13,14 +13,22 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-from . import plans, responses, state, state_plan_refs, state_status
+from . import (
+    plans_errors,
+    plans_models,
+    plans_snapshot,
+    responses,
+    state,
+    state_plan_refs,
+    state_status,
+)
 
 
 @dataclass(frozen=True)
 class PlanCommandContext:
     """A validated plan plus its current status projection."""
 
-    snapshot: plans.PlanSnapshot
+    snapshot: plans_models.PlanSnapshot
     status: dict[str, Any]
 
 
@@ -93,7 +101,7 @@ def resolve_plan_context(
         resolved_plan_dir = state_plan_refs.resolve_plan_reference(
             args.plan_dir, state.state_root(args.state_dir)
         )
-        snapshot = plans.inspect_plan(resolved_plan_dir)
+        snapshot = plans_snapshot.inspect_plan(resolved_plan_dir)
         status = state_status.status_payload(snapshot, args.state_dir)
     except state.AmbiguousPlanError as error:
         print_error(
@@ -109,14 +117,14 @@ def resolve_plan_context(
             hint="pass a full plan directory path to disambiguate",
         )
         return None
-    except (plans.PlanError, state.StateError) as error:
+    except (plans_errors.PlanError, state.StateError) as error:
         print_error(
             args,
             command_name=command_name,
             text_label=text_label,
             reason=(
                 "malformed-plan"
-                if isinstance(error, plans.PlanError)
+                if isinstance(error, plans_errors.PlanError)
                 else "state-error"
             ),
             error=str(error),

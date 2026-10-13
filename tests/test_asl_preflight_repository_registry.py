@@ -6,7 +6,7 @@ import dataclasses
 import subprocess
 
 from agent_session_loop import (
-    plans,
+    plans_metadata,
     preflight,
     preflight_auto_repair,
     preflight_cli,
@@ -51,7 +51,7 @@ class RepositoryIntentRegistryRepairTests(RepositoryIntentFixtures):
         self._write_plan(
             self.first / "README.md", self.second / "src" / "new_module.py"
         )
-        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(self.first))
         report = preflight.run_core_preflight(self.plan_dir)
 
         payload = preflight_output._preflight_payload_fields(
@@ -80,7 +80,7 @@ class RepositoryIntentRegistryRepairTests(RepositoryIntentFixtures):
         self._write_plan(
             self.first / "README.md", self.second / "src" / "new_module.py"
         )
-        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(self.first))
         report = preflight.run_core_preflight(self.plan_dir)
 
         blockers = preflight_cli._mark_loop_ready_blockers(report)
@@ -158,7 +158,7 @@ class RepositoryIntentRegistryRepairTests(RepositoryIntentFixtures):
             self.second / "src" / "new_module.py",
             statuses=("complete", "pending"),
         )
-        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(self.first))
         self._set_handoff("1", status="complete", files_modified="src/new.py")
         report = preflight.run_core_preflight(self.plan_dir)
 
@@ -242,7 +242,7 @@ class RepositoryIntentRegistryRepairTests(RepositoryIntentFixtures):
             self.second / "src" / "new_module.py",
             self.root / "outside" / "artifact.txt",
         )
-        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(self.first))
         report = preflight.run_core_preflight(self.plan_dir)
         self.assertTrue(self._intent_findings(report))
         self.assertEqual(

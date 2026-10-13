@@ -9,7 +9,12 @@ from typing import Any
 from agent_session_loop import (
     authoring,
     events,
-    plans,
+    plans_content_hash,
+    plans_files,
+    plans_models,
+    plans_readiness,
+    plans_session_ids,
+    plans_snapshot,
     review,
     review_continuation,
     review_repair,
@@ -81,10 +86,10 @@ class MaterializationFixtures:
         if with_manifest_table:
             sessions = (
                 authoring.ManifestSession(
-                    plans.parse_session_id("1"), "One", "complete"
+                    plans_session_ids.parse_session_id("1"), "One", "complete"
                 ),
                 authoring.ManifestSession(
-                    plans.parse_session_id("2"), "Review", "complete"
+                    plans_session_ids.parse_session_id("2"), "Review", "complete"
                 ),
             )
             manifest = authoring.render_manifest(
@@ -97,7 +102,7 @@ class MaterializationFixtures:
                     content_sha256="csha",
                     sessions=sessions,
                     split_date="2026-01-01",
-                    readiness=plans.ReadinessMetadata(
+                    readiness=plans_models.ReadinessMetadata(
                         "draft", "sha", "2026-01-01T00:00:00Z"
                     ),
                 )
@@ -133,7 +138,7 @@ class MaterializationFixtures:
         )
 
         review_body = review_session_body.build_generated_review_session_body(
-            plans.parse_session_id("2"),
+            plans_session_ids.parse_session_id("2"),
             review_harness="codex",
             plan_dir=self.plan_dir,
         ).replace("- **Status**: pending", f"- **Status**: {review_status}")
@@ -248,7 +253,7 @@ class MaterializationFixtures:
         return event_path
 
     def _plan_artifact_path(self, name: str) -> str:
-        return str(plans.canonicalize_path(self.plan_dir) / name)
+        return str(plans_files.canonicalize_path(self.plan_dir) / name)
 
     def _cross_repo_finding(
         self,
@@ -314,16 +319,18 @@ class MaterializationFixtures:
                 "max_review_fix_cycles": 1,
             }
         )
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-08-17T00:00:00Z",
             ),
         )
         baseline = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
         self.assertTrue(baseline.eligible, baseline.blocker)
         return event_path

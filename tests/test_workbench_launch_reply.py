@@ -49,7 +49,7 @@ from agent_session_loop import (
     mailbox,
     mailbox_appenders,
     mailbox_vocabulary,
-    plans,
+    plans_files,
     state,
     workbench,
     workbench_actions,
@@ -422,7 +422,7 @@ class _PlanFixture(unittest.TestCase):
         self.state_dir = root / "state"
         self.plan_dir = root / "plans" / "alpha"
         write_plan(self.plan_dir, ("pending", "pending"))
-        self.canonical = plans.canonicalize_path(self.plan_dir)
+        self.canonical = plans_files.canonicalize_path(self.plan_dir)
 
     def rows(self) -> list[dict[str, Any]]:
         return workbench_operations.read_operations(
@@ -841,7 +841,7 @@ class SurfaceParityTests(WorkbenchAPIFixture, unittest.TestCase):
         self.install_workbench_api(Path(self._tmp.name))
         self.plan_dir = self.plans_root / "alpha"
         write_plan(self.plan_dir, ("pending", "pending"))
-        self.canonical = plans.canonicalize_path(self.plan_dir)
+        self.canonical = plans_files.canonicalize_path(self.plan_dir)
         self.server = self.start_workbench_server()
 
     def _post(self, route: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:

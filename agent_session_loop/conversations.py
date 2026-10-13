@@ -89,7 +89,8 @@ from .harnesses import (
     continues_conversations,
 )
 from .literals import as_literal
-from .plans import canonicalize_path, is_valid_session_id
+from .plans_files import canonicalize_path
+from .plans_session_ids import is_valid_session_id
 from .workspaces import WorkspaceBinding, WorkspaceError, validate_repository_alias
 
 #: The plan-owned ledger and the ``flock`` target that serializes appends to it.

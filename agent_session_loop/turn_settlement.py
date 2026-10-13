@@ -97,7 +97,11 @@ from . import (
     guards,
     handoff_correction,
     handoff_guards,
-    plans,
+    plans_errors,
+    plans_models,
+    plans_payloads,
+    plans_snapshot,
+    plans_status_tables,
     readiness_gate,
     review,
     review_cycle,
@@ -159,7 +163,7 @@ class RunContext(Protocol):
     def guard_controller(self) -> guards.GuardController: ...
 
     @property
-    def plan_cache(self) -> plans.PlanSnapshotCache: ...
+    def plan_cache(self) -> plans_snapshot.PlanSnapshotCache: ...
 
     @property
     def session_attempts(self) -> continuation_guards.SessionAttempts: ...
@@ -179,7 +183,7 @@ class RunContext(Protocol):
     completed_count: int
     review_appended: bool
 
-    def record_final_snapshot(self, snapshot: plans.PlanSnapshot) -> None: ...
+    def record_final_snapshot(self, snapshot: plans_models.PlanSnapshot) -> None: ...
 
     def pause(
         self,
@@ -242,7 +246,7 @@ class TurnSettlement:
     """
 
     action: SettlementAction
-    snapshot: plans.PlanSnapshot
+    snapshot: plans_models.PlanSnapshot
     turn_record: Mapping[str, Any] | None
 
 
@@ -251,9 +255,9 @@ def settle_turn(
     *,
     args: argparse.Namespace,
     cwd: Path,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot,
-    snapshot: plans.PlanSnapshot,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     session_id: str,
     session_label: str,
     session_details: dict[str, Any],
@@ -279,13 +283,13 @@ def settle_turn(
 ) -> TurnSettlement:
     """Judge, record and publish one turn that changed a session's status."""
     expected_change = (
-        plans.session_status_change_payload(
+        plans_payloads.session_status_change_payload(
             session_id,
             before="pending",
             after="complete",
         ),
     )
-    status_changes = plans.status_changes(before, after)
+    status_changes = plans_payloads.status_changes(before, after)
 
     def _adjudicate_plan_artifacts_after_pause() -> None:
         # A status refusal ends the turn before the plan artifact guard's
@@ -316,7 +320,7 @@ def settle_turn(
         with ctx.persistence.lock:
             ctx.payload["expected_status_changes"] = list(expected_change)
             ctx.payload["observed_status_changes"] = []
-            ctx.payload["final_snapshot"] = plans.snapshot_payload(after)
+            ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(after)
         turn_execution.record_turn_rejected(
             event_path=ctx.event_path,
             payload=ctx.payload,
@@ -345,7 +349,7 @@ def settle_turn(
         with ctx.persistence.lock:
             ctx.payload["expected_status_changes"] = list(expected_change)
             ctx.payload["observed_status_changes"] = list(status_changes)
-            ctx.payload["final_snapshot"] = plans.snapshot_payload(after)
+            ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(after)
         turn_execution.record_turn_rejected(
             event_path=ctx.event_path,
             payload=ctx.payload,
@@ -374,7 +378,7 @@ def settle_turn(
         with ctx.persistence.lock:
             ctx.payload["expected_status_changes"] = list(expected_change)
             ctx.payload["observed_status_changes"] = list(status_changes)
-            ctx.payload["final_snapshot"] = plans.snapshot_payload(after)
+            ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(after)
         turn_execution.record_turn_rejected(
             event_path=ctx.event_path,
             payload=ctx.payload,
@@ -530,8 +534,8 @@ def settle_turn(
         durability.write_json_file(paths["result"], turn_payload)
 
     try:
-        ledger_updates = plans.sync_derived_status_ledgers(after)
-    except plans.PlanError as error:
+        ledger_updates = plans_status_tables.sync_derived_status_ledgers(after)
+    except plans_errors.PlanError as error:
         ctx.record_final_snapshot(after)
         turn_execution.record_turn_rejected(
             event_path=ctx.event_path,
@@ -555,7 +559,7 @@ def settle_turn(
     if ledger_updates:
         try:
             after = ctx.plan_cache.get_fresh(before.plan_dir)
-        except plans.PlanError as error:
+        except plans_errors.PlanError as error:
             ctx.record_final_snapshot(after)
             turn_execution.record_turn_rejected(
                 event_path=ctx.event_path,
@@ -578,7 +582,7 @@ def settle_turn(
             return TurnSettlement(ACTION_STOP, snapshot, None)
         with ctx.persistence.lock:
             turn_payload["ledger_updates"] = [str(path) for path in ledger_updates]
-            turn_payload["after"] = plans.snapshot_payload(after)
+            turn_payload["after"] = plans_payloads.snapshot_payload(after)
             durability.write_json_file(paths["result"], turn_payload)
 
     readiness_gate._refresh_active_readiness_state(
@@ -716,7 +720,7 @@ def settle_turn(
             events.CONVERSATION_CONTINUATION_EVENT,
             {
                 "run_id": ctx.run_id,
-                **plans.session_identity_payload(session_id),
+                **plans_payloads.session_identity_payload(session_id),
                 "disposition": conversation_resume.CONTINUATION_RETIRED,
                 "retired": list(retired),
                 "detail": retire_error or "session completed",
@@ -731,7 +735,9 @@ def settle_turn(
         ctx.payload[continuation_guards.SESSION_ATTEMPTS_PAYLOAD_KEY] = (
             ctx.session_attempts.to_payload()
         )
-        ctx.payload["completed_sessions"].append(plans.session_compat_value(session_id))
+        ctx.payload["completed_sessions"].append(
+            plans_payloads.session_compat_value(session_id)
+        )
         ctx.payload.setdefault("completed_session_ids", []).append(session_id)
         if is_review_session:
             ctx.payload["review_completed"] = True

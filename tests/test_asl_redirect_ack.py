@@ -44,10 +44,12 @@ from unittest import mock
 
 from agent_session_loop import (
     clock,
-    mailbox_cli,
+    mailbox_cli_args,
+    mailbox_cli_inbox,
     redirect_ack,
     redirect_continuation,
     redirect_store,
+    responses,
     run_loop_carried_corrections,
 )
 
@@ -1134,11 +1136,11 @@ class AcknowledgeCommandTests(RedirectAckTestCase):
         captured: list[dict[str, Any]] = []
         context = _FakeCommandContext(self.plan_dir)
         with (
-            mock.patch.object(mailbox_cli, "_resolve", return_value=context),
-            mock.patch.object(mailbox_cli, "_live_attempt", return_value=live),
-            mock.patch.object(mailbox_cli.responses, "print_json", captured.append),
+            mock.patch.object(mailbox_cli_args, "resolve", return_value=context),
+            mock.patch.object(mailbox_cli_inbox, "live_attempt", return_value=live),
+            mock.patch.object(responses, "print_json", captured.append),
         ):
-            code = mailbox_cli.inbox_acknowledge_from_args(self.args(**overrides))
+            code = mailbox_cli_inbox.inbox_acknowledge_from_args(self.args(**overrides))
         return code, captured[0]
 
     def test_the_default_receipts_exactly_what_the_attempt_carries(self) -> None:

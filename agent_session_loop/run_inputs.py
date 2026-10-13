@@ -81,7 +81,14 @@ from typing import Any
 from . import (
     config,
     contracts,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_metadata,
+    plans_models,
+    plans_payloads,
+    plans_progress,
+    plans_registry,
+    plans_session_ids,
     preflight_footprint,
     repository_intent,
     repository_registration,
@@ -127,9 +134,9 @@ def _repository_path_label(alias: str) -> str:
 
 
 def _invalid_status_pause(
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
 ) -> tuple[str, str, dict[str, Any]] | None:
-    unknown_sessions = plans.sessions_with_status(snapshot, "unknown")
+    unknown_sessions = plans_payloads.sessions_with_status(snapshot, "unknown")
     if unknown_sessions:
         return (
             "unknown-status",
@@ -137,7 +144,7 @@ def _invalid_status_pause(
             {"sessions": unknown_sessions},
         )
 
-    empty_sessions = plans.sessions_with_status(snapshot, "empty")
+    empty_sessions = plans_payloads.sessions_with_status(snapshot, "empty")
     if empty_sessions:
         return (
             "malformed-plan",
@@ -148,7 +155,7 @@ def _invalid_status_pause(
     return None
 
 
-def _all_sessions_complete(snapshot: plans.PlanSnapshot) -> bool:
+def _all_sessions_complete(snapshot: plans_models.PlanSnapshot) -> bool:
     return all(session.status == "complete" for session in snapshot.sessions)
 
 
@@ -157,9 +164,9 @@ def _validate_run_inputs(
     *,
     resolve_review_guard_excludes: ReviewGuardExcludeResolver,
 ) -> tuple[Path, int | None, int | None, str | None]:
-    cwd = plans.canonicalize_path(args.cwd)
+    cwd = plans_files.canonicalize_path(args.cwd)
     if not cwd.is_dir():
-        raise plans.PlanError(f"cwd does not exist or is not a directory: {cwd}")
+        raise plans_errors.PlanError(f"cwd does not exist or is not a directory: {cwd}")
 
     commit_mode = run_selection._commit_mode(args)
 
@@ -220,15 +227,17 @@ def _resolve_run_verification_context(
     cwd: Path,
 ) -> verification.VerificationContext:
     """Resolve the run root once and enforce prepare's durable binding."""
-    registry = plans.read_repository_registry(plan_dir)
-    metadata = plans.load_plan_metadata(plan_dir)
+    registry = plans_registry.read_repository_registry(plan_dir)
+    metadata = plans_metadata.load_plan_metadata(plan_dir)
     if registry is None:
-        if isinstance(metadata, plans.WorkspacePlanMetadata):
-            raise plans.PlanError(
+        if isinstance(metadata, plans_metadata.WorkspacePlanMetadata):
+            raise plans_errors.PlanError(
                 "legacy plan has incompatible multi-repository workspace metadata"
             )
-        if isinstance(metadata, plans.PlanMetadata) and metadata.cwd != str(cwd):
-            raise plans.PlanError(
+        if isinstance(metadata, plans_metadata.PlanMetadata) and metadata.cwd != str(
+            cwd
+        ):
+            raise plans_errors.PlanError(
                 f"run cwd does not match stored plan metadata: {cwd} != {metadata.cwd}"
             )
         return verification.VerificationContext.legacy(cwd, plan_dir=plan_dir)
@@ -236,20 +245,20 @@ def _resolve_run_verification_context(
     try:
         workspace = workspaces.resolve_workspace(cwd, registry)
     except workspaces.WorkspaceError as error:
-        raise plans.PlanError(f"invalid run workspace: {error}") from error
+        raise plans_errors.PlanError(f"invalid run workspace: {error}") from error
     if metadata is None:
-        raise plans.PlanError(
+        raise plans_errors.PlanError(
             "registered plan has no prepared workspace binding; run prepare first"
         )
-    if not isinstance(metadata, plans.WorkspacePlanMetadata):
-        raise plans.PlanError(
+    if not isinstance(metadata, plans_metadata.WorkspacePlanMetadata):
+        raise plans_errors.PlanError(
             "registered plan has incompatible legacy workspace metadata"
         )
     if (
         metadata.workspace_root != str(workspace.root)
         or metadata.registry_digest != registry.digest
     ):
-        raise plans.PlanError(
+        raise plans_errors.PlanError(
             "run workspace does not match the prepared workspace binding"
         )
     return verification.VerificationContext.resolved_workspace(workspace)
@@ -268,14 +277,14 @@ def _validate_resume_workspace_binding(
             persisted.get(key) is not None
             for key in ("workspace_root", "registry_digest", "repositories")
         ):
-            raise plans.PlanError(
+            raise plans_errors.PlanError(
                 "resume workspace mode does not match the persisted run"
             )
         return
     current = run_prompts._workspace_payload_fields(context)
     for key in ("workspace_root", "registry_digest", "repositories"):
         if persisted.get(key) != current[key]:
-            raise plans.PlanError(
+            raise plans_errors.PlanError(
                 "resume workspace binding does not match the persisted run"
             )
 
@@ -360,7 +369,7 @@ def _run_repository_intent_report(
 
 
 def _apply_repository_registry(
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     *,
     cwd: Path,
 ) -> tuple[repository_registration.RegistrationResult | None, str | None]:
@@ -379,7 +388,7 @@ def _apply_repository_registry(
         result = repository_registration.register_repositories(
             snapshot.plan_dir, cwd=cwd
         )
-    except (plans.PlanError, OSError) as error:
+    except (plans_errors.PlanError, OSError) as error:
         return None, str(error)
     return result, None
 
@@ -390,15 +399,17 @@ def _task_packet_artifact_paths(
     predecessor_id: str | None,
 ) -> tuple[Path, ...]:
     """Every artifact a task packet tells the worker to open and act on."""
-    selected = plans.parse_session_id(session_id)
+    selected = plans_session_ids.parse_session_id(session_id)
     paths = [
         plan_dir / selected.filename,
         plan_dir / selected.expansion_filename,
         plan_dir / "context.md",
-        plan_dir / plans.PROGRESS_FILE_NAME,
+        plan_dir / plans_progress.PROGRESS_FILE_NAME,
     ]
     if predecessor_id is not None:
-        paths.append(plan_dir / plans.parse_session_id(predecessor_id).filename)
+        paths.append(
+            plan_dir / plans_session_ids.parse_session_id(predecessor_id).filename
+        )
     return tuple(paths)
 
 
@@ -430,7 +441,7 @@ def _session_plan_store_state_root_report(
     """
     try:
         contract = contracts.read_completion_contract(plan_dir, session_id)
-    except plans.PlanError:
+    except plans_errors.PlanError:
         # Missing/malformed contracts keep their existing verification gate;
         # this check must not turn a contract-repair turn into a config error.
         return None
@@ -448,7 +459,7 @@ def _session_plan_store_state_root_report(
             # check, including the operator's home-relative spelling.
             if not (value.startswith("/") or value.startswith("~/")):
                 continue
-            required_root = plans.canonicalize_path(value)
+            required_root = plans_files.canonicalize_path(value)
             if not any(
                 workspaces.is_descendant(required_root, root, allow_equal=True)
                 for root in guard_roots
@@ -462,7 +473,7 @@ def _session_plan_store_state_root_report(
         "effective_state_root": str(state.state_root(state_dir_arg)),
         "guard_roots": [str(root) for root in guard_roots],
         "source": (
-            f"{plans.parse_session_id(session_id).filename}"
+            f"{plans_session_ids.parse_session_id(session_id).filename}"
             ":Completion Contract/Done when"
         ),
     }
@@ -517,8 +528,8 @@ def _ensure_legacy_run_metadata(
     """First-bind an unprepared legacy plan without rewriting existing metadata."""
     if context.workspace is not None:
         return
-    if plans.load_plan_metadata(plan_dir) is None:
-        plans.save_plan_metadata(plan_dir, context.root)
+    if plans_metadata.load_plan_metadata(plan_dir) is None:
+        plans_metadata.save_plan_metadata(plan_dir, context.root)
 
 
 def _max_review_fix_cycles(args: argparse.Namespace) -> int:

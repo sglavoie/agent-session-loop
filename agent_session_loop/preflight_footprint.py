@@ -16,16 +16,13 @@ from .contracts import (
     FileExistsCheck,
     RegexInFileCheck,
 )
-from .plans import (
-    PlanError,
-    PlanMetadata,
-    PlanSnapshot,
-    canonicalize_path,
-    inspect_plan,
-    load_plan_metadata,
-    read_repository_registry,
-    read_split_from,
-)
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
+from .plans_metadata import PlanMetadata, load_plan_metadata
+from .plans_models import PlanSnapshot
+from .plans_readiness import read_split_from
+from .plans_registry import read_repository_registry
+from .plans_snapshot import inspect_plan
 from .preflight_models import PreflightFinding, _finding
 from .preflight_session_checks import _check_session_contracts, _read_session_text
 from .repository_intent import RepositoryIntent

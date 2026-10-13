@@ -36,10 +36,10 @@ its own — the fifth extraction in this program that needs none, after
 every collaborator is read at its true owner: the commit-mode, model/effort and
 spark blocks at ``run_selection``, the review output path at
 ``review_session_contract``, the pause classification at ``pause_policy``, the
-snapshot projection at ``plans``, the note lines at ``run_reporting``, the audit
-status line at ``supervisor_audit``, the assurance report lines at
-``assurance_report``, the bounded repository rows at ``workspaces``, and the
-interactive-help attachment at ``task_packet``.
+snapshot projection at ``plans_payloads``, the note lines at
+``run_reporting``, the audit status line at ``supervisor_audit``, the assurance
+report lines at ``assurance_report``, the bounded repository rows at
+``workspaces``, and the interactive-help attachment at ``task_packet``.
 
 Invariants that survive the move:
 
@@ -81,7 +81,12 @@ from . import (
     events,
     harnesses,
     pause_policy,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_metadata,
+    plans_models,
+    plans_payloads,
+    plans_registry,
     responses,
     review_session_contract,
     run_reporting,
@@ -107,13 +112,13 @@ def _error_payload(
     message: str,
     paused: bool,
     cwd: Path | None = None,
-    snapshot: plans.PlanSnapshot | None = None,
+    snapshot: plans_models.PlanSnapshot | None = None,
 ) -> dict[str, Any]:
     try:
         plan_dir = str(
             snapshot.plan_dir
             if snapshot is not None
-            else plans.canonicalize_path(args.plan_dir)
+            else plans_files.canonicalize_path(args.plan_dir)
         )
     except OSError:
         plan_dir = str(args.plan_dir)
@@ -167,16 +172,18 @@ def _error_payload(
         payload["lock_path"] = str(
             state.lock_path_for_plan(snapshot.plan_dir, args.state_dir)
         )
-        payload["initial_snapshot"] = plans.snapshot_payload(snapshot)
-        payload["final_snapshot"] = plans.snapshot_payload(snapshot)
+        payload["initial_snapshot"] = plans_payloads.snapshot_payload(snapshot)
+        payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot)
         try:
-            registry = plans.read_repository_registry(snapshot.plan_dir)
-            metadata = plans.load_plan_metadata(snapshot.plan_dir)
-        except plans.PlanError:
+            registry = plans_registry.read_repository_registry(snapshot.plan_dir)
+            metadata = plans_metadata.load_plan_metadata(snapshot.plan_dir)
+        except plans_errors.PlanError:
             registry = None
             metadata = None
-        if registry is not None and isinstance(metadata, plans.WorkspacePlanMetadata):
-            workspace_root = plans.canonicalize_path(metadata.workspace_root)
+        if registry is not None and isinstance(
+            metadata, plans_metadata.WorkspacePlanMetadata
+        ):
+            workspace_root = plans_files.canonicalize_path(metadata.workspace_root)
             payload.update(
                 {
                     "cwd": str(workspace_root),
@@ -188,7 +195,7 @@ def _error_payload(
                             "path": repository.path,
                             "origin": repository.origin,
                             "resolved_root": str(
-                                plans.canonicalize_path(
+                                plans_files.canonicalize_path(
                                     workspace_root / repository.path
                                 )
                             ),

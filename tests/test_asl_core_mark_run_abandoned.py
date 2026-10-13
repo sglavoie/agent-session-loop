@@ -19,7 +19,7 @@ from unittest import mock
 from agent_session_loop import (
     events,
     harnesses,
-    plans,
+    plans_files,
     state,
     state_abandonment,
     state_assurance_pending,
@@ -92,9 +92,9 @@ class MarkRunAbandonedTests(unittest.TestCase):
             # Shaped like `run_payloads._initial_payload`: the plan directory
             # is a top-level field and the workspace binding lives in
             # `run_config`.
-            payload["plan_dir"] = str(plans.canonicalize_path(self.plan_dir))
+            payload["plan_dir"] = str(plans_files.canonicalize_path(self.plan_dir))
             payload["run_config"] = {
-                "workspace_root": str(plans.canonicalize_path(self.plan_dir)),
+                "workspace_root": str(plans_files.canonicalize_path(self.plan_dir)),
                 **run_config,
             }
         self.state_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -104,7 +104,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
             "version": 1,
             "owner": "agent-session-loop",
             "pid": pid,
-            "plan_dir": str(plans.canonicalize_path(self.plan_dir)),
+            "plan_dir": str(plans_files.canonicalize_path(self.plan_dir)),
             "created_at": "2026-06-19T12:00:00+00:00",
         }
         if hostname is not None:
@@ -511,10 +511,10 @@ class MarkRunAbandonedTests(unittest.TestCase):
         # next run of this plan overwrites the `state.json` it came from.
         self.assertEqual("codex", record["run_config"]["audit_harness"])
         self.assertEqual(
-            str(plans.canonicalize_path(self.plan_dir)), record["plan_dir"]
+            str(plans_files.canonicalize_path(self.plan_dir)), record["plan_dir"]
         )
         self.assertEqual(
-            str(plans.canonicalize_path(self.plan_dir)), record["workspace_root"]
+            str(plans_files.canonicalize_path(self.plan_dir)), record["workspace_root"]
         )
 
         persisted = self.persisted_state()

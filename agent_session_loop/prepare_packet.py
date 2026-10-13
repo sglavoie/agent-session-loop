@@ -9,8 +9,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import plans, workspaces
-from .plans import PlanError, SessionId, canonicalize_path, parse_session_id
+from . import plans_registry, plans_session_scope, workspaces
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
+from .plans_session_ids import SessionId, parse_session_id
 from .prepare_models import (
     CLAIM_TYPES,
     DEFAULT_VALIDATION_BATCH_SIZE,
@@ -299,7 +301,7 @@ def build_validation_packet(
     if not ordered:
         raise PlanError("validation packet requires at least one session id")
 
-    registry = plans.read_repository_registry(canonical_dir)
+    registry = plans_registry.read_repository_registry(canonical_dir)
     resolved_repositories: tuple[ValidatorRepository, ...] = ()
     repositories_by_alias: dict[str, ValidatorRepository] = {}
     packet_version = LEGACY_PREPARE_VALIDATION_VERSION
@@ -328,7 +330,7 @@ def build_validation_packet(
         session_paths.append(str(session_path))
         if registry is not None:
             try:
-                scope = plans.parse_session_scope(
+                scope = plans_session_scope.parse_session_scope(
                     session_path.read_text(encoding="utf-8"), registry.aliases
                 )
             except OSError as error:

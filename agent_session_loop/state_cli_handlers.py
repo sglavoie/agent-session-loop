@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import plans, responses
+from . import plans_errors, plans_files, responses
 from .state import StateError, UnlockResult, lock_path_for_plan, plan_state_dir
 from .state_locks import unlock_plan
 from .state_migration import migrate_plan_state
@@ -24,7 +24,7 @@ def _unlock_payload(
     plan_dir: str | Path,
     state_dir: str | Path | None,
 ) -> dict[str, Any]:
-    canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
     return responses.success_payload(
         "unlock",
         reason="ok",
@@ -40,7 +40,7 @@ def _unlock_payload(
 
 
 def _unlock_error_reason(error: Exception) -> str:
-    if isinstance(error, plans.PlanError):
+    if isinstance(error, plans_errors.PlanError):
         return "malformed-plan"
     if isinstance(error, OSError):
         return "os-error"
@@ -51,12 +51,12 @@ def _unlock_error_reason(error: Exception) -> str:
 
 def _unlock_error_details(args: argparse.Namespace) -> dict[str, Any]:
     try:
-        canonical_plan_dir = plans.canonicalize_path(args.plan_dir)
+        canonical_plan_dir = plans_files.canonicalize_path(args.plan_dir)
         return {
             "plan_dir": str(canonical_plan_dir),
             "lock_path": str(lock_path_for_plan(canonical_plan_dir, args.state_dir)),
         }
-    except plans.PlanError, OSError:
+    except plans_errors.PlanError, OSError:
         return {"plan_dir": str(args.plan_dir)}
 
 
@@ -64,7 +64,7 @@ def unlock_from_args(args: argparse.Namespace) -> int:
     """Remove a plan lock from CLI arguments."""
     try:
         result = unlock_plan(args.plan_dir, args.state_dir, force=args.force)
-    except (plans.PlanError, StateError, OSError) as error:
+    except (plans_errors.PlanError, StateError, OSError) as error:
         if args.json:
             details = _unlock_error_details(args)
             responses.print_json(
@@ -124,7 +124,7 @@ def _print_migration_report(report: MigrationReport) -> None:
 def _migrate_state_error_reason(error: Exception) -> str:
     if isinstance(error, MigrationError):
         return error.reason
-    if isinstance(error, plans.PlanError):
+    if isinstance(error, plans_errors.PlanError):
         return "malformed-plan"
     if isinstance(error, OSError):
         return "os-error"
@@ -141,7 +141,7 @@ def migrate_state_from_args(args: argparse.Namespace) -> int:
             state_dir=getattr(args, "state_dir", None),
             apply=args.apply,
         )
-    except (MigrationError, plans.PlanError, StateError, OSError) as error:
+    except (MigrationError, plans_errors.PlanError, StateError, OSError) as error:
         if getattr(args, "json", False):
             responses.print_json(
                 responses.error_payload(

@@ -16,10 +16,11 @@ import json
 import unittest
 
 from agent_session_loop import assurance_models as models
-from agent_session_loop import contracts, plans, preflight_cli
+from agent_session_loop import contracts, plans_models, plans_readiness, preflight_cli
 from agent_session_loop.assurance_models import AssuranceError
 from agent_session_loop.literals import as_literal, as_optional_literal
-from agent_session_loop.plans import PlanError, parse_session_id
+from agent_session_loop.plans_errors import PlanError
+from agent_session_loop.plans_session_ids import parse_session_id
 
 
 class AlwaysEqual:
@@ -226,13 +227,13 @@ class ParseBoundaryTests(unittest.TestCase):
             contracts.parse_completion_contract(text, session_id=parse_session_id("1"))
 
     def test_an_unpermitted_readiness_state_raises_a_plan_error(self) -> None:
-        for state in plans.READINESS_STATES:
+        for state in plans_models.READINESS_STATES:
             with self.subTest(state=state):
-                parsed = plans.parse_readiness_state(f"  {state.upper()} ")
+                parsed = plans_readiness.parse_readiness_state(f"  {state.upper()} ")
                 self.assertEqual(parsed, state)
 
         with self.assertRaisesRegex(PlanError, "readiness state must be one of"):
-            plans.parse_readiness_state("almost-ready")
+            plans_readiness.parse_readiness_state("almost-ready")
 
     def test_an_unpermitted_preflight_commit_mode_is_refused(self) -> None:
         """The optional form's own boundary, one frame in from ``argparse``.

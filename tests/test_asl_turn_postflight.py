@@ -43,7 +43,9 @@ from agent_session_loop import (
     events,
     handoff_guards,
     harnesses,
-    plans,
+    plans_models,
+    plans_payloads,
+    plans_snapshot,
     run_loop_context,
     turn_postflight,
     workspace_evidence,
@@ -112,7 +114,7 @@ class FakeRunContext:
         self.event_path = event_path
         self.payload: dict[str, Any] = {"run_id": RUN_ID}
         self.persistence = RecordingPersistence()
-        self.plan_cache = plans.PlanSnapshotCache()
+        self.plan_cache = plans_snapshot.PlanSnapshotCache()
         self.guard_controller = mock.Mock()
         self.session_attempts = continuation_guards.SessionAttempts()
         self.pauses: list[dict[str, Any]] = []
@@ -221,7 +223,7 @@ class PostflightTestCase(unittest.TestCase):
         self.event_path = self.run_dir / events.EVENTS_FILE_NAME
         self.ctx = FakeRunContext(run_dir=self.run_dir, event_path=self.event_path)
         write_plan(self.plan_dir, ("pending",))
-        self.before = plans.inspect_plan(self.plan_dir)
+        self.before = plans_snapshot.inspect_plan(self.plan_dir)
         self.recorder = GuardRecorder()
 
     def paths(self) -> dict[str, Path]:
@@ -253,7 +255,7 @@ class PostflightTestCase(unittest.TestCase):
         review_fingerprint_before: dict[str, Any] | None = None,
         is_review_session: bool = False,
         turn_payload: dict[str, Any] | None = None,
-        after: plans.PlanSnapshot | None = None,
+        after: plans_models.PlanSnapshot | None = None,
     ) -> turn_postflight.PostTurnGuards:
         with self.recorder.patched():
             return turn_postflight.enforce_post_turn_guards(
@@ -735,7 +737,8 @@ class ReviewBaseProjectionTests(PostflightTestCase):
         self.workspace_turn(is_review_session=True, after=None)
 
         self.assertEqual(
-            plans.snapshot_payload(self.before), self.ctx.payload["final_snapshot"]
+            plans_payloads.snapshot_payload(self.before),
+            self.ctx.payload["final_snapshot"],
         )
 
 

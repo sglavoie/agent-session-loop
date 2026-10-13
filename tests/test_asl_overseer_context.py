@@ -57,7 +57,7 @@ from agent_session_loop import (
     overseer_discovery,
     overseer_policy_client,
     overseer_store,
-    plans,
+    plans_files,
     state,
 )
 
@@ -100,14 +100,14 @@ class _Plan:
     def __init__(self, case: unittest.TestCase) -> None:
         tmp = tempfile.TemporaryDirectory()
         case.addCleanup(tmp.cleanup)
-        # `plans.canonicalize_path` resolves the macOS `/var` symlink and the
+        # `plans_files.canonicalize_path` resolves the macOS `/var` symlink and the
         # state directory name is a hash of the canonical path, so the fixture
         # has to agree with it before anything is written.
-        self.root = plans.canonicalize_path(tmp.name)
+        self.root = plans_files.canonicalize_path(tmp.name)
         self.state_root = self.root / "state"
         self.plan_dir = self.root / "plans" / "plan-alpha"
         self.plan_dir.mkdir(parents=True)
-        self.plan_dir = plans.canonicalize_path(self.plan_dir)
+        self.plan_dir = plans_files.canonicalize_path(self.plan_dir)
         self.run_id = "run-1"
         self.now = EPOCH
         self.ledger = overseer_store.open_ledger(

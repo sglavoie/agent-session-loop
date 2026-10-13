@@ -14,7 +14,10 @@ from unittest import mock
 from agent_session_loop import (
     cli,
     events,
-    plans,
+    plans_metadata,
+    plans_registry,
+    plans_session_scope,
+    plans_snapshot,
     repository_evidence,
     scope_recovery,
     state,
@@ -48,10 +51,12 @@ class RefRecoveryTests(unittest.TestCase):
                 "**Writes repositories**: scripts", "**Writes repositories**: (none)"
             )
         )
-        registry = plans.read_repository_registry(self.plan)
+        registry = plans_registry.read_repository_registry(self.plan)
         assert registry is not None
         self.resolved = workspaces.resolve_workspace(self.workspace, registry)
-        plans.save_workspace_plan_metadata(self.plan, self.workspace, registry.digest)
+        plans_metadata.save_workspace_plan_metadata(
+            self.plan, self.workspace, registry.digest
+        )
         self.state_dir = self.root / "state"
         self.event_path = (
             state.plan_state_dir(self.plan, self.state_dir) / events.EVENTS_FILE_NAME
@@ -76,7 +81,7 @@ class RefRecoveryTests(unittest.TestCase):
         after = self.capture()
         self.guard = workspace_evidence._workspace_write_guard_evidence(
             workspace=self.resolved,
-            scope=plans.SessionScope(reads=("scripts",), writes=()),
+            scope=plans_session_scope.SessionScope(reads=("scripts",), writes=()),
             comparison=repository_evidence.compare_workspace_snapshots(before, after),
             exclude=(),
             include_ignored=False,
@@ -141,7 +146,7 @@ class RefRecoveryTests(unittest.TestCase):
         self.assertTrue(accepted["accepted"])
         self.assertIsNone(self.retained())
         self.assertEqual(session_before, self.session.read_bytes())
-        self.assertEqual("1", plans.inspect_plan(self.plan).next_pending.id)
+        self.assertEqual("1", plans_snapshot.inspect_plan(self.plan).next_pending.id)
         self.assertEqual(
             self.new, git_stdout(self.repo, "rev-parse", "refs/remotes/origin/main")
         )
@@ -252,9 +257,11 @@ class RefRecoveryTests(unittest.TestCase):
         git_stdout(
             self.repo, "remote", "set-url", "origin", "git@github.com:example/other.git"
         )
-        registry = plans.read_repository_registry(self.plan)
+        registry = plans_registry.read_repository_registry(self.plan)
         assert registry is not None
-        plans.save_workspace_plan_metadata(self.plan, self.workspace, registry.digest)
+        plans_metadata.save_workspace_plan_metadata(
+            self.plan, self.workspace, registry.digest
+        )
         code, result = self.invoke()
         self.assertEqual(1, code, result)
         self.assertIn("original run workspace binding", result["error"])
@@ -328,9 +335,11 @@ class ExternalRecoveryTests(unittest.TestCase):
                 "**Writes repositories**: notes, pi", "**Writes repositories**: notes"
             )
         )
-        registry = plans.read_repository_registry(self.plan)
+        registry = plans_registry.read_repository_registry(self.plan)
         self.resolved = workspaces.resolve_workspace(self.workspace, registry)
-        plans.save_workspace_plan_metadata(self.plan, self.workspace, registry.digest)
+        plans_metadata.save_workspace_plan_metadata(
+            self.plan, self.workspace, registry.digest
+        )
         self.state_dir = self.root / "state"
         self.event_path = (
             state.plan_state_dir(self.plan, self.state_dir) / events.EVENTS_FILE_NAME
@@ -371,7 +380,7 @@ class ExternalRecoveryTests(unittest.TestCase):
         self.after = self.capture()
         self.guard = workspace_evidence._workspace_write_guard_evidence(
             workspace=self.resolved,
-            scope=plans.SessionScope(reads=("notes",), writes=("notes",)),
+            scope=plans_session_scope.SessionScope(reads=("notes",), writes=("notes",)),
             comparison=repository_evidence.compare_workspace_snapshots(
                 self.before, self.after
             ),
@@ -445,7 +454,7 @@ class ExternalRecoveryTests(unittest.TestCase):
         self.assertEqual(before["pi"], self.capture()["pi"])
         self.assertEqual("", git_stdout(self.repos["notes"], "status", "--porcelain"))
         self.assertTrue(self.linked.exists())
-        self.assertEqual("1", plans.inspect_plan(self.plan).next_pending.id)
+        self.assertEqual("1", plans_snapshot.inspect_plan(self.plan).next_pending.id)
         self.assertIsNone(
             workspace_evidence._latest_workspace_scope_repair_requirement(
                 self.event_path, "1"
@@ -545,14 +554,16 @@ class ExternalRecoveryTests(unittest.TestCase):
         git_stdout(self.repos["notes"], "add", "README.md")
         git_stdout(self.repos["notes"], "commit", "-m", "manual checkpoint")
         context = verification.VerificationContext.resolved_workspace(self.resolved)
-        snapshot = plans.inspect_plan(self.plan)
+        snapshot = plans_snapshot.inspect_plan(self.plan)
         self.assertEqual(
             (),
             preflight_environment._check_registered_env_git(
                 context, "per-session", snapshot
             ),
         )
-        needed = plans.needed_repository_aliases(snapshot, self.resolved.registry)
+        needed = plans_session_scope.needed_repository_aliases(
+            snapshot, self.resolved.registry
+        )
         review_guard._validate_commit_preflight(
             self.workspace, verification_context=context, needed_aliases=needed
         )
@@ -578,7 +589,7 @@ class ExternalRecoveryTests(unittest.TestCase):
                 "**Reads repositories**: notes", "**Reads repositories**: notes, pi"
             )
         )
-        snapshot = plans.inspect_plan(self.plan)
+        snapshot = plans_snapshot.inspect_plan(self.plan)
         # A dirty tree the session only reads is inspected, reported green, and
         # never refused: its commit stages write aliases only.
         findings = preflight_environment._check_registered_env_git(
@@ -589,10 +600,10 @@ class ExternalRecoveryTests(unittest.TestCase):
         result = review_guard._validate_commit_preflight(
             self.workspace,
             verification_context=context,
-            needed_aliases=plans.needed_repository_aliases(
+            needed_aliases=plans_session_scope.needed_repository_aliases(
                 snapshot, self.resolved.registry
             ),
-            clean_aliases=plans.commit_repository_aliases(
+            clean_aliases=plans_session_scope.commit_repository_aliases(
                 snapshot, self.resolved.registry
             ),
         )
@@ -606,7 +617,7 @@ class ExternalRecoveryTests(unittest.TestCase):
                 "**Writes repositories**: notes", "**Writes repositories**: notes, pi"
             )
         )
-        snapshot = plans.inspect_plan(self.plan)
+        snapshot = plans_snapshot.inspect_plan(self.plan)
         self.assertEqual(
             ["yellow"],
             [
@@ -620,10 +631,10 @@ class ExternalRecoveryTests(unittest.TestCase):
             review_guard._validate_commit_preflight(
                 self.workspace,
                 verification_context=context,
-                needed_aliases=plans.needed_repository_aliases(
+                needed_aliases=plans_session_scope.needed_repository_aliases(
                     snapshot, self.resolved.registry
                 ),
-                clean_aliases=plans.commit_repository_aliases(
+                clean_aliases=plans_session_scope.commit_repository_aliases(
                     snapshot, self.resolved.registry
                 ),
             )
@@ -631,7 +642,9 @@ class ExternalRecoveryTests(unittest.TestCase):
     def test_dirty_read_only_tree_convicts_only_turn_writes(self):
         # The write guard judges the turn's own delta, so dirt a read-only tree
         # already carried at turn start is what the commit gate may now allow.
-        scope = plans.SessionScope(reads=("notes", "pi"), writes=("notes",))
+        scope = plans_session_scope.SessionScope(
+            reads=("notes", "pi"), writes=("notes",)
+        )
 
         def verdict(before, after):
             return workspace_evidence._workspace_write_guard_evidence(
@@ -670,7 +683,9 @@ class ExternalRecoveryTests(unittest.TestCase):
                 external_change_aliases=aliases,
             )
 
-        read_pi = plans.SessionScope(reads=("notes", "pi"), writes=("notes",))
+        read_pi = plans_session_scope.SessionScope(
+            reads=("notes", "pi"), writes=("notes",)
+        )
         strict = verdict(read_pi, frozenset())
         self.assertFalse(strict["passed"])
         allowed = verdict(read_pi, frozenset({"pi"}))
@@ -678,7 +693,9 @@ class ExternalRecoveryTests(unittest.TestCase):
         self.assertEqual(["notes"], allowed["authorized_aliases"])
         self.assertEqual({"pi": ["pi:independent.txt"]}, allowed["external_changes"])
         # A session that writes the alias owns its changes as before.
-        write_pi = plans.SessionScope(reads=("notes", "pi"), writes=("notes", "pi"))
+        write_pi = plans_session_scope.SessionScope(
+            reads=("notes", "pi"), writes=("notes", "pi")
+        )
         owned = verdict(write_pi, frozenset({"pi"}))
         self.assertTrue(owned["passed"])
         self.assertNotIn("external_changes", owned)
@@ -725,7 +742,7 @@ class ExternalRecoveryTests(unittest.TestCase):
         self.after = self.capture()
         self.guard = workspace_evidence._workspace_write_guard_evidence(
             workspace=self.resolved,
-            scope=plans.SessionScope(reads=("notes",), writes=("notes",)),
+            scope=plans_session_scope.SessionScope(reads=("notes",), writes=("notes",)),
             comparison=repository_evidence.compare_workspace_snapshots(
                 self.before, self.after
             ),
@@ -879,7 +896,7 @@ class RecoveryJournalIncidentTests(unittest.TestCase):
     def test_status_fallback_does_not_project_a_finished_journal(self) -> None:
         self.journal(guard=self.guard_9, run_id="run-9", complete=True)
         payload = state_status.status_payload(
-            plans.inspect_plan(self.plan_dir), self.state_dir
+            plans_snapshot.inspect_plan(self.plan_dir), self.state_dir
         )
         recovery = payload["external_change_recovery"]
         self.assertNotIn("progress", recovery)
@@ -888,13 +905,13 @@ class RecoveryJournalIncidentTests(unittest.TestCase):
     def test_status_fallback_still_projects_an_unfinished_recovery(self) -> None:
         self.journal(guard=self.guard_9, run_id="run-9", complete=False)
         payload = state_status.status_payload(
-            plans.inspect_plan(self.plan_dir), self.state_dir
+            plans_snapshot.inspect_plan(self.plan_dir), self.state_dir
         )
         self.assertFalse(payload["external_change_recovery"]["progress"]["complete"])
 
     def test_status_without_a_journal_reports_no_recovery(self) -> None:
         payload = state_status.status_payload(
-            plans.inspect_plan(self.plan_dir), self.state_dir
+            plans_snapshot.inspect_plan(self.plan_dir), self.state_dir
         )
         self.assertIsNone(payload["external_change_recovery"])
 
@@ -916,7 +933,7 @@ class ExternalChangeCommitTargetTests(unittest.TestCase):
         repos = init_multi_repo_workspace(workspace, specs)
         plan = root / "plan"
         write_multi_repo_plan(plan, ("pending",), specs=specs)
-        registry = plans.read_repository_registry(plan)
+        registry = plans_registry.read_repository_registry(plan)
         resolved = workspaces.resolve_workspace(workspace, registry)
 
         def capture():
@@ -929,7 +946,9 @@ class ExternalChangeCommitTargetTests(unittest.TestCase):
         (repos["pi"] / "independent.txt").write_text("someone else\n")
         guard = workspace_evidence._workspace_write_guard_evidence(
             workspace=resolved,
-            scope=plans.SessionScope(reads=("notes", "pi"), writes=("notes",)),
+            scope=plans_session_scope.SessionScope(
+                reads=("notes", "pi"), writes=("notes",)
+            ),
             comparison=repository_evidence.compare_workspace_snapshots(
                 before, capture()
             ),

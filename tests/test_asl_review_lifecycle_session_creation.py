@@ -6,7 +6,12 @@ import json
 
 from agent_session_loop import (
     config,
-    plans,
+    plans_content_hash,
+    plans_files,
+    plans_models,
+    plans_payloads,
+    plans_progress,
+    plans_readiness,
     review_session_contract,
 )
 from tests.review_lifecycle_base import RunReviewHarnessLifecycleBase
@@ -42,9 +47,11 @@ class RunReviewSessionCreationTests(RunReviewHarnessLifecycleBase):
         # Both impl and review turns ran with the right kind tag.
         turns = payload["turns"]
         self.assertEqual(2, len(turns))
-        self.assertEqual(plans.SESSION_KIND_IMPLEMENTATION, turns[0]["session_kind"])
+        self.assertEqual(
+            plans_payloads.SESSION_KIND_IMPLEMENTATION, turns[0]["session_kind"]
+        )
         self.assertEqual("codex", turns[0]["harness"])
-        self.assertEqual(plans.SESSION_KIND_REVIEW, turns[1]["session_kind"])
+        self.assertEqual(plans_payloads.SESSION_KIND_REVIEW, turns[1]["session_kind"])
         self.assertEqual("claude", turns[1]["harness"])
         self.assertEqual(1, turns[0]["total_sessions"])
         self.assertEqual(2, turns[1]["total_sessions"])
@@ -141,7 +148,9 @@ class RunReviewSessionCreationTests(RunReviewHarnessLifecycleBase):
         self.assertEqual("2", payload["review_session_id"])
         # Only the review turn should have executed.
         self.assertEqual(1, len(payload["turns"]))
-        self.assertEqual(plans.SESSION_KIND_REVIEW, payload["turns"][0]["session_kind"])
+        self.assertEqual(
+            plans_payloads.SESSION_KIND_REVIEW, payload["turns"][0]["session_kind"]
+        )
         self.assertEqual("claude", payload["turns"][0]["harness"])
         # Initial readiness was 'complete'; after appending a review session
         # the readiness was switched to 'running' and then finalized to
@@ -162,11 +171,13 @@ class RunReviewSessionCreationTests(RunReviewHarnessLifecycleBase):
             encoding="utf-8",
         )
         self._precreate_final_review()
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
@@ -199,7 +210,7 @@ class RunReviewSessionCreationTests(RunReviewHarnessLifecycleBase):
         assert payload is not None
         review_path = self.plan_dir / "session-2.md"
         self.assertEqual(
-            [str(plans.canonicalize_path(review_path))],
+            [str(plans_files.canonicalize_path(review_path))],
             payload["normalized_review_handoffs"],
         )
         self.assertIn(
@@ -217,7 +228,7 @@ class RunReviewSessionCreationTests(RunReviewHarnessLifecycleBase):
         self._write_plan(("complete",), readiness="complete")
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
         self._precreate_final_review()
-        progress_file = plans.progress_path(self.plan_dir)
+        progress_file = plans_progress.progress_path(self.plan_dir)
         self.assertTrue(progress_file.exists())
         progress_file.unlink()
 
@@ -244,7 +255,7 @@ class RunReviewSessionCreationTests(RunReviewHarnessLifecycleBase):
         self.assertEqual(["progress-journal-missing"], categories)
         # Final on-disk readiness is `complete` (the lifecycle finishes
         # writing it after the review session completes).
-        metadata = plans.read_readiness_metadata(self.plan_dir)
+        metadata = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertEqual("complete", metadata.state)
 
     def test_complete_plan_review_harness_repairs_sha_keeps_complete_readiness(
@@ -282,7 +293,7 @@ class RunReviewSessionCreationTests(RunReviewHarnessLifecycleBase):
         # whole point of the review-only complete start branch in
         # `readiness_gate._repair_readiness_gate`.
         self.assertEqual("complete", repair["target_state"])
-        metadata = plans.read_readiness_metadata(self.plan_dir)
+        metadata = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertEqual("complete", metadata.state)
         self.assertNotEqual("0" * 64, metadata.readiness_sha256)
 
@@ -294,10 +305,10 @@ class RunReviewSessionCreationTests(RunReviewHarnessLifecycleBase):
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
         review_session = self._write_pending_review_session()
         # The readiness SHA must reflect the plan including the review session.
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -315,15 +326,17 @@ class RunReviewSessionCreationTests(RunReviewHarnessLifecycleBase):
         self.assertEqual(review_session.session_id.value, payload["review_session_id"])
         # Only the existing review session needed to run.
         self.assertEqual(1, len(payload["turns"]))
-        self.assertEqual(plans.SESSION_KIND_REVIEW, payload["turns"][0]["session_kind"])
+        self.assertEqual(
+            plans_payloads.SESSION_KIND_REVIEW, payload["turns"][0]["session_kind"]
+        )
 
     def test_pending_review_session_without_review_harness_pauses(self) -> None:
         self._write_plan(("complete",), readiness=None)
         self._write_pending_review_session()
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -356,7 +369,7 @@ class RunReviewSessionCreationTests(RunReviewHarnessLifecycleBase):
         # review session could be appended.
         self.assertEqual(1, len(payload["turns"]))
         self.assertEqual(
-            plans.SESSION_KIND_IMPLEMENTATION,
+            plans_payloads.SESSION_KIND_IMPLEMENTATION,
             payload["turns"][0]["session_kind"],
         )
         # No review session file should have been created.

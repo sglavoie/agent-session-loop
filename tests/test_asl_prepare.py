@@ -10,7 +10,8 @@ from pathlib import Path
 
 from agent_session_loop import (
     authoring,
-    plans,
+    plans_errors,
+    plans_metadata,
     prepare_expand_ingest,
     prepare_models,
     prepare_packet,
@@ -67,7 +68,7 @@ class PrepareValidatorPayloadTests(PrepareValidatorFixtures):
     def test_rejects_wrong_version(self) -> None:
         payload = _validator_payload()
         payload["version"] = 99
-        with self.assertRaisesRegex(plans.PlanError, "unsupported version"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "unsupported version"):
             prepare_parsing.parse_validator_output(payload)
 
     def test_v2_requires_repo_attribution_on_every_finding_kind(self) -> None:
@@ -84,7 +85,7 @@ class PrepareValidatorPayloadTests(PrepareValidatorFixtures):
             ],
             "sessions": _validator_payload()["sessions"],
         }
-        with self.assertRaisesRegex(plans.PlanError, "claim #1 'repo'"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "claim #1 'repo'"):
             prepare_parsing.parse_validator_output(payload)
 
     def test_registered_packet_contains_exact_roots_and_declared_reads(self) -> None:
@@ -142,8 +143,8 @@ class PrepareValidatorPayloadTests(PrepareValidatorFixtures):
                 plan_dir, payload, expanded="2026-08-08"
             )
 
-            metadata = plans.load_plan_metadata(plan_dir)
-            self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
+            metadata = plans_metadata.load_plan_metadata(plan_dir)
+            self.assertIsInstance(metadata, plans_metadata.WorkspacePlanMetadata)
             self.assertEqual(("1",), result.batch_session_ids)
             expansion = (plan_dir / "session-1.expand.md").read_text(encoding="utf-8")
             self.assertIn("**Workspace root**", expansion)
@@ -231,7 +232,7 @@ class PrepareValidatorPayloadTests(PrepareValidatorFixtures):
                     if path.is_file()
                 }
 
-                with self.assertRaises(plans.PlanError):
+                with self.assertRaises(plans_errors.PlanError):
                     prepare_expand_ingest.ingest_expand_batch(plan_dir, payload)
 
                 after = {
@@ -255,7 +256,9 @@ class PrepareValidatorPayloadTests(PrepareValidatorFixtures):
                 if path.is_file()
             }
 
-            with self.assertRaisesRegex(plans.PlanError, "require validator output"):
+            with self.assertRaisesRegex(
+                plans_errors.PlanError, "require validator output"
+            ):
                 prepare_expand_ingest.ingest_expand_batch(
                     plan_dir, _validator_payload()
                 )
@@ -298,7 +301,7 @@ class PrepareValidatorPayloadTests(PrepareValidatorFixtures):
                 if path.is_file()
             }
 
-            with self.assertRaisesRegex(plans.PlanError, "Before starting"):
+            with self.assertRaisesRegex(plans_errors.PlanError, "Before starting"):
                 prepare_expand_ingest.ingest_expand_batch(plan_dir, payload)
 
             after = {
@@ -307,32 +310,34 @@ class PrepareValidatorPayloadTests(PrepareValidatorFixtures):
                 if path.is_file()
             }
             self.assertEqual(before, after)
-            self.assertFalse((plan_dir / plans.PLAN_METADATA_FILE_NAME).exists())
+            self.assertFalse(
+                (plan_dir / plans_metadata.PLAN_METADATA_FILE_NAME).exists()
+            )
 
     def test_rejects_unknown_top_level_keys(self) -> None:
         payload = _validator_payload()
         payload["extra"] = True
-        with self.assertRaisesRegex(plans.PlanError, "unknown keys: extra"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "unknown keys: extra"):
             prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_empty_or_missing_sessions(self) -> None:
         payload = _validator_payload()
         payload["sessions"] = []
-        with self.assertRaisesRegex(plans.PlanError, "'sessions'"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "'sessions'"):
             prepare_parsing.parse_validator_output(payload)
         del payload["sessions"]
-        with self.assertRaisesRegex(plans.PlanError, "'sessions'"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "'sessions'"):
             prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_duplicate_session_ids(self) -> None:
         payload = _validator_payload()
         payload["sessions"] = [payload["sessions"][0], payload["sessions"][0]]
-        with self.assertRaisesRegex(plans.PlanError, "duplicate session id"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "duplicate session id"):
             prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_invalid_session_id(self) -> None:
         payload = _validator_payload(session_id="01")
-        with self.assertRaisesRegex(plans.PlanError, "session_id"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "session_id"):
             prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_unknown_claim_type(self) -> None:
@@ -347,14 +352,14 @@ class PrepareValidatorPayloadTests(PrepareValidatorFixtures):
                 }
             ]
         )
-        with self.assertRaisesRegex(plans.PlanError, "claim_type"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "claim_type"):
             prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_claim_missing_location(self) -> None:
         payload = _validator_payload(
             claims=[{"claim": "x", "claim_type": "P", "line": 1}]
         )
-        with self.assertRaisesRegex(plans.PlanError, "location"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "location"):
             prepare_parsing.parse_validator_output(payload)
 
     def test_to_be_created_claim_drops_a_supplied_line(self) -> None:

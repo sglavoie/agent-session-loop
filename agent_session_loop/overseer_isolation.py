@@ -60,7 +60,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from . import plans, run_contention, session_overview, state, state_locks
+from . import plans_files, run_contention, session_overview, state, state_locks
 
 __all__ = [
     "ACCESS_MUTATION",
@@ -156,7 +156,7 @@ class Authorization:
         if not self.request_digest:
             return False
         try:
-            return plans.canonicalize_path(self.plan_dir) == canonical_plan_dir
+            return plans_files.canonicalize_path(self.plan_dir) == canonical_plan_dir
         except OSError, ValueError:
             return False
 
@@ -238,7 +238,7 @@ def observe_contention(
     not disturb the corpus is not to walk it.
     """
     claimed = run_contention.canonical_roots(repository_roots)
-    canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
     if not claimed:
         return Observation(
             plan_dir=canonical_plan_dir,
@@ -382,7 +382,7 @@ def recover_stale_lock(
     calling again, never by forcing.
     """
     try:
-        canonical_plan_dir = plans.canonicalize_path(plan_dir)
+        canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
     except (OSError, ValueError) as error:
         return Recovery(
             plan_dir=Path(str(plan_dir)),

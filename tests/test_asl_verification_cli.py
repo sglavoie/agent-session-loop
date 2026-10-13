@@ -10,11 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import (
-    artifacts,
-    plans,
-    verification,
-)
+from agent_session_loop import artifacts, plans_files, verification
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
@@ -77,7 +73,9 @@ class VerifyCliTests(unittest.TestCase):
             self.assertEqual("verify", payload["command"])
             self.assertEqual("ok", payload["reason"])
             self.assertEqual("1", payload["session"])
-            self.assertEqual(str(plans.canonicalize_path(repo_root)), payload["cwd"])
+            self.assertEqual(
+                str(plans_files.canonicalize_path(repo_root)), payload["cwd"]
+            )
             self.assertEqual(str(plan_dir), payload["plan_dir"])
             self.assertEqual(1, payload["recipe"]["check_count"])
             self.assertEqual(1, payload["recipe"]["gate_count"])

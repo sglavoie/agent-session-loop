@@ -18,7 +18,9 @@ from agent_session_loop import (
     mailbox_cursors,
     mailbox_leases,
     mailbox_vocabulary,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_snapshot,
     state,
     state_locks,
     state_status,
@@ -55,7 +57,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             ]
         )
 
-        with self.assertRaisesRegex(plans.PlanError, "duplicated"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "duplicated"):
             contracts.parse_completion_contract(text, session_id="1")
 
     def test_parse_completion_contract_reads_parallel_flag(self) -> None:
@@ -70,7 +72,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
         for literal in ('"true"', "1", "null", "[]"):
             with (
                 self.subTest(parallel=literal),
-                self.assertRaisesRegex(plans.PlanError, "'parallel' must be a boolean"),
+                self.assertRaisesRegex(
+                    plans_errors.PlanError, "'parallel' must be a boolean"
+                ),
             ):
                 contracts.parse_completion_contract(
                     self._parallel_contract_text(literal), session_id="1"
@@ -195,7 +199,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
         for payload, message in invalid_recipes:
             with (
                 self.subTest(message=message),
-                self.assertRaisesRegex(plans.PlanError, message),
+                self.assertRaisesRegex(plans_errors.PlanError, message),
             ):
                 authoring.contract_from_payload("1", ["something"], payload)
 
@@ -218,7 +222,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             ]
         )
 
-        with self.assertRaisesRegex(plans.PlanError, "Verify JSON is invalid"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "Verify JSON is invalid"):
             contracts.parse_completion_contract(text, session_id="1")
 
     def test_parse_completion_contract_ignores_handoff_section_content(self) -> None:
@@ -287,7 +291,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             plan_dir = Path(tmp) / "plan"
             write_plan(plan_dir, ("pending",))
 
-            with self.assertRaisesRegex(plans.PlanError, "missing session file"):
+            with self.assertRaisesRegex(plans_errors.PlanError, "missing session file"):
                 contracts.read_completion_contract(plan_dir, "9")
 
     def test_acquire_lock_rejects_active_lock_and_replaces_stale_lock(self) -> None:
@@ -306,7 +310,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             lock_path.write_text(
                 json.dumps(
-                    {"pid": 0, "plan_dir": str(plans.canonicalize_path(plan_dir))}
+                    {"pid": 0, "plan_dir": str(plans_files.canonicalize_path(plan_dir))}
                 ),
                 encoding="utf-8",
             )
@@ -321,7 +325,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             write_plan(plan_dir, ("pending",))
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             self.assertTrue(payload["state_path"].endswith("/state.json"))
@@ -344,7 +348,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             plan_state = state.plan_state_dir(plan_dir, state_dir)
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             status = payload["mailbox"]
@@ -392,7 +396,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             lease_before = lease_path.read_bytes()
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             status = payload["mailbox"]
@@ -440,7 +444,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             [entry] = payload["mailbox"]["guidance"]

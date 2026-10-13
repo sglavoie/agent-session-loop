@@ -23,7 +23,7 @@ from agent_session_loop import (
     cli,
     events,
     install_verify,
-    plans,
+    plans_files,
     state,
     state_locks,
 )
@@ -38,7 +38,7 @@ class PairingTestBase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.tmp_path = plans.canonicalize_path(self._tmp.name)
+        self.tmp_path = plans_files.canonicalize_path(self._tmp.name)
         self.state_dir = self.tmp_path / "state"
         self.state_dir.mkdir(parents=True)
 
@@ -59,7 +59,7 @@ class PairingTestBase(unittest.TestCase):
         a JSON object. ``locked`` takes a real lock held by this live process,
         which is the only honest way to produce an active run.
         """
-        plan_dir = plans.canonicalize_path(self.tmp_path / "plans" / name)
+        plan_dir = plans_files.canonicalize_path(self.tmp_path / "plans" / name)
         write_plan(plan_dir, ("pending",))
         plan_state = state.plan_state_dir(plan_dir, self.state_dir)
         plan_state.mkdir(parents=True, exist_ok=True)
@@ -245,7 +245,7 @@ class PairingClassificationTests(PairingTestBase):
         )
 
     def test_state_directory_without_a_record_is_empty(self) -> None:
-        plan_dir = plans.canonicalize_path(self.tmp_path / "plans" / "bare")
+        plan_dir = plans_files.canonicalize_path(self.tmp_path / "plans" / "bare")
         state.plan_state_dir(plan_dir, self.state_dir).mkdir(parents=True)
         report = self._survey()
         self.assertTrue(report["ok"])

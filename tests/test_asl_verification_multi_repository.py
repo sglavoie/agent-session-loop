@@ -7,11 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import (
-    contracts,
-    plans,
-    verification,
-)
+from agent_session_loop import contracts, plans_errors, plans_session_ids, verification
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     init_multi_repo_workspace,
@@ -32,7 +28,7 @@ class MultiRepositoryVerificationTests(unittest.TestCase):
             nested = repositories["OAK"] / "nested"
             nested.mkdir()
             contract = contracts.CompletionContract(
-                session_id=plans.parse_session_id("1"),
+                session_id=plans_session_ids.parse_session_id("1"),
                 done_when=("done",),
                 verify=contracts.VerifyRecipe(
                     checks=(
@@ -94,7 +90,7 @@ class MultiRepositoryVerificationTests(unittest.TestCase):
                 name="escape", path="../outside", repo="SVC"
             )
 
-            with self.assertRaisesRegex(plans.PlanError, "stay beneath"):
+            with self.assertRaisesRegex(plans_errors.PlanError, "stay beneath"):
                 verification.run_check(check, context=context)
 
     def test_legacy_command_cwd_outside_the_bound_root_is_refused(self) -> None:
@@ -111,7 +107,9 @@ class MultiRepositoryVerificationTests(unittest.TestCase):
                 cwd="../elsewhere",
             )
 
-            with self.assertRaisesRegex(plans.PlanError, "escapes the bound root"):
+            with self.assertRaisesRegex(
+                plans_errors.PlanError, "escapes the bound root"
+            ):
                 verification.run_check(check, context=context)
 
     def test_parallel_repository_results_stay_in_declared_order(self) -> None:
@@ -137,7 +135,7 @@ class MultiRepositoryVerificationTests(unittest.TestCase):
                 ),
             )
             contract = contracts.CompletionContract(
-                session_id=plans.parse_session_id("1"),
+                session_id=plans_session_ids.parse_session_id("1"),
                 done_when=("done",),
                 verify=contracts.VerifyRecipe(checks=checks, parallel=True),
             )

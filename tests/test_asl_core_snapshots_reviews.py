@@ -18,7 +18,9 @@ from agent_session_loop import (
     harness_codex,
     harness_copilot,
     harnesses,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_snapshot,
     responses,
     review,
     review_transitions,
@@ -129,13 +131,13 @@ class PlanSnapshotCacheTests(unittest.TestCase):
     @contextmanager
     def _counting_inspect(self):
         calls: list[Path] = []
-        real_inspect_plan = plans.inspect_plan
+        real_inspect_plan = plans_snapshot.inspect_plan
 
         def counting(plan_dir):
-            calls.append(plans.canonicalize_path(plan_dir))
+            calls.append(plans_files.canonicalize_path(plan_dir))
             return real_inspect_plan(plan_dir)
 
-        with mock.patch.object(plans, "inspect_plan", counting):
+        with mock.patch.object(plans_snapshot, "inspect_plan", counting):
             yield calls
 
     @contextmanager
@@ -143,7 +145,7 @@ class PlanSnapshotCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_plan(plan_dir, statuses)
-            cache = plans.PlanSnapshotCache()
+            cache = plans_snapshot.PlanSnapshotCache()
             cache.get(plan_dir)
             yield plan_dir, cache
 
@@ -231,7 +233,7 @@ class PlanSnapshotCacheTests(unittest.TestCase):
                 other = cache.get(other_dir)
 
             self.assertEqual(1, len(calls))
-            self.assertEqual(plans.canonicalize_path(other_dir), other.plan_dir)
+            self.assertEqual(plans_files.canonicalize_path(other_dir), other.plan_dir)
 
     def test_get_fresh_always_rereads(self) -> None:
         with self._seeded_cache() as (plan_dir, cache):
@@ -257,7 +259,7 @@ class PlanSnapshotCacheTests(unittest.TestCase):
         with self._seeded_cache() as (plan_dir, cache):
             (plan_dir / "manifest.md").unlink()
 
-            with self.assertRaises(plans.PlanError):
+            with self.assertRaises(plans_errors.PlanError):
                 cache.get(plan_dir)
 
             (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
@@ -304,7 +306,7 @@ class PlanSnapshotCacheTests(unittest.TestCase):
             self.assertEqual([], errors)
             self.assertFalse(any(reader.is_alive() for reader in readers))
             self.assertEqual(
-                plans.inspect_plan(plan_dir).content_sha256,
+                plans_snapshot.inspect_plan(plan_dir).content_sha256,
                 cache.get(plan_dir).content_sha256,
             )
 

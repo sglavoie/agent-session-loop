@@ -5,7 +5,12 @@ from __future__ import annotations
 import json
 
 from agent_session_loop import (
-    plans,
+    plans_content_hash,
+    plans_discovery,
+    plans_files,
+    plans_models,
+    plans_payloads,
+    plans_readiness,
     review,
     review_session_contract,
 )
@@ -19,10 +24,10 @@ class RunReviewFinalReviewPauseTests(RunReviewHarnessLifecycleBase):
         self._write_plan(("complete",), readiness=None)
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
         self._write_pending_review_session()
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -36,16 +41,18 @@ class RunReviewFinalReviewPauseTests(RunReviewHarnessLifecycleBase):
         self.assertEqual("nonzero-exit", payload["pause_reason"])
         self.assertFalse(payload["review_completed"])
         self.assertEqual(1, len(payload["turns"]))
-        self.assertEqual(plans.SESSION_KIND_REVIEW, payload["turns"][0]["session_kind"])
+        self.assertEqual(
+            plans_payloads.SESSION_KIND_REVIEW, payload["turns"][0]["session_kind"]
+        )
 
     def test_review_timeout_pauses_run(self) -> None:
         self._write_plan(("complete",), readiness=None)
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
         self._write_pending_review_session()
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -68,10 +75,10 @@ class RunReviewFinalReviewPauseTests(RunReviewHarnessLifecycleBase):
         self._write_plan(("complete",), readiness=None)
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
         self._write_pending_review_session()
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -98,10 +105,10 @@ class RunReviewFinalReviewPauseTests(RunReviewHarnessLifecycleBase):
         self._write_plan(("complete",), readiness=None)
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
         self._write_pending_review_session()
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -123,10 +130,10 @@ class RunReviewFinalReviewPauseTests(RunReviewHarnessLifecycleBase):
         self._write_plan(("complete",), readiness=None)
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
         self._write_pending_review_session()
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -146,7 +153,7 @@ class RunReviewFinalReviewPauseTests(RunReviewHarnessLifecycleBase):
     def test_legacy_review_contract_still_requires_runner_verdict(self) -> None:
         self._write_plan(("complete",), readiness=None)
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
-        review_id = plans.next_top_level_session_id(self.plan_dir)
+        review_id = plans_discovery.next_top_level_session_id(self.plan_dir)
         legacy_contract = {
             "session": review_id.value,
             "checks": [
@@ -163,7 +170,7 @@ class RunReviewFinalReviewPauseTests(RunReviewHarnessLifecycleBase):
                             "sys.exit(0 if text.strip() else 1)"
                         ),
                     ],
-                    "cwd": str(plans.canonicalize_path(self.plan_dir)),
+                    "cwd": str(plans_files.canonicalize_path(self.plan_dir)),
                     "timeout_seconds": 60,
                 }
             ],
@@ -204,10 +211,10 @@ class RunReviewFinalReviewPauseTests(RunReviewHarnessLifecycleBase):
             ),
             encoding="utf-8",
         )
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -245,7 +252,7 @@ class RunReviewFinalReviewPauseTests(RunReviewHarnessLifecycleBase):
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         expected_path = review_session_contract.final_review_output_path(
-            plans.canonicalize_path(self.plan_dir)
+            plans_files.canonicalize_path(self.plan_dir)
         )
         self.assertIn(f"Review: {expected_path}", completed.stdout)
         self.assertEqual(

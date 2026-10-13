@@ -8,10 +8,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from . import harnesses, plans, state, state_locks, workspaces
+from . import harnesses, plans_metadata, plans_registry, state, state_locks, workspaces
 from .authoring import PlanTransaction
 from .baseline_cache import BASELINE_RESULTS_FILENAME, BaselineCache
-from .plans import PlanError, canonicalize_path, inspect_plan, parse_session_id
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
+from .plans_session_ids import parse_session_id
+from .plans_snapshot import inspect_plan
 from .prepare_commands import _format_resume_command, _format_run_command
 from .prepare_corrections import CorrectionOutcome
 from .prepare_models import (
@@ -208,11 +211,11 @@ def _prepare_workspace_rebind(
     plan_dir = canonicalize_path(plan_dir_value)
     snapshot = inspect_plan(plan_dir)
     session_ids = tuple(status.id for status in snapshot.sessions)
-    registry = plans.read_repository_registry(plan_dir)
+    registry = plans_registry.read_repository_registry(plan_dir)
     if registry is None:
         raise PlanError("--rebind-workspace requires a registered plan")
-    metadata = plans.load_plan_metadata(plan_dir)
-    if isinstance(metadata, plans.WorkspacePlanMetadata):
+    metadata = plans_metadata.load_plan_metadata(plan_dir)
+    if isinstance(metadata, plans_metadata.WorkspacePlanMetadata):
         if metadata.registry_digest != registry.digest:
             raise PlanError("stored workspace binding does not match the plan registry")
         if canonicalize_path(metadata.workspace_root) == cwd:
@@ -221,7 +224,7 @@ def _prepare_workspace_rebind(
             metadata.workspace_root,
             registry,
         )
-    elif isinstance(metadata, plans.PlanMetadata):
+    elif isinstance(metadata, plans_metadata.PlanMetadata):
         # A plan that grew a registry after it was bound in legacy mode: the
         # stale v1 binding names no repositories, so it is discarded wholesale
         # rather than compared against the registry.
@@ -288,14 +291,14 @@ def _prepare_workspace_rebind(
         ) from error
 
     try:
-        if plans.read_repository_registry(plan_dir) != registry:
+        if plans_registry.read_repository_registry(plan_dir) != registry:
             raise _WorkspaceRebindConcurrencyError(
                 "plan registry changed while workspace rebind was starting",
                 old_workspace=old_workspace,
                 new_workspace=new_workspace,
                 stage=PREPARE_STAGE_METADATA,
             )
-        if plans.load_plan_metadata(plan_dir) != metadata:
+        if plans_metadata.load_plan_metadata(plan_dir) != metadata:
             raise _WorkspaceRebindConcurrencyError(
                 "workspace binding changed while rebind was starting",
                 old_workspace=old_workspace,
@@ -315,7 +318,7 @@ def _prepare_workspace_rebind(
                 )
                 (staged_plan_dir / BASELINE_RESULTS_FILENAME).unlink(missing_ok=True)
                 try:
-                    plans.save_workspace_plan_metadata(
+                    plans_metadata.save_workspace_plan_metadata(
                         staged_plan_dir,
                         resolved_workspace.root,
                         registry.digest,
@@ -413,7 +416,7 @@ def _prepare_workspace_rebind(
 
                 relative_paths = [
                     "manifest.md",
-                    plans.PLAN_METADATA_FILE_NAME,
+                    plans_metadata.PLAN_METADATA_FILE_NAME,
                     PREPARE_VALIDATION_FILENAME,
                     PREPARE_VALIDATION_CACHE_FILENAME,
                     BASELINE_RESULTS_FILENAME,

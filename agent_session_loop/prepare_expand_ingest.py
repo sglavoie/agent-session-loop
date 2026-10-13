@@ -9,9 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import plans, repository_intent, responses
+from . import plans_metadata, repository_intent, responses
 from .authoring import PlanTransaction
-from .plans import PlanError, canonicalize_path
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
 from .prepare_corrections import CorrectionOutcome, _apply_one_correction
 from .prepare_expansion import insert_expansion_reference, render_expansion
 from .prepare_models import (
@@ -81,7 +82,7 @@ def ingest_expand_batch(
 
     transaction = PlanTransaction(canonical_dir)
     if metadata_text is not None:
-        transaction.stage(plans.PLAN_METADATA_FILE_NAME, metadata_text)
+        transaction.stage(plans_metadata.PLAN_METADATA_FILE_NAME, metadata_text)
     transaction.stage(
         PREPARE_VALIDATION_FILENAME, serialize_prepare_validation(aggregate)
     )

@@ -15,7 +15,10 @@ from agent_session_loop import (
     agent_mux_delivery,
     mailbox,
     mailbox_appenders,
-    mailbox_cli,
+    mailbox_cli_constants,
+    mailbox_cli_guidance,
+    mailbox_cli_receipts,
+    mailbox_cli_replies,
     mailbox_leases,
     mailbox_models,
     mailbox_vocabulary,
@@ -40,9 +43,11 @@ class MailboxCliTests(MailboxCliTestsBase):
             turn_index=2,
             waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_WORKER,
         )
-        with mock.patch.object(mailbox_cli, "_wait_for_receipt", return_value=None):
+        with mock.patch.object(
+            mailbox_cli_receipts, "wait_for_receipt", return_value=None
+        ):
             code, payload = self.payload_from(
-                mailbox_cli.inbox_reply_from_args,
+                mailbox_cli_replies.inbox_reply_from_args,
                 self.args(
                     to=question.id,
                     text="answer",
@@ -76,9 +81,11 @@ class MailboxCliTests(MailboxCliTestsBase):
             wait_id=wait_start.id,
             closure_id=str(uuid.uuid4()),
         )
-        with mock.patch.object(mailbox_cli, "_wait_for_receipt", return_value=receipt):
+        with mock.patch.object(
+            mailbox_cli_receipts, "wait_for_receipt", return_value=receipt
+        ):
             code, payload = self.payload_from(
-                mailbox_cli.inbox_reply_from_args,
+                mailbox_cli_replies.inbox_reply_from_args,
                 self.args(
                     to=question.id,
                     text="answer",
@@ -93,7 +100,7 @@ class MailboxCliTests(MailboxCliTestsBase):
 
     def test_guidance_and_reply_append_records_and_renew_lease(self) -> None:
         code, guidance_payload = self.payload_from(
-            mailbox_cli.inbox_guidance_from_args,
+            mailbox_cli_guidance.inbox_guidance_from_args,
             self.args(text="Keep the parser lazy."),
         )
         self.assertEqual(0, code)
@@ -113,7 +120,7 @@ class MailboxCliTests(MailboxCliTestsBase):
             state_dir=self.state_dir,
         )
         code, reply_payload = self.payload_from(
-            mailbox_cli.inbox_reply_from_args,
+            mailbox_cli_replies.inbox_reply_from_args,
             self.args(text="Use one object.", to=question.id),
         )
         self.assertEqual(0, code)
@@ -142,7 +149,7 @@ class MailboxCliTests(MailboxCliTestsBase):
         """
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = mailbox_cli.inbox_guidance_from_args(
+            code = mailbox_cli_guidance.inbox_guidance_from_args(
                 self.args(text="Keep going.", json=False)
             )
 
@@ -153,7 +160,7 @@ class MailboxCliTests(MailboxCliTestsBase):
         self.assertNotIn("sent", output)
 
         code, payload = self.payload_from(
-            mailbox_cli.inbox_guidance_from_args,
+            mailbox_cli_guidance.inbox_guidance_from_args,
             self.args(text="Keep going again."),
         )
         self.assertEqual(0, code)
@@ -171,7 +178,7 @@ class MailboxCliTests(MailboxCliTestsBase):
             run_id="run-live", session_id="5", turn_index=2, harness="codex"
         ):
             code, payload = self.payload_from(
-                mailbox_cli.inbox_guidance_from_args,
+                mailbox_cli_guidance.inbox_guidance_from_args,
                 self.args(text="Deliver me.", wait_delivered=True, wait_timeout=5.0),
             )
 
@@ -200,7 +207,7 @@ class MailboxCliTests(MailboxCliTestsBase):
             turn_index=2,
         ):
             code, payload = self.payload_from(
-                mailbox_cli.inbox_guidance_from_args,
+                mailbox_cli_guidance.inbox_guidance_from_args,
                 self.args(text="Maybe later.", wait_delivered=True, wait_timeout=5.0),
             )
 
@@ -227,7 +234,7 @@ class MailboxCliTests(MailboxCliTestsBase):
             turn_index=1,
         ):
             code, payload = self.payload_from(
-                mailbox_cli.inbox_guidance_from_args,
+                mailbox_cli_guidance.inbox_guidance_from_args,
                 self.args(text="Stale news.", wait_delivered=True, wait_timeout=0.0),
             )
 
@@ -255,7 +262,7 @@ class MailboxCliTests(MailboxCliTestsBase):
             harness="claude",
         ):
             code, payload = self.payload_from(
-                mailbox_cli.inbox_guidance_from_args,
+                mailbox_cli_guidance.inbox_guidance_from_args,
                 self.args(text="Still working.", wait_delivered=True, wait_timeout=0.0),
             )
 
@@ -276,7 +283,7 @@ class MailboxCliTests(MailboxCliTestsBase):
             ),
             redirect_stdout(stdout),
         ):
-            code = mailbox_cli.inbox_guidance_from_args(
+            code = mailbox_cli_guidance.inbox_guidance_from_args(
                 self.args(
                     text="Deliver me.",
                     json=False,
@@ -304,7 +311,7 @@ class MailboxCliTests(MailboxCliTestsBase):
             ),
             redirect_stdout(stdout),
         ):
-            code = mailbox_cli.inbox_guidance_from_args(
+            code = mailbox_cli_guidance.inbox_guidance_from_args(
                 self.args(
                     text="Maybe later.",
                     json=False,
@@ -321,7 +328,7 @@ class MailboxCliTests(MailboxCliTestsBase):
 
     def test_guidance_wait_timeout_keeps_the_append_successful(self) -> None:
         code, payload = self.payload_from(
-            mailbox_cli.inbox_guidance_from_args,
+            mailbox_cli_guidance.inbox_guidance_from_args,
             self.args(text="Nobody home.", wait_delivered=True, wait_timeout=0.0),
         )
 
@@ -348,22 +355,22 @@ class MailboxCliTests(MailboxCliTestsBase):
             return None
 
         with mock.patch.object(
-            mailbox_cli, "_wait_for_guidance_delivery", side_effect=capture
+            mailbox_cli_receipts, "wait_for_guidance_delivery", side_effect=capture
         ):
             code, _payload = self.payload_from(
-                mailbox_cli.inbox_guidance_from_args,
+                mailbox_cli_guidance.inbox_guidance_from_args,
                 self.args(text="Default me.", wait_delivered=True),
             )
 
         self.assertEqual(0, code)
         self.assertEqual(
-            mailbox_cli.DEFAULT_GUIDANCE_DELIVERED_TIMEOUT_SECONDS,
+            mailbox_cli_constants.DEFAULT_GUIDANCE_DELIVERED_TIMEOUT_SECONDS,
             observed["timeout"],
         )
 
     def test_guidance_timeout_without_wait_is_refused_before_appending(self) -> None:
         code, payload = self.payload_from(
-            mailbox_cli.inbox_guidance_from_args,
+            mailbox_cli_guidance.inbox_guidance_from_args,
             self.args(text="Too eager.", wait_timeout=5.0),
         )
 
@@ -378,7 +385,7 @@ class MailboxCliTests(MailboxCliTestsBase):
         for requested in (-1.0, float("inf"), float("nan"), 1801.0):
             with self.subTest(timeout=requested):
                 code, payload = self.payload_from(
-                    mailbox_cli.inbox_guidance_from_args,
+                    mailbox_cli_guidance.inbox_guidance_from_args,
                     self.args(
                         text="Forever?", wait_delivered=True, wait_timeout=requested
                     ),
@@ -398,7 +405,7 @@ class MailboxCliTests(MailboxCliTestsBase):
         original = self._write_projected_lease(supervisor_id, question)
 
         code, payload = self.payload_from(
-            mailbox_cli.inbox_guidance_from_args,
+            mailbox_cli_guidance.inbox_guidance_from_args,
             self.args(text="Keep the parser lazy."),
         )
 
@@ -424,7 +431,7 @@ class MailboxCliTests(MailboxCliTestsBase):
             return_value={"final_status": "accepted"},
         ):
             code, payload = self.payload_from(
-                mailbox_cli.inbox_reply_from_args,
+                mailbox_cli_replies.inbox_reply_from_args,
                 self.args(text="Use one object.", to=question.id),
             )
 
@@ -451,7 +458,7 @@ class MailboxCliTests(MailboxCliTestsBase):
         original = self._write_projected_lease(supervisor_id, question)
 
         code, payload = self.payload_from(
-            mailbox_cli.inbox_resolve_from_args,
+            mailbox_cli_replies.inbox_resolve_from_args,
             self.args(
                 action="continue",
                 note="Informational only.",

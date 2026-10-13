@@ -8,11 +8,7 @@ import io
 import unittest
 from contextlib import redirect_stdout
 
-from agent_session_loop import (
-    control_cli,
-    control_queue,
-    plans,
-)
+from agent_session_loop import control_cli, control_queue, plans_files
 from tests.asl_control_cli_support import ControlCliTestsBase
 from tests.asl_control_support import LIVE_WAKEUP
 from tests.support import (
@@ -37,7 +33,7 @@ class ControlCliTests(ControlCliTestsBase):
         self.assertEqual("control-stop-after-current", payload["command"])
         self.assertTrue(payload["enqueued"])
         self.assertEqual(
-            str(plans.canonicalize_path(self.plan_dir)), payload["plan_dir"]
+            str(plans_files.canonicalize_path(self.plan_dir)), payload["plan_dir"]
         )
         self.assertEqual(str(self.queue_path()), payload["queue_path"])
 

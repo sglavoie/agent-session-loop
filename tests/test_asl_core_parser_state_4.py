@@ -11,7 +11,13 @@ from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
-    plans,
+    plans_content_hash,
+    plans_errors,
+    plans_files,
+    plans_models,
+    plans_readiness,
+    plans_snapshot,
+    plans_status_tables,
     run_inputs,
 )
 from tests.asl_core_support import ParserAndStateTestsBase
@@ -56,13 +62,13 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            snapshot = plans.inspect_plan(plan_dir)
-            changed = plans.sync_derived_status_ledgers(snapshot)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
+            changed = plans_status_tables.sync_derived_status_ledgers(snapshot)
 
             self.assertEqual(
                 {
-                    plans.canonicalize_path(manifest_path),
-                    plans.canonicalize_path(context_path),
+                    plans_files.canonicalize_path(manifest_path),
+                    plans_files.canonicalize_path(context_path),
                 },
                 set(changed),
             )
@@ -92,8 +98,8 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
             context_path.write_text(original_context, encoding="utf-8")
 
-            snapshot = plans.inspect_plan(plan_dir)
-            changed = plans.sync_derived_status_ledgers(snapshot)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
+            changed = plans_status_tables.sync_derived_status_ledgers(snapshot)
 
             self.assertEqual((), changed)
             self.assertEqual(original_context, context_path.read_text(encoding="utf-8"))
@@ -106,7 +112,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 "# Session 1\n\n## Handoff\n\n- **Status**: maybe\n",
                 encoding="utf-8",
             )
-            unknown = plans.inspect_plan(plan_dir)
+            unknown = plans_snapshot.inspect_plan(plan_dir)
             self.assertEqual("unknown", unknown.sessions[0].status)
             self.assertEqual(
                 "unknown-status", run_inputs._invalid_status_pause(unknown)[0]
@@ -116,7 +122,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 "# Session 1\n\n## Handoff\n\n- **Files modified**: none\n",
                 encoding="utf-8",
             )
-            empty = plans.inspect_plan(plan_dir)
+            empty = plans_snapshot.inspect_plan(plan_dir)
             self.assertEqual("empty", empty.sessions[0].status)
             self.assertEqual(
                 "malformed-plan", run_inputs._invalid_status_pause(empty)[0]
@@ -142,12 +148,12 @@ class ParserAndStateTests(ParserAndStateTestsBase):
 
                 with (
                     fail_open_for_path(target),
-                    self.assertRaises(plans.PlanError) as raised,
+                    self.assertRaises(plans_errors.PlanError) as raised,
                 ):
-                    plans.inspect_plan(plan_dir)
+                    plans_snapshot.inspect_plan(plan_dir)
 
                 message = str(raised.exception)
-                self.assertIn(str(plans.canonicalize_path(target)), message)
+                self.assertIn(str(plans_files.canonicalize_path(target)), message)
                 self.assertIn("permission denied", message.lower())
                 self.assertIsInstance(raised.exception.__cause__, PermissionError)
 
@@ -155,11 +161,11 @@ class ParserAndStateTests(ParserAndStateTestsBase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_plan(plan_dir, ("pending",))
-            canonical_plan_dir = plans.canonicalize_path(plan_dir)
+            canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
             original_iterdir = Path.iterdir
 
             def failing_iterdir(path: Path):
-                if plans.canonicalize_path(path) == canonical_plan_dir:
+                if plans_files.canonicalize_path(path) == canonical_plan_dir:
                     raise PermissionError(
                         errno.EACCES, "permission denied", os.fspath(canonical_plan_dir)
                     )
@@ -167,9 +173,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
 
             with (
                 mock.patch.object(Path, "iterdir", failing_iterdir),
-                self.assertRaises(plans.PlanError) as raised,
+                self.assertRaises(plans_errors.PlanError) as raised,
             ):
-                plans.inspect_plan(plan_dir)
+                plans_snapshot.inspect_plan(plan_dir)
 
             message = str(raised.exception)
             self.assertIn(str(canonical_plan_dir), message)
@@ -179,18 +185,22 @@ class ParserAndStateTests(ParserAndStateTestsBase):
     def test_readiness_states_cover_full_lifecycle(self) -> None:
         self.assertEqual(
             ("draft", "reviewed", "loop-ready", "running", "complete"),
-            plans.READINESS_STATES,
+            plans_models.READINESS_STATES,
         )
-        for state_value in plans.READINESS_STATES:
+        for state_value in plans_models.READINESS_STATES:
             with self.subTest(state=state_value):
-                self.assertEqual(state_value, plans.parse_readiness_state(state_value))
-        self.assertEqual("loop-ready", plans.parse_readiness_state("  LOOP-READY  "))
+                self.assertEqual(
+                    state_value, plans_readiness.parse_readiness_state(state_value)
+                )
+        self.assertEqual(
+            "loop-ready", plans_readiness.parse_readiness_state("  LOOP-READY  ")
+        )
         for invalid in ("", "ready", "loop_ready", "DONE"):
             with (
                 self.subTest(value=invalid),
-                self.assertRaises(plans.PlanError),
+                self.assertRaises(plans_errors.PlanError),
             ):
-                plans.parse_readiness_state(invalid)
+                plans_readiness.parse_readiness_state(invalid)
 
     def test_parse_readiness_metadata_reads_all_three_lines(self) -> None:
         manifest_text = "\n".join(
@@ -207,7 +217,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             ]
         )
 
-        metadata = plans.parse_readiness_metadata(manifest_text)
+        metadata = plans_readiness.parse_readiness_metadata(manifest_text)
 
         self.assertIsNotNone(metadata)
         self.assertEqual("reviewed", metadata.state)
@@ -217,7 +227,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
     def test_parse_readiness_metadata_returns_none_when_absent(self) -> None:
         manifest_text = "# Plan\n\n**Sessions**: 1\n\n## Sessions\n"
 
-        self.assertIsNone(plans.parse_readiness_metadata(manifest_text))
+        self.assertIsNone(plans_readiness.parse_readiness_metadata(manifest_text))
 
     def test_parse_readiness_metadata_rejects_partial_or_invalid_blocks(self) -> None:
         cases = (
@@ -250,9 +260,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
         for label, text in cases:
             with (
                 self.subTest(label=label),
-                self.assertRaises(plans.PlanError),
+                self.assertRaises(plans_errors.PlanError),
             ):
-                plans.parse_readiness_metadata(text)
+                plans_readiness.parse_readiness_metadata(text)
 
     def test_parse_split_from_reads_a_backticked_pointer(self) -> None:
         manifest_text = "\n".join(
@@ -268,7 +278,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
         )
 
         self.assertEqual(
-            "~/.claude/plans/source.md", plans.parse_split_from(manifest_text)
+            "~/.claude/plans/source.md", plans_readiness.parse_split_from(manifest_text)
         )
 
     def test_parse_split_from_drops_prose_beside_the_pointer(self) -> None:
@@ -288,7 +298,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
         for label, line, expected in cases:
             with self.subTest(label=label):
                 manifest_text = f"# Plan\n\n{line}\n\n## Sessions\n"
-                self.assertEqual(expected, plans.parse_split_from(manifest_text))
+                self.assertEqual(
+                    expected, plans_readiness.parse_split_from(manifest_text)
+                )
 
     def test_parse_split_from_ignores_a_pointer_below_the_first_heading(self) -> None:
         manifest_text = "\n".join(
@@ -304,7 +316,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             ]
         )
 
-        self.assertIsNone(plans.parse_split_from(manifest_text))
+        self.assertIsNone(plans_readiness.parse_split_from(manifest_text))
 
     def test_parse_split_from_returns_none_when_absent_or_empty(self) -> None:
         cases = (
@@ -315,11 +327,11 @@ class ParserAndStateTests(ParserAndStateTestsBase):
 
         for label, text in cases:
             with self.subTest(label=label):
-                self.assertIsNone(plans.parse_split_from(text))
+                self.assertIsNone(plans_readiness.parse_split_from(text))
 
     def test_read_split_from_survives_a_missing_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertIsNone(plans.read_split_from(Path(tmp) / "absent"))
+            self.assertIsNone(plans_readiness.read_split_from(Path(tmp) / "absent"))
 
     def test_write_readiness_metadata_inserts_after_front_matter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -345,12 +357,12 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            metadata = plans.ReadinessMetadata(
+            metadata = plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256="deadbeef",
                 checked_at="2026-06-19T00:00:00Z",
             )
-            changed = plans.write_readiness_metadata(plan_dir, metadata)
+            changed = plans_readiness.write_readiness_metadata(plan_dir, metadata)
 
             self.assertTrue(changed)
             text = manifest_path.read_text(encoding="utf-8")
@@ -364,10 +376,10 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertLess(sessions_count_index, readiness_index)
             self.assertLess(readiness_index, sessions_index)
 
-            roundtrip = plans.parse_readiness_metadata(text)
+            roundtrip = plans_readiness.parse_readiness_metadata(text)
             self.assertEqual(metadata, roundtrip)
 
-            unchanged = plans.write_readiness_metadata(plan_dir, metadata)
+            unchanged = plans_readiness.write_readiness_metadata(plan_dir, metadata)
             self.assertFalse(unchanged)
 
     def test_write_readiness_metadata_replaces_existing_block(self) -> None:
@@ -392,12 +404,12 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            updated = plans.ReadinessMetadata(
+            updated = plans_models.ReadinessMetadata(
                 state="reviewed",
                 readiness_sha256="newhash",
                 checked_at="2026-06-19T12:00:00Z",
             )
-            changed = plans.write_readiness_metadata(plan_dir, updated)
+            changed = plans_readiness.write_readiness_metadata(plan_dir, updated)
 
             self.assertTrue(changed)
             text = manifest_path.read_text(encoding="utf-8")
@@ -408,14 +420,14 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertIn("`newhash`", text)
             self.assertNotIn("oldhash", text)
             self.assertNotIn("2026-01-01", text)
-            self.assertEqual(updated, plans.parse_readiness_metadata(text))
+            self.assertEqual(updated, plans_readiness.parse_readiness_metadata(text))
 
     def test_stable_readiness_sha256_ignores_handoff_status_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_plan(plan_dir, ("pending", "pending"))
 
-            baseline = plans.stable_readiness_sha256(plan_dir)
+            baseline = plans_content_hash.stable_readiness_sha256(plan_dir)
 
             (plan_dir / "session-1.md").write_text(
                 "\n".join(
@@ -437,7 +449,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
+            self.assertEqual(
+                baseline, plans_content_hash.stable_readiness_sha256(plan_dir)
+            )
 
     def test_stable_readiness_sha256_ignores_status_table_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -463,7 +477,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            baseline = plans.stable_readiness_sha256(plan_dir)
+            baseline = plans_content_hash.stable_readiness_sha256(plan_dir)
 
             manifest_path.write_text(
                 "\n".join(
@@ -484,4 +498,6 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
+            self.assertEqual(
+                baseline, plans_content_hash.stable_readiness_sha256(plan_dir)
+            )

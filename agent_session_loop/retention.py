@@ -41,7 +41,7 @@ from typing import Any
 from . import (
     assurance_ledger,
     assurance_report,
-    plans,
+    plans_files,
     session_overview,
     state,
     state_locks,
@@ -382,7 +382,7 @@ def plan_retention(
     """
     if max_age_days < 0:
         raise ValueError("max_age_days must be non-negative")
-    canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
     return _plan_report(
         plan_dir=canonical_plan_dir,
         plan_state=state.plan_state_dir(canonical_plan_dir, state_dir),
@@ -403,10 +403,10 @@ def _recover_plan_dir(plan_state: Path) -> Path | None:
         if not candidate:
             continue
         try:
-            canonical = plans.canonicalize_path(candidate)
+            canonical = plans_files.canonicalize_path(candidate)
         except OSError, ValueError:
             continue
-        if plans.path_sha256(canonical) == plan_state.name:
+        if plans_files.path_sha256(canonical) == plan_state.name:
             return canonical
     return None
 

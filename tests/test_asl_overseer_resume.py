@@ -1039,9 +1039,9 @@ class NoInventedReply(_ResumeCase):
     def launchable_plan(self) -> Path:
         directory = self.root / "launchable"
         write_plan(directory, ("pending", "pending"))
-        from agent_session_loop import plans
+        from agent_session_loop import plans_files
 
-        return plans.canonicalize_path(directory)
+        return plans_files.canonicalize_path(directory)
 
     def spawn(self, **kwargs: Any) -> tuple[Any, list[_FakePopen]]:
         captured: list[_FakePopen] = []
@@ -1523,15 +1523,21 @@ class LaunchIsolationTests(unittest.TestCase):
     SPECS = (("SVC", "tundra_svc", "git@github.com:tundra/SVC.git"),)
 
     def setUp(self) -> None:
-        from agent_session_loop import plans, run_contention, workspaces
+        from agent_session_loop import (
+            plans_files,
+            plans_metadata,
+            plans_registry,
+            run_contention,
+            workspaces,
+        )
 
-        self.plans = plans
+        self.plans_files = plans_files
         self.run_contention = run_contention
         self.workspaces = workspaces
 
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        # Resolved because `plans.inspect_plan` canonicalizes the macOS
+        # Resolved because `plans_snapshot.inspect_plan` canonicalizes the macOS
         # `/var/folders/...` symlink and a later comparison would differ.
         self.root = Path(tmp.name).resolve()
         self.state_root = self.root / "state"
@@ -1542,10 +1548,10 @@ class LaunchIsolationTests(unittest.TestCase):
 
         self.plan_dir = self.root / "allowed"
         write_multi_repo_plan(self.plan_dir, ("pending",), specs=self.SPECS)
-        registry = plans.read_repository_registry(self.plan_dir)
+        registry = plans_registry.read_repository_registry(self.plan_dir)
         assert registry is not None
         self.registry = registry
-        plans.save_workspace_plan_metadata(
+        plans_metadata.save_workspace_plan_metadata(
             self.plan_dir, self.workspace, registry.digest
         )
         self.publish(self.plan_dir, payload={"run_config": self.run_config()})
@@ -1559,7 +1565,7 @@ class LaunchIsolationTests(unittest.TestCase):
                 "version": 2,
                 "pid": self.DEAD_PID,
                 "hostname": socket.gethostname(),
-                "repositories": [str(self.plans.canonicalize_path(self.repo))],
+                "repositories": [str(self.plans_files.canonicalize_path(self.repo))],
             },
         )
 
@@ -1583,7 +1589,7 @@ class LaunchIsolationTests(unittest.TestCase):
             lock_path.write_text(
                 json.dumps(
                     {
-                        "plan_dir": str(self.plans.canonicalize_path(plan_dir)),
+                        "plan_dir": str(self.plans_files.canonicalize_path(plan_dir)),
                         "created_at": MOMENT,
                         **lock,
                     },
@@ -1606,7 +1612,7 @@ class LaunchIsolationTests(unittest.TestCase):
                 "path": repository.path,
                 "origin": repository.origin,
                 "resolved_root": str(
-                    self.plans.canonicalize_path(self.workspace / repository.path)
+                    self.plans_files.canonicalize_path(self.workspace / repository.path)
                 ),
             }
             for repository in self.registry
@@ -1626,7 +1632,7 @@ class LaunchIsolationTests(unittest.TestCase):
             "allow_not_loop_ready": False,
             "cwd": str(self.workspace),
             "state_dir_override": str(self.state_root),
-            "workspace_root": str(self.plans.canonicalize_path(self.workspace)),
+            "workspace_root": str(self.plans_files.canonicalize_path(self.workspace)),
             "registry_digest": self.registry.digest,
             "repositories": self.repositories(),
         }
@@ -1639,7 +1645,7 @@ class LaunchIsolationTests(unittest.TestCase):
         the inspection is answered rather than run.
         """
         origins = {
-            str(self.plans.canonicalize_path(self.workspace / path)): origin
+            str(self.plans_files.canonicalize_path(self.workspace / path)): origin
             for _alias, path, origin in self.SPECS
         }
 
@@ -1835,7 +1841,7 @@ class LaunchIsolationTests(unittest.TestCase):
                 "version": 2,
                 "pid": os.getpid(),
                 "hostname": socket.gethostname(),
-                "repositories": [str(self.plans.canonicalize_path(self.repo))],
+                "repositories": [str(self.plans_files.canonicalize_path(self.repo))],
             },
         )
         child = self.recovery_child()

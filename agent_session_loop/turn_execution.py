@@ -55,7 +55,10 @@ from . import (
     mailbox,
     mailbox_models,
     mailbox_vocabulary,
-    plans,
+    plans_errors,
+    plans_models,
+    plans_payloads,
+    plans_snapshot,
     process_tree,
 )
 
@@ -537,7 +540,8 @@ def live_stream_callback(
 
 def turn_paths(run_dir: Path, *, turn_index: int, session_id: str) -> dict[str, Path]:
     artifact_dir = (
-        run_dir / f"turn-{turn_index:04d}-{plans.session_path_label(session_id)}"
+        run_dir
+        / f"turn-{turn_index:04d}-{plans_payloads.session_path_label(session_id)}"
     )
     return {
         "artifact_dir": artifact_dir,
@@ -579,7 +583,7 @@ def turn_status_result(
         return "no-status-change"
     if len(status_changes) > 1:
         return "multiple-status-changes"
-    expected_change = plans.session_status_change_payload(
+    expected_change = plans_payloads.session_status_change_payload(
         session_id,
         before="pending",
         after="complete",
@@ -647,8 +651,8 @@ def write_turn_artifacts(
     *,
     paths: dict[str, Path],
     result: harnesses.HarnessResult,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot | None,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot | None,
     run_id: str,
     turn_index: int,
     session_id: str,
@@ -674,9 +678,11 @@ def write_turn_artifacts(
     durability.write_text(paths["stderr"], result.stderr)
     durability.write_text(paths["last_message"], result.last_message)
 
-    status_changes = plans.status_changes(before, after) if after is not None else ()
+    status_changes = (
+        plans_payloads.status_changes(before, after) if after is not None else ()
+    )
     pending_completed = (
-        plans.pending_completed(before, after) if after is not None else ()
+        plans_payloads.pending_completed(before, after) if after is not None else ()
     )
     signals = runner_signals(result)
     status_result = turn_status_result(
@@ -696,9 +702,9 @@ def write_turn_artifacts(
         "version": RESULT_SCHEMA_VERSION,
         "run_id": run_id,
         "turn_index": turn_index,
-        **plans.session_identity_payload(session_id),
+        **plans_payloads.session_identity_payload(session_id),
         "session_kind": live_turn.get(
-            "session_kind", plans.SESSION_KIND_IMPLEMENTATION
+            "session_kind", plans_payloads.SESSION_KIND_IMPLEMENTATION
         ),
         "total_sessions": live_turn.get("total_sessions"),
         "artifact_dir": str(paths["artifact_dir"]),
@@ -721,7 +727,7 @@ def write_turn_artifacts(
         "result_path": str(paths["result"]),
         "status_changes": list(status_changes),
         "pending_completed": [
-            plans.session_compat_value(completed_id)
+            plans_payloads.session_compat_value(completed_id)
             for completed_id in pending_completed
         ],
         "pending_completed_ids": list(pending_completed),
@@ -740,8 +746,8 @@ def write_turn_artifacts(
         ),
         "last_heartbeat_at": live_turn.get("last_heartbeat_at"),
         "heartbeat_count": live_turn.get("heartbeat_count", 0),
-        "before": plans.snapshot_payload(before),
-        "after": plans.snapshot_payload(after) if after is not None else None,
+        "before": plans_payloads.snapshot_payload(before),
+        "after": plans_payloads.snapshot_payload(after) if after is not None else None,
     }
     if termination_note is not None:
         payload["last_harness_activity_preview"] = last_activity_preview
@@ -792,7 +798,7 @@ class TurnFinalization:
     """
 
     result: harnesses.HarnessResult
-    after: plans.PlanSnapshot | None
+    after: plans_models.PlanSnapshot | None
     plan_error: str | None
     turn_payload: dict[str, Any]
 
@@ -801,9 +807,9 @@ def finalize_turn_execution(
     *,
     event_path: Path,
     persistence: TurnPersistence,
-    plan_cache: plans.PlanSnapshotCache,
+    plan_cache: plans_snapshot.PlanSnapshotCache,
     result: harnesses.HarnessResult,
-    before: plans.PlanSnapshot,
+    before: plans_models.PlanSnapshot,
     paths: dict[str, Path],
     run_id: str,
     turn_index: int,
@@ -821,10 +827,10 @@ def finalize_turn_execution(
     artifacts that are not on disk yet.
     """
     plan_error: str | None = None
-    after: plans.PlanSnapshot | None
+    after: plans_models.PlanSnapshot | None
     try:
         after = plan_cache.get_fresh(before.plan_dir)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         after = None
         plan_error = str(error)
     if pending_exception_guard is not None:
@@ -846,7 +852,7 @@ def finalize_turn_execution(
     execution_payload: dict[str, Any] = {
         "run_id": run_id,
         "turn_index": turn_index,
-        **plans.session_identity_payload(session_id),
+        **plans_payloads.session_identity_payload(session_id),
         "harness": result.name,
         "returncode": result.returncode,
         "timed_out": result.timed_out,
@@ -903,9 +909,9 @@ class TurnCommitRejected(Exception):
 
 
 def publication_snapshot(
-    plan_cache: plans.PlanSnapshotCache,
-    accepted: plans.PlanSnapshot,
-) -> plans.PlanSnapshot:
+    plan_cache: plans_snapshot.PlanSnapshotCache,
+    accepted: plans_models.PlanSnapshot,
+) -> plans_models.PlanSnapshot:
     """Re-read the plan so the published snapshot describes it as it now is.
 
     Runner bookkeeping between the last guard and the commit point — the
@@ -917,13 +923,13 @@ def publication_snapshot(
     """
     try:
         recomputed = plan_cache.get_fresh(accepted.plan_dir)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         raise TurnCommitRejected(
             reason="malformed-plan",
             message="the plan could not be re-read before publishing the turn",
             detail={"error": str(error)},
         ) from error
-    if plans.status_map(recomputed) != plans.status_map(accepted):
+    if plans_payloads.status_map(recomputed) != plans_payloads.status_map(accepted):
         raise TurnCommitRejected(
             reason="unexpected-status-change",
             message=(
@@ -932,7 +938,9 @@ def publication_snapshot(
             detail={
                 "accepted_content_sha256": accepted.content_sha256,
                 "recomputed_content_sha256": recomputed.content_sha256,
-                "status_changes": list(plans.status_changes(accepted, recomputed)),
+                "status_changes": list(
+                    plans_payloads.status_changes(accepted, recomputed)
+                ),
             },
         )
     return recomputed
@@ -949,7 +957,7 @@ class TurnCommit:
     same read the publication was built from rather than a later one.
     """
 
-    published: plans.PlanSnapshot
+    published: plans_models.PlanSnapshot
     record: Mapping[str, Any]
 
 
@@ -961,8 +969,8 @@ def commit_turn(
     progress: TurnProgress,
     turn_payload: dict[str, Any],
     live_turn: dict[str, Any],
-    accepted: plans.PlanSnapshot,
-    plan_cache: plans.PlanSnapshotCache,
+    accepted: plans_models.PlanSnapshot,
+    plan_cache: plans_snapshot.PlanSnapshotCache,
     paths: dict[str, Path],
 ) -> TurnCommit:
     """Publish the single immutable statement that a turn was accepted.
@@ -985,7 +993,7 @@ def commit_turn(
     """
     published = publication_snapshot(plan_cache, accepted)
     committed = dict(turn_payload)
-    committed["after"] = plans.snapshot_payload(published)
+    committed["after"] = plans_payloads.snapshot_payload(published)
     committed["committed"] = True
     with persistence.lock:
         durability.write_json_file(paths["result"], committed, durable=True)
@@ -1050,7 +1058,7 @@ def record_turn_rejected(
     rejection: dict[str, Any] = {
         "run_id": payload.get("run_id"),
         "turn_index": turn_payload.get("turn_index"),
-        **plans.session_identity_payload(session_id),
+        **plans_payloads.session_identity_payload(session_id),
         "guard": guard,
         "reason": reason,
         "reopened": reopened,
@@ -1067,7 +1075,7 @@ def record_turn_rejected(
         {
             "run_id": payload.get("run_id"),
             "turn_index": turn_payload.get("turn_index"),
-            **plans.session_identity_payload(session_id),
+            **plans_payloads.session_identity_payload(session_id),
             "from_status": from_status,
             "to_status": "pending",
             "guard": guard,
@@ -2303,7 +2311,7 @@ class TurnExecutor:
         event_path: Path,
         persistence: TurnPersistence,
         progress: TurnProgress,
-        plan_cache: plans.PlanSnapshotCache,
+        plan_cache: plans_snapshot.PlanSnapshotCache,
     ) -> None:
         self.identity = identity
         self.paths = paths
@@ -2417,7 +2425,7 @@ class TurnExecutor:
         self,
         execution: TurnExecution,
         *,
-        before: plans.PlanSnapshot,
+        before: plans_models.PlanSnapshot,
         unredacted_prompt: str | None = None,
         pending_exception_guard: MutableMapping[str, Any] | None = None,
     ) -> TurnFinalization:
@@ -2443,7 +2451,7 @@ class TurnExecutor:
         payload: dict[str, Any],
         turn_payload: dict[str, Any],
         live_turn: dict[str, Any],
-        accepted: plans.PlanSnapshot,
+        accepted: plans_models.PlanSnapshot,
     ) -> TurnCommit:
         """Publish the accepted turn, or raise :class:`TurnCommitRejected`."""
         return commit_turn(

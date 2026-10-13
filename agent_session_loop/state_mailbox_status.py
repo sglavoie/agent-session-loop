@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from . import plans
+from . import plans_errors, plans_progress
 
 #: How many guidance records the status projection describes. Status is a
 #: bounded snapshot, not a mailbox reader: a long run's ledger can hold
@@ -215,7 +215,7 @@ def _progress_journal_payload(plan_dir: Path) -> dict[str, Any]:
     (`entry_count`/`last_appended` populated), or present-but-malformed
     (`error` set, counts None).
     """
-    journal_path = plans.progress_path(plan_dir)
+    journal_path = plans_progress.progress_path(plan_dir)
     if not journal_path.exists():
         return {
             "present": False,
@@ -225,8 +225,8 @@ def _progress_journal_payload(plan_dir: Path) -> dict[str, Any]:
             "error": None,
         }
     try:
-        entries = plans.read_progress_entries(plan_dir)
-    except plans.PlanError as error:
+        entries = plans_progress.read_progress_entries(plan_dir)
+    except plans_errors.PlanError as error:
         return {
             "present": True,
             "path": str(journal_path),

@@ -75,7 +75,7 @@ from . import (
     agent_mux_delivery,
     clock,
     events,
-    plans,
+    plans_payloads,
     run_persistence,
     run_reporting,
     turn_execution,
@@ -186,7 +186,7 @@ class _LiveVerification:
         identity: dict[str, Any] = {
             "run_id": self._run_id,
             "turn_index": self._turn_index,
-            "session": plans.session_compat_value(self._session_id),
+            "session": plans_payloads.session_compat_value(self._session_id),
             "session_id": self._session_id,
             "total_sessions": self._total_sessions,
         }

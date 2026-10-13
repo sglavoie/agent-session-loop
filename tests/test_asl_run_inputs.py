@@ -29,7 +29,10 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
-    plans,
+    plans_errors,
+    plans_files,
+    plans_metadata,
+    plans_snapshot,
     repository_registration,
     run_inputs,
     run_selection,
@@ -80,8 +83,8 @@ class RunInputsBoundaryTests(unittest.TestCase):
     def test_the_only_read_is_the_task_packet_artifact_scan(self) -> None:
         source = Path(run_inputs.__file__ or "").read_text(encoding="utf-8")
 
-        # Every other read goes through `plans`, `preflight`, or `state`. This
-        # one is direct because the point of the check is to see what the
+        # Every other read goes through the `plans_*` modules, `preflight`, or
+        # `state`. This one is direct because the point of the check is to see what the
         # worker will see, not what a parser reports about it.
         self.assertEqual(1, source.count("read_text("))
 
@@ -153,7 +156,7 @@ class RunAdmissionTests(unittest.TestCase):
                 args, resolve_review_guard_excludes=resolver
             )
 
-            self.assertEqual(plans.canonicalize_path(tmp), cwd)
+            self.assertEqual(plans_files.canonicalize_path(tmp), cwd)
         self.assertEqual(900, timeout)
         self.assertEqual(3, max_sessions)
         self.assertEqual("per-session", commit_mode)
@@ -164,7 +167,7 @@ class RunAdmissionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             args = _args(cwd=str(Path(tmp) / "absent"))
 
-            with self.assertRaises(plans.PlanError) as caught:
+            with self.assertRaises(plans_errors.PlanError) as caught:
                 run_inputs._validate_run_inputs(
                     args, resolve_review_guard_excludes=resolver
                 )
@@ -227,9 +230,11 @@ class PlanStatusProjectionTests(unittest.TestCase):
             partial = Path(tmp) / "partial"
             write_plan(partial, ("complete", "pending"))
 
-            self.assertTrue(run_inputs._all_sessions_complete(plans.inspect_plan(done)))
+            self.assertTrue(
+                run_inputs._all_sessions_complete(plans_snapshot.inspect_plan(done))
+            )
             self.assertFalse(
-                run_inputs._all_sessions_complete(plans.inspect_plan(partial))
+                run_inputs._all_sessions_complete(plans_snapshot.inspect_plan(partial))
             )
 
     def test_a_well_formed_plan_names_no_pause(self) -> None:
@@ -238,7 +243,7 @@ class PlanStatusProjectionTests(unittest.TestCase):
             write_plan(plan_dir, ("complete", "pending"))
 
             self.assertIsNone(
-                run_inputs._invalid_status_pause(plans.inspect_plan(plan_dir))
+                run_inputs._invalid_status_pause(plans_snapshot.inspect_plan(plan_dir))
             )
 
     def test_an_unrecognized_status_pauses_with_the_offending_sessions(self) -> None:
@@ -246,7 +251,9 @@ class PlanStatusProjectionTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             write_plan(plan_dir, ("complete", "in-progress"))
 
-            pause = run_inputs._invalid_status_pause(plans.inspect_plan(plan_dir))
+            pause = run_inputs._invalid_status_pause(
+                plans_snapshot.inspect_plan(plan_dir)
+            )
 
         assert pause is not None
         reason, detail, payload = pause
@@ -264,7 +271,9 @@ class PlanStatusProjectionTests(unittest.TestCase):
                 "# Session 2: Test\n\nInstructions.\n", encoding="utf-8"
             )
 
-            pause = run_inputs._invalid_status_pause(plans.inspect_plan(plan_dir))
+            pause = run_inputs._invalid_status_pause(
+                plans_snapshot.inspect_plan(plan_dir)
+            )
 
         assert pause is not None
         reason, detail, payload = pause
@@ -285,7 +294,7 @@ class RunnerOwnedRootsTests(unittest.TestCase):
             roots = run_inputs._runner_owned_roots(plan_dir, str(state_dir))
 
             self.assertEqual(
-                (plan_dir, plans.canonicalize_path(state_dir)),
+                (plan_dir, plans_files.canonicalize_path(state_dir)),
                 roots,
             )
 
@@ -416,7 +425,7 @@ class TaskPacketIntentTests(unittest.TestCase):
         assert report is not None
         self.assertTrue(report["registry_required"])
         self.assertEqual(2, report["git_root_count"])
-        self.assertIn(str(plans.canonicalize_path(other)), report["git_roots"])
+        self.assertIn(str(plans_files.canonicalize_path(other)), report["git_roots"])
 
     def test_provenance_roots_are_exempt_from_the_packet_scan_too(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -474,7 +483,7 @@ class PlanStoreStateRootTests(unittest.TestCase):
         self.assertEqual("session-1.md:Completion Contract/Done when", report["source"])
         self.assertEqual(
             ("pending",),
-            tuple(s.status for s in plans.inspect_plan(self.plan).sessions),
+            tuple(s.status for s in plans_snapshot.inspect_plan(self.plan).sessions),
         )
 
     def test_matching_or_covering_state_root_needs_no_pause(self) -> None:
@@ -559,13 +568,13 @@ class LegacyBindingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_plan(plan_dir, ("pending",))
-            cwd = plans.canonicalize_path(tmp)
+            cwd = plans_files.canonicalize_path(tmp)
 
             context = run_inputs._resolve_run_verification_context(plan_dir, cwd)
 
         self.assertEqual(cwd, context.root)
         self.assertIsNone(context.workspace)
-        self.assertEqual(plans.canonicalize_path(plan_dir), context.plan_dir)
+        self.assertEqual(plans_files.canonicalize_path(plan_dir), context.plan_dir)
 
     def test_a_legacy_plan_bound_elsewhere_refuses_the_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -573,11 +582,11 @@ class LegacyBindingTests(unittest.TestCase):
             write_plan(plan_dir, ("pending",))
             elsewhere = Path(tmp) / "elsewhere"
             elsewhere.mkdir()
-            plans.save_plan_metadata(plan_dir, elsewhere)
+            plans_metadata.save_plan_metadata(plan_dir, elsewhere)
 
-            with self.assertRaises(plans.PlanError) as caught:
+            with self.assertRaises(plans_errors.PlanError) as caught:
                 run_inputs._resolve_run_verification_context(
-                    plan_dir, plans.canonicalize_path(tmp)
+                    plan_dir, plans_files.canonicalize_path(tmp)
                 )
 
         self.assertIn("does not match stored plan metadata", str(caught.exception))
@@ -592,7 +601,7 @@ class LegacyBindingTests(unittest.TestCase):
             run_inputs._ensure_legacy_run_metadata(
                 plan_dir, verification.VerificationContext.legacy(first)
             )
-            bound = plans.load_plan_metadata(plan_dir)
+            bound = plans_metadata.load_plan_metadata(plan_dir)
 
             # A second call against another root must not move the binding;
             # the mismatch is `_resolve_run_verification_context`'s to refuse.
@@ -602,10 +611,10 @@ class LegacyBindingTests(unittest.TestCase):
                 plan_dir, verification.VerificationContext.legacy(second)
             )
 
-            self.assertEqual(bound, plans.load_plan_metadata(plan_dir))
+            self.assertEqual(bound, plans_metadata.load_plan_metadata(plan_dir))
 
-        assert isinstance(bound, plans.PlanMetadata)
-        self.assertEqual(str(plans.canonicalize_path(first)), bound.cwd)
+        assert isinstance(bound, plans_metadata.PlanMetadata)
+        self.assertEqual(str(plans_files.canonicalize_path(first)), bound.cwd)
 
     def test_a_resume_without_a_persisted_binding_is_admitted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -621,7 +630,7 @@ class LegacyBindingTests(unittest.TestCase):
             context = verification.VerificationContext.legacy(tmp)
             args = _args(_resume_workspace_config={"workspace_root": tmp})
 
-            with self.assertRaises(plans.PlanError) as caught:
+            with self.assertRaises(plans_errors.PlanError) as caught:
                 run_inputs._validate_resume_workspace_binding(args, context)
 
         self.assertIn("workspace mode does not match", str(caught.exception))

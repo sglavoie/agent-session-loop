@@ -413,7 +413,7 @@ roll-forward, because nothing on disk proves an interrupted publication would
 have reached loop-ready; the review findings are unchanged, so the next cycle
 re-plans. `review_repair.recover_review_repair_publication(plan_dir)` performs
 it under the caller's plan lock, running
-`plans.recover_pending_plan_transaction` first so a half-installed generation
+`plans_transaction.recover_pending_plan_transaction` first so a half-installed generation
 is settled before the image is restored. `asl run` calls it before its first
 plan snapshot, so selection never sees a non-loop-ready generated child, and
 `materialize_review_repair_sessions` calls it before planning. A window whose

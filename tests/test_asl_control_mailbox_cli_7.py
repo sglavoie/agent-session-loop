@@ -12,7 +12,9 @@ from contextlib import redirect_stdout
 from agent_session_loop import (
     mailbox,
     mailbox_appenders,
-    mailbox_cli,
+    mailbox_cli_constants,
+    mailbox_cli_outbox,
+    mailbox_cli_output,
     mailbox_cursors,
     mailbox_leases,
     mailbox_rendering,
@@ -49,7 +51,7 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
         )
 
         code, payload = self.payload_from(
-            mailbox_cli.outbox_wait_from_args,
+            mailbox_cli_outbox.outbox_wait_from_args,
             self.args(since=1, timeout=0),
         )
         self.assertEqual(0, code)
@@ -69,7 +71,7 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
         self.assertEqual(payload["supervisor_id"], lease.supervisor_id)
 
         code, empty = self.payload_from(
-            mailbox_cli.outbox_wait_from_args,
+            mailbox_cli_outbox.outbox_wait_from_args,
             self.args(since=99, timeout=0),
         )
         self.assertEqual(0, code)
@@ -91,7 +93,7 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
         original = self._write_projected_lease(supervisor_id, question)
 
         code, payload = self.payload_from(
-            mailbox_cli.outbox_wait_from_args,
+            mailbox_cli_outbox.outbox_wait_from_args,
             self.args(timeout=0),
         )
 
@@ -149,15 +151,15 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
         physical_last_seq = second_question.seq + 1
 
         expected = {
-            mailbox_cli.OUTBOX_INCLUDE_QUESTIONS: (
+            mailbox_cli_constants.OUTBOX_INCLUDE_QUESTIONS: (
                 [first_question.id, second_question.id],
                 [],
             ),
-            mailbox_cli.OUTBOX_INCLUDE_NOTICES: (
+            mailbox_cli_constants.OUTBOX_INCLUDE_NOTICES: (
                 [],
                 [first_notice.id, second_notice.id],
             ),
-            mailbox_cli.OUTBOX_INCLUDE_ALL: (
+            mailbox_cli_constants.OUTBOX_INCLUDE_ALL: (
                 [first_question.id, second_question.id],
                 [first_notice.id, second_notice.id],
             ),
@@ -165,7 +167,7 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
         for include, (question_ids, notice_ids) in expected.items():
             with self.subTest(include=include):
                 code, payload = self.payload_from(
-                    mailbox_cli.outbox_wait_from_args,
+                    mailbox_cli_outbox.outbox_wait_from_args,
                     self.args(since=1, timeout=0, include=include),
                 )
                 self.assertEqual(0, code)
@@ -194,7 +196,7 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
         )
 
         code, filtered = self.payload_from(
-            mailbox_cli.outbox_wait_from_args,
+            mailbox_cli_outbox.outbox_wait_from_args,
             self.args(timeout=0),
         )
         self.assertEqual(0, code)
@@ -209,7 +211,7 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
             state_dir=self.state_dir,
         )
         code, resumed = self.payload_from(
-            mailbox_cli.outbox_wait_from_args,
+            mailbox_cli_outbox.outbox_wait_from_args,
             self.args(since=filtered["next_since"], timeout=0),
         )
         self.assertEqual(0, code)
@@ -232,7 +234,9 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
 
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = mailbox_cli.outbox_wait_from_args(self.args(json=False, timeout=0))
+            code = mailbox_cli_outbox.outbox_wait_from_args(
+                self.args(json=False, timeout=0)
+            )
 
         self.assertEqual(0, code)
         lines = stdout.getvalue().splitlines()
@@ -245,7 +249,7 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
         bounded_records = [
             json.loads(lines[index + 1])
             for index, line in enumerate(lines)
-            if line == mailbox_cli.MAILBOX_MESSAGE_BEGIN
+            if line == mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN
         ]
         self.assertEqual(
             [questions[-1].id],
@@ -266,7 +270,7 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
         )
 
         code, payload = self.payload_from(
-            mailbox_cli.outbox_wait_from_args,
+            mailbox_cli_outbox.outbox_wait_from_args,
             self.args(timeout=0),
         )
         self.assertEqual(0, code)
@@ -287,19 +291,21 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
         )
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = mailbox_cli.outbox_wait_from_args(
+            code = mailbox_cli_outbox.outbox_wait_from_args(
                 self.args(
                     json=False,
                     timeout=0,
-                    include=mailbox_cli.OUTBOX_INCLUDE_NOTICES,
+                    include=mailbox_cli_constants.OUTBOX_INCLUDE_NOTICES,
                 )
             )
         self.assertEqual(0, code)
         rendered = stdout.getvalue()
         lines = rendered.splitlines()
         self.assertTrue(rendered.isascii())
-        self.assertEqual(1, lines.count(mailbox_cli.MAILBOX_MESSAGE_BEGIN))
-        record = json.loads(lines[lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1])
+        self.assertEqual(1, lines.count(mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN))
+        record = json.loads(
+            lines[lines.index(mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN) + 1]
+        )
         self.assertEqual(
             {"id": first.id, "seq": first.seq, "text": forged},
             record,
@@ -318,7 +324,7 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
             )
             for index in range(30)
         ]
-        bounded_lines = mailbox_cli._outbox_notice_text_lines((first, *appended))
+        bounded_lines = mailbox_cli_output.outbox_notice_text_lines((first, *appended))
         bounded = "\n".join(bounded_lines)
         self.assertLessEqual(
             len(bounded.encode("utf-8")),
@@ -327,7 +333,7 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
         bounded_records = [
             json.loads(bounded_lines[index + 1])
             for index, line in enumerate(bounded_lines)
-            if line == mailbox_cli.MAILBOX_MESSAGE_BEGIN
+            if line == mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN
         ]
         self.assertEqual(
             [appended[-1].id],
@@ -349,8 +355,8 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
         )
 
         code, payload = self.payload_from(
-            mailbox_cli.outbox_wait_from_args,
-            self.args(timeout=0, include=mailbox_cli.OUTBOX_INCLUDE_ALL),
+            mailbox_cli_outbox.outbox_wait_from_args,
+            self.args(timeout=0, include=mailbox_cli_constants.OUTBOX_INCLUDE_ALL),
         )
 
         self.assertEqual(0, code)
@@ -382,10 +388,10 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
         launch = mailbox_validation.new_supervision_id()
 
         code, payload = self.payload_from(
-            mailbox_cli.outbox_wait_from_args,
+            mailbox_cli_outbox.outbox_wait_from_args,
             self.args(
                 timeout=0,
-                include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                include=mailbox_cli_constants.OUTBOX_INCLUDE_ALL,
                 supervision_id=launch,
             ),
         )
@@ -418,11 +424,11 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
         self.assertGreater(overlapping.seq, baseline)
 
         code, payload = self.payload_from(
-            mailbox_cli.outbox_wait_from_args,
+            mailbox_cli_outbox.outbox_wait_from_args,
             self.args(
                 since=baseline,
                 timeout=0,
-                include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                include=mailbox_cli_constants.OUTBOX_INCLUDE_ALL,
                 supervision_id=launch,
             ),
         )
@@ -453,10 +459,10 @@ class MailboxCliTestsPart7(MailboxCliTestsBase):
         )
 
         code, payload = self.payload_from(
-            mailbox_cli.outbox_wait_from_args,
+            mailbox_cli_outbox.outbox_wait_from_args,
             self.args(
                 timeout=0,
-                include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                include=mailbox_cli_constants.OUTBOX_INCLUDE_ALL,
                 supervision_id=launch,
             ),
         )

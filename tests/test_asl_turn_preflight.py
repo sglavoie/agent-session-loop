@@ -44,7 +44,10 @@ from agent_session_loop import (
     events,
     external_write_evidence,
     handoff_guards,
-    plans,
+    plans_models,
+    plans_payloads,
+    plans_session_scope,
+    plans_snapshot,
     repository_evidence,
     review_guard,
     run_loop_context,
@@ -133,10 +136,10 @@ class FakeRunContext:
         self.persistence = RecordingPersistence()
         self.verification_context = FakeVerificationContext()
         self.runner_work_finished_at: Any = None
-        self.final_snapshots: list[plans.PlanSnapshot] = []
+        self.final_snapshots: list[plans_models.PlanSnapshot] = []
         self.pauses: list[dict[str, Any]] = []
 
-    def record_final_snapshot(self, snapshot: plans.PlanSnapshot) -> None:
+    def record_final_snapshot(self, snapshot: plans_models.PlanSnapshot) -> None:
         self.final_snapshots.append(snapshot)
 
     def pause(
@@ -174,9 +177,11 @@ class PreflightTestCase(unittest.TestCase):
         self.event_path = self.run_dir / events.EVENTS_FILE_NAME
         self.ctx = FakeRunContext(run_dir=self.run_dir, event_path=self.event_path)
 
-    def snapshot(self, statuses: tuple[str, ...] = ("pending",)) -> plans.PlanSnapshot:
+    def snapshot(
+        self, statuses: tuple[str, ...] = ("pending",)
+    ) -> plans_models.PlanSnapshot:
         write_plan(self.plan_dir, statuses)
-        return plans.inspect_plan(self.plan_dir)
+        return plans_snapshot.inspect_plan(self.plan_dir)
 
     def classification(
         self,
@@ -188,9 +193,9 @@ class PreflightTestCase(unittest.TestCase):
             is_review_session=review,
             is_repair_session=repair,
             session_kind=(
-                plans.SESSION_KIND_REVIEW
+                plans_payloads.SESSION_KIND_REVIEW
                 if review
-                else plans.SESSION_KIND_IMPLEMENTATION
+                else plans_payloads.SESSION_KIND_IMPLEMENTATION
             ),
         )
 
@@ -217,11 +222,11 @@ class PreflightTestCase(unittest.TestCase):
 
     def baselines(
         self,
-        snapshot: plans.PlanSnapshot,
+        snapshot: plans_models.PlanSnapshot,
         *,
         classification: turn_preparation.SessionClassification,
         workspace: Any = None,
-        session_scope: plans.SessionScope | None = None,
+        session_scope: plans_session_scope.SessionScope | None = None,
         review_base: Any = None,
         retained_scope_repair: dict[str, Any] | None = None,
         regenerated_write_scope: dict[str, Any] | None = None,
@@ -712,7 +717,9 @@ class WorkspaceBaselineTests(PreflightTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.workspace = fake_workspace("app", "docs")
-        self.scope = plans.SessionScope(reads=("app", "docs"), writes=("app",))
+        self.scope = plans_session_scope.SessionScope(
+            reads=("app", "docs"), writes=("app",)
+        )
 
     def capture(self, **overrides: Any) -> turn_preflight.TurnBaselines:
         snapshot = overrides.pop("snapshot", None) or self.snapshot()

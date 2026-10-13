@@ -323,7 +323,7 @@ def manifest_title(manifest_text: object) -> str | None:
     """The plan title from a manifest's first ``# H1``, or ``None``.
 
     ``None`` rather than the directory name, which is what ASL's
-    ``plans.inspect_plan`` falls back to: that fallback is a path component,
+    ``plans_snapshot.inspect_plan`` falls back to: that fallback is a path component,
     and a catalog field that is usually a title and occasionally a directory
     name is not a field that can be published.
     """

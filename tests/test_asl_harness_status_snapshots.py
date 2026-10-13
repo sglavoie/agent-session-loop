@@ -7,7 +7,8 @@ from agent_session_loop import (
     config,
     events,
     harness_failures,
-    plans,
+    plans_files,
+    plans_snapshot,
     run_reporting,
     state,
 )
@@ -57,7 +58,7 @@ class StatusSnapshotTests(FakeHarnessIntegrationBase):
             run_reporting._compact_status_lines(
                 payload=payload,
                 control=control,
-                snapshot=plans.inspect_plan(plan_dir),
+                snapshot=plans_snapshot.inspect_plan(plan_dir),
                 now=clock.parse_datetime("2026-06-11T12:00:20+00:00"),
             )
         )
@@ -103,7 +104,7 @@ class StatusSnapshotTests(FakeHarnessIntegrationBase):
             run_reporting._compact_status_lines(
                 payload=payload,
                 control=control,
-                snapshot=plans.inspect_plan(plan_dir),
+                snapshot=plans_snapshot.inspect_plan(plan_dir),
                 now=clock.parse_datetime("2026-06-11T12:01:30+00:00"),
             )
         )
@@ -139,7 +140,7 @@ class StatusSnapshotTests(FakeHarnessIntegrationBase):
             run_reporting._compact_status_lines(
                 payload=payload,
                 control=control,
-                snapshot=plans.inspect_plan(plan_dir),
+                snapshot=plans_snapshot.inspect_plan(plan_dir),
             )
         )
 
@@ -221,7 +222,7 @@ class StatusSnapshotTests(FakeHarnessIntegrationBase):
             run_reporting._compact_status_lines(
                 payload=payload,
                 control=control,
-                snapshot=plans.inspect_plan(plan_dir),
+                snapshot=plans_snapshot.inspect_plan(plan_dir),
             )
         )
 
@@ -279,7 +280,7 @@ class StatusSnapshotTests(FakeHarnessIntegrationBase):
             run_reporting._compact_status_lines(
                 payload=payload,
                 control=control,
-                snapshot=plans.inspect_plan(plan_dir),
+                snapshot=plans_snapshot.inspect_plan(plan_dir),
                 now=clock.parse_datetime("2026-06-11T12:00:20+00:00"),
             )
         )
@@ -335,7 +336,7 @@ class StatusSnapshotTests(FakeHarnessIntegrationBase):
             run_reporting._compact_status_lines(
                 payload=payload,
                 control=control,
-                snapshot=plans.inspect_plan(plan_dir),
+                snapshot=plans_snapshot.inspect_plan(plan_dir),
                 now=clock.parse_datetime("2026-06-11T12:00:01+00:00"),
             )
         )
@@ -390,8 +391,8 @@ class StatusSnapshotTests(FakeHarnessIntegrationBase):
         turn = payload["turns"][0]
         self.assertEqual(
             {
-                str(plans.canonicalize_path(plan_dir / "manifest.md")),
-                str(plans.canonicalize_path(plan_dir / "context.md")),
+                str(plans_files.canonicalize_path(plan_dir / "manifest.md")),
+                str(plans_files.canonicalize_path(plan_dir / "context.md")),
             },
             set(turn["ledger_updates"]),
         )

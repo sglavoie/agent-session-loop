@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 import tests.reply_flow_support as rfs
-from agent_session_loop import cli, events, harnesses, plans, runner, state
+from agent_session_loop import cli, events, harnesses, plans_files, runner, state
 from tests.support import (
     write_plan,
 )
@@ -373,7 +373,9 @@ class RunResumeConfigTests(unittest.TestCase):
             self.assertEqual(5, run_config["max_pending_sessions"])
             self.assertTrue(run_config["allow_not_loop_ready"])
             self.assertTrue(run_config["unsafe_bypass"])
-            self.assertEqual(str(plans.canonicalize_path(tmp_dir)), run_config["cwd"])
+            self.assertEqual(
+                str(plans_files.canonicalize_path(tmp_dir)), run_config["cwd"]
+            )
             self.assertEqual(str(state_dir), run_config["state_dir_override"])
 
 

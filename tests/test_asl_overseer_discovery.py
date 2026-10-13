@@ -44,7 +44,8 @@ from agent_session_loop import (
     bridge,
     events,
     overseer_discovery,
-    plans,
+    plans_files,
+    plans_snapshot,
     run_payloads,
     run_selection,
     run_termination,
@@ -85,10 +86,10 @@ class _Corpus:
     def __init__(self, case: unittest.TestCase) -> None:
         tmp = tempfile.TemporaryDirectory()
         case.addCleanup(tmp.cleanup)
-        # `plans.canonicalize_path` resolves the macOS `/var` symlink, and the
+        # `plans_files.canonicalize_path` resolves the macOS `/var` symlink, and the
         # state directory name is a hash of the canonical path, so the fixture
         # has to agree with it before anything is written.
-        self.root = plans.canonicalize_path(tmp.name)
+        self.root = plans_files.canonicalize_path(tmp.name)
         self.plans_root = self.root / "plans"
         self.plans_root.mkdir()
         self.state_root = self.root / "state"
@@ -96,7 +97,7 @@ class _Corpus:
     def plan_dir(self, name: str) -> Path:
         plan_dir = self.plans_root / name
         plan_dir.mkdir(parents=True, exist_ok=True)
-        return plans.canonicalize_path(plan_dir)
+        return plans_files.canonicalize_path(plan_dir)
 
     def published_record(self, **overrides: Any) -> dict[str, Any]:
         """A record shaped the way a run born after this session publishes one."""
@@ -721,7 +722,7 @@ def _initial_payload(case: unittest.TestCase) -> dict[str, Any]:
     )
     return run_payloads._initial_payload(
         args=args,
-        snapshot=plans.inspect_plan(plan_dir),
+        snapshot=plans_snapshot.inspect_plan(plan_dir),
         state_dir=plan_state,
         run_dir=plan_state / "runs" / run_id,
         event_path=plan_state / events.EVENTS_FILE_NAME,
@@ -729,7 +730,7 @@ def _initial_payload(case: unittest.TestCase) -> dict[str, Any]:
         lock_info=state.LockInfo(
             path=plan_state / state.LOCK_FILE_NAME,
             pid=123,
-            plan_dir=str(plans.canonicalize_path(plan_dir)),
+            plan_dir=str(plans_files.canonicalize_path(plan_dir)),
             created_at=STARTED_AT,
             stale=False,
             reason="active",

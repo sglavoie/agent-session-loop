@@ -8,7 +8,11 @@ import tempfile
 from pathlib import Path
 
 from agent_session_loop import (
-    plans,
+    plans_content_hash,
+    plans_files,
+    plans_handoff,
+    plans_snapshot,
+    plans_status_tables,
 )
 from tests.asl_core_support import ParserAndStateTestsBase
 from tests.support import (
@@ -43,7 +47,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            handoff = plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
             self.assertEqual("complete", handoff.status)
             self.assertIsNone(handoff.notes)
@@ -78,7 +82,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            handoff = plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
             self.assertEqual("complete", handoff.status)
             self.assertEqual("body notes", handoff.notes)
@@ -122,7 +126,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            handoff = plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
             self.assertEqual(("fact one",), handoff.discovered_facts)
             self.assertEqual(("question one",), handoff.open_questions)
@@ -149,7 +153,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            handoff = plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
             self.assertEqual(("the only fact",), handoff.discovered_facts)
             self.assertEqual((), handoff.open_questions)
@@ -179,7 +183,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            handoff = plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
             self.assertEqual((), handoff.discovered_facts)
             self.assertEqual((), handoff.open_questions)
@@ -209,7 +213,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            handoff = plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
             self.assertEqual(
                 ("top-level fact", "another top-level fact"),
@@ -241,7 +245,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            handoff = plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
             self.assertEqual("complete", handoff.status)
             self.assertEqual(("a real fact",), handoff.discovered_facts)
@@ -272,7 +276,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            handoff = plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
             self.assertEqual(("fact inside the block",), handoff.discovered_facts)
 
@@ -296,8 +300,8 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
             session_file = self._session_file(plan_dir)
 
-            status = plans.read_session_status(session_file)
-            handoff = plans.read_session_handoff(session_file)
+            status = plans_handoff.read_session_status(session_file)
+            handoff = plans_handoff.read_session_handoff(session_file)
 
             self.assertEqual(handoff.status, status.status)
             self.assertEqual(handoff.raw_value, status.raw_value)
@@ -311,18 +315,20 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             ignored = plan_dir / "session-1.1.expand.md.bak"
             ignored.write_text("ignored\n", encoding="utf-8")
 
-            without_expansion = plans.plan_content_sha256(plan_dir)
+            without_expansion = plans_content_hash.plan_content_sha256(plan_dir)
             expansion = plan_dir / "session-1.1.expand.md"
             expansion.write_text("first\n", encoding="utf-8")
-            with_expansion = plans.plan_content_sha256(plan_dir)
+            with_expansion = plans_content_hash.plan_content_sha256(plan_dir)
             expansion.write_text("second\n", encoding="utf-8")
-            changed_expansion = plans.plan_content_sha256(plan_dir)
+            changed_expansion = plans_content_hash.plan_content_sha256(plan_dir)
 
             self.assertNotEqual(without_expansion, with_expansion)
             self.assertNotEqual(with_expansion, changed_expansion)
-            ignored_hash = plans.plan_content_sha256(plan_dir)
+            ignored_hash = plans_content_hash.plan_content_sha256(plan_dir)
             ignored.write_text("still ignored\n", encoding="utf-8")
-            self.assertEqual(ignored_hash, plans.plan_content_sha256(plan_dir))
+            self.assertEqual(
+                ignored_hash, plans_content_hash.plan_content_sha256(plan_dir)
+            )
 
     def test_sync_derived_status_ledgers_updates_clear_status_tables(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -359,13 +365,13 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            snapshot = plans.inspect_plan(plan_dir)
-            changed = plans.sync_derived_status_ledgers(snapshot)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
+            changed = plans_status_tables.sync_derived_status_ledgers(snapshot)
 
             self.assertEqual(
                 {
-                    plans.canonicalize_path(manifest_path),
-                    plans.canonicalize_path(context_path),
+                    plans_files.canonicalize_path(manifest_path),
+                    plans_files.canonicalize_path(context_path),
                 },
                 set(changed),
             )
@@ -425,13 +431,13 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            snapshot = plans.inspect_plan(plan_dir)
-            changed = plans.sync_derived_status_ledgers(snapshot)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
+            changed = plans_status_tables.sync_derived_status_ledgers(snapshot)
 
             self.assertEqual(
                 {
-                    plans.canonicalize_path(manifest_path),
-                    plans.canonicalize_path(context_path),
+                    plans_files.canonicalize_path(manifest_path),
+                    plans_files.canonicalize_path(context_path),
                 },
                 set(changed),
             )

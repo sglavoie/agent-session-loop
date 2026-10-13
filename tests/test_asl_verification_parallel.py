@@ -13,7 +13,7 @@ from unittest import mock
 
 from agent_session_loop import (
     contracts,
-    plans,
+    plans_session_ids,
     verification,
     verification_transitions,
 )
@@ -50,7 +50,7 @@ class ParallelVerificationTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.repo_root = Path(self._tmp.name)
-        self.session_id = plans.parse_session_id("1")
+        self.session_id = plans_session_ids.parse_session_id("1")
 
     def _contract(
         self,

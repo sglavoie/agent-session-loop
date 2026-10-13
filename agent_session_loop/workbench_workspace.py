@@ -6,8 +6,8 @@ projection: the root, the registry digest, and the ordered repository rows.
 This module computes that projection once, from runtime state when a run has
 recorded one and from prepared plan metadata before the first run.
 
-It is the lowest Workbench layer: it imports only ``plans``, so ``workbench``
-and ``workbench_recovery`` can both read it without importing each other.
+It is the lowest Workbench layer: it imports only the ``plans_*`` modules, so
+``workbench`` and ``workbench_recovery`` can both read it without importing each other.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import plans
+from . import plans_files, plans_metadata, plans_registry
 
 
 def _repository_rows(value: Any) -> tuple[dict[str, Any], ...]:
@@ -50,17 +50,19 @@ def _workspace_projection(
             "repository_count": len(repositories),
         }
 
-    registry = plans.read_repository_registry(plan_dir)
-    metadata = plans.load_plan_metadata(plan_dir)
-    if registry is None or not isinstance(metadata, plans.WorkspacePlanMetadata):
+    registry = plans_registry.read_repository_registry(plan_dir)
+    metadata = plans_metadata.load_plan_metadata(plan_dir)
+    if registry is None or not isinstance(
+        metadata, plans_metadata.WorkspacePlanMetadata
+    ):
         return {}
-    root = plans.canonicalize_path(metadata.workspace_root)
+    root = plans_files.canonicalize_path(metadata.workspace_root)
     rows = [
         {
             "alias": repository.alias,
             "path": repository.path,
             "origin": repository.origin,
-            "resolved_root": str(plans.canonicalize_path(root / repository.path)),
+            "resolved_root": str(plans_files.canonicalize_path(root / repository.path)),
         }
         for repository in registry.repositories
     ]

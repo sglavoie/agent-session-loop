@@ -11,9 +11,7 @@ from . import (
     repository_scope,
     workspaces,
 )
-from .plans import (
-    ReadinessMetadata,
-)
+from .plans_models import ReadinessMetadata
 from .preflight_auto_repair import (
     AutoRepair,
     build_auto_repair_plan,

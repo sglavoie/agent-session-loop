@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from agent_session_loop import events, plans, state, supervisor_audit_checks
+from agent_session_loop import events, plans_metadata, state, supervisor_audit_checks
 from tests import support_supervisor_audit_checks as checks_support
 from tests.support_supervisor_audit import RUN_ID
 
@@ -206,7 +206,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
             repository = history[0] / "app"
             (history[1] / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
             (history[1] / "session-01.md").write_text("# Session 1\n", encoding="utf-8")
-            (history[1] / plans.PLAN_METADATA_FILE_NAME).write_text(
+            (history[1] / plans_metadata.PLAN_METADATA_FILE_NAME).write_text(
                 json.dumps({"version": 1, "cwd": str(repository)}),
                 encoding="utf-8",
             )

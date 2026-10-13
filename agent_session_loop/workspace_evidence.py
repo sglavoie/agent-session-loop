@@ -15,9 +15,10 @@ It owns four things that the run loop used to hold inline:
   registered repository a snapshot could not fingerprint.
 * **The two guard projections.** :func:`_workspace_write_guard_evidence`
   classifies a workspace-vector comparison against one session's
-  :class:`plans.SessionScope`; :func:`_legacy_implementation_write_guard_evidence`
-  projects the single-repository comparison a legacy run produces into the same
-  schema, so both modes are read by one enforcement layer.
+  :class:`plans_session_scope.SessionScope`;
+  :func:`_legacy_implementation_write_guard_evidence` projects the
+  single-repository comparison a legacy run produces into the same schema, so
+  both modes are read by one enforcement layer.
 * **The two bounded pause suffixes.** :func:`_workspace_unavailable_summary` and
   :func:`_workspace_guard_violation_summary` name at most three subjects and a
   count, so a pause reason stays a sentence rather than a payload dump.
@@ -48,7 +49,7 @@ appearing in this module is a test failure rather than a review catch.
 Nothing here imports the runner. The resolved workspace, the session scope, the
 comparison, the plan directory, the event path and the session status all enter
 as parameters, and every collaborator this boundary reaches --
-``repository_evidence``, ``review_guard``, ``review_repair``, ``plans``,
+``repository_evidence``, ``review_guard``, ``review_repair``, the ``plans_*`` modules,
 ``workspaces``, ``external_write_evidence``, ``run_errors`` -- is already
 runner-free, so each is a direct import at its true owner and no seam is
 required. This module is also what finally satisfies the
@@ -97,7 +98,10 @@ from typing import Any
 from . import (
     events,
     external_write_evidence,
-    plans,
+    plans_errors,
+    plans_models,
+    plans_session_ids,
+    plans_session_scope,
     repository_evidence,
     review_guard,
     review_repair,
@@ -332,7 +336,7 @@ def _legacy_write_guard_failure_message(evidence: Mapping[str, Any]) -> str:
 def _workspace_write_guard_evidence(
     *,
     workspace: workspaces.ResolvedWorkspace,
-    scope: plans.SessionScope,
+    scope: plans_session_scope.SessionScope,
     comparison: Mapping[str, Any],
     exclude: tuple[str, ...],
     include_ignored: bool,
@@ -597,7 +601,7 @@ def _workspace_repair_required(
 
 
 def _session_expansion_evidence(plan_dir: Path, session_id: str) -> dict[str, Any]:
-    path = plan_dir / plans.session_id_to_expansion_filename(session_id)
+    path = plan_dir / plans_session_ids.session_id_to_expansion_filename(session_id)
     try:
         stat_result = path.stat()
         content = path.read_bytes()
@@ -685,7 +689,7 @@ def _latest_workspace_scope_repair_requirement(
 
 def _workspace_scope_repair_still_unauthorized(
     record: Mapping[str, Any],
-    scope: plans.SessionScope | None,
+    scope: plans_session_scope.SessionScope | None,
 ) -> bool:
     """Whether a retained scope violation is still outside the session's scope.
 
@@ -733,7 +737,7 @@ def _workspace_scope_repair_restored(
     current: repository_evidence.WorkspaceSnapshot,
     *,
     workspace: workspaces.ResolvedWorkspace,
-    scope: plans.SessionScope | None,
+    scope: plans_session_scope.SessionScope | None,
     exclude: tuple[str, ...] = (),
     include_ignored: bool = False,
 ) -> bool:
@@ -848,10 +852,10 @@ def _workspace_scope_repair_comparison(
 
 def _regenerated_repair_child_write_scope(
     *,
-    session: plans.SessionStatus,
+    session: plans_models.SessionStatus,
     plan_dir: Path,
     workspace: workspaces.ResolvedWorkspace,
-    scope: plans.SessionScope,
+    scope: plans_session_scope.SessionScope,
 ) -> dict[str, Any] | None:
     """Widen a materialized repair child's persisted write scope in place.
 
@@ -909,16 +913,16 @@ def _regenerated_repair_child_write_scope(
     reads = frozenset(scope.reads) | frozenset(required)
     writes = frozenset(scope.writes) | frozenset(required)
     try:
-        widened = plans.SessionScope(
+        widened = plans_session_scope.SessionScope(
             reads=tuple(alias for alias in aliases if alias in reads),
             # Writes must stay a subset of reads, so a child whose reads were
             # narrowed by hand widens both rather than persisting an
             # unparseable scope.
             writes=tuple(alias for alias in aliases if alias in writes),
         ).validate_registry(aliases)
-        rewritten = plans.replaced_session_scope_text(text, widened)
-        plans.parse_session_scope(rewritten, aliases)
-    except plans.PlanError, ValueError:
+        rewritten = plans_session_scope.replaced_session_scope_text(text, widened)
+        plans_session_scope.parse_session_scope(rewritten, aliases)
+    except plans_errors.PlanError, ValueError:
         return None
     try:
         session.path.write_text(rewritten, encoding="utf-8")

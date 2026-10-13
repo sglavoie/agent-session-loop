@@ -14,7 +14,7 @@ from agent_session_loop import (
     control_queue,
     events,
     harnesses,
-    plans,
+    plans_payloads,
     review_session_body,
     run_control,
     state,
@@ -259,7 +259,7 @@ class ModelControlTests(FakeHarnessIntegrationBase):
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         turn = payload["turns"][0]
-        self.assertEqual(plans.SESSION_KIND_REVIEW, turn["session_kind"])
+        self.assertEqual(plans_payloads.SESSION_KIND_REVIEW, turn["session_kind"])
         self.assertEqual("claude", turn["harness"])
         self.assertEqual("claude-review", turn["model"])
         self.assertEqual(config.MODEL_SOURCE_FLAG, turn["model_source"])

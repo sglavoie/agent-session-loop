@@ -6,7 +6,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .authoring import PlanTransaction
-from .plans import PlanError, SessionId, canonicalize_path, parse_session_id
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
+from .plans_session_ids import SessionId, parse_session_id
 from .prepare_models import (
     _BEFORE_STARTING_PREFIX,
     EXPANSION_REFERENCE_TEMPLATE,

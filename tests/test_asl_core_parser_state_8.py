@@ -22,7 +22,7 @@ from agent_session_loop import (
     mailbox_cursors,
     mailbox_validation,
     mailbox_vocabulary,
-    plans,
+    plans_snapshot,
     state,
     state_abandonment,
     state_mailbox_status,
@@ -75,7 +75,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             first, second = payload["mailbox"]["guidance"]
@@ -127,7 +127,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             self.assertNotIn(
@@ -147,7 +147,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             ]
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             entries = payload["mailbox"]["guidance"]
@@ -210,7 +210,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             _write_lock_file(plan_dir, state_dir, pid=os.getpid())
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             status = payload["mailbox"]
@@ -239,7 +239,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             status = payload["mailbox"]
@@ -281,7 +281,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 _write_lock_file(plan_dir, state_dir, pid=os.getpid())
 
                 payload = state_status.status_payload(
-                    plans.inspect_plan(plan_dir), state_dir
+                    plans_snapshot.inspect_plan(plan_dir), state_dir
                 )
 
                 status = payload["mailbox"]

@@ -15,7 +15,11 @@ from agent_session_loop import (
     baseline,
     baseline_cache,
     contracts,
-    plans,
+    plans_content_hash,
+    plans_metadata,
+    plans_models,
+    plans_readiness,
+    plans_session_ids,
     preflight,
     preflight_models,
 )
@@ -45,9 +49,9 @@ class PreflightCoreFixtures(unittest.TestCase):
         session_id: str,
         *,
         status: str = "complete",
-    ) -> plans.ProgressEntry:
-        return plans.ProgressEntry(
-            session_id=plans.parse_session_id(session_id),
+    ) -> plans_models.ProgressEntry:
+        return plans_models.ProgressEntry(
+            session_id=plans_session_ids.parse_session_id(session_id),
             status=status,
             completed_at="2026-06-19T15:00:00Z",
             files_modified=(),
@@ -179,15 +183,17 @@ class RepositoryIntentFixtures(unittest.TestCase):
                 + f"\nRestated from {cited_in_session} for context.\n",
                 encoding="utf-8",
             )
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
-        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(self.first))
 
     def _footprint_findings(
         self, report: preflight_models.PreflightReport
@@ -202,7 +208,7 @@ class RepositoryIntentFixtures(unittest.TestCase):
         self._write_plan(
             self.first / "README.md", self.second / "src" / "new_module.py"
         )
-        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(self.first))
         return preflight.run_core_preflight(self.plan_dir)
 
 

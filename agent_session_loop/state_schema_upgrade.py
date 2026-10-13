@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import agent_mux_projection, artifacts, events, plans
+from . import agent_mux_projection, artifacts, events, plans_files
 from .state import (
     LOCK_FILE_NAME,
     STATE_MIGRATED_EVENT,
@@ -181,7 +181,7 @@ def upgrade_plan_state_schema(
     lifecycle hooks a v3 consumer will not recognise. Such a run is reported as
     incompatible and left for its operator to stop.
     """
-    canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
     plan_state = plan_state_dir(canonical_plan_dir, state_dir)
     state_path = plan_state / events.STATE_FILE_NAME
     if not plan_state.is_dir() or not state_path.is_file():

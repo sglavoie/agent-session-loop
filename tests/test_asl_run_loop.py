@@ -31,7 +31,7 @@ this module's shape (one arming site, one call site, one set of refusals, one
 progress line reported after the record is durable, and the two source-order
 assertions that fail if either site moves)
 rather than of a run. The commit those refusals let through is covered where it
-is made, in ``tests/test_asl_turn_commit.py``, and the cross-process behaviour
+is made, in ``tests/test_asl_turn_commit_*.py``, and the cross-process behaviour
 this all exists for is covered in ``tests/test_asl_harness_*.py``.
 The second is the commit-group barrier. ``CommitGroupBarrierTests`` asserts
 that spending a group's retry budget arms it and that it is read at the loop's
@@ -106,7 +106,7 @@ OWNED_ELSEWHERE = (
     "turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS",
     "turn_execution.turn_paths",
     "clock.utc_now",
-    "plans.snapshot_payload",
+    "plans_payloads.snapshot_payload",
 )
 
 

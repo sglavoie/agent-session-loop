@@ -10,7 +10,7 @@ from . import (
     guards,
     guidance_delivery,
     harnesses,
-    plans,
+    plans_content_hash,
     redirect_continuation,
     redirect_store,
     run_commit,
@@ -252,7 +252,7 @@ def _prepare_turn_prompt(frame: RunFrame) -> RunResult | LoopSignal | None:
     frame.turn_started_ns = baselines.turn_started_ns
     frame.pending_exception_guard = baselines.pending_exception_guard
     frame.protected_path_baseline = baselines.protected_path_baseline
-    frame.plan_artifacts_before = plans.session_artifact_digests(
+    frame.plan_artifacts_before = plans_content_hash.session_artifact_digests(
         frame.before.plan_dir, exclude_session_id=frame.session_id
     )
     return None

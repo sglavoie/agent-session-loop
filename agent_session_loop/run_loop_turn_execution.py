@@ -7,7 +7,8 @@ import functools
 from . import (
     conversation_resume,
     events,
-    plans,
+    plans_handoff,
+    plans_payloads,
     redirect_continuation,
     review,
     run_commit,
@@ -102,7 +103,7 @@ def _execute_turn(frame: RunFrame) -> RunResult | LoopSignal | None:
                 events.CONVERSATION_CONTINUATION_EVENT,
                 {
                     "run_id": frame.ctx.run_id,
-                    **plans.session_identity_payload(frame.session_id),
+                    **plans_payloads.session_identity_payload(frame.session_id),
                     "disposition": frame.continuation.disposition,
                     "conversation": frame.outcome_record.conversation,
                     "confirmed": frame.outcome_record.confirmed,
@@ -122,7 +123,9 @@ def _execute_turn(frame: RunFrame) -> RunResult | LoopSignal | None:
         with frame.ctx.persistence.lock:
             frame.ctx.payload["review_session_executed"] = frame.session_id
         frame.normalized_after_review = (
-            plans.normalize_generated_review_handoff_artifacts(frame.before.plan_dir)
+            plans_handoff.normalize_generated_review_handoff_artifacts(
+                frame.before.plan_dir
+            )
         )
         if frame.normalized_after_review:
             frame.normalized_review_handoffs.extend(frame.normalized_after_review)
@@ -176,7 +179,7 @@ def _execute_turn(frame: RunFrame) -> RunResult | LoopSignal | None:
         frame.turn_identity = {
             "run_id": frame.ctx.run_id,
             "turn_index": frame.turn_index,
-            **plans.session_identity_payload(frame.session_id),
+            **plans_payloads.session_identity_payload(frame.session_id),
         }
         run_persistence._append_process_sweep_event(
             event_path=frame.ctx.event_path,

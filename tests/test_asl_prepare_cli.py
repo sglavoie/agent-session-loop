@@ -15,7 +15,7 @@ from unittest import mock
 from agent_session_loop import (
     cli,
     harnesses,
-    plans,
+    plans_files,
     prepare,
     prepare_cli,
     prepare_models,
@@ -310,7 +310,7 @@ class PrepareCliTests(unittest.TestCase):
 
     def test_prepare_success_via_default_validator_harness(self) -> None:
         source = self._write_source()
-        canonical_repo = plans.canonicalize_path(self.repo)
+        canonical_repo = plans_files.canonicalize_path(self.repo)
         payload = _prepare_pipeline_payload(str(canonical_repo), ("1", "2"))
 
         def fake_run_harness(name: str, **kwargs: object) -> harnesses.HarnessResult:
@@ -425,7 +425,7 @@ class PrepareCliTests(unittest.TestCase):
 
     def test_omitted_validator_selection_uses_harness_native_defaults(self) -> None:
         source = self._write_source()
-        canonical_repo = plans.canonicalize_path(self.repo)
+        canonical_repo = plans_files.canonicalize_path(self.repo)
         payload = _prepare_pipeline_payload(str(canonical_repo), ("1", "2"))
 
         def fake_run_harness(name: str, **kwargs: object) -> harnesses.HarnessResult:
@@ -463,7 +463,7 @@ class PrepareCliTests(unittest.TestCase):
 
     def test_validator_heartbeat_keeps_json_stdout_clean(self) -> None:
         source = self._write_source()
-        canonical_repo = plans.canonicalize_path(self.repo)
+        canonical_repo = plans_files.canonicalize_path(self.repo)
         payload = _prepare_pipeline_payload(str(canonical_repo), ("1", "2"))
 
         def slow_launch(*_args: object, **_kwargs: object) -> object:

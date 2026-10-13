@@ -16,7 +16,7 @@ from pathlib import Path
 from agent_session_loop import (
     cli,
     mailbox_appenders,
-    plans,
+    plans_files,
     retention,
     run_prompts,
     state,
@@ -255,7 +255,7 @@ class JsonStateMaintenanceCliTests(JsonCliHelpers, unittest.TestCase):
             (locked_state / state.LOCK_FILE_NAME).write_text(
                 json.dumps(
                     {
-                        "plan_dir": str(plans.canonicalize_path(locked)),
+                        "plan_dir": str(plans_files.canonicalize_path(locked)),
                         "created_at": "2026-08-01T00:00:00+00:00",
                         "pid": 4_242_424,
                     },
@@ -289,10 +289,10 @@ class JsonStateMaintenanceCliTests(JsonCliHelpers, unittest.TestCase):
                 entry["plan_dir"]: entry["reclaimable_bytes"]
                 for entry in payload["plans"]
             }
-            self.assertEqual(0, by_plan[str(plans.canonicalize_path(locked))])
+            self.assertEqual(0, by_plan[str(plans_files.canonicalize_path(locked))])
             self.assertEqual(
                 payload["reclaimable_bytes"],
-                by_plan[str(plans.canonicalize_path(sweepable))],
+                by_plan[str(plans_files.canonicalize_path(sweepable))],
             )
             self.assertTrue(
                 (
@@ -326,7 +326,7 @@ class JsonStateMaintenanceCliTests(JsonCliHelpers, unittest.TestCase):
             lock_path.write_text(
                 json.dumps(
                     {
-                        "plan_dir": str(plans.canonicalize_path(plan_dir)),
+                        "plan_dir": str(plans_files.canonicalize_path(plan_dir)),
                         "created_at": "2026-08-01T00:00:00+00:00",
                         "pid": 4_242_424,
                         "hostname": socket.gethostname(),
@@ -350,7 +350,7 @@ class JsonStateMaintenanceCliTests(JsonCliHelpers, unittest.TestCase):
                 entry = next(
                     plan
                     for plan in payload["plans"]
-                    if plan["plan_dir"] == str(plans.canonicalize_path(plan_dir))
+                    if plan["plan_dir"] == str(plans_files.canonicalize_path(plan_dir))
                 )
                 return [
                     (run["run_id"], run["reclaimable"], run["reason"])

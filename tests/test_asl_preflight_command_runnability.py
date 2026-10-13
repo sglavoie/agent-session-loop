@@ -8,7 +8,7 @@ from pathlib import Path
 
 from agent_session_loop import (
     contracts,
-    plans,
+    plans_session_ids,
     preflight,
     preflight_hint_resolution,
     preflight_models,
@@ -27,7 +27,7 @@ class PreflightCommandRunnabilityTests(unittest.TestCase):
         *checks: contracts.VerificationCheck,
     ) -> contracts.CompletionContract:
         return contracts.CompletionContract(
-            session_id=plans.parse_session_id(session_id),
+            session_id=plans_session_ids.parse_session_id(session_id),
             done_when=("recipe runs",),
             verify=contracts.VerifyRecipe(checks=tuple(checks)),
         )

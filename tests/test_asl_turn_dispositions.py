@@ -63,7 +63,9 @@ from agent_session_loop import (
     mailbox_models,
     mailbox_vocabulary,
     model_availability,
-    plans,
+    plans_models,
+    plans_payloads,
+    plans_snapshot,
     run_coordination,
     run_loop_context,
     run_termination,
@@ -163,21 +165,21 @@ class FakeRunContext:
             "spark": {"baseline": "sonnet"},
         }
         self.persistence = RecordingPersistence()
-        self.plan_cache = plans.PlanSnapshotCache()
+        self.plan_cache = plans_snapshot.PlanSnapshotCache()
         self.control_payload: dict[str, Any] = {}
         self.runner_work_finished_at: Any = None
         self.idle_baseline_pinned = False
-        self.final_snapshots: list[plans.PlanSnapshot] = []
+        self.final_snapshots: list[plans_models.PlanSnapshot] = []
         self.pauses: list[dict[str, Any]] = []
         # Present and None, exactly as `run_loop.RunContext` declares it: the
         # crash-recovery branches read it before anything sets it, and absent
         # here that read would raise instead of taking the untouched path.
         self.redirect_recovery_report: Any = None
 
-    def record_final_snapshot(self, snapshot: plans.PlanSnapshot) -> None:
+    def record_final_snapshot(self, snapshot: plans_models.PlanSnapshot) -> None:
         self.final_snapshots.append(snapshot)
         with self.persistence.lock:
-            self.payload["final_snapshot"] = plans.snapshot_payload(snapshot)
+            self.payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot)
 
     def pause(
         self,
@@ -215,8 +217,8 @@ class DispositionTestCase(unittest.TestCase):
         self.event_path = self.run_dir / events.EVENTS_FILE_NAME
         self.ctx = FakeRunContext(event_path=self.event_path)
         write_plan(self.plan_dir, ("pending",))
-        self.before = plans.inspect_plan(self.plan_dir)
-        self.after = plans.inspect_plan(self.plan_dir)
+        self.before = plans_snapshot.inspect_plan(self.plan_dir)
+        self.after = plans_snapshot.inspect_plan(self.plan_dir)
         self.session_details: dict[str, Any] = {"session_id": SESSION_ID}
 
     def paths(self) -> dict[str, Path]:
@@ -324,7 +326,8 @@ class UninspectedTurnTests(DispositionTestCase):
             session_details=self.session_details,
         )
         self.assertEqual(
-            plans.snapshot_payload(self.after), self.ctx.payload["final_snapshot"]
+            plans_payloads.snapshot_payload(self.after),
+            self.ctx.payload["final_snapshot"],
         )
         self.assertEqual(
             [
@@ -345,7 +348,8 @@ class UninspectedTurnTests(DispositionTestCase):
             session_details=self.session_details,
         )
         self.assertEqual(
-            plans.snapshot_payload(self.before), self.ctx.payload["final_snapshot"]
+            plans_payloads.snapshot_payload(self.before),
+            self.ctx.payload["final_snapshot"],
         )
 
     def test_a_timed_out_turn_names_the_session_in_its_message(self) -> None:
@@ -357,7 +361,8 @@ class UninspectedTurnTests(DispositionTestCase):
             session_details=self.session_details,
         )
         self.assertEqual(
-            plans.snapshot_payload(self.before), self.ctx.payload["final_snapshot"]
+            plans_payloads.snapshot_payload(self.before),
+            self.ctx.payload["final_snapshot"],
         )
         self.assertEqual("timeout", self.ctx.pauses[0]["reason"])
         self.assertEqual(
@@ -682,7 +687,7 @@ class NonzeroExitTests(DispositionTestCase):
         *,
         reason: str = events.PAUSE_REASON_QUOTA_EXHAUSTED,
         decision: str = "spark",
-        after: plans.PlanSnapshot | None = None,
+        after: plans_models.PlanSnapshot | None = None,
         cooldown: Any = None,
         suppress_error: Exception | None = None,
         spark_run_suppression: str | None = None,
@@ -758,7 +763,7 @@ class NonzeroExitTests(DispositionTestCase):
 
     def test_a_spark_failure_that_left_a_trace_is_not_retried(self) -> None:
         write_plan(self.plan_dir, ("complete",))
-        moved = plans.inspect_plan(self.plan_dir)
+        moved = plans_snapshot.inspect_plan(self.plan_dir)
         outcome = self.settle(after=moved)
         self.assertIsNone(outcome)
         self.suppress.assert_not_called()
@@ -788,16 +793,16 @@ class NonzeroExitTests(DispositionTestCase):
             self.ctx.pauses[0]["message"],
         )
 
-    def claimed_complete(self) -> plans.PlanSnapshot:
+    def claimed_complete(self) -> plans_models.PlanSnapshot:
         """The after-image of a turn that claimed the session and then died."""
         write_plan(self.plan_dir, ("complete",))
-        return plans.inspect_plan(self.plan_dir)
+        return plans_snapshot.inspect_plan(self.plan_dir)
 
     def test_an_unsettled_completion_is_taken_back_before_the_run_pauses(
         self,
     ) -> None:
         self.settle(after=self.claimed_complete(), decision="baseline")
-        reverted = plans.inspect_plan(self.plan_dir)
+        reverted = plans_snapshot.inspect_plan(self.plan_dir)
         self.assertEqual("pending", reverted.sessions[0].status)
         record = self.turn_payload["completion_reconciliation"]
         self.assertIs(True, record["reverted"])
@@ -813,7 +818,8 @@ class NonzeroExitTests(DispositionTestCase):
         published = self.ctx.final_snapshots[0]
         self.assertEqual("pending", published.sessions[0].status)
         self.assertEqual(
-            plans.snapshot_payload(published), self.ctx.payload["final_snapshot"]
+            plans_payloads.snapshot_payload(published),
+            self.ctx.payload["final_snapshot"],
         )
 
     def test_the_reversion_is_recorded_as_a_reopen(self) -> None:
@@ -828,7 +834,7 @@ class NonzeroExitTests(DispositionTestCase):
         self.assertEqual("pending", reopens[0]["to_status"])
         self.assertEqual("turn-completion-reconciliation", reopens[0]["guard"])
         self.assertEqual(
-            plans.inspect_plan(self.plan_dir).content_sha256,
+            plans_snapshot.inspect_plan(self.plan_dir).content_sha256,
             reopens[0]["content_sha256"],
         )
 

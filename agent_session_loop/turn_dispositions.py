@@ -104,7 +104,9 @@ from . import (
     mailbox_models,
     mailbox_vocabulary,
     model_availability,
-    plans,
+    plans_models,
+    plans_payloads,
+    plans_snapshot,
     redirect_continuation,
     redirect_control,
     run_control,
@@ -155,12 +157,12 @@ class RunContext(Protocol):
     def persistence(self) -> run_persistence._RunPersistence: ...
 
     @property
-    def plan_cache(self) -> plans.PlanSnapshotCache: ...
+    def plan_cache(self) -> plans_snapshot.PlanSnapshotCache: ...
 
     @property
     def control_payload(self) -> dict[str, Any]: ...
 
-    def record_final_snapshot(self, snapshot: plans.PlanSnapshot) -> None: ...
+    def record_final_snapshot(self, snapshot: plans_models.PlanSnapshot) -> None: ...
 
     def pause(
         self,
@@ -186,7 +188,7 @@ class MailboxContinuation:
     against, and the next pass starts from it rather than re-reading the plan.
     """
 
-    snapshot: plans.PlanSnapshot
+    snapshot: plans_models.PlanSnapshot
     pending_reply: run_prompts._PendingReply | None
     pending_resolution: run_prompts._PendingResolution | None
 
@@ -204,7 +206,7 @@ class RedirectContinuation:
     was recorded always has one -- and it is what the next attempt resumes from.
     """
 
-    snapshot: plans.PlanSnapshot | None
+    snapshot: plans_models.PlanSnapshot | None
     pending: redirect_continuation.PendingRedirect
 
 
@@ -218,7 +220,7 @@ class SparkRetry:
     pass reports it on the route it selects.
     """
 
-    snapshot: plans.PlanSnapshot
+    snapshot: plans_models.PlanSnapshot
     fallback_reason: str
     run_suppression: str | None
 
@@ -231,8 +233,8 @@ class SparkRetry:
 def _record_uninspected_final_snapshot(
     ctx: RunContext,
     *,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot | None,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot | None,
 ) -> None:
     """Publish the newest plan image this run actually holds.
 
@@ -243,17 +245,17 @@ def _record_uninspected_final_snapshot(
     """
     with ctx.persistence.lock:
         ctx.payload["final_snapshot"] = (
-            plans.snapshot_payload(after)
+            plans_payloads.snapshot_payload(after)
             if after is not None
-            else plans.snapshot_payload(before)
+            else plans_payloads.snapshot_payload(before)
         )
 
 
 def pause_interrupted_run(
     ctx: RunContext,
     *,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot | None,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot | None,
     session_details: dict[str, Any],
 ) -> None:
     """Stop a run whose turn was interrupted by the operator's own terminal."""
@@ -268,8 +270,8 @@ def pause_interrupted_run(
 def pause_timed_out_turn(
     ctx: RunContext,
     *,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot | None,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot | None,
     session_label: str,
     session_details: dict[str, Any],
 ) -> None:
@@ -286,8 +288,8 @@ def record_aborted_turn(
     ctx: RunContext,
     listener: run_control.RunControlListener,
     *,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot | None,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot | None,
     session_id: str,
     turn_payload: dict[str, Any],
 ) -> None:
@@ -318,7 +320,7 @@ def record_aborted_turn(
 def settle_malformed_plan(
     ctx: RunContext,
     *,
-    before: plans.PlanSnapshot,
+    before: plans_models.PlanSnapshot,
     workspace: workspaces.ResolvedWorkspace | None,
     session_id: str,
     turn_index: int,
@@ -326,7 +328,7 @@ def settle_malformed_plan(
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
     session_details: dict[str, Any],
-) -> plans.PlanSnapshot | None:
+) -> plans_models.PlanSnapshot | None:
     """Try to make the plan readable again, and pause when it cannot be.
 
     Returns the corrected snapshot the next pass retries from, or ``None`` when
@@ -452,7 +454,7 @@ def _record_redirect_continuation(
             {
                 "run_id": ctx.run_id,
                 "turn_index": turn_index,
-                **plans.session_identity_payload(session_id),
+                **plans_payloads.session_identity_payload(session_id),
                 **continuation_record,
             },
         )
@@ -463,8 +465,8 @@ def settle_redirected_turn(
     ctx: RunContext,
     listener: run_control.RunControlListener,
     *,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot | None,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot | None,
     redirect: redirect_continuation.TurnRedirect,
     harness: str,
     conversation_id: str | None,
@@ -701,7 +703,7 @@ def _enter_mailbox_reply_wait(
 def settle_runner_pause(
     ctx: RunContext,
     *,
-    after: plans.PlanSnapshot,
+    after: plans_models.PlanSnapshot,
     session_id: str,
     turn_index: int,
     result: harnesses.HarnessResult,
@@ -858,7 +860,7 @@ def settle_runner_pause(
 def _record_spark_fallback(
     ctx: RunContext,
     *,
-    after: plans.PlanSnapshot,
+    after: plans_models.PlanSnapshot,
     classification: harness_failures.FailureClassification,
     spark_route: dict[str, Any],
     spark_status_update: dict[str, Any],
@@ -879,7 +881,7 @@ def _record_spark_fallback(
         turn_payload["spark_route"] = dict(spark_route)
         ctx.payload["spark"].update(spark_status_update)
         ctx.payload["spark"]["active_route"] = dict(spark_route)
-        ctx.payload["final_snapshot"] = plans.snapshot_payload(after)
+        ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(after)
         durability.write_json_file(paths["result"], turn_payload)
         ctx.persistence.append_event(
             ctx.event_path,
@@ -900,8 +902,8 @@ def _record_spark_fallback(
 def _reconcile_unsettled_completion(
     ctx: RunContext,
     *,
-    after: plans.PlanSnapshot,
-    selected_after: plans.SessionStatus | None,
+    after: plans_models.PlanSnapshot,
+    selected_after: plans_models.SessionStatus | None,
     session_id: str,
     turn_index: int,
     result: harnesses.HarnessResult,
@@ -909,7 +911,7 @@ def _reconcile_unsettled_completion(
     paths: dict[str, Path],
     reason: str = "unsettled-completion-after-nonzero-exit",
     failure_note: str | None = None,
-) -> tuple[plans.PlanSnapshot, dict[str, Any] | None]:
+) -> tuple[plans_models.PlanSnapshot, dict[str, Any] | None]:
     """Take back a completion claim a terminating turn never settled.
 
     A nonzero exit ends the turn ahead of verification and the handoff guards,
@@ -966,13 +968,13 @@ def _reconcile_unsettled_completion(
                 {
                     "run_id": ctx.run_id,
                     "turn_index": turn_index,
-                    **plans.session_identity_payload(session_id),
+                    **plans_payloads.session_identity_payload(session_id),
                     "from_status": "complete",
                     "to_status": "pending",
                     "guard": "turn-completion-reconciliation",
                     "reason": reason,
                     **turn_execution.reopened_snapshot_identity(
-                        plans.snapshot_payload(snapshot_after)
+                        plans_payloads.snapshot_payload(snapshot_after)
                     ),
                 },
             )
@@ -983,8 +985,8 @@ def settle_restore_refused(
     ctx: RunContext,
     *,
     plan_state: Path,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot | None,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot | None,
     result: harnesses.HarnessResult,
     continuation: conversation_resume.TurnContinuation,
     session_id: str,
@@ -1048,7 +1050,7 @@ def settle_restore_refused(
             {
                 "run_id": ctx.run_id,
                 "turn_index": turn_index,
-                **plans.session_identity_payload(session_id),
+                **plans_payloads.session_identity_payload(session_id),
                 **record,
             },
         )
@@ -1073,8 +1075,8 @@ def settle_restore_refused(
 def settle_nonzero_exit(
     ctx: RunContext,
     *,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot,
     result: harnesses.HarnessResult,
     spark_route: dict[str, Any],
     session_id: str,

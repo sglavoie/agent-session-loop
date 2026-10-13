@@ -60,7 +60,7 @@ from agent_session_loop import (
     overseer_store,
     overseer_watch,
     pause_policy,
-    plans,
+    plans_files,
     state,
 )
 
@@ -160,10 +160,10 @@ class _Fleet:
     def __init__(self, case: unittest.TestCase, *, cost: float = 0.0) -> None:
         tmp = tempfile.TemporaryDirectory()
         case.addCleanup(tmp.cleanup)
-        # `plans.canonicalize_path` resolves the macOS `/var` symlink and the
+        # `plans_files.canonicalize_path` resolves the macOS `/var` symlink and the
         # state directory name is a hash of the canonical path, so the fixture
         # has to agree with it before anything is written.
-        self.root = plans.canonicalize_path(tmp.name)
+        self.root = plans_files.canonicalize_path(tmp.name)
         self.plans_root = self.root / "plans"
         self.plans_root.mkdir()
         self.state_root = self.root / "state"
@@ -180,7 +180,7 @@ class _Fleet:
     def plan_dir(self, name: str) -> Path:
         plan_dir = self.plans_root / name
         plan_dir.mkdir(parents=True, exist_ok=True)
-        return plans.canonicalize_path(plan_dir)
+        return plans_files.canonicalize_path(plan_dir)
 
     def write_run(self, name: str, **overrides: Any) -> Path:
         """Write one run's published record, paused a minute ago by default."""

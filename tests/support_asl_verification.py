@@ -13,7 +13,7 @@ from typing import Any
 
 from agent_session_loop import (
     contracts,
-    plans,
+    plans_session_ids,
     review_session_body,
     review_session_contract,
     verification,
@@ -60,8 +60,8 @@ def write_detached_spawner_script(root: Path) -> Path:
 
 
 class VerificationExecutorFixtures(unittest.TestCase):
-    def _session_id(self, value: str = "1") -> plans.SessionId:
-        return plans.parse_session_id(value)
+    def _session_id(self, value: str = "1") -> plans_session_ids.SessionId:
+        return plans_session_ids.parse_session_id(value)
 
     def _contract(
         self,
@@ -191,7 +191,7 @@ class VerificationExecutorFixtures(unittest.TestCase):
         re-derived from a fresh rendering — the same three steps a review turn
         takes.
         """
-        session_id = plans.parse_session_id("9")
+        session_id = plans_session_ids.parse_session_id("9")
         (plan_dir / f"session-{session_id.value}.md").write_text(
             review_session_body.build_generated_review_session_body(
                 session_id, review_harness="codex", plan_dir=plan_dir

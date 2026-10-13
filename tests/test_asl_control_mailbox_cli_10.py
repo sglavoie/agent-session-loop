@@ -5,6 +5,7 @@ Split from tests/test_asl_control.py."""
 from __future__ import annotations
 
 import io
+import time
 import unittest
 import uuid
 from contextlib import redirect_stderr
@@ -14,13 +15,22 @@ from agent_session_loop import (
     cli,
     control_cli,
     mailbox,
-    mailbox_cli,
+    mailbox_cli_args,
+    mailbox_cli_ask,
+    mailbox_cli_constants,
+    mailbox_cli_guidance,
+    mailbox_cli_inbox,
+    mailbox_cli_notify,
+    mailbox_cli_outbox,
+    mailbox_cli_replies,
+    mailbox_cli_status,
+    mailbox_cli_waits,
     mailbox_constants,
     mailbox_cursors,
     mailbox_models,
     mailbox_snapshot,
     mailbox_vocabulary,
-    plans,
+    plans_files,
 )
 from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
 from tests.support import (
@@ -63,22 +73,22 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
                 ],
             ),
             mock.patch.object(
-                mailbox_cli.mailbox,
+                mailbox,
                 "read_mailbox",
                 side_effect=[large_view, changed_view],
             ) as read,
             mock.patch.object(
-                mailbox_cli,
-                "_write_supervisor_lease",
+                mailbox_cli_status,
+                "write_supervisor_lease",
             ),
             mock.patch.object(
-                mailbox_cli.time,
+                time,
                 "monotonic",
                 side_effect=[0.0, 0.0, 5.0],
             ),
-            mock.patch.object(mailbox_cli.time, "sleep") as sleep,
+            mock.patch.object(time, "sleep") as sleep,
         ):
-            result = mailbox_cli._wait_for_questions(
+            result = mailbox_cli_waits.wait_for_questions(
                 self.plan_dir,
                 state_dir=self.state_dir,
                 since=0,
@@ -112,7 +122,7 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
         )
         with (
             mock.patch.object(
-                mailbox_cli.mailbox,
+                mailbox,
                 "read_mailbox",
                 side_effect=[empty, found],
             ),
@@ -122,17 +132,17 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
                 side_effect=[(1, 2, 0, 3), (1, 2, 1, 4)],
             ),
             mock.patch.object(
-                mailbox_cli,
-                "_write_supervisor_lease",
+                mailbox_cli_status,
+                "write_supervisor_lease",
             ) as renew,
             mock.patch.object(
-                mailbox_cli.time,
+                time,
                 "monotonic",
                 side_effect=[0.0, 30.0],
             ),
-            mock.patch.object(mailbox_cli.time, "sleep"),
+            mock.patch.object(time, "sleep"),
         ):
-            result = mailbox_cli._wait_for_questions(
+            result = mailbox_cli_waits.wait_for_questions(
                 self.plan_dir,
                 state_dir=self.state_dir,
                 since=0,
@@ -175,34 +185,34 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
         context.snapshot.plan_dir = self.plan_dir
         with (
             mock.patch.object(
-                mailbox_cli,
-                "_resolve",
+                mailbox_cli_args,
+                "resolve",
                 return_value=context,
             ),
             mock.patch.object(
-                mailbox_cli.mailbox,
+                mailbox,
                 "mailbox_change_token",
                 side_effect=([unchanged_token] * 7) + [changed_token],
             ),
             mock.patch.object(
-                mailbox_cli.mailbox,
+                mailbox,
                 "read_mailbox",
                 side_effect=[empty, found],
             ),
             mock.patch.object(
-                mailbox_cli,
-                "_write_supervisor_lease",
+                mailbox_cli_status,
+                "write_supervisor_lease",
                 side_effect=[landed_lease, renewal_failure, landed_lease],
             ) as renew,
             mock.patch.object(
-                mailbox_cli.time,
+                time,
                 "monotonic",
                 side_effect=[0.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0],
             ),
-            mock.patch.object(mailbox_cli.time, "sleep"),
+            mock.patch.object(time, "sleep"),
         ):
             code, payload = self.payload_from(
-                mailbox_cli.outbox_wait_from_args,
+                mailbox_cli_outbox.outbox_wait_from_args,
                 self.args(timeout=90),
             )
 
@@ -234,22 +244,22 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
         )
         with (
             mock.patch.object(
-                mailbox_cli,
-                "_resolve",
+                mailbox_cli_args,
+                "resolve",
                 return_value=context,
             ),
             mock.patch.object(
-                mailbox_cli,
-                "_write_supervisor_lease",
+                mailbox_cli_status,
+                "write_supervisor_lease",
                 side_effect=initial_failure,
             ) as write,
             mock.patch.object(
-                mailbox_cli.mailbox,
+                mailbox,
                 "read_mailbox",
             ) as read,
         ):
             code, payload = self.payload_from(
-                mailbox_cli.outbox_wait_from_args,
+                mailbox_cli_outbox.outbox_wait_from_args,
                 self.args(timeout=90),
             )
 
@@ -260,32 +270,32 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
         read.assert_not_called()
 
     def test_cli_wait_cadences_match_runner_and_supervisor(self) -> None:
-        self.assertEqual(2.0, mailbox_cli.ASK_WAIT_POLL_INTERVAL_SECONDS)
-        self.assertEqual(5.0, mailbox_cli.OUTBOX_WAIT_POLL_INTERVAL_SECONDS)
+        self.assertEqual(2.0, mailbox_cli_constants.ASK_WAIT_POLL_INTERVAL_SECONDS)
+        self.assertEqual(5.0, mailbox_cli_constants.OUTBOX_WAIT_POLL_INTERVAL_SECONDS)
 
     def test_negative_cursor_and_unbounded_timeouts_are_json_errors(self) -> None:
         cases = (
             (
-                mailbox_cli.outbox_wait_from_args,
+                mailbox_cli_outbox.outbox_wait_from_args,
                 self.args(since=-1, timeout=0),
                 "invalid-since",
             ),
             (
-                mailbox_cli.outbox_wait_from_args,
-                self.args(timeout=mailbox_cli.MAX_WAIT_TIMEOUT_SECONDS + 1),
+                mailbox_cli_outbox.outbox_wait_from_args,
+                self.args(timeout=mailbox_cli_constants.MAX_WAIT_TIMEOUT_SECONDS + 1),
                 "invalid-timeout",
             ),
             (
-                mailbox_cli.outbox_wait_from_args,
+                mailbox_cli_outbox.outbox_wait_from_args,
                 self.args(include="other", timeout=0),
                 "invalid-include",
             ),
             (
-                mailbox_cli.ask_from_args,
+                mailbox_cli_ask.ask_from_args,
                 self.args(
                     text="question",
                     wait=True,
-                    wait_timeout=mailbox_cli.MAX_WAIT_TIMEOUT_SECONDS + 1,
+                    wait_timeout=mailbox_cli_constants.MAX_WAIT_TIMEOUT_SECONDS + 1,
                 ),
                 "invalid-timeout",
             ),
@@ -304,7 +314,7 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
             self.args(plan_dir=str(broken)),
         )
         mailbox_code, mailbox_payload = self.payload_from(
-            mailbox_cli.inbox_guidance_from_args,
+            mailbox_cli_guidance.inbox_guidance_from_args,
             self.args(plan_dir=str(broken), text="body"),
         )
         self.assertEqual((1, 1), (control_code, mailbox_code))
@@ -324,7 +334,7 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
         _write_state_payload(
             self.plan_dir,
             self.state_dir,
-            {"plan_dir": str(plans.canonicalize_path(self.plan_dir))},
+            {"plan_dir": str(plans_files.canonicalize_path(self.plan_dir))},
         )
         plan_reference = self.plan_dir.name
 
@@ -355,7 +365,7 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
         self.assertEqual("", success_stderr)
         self.assertEqual("", failure_stderr)
         self.assertEqual(
-            str(plans.canonicalize_path(self.plan_dir)),
+            str(plans_files.canonicalize_path(self.plan_dir)),
             success["plan_dir"],
         )
         self.assertNotIn("plan_reference", success)
@@ -367,8 +377,8 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
         cases = (
             (
                 ["inbox", "guidance", "/tmp/plan", "--text", "body"],
-                "mailbox_cli:inbox_guidance_from_args",
-                mailbox_cli.inbox_guidance_from_args,
+                "mailbox_cli_guidance:inbox_guidance_from_args",
+                mailbox_cli_guidance.inbox_guidance_from_args,
             ),
             (
                 [
@@ -379,8 +389,8 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
                     str(uuid.uuid4()),
                     "--text-stdin",
                 ],
-                "mailbox_cli:inbox_reply_from_args",
-                mailbox_cli.inbox_reply_from_args,
+                "mailbox_cli_replies:inbox_reply_from_args",
+                mailbox_cli_replies.inbox_reply_from_args,
             ),
             (
                 [
@@ -393,23 +403,23 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
                     "pause",
                     "--note-stdin",
                 ],
-                "mailbox_cli:inbox_resolve_from_args",
-                mailbox_cli.inbox_resolve_from_args,
+                "mailbox_cli_replies:inbox_resolve_from_args",
+                mailbox_cli_replies.inbox_resolve_from_args,
             ),
             (
                 ["inbox", "read", "/tmp/plan", "--peek"],
-                "mailbox_cli:inbox_read_from_args",
-                mailbox_cli.inbox_read_from_args,
+                "mailbox_cli_inbox:inbox_read_from_args",
+                mailbox_cli_inbox.inbox_read_from_args,
             ),
             (
                 ["ask", "/tmp/plan", "question", "--wait", "--wait-timeout", "0"],
-                "mailbox_cli:ask_from_args",
-                mailbox_cli.ask_from_args,
+                "mailbox_cli_ask:ask_from_args",
+                mailbox_cli_ask.ask_from_args,
             ),
             (
                 ["notify", "/tmp/plan", "checkpoint"],
-                "mailbox_cli:notify_from_args",
-                mailbox_cli.notify_from_args,
+                "mailbox_cli_notify:notify_from_args",
+                mailbox_cli_notify.notify_from_args,
             ),
             (
                 [
@@ -423,8 +433,8 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
                     "--timeout",
                     "0",
                 ],
-                "mailbox_cli:outbox_wait_from_args",
-                mailbox_cli.outbox_wait_from_args,
+                "mailbox_cli_outbox:outbox_wait_from_args",
+                mailbox_cli_outbox.outbox_wait_from_args,
             ),
         )
         for argv, handler_ref, handler in cases:

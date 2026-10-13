@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import plans, session_overview
+from . import plans_files, session_overview
 
 __all__ = [
     "LIVENESS_RUNNING",
@@ -93,7 +93,7 @@ def canonical_roots(roots: Iterable[Any]) -> frozenset[str]:
         if not text:
             continue
         try:
-            canonical.add(str(plans.canonicalize_path(text)))
+            canonical.add(str(plans_files.canonicalize_path(text)))
         except OSError, ValueError:
             continue
     return frozenset(canonical)
@@ -175,7 +175,7 @@ def detect_conflicts(
     claimed = canonical_roots(repository_roots)
     if not claimed:
         return ()
-    canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
     rows, stale_locks, _skipped = session_overview.scan_running_rows(
         state_dir, reclaim=reclaim
     )
@@ -246,7 +246,7 @@ def conflict_message(
         return ""
     lines = [
         "another run already claims repositories registered by "
-        f"{plans.canonicalize_path(plan_dir)}:"
+        f"{plans_files.canonicalize_path(plan_dir)}:"
     ]
     for conflict in ordered:
         repositories = ", ".join(conflict.repositories)

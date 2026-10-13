@@ -44,7 +44,7 @@ from typing import Any
 
 from asl_workbench import archive as portable_archive
 
-from . import durability, plans, state, state_locks, workbench
+from . import durability, plans_errors, plans_files, state, state_locks, workbench
 
 # --------------------------------------------------------------------------
 # Storage
@@ -315,7 +315,7 @@ def _validate_plan_for_mutation(
     Returns the canonical plan directory and the loaded registry.
     """
     try:
-        canonical = plans.canonicalize_path(plan_dir)
+        canonical = plans_files.canonicalize_path(plan_dir)
     except (OSError, ValueError) as error:
         raise error_cls(
             "invalid-plan",
@@ -813,7 +813,7 @@ def restore_archive(
         raise ArchiveError("not-found", f"no archive entry {archive_id!r}", status=404)
 
     try:
-        original = plans.canonicalize_path(metadata.original_plan_dir)
+        original = plans_files.canonicalize_path(metadata.original_plan_dir)
     except (OSError, ValueError) as error:
         raise ArchiveError(
             "invalid-archive",
@@ -1186,7 +1186,7 @@ def set_retention(
 
 def _canonical(plan_dir: str, *, field: str) -> Path:
     try:
-        return plans.canonicalize_path(plan_dir)
+        return plans_files.canonicalize_path(plan_dir)
     except (OSError, ValueError) as error:
         raise ArchiveRefused(
             portable_archive.REASON_INVALID_PLAN,
@@ -1257,7 +1257,7 @@ def archive_many(
     outcomes: list[portable_archive.BulkOutcome] = []
     for raw_plan_dir in plan_dirs:
         try:
-            canonical = plans.canonicalize_path(raw_plan_dir)
+            canonical = plans_files.canonicalize_path(raw_plan_dir)
         except (OSError, ValueError) as error:
             outcomes.append(
                 portable_archive.BulkOutcome(
@@ -1394,7 +1394,7 @@ def unlock(
     """
     try:
         return state_locks.unlock_plan(plan_dir, state_dir, force=force)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         raise ArchiveRefused(
             portable_archive.REASON_MALFORMED_PLAN,
             str(error),
@@ -1448,7 +1448,7 @@ def workbench_pin_from_args(args: Any) -> int:
     # and reporting the raw argument would hide a symlink or a relative path
     # having resolved somewhere the operator did not mean.
     try:
-        canonical: str | None = str(plans.canonicalize_path(plan_dir))
+        canonical: str | None = str(plans_files.canonicalize_path(plan_dir))
     except OSError, ValueError:
         canonical = None
     matching = next(
@@ -1474,7 +1474,7 @@ def workbench_unpin_from_args(args: Any) -> int:
 def unlock_payload(plan_dir: str, result: state.UnlockResult) -> dict[str, Any]:
     """The facts an unlock answer carries, whatever a surface calls them."""
     return {
-        "plan_dir": str(plans.canonicalize_path(plan_dir)),
+        "plan_dir": str(plans_files.canonicalize_path(plan_dir)),
         "lock_path": str(result.path),
         "had_lock": result.had_lock,
         "removed": result.removed,

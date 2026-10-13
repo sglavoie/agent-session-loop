@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from . import repository_intent
-from .plans import PlanError
+from .plans_errors import PlanError
 from .prepare_corrections import CorrectionOutcome
 
 PREPARE_EXIT_REASON_OK = "ok"

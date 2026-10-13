@@ -16,7 +16,10 @@ from pathlib import Path
 from agent_session_loop import (
     agent_mux_projection,
     events,
-    plans,
+    plans_models,
+    plans_progress,
+    plans_session_ids,
+    plans_snapshot,
     run_persistence,
     state,
     state_abandonment,
@@ -50,10 +53,10 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             output = buffer.getvalue()
             self.assertIn("Progress journal: not initialized", output)
 
-            plans.append_progress_entry(
+            plans_progress.append_progress_entry(
                 plan_dir,
-                plans.ProgressEntry(
-                    session_id=plans.parse_session_id("1"),
+                plans_models.ProgressEntry(
+                    session_id=plans_session_ids.parse_session_id("1"),
                     status="complete",
                     completed_at="2026-06-19T14:22:00Z",
                 ),
@@ -110,7 +113,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             self.assertIsNone(payload["next_pending"])
@@ -174,7 +177,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             runner_state = payload["runner_state"]
@@ -210,7 +213,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             runner_state = payload["runner_state"]
@@ -245,7 +248,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             lock_info = state_locks.acquire_lock(plan_dir, state_dir)
             try:
                 payload = state_status.status_payload(
-                    plans.inspect_plan(plan_dir), state_dir
+                    plans_snapshot.inspect_plan(plan_dir), state_dir
                 )
             finally:
                 state_locks.release_lock(plan_dir, state_dir)
@@ -306,7 +309,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             state_locks.acquire_lock(plan_dir, state_dir)
             try:
                 payload = state_status.status_payload(
-                    plans.inspect_plan(plan_dir), state_dir
+                    plans_snapshot.inspect_plan(plan_dir), state_dir
                 )
             finally:
                 state_locks.release_lock(plan_dir, state_dir)
@@ -344,7 +347,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             self.assertIsNone(payload["active_verification"])

@@ -7,7 +7,10 @@ import json
 from agent_session_loop import (
     events,
     pause_policy,
-    plans,
+    plans_handoff,
+    plans_models,
+    plans_payloads,
+    plans_session_ids,
     review,
     review_transitions,
     run_selection,
@@ -42,7 +45,7 @@ class RunReviewBroadGateDeferralTests(RunReviewHarnessLifecycleBase):
         review_turns = [
             turn
             for turn in payload["turns"]
-            if turn["session_kind"] == plans.SESSION_KIND_REVIEW
+            if turn["session_kind"] == plans_payloads.SESSION_KIND_REVIEW
         ]
         self.assertEqual(2, len(review_turns))
         first_verification = review_turns[0]["verification"]
@@ -295,9 +298,9 @@ class RunReviewBroadGateDeferralTests(RunReviewHarnessLifecycleBase):
         self.assertFalse(commit_log.exists())
         self.assertEqual(
             "pending",
-            plans.read_session_status(
-                plans.SessionFile(
-                    plans.parse_session_id("2.1"),
+            plans_handoff.read_session_status(
+                plans_models.SessionFile(
+                    plans_session_ids.parse_session_id("2.1"),
                     self.plan_dir / "session-2.1.md",
                 )
             ).status,
@@ -330,7 +333,9 @@ class RunReviewBroadGateDeferralTests(RunReviewHarnessLifecycleBase):
         verification_payload = payload["turns"][0]["verification"]
         self.assertFalse(verification_payload["passed"])
         self.assertNotIn("acceptance", verification_payload)
-        self.assertEqual("pending", plans.read_session_status(review_session).status)
+        self.assertEqual(
+            "pending", plans_handoff.read_session_status(review_session).status
+        )
 
     def test_v2_review_missing_structured_artifact_pauses_run(self) -> None:
         review_session = self._setup_complete_plan_with_pending_review()

@@ -42,7 +42,9 @@ from agent_session_loop import (
     cli,
     commit_settlement,
     events,
-    plans,
+    plans_files,
+    plans_models,
+    plans_snapshot,
     run_entry,
     run_flags,
     run_payloads,
@@ -158,7 +160,7 @@ class _PlanFixture:
     def __init__(self, case: unittest.TestCase, statuses: tuple[str, ...]) -> None:
         tmp = tempfile.TemporaryDirectory()
         case.addCleanup(tmp.cleanup)
-        # Resolve the temp root: `plans.inspect_plan` canonicalizes the macOS
+        # Resolve the temp root: `plans_snapshot.inspect_plan` canonicalizes the macOS
         # `/var/folders/...` symlink and a later path comparison would differ.
         self.root = Path(tmp.name).resolve()
         self.plan_dir = self.root / "plan"
@@ -169,7 +171,7 @@ class _PlanFixture:
         self.lock_info = state.LockInfo(
             path=self.plan_state / state.LOCK_FILE_NAME,
             pid=123,
-            plan_dir=str(plans.canonicalize_path(self.plan_dir)),
+            plan_dir=str(plans_files.canonicalize_path(self.plan_dir)),
             created_at="2026-08-10T10:00:00+00:00",
             stale=False,
             reason="active",
@@ -181,8 +183,8 @@ class _PlanFixture:
             ["run", str(self.plan_dir), "--state-dir", str(self.state_dir), *tokens]
         )
 
-    def snapshot(self) -> plans.PlanSnapshot:
-        return plans.inspect_plan(self.plan_dir)
+    def snapshot(self) -> plans_models.PlanSnapshot:
+        return plans_snapshot.inspect_plan(self.plan_dir)
 
     def initial(self, *tokens: str) -> dict[str, Any]:
         args = self.args(*tokens)

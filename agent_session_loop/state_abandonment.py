@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import artifacts, events, plans, state
+from . import artifacts, events, plans_files, plans_models, state
 from .state import (
     LOCK_FILE_NAME,
     LockInfo,
@@ -366,7 +366,7 @@ def _migrate_command_text(
 
 
 def orphaned_state_candidates(
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     state_dir: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     """Find moved-plan state directories whose content matches this plan.
@@ -403,7 +403,7 @@ def orphaned_state_candidates(
         if recorded_hash != snapshot.content_sha256:
             continue
         try:
-            still_exists = plans.canonicalize_path(recorded_plan_dir).is_dir()
+            still_exists = plans_files.canonicalize_path(recorded_plan_dir).is_dir()
         except OSError, ValueError:
             still_exists = False
         if still_exists:

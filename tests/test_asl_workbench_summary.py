@@ -13,7 +13,13 @@ from unittest import mock
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_files,
+    plans_metadata,
+    plans_models,
+    plans_progress,
+    plans_registry,
+    plans_session_ids,
+    plans_snapshot,
     qna,
     review,
     review_repair,
@@ -49,14 +55,14 @@ class WorkbenchSummaryTests(unittest.TestCase):
             init_multi_repo_workspace(workspace_root, specs)
             plan_dir = tmp_path / "plan"
             write_multi_repo_plan(plan_dir, ("pending",), specs=specs)
-            registry = plans.read_repository_registry(plan_dir)
+            registry = plans_registry.read_repository_registry(plan_dir)
             assert registry is not None
-            plans.save_workspace_plan_metadata(
+            plans_metadata.save_workspace_plan_metadata(
                 plan_dir,
                 workspace_root,
                 registry.digest,
             )
-            metadata_path = plan_dir / plans.PLAN_METADATA_FILE_NAME
+            metadata_path = plan_dir / plans_metadata.PLAN_METADATA_FILE_NAME
             legacy = json.loads(metadata_path.read_text(encoding="utf-8"))
             legacy["workspace_inventory_excludes"] = ["Library/Protected.dv"]
             metadata_path.write_text(json.dumps(legacy), encoding="utf-8")
@@ -124,7 +130,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             plan_dir = tmp_path / "broken"
             plan_dir.mkdir()
             (plan_dir / "context.md").write_text("# C\n", encoding="utf-8")
-            discovered = _discovered(plans.canonicalize_path(plan_dir))
+            discovered = _discovered(plans_files.canonicalize_path(plan_dir))
 
             summary = workbench.build_workbench_summary(
                 discovered, state_dir=tmp_path / "state"
@@ -160,7 +166,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             tmp_path = Path(tmp)
             plan_dir = tmp_path / "done-plan"
             write_plan(plan_dir, ("complete", "complete"))
-            canonical = plans.canonicalize_path(plan_dir)
+            canonical = plans_files.canonicalize_path(plan_dir)
             discovered = _discovered(canonical)
 
             summary = workbench.build_workbench_summary(
@@ -207,7 +213,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 _discovered(plan_dir), state_dir=state_root
             )
             status_payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_root
+                plans_snapshot.inspect_plan(plan_dir), state_root
             )
 
             self.assertEqual("complete", summary.primary_state)
@@ -487,11 +493,11 @@ class WorkbenchSummaryTests(unittest.TestCase):
             tmp_path = Path(tmp)
             plan_dir = tmp_path / "done-progress"
             write_plan(plan_dir, ("complete", "complete"))
-            canonical = plans.canonicalize_path(plan_dir)
-            plans.append_progress_entry(
+            canonical = plans_files.canonicalize_path(plan_dir)
+            plans_progress.append_progress_entry(
                 canonical,
-                plans.ProgressEntry(
-                    session_id=plans.parse_session_id("2"),
+                plans_models.ProgressEntry(
+                    session_id=plans_session_ids.parse_session_id("2"),
                     status="complete",
                     completed_at="2026-06-19T14:22:00Z",
                 ),
@@ -533,7 +539,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             tmp_path = Path(tmp)
             plan_dir = tmp_path / "audited"
             write_plan(plan_dir, ("complete", "complete"))
-            canonical = plans.canonicalize_path(plan_dir)
+            canonical = plans_files.canonicalize_path(plan_dir)
             state_root = tmp_path / "state"
             self._write_audited_state(
                 canonical,
@@ -565,7 +571,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             tmp_path = Path(tmp)
             plan_dir = tmp_path / "audited-many"
             write_plan(plan_dir, ("complete", "complete"))
-            canonical = plans.canonicalize_path(plan_dir)
+            canonical = plans_files.canonicalize_path(plan_dir)
             state_root = tmp_path / "state"
             self._write_audited_state(
                 canonical,
@@ -593,7 +599,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             tmp_path = Path(tmp)
             plan_dir = tmp_path / "audited-controls"
             write_plan(plan_dir, ("complete", "complete"))
-            canonical = plans.canonicalize_path(plan_dir)
+            canonical = plans_files.canonicalize_path(plan_dir)
             state_root = tmp_path / "state"
             self._write_audited_state(
                 canonical,
@@ -637,7 +643,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             tmp_path = Path(tmp)
             plan_dir = tmp_path / "done-runfinished"
             write_plan(plan_dir, ("complete", "complete"))
-            canonical = plans.canonicalize_path(plan_dir)
+            canonical = plans_files.canonicalize_path(plan_dir)
             state_root = tmp_path / "state"
             _write_state_payload(
                 canonical,
@@ -668,7 +674,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             tmp_path = Path(tmp)
             plan_dir = tmp_path / "done-bare"
             write_plan(plan_dir, ("complete", "complete"))
-            canonical = plans.canonicalize_path(plan_dir)
+            canonical = plans_files.canonicalize_path(plan_dir)
             discovered = _discovered(canonical)
 
             summary = workbench.build_workbench_summary(
@@ -1149,10 +1155,10 @@ class WorkbenchSummaryTests(unittest.TestCase):
             (plan_dir / workbench.FINAL_REVIEW_FILE_NAME).write_text(
                 "# Final review\n", encoding="utf-8"
             )
-            plans.append_progress_entry(
+            plans_progress.append_progress_entry(
                 plan_dir,
-                plans.ProgressEntry(
-                    session_id=plans.parse_session_id("1"),
+                plans_models.ProgressEntry(
+                    session_id=plans_session_ids.parse_session_id("1"),
                     status="complete",
                     completed_at="2026-06-19T14:22:00Z",
                 ),
@@ -1214,7 +1220,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             healthy = _make_workbench_plan(tmp_path, "healthy")
             broken = tmp_path / "broken"
             write_multi_repo_plan(broken, ("pending",))
-            (broken / plans.PLAN_METADATA_FILE_NAME).write_text(
+            (broken / plans_metadata.PLAN_METADATA_FILE_NAME).write_text(
                 "{not-json", encoding="utf-8"
             )
 
@@ -1546,19 +1552,19 @@ class WorkbenchSummaryTests(unittest.TestCase):
             tmp_path = Path(tmp)
             plan_dir = tmp_path / "done-plan"
             write_plan(plan_dir, ("complete", "complete"))
-            canonical = plans.canonicalize_path(plan_dir)
-            plans.append_progress_entry(
+            canonical = plans_files.canonicalize_path(plan_dir)
+            plans_progress.append_progress_entry(
                 canonical,
-                plans.ProgressEntry(
-                    session_id=plans.parse_session_id("1"),
+                plans_models.ProgressEntry(
+                    session_id=plans_session_ids.parse_session_id("1"),
                     status="complete",
                     completed_at="2026-06-19T14:22:00+00:00",
                 ),
             )
-            plans.append_progress_entry(
+            plans_progress.append_progress_entry(
                 canonical,
-                plans.ProgressEntry(
-                    session_id=plans.parse_session_id("2"),
+                plans_models.ProgressEntry(
+                    session_id=plans_session_ids.parse_session_id("2"),
                     status="complete",
                     completed_at="2026-06-19T15:10:00+00:00",
                 ),

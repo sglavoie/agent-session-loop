@@ -24,7 +24,10 @@ from agent_session_loop import (
     mailbox_models,
     mailbox_rendering,
     mailbox_vocabulary,
-    plans,
+    plans_files,
+    plans_handoff,
+    plans_payloads,
+    plans_session_scope,
     qna,
     redirect_ack,
     redirect_store,
@@ -47,7 +50,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
     PLAN_DIR = "/tmp/plan"
 
     def _canon(self, name: str) -> str:
-        return str(plans.canonicalize_path(self.PLAN_DIR) / name)
+        return str(plans_files.canonicalize_path(self.PLAN_DIR) / name)
 
     def _make_reply_context(
         self,
@@ -156,8 +159,8 @@ class TaskPacketBuilderTests(unittest.TestCase):
             "codex", self.PLAN_DIR, session_id="9"
         ).render()
         self.assertIn("- **Status**: complete", rendered)
-        self.assertIn(plans.DISCOVERED_FACTS_HEADING, rendered)
-        self.assertIn(plans.OPEN_QUESTIONS_HEADING, rendered)
+        self.assertIn(plans_handoff.DISCOVERED_FACTS_HEADING, rendered)
+        self.assertIn(plans_handoff.OPEN_QUESTIONS_HEADING, rendered)
         self.assertIn(".expand.md", rendered)
         self.assertIn("never inline in chat", rendered)
 
@@ -169,7 +172,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             "codex",
             self.PLAN_DIR,
             session_id="9",
-            session_kind=plans.SESSION_KIND_REVIEW,
+            session_kind=plans_payloads.SESSION_KIND_REVIEW,
         )
 
         self.assertFalse(implementation.is_review)
@@ -197,7 +200,10 @@ class TaskPacketBuilderTests(unittest.TestCase):
             )
 
     def test_packet_states_runner_signal_protocol(self) -> None:
-        for kind in (plans.SESSION_KIND_IMPLEMENTATION, plans.SESSION_KIND_REVIEW):
+        for kind in (
+            plans_payloads.SESSION_KIND_IMPLEMENTATION,
+            plans_payloads.SESSION_KIND_REVIEW,
+        ):
             with self.subTest(kind=kind):
                 rendered = task_packet.build_task_packet(
                     "codex", self.PLAN_DIR, session_id="9", session_kind=kind
@@ -230,7 +236,10 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self,
     ) -> None:
         """The final-gate ban must not read as a ban on checking at all."""
-        for kind in (plans.SESSION_KIND_IMPLEMENTATION, plans.SESSION_KIND_REVIEW):
+        for kind in (
+            plans_payloads.SESSION_KIND_IMPLEMENTATION,
+            plans_payloads.SESSION_KIND_REVIEW,
+        ):
             with self.subTest(kind=kind):
                 rendered = task_packet.build_task_packet(
                     "codex", self.PLAN_DIR, session_id="9", session_kind=kind
@@ -265,7 +274,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             "codex",
             self.PLAN_DIR,
             session_id="9",
-            session_kind=plans.SESSION_KIND_REVIEW,
+            session_kind=plans_payloads.SESSION_KIND_REVIEW,
         ).render()
 
         self.assertIn(
@@ -887,7 +896,9 @@ class MultiRepositoryTaskPacketTests(unittest.TestCase):
             "/tmp/plan",
             session_id="1",
             workspace=workspace,
-            session_scope=plans.SessionScope(reads=("SVC",), writes=("SVC",)),
+            session_scope=plans_session_scope.SessionScope(
+                reads=("SVC",), writes=("SVC",)
+            ),
         ).render()
 
         self.assertIn("Expected read aliases: SVC", rendered)
@@ -898,7 +909,9 @@ class MultiRepositoryTaskPacketTests(unittest.TestCase):
         self.assertIn("Alias:path/to/file", rendered)
 
         for writes in (("SVC",), ()):
-            scope = plans.SessionScope(reads=("SVC", "OAK"), writes=writes)
+            scope = plans_session_scope.SessionScope(
+                reads=("SVC", "OAK"), writes=writes
+            )
             prompts = {
                 "packet": task_packet.build_task_packet(
                     "codex",
@@ -911,7 +924,7 @@ class MultiRepositoryTaskPacketTests(unittest.TestCase):
                     "codex",
                     "/tmp/plan",
                     session_id="1",
-                    session_kind=plans.SESSION_KIND_REVIEW,
+                    session_kind=plans_payloads.SESSION_KIND_REVIEW,
                     workspace=workspace,
                     session_scope=scope,
                 ).render(),
@@ -1453,14 +1466,14 @@ class HarnessInvocationPromptOverrideTests(unittest.TestCase):
                 last_message_path=last_message,
             )
             expected_prompt = run_prompts.build_session_prompt(
-                "codex", plans.canonicalize_path(plan_dir)
+                "codex", plans_files.canonicalize_path(plan_dir)
             )
             self._assert_prompt_free(invocation, expected_prompt)
             self.assertIn(
                 expected_prompt,
                 self._codex_exec_argv(
-                    cwd=plans.canonicalize_path(cwd),
-                    plan_dir=plans.canonicalize_path(plan_dir),
+                    cwd=plans_files.canonicalize_path(cwd),
+                    plan_dir=plans_files.canonicalize_path(plan_dir),
                     prompt=expected_prompt,
                     last_message_path=last_message,
                 ),
@@ -1485,8 +1498,8 @@ class HarnessInvocationPromptOverrideTests(unittest.TestCase):
             )
             self._assert_prompt_free(invocation, override_prompt)
             argv = self._codex_exec_argv(
-                cwd=plans.canonicalize_path(cwd),
-                plan_dir=plans.canonicalize_path(plan_dir),
+                cwd=plans_files.canonicalize_path(cwd),
+                plan_dir=plans_files.canonicalize_path(plan_dir),
                 prompt=override_prompt,
                 last_message_path=last_message,
             )
@@ -1520,8 +1533,8 @@ class HarnessInvocationPromptOverrideTests(unittest.TestCase):
                         self.assertIn(
                             override_prompt,
                             self._codex_exec_argv(
-                                cwd=plans.canonicalize_path(cwd),
-                                plan_dir=plans.canonicalize_path(plan_dir),
+                                cwd=plans_files.canonicalize_path(cwd),
+                                plan_dir=plans_files.canonicalize_path(plan_dir),
                                 prompt=override_prompt,
                                 last_message_path=last_message,
                             ),
@@ -1905,7 +1918,7 @@ class CorrectionContextPromptTests(unittest.TestCase):
                 "asl",
                 "inbox",
                 "acknowledge",
-                str(plans.canonicalize_path(self.PLAN_DIR)) + "/",
+                str(plans_files.canonicalize_path(self.PLAN_DIR)) + "/",
                 "--redirect-id",
                 "op-1",
                 "--redirect-id",

@@ -18,7 +18,8 @@ from agent_session_loop import (
     baseline,
     baseline_cache,
     contracts,
-    plans,
+    plans_content_hash,
+    plans_errors,
     verification,
 )
 from tests.support import (
@@ -108,7 +109,9 @@ class BaselineContractTests(unittest.TestCase):
                         }
                     )
                 )
-                with self.assertRaisesRegex(plans.PlanError, "baseline_expectation"):
+                with self.assertRaisesRegex(
+                    plans_errors.PlanError, "baseline_expectation"
+                ):
                     contracts.parse_completion_contract(text, session_id="1")
 
     def test_legacy_contract_without_field_parses_unchanged(self) -> None:
@@ -150,7 +153,7 @@ class BaselineContractTests(unittest.TestCase):
             )
         )
 
-        with self.assertRaisesRegex(plans.PlanError, "repository registry"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "repository registry"):
             contracts.parse_completion_contract(text, session_id="1")
 
     def test_baseline_budget_constants(self) -> None:
@@ -461,8 +464,8 @@ class BaselineCacheTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            content_before = plans.plan_content_sha256(plan_dir)
-            readiness_before = plans.stable_readiness_sha256(plan_dir)
+            content_before = plans_content_hash.plan_content_sha256(plan_dir)
+            readiness_before = plans_content_hash.stable_readiness_sha256(plan_dir)
 
             cache = baseline_cache.BaselineCache(
                 plan_dir / baseline_cache.BASELINE_RESULTS_FILENAME
@@ -473,8 +476,12 @@ class BaselineCacheTests(unittest.TestCase):
                 (plan_dir / baseline_cache.BASELINE_RESULTS_FILENAME).exists()
             )
 
-            self.assertEqual(content_before, plans.plan_content_sha256(plan_dir))
-            self.assertEqual(readiness_before, plans.stable_readiness_sha256(plan_dir))
+            self.assertEqual(
+                content_before, plans_content_hash.plan_content_sha256(plan_dir)
+            )
+            self.assertEqual(
+                readiness_before, plans_content_hash.stable_readiness_sha256(plan_dir)
+            )
 
 
 class BaselineTotalBudgetTests(unittest.TestCase):
@@ -669,7 +676,9 @@ class MultiRepositoryBaselineTests(unittest.TestCase):
             )
 
             for _attempt in range(2):
-                with self.assertRaisesRegex(plans.PlanError, "escapes repository"):
+                with self.assertRaisesRegex(
+                    plans_errors.PlanError, "escapes repository"
+                ):
                     baseline.run_baseline(plan_dir, workspace_root)
 
             self.assertFalse(marker.exists())
@@ -704,7 +713,7 @@ class MultiRepositoryBaselineTests(unittest.TestCase):
                     "_registered_repository_fingerprint",
                     return_value=("same-digest", False),
                 ),
-                self.assertRaisesRegex(plans.PlanError, "unavailable"),
+                self.assertRaisesRegex(plans_errors.PlanError, "unavailable"),
             ):
                 baseline.aggregate_repository_fingerprint(context, plan_dir)
 

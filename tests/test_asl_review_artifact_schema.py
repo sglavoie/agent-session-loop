@@ -7,11 +7,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from agent_session_loop import (
-    plans,
-    review,
-    workspaces,
-)
+from agent_session_loop import plans_registry, review, workspaces
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     _structured_review_finding,
@@ -116,7 +112,7 @@ class ReviewArtifactSchemaTests(unittest.TestCase):
                 ("pending",),
                 specs=DEFAULT_MULTI_REPO_SPECS[:2],
             )
-            registry = plans.read_repository_registry(plan_dir)
+            registry = plans_registry.read_repository_registry(plan_dir)
             assert registry is not None
             finding = _structured_review_finding(
                 repo="SVC",

@@ -3,7 +3,8 @@
 import unittest
 
 from agent_session_loop import (
-    plans,
+    plans_registry,
+    plans_session_scope,
     review,
     review_repair,
 )
@@ -305,12 +306,14 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
         self.assertTrue(result.ok, result.error)
         self.assertEqual(("SVC", "OAK"), result.children[0].read_repositories)
         self.assertEqual(("SVC", "OAK"), result.children[0].write_repositories)
-        registry = plans.read_repository_registry(self.plan_dir)
+        registry = plans_registry.read_repository_registry(self.plan_dir)
         assert registry is not None
-        child_scope = plans.parse_session_scope(
+        child_scope = plans_session_scope.parse_session_scope(
             result.children[1].path.read_text(encoding="utf-8"), registry.aliases
         )
-        self.assertEqual(plans.SessionScope(("SVC", "OAK"), ("SVC",)), child_scope)
+        self.assertEqual(
+            plans_session_scope.SessionScope(("SVC", "OAK"), ("SVC",)), child_scope
+        )
 
     def test_registered_group_writes_union_evidence_and_check_repositories(
         self,
@@ -352,11 +355,11 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
         result = self._materialize()
 
         self.assertTrue(result.ok, result.error)
-        registry = plans.read_repository_registry(self.plan_dir)
+        registry = plans_registry.read_repository_registry(self.plan_dir)
         assert registry is not None
         self.assertEqual(
-            plans.SessionScope(("SVC", "OAK"), ("SVC", "OAK")),
-            plans.parse_session_scope(
+            plans_session_scope.SessionScope(("SVC", "OAK"), ("SVC", "OAK")),
+            plans_session_scope.parse_session_scope(
                 result.children[0].path.read_text(encoding="utf-8"), registry.aliases
             ),
         )

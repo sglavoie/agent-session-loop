@@ -67,7 +67,14 @@ CANDIDATE_WRAPPER = CANDIDATE_ROOT / "bin" / ".local" / "bin" / "agent-session-l
 if str(CANDIDATE_ROOT) not in sys.path:
     sys.path.insert(0, str(CANDIDATE_ROOT))
 
-from agent_session_loop import plans, state, task_packet  # noqa: E402
+from agent_session_loop import (  # noqa: E402
+    plans_content_hash,
+    plans_models,
+    plans_payloads,
+    plans_readiness,
+    state,
+    task_packet,
+)
 
 #: Schema version of a receipt this module writes and ``check`` accepts.
 RECEIPT_VERSION = 1
@@ -376,9 +383,9 @@ def _rendered_packet(*, is_review: bool) -> str:
         session_path="/plan/session-1.md",
         context_path="/plan/context.md",
         session_kind=(
-            plans.SESSION_KIND_REVIEW
+            plans_payloads.SESSION_KIND_REVIEW
             if is_review
-            else plans.SESSION_KIND_IMPLEMENTATION
+            else plans_payloads.SESSION_KIND_IMPLEMENTATION
         ),
     )
     return packet.render()
@@ -544,11 +551,11 @@ def write_plan(plan_dir: Path, scenario: Scenario) -> None:
     )
     (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
     (plan_dir / "session-1.md").write_text(session_text(scenario), encoding="utf-8")
-    plans.write_readiness_metadata(
+    plans_readiness.write_readiness_metadata(
         plan_dir,
-        plans.ReadinessMetadata(
+        plans_models.ReadinessMetadata(
             state="loop-ready",
-            readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+            readiness_sha256=plans_content_hash.stable_readiness_sha256(plan_dir),
             checked_at=_now(),
         ),
     )

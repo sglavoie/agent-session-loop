@@ -2,7 +2,7 @@
 
 The behavioural coverage of these guards is end to end and lives elsewhere:
 `tests/test_asl_run_protected_path_guard.py` drives real runs against real checkouts and
-asserts what an operator sees after a violation, and `tests/test_asl_turn_commit.py`
+asserts what an operator sees after a violation, and `tests/test_asl_turn_commit_*.py`
 pins that the commit happens after every guard. Neither can cheaply state the
 things this module owns, so they are stated here: the extraction contract
 (runner-free, no alias left behind, the seams required rather than defaulted and
@@ -32,7 +32,9 @@ from agent_session_loop import (
     guards,
     handoff_correction,
     handoff_guards,
-    plans,
+    plans_errors,
+    plans_session_scope,
+    plans_snapshot,
     review_continuation,
     review_cycle,
     review_guard,
@@ -225,7 +227,8 @@ class RefusalShapeTests(unittest.TestCase):
         for name in ENFORCEMENT_FUNCTIONS:
             with self.subTest(name=name):
                 self.assertIn(
-                    'payload["final_snapshot"] = plans.snapshot_payload(inspected)',
+                    'payload["final_snapshot"] = '
+                    "plans_payloads.snapshot_payload(inspected)",
                     self._source(name),
                 )
 
@@ -268,12 +271,12 @@ class SeamTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             plan_dir = Path(tmp_dir).resolve() / "plan"
             write_plan(plan_dir, ("pending",))
-            fallback = plans.inspect_plan(plan_dir)
+            fallback = plans_snapshot.inspect_plan(plan_dir)
             # Nothing was reverted, so the fallback snapshot is returned as it
             # stands rather than re-read.
             self.assertIs(
                 fallback,
-                reinspect(plan_dir, fallback, None, plans.PlanSnapshotCache()),
+                reinspect(plan_dir, fallback, None, plans_snapshot.PlanSnapshotCache()),
             )
 
     def test_the_loop_passes_both_seams_at_every_enforcement_call(self) -> None:
@@ -460,7 +463,7 @@ class RegenerateStaleRepairChildScopesTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         plan_dir = Path(self._tmp.name).resolve() / "plan"
         write_plan(plan_dir, ("complete", "pending", "pending"))
-        self.snapshot = plans.inspect_plan(plan_dir)
+        self.snapshot = plans_snapshot.inspect_plan(plan_dir)
         self.workspace = _workspace("SVC")
 
     def _regenerate(
@@ -476,12 +479,14 @@ class RegenerateStaleRepairChildScopesTests(unittest.TestCase):
             widened.append(session.id)
             return regenerated
 
-        scope = plans.SessionScope(reads=("SVC",), writes=("SVC",))
+        scope = plans_session_scope.SessionScope(reads=("SVC",), writes=("SVC",))
         with (
             mock.patch.object(
                 run_prompts,
                 "_session_scope",
-                side_effect=plans.PlanError("unparseable") if scope_error else None,
+                side_effect=plans_errors.PlanError("unparseable")
+                if scope_error
+                else None,
                 return_value=scope,
             ),
             mock.patch.object(

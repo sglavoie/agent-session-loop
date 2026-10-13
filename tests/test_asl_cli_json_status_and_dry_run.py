@@ -10,7 +10,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import config, harnesses, plans, responses, state_status
+from agent_session_loop import (
+    config,
+    harnesses,
+    plans_snapshot,
+    responses,
+    state_status,
+)
 from tests.support import (
     REPO_ROOT,
     write_plan,
@@ -30,7 +36,7 @@ class JsonStatusAndDryRunCliTests(JsonCliHelpers, unittest.TestCase):
             write_plan_with_ids(plan_dir, (("1", "complete"), ("1.1", "pending")))
 
             status_payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
             self.assertEqual("1.1", status_payload["next_pending"])
             self.assertEqual("1.1", status_payload["next_pending_id"])
@@ -85,7 +91,7 @@ class JsonStatusAndDryRunCliTests(JsonCliHelpers, unittest.TestCase):
             write_plan(plan_dir, ("complete", "pending"))
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
             next_command = payload["next_command"]
             self.assertFalse(next_command["complete"])
@@ -110,7 +116,7 @@ class JsonStatusAndDryRunCliTests(JsonCliHelpers, unittest.TestCase):
             write_plan(plan_dir, ("complete", "complete"))
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
             self.assertEqual(
                 {

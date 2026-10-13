@@ -12,13 +12,9 @@ from .baseline_cache import BASELINE_RESULTS_FILENAME, BaselineCache
 from .contracts import (
     CompletionContract,
 )
-from .plans import (
-    PlanError,
-    PlanSnapshot,
-    ProgressEntry,
-    progress_path,
-    read_progress_entries,
-)
+from .plans_errors import PlanError
+from .plans_models import PlanSnapshot, ProgressEntry
+from .plans_progress import progress_path, read_progress_entries
 from .preflight_models import PreflightFinding, _finding
 from .verification import (
     VerificationContext,

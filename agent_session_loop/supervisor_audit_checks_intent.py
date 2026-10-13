@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import plans, preflight_footprint
+from . import plans_errors, plans_transaction, preflight_footprint
 from . import supervisor_audit_evidence as audit_evidence
 from .supervisor_audit_models import _CheckContext, _inside, _joined, _names, _Verdict
 from .supervisor_audit_vocabulary import _TURN_PATH_KEYS
@@ -95,10 +95,10 @@ def _check_repository_intent(context: _CheckContext) -> _Verdict:
             "repository-intent gate against",
             evidence,
         )
-    # Replaying the gate reads the plan through ``plans``, which rolls a pending
-    # publication forward as a side effect. An audit observes a run; it does not
+    # Replaying the gate reads the plan through ``plans_metadata``, which rolls a
+    # pending publication forward as a side effect. An audit observes a run; it does not
     # finish one, so an interrupted plan is reported rather than repaired.
-    if (Path(plan_root) / plans.PLAN_TRANSACTION_DIR_NAME).exists():
+    if (Path(plan_root) / plans_transaction.PLAN_TRANSACTION_DIR_NAME).exists():
         return _Verdict(
             "unavailable",
             "the plan directory holds a pending publication transaction, and "
@@ -118,7 +118,7 @@ def _check_repository_intent(context: _CheckContext) -> _Verdict:
         intent, report = preflight_footprint.plan_repository_intent(
             plan_root, workspace_root, extra_exempt_roots=exempt
         )
-    except (OSError, ValueError, plans.PlanError) as error:
+    except (OSError, ValueError, plans_errors.PlanError) as error:
         return _Verdict(
             "unavailable",
             f"the repository-intent gate could not be replayed after the run: {error}",

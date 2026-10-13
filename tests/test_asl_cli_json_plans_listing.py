@@ -11,11 +11,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from agent_session_loop import (
-    config,
-    harnesses,
-    plans,
-)
+from agent_session_loop import config, harnesses, plans_files
 from tests.support import (
     REPO_ROOT,
     _write_state_payload,
@@ -165,11 +161,11 @@ class JsonPlansListingCliTests(JsonCliHelpers, unittest.TestCase):
 
             self.assertEqual(0, text_code, text_stderr)
             self.assertEqual("", text_stderr)
-            self.assertIn(f"- {plans.canonicalize_path(reviewed)}", text_stdout)
+            self.assertIn(f"- {plans_files.canonicalize_path(reviewed)}", text_stdout)
             self.assertIn("  state: ready", text_stdout)
             self.assertIn("  run state: absent", text_stdout)
             self.assertIn("  readiness: reviewed", text_stdout)
-            self.assertNotIn(str(plans.canonicalize_path(draft)), text_stdout)
+            self.assertNotIn(str(plans_files.canonicalize_path(draft)), text_stdout)
 
             self.assertEqual(0, json_code, json_stderr)
             self.assertEqual("", json_stderr)
@@ -186,7 +182,7 @@ class JsonPlansListingCliTests(JsonCliHelpers, unittest.TestCase):
             )
             self.assertEqual(1, payload["plan_count"])
             self.assertEqual(
-                str(plans.canonicalize_path(reviewed)),
+                str(plans_files.canonicalize_path(reviewed)),
                 payload["plans"][0]["plan_dir"],
             )
             self.assertEqual("ready", payload["plans"][0]["primary_state"])
@@ -221,7 +217,7 @@ class JsonPlansListingCliTests(JsonCliHelpers, unittest.TestCase):
                 checked_at=(now - timedelta(days=400)).isoformat(),
             )
             _write_state_payload(
-                plans.canonicalize_path(recent),
+                plans_files.canonicalize_path(recent),
                 state_root,
                 {
                     "ok": True,
@@ -259,7 +255,7 @@ class JsonPlansListingCliTests(JsonCliHelpers, unittest.TestCase):
             stale_payload = json.loads(stale_stdout)
             self.assertEqual(1, stale_payload["plan_count"])
             self.assertEqual(
-                [str(plans.canonicalize_path(abandoned))],
+                [str(plans_files.canonicalize_path(abandoned))],
                 [entry["plan_dir"] for entry in stale_payload["plans"]],
             )
 
@@ -268,7 +264,7 @@ class JsonPlansListingCliTests(JsonCliHelpers, unittest.TestCase):
             never_run_payload = json.loads(never_run_stdout)
             self.assertEqual(1, never_run_payload["plan_count"])
             self.assertEqual(
-                [str(plans.canonicalize_path(abandoned))],
+                [str(plans_files.canonicalize_path(abandoned))],
                 [entry["plan_dir"] for entry in never_run_payload["plans"]],
             )
 
@@ -439,7 +435,7 @@ class JsonPlansListingCliTests(JsonCliHelpers, unittest.TestCase):
             self.assertEqual(0, code, stderr)
             payload = json.loads(stdout)
             self.assertEqual(
-                [str(plans.canonicalize_path(stale))],
+                [str(plans_files.canonicalize_path(stale))],
                 [entry["plan_dir"] for entry in payload["plans"]],
             )
 

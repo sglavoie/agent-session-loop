@@ -17,7 +17,7 @@ from agent_session_loop import (
     mailbox_rendering,
     mailbox_validation,
     mailbox_vocabulary,
-    plans,
+    plans_snapshot,
     state_status,
 )
 from tests.asl_core_support import ParserAndStateTestsBase
@@ -97,7 +97,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 )
 
             full_payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             full_status = full_payload["mailbox"]
@@ -117,7 +117,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             lease_path.write_text("not-json\n", encoding="utf-8")
 
             malformed_payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             malformed = malformed_payload["mailbox"]

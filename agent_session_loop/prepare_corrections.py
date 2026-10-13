@@ -7,7 +7,9 @@ from pathlib import Path
 
 from .authoring import PlanTransaction
 from .contracts import COMPLETION_CONTRACT_HEADING
-from .plans import HANDOFF_HEADING, PlanError, canonicalize_path
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
+from .plans_handoff import HANDOFF_HEADING
 from .prepare_models import (
     _HEADING_LINE_RE,
     BLOCKER_AMBIGUOUS,

@@ -48,7 +48,9 @@ from unittest import mock
 from agent_session_loop import (
     cli,
     events,
-    plans,
+    plans_files,
+    plans_models,
+    plans_snapshot,
     run_outcome,
     run_payloads,
     run_selection,
@@ -167,7 +169,7 @@ class _PlanFixture:
     def __init__(self, case: unittest.TestCase, statuses: tuple[str, ...]) -> None:
         tmp = tempfile.TemporaryDirectory()
         case.addCleanup(tmp.cleanup)
-        # Resolve the temp root: `plans.inspect_plan` canonicalizes the macOS
+        # Resolve the temp root: `plans_snapshot.inspect_plan` canonicalizes the macOS
         # `/var/folders/...` symlink and a later path comparison would differ.
         self.root = Path(tmp.name).resolve()
         self.plan_dir = self.root / "plan"
@@ -178,7 +180,7 @@ class _PlanFixture:
         self.lock_info = state.LockInfo(
             path=self.plan_state / state.LOCK_FILE_NAME,
             pid=123,
-            plan_dir=str(plans.canonicalize_path(self.plan_dir)),
+            plan_dir=str(plans_files.canonicalize_path(self.plan_dir)),
             created_at="2026-08-10T10:00:00+00:00",
             stale=False,
             reason="active",
@@ -200,8 +202,8 @@ class _PlanFixture:
             ]
         )
 
-    def snapshot(self) -> plans.PlanSnapshot:
-        return plans.inspect_plan(self.plan_dir)
+    def snapshot(self) -> plans_models.PlanSnapshot:
+        return plans_snapshot.inspect_plan(self.plan_dir)
 
     def seeded(self, *tokens: str) -> dict[str, Any]:
         """The payload a real run is born with, from `run_payloads`."""
@@ -228,7 +230,7 @@ class _PlanFixture:
         reason: str = "invalid-input",
         message: str = "boom",
         paused: bool = False,
-        snapshot: plans.PlanSnapshot | None = None,
+        snapshot: plans_models.PlanSnapshot | None = None,
     ) -> dict[str, Any]:
         """The payload this module builds when no run was ever seeded."""
         return run_outcome._error_payload(
@@ -421,7 +423,9 @@ class ErrorPayloadTests(unittest.TestCase):
 
     def test_an_uncanonicalizable_plan_dir_degrades_to_the_raw_argument(self) -> None:
         args = self.plan.args()
-        with mock.patch.object(plans, "canonicalize_path", side_effect=OSError("no")):
+        with mock.patch.object(
+            plans_files, "canonicalize_path", side_effect=OSError("no")
+        ):
             payload = run_outcome._error_payload(
                 args, reason="invalid-input", message="boom", paused=False
             )

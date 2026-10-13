@@ -61,7 +61,7 @@ from . import (
     intervention,
     mailbox,
     mailbox_models,
-    plans,
+    plans_files,
     state,
 )
 
@@ -114,7 +114,7 @@ def plan_target(
     the directory, so a journal row and a published catalog row agree on which
     plan they are about and neither holds a Mac path.
     """
-    canonical = plans.canonicalize_path(plan_dir)
+    canonical = plans_files.canonicalize_path(plan_dir)
     return operations.OperationTarget(
         plan_key=portable_catalog.plan_key(str(canonical)), selector=selector
     )

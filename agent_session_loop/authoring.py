@@ -22,7 +22,7 @@ turns all of that into importable, unit-tested Python:
 - **Manifest table / previous-session / archive / readiness helpers** — the
   small structural mutations shared by split and resplit.
 
-Canonical session identities come from :mod:`agent_session_loop.plans`
+Canonical session identities come from :mod:`agent_session_loop.plans_session_ids`
 (``SessionId``); contract parsing/validation comes from
 :mod:`agent_session_loop.contracts`.
 """
@@ -46,21 +46,26 @@ from . import contracts as _contracts
 from . import (
     durability,
     harnesses,
-    plans,
+    plans_files,
+    plans_handoff,
+    plans_models,
+    plans_progress,
+    plans_readiness,
+    plans_registry,
+    plans_session_scope,
+    plans_snapshot,
+    plans_status_tables,
+    plans_transaction,
     repository_intent,
     repository_scope,
     responses,
 )
-from .plans import (
-    SPLIT_FROM_PREFIX,
-    PlanError,
-    ReadinessMetadata,
-    SessionId,
-    canonicalize_path,
-    parse_session_id,
-    stable_readiness_sha256,
-    write_readiness_metadata,
-)
+from .plans_content_hash import stable_readiness_sha256
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
+from .plans_models import ReadinessMetadata
+from .plans_readiness import SPLIT_FROM_PREFIX, write_readiness_metadata
+from .plans_session_ids import SessionId, parse_session_id
 from .workspaces import (
     Repository,
     RepositoryRegistry,
@@ -73,7 +78,7 @@ HASH_PREFIX_LENGTH = 12
 
 #: Matches the bounded source-plan session-heading grammar after any optional
 #: ATX closing marker has been removed. Source IDs are intentionally broader
-#: than :data:`plans.SESSION_ID_PATTERN`; they are canonicalized privately
+#: than :data:`plans_session_ids.SESSION_ID_PATTERN`; they are canonicalized privately
 #: before a strict :class:`SessionId` is constructed.
 SESSION_HEADING_RE = re.compile(
     r"^ {0,3}(?P<hashes>#{2,6})[ \t]+Session[ \t]+"
@@ -202,8 +207,8 @@ HANDOFF_TEMPLATE = (
     "\n"
     "<!--\n"
     "Optional: record verified facts and open uncertainties as flat, top-level\n"
-    f"bullets under `{plans.DISCOVERED_FACTS_HEADING}` and "
-    f"`{plans.OPEN_QUESTIONS_HEADING}` headings added below this comment. The\n"
+    f"bullets under `{plans_handoff.DISCOVERED_FACTS_HEADING}` and "
+    f"`{plans_handoff.OPEN_QUESTIONS_HEADING}` headings added below this comment. The\n"
     "handoff parser reads only top-level `- ` bullets directly under those exact\n"
     "headings; indented or nested bullets are ignored. Keep each bullet on one\n"
     "line and never put a comma inside a file path (the Files modified list is\n"
@@ -306,7 +311,7 @@ def extract_inline_plan(raw_input: str) -> str:
 
 def title_from_plan(content: str) -> str:
     """Return the first ``# H1`` title in a plan, or ``"plan"``."""
-    return plans.plan_title_from_markdown(content) or "plan"
+    return plans_files.plan_title_from_markdown(content) or "plan"
 
 
 def _write_source_file(
@@ -363,8 +368,8 @@ def _describe_existing_split_output(path: Path) -> str:
     if not canonical.is_dir():
         return f"{canonical} [not-a-directory]"
     try:
-        plans.inspect_plan(canonical)
-        metadata = plans.read_readiness_metadata(canonical)
+        plans_snapshot.inspect_plan(canonical)
+        metadata = plans_readiness.read_readiness_metadata(canonical)
     except PlanError as error:
         return f"{canonical} [invalid: {error}]"
     readiness = metadata.state if metadata is not None else "unknown"
@@ -471,13 +476,13 @@ class ParsedSession:
     title: str | None
     heading_level: int
     lines: tuple[str, ...]
-    scope: plans.SessionScope | None = None
+    scope: plans_session_scope.SessionScope | None = None
 
     @property
     def instruction_lines(self) -> tuple[str, ...]:
         """Body lines with leading/trailing blank lines and ``---`` rules trimmed."""
         lines = (
-            plans.strip_session_scope_lines(self.lines)
+            plans_session_scope.strip_session_scope_lines(self.lines)
             if self.scope is not None
             else self.lines
         )
@@ -809,7 +814,7 @@ def _parse_repository_registry(
             category=LINT_MALFORMED_REPOSITORIES,
         )
 
-    header = plans._split_table_row(lines[table_index])
+    header = plans_registry._split_table_row(lines[table_index])
     if (
         header is None
         or tuple(cell.strip() for cell in header[1]) != _REPOSITORY_HEADERS
@@ -829,11 +834,11 @@ def _parse_repository_registry(
             _redact_repository_row(lines[table_index]),
             category=LINT_MALFORMED_REPOSITORIES,
         )
-    separator = plans._split_table_row(lines[separator_index])
+    separator = plans_registry._split_table_row(lines[separator_index])
     if (
         separator is None
         or len(separator[1]) != len(_REPOSITORY_HEADERS)
-        or not plans._is_separator_row(separator[1])
+        or not plans_registry._is_separator_row(separator[1])
     ):
         raise _source_registry_error(
             separator_index + 1,
@@ -845,7 +850,7 @@ def _parse_repository_registry(
     repositories: list[Repository] = []
     row_index = separator_index + 1
     while row_index < len(lines):
-        parsed_row = plans._split_table_row(lines[row_index])
+        parsed_row = plans_registry._split_table_row(lines[row_index])
         if parsed_row is None:
             break
         safe_source_line = _redact_repository_row(lines[row_index])
@@ -914,15 +919,15 @@ def parse_plan_document(text: str) -> ParsedPlan:
         if current is None:
             return
         body = lines[current["body_start"] : end]
-        scope: plans.SessionScope | None = None
+        scope: plans_session_scope.SessionScope | None = None
         if registry is not None:
             try:
-                scope = plans.parse_session_scope_lines(
+                scope = plans_session_scope.parse_session_scope_lines(
                     body,
                     registry.aliases,
                     start_line=current["body_start"] + 1,
                 )
-            except plans.SessionScopeError as error:
+            except plans_session_scope.SessionScopeError as error:
                 raise SourceScopeError(
                     line_number=error.line_number,
                     category=LINT_INVALID_SESSION_SCOPE,
@@ -1478,7 +1483,7 @@ def render_session_file(
     previous_session_id: int | str | SessionId | None = None,
     contract: _contracts.CompletionContract | None = None,
     require_contract: bool = True,
-    scope: plans.SessionScope | None = None,
+    scope: plans_session_scope.SessionScope | None = None,
     repository_registry: RepositoryRegistry | None = None,
 ) -> str:
     """Render a full ``session-<id>.md`` file.
@@ -1514,7 +1519,9 @@ def render_session_file(
         parts.append(previous_session_reference_line(previous_session_id))
     if scope is not None:
         parts.append("")
-        parts.extend(plans.render_session_scope(scope).rstrip("\n").splitlines())
+        parts.extend(
+            plans_session_scope.render_session_scope(scope).rstrip("\n").splitlines()
+        )
     parts.append("")
     parts.append("---")
     parts.append("")
@@ -1545,7 +1552,7 @@ def render_session_file(
 
 def render_progress_skeleton() -> str:
     """Return the header-only ``progress.md`` skeleton for a fresh plan."""
-    return plans.PROGRESS_HEADER
+    return plans_progress.PROGRESS_HEADER
 
 
 # ---------------------------------------------------------------------------
@@ -1559,7 +1566,7 @@ class ManifestSession:
 
     session_id: SessionId
     title: str
-    status: plans.StatusValue = "pending"
+    status: plans_models.StatusValue = "pending"
 
     @property
     def filename(self) -> str:
@@ -1696,10 +1703,14 @@ def _replace_status_table_rows(
     session_id: SessionId,
     replacements: tuple[ManifestSession, ...],
 ) -> tuple[list[str], bool]:
-    parsed_header = plans._split_table_row(block[0])
+    parsed_header = plans_registry._split_table_row(block[0])
     assert parsed_header is not None
-    headers = [plans._normalize_table_header(cell) for cell in parsed_header[1]]
-    session_index = _find_header(headers, plans.SESSION_STATUS_TABLE_HEADERS)
+    headers = [
+        plans_registry._normalize_table_header(cell) for cell in parsed_header[1]
+    ]
+    session_index = _find_header(
+        headers, plans_status_tables.SESSION_STATUS_TABLE_HEADERS
+    )
     status_index = _find_header(headers, {"status"})
     title_index = _find_header(headers, {"title"})
     file_index = _find_header(headers, {"file"})
@@ -1709,7 +1720,7 @@ def _replace_status_table_rows(
     changed = False
     updated = block[:2]
     for row in block[2:]:
-        parsed = plans._split_table_row(row)
+        parsed = plans_registry._split_table_row(row)
         if parsed is None:
             updated.append(row)
             continue
@@ -1717,7 +1728,10 @@ def _replace_status_table_rows(
         if max(session_index, status_index) >= len(cells):
             updated.append(row)
             continue
-        if plans._session_id_from_cell(cells[session_index]) != session_id:
+        if (
+            plans_status_tables._session_id_from_cell(cells[session_index])
+            != session_id
+        ):
             updated.append(row)
             continue
 
@@ -1772,12 +1786,16 @@ def replace_session_status_rows(
         while index < len(lines) and lines[index].lstrip().startswith("|"):
             index += 1
         block = lines[block_start:index]
-        parsed_header = plans._split_table_row(block[0]) if len(block) >= 2 else None
-        parsed_separator = plans._split_table_row(block[1]) if len(block) >= 2 else None
+        parsed_header = (
+            plans_registry._split_table_row(block[0]) if len(block) >= 2 else None
+        )
+        parsed_separator = (
+            plans_registry._split_table_row(block[1]) if len(block) >= 2 else None
+        )
         if (
             parsed_header is None
             or parsed_separator is None
-            or not plans._is_separator_row(parsed_separator[1])
+            or not plans_registry._is_separator_row(parsed_separator[1])
         ):
             updated.extend(block)
             continue
@@ -1808,7 +1826,7 @@ def replace_previous_session_reference(
 def add_manifest_session_row(manifest_text: str, session: ManifestSession) -> str:
     """Append a session row to the manifest's ``## Sessions`` status table.
 
-    Reuses :mod:`plans` table primitives so the inserted row matches the
+    Reuses :mod:`plans_status_tables` table primitives so the inserted row matches the
     existing header/separator alignment. Raises :class:`PlanError` when no
     session-status table is present.
     """
@@ -1835,16 +1853,18 @@ def add_manifest_session_row(manifest_text: str, session: ManifestSession) -> st
 def _is_session_status_table(block: list[str]) -> bool:
     if len(block) < 2:
         return False
-    header = plans._split_table_row(block[0])
-    separator = plans._split_table_row(block[1])
+    header = plans_registry._split_table_row(block[0])
+    separator = plans_registry._split_table_row(block[1])
     if header is None or separator is None:
         return False
-    if not plans._is_separator_row(separator[1]):
+    if not plans_registry._is_separator_row(separator[1]):
         return False
-    headers = [plans._normalize_table_header(cell) for cell in header[1]]
+    headers = [plans_registry._normalize_table_header(cell) for cell in header[1]]
     if "status" not in headers:
         return False
-    return any(name in plans.SESSION_STATUS_TABLE_HEADERS for name in headers)
+    return any(
+        name in plans_status_tables.SESSION_STATUS_TABLE_HEADERS for name in headers
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1888,7 +1908,7 @@ def create_archive_dir(
 def refresh_readiness_metadata(
     plan_dir: str | os.PathLike[str],
     *,
-    state: plans.ReadinessState = "draft",
+    state: plans_models.ReadinessState = "draft",
     checked_at: str | None = None,
     now: datetime | None = None,
 ) -> ReadinessMetadata:
@@ -1953,10 +1973,14 @@ class PlanTransaction:
             self.plan_dir.mkdir(parents=True, exist_ok=True)
         except OSError as error:
             raise PlanError(f"failed to stage plan write: {error}") from error
-        plans.recover_pending_plan_transaction(self.plan_dir)
-        transaction_dir = self.plan_dir / plans.PLAN_TRANSACTION_DIR_NAME
-        staging_dir = self.plan_dir / plans.PLAN_TRANSACTION_STAGING_DIR_NAME
-        cleanup_dir = self.plan_dir / plans.PLAN_TRANSACTION_CLEANUP_DIR_NAME
+        plans_transaction.recover_pending_plan_transaction(self.plan_dir)
+        transaction_dir = self.plan_dir / plans_transaction.PLAN_TRANSACTION_DIR_NAME
+        staging_dir = (
+            self.plan_dir / plans_transaction.PLAN_TRANSACTION_STAGING_DIR_NAME
+        )
+        cleanup_dir = (
+            self.plan_dir / plans_transaction.PLAN_TRANSACTION_CLEANUP_DIR_NAME
+        )
         try:
             shutil.rmtree(staging_dir, ignore_errors=True)
             shutil.rmtree(cleanup_dir, ignore_errors=True)
@@ -1983,11 +2007,13 @@ class PlanTransaction:
                         "sha256": hashlib.sha256(content).hexdigest(),
                     }
                 )
-            journal_temp = staging_dir / f".{plans.PLAN_TRANSACTION_JOURNAL_NAME}.tmp"
+            journal_temp = (
+                staging_dir / f".{plans_transaction.PLAN_TRANSACTION_JOURNAL_NAME}.tmp"
+            )
             with journal_temp.open("w", encoding="utf-8") as handle:
                 json.dump(
                     {
-                        "version": plans.PLAN_TRANSACTION_SCHEMA_VERSION,
+                        "version": plans_transaction.PLAN_TRANSACTION_SCHEMA_VERSION,
                         "entries": entries,
                     },
                     handle,
@@ -1999,9 +2025,9 @@ class PlanTransaction:
                 durability.fullsync(handle.fileno())
             os.replace(
                 journal_temp,
-                staging_dir / plans.PLAN_TRANSACTION_JOURNAL_NAME,
+                staging_dir / plans_transaction.PLAN_TRANSACTION_JOURNAL_NAME,
             )
-            plans._fsync_directory(staging_dir)
+            plans_files._fsync_directory(staging_dir)
         except (OSError, PlanError) as error:
             shutil.rmtree(staging_dir, ignore_errors=True)
             if isinstance(error, PlanError):
@@ -2009,7 +2035,7 @@ class PlanTransaction:
             raise PlanError(f"failed to stage plan write: {error}") from error
 
         try:
-            with plans._plan_transaction_mutex(staging_dir):
+            with plans_transaction._plan_transaction_mutex(staging_dir):
                 return self._publish_staged_transaction(
                     transaction_dir=transaction_dir,
                     staging_dir=staging_dir,
@@ -2026,7 +2052,7 @@ class PlanTransaction:
         """Publish prepared payloads while holding their transaction mutex."""
         try:
             os.replace(staging_dir, transaction_dir)
-            plans._fsync_directory(self.plan_dir)
+            plans_files._fsync_directory(self.plan_dir)
         except OSError as error:
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise PlanError(f"failed to stage plan write: {error}") from error
@@ -2049,17 +2075,19 @@ class PlanTransaction:
                     handle.flush()
                     durability.fullsync(handle.fileno())
                 os.replace(temp_path, item.path)
-                plans._fsync_directory(item.path.parent)
+                plans_files._fsync_directory(item.path.parent)
                 replaced.append(item.path)
         except OSError as error:
             rolled_back = self._rollback(backups, replaced, install_temps)
             if rolled_back:
                 with contextlib.suppress(OSError):
-                    plans._retire_plan_transaction(self.plan_dir, transaction_dir)
+                    plans_transaction._retire_plan_transaction(
+                        self.plan_dir, transaction_dir
+                    )
             raise PlanError(f"failed to commit plan write: {error}") from error
 
         try:
-            plans._retire_plan_transaction(self.plan_dir, transaction_dir)
+            plans_transaction._retire_plan_transaction(self.plan_dir, transaction_dir)
         except OSError as error:
             raise PlanError(
                 f"plan write committed but transaction cleanup failed: {error}"

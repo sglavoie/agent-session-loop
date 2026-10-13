@@ -11,7 +11,8 @@ from typing import Any
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_models,
+    plans_session_ids,
     preflight_models,
     readiness_gate,
     run_commit,
@@ -21,9 +22,11 @@ from agent_session_loop import (
 
 
 class ParserAndStateTestsBase(unittest.TestCase):
-    def _session_file(self, plan_dir: Path, session_id: str = "1") -> plans.SessionFile:
-        return plans.SessionFile(
-            session_id=plans.parse_session_id(session_id),
+    def _session_file(
+        self, plan_dir: Path, session_id: str = "1"
+    ) -> plans_models.SessionFile:
+        return plans_models.SessionFile(
+            session_id=plans_session_ids.parse_session_id(session_id),
             path=plan_dir / f"session-{session_id}.md",
         )
 

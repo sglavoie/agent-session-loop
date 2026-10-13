@@ -93,7 +93,10 @@ from typing import Any
 from . import (
     clock,
     events,
-    plans,
+    plans_errors,
+    plans_models,
+    plans_payloads,
+    plans_snapshot,
     readiness_gate,
     review,
     review_continuation,
@@ -116,7 +119,8 @@ from . import (
 #: describes for the revert path, narrowed here to the two arguments the
 #: materialization path has to hand.
 PlanMutationReinspector = Callable[
-    [plans.PlanSnapshotCache, plans.PlanSnapshot], plans.PlanSnapshot
+    [plans_snapshot.PlanSnapshotCache, plans_models.PlanSnapshot],
+    plans_models.PlanSnapshot,
 ]
 
 
@@ -299,7 +303,7 @@ def _has_successful_review_reopen(
 
 def _set_review_resume(
     *,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     event_path: Path,
     payload: dict[str, Any],
     persistence: run_persistence._RunPersistence,
@@ -429,12 +433,12 @@ def _advance_review_cycle(
     session_id: str,
     session_label: str,
     session_details: dict[str, Any],
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     turn_payload: Mapping[str, Any],
     max_review_fix_cycles: int,
-    plan_cache: plans.PlanSnapshotCache,
+    plan_cache: plans_snapshot.PlanSnapshotCache,
     reinspect: PlanMutationReinspector,
-) -> tuple[str, plans.PlanSnapshot]:
+) -> tuple[str, plans_models.PlanSnapshot]:
     """Advance the repair/rereview loop after a review session completed.
 
     Classifies the just-enforced review verdict against the previous cycle's
@@ -496,7 +500,7 @@ def _advance_review_cycle(
 
     def record_and_complete(
         transition: review_transitions.ReviewCycleTransition,
-    ) -> tuple[str, plans.PlanSnapshot]:
+    ) -> tuple[str, plans_models.PlanSnapshot]:
         _record_review_cycle(
             event_path=event_path,
             payload=payload,
@@ -623,7 +627,7 @@ def _advance_review_cycle(
             disposition=review_continuation.REVIEW_CYCLE_DISPOSITION_MALFORMED,
         )
         with persistence.lock:
-            payload["final_snapshot"] = plans.snapshot_payload(materialized)
+            payload["final_snapshot"] = plans_payloads.snapshot_payload(materialized)
         run_termination._pause_run(
             event_path,
             payload,
@@ -657,7 +661,7 @@ def _advance_review_cycle(
             disposition=review_continuation.REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY,
         )
         with persistence.lock:
-            payload["final_snapshot"] = plans.snapshot_payload(materialized)
+            payload["final_snapshot"] = plans_payloads.snapshot_payload(materialized)
         run_termination._pause_run(
             event_path,
             payload,
@@ -702,9 +706,9 @@ def _advance_review_cycle(
     )
     try:
         refreshed = plan_cache.get_fresh(snapshot.plan_dir)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         with persistence.lock:
-            payload["final_snapshot"] = plans.snapshot_payload(materialized)
+            payload["final_snapshot"] = plans_payloads.snapshot_payload(materialized)
         run_termination._pause_run(
             event_path,
             payload,
@@ -731,7 +735,7 @@ def _advance_review_cycle(
         refreshed.plan_dir, "running"
     )
     with persistence.lock:
-        payload["final_snapshot"] = plans.snapshot_payload(refreshed)
+        payload["final_snapshot"] = plans_payloads.snapshot_payload(refreshed)
         if running_success:
             payload["readiness_state_active"] = True
             payload["readiness_state_current"] = "running"

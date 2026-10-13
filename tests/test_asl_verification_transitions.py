@@ -24,7 +24,7 @@ from typing import Any
 from agent_session_loop import (
     contracts,
     events,
-    plans,
+    plans_session_ids,
     review,
     review_continuation,
     verification,
@@ -65,7 +65,7 @@ def _result(
     session_id: str = "1",
 ) -> verification.VerificationResult:
     return verification.VerificationResult(
-        session_id=plans.SessionId.parse(session_id),
+        session_id=plans_session_ids.SessionId.parse(session_id),
         checks=list(checks),
         skipped_checks=[],
     )
@@ -73,7 +73,7 @@ def _result(
 
 def _contract(*names: str) -> contracts.CompletionContract:
     return contracts.CompletionContract(
-        session_id=plans.SessionId.parse("1"),
+        session_id=plans_session_ids.SessionId.parse("1"),
         done_when=("done",),
         verify=contracts.VerifyRecipe(
             checks=tuple(

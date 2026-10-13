@@ -21,7 +21,7 @@ from agent_session_loop import (
     harnesses,
     mailbox_leases,
     pause_policy,
-    plans,
+    plans_handoff,
     review_session_body,
     run_coordination,
     run_loop,
@@ -202,7 +202,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
         self.assertEqual("review-mutated-worktree", payload["pause_reason"])
         self.assertFalse(payload["review_completed"])
         self.assertEqual(
-            "pending", plans.read_session_status(self.review_session).status
+            "pending", plans_handoff.read_session_status(self.review_session).status
         )
         turn = payload["turns"][0]
         guard = turn["review_mutation_guard"]

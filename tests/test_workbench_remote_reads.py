@@ -47,7 +47,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from agent_session_loop import events, plans, state, workbench_remote_reads
+from agent_session_loop import events, plans_files, state, workbench_remote_reads
 from asl_workbench import catalog, details, remote_reads
 from asl_workbench import connector as portable
 from asl_workbench.transport import (
@@ -1297,7 +1297,7 @@ class ResponderTestCase(unittest.TestCase):
         plan_dir = self.plans_root / name
         write_plan(plan_dir, statuses)
         (plan_dir / "manifest.md").write_text("# A plan\n", encoding="utf-8")
-        canonical = plans.canonicalize_path(plan_dir)
+        canonical = plans_files.canonicalize_path(plan_dir)
         _write_state_payload(
             canonical, self.state_root, dict(payload, plan_dir=str(canonical))
         )

@@ -17,7 +17,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import plans, responses, state, state_locks, state_payloads, workspaces
+from . import (
+    plans_errors,
+    plans_files,
+    plans_metadata,
+    plans_registry,
+    responses,
+    state,
+    state_locks,
+    state_payloads,
+    workspaces,
+)
 from .formatting import format_duration_seconds
 
 __all__ = [
@@ -129,20 +139,22 @@ def _workspace_fields(
     if root is not None and rows:
         return cwd or root, root, digest, rows
     try:
-        registry = plans.read_repository_registry(plan_dir)
-        metadata = plans.load_plan_metadata(plan_dir)
-    except plans.PlanError, OSError:
+        registry = plans_registry.read_repository_registry(plan_dir)
+        metadata = plans_metadata.load_plan_metadata(plan_dir)
+    except plans_errors.PlanError, OSError:
         return cwd, None, None, ()
-    if registry is None or not isinstance(metadata, plans.WorkspacePlanMetadata):
+    if registry is None or not isinstance(
+        metadata, plans_metadata.WorkspacePlanMetadata
+    ):
         return cwd, None, None, ()
-    workspace_root = str(plans.canonicalize_path(metadata.workspace_root))
+    workspace_root = str(plans_files.canonicalize_path(metadata.workspace_root))
     repositories = tuple(
         {
             "alias": repository.alias,
             "path": repository.path,
             "origin": repository.origin,
             "resolved_root": str(
-                plans.canonicalize_path(Path(workspace_root) / repository.path)
+                plans_files.canonicalize_path(Path(workspace_root) / repository.path)
             ),
         }
         for repository in registry.repositories
@@ -236,7 +248,7 @@ def plan_basename_label(plan_dir: str | Path) -> str:
 def plan_label(plan_dir: str | Path, *, verbose: bool = False) -> str:
     """Return a plan label: full canonical path when verbose, basename otherwise."""
     if verbose:
-        return str(plans.canonicalize_path(plan_dir))
+        return str(plans_files.canonicalize_path(plan_dir))
     return plan_basename_label(plan_dir)
 
 
@@ -341,7 +353,7 @@ def _resolve_recent_plan_dir(
         if not candidate:
             continue
         try:
-            return plans.canonicalize_path(candidate)
+            return plans_files.canonicalize_path(candidate)
         except OSError, ValueError:
             continue
     return None
@@ -702,7 +714,7 @@ def scan_running_rows(
             )
             continue
         try:
-            canonical_plan_dir = plans.canonicalize_path(plan_dir_value)
+            canonical_plan_dir = plans_files.canonicalize_path(plan_dir_value)
         except (OSError, ValueError) as error:
             stale_locks.append(
                 StaleLock(
@@ -714,7 +726,7 @@ def scan_running_rows(
                 )
             )
             continue
-        expected_state_dir_name = plans.path_sha256(canonical_plan_dir)
+        expected_state_dir_name = plans_files.path_sha256(canonical_plan_dir)
         if state_dir.name != expected_state_dir_name:
             stale_locks.append(
                 StaleLock(

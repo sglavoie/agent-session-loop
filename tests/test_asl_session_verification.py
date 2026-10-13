@@ -33,7 +33,7 @@ from typing import Any, cast
 from agent_session_loop import (
     handoff_correction,
     handoff_guards,
-    plans,
+    plans_snapshot,
     review_transitions,
     run_persistence,
     run_reporting,
@@ -296,7 +296,7 @@ class VerifyThenProgressThenLedgersTests(unittest.TestCase):
         return (
             self.source.index("session_verification._enforce_session_verification("),
             self.source.index("handoff_guards._append_progress_entry("),
-            self.source.index("plans.sync_derived_status_ledgers("),
+            self.source.index("plans_status_tables.sync_derived_status_ledgers("),
         )
 
     def test_the_loop_verifies_before_it_appends_to_the_journal(self) -> None:
@@ -353,7 +353,8 @@ class RefusalShapeTests(unittest.TestCase):
         # the post-revert one; publishing the pre-revert snapshot would report a
         # session as complete that the gate had just reopened.
         republished = (
-            'payload["final_snapshot"] = plans.snapshot_payload(snapshot_after)'
+            'payload["final_snapshot"] = '
+            "plans_payloads.snapshot_payload(snapshot_after)"
         )
         for name in ENFORCEMENT_FUNCTIONS:
             with self.subTest(name=name):
@@ -382,8 +383,8 @@ class ReinspectTests(unittest.TestCase):
         self.tmp_dir = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
         self.plan_dir = self.tmp_dir / "plan"
         write_plan(self.plan_dir, ("complete", "pending"))
-        self.cache = plans.PlanSnapshotCache()
-        self.fallback = plans.inspect_plan(self.plan_dir)
+        self.cache = plans_snapshot.PlanSnapshotCache()
+        self.fallback = plans_snapshot.inspect_plan(self.plan_dir)
 
     def test_nothing_reverted_returns_the_fallback_untouched(self) -> None:
         # Not merely equal: an unnecessary re-read of a large plan on every
@@ -446,7 +447,7 @@ class _Turn:
         }
         self.payload: dict[str, Any] = {"run_id": "run-1"}
         self.turn_payload: dict[str, Any] = {}
-        self.snapshot = plans.inspect_plan(self.plan_dir)
+        self.snapshot = plans_snapshot.inspect_plan(self.plan_dir)
 
     def enforce(self, *, allow_not_loop_ready: bool) -> bool:
         return session_verification._enforce_session_verification(
@@ -463,7 +464,7 @@ class _Turn:
             allow_not_loop_ready=allow_not_loop_ready,
             turn_payload=self.turn_payload,
             paths=self.paths,
-            plan_cache=plans.PlanSnapshotCache(),
+            plan_cache=plans_snapshot.PlanSnapshotCache(),
             append_handoff_note=handoff_correction._append_handoff_note,
             run_id="run-1",
             turn_index=1,
@@ -471,7 +472,7 @@ class _Turn:
         )
 
     def status(self) -> str | None:
-        for session in plans.inspect_plan(self.plan_dir).sessions:
+        for session in plans_snapshot.inspect_plan(self.plan_dir).sessions:
             if session.id == "1":
                 return session.status
         return None

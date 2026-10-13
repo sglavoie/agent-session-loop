@@ -8,7 +8,7 @@ from agent_session_loop import cli_trace as _cli_trace
 from agent_session_loop import harnesses as _harnesses
 from agent_session_loop import intervention as _intervention
 from agent_session_loop import pause_policy as _pause_policy
-from agent_session_loop import plans as _plans
+from agent_session_loop import plans_payloads
 from agent_session_loop import review as _review
 from agent_session_loop import run_inputs as _run_inputs
 
@@ -73,8 +73,8 @@ HARNESS_NAMES = _harnesses.HARNESS_NAMES
 # Session kinds the runner stamps on `active_turn.session_kind`, re-exported for
 # the same reason. A dual-harness run alternates between them: implementation
 # legs run under `--harness`, review/rereview legs under `--review-harness`.
-SESSION_KIND_IMPLEMENTATION = _plans.SESSION_KIND_IMPLEMENTATION
-SESSION_KIND_REVIEW = _plans.SESSION_KIND_REVIEW
+SESSION_KIND_IMPLEMENTATION = plans_payloads.SESSION_KIND_IMPLEMENTATION
+SESSION_KIND_REVIEW = plans_payloads.SESSION_KIND_REVIEW
 
 # Every `asl` child this helper spawns is internal automation, not a direct
 # operator call, so its invocation trace is attributed to the helper.

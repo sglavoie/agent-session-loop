@@ -64,7 +64,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from . import control_signal, intervention, plans, redirect_store, state_locks
+from . import (
+    control_signal,
+    intervention,
+    plans_files,
+    plans_payloads,
+    redirect_store,
+    state_locks,
+)
 
 #: The urgent window, and the single number both halves of it are derived from.
 #: It bounds what a producer waits for an answer *and* what the runner's own
@@ -128,7 +135,7 @@ UNAVAILABLE_REASONS: tuple[str, ...] = (
 )
 
 #: Session kinds whose turn is the run's own audit and may not be redirected.
-TERMINAL_AUDIT_SESSION_KINDS: tuple[str, ...] = (plans.SESSION_KIND_REVIEW,)
+TERMINAL_AUDIT_SESSION_KINDS: tuple[str, ...] = (plans_payloads.SESSION_KIND_REVIEW,)
 
 
 class RedirectAdmissionError(Exception):
@@ -232,7 +239,7 @@ class SubmissionOutcome:
 
 def _canonical_plan_dir(plan_dir: str | Path) -> Path:
     try:
-        return plans.canonicalize_path(plan_dir)
+        return plans_files.canonicalize_path(plan_dir)
     except (OSError, ValueError) as error:
         raise RedirectAdmissionError(
             REFUSE_INVALID_PLAN, f"invalid plan directory {plan_dir!r}: {error}"

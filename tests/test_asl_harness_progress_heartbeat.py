@@ -14,7 +14,8 @@ from pathlib import Path
 from agent_session_loop import (
     clock,
     events,
-    plans,
+    plans_files,
+    plans_snapshot,
     run_commit,
     run_payloads,
     run_persistence,
@@ -431,7 +432,7 @@ class ProgressAndHeartbeatTests(FakeHarnessIntegrationBase):
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
-            snapshot = plans.inspect_plan(plan_dir)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
             plan_state_dir = state.plan_state_dir(plan_dir, state_dir)
             run_id = "run-1"
             run_dir = plan_state_dir / "runs" / run_id
@@ -440,7 +441,7 @@ class ProgressAndHeartbeatTests(FakeHarnessIntegrationBase):
             lock_info = state.LockInfo(
                 path=plan_state_dir / state.LOCK_FILE_NAME,
                 pid=123,
-                plan_dir=str(plans.canonicalize_path(plan_dir)),
+                plan_dir=str(plans_files.canonicalize_path(plan_dir)),
                 created_at="2026-06-20T10:00:00+00:00",
                 stale=False,
                 reason="active",

@@ -20,7 +20,7 @@ from agent_session_loop import (
     mailbox_leases,
     mailbox_models,
     mailbox_vocabulary,
-    plans,
+    plans_readiness,
     qna,
     run_coordination,
     run_prompts,
@@ -292,7 +292,7 @@ class EndToEndReplyResumeTests(rfs.EndToEndReplyResumeCase):
         first_completed, first_payload = self._run_run(mode="reply-aware")
         self.assertEqual(1, first_completed.returncode, first_completed.stderr)
         self.assertTrue(first_payload["paused"])
-        self.assertIsNone(plans.read_readiness_metadata(self.plan_dir))
+        self.assertIsNone(plans_readiness.read_readiness_metadata(self.plan_dir))
 
         resume_completed, resume_payload = self._run_run(
             mode="reply-aware",

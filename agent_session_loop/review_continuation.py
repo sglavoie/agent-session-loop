@@ -21,7 +21,14 @@ from typing import Any, Literal
 from . import (
     events,
     pause_policy,
-    plans,
+    plans_content_hash,
+    plans_errors,
+    plans_models,
+    plans_readiness,
+    plans_registry,
+    plans_session_ids,
+    plans_session_scope,
+    plans_snapshot,
     review,
     review_repair,
     session_overview,
@@ -555,7 +562,7 @@ def _source_id_from_repair_ids(payload: Mapping[str, Any]) -> str | None:
     source_components: set[int] = set()
     for repair_id in _event_repair_ids(payload):
         try:
-            parsed = plans.parse_session_id(repair_id)
+            parsed = plans_session_ids.parse_session_id(repair_id)
         except ValueError:
             continue
         if parsed.is_integer:
@@ -676,16 +683,16 @@ def review_event_materialization_key(
 
 def repair_group_attempts(
     event_path: str | Path,
-    snapshot_or_plan_dir: plans.PlanSnapshot | str | Path | None = None,
+    snapshot_or_plan_dir: plans_models.PlanSnapshot | str | Path | None = None,
 ) -> dict[str, int]:
     """Return per-group repair attempt counts from events and durable children."""
 
     records = read_review_events(event_path)
     snapshot = (
         snapshot_or_plan_dir
-        if isinstance(snapshot_or_plan_dir, plans.PlanSnapshot)
+        if isinstance(snapshot_or_plan_dir, plans_models.PlanSnapshot)
         else (
-            plans.inspect_plan(snapshot_or_plan_dir)
+            plans_snapshot.inspect_plan(snapshot_or_plan_dir)
             if snapshot_or_plan_dir is not None
             else None
         )
@@ -834,8 +841,9 @@ def _review_id_for_cycle_position(
 
 def _materialization_key_times(
     records: tuple[ReviewEventRecord, ...],
-    generated_repairs: Mapping[str, Mapping[str, plans.SessionStatus]] | None = None,
-    generated_reviews: Mapping[str, plans.SessionStatus] | None = None,
+    generated_repairs: Mapping[str, Mapping[str, plans_models.SessionStatus]]
+    | None = None,
+    generated_reviews: Mapping[str, plans_models.SessionStatus] | None = None,
 ) -> dict[str, datetime | None]:
     """Return each unique materialization with the newest event that dated it.
 
@@ -849,7 +857,7 @@ def _materialization_key_times(
         review_ids = (
             sorted(
                 generated_reviews,
-                key=lambda item: plans.parse_session_id(item).sort_key,
+                key=lambda item: plans_session_ids.parse_session_id(item).sort_key,
             )
             if generated_reviews is not None
             else []
@@ -895,8 +903,9 @@ def _materialization_key_times(
 
 def _reconciled_materialization_keys(
     records: tuple[ReviewEventRecord, ...],
-    generated_repairs: Mapping[str, Mapping[str, plans.SessionStatus]] | None = None,
-    generated_reviews: Mapping[str, plans.SessionStatus] | None = None,
+    generated_repairs: Mapping[str, Mapping[str, plans_models.SessionStatus]]
+    | None = None,
+    generated_reviews: Mapping[str, plans_models.SessionStatus] | None = None,
 ) -> set[str]:
     """Return unique materializations across events and durable children."""
 
@@ -907,7 +916,7 @@ def _reconciled_materialization_keys(
 
 def reconciled_materialization_keys(
     event_path: str | Path,
-    snapshot_or_plan_dir: plans.PlanSnapshot | str | Path | None = None,
+    snapshot_or_plan_dir: plans_models.PlanSnapshot | str | Path | None = None,
     *,
     since: datetime | None = None,
 ) -> frozenset[str]:
@@ -927,9 +936,9 @@ def reconciled_materialization_keys(
     records = read_review_events(event_path)
     snapshot = (
         snapshot_or_plan_dir
-        if isinstance(snapshot_or_plan_dir, plans.PlanSnapshot)
+        if isinstance(snapshot_or_plan_dir, plans_models.PlanSnapshot)
         else (
-            plans.inspect_plan(snapshot_or_plan_dir)
+            plans_snapshot.inspect_plan(snapshot_or_plan_dir)
             if snapshot_or_plan_dir is not None
             else None
         )
@@ -951,7 +960,7 @@ def reconciled_materialization_keys(
 def _post_reopen_baseline_payload(
     records: tuple[ReviewEventRecord, ...],
     latest_cycle: Mapping[str, Any],
-    generated_reviews: Mapping[str, plans.SessionStatus] | None = None,
+    generated_reviews: Mapping[str, plans_models.SessionStatus] | None = None,
 ) -> Mapping[str, Any] | None:
     """Return the later successful reopen whose evidence corrects a cycle.
 
@@ -968,12 +977,14 @@ def _post_reopen_baseline_payload(
 
     source_id_text = _cycle_source_id(latest_cycle)
     source_id = _parse_session_id_or_none(source_id_text)
-    positional_source_id: plans.SessionId | None = None
-    unresolved_source_reopen: tuple[plans.SessionId, Mapping[str, Any]] | None = None
+    positional_source_id: plans_session_ids.SessionId | None = None
+    unresolved_source_reopen: (
+        tuple[plans_session_ids.SessionId, Mapping[str, Any]] | None
+    ) = None
     if source_id_text is None and generated_reviews:
         review_ids = sorted(
             generated_reviews,
-            key=lambda item: plans.parse_session_id(item).sort_key,
+            key=lambda item: plans_session_ids.parse_session_id(item).sort_key,
         )
         cycle_ordinal = (
             sum(
@@ -1046,7 +1057,9 @@ def _latest_materialized_reopen_baseline_payload(
     Legacy records without source lineage retain their newest-record fallback.
     """
 
-    latest_source_reopen: tuple[plans.SessionId, Mapping[str, Any]] | None = None
+    latest_source_reopen: (
+        tuple[plans_session_ids.SessionId, Mapping[str, Any]] | None
+    ) = None
     latest_legacy_reopen: Mapping[str, Any] | None = None
     for record in records:
         if (
@@ -1070,7 +1083,7 @@ def _latest_materialized_reopen_baseline_payload(
 
 def review_cycle_state(
     event_path: str | Path,
-    snapshot_or_plan_dir: plans.PlanSnapshot | str | Path | None = None,
+    snapshot_or_plan_dir: plans_models.PlanSnapshot | str | Path | None = None,
 ) -> dict[str, Any]:
     """Compute the cross-process state used for the next cycle record.
 
@@ -1083,9 +1096,9 @@ def review_cycle_state(
     records = read_review_events(event_path)
     snapshot = (
         snapshot_or_plan_dir
-        if isinstance(snapshot_or_plan_dir, plans.PlanSnapshot)
+        if isinstance(snapshot_or_plan_dir, plans_models.PlanSnapshot)
         else (
-            plans.inspect_plan(snapshot_or_plan_dir)
+            plans_snapshot.inspect_plan(snapshot_or_plan_dir)
             if snapshot_or_plan_dir is not None
             else None
         )
@@ -1127,9 +1140,9 @@ def review_cycle_state(
 
 
 def _generated_review_statuses(
-    snapshot: plans.PlanSnapshot,
-) -> dict[str, plans.SessionStatus]:
-    statuses: dict[str, plans.SessionStatus] = {}
+    snapshot: plans_models.PlanSnapshot,
+) -> dict[str, plans_models.SessionStatus]:
+    statuses: dict[str, plans_models.SessionStatus] = {}
     for session in snapshot.sessions:
         if not session.session_id.is_integer:
             continue
@@ -1143,9 +1156,9 @@ def _generated_review_statuses(
 
 
 def _generated_repair_statuses(
-    snapshot: plans.PlanSnapshot,
-) -> dict[str, dict[str, plans.SessionStatus]]:
-    by_source: dict[str, dict[str, plans.SessionStatus]] = {}
+    snapshot: plans_models.PlanSnapshot,
+) -> dict[str, dict[str, plans_models.SessionStatus]]:
+    by_source: dict[str, dict[str, plans_models.SessionStatus]] = {}
     for session in snapshot.sessions:
         if session.session_id.is_integer:
             continue
@@ -1160,18 +1173,18 @@ def _generated_repair_statuses(
     return by_source
 
 
-def _parse_session_id_or_none(value: str | None) -> plans.SessionId | None:
+def _parse_session_id_or_none(value: str | None) -> plans_session_ids.SessionId | None:
     if value is None:
         return None
     try:
-        return plans.parse_session_id(value)
+        return plans_session_ids.parse_session_id(value)
     except ValueError:
         return None
 
 
 def _latest_source(
     cycles: list[Mapping[str, Any]],
-    review_statuses: Mapping[str, plans.SessionStatus],
+    review_statuses: Mapping[str, plans_models.SessionStatus],
 ) -> tuple[str | None, Mapping[str, Any] | None]:
     latest_cycle = cycles[-1] if cycles else None
     cycle_source = _cycle_source_id(latest_cycle) if latest_cycle is not None else None
@@ -1282,7 +1295,7 @@ def _source_digests(
 
 
 def _eventless_review_disposition(
-    plan_dir: Path, source_status: plans.SessionStatus
+    plan_dir: Path, source_status: plans_models.SessionStatus
 ) -> str | None:
     """Recover a terminal disposition from a completed review's artifacts.
 
@@ -1313,7 +1326,7 @@ def _eventless_review_disposition(
 def _repair_ids_for_source(
     source_id: str,
     records: tuple[ReviewEventRecord, ...],
-    generated: Mapping[str, plans.SessionStatus],
+    generated: Mapping[str, plans_models.SessionStatus],
 ) -> tuple[str, ...]:
     ids = set(generated)
     for record in records:
@@ -1326,7 +1339,7 @@ def _repair_ids_for_source(
 
     def sort_key(value: str) -> tuple[int, tuple[int, ...] | str]:
         try:
-            return (0, plans.parse_session_id(value).sort_key)
+            return (0, plans_session_ids.parse_session_id(value).sort_key)
         except ValueError:
             return (1, value)
 
@@ -1334,10 +1347,10 @@ def _repair_ids_for_source(
 
 
 def _resplit_repair_children(
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     repair_ids: Sequence[str],
-    generated: Mapping[str, plans.SessionStatus],
-) -> tuple[dict[str, plans.SessionStatus], frozenset[str]]:
+    generated: Mapping[str, plans_models.SessionStatus],
+) -> tuple[dict[str, plans_models.SessionStatus], frozenset[str]]:
     """Descendants standing in for a repair child the plan no longer holds.
 
     A repair session too large to run in one turn is resplit: the parent is
@@ -1362,7 +1375,7 @@ def _resplit_repair_children(
     what the projection reports, not what it re-derives.
     """
     present = {session.id for session in snapshot.sessions}
-    children: dict[str, plans.SessionStatus] = {}
+    children: dict[str, plans_models.SessionStatus] = {}
     superseded: set[str] = set()
     for repair_id in repair_ids:
         if repair_id in generated or repair_id in present:
@@ -1385,14 +1398,14 @@ def _resplit_repair_children(
 
 
 def _repair_group_records_from_children(
-    generated: Mapping[str, plans.SessionStatus],
+    generated: Mapping[str, plans_models.SessionStatus],
 ) -> tuple[Mapping[str, Any], ...] | None:
     """Recover durable repair-group identity from generated child sessions."""
     if not generated:
         return None
     groups: list[Mapping[str, Any]] = []
     for session_id in sorted(
-        generated, key=lambda item: plans.parse_session_id(item).sort_key
+        generated, key=lambda item: plans_session_ids.parse_session_id(item).sort_key
     ):
         status = generated[session_id]
         try:
@@ -1434,13 +1447,13 @@ class _DurableRepairScopes:
 
 def _repair_groups_from_children(
     plan_dir: Path,
-    generated: Mapping[str, plans.SessionStatus],
+    generated: Mapping[str, plans_models.SessionStatus],
 ) -> _DurableRepairScopes | None:
     """Recover repository attribution from durable generated child sessions."""
     groups = _repair_group_records_from_children(generated)
     if groups is None:
         return None
-    registry = plans.read_repository_registry(plan_dir)
+    registry = plans_registry.read_repository_registry(plan_dir)
     if registry is None:
         return _DurableRepairScopes(groups, None)
     attributed: list[Mapping[str, Any]] = []
@@ -1451,8 +1464,8 @@ def _repair_groups_from_children(
             return None
         try:
             text = status.path.read_text(encoding="utf-8")
-            scope = plans.parse_session_scope(text, registry.aliases)
-        except OSError, plans.PlanError:
+            scope = plans_session_scope.parse_session_scope(text, registry.aliases)
+        except OSError, plans_errors.PlanError:
             return None
         entry = dict(group)
         entry["read_repositories"] = list(scope.reads)
@@ -1759,18 +1772,20 @@ def _unresolved_materialization_blocker(
     if disposition != REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY:
         return None
     try:
-        readiness = plans.read_readiness_metadata(plan_dir)
+        readiness = plans_readiness.read_readiness_metadata(plan_dir)
         if readiness is None or readiness.state not in ("loop-ready", "running"):
             return REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY
-        if readiness.readiness_sha256 != plans.stable_readiness_sha256(plan_dir):
+        if readiness.readiness_sha256 != plans_content_hash.stable_readiness_sha256(
+            plan_dir
+        ):
             return REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY
-    except plans.PlanError:
+    except plans_errors.PlanError:
         return REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY
     return None
 
 
 def evaluate_review_continuation(
-    snapshot_or_plan_dir: plans.PlanSnapshot | str | Path,
+    snapshot_or_plan_dir: plans_models.PlanSnapshot | str | Path,
     event_path: str | Path,
     *,
     max_repair_group_attempts: int | None = None,
@@ -1787,8 +1802,8 @@ def evaluate_review_continuation(
     """
     snapshot = (
         snapshot_or_plan_dir
-        if isinstance(snapshot_or_plan_dir, plans.PlanSnapshot)
-        else plans.inspect_plan(snapshot_or_plan_dir)
+        if isinstance(snapshot_or_plan_dir, plans_models.PlanSnapshot)
+        else plans_snapshot.inspect_plan(snapshot_or_plan_dir)
     )
     records = read_review_events(event_path)
     cycles = [
@@ -1870,7 +1885,7 @@ def evaluate_review_continuation(
     resplit_children, superseded_repair_ids = _resplit_repair_children(
         snapshot, repair_ids, generated_for_source
     )
-    accounted_for_source: dict[str, plans.SessionStatus] = {
+    accounted_for_source: dict[str, plans_models.SessionStatus] = {
         **generated_for_source,
         **resplit_children,
     }
@@ -1881,7 +1896,7 @@ def evaluate_review_continuation(
                 for session_id, status in accounted_for_source.items()
                 if status.status == "pending"
             ),
-            key=lambda item: plans.parse_session_id(item).sort_key,
+            key=lambda item: plans_session_ids.parse_session_id(item).sort_key,
         )
     )
     completed_ids = tuple(
@@ -1891,7 +1906,7 @@ def evaluate_review_continuation(
                 for session_id, status in accounted_for_source.items()
                 if status.status == "complete"
             ),
-            key=lambda item: plans.parse_session_id(item).sort_key,
+            key=lambda item: plans_session_ids.parse_session_id(item).sort_key,
         )
     )
     repair_attempt_counts = repair_group_attempts(event_path, snapshot)
@@ -1999,7 +2014,7 @@ def evaluate_review_continuation(
         planning = review_repair.plan_review_repair_sessions(
             snapshot.plan_dir, review_session_id=source_id
         )
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         planning = review_repair.ReviewRepairPlan(
             ok=False,
             reason=review_repair.REVIEW_REPAIR_REASON_MALFORMED,

@@ -9,7 +9,7 @@ import json
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
-from agent_session_loop import cli, control_cli, control_queue, plans
+from agent_session_loop import cli, control_cli, control_queue, plans_files
 from tests.asl_control_cli_support import ControlCliTestsBase
 from tests.support import (
     _write_state_payload,
@@ -55,7 +55,7 @@ class ControlCliTestsPart2(ControlCliTestsBase):
         self.assertEqual(
             str(
                 control_queue.queue_path_for_plan(
-                    plans.canonicalize_path(self.plan_dir), state_dir
+                    plans_files.canonicalize_path(self.plan_dir), state_dir
                 )
             ),
             payload["details"]["queue_path"],
@@ -128,7 +128,7 @@ class ControlCliTestsPart2(ControlCliTestsBase):
             _write_state_payload(
                 candidate,
                 self.state_dir,
-                {"plan_dir": str(plans.canonicalize_path(candidate))},
+                {"plan_dir": str(plans_files.canonicalize_path(candidate))},
             )
 
         exit_code, payload = self.payload_from(
@@ -143,14 +143,14 @@ class ControlCliTestsPart2(ControlCliTestsBase):
         self.assertEqual(
             sorted(
                 [
-                    str(plans.canonicalize_path(first)),
-                    str(plans.canonicalize_path(second)),
+                    str(plans_files.canonicalize_path(first)),
+                    str(plans_files.canonicalize_path(second)),
                 ]
             ),
             payload["details"]["candidates"],
         )
         self.assertEqual(
-            str(plans.canonicalize_path(self.state_dir)),
+            str(plans_files.canonicalize_path(self.state_dir)),
             payload["details"]["state_root"],
         )
         self.assertEqual(
@@ -166,7 +166,7 @@ class ControlCliTestsPart2(ControlCliTestsBase):
             _write_state_payload(
                 candidate,
                 self.state_dir,
-                {"plan_dir": str(plans.canonicalize_path(candidate))},
+                {"plan_dir": str(plans_files.canonicalize_path(candidate))},
             )
 
         stderr = io.StringIO()

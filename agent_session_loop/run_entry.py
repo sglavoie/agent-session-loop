@@ -96,7 +96,8 @@ from . import (
     control_signal,
     events,
     harnesses,
-    plans,
+    plans_errors,
+    plans_snapshot,
     preflight_auto_repair,
     repository_registration,
     review_guard,
@@ -429,7 +430,7 @@ def run_from_args(
             args,
             resolve_review_guard_excludes=review_guard._review_guard_excludes,
         )
-    except (plans.PlanError, RunError) as error:
+    except (plans_errors.PlanError, RunError) as error:
         payload = run_outcome._error_payload(
             args,
             reason="input-error",
@@ -479,8 +480,8 @@ def run_from_args(
         return 1
 
     try:
-        initial_snapshot = plans.inspect_plan(args.plan_dir)
-    except plans.PlanError as error:
+        initial_snapshot = plans_snapshot.inspect_plan(args.plan_dir)
+    except plans_errors.PlanError as error:
         payload = run_outcome._error_payload(
             args,
             reason="malformed-plan",
@@ -497,7 +498,7 @@ def run_from_args(
             cwd,
         )
         run_inputs._validate_resume_workspace_binding(args, verification_context)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         payload = run_outcome._error_payload(
             args,
             reason="workspace-error",
@@ -668,7 +669,7 @@ def run_from_args(
         except (
             config.ConfigError,
             harnesses.HarnessError,
-            plans.PlanError,
+            plans_errors.PlanError,
             RunError,
             state.StateError,
             OSError,

@@ -12,7 +12,10 @@ from pathlib import Path
 
 from agent_session_loop import (
     authoring,
-    plans,
+    plans_content_hash,
+    plans_errors,
+    plans_metadata,
+    plans_registry,
     run_inputs,
     run_prompts,
     verification,
@@ -177,7 +180,7 @@ class RepositoryRegistryTests(unittest.TestCase):
             + authoring.render_repository_registry_table(registry)
         )
 
-        parsed = plans.parse_repository_registry_manifest(manifest)
+        parsed = plans_registry.parse_repository_registry_manifest(manifest)
 
         self.assertIsNotNone(parsed)
         self.assertEqual(registry.digest, parsed.digest)
@@ -370,15 +373,15 @@ class WorkspaceMetadataTests(unittest.TestCase):
             workspace_root.mkdir()
             digest = _registry().digest
 
-            path = plans.save_workspace_plan_metadata(
+            path = plans_metadata.save_workspace_plan_metadata(
                 plan_dir,
                 workspace_root / ".." / "workspace",
                 digest,
             )
-            metadata = plans.load_plan_metadata(plan_dir)
+            metadata = plans_metadata.load_plan_metadata(plan_dir)
 
             self.assertEqual(
-                plans.WorkspacePlanMetadata(
+                plans_metadata.WorkspacePlanMetadata(
                     workspace_root=str(workspace_root.resolve()),
                     registry_digest=digest,
                 ),
@@ -402,10 +405,10 @@ class WorkspaceMetadataTests(unittest.TestCase):
             workspace_root = root / "workspace"
             write_plan(plan_dir, ("pending",))
             workspace_root.mkdir()
-            content_before = plans.plan_content_sha256(plan_dir)
-            readiness_before = plans.stable_readiness_sha256(plan_dir)
+            content_before = plans_content_hash.plan_content_sha256(plan_dir)
+            readiness_before = plans_content_hash.stable_readiness_sha256(plan_dir)
 
-            metadata_path = plan_dir / plans.PLAN_METADATA_FILE_NAME
+            metadata_path = plan_dir / plans_metadata.PLAN_METADATA_FILE_NAME
             metadata_path.write_text(
                 json.dumps(
                     {
@@ -417,13 +420,17 @@ class WorkspaceMetadataTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            metadata = plans.load_plan_metadata(plan_dir)
-            self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
-            assert isinstance(metadata, plans.WorkspacePlanMetadata)
+            metadata = plans_metadata.load_plan_metadata(plan_dir)
+            self.assertIsInstance(metadata, plans_metadata.WorkspacePlanMetadata)
+            assert isinstance(metadata, plans_metadata.WorkspacePlanMetadata)
             self.assertEqual(2, metadata.version)
 
-            self.assertEqual(content_before, plans.plan_content_sha256(plan_dir))
-            self.assertEqual(readiness_before, plans.stable_readiness_sha256(plan_dir))
+            self.assertEqual(
+                content_before, plans_content_hash.plan_content_sha256(plan_dir)
+            )
+            self.assertEqual(
+                readiness_before, plans_content_hash.stable_readiness_sha256(plan_dir)
+            )
             metadata_path.write_text(
                 json.dumps(
                     {
@@ -434,8 +441,8 @@ class WorkspaceMetadataTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(plans.PlanError, "SHA-256"):
-                plans.load_plan_metadata(plan_dir)
+            with self.assertRaisesRegex(plans_errors.PlanError, "SHA-256"):
+                plans_metadata.load_plan_metadata(plan_dir)
 
     def test_v3_loader_accepts_and_discards_a_legacy_inventory_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -444,13 +451,13 @@ class WorkspaceMetadataTests(unittest.TestCase):
             workspace_root = root / "workspace"
             plan_dir.mkdir()
             workspace_root.mkdir()
-            metadata_path = plan_dir / plans.PLAN_METADATA_FILE_NAME
+            metadata_path = plan_dir / plans_metadata.PLAN_METADATA_FILE_NAME
 
             def write(excludes: object) -> None:
                 metadata_path.write_text(
                     json.dumps(
                         {
-                            "version": plans.PLAN_METADATA_V3_SCHEMA_VERSION,
+                            "version": plans_metadata.PLAN_METADATA_V3_SCHEMA_VERSION,
                             "workspace_root": str(workspace_root.resolve()),
                             "registry_digest": "0" * 64,
                             "workspace_inventory_excludes": excludes,
@@ -461,19 +468,19 @@ class WorkspaceMetadataTests(unittest.TestCase):
 
             write(["Library/Protected.dv"])
             self.assertEqual(
-                plans.WorkspacePlanMetadata(
+                plans_metadata.WorkspacePlanMetadata(
                     workspace_root=str(workspace_root.resolve()),
                     registry_digest="0" * 64,
                 ),
-                plans.load_plan_metadata(plan_dir),
+                plans_metadata.load_plan_metadata(plan_dir),
             )
 
             write("Library/Protected.dv")
             with self.assertRaisesRegex(
-                plans.PlanError,
+                plans_errors.PlanError,
                 "'workspace_inventory_excludes' must be a string array",
             ):
-                plans.load_plan_metadata(plan_dir)
+                plans_metadata.load_plan_metadata(plan_dir)
 
     def test_resume_binding_ignores_a_persisted_inventory_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -498,7 +505,7 @@ class WorkspaceMetadataTests(unittest.TestCase):
                 context,
             )
 
-            with self.assertRaisesRegex(plans.PlanError, "persisted run"):
+            with self.assertRaisesRegex(plans_errors.PlanError, "persisted run"):
                 run_inputs._validate_resume_workspace_binding(
                     argparse.Namespace(
                         _resume_workspace_config={
@@ -517,10 +524,12 @@ class WorkspaceMetadataTests(unittest.TestCase):
             plan_dir.mkdir()
             cwd.mkdir()
 
-            path = plans.save_plan_metadata(plan_dir, cwd)
-            metadata = plans.load_plan_metadata(plan_dir)
+            path = plans_metadata.save_plan_metadata(plan_dir, cwd)
+            metadata = plans_metadata.load_plan_metadata(plan_dir)
 
-            self.assertEqual(plans.PlanMetadata(cwd=str(cwd.resolve())), metadata)
+            self.assertEqual(
+                plans_metadata.PlanMetadata(cwd=str(cwd.resolve())), metadata
+            )
             self.assertEqual(
                 json.dumps(
                     {"cwd": str(cwd.resolve()), "version": 1},

@@ -13,18 +13,14 @@ from .contracts import (
     CompletionContract,
     parse_completion_contract,
 )
-from .plans import (
-    HANDOFF_HEADING,
-    PlanError,
-    PlanSnapshot,
-    ReadinessMetadata,
-    SessionFile,
-    SessionScopeError,
-    inspect_plan,
-    noncanonical_session_file_suggestions,
-    parse_readiness_metadata,
-    stable_readiness_sha256,
-)
+from .plans_content_hash import stable_readiness_sha256
+from .plans_discovery import noncanonical_session_file_suggestions
+from .plans_errors import PlanError
+from .plans_handoff import HANDOFF_HEADING
+from .plans_models import PlanSnapshot, ReadinessMetadata, SessionFile
+from .plans_readiness import parse_readiness_metadata
+from .plans_session_scope import SessionScopeError
+from .plans_snapshot import inspect_plan
 from .preflight_models import PreflightCategory, PreflightFinding, _finding
 
 WORD_AMBIGUITY_SENTINELS: tuple[str, ...] = (

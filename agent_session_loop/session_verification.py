@@ -59,9 +59,9 @@ Invariants that survive the move:
 * **Verify, then journal, then ledgers.** The loop calls
   :func:`_enforce_session_verification` strictly before
   ``handoff_guards._append_progress_entry`` and before
-  ``plans.sync_derived_status_ledgers``. Both halves fail silently — a journal
-  row appended before verification looks exactly like one appended after it — so
-  the ordering is asserted against the loop's source rather than assumed.
+  ``plans_status_tables.sync_derived_status_ledgers``. Both halves fail silently —
+  a journal row appended before verification looks exactly like one appended
+  after it — so the ordering is asserted against the loop's source rather than assumed.
 * **A refusal reverts, re-reads, records, and pauses, in that order.** The
   session goes back to ``pending`` with a note naming the failure, the plan is
   re-read so ``final_snapshot`` describes the plan as the guard left it, the
@@ -95,7 +95,10 @@ from . import (
     events,
     handoff_guards,
     live_verification,
-    plans,
+    plans_errors,
+    plans_models,
+    plans_payloads,
+    plans_snapshot,
     review_delta,
     review_session_contract,
     review_transitions,
@@ -113,18 +116,18 @@ def _enforce_review_verdict(
     event_path: Path,
     payload: dict[str, Any],
     persistence: run_persistence._RunPersistence,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot,
     session_id: str,
     session_label: str,
     session_details: dict[str, Any],
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
-    plan_cache: plans.PlanSnapshotCache,
+    plan_cache: plans_snapshot.PlanSnapshotCache,
     append_handoff_note: handoff_guards.HandoffNoteAppender,
     require_artifact: bool = False,
     stop_after_current_pending: bool = False,
-) -> tuple[str, plans.PlanSnapshot | None]:
+) -> tuple[str, plans_models.PlanSnapshot | None]:
     """Validate and persist the final review verdict.
 
     ``require_artifact=True`` (review sessions at or above
@@ -181,7 +184,7 @@ def _enforce_review_verdict(
 
     repair_payload = graded.to_payload()
     with persistence.lock:
-        payload["final_snapshot"] = plans.snapshot_payload(snapshot_after)
+        payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
         payload["review_verdict"] = None
         turn_payload["review_verdict"] = {
             "passed": False,
@@ -213,7 +216,7 @@ def _enforce_review_verdict(
             events.REVIEW_VERDICT_RETRY_EVENT,
             {
                 "run_id": payload.get("run_id"),
-                **plans.session_identity_payload(session_id),
+                **plans_payloads.session_identity_payload(session_id),
                 "attempt": graded.attempt,
                 "max_attempts": graded.max_attempts,
                 "fingerprint": graded.fingerprint,
@@ -250,8 +253,8 @@ def _enforce_session_verification(
     payload: dict[str, Any],
     persistence: run_persistence._RunPersistence,
     progress: run_reporting._ProgressReporter,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot,
     cwd: Path,
     session_id: str,
     session_label: str,
@@ -259,7 +262,7 @@ def _enforce_session_verification(
     allow_not_loop_ready: bool,
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
-    plan_cache: plans.PlanSnapshotCache,
+    plan_cache: plans_snapshot.PlanSnapshotCache,
     append_handoff_note: handoff_guards.HandoffNoteAppender,
     run_id: str | None,
     turn_index: int,
@@ -308,7 +311,7 @@ def _enforce_session_verification(
             before.plan_dir, after, reverted, plan_cache
         )
         with persistence.lock:
-            payload["final_snapshot"] = plans.snapshot_payload(snapshot_after)
+            payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
             turn_payload["verification"] = refusal.turn_verification(session_id)
             durability.write_json_file(paths["result"], turn_payload)
         turn_execution.record_turn_rejected(
@@ -336,7 +339,7 @@ def _enforce_session_verification(
     contract_error: str | None = None
     try:
         contract = contracts.read_completion_contract(before.plan_dir, session_id)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         contract, contract_error = None, str(error)
 
     schedule = verification_transitions.schedule_verification(
@@ -368,7 +371,7 @@ def _enforce_session_verification(
     # snapshot itself is the post-turn view either way so operator tools see
     # the in-flight phase as "verifying" rather than "idle".
     with persistence.lock:
-        payload["final_snapshot"] = plans.snapshot_payload(after)
+        payload["final_snapshot"] = plans_payloads.snapshot_payload(after)
 
     if generated_review_session:
         review_workspace = (
@@ -513,7 +516,7 @@ def _enforce_session_verification(
                 identity={
                     "run_id": run_id,
                     "turn_index": turn_index,
-                    **plans.session_identity_payload(session_id),
+                    **plans_payloads.session_identity_payload(session_id),
                     "check": check.name,
                 },
             )
@@ -546,7 +549,7 @@ def _enforce_session_verification(
     )
     repair_payload = repair.to_payload()
     with persistence.lock:
-        payload["final_snapshot"] = plans.snapshot_payload(snapshot_after)
+        payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
         turn_payload["verification"].update(repair_payload)
         durability.write_json_file(paths["result"], turn_payload)
     turn_execution.record_turn_rejected(
@@ -573,19 +576,19 @@ def _enforce_session_verification(
 
 def _reinspect_after_revert(
     plan_dir: Path,
-    fallback: plans.PlanSnapshot,
+    fallback: plans_models.PlanSnapshot,
     reverted_path: object | None,
-    plan_cache: plans.PlanSnapshotCache,
-) -> plans.PlanSnapshot:
+    plan_cache: plans_snapshot.PlanSnapshotCache,
+) -> plans_models.PlanSnapshot:
     if reverted_path is None:
         return fallback
     return _reinspect_after_plan_mutation(plan_cache, fallback)
 
 
 def _reinspect_after_plan_mutation(
-    plan_cache: plans.PlanSnapshotCache,
-    fallback: plans.PlanSnapshot,
-) -> plans.PlanSnapshot:
+    plan_cache: plans_snapshot.PlanSnapshotCache,
+    fallback: plans_models.PlanSnapshot,
+) -> plans_models.PlanSnapshot:
     """Re-read a plan the runner itself just rewrote.
 
     Reverting a session or materializing repair children changes the durable
@@ -596,5 +599,5 @@ def _reinspect_after_plan_mutation(
     """
     try:
         return plan_cache.get_fresh(fallback.plan_dir)
-    except plans.PlanError:
+    except plans_errors.PlanError:
         return fallback

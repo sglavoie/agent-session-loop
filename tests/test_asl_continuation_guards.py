@@ -47,7 +47,7 @@ from agent_session_loop import (
     handoff_guards,
     harnesses,
     pause_policy,
-    plans,
+    plans_snapshot,
     review_guard,
     review_transitions,
     run_commit,
@@ -539,7 +539,7 @@ class FakeRunContext:
         self.event_path = event_path
         self.payload: dict[str, Any] = {"run_id": RUN_ID}
         self.persistence = RecordingPersistence()
-        self.plan_cache = plans.PlanSnapshotCache()
+        self.plan_cache = plans_snapshot.PlanSnapshotCache()
         self.guard_controller = mock.Mock()
         self.session_attempts = continuation_guards.SessionAttempts()
         self.pauses: list[dict[str, Any]] = []
@@ -576,7 +576,7 @@ class ContinuationPostflightTests(unittest.TestCase):
         self.event_path = self.run_dir / events.EVENTS_FILE_NAME
         self.ctx = FakeRunContext(run_dir=self.run_dir, event_path=self.event_path)
         write_plan(self.plan_dir, ("pending",))
-        self.before = plans.inspect_plan(self.plan_dir)
+        self.before = plans_snapshot.inspect_plan(self.plan_dir)
         self.protected_calls: list[dict[str, Any]] = []
 
     def paths(self) -> dict[str, Path]:

@@ -89,7 +89,7 @@ INTENTIONAL_CHANGES: tuple[IntentionalChange, ...] = (
             # The archive half, landed. These replace the two tests that used
             # to pin the deleting read; they hold the same scenario to the
             # opposite outcome, so a reintroduced maintenance pass fails here.
-            "scripts:tests/test_asl_workbench_server.py"
+            "scripts:tests/test_asl_workbench_server_archive.py"
             "::test_archive_list_leaves_expired_entries_in_place",
             "scripts:tests/test_asl_workbench_archive.py"
             "::test_retention_marks_expired_entries_without_removing_them",
@@ -160,7 +160,7 @@ INTENTIONAL_CHANGES: tuple[IntentionalChange, ...] = (
             "::test_retention_marks_expired_entries_without_removing_them",
             "scripts:tests/test_asl_workbench_archive.py"
             "::test_shortening_retention_marks_more_candidates_only",
-            "scripts:tests/test_asl_workbench_server.py"
+            "scripts:tests/test_asl_workbench_server_archive.py"
             "::test_archive_list_leaves_expired_entries_in_place",
             # The confirmation contract is the half that did not change, so it
             # is pinned alongside: a later session reading this record must not

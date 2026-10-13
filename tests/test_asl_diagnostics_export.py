@@ -27,7 +27,7 @@ from agent_session_loop import (
     diagnostics_export,
     events,
     mailbox_constants,
-    plans,
+    plans_files,
 )
 
 #: Strings that must never survive into an export. Each one stands for a class
@@ -60,14 +60,14 @@ class ExportTestBase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.tmp_path = plans.canonicalize_path(self._tmp.name)
+        self.tmp_path = plans_files.canonicalize_path(self._tmp.name)
         self.state_dir = self.tmp_path / "state"
         self.state_dir.mkdir(parents=True)
 
     # -- seeding ---------------------------------------------------------
 
     def plan_state_dir(self, plan_dir: Path) -> Path:
-        target = self.state_dir / plans.path_sha256(plan_dir)
+        target = self.state_dir / plans_files.path_sha256(plan_dir)
         target.mkdir(parents=True, exist_ok=True)
         return target
 
@@ -390,7 +390,7 @@ class ExportCorrelationTests(ExportTestBase):
         run = document["runs"][0]
 
         self.assertEqual(run["run_id"], RUN_ID)
-        self.assertEqual(run["plan_digest"], plans.path_sha256(plan_dir))
+        self.assertEqual(run["plan_digest"], plans_files.path_sha256(plan_dir))
         self.assertEqual(
             run["projection_status"], diagnostics_export.PROJECTION_PRESENT
         )
@@ -462,9 +462,11 @@ class ExportCorrelationTests(ExportTestBase):
         self.seed_state(plan_b, run_id="run-other", projection=None)
         narrowed = self.export(plan_dir=plan_b)
         self.assertEqual([run["run_id"] for run in narrowed["runs"]], ["run-other"])
-        self.assertEqual(narrowed["selector"]["plan_digest"], plans.path_sha256(plan_b))
+        self.assertEqual(
+            narrowed["selector"]["plan_digest"], plans_files.path_sha256(plan_b)
+        )
         self.assertNotEqual(
-            narrowed["selector"]["plan_digest"], plans.path_sha256(plan_a)
+            narrowed["selector"]["plan_digest"], plans_files.path_sha256(plan_a)
         )
 
     def test_assurance_summary_is_bounded_and_finding_free(self) -> None:

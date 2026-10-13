@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_content_hash,
+    plans_handoff,
+    plans_models,
+    plans_readiness,
     review_continuation,
     review_delta,
     review_guard,
@@ -72,11 +75,13 @@ class RunReviewMutationGuardTests(MutatingFakeClaudeMixin):
         late = self.repo_root / "src" / "late.py"
         late.parent.mkdir(parents=True, exist_ok=True)
         late.write_text("late\n", encoding="utf-8")
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
@@ -110,10 +115,10 @@ class RunReviewMutationGuardTests(MutatingFakeClaudeMixin):
         self._write_plan(("complete",), readiness=None)
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
         review_session = self._write_pending_review_session()
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -132,7 +137,9 @@ class RunReviewMutationGuardTests(MutatingFakeClaudeMixin):
             "mutated by review\n",
             (self.repo_root / "README.md").read_text(encoding="utf-8"),
         )
-        self.assertEqual("pending", plans.read_session_status(review_session).status)
+        self.assertEqual(
+            "pending", plans_handoff.read_session_status(review_session).status
+        )
         self.assertEqual(1, payload["final_snapshot"]["counts"]["pending"])
         guard = payload["turns"][0].get("review_mutation_guard")
         self.assertIsNotNone(guard)
@@ -151,11 +158,13 @@ class RunReviewMutationGuardTests(MutatingFakeClaudeMixin):
     def test_review_guard_exclude_flag_allows_excluded_mutation(self) -> None:
         self._write_plan(("complete",), readiness=None)
         review_session = self._write_pending_review_session()
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
@@ -167,7 +176,9 @@ class RunReviewMutationGuardTests(MutatingFakeClaudeMixin):
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertTrue(payload["review_completed"])
-        self.assertEqual("complete", plans.read_session_status(review_session).status)
+        self.assertEqual(
+            "complete", plans_handoff.read_session_status(review_session).status
+        )
         guard = payload["turns"][0]["review_mutation_guard"]
         self.assertTrue(guard["passed"])
         self.assertEqual(["README.md"], guard["excluded"])
@@ -175,11 +186,13 @@ class RunReviewMutationGuardTests(MutatingFakeClaudeMixin):
     def test_review_guard_exclude_env_var_allows_excluded_mutation(self) -> None:
         self._write_plan(("complete",), readiness=None)
         self._write_pending_review_session()
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
@@ -199,11 +212,13 @@ class RunReviewMutationGuardTests(MutatingFakeClaudeMixin):
     def test_review_guard_exclude_merges_env_var_and_flag(self) -> None:
         self._write_plan(("complete",), readiness=None)
         self._write_pending_review_session()
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
@@ -227,11 +242,13 @@ class RunReviewMutationGuardTests(MutatingFakeClaudeMixin):
     def test_review_guard_exclude_still_trips_on_other_paths(self) -> None:
         self._write_plan(("complete",), readiness=None)
         self._write_pending_review_session()
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )

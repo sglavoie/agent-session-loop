@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 
-from .plans import PlanError, parse_session_id
+from .plans_errors import PlanError
+from .plans_session_ids import parse_session_id
 from .prepare_models import (
     CLAIM_TYPES,
     DEPENDENCY_DIRECTIONS,

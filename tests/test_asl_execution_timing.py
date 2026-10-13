@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from agent_session_loop import events, execution_timing, plans
+from agent_session_loop import events, execution_timing, plans_payloads
 
 BASE = datetime(2026, 9, 1, 0, 0, 0, tzinfo=UTC)
 RUN_ID = "20260901T000000000000Z-4242"
@@ -108,7 +108,7 @@ def _turn_finished(
     duration: float | None = None,
     run_id: str = RUN_ID,
     session_id: str = "1",
-    session_kind: str | None = plans.SESSION_KIND_IMPLEMENTATION,
+    session_kind: str | None = plans_payloads.SESSION_KIND_IMPLEMENTATION,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "run_id": run_id,
@@ -163,7 +163,7 @@ def _result(
     duration: float | None = None,
     run_id: str = RUN_ID,
     session_id: str = "1",
-    session_kind: str | None = plans.SESSION_KIND_IMPLEMENTATION,
+    session_kind: str | None = plans_payloads.SESSION_KIND_IMPLEMENTATION,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "version": 2,
@@ -367,7 +367,7 @@ def _clean_run_events() -> list[dict[str, Any]]:
             started=150,
             finished=200,
             session_id="2",
-            session_kind=plans.SESSION_KIND_REVIEW,
+            session_kind=plans_payloads.SESSION_KIND_REVIEW,
         ),
         *_finalization(started=200, finished=220),
         _run_finished(),
@@ -1262,7 +1262,7 @@ class InconsistencyTests(unittest.TestCase):
                     turn_index=1,
                     started=0,
                     finished=100,
-                    session_kind=plans.SESSION_KIND_REVIEW,
+                    session_kind=plans_payloads.SESSION_KIND_REVIEW,
                 )
             ],
         )

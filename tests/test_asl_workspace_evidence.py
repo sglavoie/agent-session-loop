@@ -23,7 +23,8 @@ from pathlib import Path
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_session_ids,
+    plans_session_scope,
     runner,
     workspace_evidence,
     workspaces,
@@ -157,7 +158,7 @@ class WorkspaceEvidenceBoundaryTests(unittest.TestCase):
             [],
             probe(
                 workspace=_workspace("SVC"),
-                scope=plans.SessionScope(reads=("SVC",), writes=("SVC",)),
+                scope=plans_session_scope.SessionScope(reads=("SVC",), writes=("SVC",)),
                 comparison={},
                 exclude=(),
                 include_ignored=False,
@@ -400,7 +401,7 @@ class SessionExpansionEvidenceTests(unittest.TestCase):
         self.assertTrue(record["path"].endswith("session-7.expand.md"))
 
     def test_a_present_expansion_carries_its_mtime_and_content_digest(self) -> None:
-        path = self.plan_dir / plans.session_id_to_expansion_filename("7")
+        path = self.plan_dir / plans_session_ids.session_id_to_expansion_filename("7")
         path.write_text("# expansion\n", encoding="utf-8")
 
         record = workspace_evidence._session_expansion_evidence(self.plan_dir, "7")
@@ -412,7 +413,7 @@ class SessionExpansionEvidenceTests(unittest.TestCase):
     def test_rewriting_the_same_bytes_leaves_the_digest_alone(self) -> None:
         # The freshness rule below compares mtimes, not digests; the digest is
         # what tells an operator whether the re-expansion changed anything.
-        path = self.plan_dir / plans.session_id_to_expansion_filename("7")
+        path = self.plan_dir / plans_session_ids.session_id_to_expansion_filename("7")
         path.write_text("# expansion\n", encoding="utf-8")
         before = workspace_evidence._session_expansion_evidence(self.plan_dir, "7")
         path.write_text("# expansion\n", encoding="utf-8")
@@ -422,7 +423,9 @@ class SessionExpansionEvidenceTests(unittest.TestCase):
         self.assertEqual(before["sha256"], after["sha256"])
 
     def test_a_directory_in_the_expansion_slot_reports_unavailable(self) -> None:
-        (self.plan_dir / plans.session_id_to_expansion_filename("7")).mkdir()
+        (
+            self.plan_dir / plans_session_ids.session_id_to_expansion_filename("7")
+        ).mkdir()
 
         record = workspace_evidence._session_expansion_evidence(self.plan_dir, "7")
 
@@ -497,8 +500,8 @@ class WorkspaceScopeRepairReconciliationTests(unittest.TestCase):
             **extra,
         }
 
-    def _scope(self, *aliases: str) -> plans.SessionScope:
-        return plans.SessionScope(reads=aliases, writes=aliases)
+    def _scope(self, *aliases: str) -> plans_session_scope.SessionScope:
+        return plans_session_scope.SessionScope(reads=aliases, writes=aliases)
 
     def test_a_violation_the_widened_scope_now_writes_is_reconciled(self) -> None:
         self.assertFalse(
@@ -528,7 +531,9 @@ class WorkspaceScopeRepairReconciliationTests(unittest.TestCase):
         self.assertTrue(
             workspace_evidence._workspace_scope_repair_still_unauthorized(
                 self._record("scripts"),
-                plans.SessionScope(reads=("brainnotes", "scripts"), writes=()),
+                plans_session_scope.SessionScope(
+                    reads=("brainnotes", "scripts"), writes=()
+                ),
             )
         )
 
@@ -567,7 +572,7 @@ class WorkspaceScopeRepairReconciliationTests(unittest.TestCase):
 class WorkspaceScopeRestorationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workspace = _workspace("Writer", "Reader", "Other")
-        self.scope = plans.SessionScope(
+        self.scope = plans_session_scope.SessionScope(
             reads=("Writer", "Reader", "Other"), writes=("Writer",)
         )
         self.current = {

@@ -8,7 +8,13 @@ import tempfile
 from pathlib import Path
 
 from agent_session_loop import (
-    plans,
+    plans_content_hash,
+    plans_errors,
+    plans_files,
+    plans_handoff,
+    plans_registry,
+    plans_session_scope,
+    plans_snapshot,
 )
 from tests.asl_core_support import ParserAndStateTestsBase
 from tests.support import (
@@ -41,7 +47,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 "invalid id ignored\n", encoding="utf-8"
             )
 
-            snapshot = plans.inspect_plan(plan_dir)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
 
             self.assertEqual(
                 ["1", "2", "2.1", "2.2", "2.10", "10"],
@@ -79,7 +85,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            snapshot = plans.inspect_plan(plan_dir)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
 
             self.assertEqual("complete", snapshot.sessions[0].status)
             self.assertEqual("complete", snapshot.sessions[0].raw_value)
@@ -98,8 +104,8 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            registry = plans.read_repository_registry(plan_dir)
-            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            registry = plans_registry.read_repository_registry(plan_dir)
+            handoff = plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
             self.assertIsNone(registry)
             self.assertEqual("complete", handoff.status)
@@ -120,14 +126,14 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            registry = plans.read_repository_registry(plan_dir)
-            snapshot = plans.inspect_plan(plan_dir)
+            registry = plans_registry.read_repository_registry(plan_dir)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
 
             self.assertIsNone(registry)
             self.assertEqual(["1"], [session.id for session in snapshot.sessions])
 
     def test_session_scope_and_qualified_paths_are_canonical(self) -> None:
-        scope = plans.parse_session_scope(
+        scope = plans_session_scope.parse_session_scope(
             "**Reads repositories**: SVC, OAK\n"
             "**Writes repositories**: SVC\n"
             "```markdown\n"
@@ -141,12 +147,16 @@ class ParserAndStateTests(ParserAndStateTestsBase):
         self.assertEqual(("SVC",), scope.writes)
         self.assertEqual(
             "**Reads repositories**: SVC, OAK\n**Writes repositories**: SVC\n",
-            plans.render_session_scope(scope),
+            plans_session_scope.render_session_scope(scope),
         )
-        qualified = plans.parse_qualified_path("SVC:internal/foo.go", scope.reads)
+        qualified = plans_session_scope.parse_qualified_path(
+            "SVC:internal/foo.go", scope.reads
+        )
         self.assertEqual("SVC", qualified.alias)
         self.assertEqual("internal/foo.go", qualified.path)
-        self.assertEqual("SVC:internal/foo.go", plans.render_qualified_path(qualified))
+        self.assertEqual(
+            "SVC:internal/foo.go", plans_session_scope.render_qualified_path(qualified)
+        )
         for invalid in (
             "internal/foo.go",
             "SVC:/tmp/foo",
@@ -157,7 +167,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 self.subTest(invalid=invalid),
                 self.assertRaises(ValueError),
             ):
-                plans.parse_qualified_path(invalid, ("SVC",))
+                plans_session_scope.parse_qualified_path(invalid, ("SVC",))
 
     def test_completed_multi_repo_handoff_requires_qualified_write_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -187,20 +197,22 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 template.format(files="internal/foo.go"), encoding="utf-8"
             )
 
-            with self.assertRaisesRegex(plans.PlanError, "Alias:path"):
-                plans.read_session_handoff(self._session_file(plan_dir))
+            with self.assertRaisesRegex(plans_errors.PlanError, "Alias:path"):
+                plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
             session_path.write_text(
                 template.format(files="OAK:internal/foo.go"), encoding="utf-8"
             )
-            with self.assertRaisesRegex(plans.PlanError, "outside Writes repositories"):
-                plans.read_session_handoff(self._session_file(plan_dir))
+            with self.assertRaisesRegex(
+                plans_errors.PlanError, "outside Writes repositories"
+            ):
+                plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
             session_path.write_text(
                 template.format(files="SVC:internal/foo.go, SVC:README.md"),
                 encoding="utf-8",
             )
-            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            handoff = plans_handoff.read_session_handoff(self._session_file(plan_dir))
             self.assertEqual(
                 ("SVC:internal/foo.go, SVC:README.md",),
                 handoff.files_modified,
@@ -238,8 +250,8 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            handoff = plans.read_session_handoff(self._session_file(plan_dir))
-            snapshot = plans.inspect_plan(plan_dir)
+            handoff = plans_handoff.read_session_handoff(self._session_file(plan_dir))
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
 
             self.assertEqual("complete", handoff.status)
             self.assertEqual(("(none)",), handoff.files_modified)
@@ -250,23 +262,23 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
 
             self.assertEqual(
-                (plans.canonicalize_path(session_path),),
-                plans.normalize_generated_review_handoff_artifacts(plan_dir),
+                (plans_files.canonicalize_path(session_path),),
+                plans_handoff.normalize_generated_review_handoff_artifacts(plan_dir),
             )
             self.assertIn(
                 "- **Files modified**: (none)",
                 session_path.read_text(encoding="utf-8"),
             )
             self.assertEqual(
-                (), plans.normalize_generated_review_handoff_artifacts(plan_dir)
+                (), plans_handoff.normalize_generated_review_handoff_artifacts(plan_dir)
             )
 
             session_path.write_text(
                 template.format(files="final-review.md, README.md"),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(plans.PlanError, "Alias:path"):
-                plans.read_session_handoff(self._session_file(plan_dir))
+            with self.assertRaisesRegex(plans_errors.PlanError, "Alias:path"):
+                plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
     def test_completed_handoff_omits_files_modified_only_when_writes_are_empty(
         self,
@@ -301,14 +313,16 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                         encoding="utf-8",
                     )
 
-                    handoff = plans.read_session_handoff(self._session_file(plan_dir))
+                    handoff = plans_handoff.read_session_handoff(
+                        self._session_file(plan_dir)
+                    )
 
                     self.assertEqual("complete", handoff.status)
                     self.assertEqual((), handoff.files_modified)
                     self.assertIsNone(
-                        plans.completed_handoff_registry_blocker(
+                        plans_registry.completed_handoff_registry_blocker(
                             handoff,
-                            scope=plans.parse_session_scope(
+                            scope=plans_session_scope.parse_session_scope(
                                 "**Reads repositories**: SVC\n"
                                 "**Writes repositories**: (none)\n",
                                 ("SVC",),
@@ -322,9 +336,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                         encoding="utf-8",
                     )
                     with self.assertRaisesRegex(
-                        plans.PlanError, "missing Files modified"
+                        plans_errors.PlanError, "missing Files modified"
                     ):
-                        plans.read_session_handoff(self._session_file(plan_dir))
+                        plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
     def test_session_scope_participates_in_readiness_hash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -348,8 +362,8 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 )
 
             self.assertNotEqual(
-                plans.stable_readiness_sha256(roots[0]),
-                plans.stable_readiness_sha256(roots[1]),
+                plans_content_hash.stable_readiness_sha256(roots[0]),
+                plans_content_hash.stable_readiness_sha256(roots[1]),
             )
 
     def test_read_session_handoff_round_trip_captures_all_bullets(self) -> None:
@@ -377,7 +391,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            handoff = plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
             self.assertEqual("complete", handoff.status)
             self.assertEqual("complete", handoff.raw_value)
@@ -399,7 +413,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            handoff = plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
             self.assertEqual("empty", handoff.status)
             self.assertEqual("", handoff.raw_value)
@@ -433,7 +447,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            handoff = plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
             self.assertEqual("empty", handoff.status)
             self.assertEqual("", handoff.raw_value)
@@ -466,7 +480,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            handoff = plans_handoff.read_session_handoff(self._session_file(plan_dir))
 
             self.assertEqual("complete", handoff.status)
             self.assertEqual("real", handoff.notes)

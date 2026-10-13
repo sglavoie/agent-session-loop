@@ -11,7 +11,9 @@ from unittest import mock
 
 from agent_session_loop import (
     baseline,
-    plans,
+    plans_content_hash,
+    plans_models,
+    plans_readiness,
     preflight,
     preflight_hint_resolution,
     preflight_output,
@@ -53,11 +55,13 @@ class MultiRepositoryPreflightTests(unittest.TestCase):
             contracts_by_id={"1": self.contract},
             specs=self.specs,
         )
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )

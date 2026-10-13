@@ -28,7 +28,10 @@ from agent_session_loop import (
     events,
     harnesses,
     live_verification,
-    plans,
+    plans_files,
+    plans_metadata,
+    plans_session_scope,
+    plans_snapshot,
     readiness_gate,
     run_control,
     run_coordination,
@@ -151,11 +154,11 @@ class _RunHistory:
         (plan_dir / "manifest.md").write_text(self.MANIFEST, encoding="utf-8")
         (plan_dir / "session-01.md").write_text(
             "# Session 1\n\n"
-            f"{plans.READS_REPOSITORIES_PREFIX} app\n"
-            f"{plans.WRITES_REPOSITORIES_PREFIX} app\n",
+            f"{plans_session_scope.READS_REPOSITORIES_PREFIX} app\n"
+            f"{plans_session_scope.WRITES_REPOSITORIES_PREFIX} app\n",
             encoding="utf-8",
         )
-        (plan_dir / plans.PLAN_METADATA_FILE_NAME).write_text(
+        (plan_dir / plans_metadata.PLAN_METADATA_FILE_NAME).write_text(
             json.dumps({"version": 1, "workspace_root": str(workspace)}),
             encoding="utf-8",
         )
@@ -961,7 +964,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
         lock_info = state.LockInfo(
             path=plan_state / state.LOCK_FILE_NAME,
             pid=123,
-            plan_dir=str(plans.canonicalize_path(plan_dir)),
+            plan_dir=str(plans_files.canonicalize_path(plan_dir)),
             created_at="2026-08-10T10:00:00+00:00",
             stale=False,
             reason="active",
@@ -969,7 +972,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
         )
         return run_payloads._initial_payload(
             args=args,
-            snapshot=plans.inspect_plan(plan_dir),
+            snapshot=plans_snapshot.inspect_plan(plan_dir),
             state_dir=plan_state,
             run_dir=plan_state / "runs" / RUN_ID,
             event_path=plan_state / events.EVENTS_FILE_NAME,
@@ -1698,7 +1701,7 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
         payload.update(
             {
                 "run_id": RUN_ID,
-                "plan_dir": str(plans.canonicalize_path(plan_dir)),
+                "plan_dir": str(plans_files.canonicalize_path(plan_dir)),
                 # Old enough that the no-lock grace window has elapsed, which
                 # is what proves the run is gone rather than starting up.
                 "run_started_at": "2026-08-10T10:11:12+00:00",

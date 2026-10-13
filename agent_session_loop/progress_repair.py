@@ -22,21 +22,21 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import plans
+from . import plans_handoff, plans_models, plans_progress, plans_snapshot
 
 
 def handoff_to_progress_entry(
-    handoff: plans.SessionHandoff,
+    handoff: plans_models.SessionHandoff,
     completed_at: str,
-) -> plans.ProgressEntry:
-    """Map a parsed `SessionHandoff` into a `plans.ProgressEntry`."""
+) -> plans_models.ProgressEntry:
+    """Map a parsed `SessionHandoff` into a `plans_models.ProgressEntry`."""
     files_modified: tuple[str, ...] = ()
     if handoff.files_modified:
         inline = handoff.files_modified[0]
         files_modified = tuple(
             part.strip() for part in inline.split(",") if part.strip()
         )
-    return plans.ProgressEntry(
+    return plans_models.ProgressEntry(
         session_id=handoff.session_id,
         status=handoff.status,
         completed_at=completed_at,
@@ -55,14 +55,14 @@ def utc_iso_from_mtime(path: Path) -> str:
 
 
 def build_backfill_entries(
-    snapshot: plans.PlanSnapshot,
-) -> list[plans.ProgressEntry]:
+    snapshot: plans_models.PlanSnapshot,
+) -> list[plans_models.ProgressEntry]:
     """Synthesise progress entries for every completed session in `snapshot`."""
-    entries: list[plans.ProgressEntry] = []
+    entries: list[plans_models.ProgressEntry] = []
     for session_status in snapshot.sessions:
         if session_status.status != "complete":
             continue
-        handoff = plans.read_session_handoff(session_status.session)
+        handoff = plans_handoff.read_session_handoff(session_status.session)
         completed_at = utc_iso_from_mtime(session_status.session.path)
         entries.append(handoff_to_progress_entry(handoff, completed_at))
     return entries
@@ -82,28 +82,28 @@ class ProgressRepairResult:
 def repair_progress_journal(
     plan_dir: str | Path,
     *,
-    snapshot: plans.PlanSnapshot | None = None,
+    snapshot: plans_models.PlanSnapshot | None = None,
 ) -> ProgressRepairResult:
     """Rebuild and atomically replace `<plan_dir>/progress.md` from handoffs.
 
     The journal is always rewritten (force semantics). Callers that need
     "refuse to overwrite" behaviour must check the destination file's
     existence themselves before invoking this helper. The write goes
-    through `plans.write_progress_journal`, which uses an atomic
+    through `plans_progress.write_progress_journal`, which uses an atomic
     temp-file + `os.replace` so the destination is never half-written.
 
-    Raises `plans.PlanError` if the plan snapshot cannot be loaded or
+    Raises `plans_errors.PlanError` if the plan snapshot cannot be loaded or
     `OSError` if the atomic write fails; both originate from
-    `plans.write_progress_journal` and are surfaced unchanged so callers
+    `plans_progress.write_progress_journal` and are surfaced unchanged so callers
     can map them to their own error vocabularies.
     """
     if snapshot is None:
-        snapshot = plans.inspect_plan(plan_dir)
+        snapshot = plans_snapshot.inspect_plan(plan_dir)
 
     entries = build_backfill_entries(snapshot)
-    path = plans.progress_path(snapshot.plan_dir)
+    path = plans_progress.progress_path(snapshot.plan_dir)
     journal_replaced = path.exists()
-    plans.write_progress_journal(snapshot.plan_dir, tuple(entries))
+    plans_progress.write_progress_journal(snapshot.plan_dir, tuple(entries))
 
     return ProgressRepairResult(
         action="rewrite",

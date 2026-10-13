@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from . import (
     clock,
     model_availability,
-    plans,
+    plans_payloads,
     review_repair,
     run_completion,
     run_coordination,
@@ -127,9 +127,9 @@ def _select_turn_harness(frame: RunFrame) -> RunResult | LoopSignal | None:
     """Identify the session, drain controls and choose the harness, model and scope."""
     frame.before = frame.snapshot
     frame.session_id = frame.pending_session.id
-    frame.session_label = plans.session_label(frame.session_id)
-    frame.session_identity = plans.session_identity_payload(frame.session_id)
-    frame.session_details = plans.session_details_payload(frame.session_id)
+    frame.session_label = plans_payloads.session_label(frame.session_id)
+    frame.session_identity = plans_payloads.session_identity_payload(frame.session_id)
+    frame.session_details = plans_payloads.session_details_payload(frame.session_id)
     frame.ctx.last_session_details = frame.session_details
 
     if frame.is_review_session:
@@ -149,7 +149,7 @@ def _select_turn_harness(frame: RunFrame) -> RunResult | LoopSignal | None:
     pre_turn_control_context = {
         **frame.session_identity,
         "turn_index": frame.turn_index,
-        "total_sessions": sum(plans.status_counts(frame.before).values()),
+        "total_sessions": sum(plans_payloads.status_counts(frame.before).values()),
     }
     run_coordination.drain_external_control_queue(
         plan_dir=frame.before.plan_dir,

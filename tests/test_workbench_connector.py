@@ -59,7 +59,7 @@ from agent_session_loop import (
     bridge,
     events,
     intervention,
-    plans,
+    plans_files,
     state,
     workbench_connector,
     workbench_history,
@@ -1682,7 +1682,7 @@ class CorpusTestCase(unittest.TestCase):
         plan_dir = self.plans_root / name
         write_plan(plan_dir, statuses)
         (plan_dir / "manifest.md").write_text(title, encoding="utf-8")
-        canonical = plans.canonicalize_path(plan_dir)
+        canonical = plans_files.canonicalize_path(plan_dir)
         _write_state_payload(
             canonical, self.state_root, dict(payload, plan_dir=str(canonical))
         )

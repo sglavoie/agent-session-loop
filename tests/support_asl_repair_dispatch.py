@@ -13,7 +13,8 @@ from unittest import mock
 from agent_session_loop import (
     events,
     harnesses,
-    plans,
+    plans_metadata,
+    plans_registry,
     review,
     review_repair,
     run_loop,
@@ -102,10 +103,10 @@ class GeneratedRepairDispatchFixture(unittest.TestCase):
         )
 
     def _pin_workspace(self) -> None:
-        registry = plans.read_repository_registry(self.plan_dir)
+        registry = plans_registry.read_repository_registry(self.plan_dir)
         self.assertIsNotNone(registry, "the plan must carry a repository registry")
         assert registry is not None
-        plans.save_workspace_plan_metadata(
+        plans_metadata.save_workspace_plan_metadata(
             self.plan_dir, self.workspace_root, registry.digest
         )
 

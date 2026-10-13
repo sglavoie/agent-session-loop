@@ -8,7 +8,11 @@ import unittest
 from pathlib import Path
 
 from agent_session_loop import (
-    plans,
+    plans_handoff,
+    plans_metadata,
+    plans_models,
+    plans_registry,
+    plans_session_ids,
     review_repair,
 )
 from tests.support import (
@@ -53,9 +57,9 @@ class MultiRepoCommitRecoveryTests(MultiRepoRunnerHelpers, unittest.TestCase):
             )
             self.assertEqual(
                 "complete",
-                plans.read_session_status(
-                    plans.SessionFile(
-                        session_id=plans.SessionId.parse("1"),
+                plans_handoff.read_session_status(
+                    plans_models.SessionFile(
+                        session_id=plans_session_ids.SessionId.parse("1"),
                         path=plan_dir / "session-1.md",
                     )
                 ).status,
@@ -319,9 +323,9 @@ class MultiRepoCommitRecoveryTests(MultiRepoRunnerHelpers, unittest.TestCase):
                 specs=specs,
                 contracts_by_id={"1": contract, "2": contract_2},
             )
-            registry = plans.read_repository_registry(plan_dir)
+            registry = plans_registry.read_repository_registry(plan_dir)
             assert registry is not None
-            plans.save_workspace_plan_metadata(
+            plans_metadata.save_workspace_plan_metadata(
                 plan_dir, workspace_root, registry.digest
             )
             commit_log = tmp_dir / "fake-commit.jsonl"
@@ -421,9 +425,9 @@ class MultiRepoCommitRecoveryTests(MultiRepoRunnerHelpers, unittest.TestCase):
                 + session_path.read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
-            registry = plans.read_repository_registry(plan_dir)
+            registry = plans_registry.read_repository_registry(plan_dir)
             assert registry is not None
-            plans.save_workspace_plan_metadata(
+            plans_metadata.save_workspace_plan_metadata(
                 plan_dir, workspace_root, registry.digest
             )
             commit_log = tmp_dir / "fake-commit.jsonl"

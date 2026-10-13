@@ -10,10 +10,7 @@ import unittest
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agent_session_loop import (
-    config,
-    plans,
-)
+from agent_session_loop import config, plans_metadata, plans_registry
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
@@ -58,9 +55,9 @@ class MultiRepoRunnerHelpers(_Base):
             ),
             encoding="utf-8",
         )
-        registry = plans.read_repository_registry(plan_dir)
+        registry = plans_registry.read_repository_registry(plan_dir)
         assert registry is not None
-        plans.save_workspace_plan_metadata(
+        plans_metadata.save_workspace_plan_metadata(
             plan_dir,
             workspace_root,
             registry.digest,

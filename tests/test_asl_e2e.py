@@ -20,7 +20,12 @@ from typing import Any
 from agent_session_loop import (
     config,
     events,
-    plans,
+    plans_content_hash,
+    plans_files,
+    plans_metadata,
+    plans_models,
+    plans_readiness,
+    plans_registry,
     prepare_models,
     prepare_packet,
     prepare_results,
@@ -571,10 +576,10 @@ class EndToEndQATests(unittest.TestCase):
             session="1",
         )
         write_plan(self.plan_dir, ("pending",), contracts_by_id={"1": contract})
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="draft",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -605,7 +610,7 @@ class EndToEndQATests(unittest.TestCase):
 
         # Step 2: repair (add contract, write draft readiness).
         self._repair_legacy_plan_to_draft()
-        readiness_before_mark = plans.read_readiness_metadata(self.plan_dir)
+        readiness_before_mark = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertEqual("draft", readiness_before_mark.state)
 
         # Step 3: --mark-loop-ready promotes a clean draft plan.
@@ -618,11 +623,11 @@ class EndToEndQATests(unittest.TestCase):
         self.assertTrue(marked_payload["ok"])
         self.assertEqual("loop-ready-marked", marked_payload["reason"])
         self.assertTrue(marked_payload["marked_loop_ready"])
-        readiness_after_mark = plans.read_readiness_metadata(self.plan_dir)
+        readiness_after_mark = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertIsNotNone(readiness_after_mark)
         self.assertEqual("loop-ready", readiness_after_mark.state)
         self.assertEqual(
-            plans.stable_readiness_sha256(self.plan_dir),
+            plans_content_hash.stable_readiness_sha256(self.plan_dir),
             readiness_after_mark.readiness_sha256,
         )
         self.assertNotEqual(readiness_before_mark.state, readiness_after_mark.state)
@@ -647,10 +652,10 @@ class EndToEndQATests(unittest.TestCase):
             session="1",
         )
         write_plan(self.plan_dir, ("pending",), contracts_by_id={"1": contract})
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -672,7 +677,7 @@ class EndToEndQATests(unittest.TestCase):
 
         # A verify-failed pause flips readiness to `reviewed`; after the
         # underlying issue is repaired, preflight can re-mark the plan.
-        reviewed_metadata = plans.read_readiness_metadata(self.plan_dir)
+        reviewed_metadata = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertEqual("reviewed", reviewed_metadata.state)
 
         # Repair: create the missing file so the contract will now pass.
@@ -692,7 +697,7 @@ class EndToEndQATests(unittest.TestCase):
         final_session = session_path.read_text(encoding="utf-8")
         self.assertIn("- **Status**: complete", final_session)
         # Readiness lifecycle resolves to complete after the resumed run.
-        final_metadata = plans.read_readiness_metadata(self.plan_dir)
+        final_metadata = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertEqual("complete", final_metadata.state)
 
     def test_stale_lock_surfaces_in_preflight_cli_with_repair_hint(
@@ -717,7 +722,7 @@ class EndToEndQATests(unittest.TestCase):
                 {
                     "version": 1,
                     "pid": 0,
-                    "plan_dir": str(plans.canonicalize_path(self.plan_dir)),
+                    "plan_dir": str(plans_files.canonicalize_path(self.plan_dir)),
                     "created_at": "2026-06-19T00:00:00Z",
                 }
             ),
@@ -787,10 +792,10 @@ class EndToEndQATests(unittest.TestCase):
             session="1",
         )
         write_plan(self.plan_dir, ("pending",), contracts_by_id={"1": contract})
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -1689,8 +1694,8 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
             str(equivalent_workspace.resolve()), rebind["new"]["workspace_root"]
         )
         self.assertIsNone(rebind["failure_stage"])
-        metadata = plans.load_plan_metadata(plan_dir)
-        self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
+        metadata = plans_metadata.load_plan_metadata(plan_dir)
+        self.assertIsInstance(metadata, plans_metadata.WorkspacePlanMetadata)
         self.assertEqual(str(equivalent_workspace.resolve()), metadata.workspace_root)
         self.assertNotIn("git@", json.dumps(rebind))
 
@@ -1767,11 +1772,11 @@ class KilnTwinCloneRegressionTests(unittest.TestCase):
         return completed, payload
 
     def _mark_loop_ready(self, plan_dir: Path) -> None:
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(plan_dir),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
@@ -1838,7 +1843,7 @@ class KilnTwinCloneRegressionTests(unittest.TestCase):
         self.assertEqual(2, report["git_root_count"])
         self.assertEqual(
             sorted(
-                str(plans.canonicalize_path(path))
+                str(plans_files.canonicalize_path(path))
                 for path in (self.kiln, self.kiln_testing)
             ),
             sorted(report["git_roots"]),
@@ -1943,7 +1948,7 @@ class KilnTwinCloneRegressionTests(unittest.TestCase):
         self.assertNotIn(secret, completed.stdout)
         self.assertNotIn(secret, completed.stderr)
         self.assertIn(
-            str(plans.canonicalize_path(self.kiln_testing)),
+            str(plans_files.canonicalize_path(self.kiln_testing)),
             payload["pause_details"]["repository_intent"]["git_roots"],
         )
 
@@ -1977,9 +1982,11 @@ class KilnTwinCloneRegressionTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        registry = plans.read_repository_registry(plan_dir)
+        registry = plans_registry.read_repository_registry(plan_dir)
         assert registry is not None
-        plans.save_workspace_plan_metadata(plan_dir, self.workspace, registry.digest)
+        plans_metadata.save_workspace_plan_metadata(
+            plan_dir, self.workspace, registry.digest
+        )
         fixture = self.kiln_testing / "fixture.py"
 
         completed, payload = self._run(
@@ -2040,10 +2047,10 @@ class VerificationRepairLoopTests(unittest.TestCase):
             )
         }
         write_plan(self.plan_dir, ("pending",), contracts_by_id=contracts_by_id)
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",

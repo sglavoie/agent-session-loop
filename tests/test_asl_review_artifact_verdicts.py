@@ -10,7 +10,8 @@ from typing import Any
 from agent_session_loop import (
     contracts,
     handoff_guards,
-    plans,
+    plans_session_ids,
+    plans_snapshot,
     review,
     review_continuation,
     review_delta,
@@ -131,7 +132,7 @@ class ReviewArtifactVerdictTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            snapshot = plans.inspect_plan(plan_dir)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
             source = next(session for session in snapshot.sessions if session.id == "2")
 
             self.assertEqual(
@@ -162,7 +163,7 @@ class ReviewArtifactVerdictTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp)
-            session_id = plans.SessionId((7,))
+            session_id = plans_session_ids.SessionId((7,))
 
             full = review_session_body.build_generated_review_session_body(
                 session_id, review_harness="claude", plan_dir=plan_dir
@@ -235,7 +236,7 @@ class ReviewArtifactVerdictTests(unittest.TestCase):
     def test_generated_review_session_body_is_versioned_v2(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp)
-            session_id = plans.SessionId((7,))
+            session_id = plans_session_ids.SessionId((7,))
 
             body = review_session_body.build_generated_review_session_body(
                 session_id,
@@ -264,7 +265,7 @@ class ReviewArtifactVerdictTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             body = review_session_body.build_generated_review_session_body(
-                plans.SessionId((7,)),
+                plans_session_ids.SessionId((7,)),
                 review_harness="claude",
                 plan_dir=Path(tmp),
             )
@@ -281,7 +282,7 @@ class ReviewArtifactVerdictTests(unittest.TestCase):
             )
             # The gate the review runs against itself says the same thing.
             contract = contracts.parse_completion_contract(
-                body, session_id=plans.SessionId((7,))
+                body, session_id=plans_session_ids.SessionId((7,))
             )
             self.assertIn(
                 contracts.CHECK_PRESENCE_SEMANTICS["regex_in_file"],
@@ -293,7 +294,7 @@ class ReviewArtifactVerdictTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             body = review_session_body.build_generated_review_session_body(
-                plans.SessionId((7,)),
+                plans_session_ids.SessionId((7,)),
                 review_harness="claude",
                 plan_dir=Path(tmp),
             )
@@ -314,7 +315,7 @@ class ReviewArtifactVerdictTests(unittest.TestCase):
     def test_generated_artifact_contract_check_gates_consistency(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp)
-            session_id = plans.SessionId((7,))
+            session_id = plans_session_ids.SessionId((7,))
             body = review_session_body.build_generated_review_session_body(
                 session_id,
                 review_harness="claude",

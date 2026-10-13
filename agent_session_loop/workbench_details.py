@@ -43,7 +43,11 @@ from asl_workbench.details import DetailError, DetailScope, Window
 from . import (
     artifacts,
     intervention,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_models,
+    plans_progress,
+    plans_snapshot,
     qna,
     state,
     state_locks,
@@ -113,7 +117,7 @@ class PlanReader:
 def canonical_plan_dir(plan_dir: str | Path) -> Path:
     """Canonicalize a caller-supplied plan directory, or refuse it."""
     try:
-        return plans.canonicalize_path(plan_dir)
+        return plans_files.canonicalize_path(plan_dir)
     except (OSError, ValueError) as error:
         raise DetailError(
             details.REASON_INVALID_PLAN,
@@ -301,8 +305,8 @@ def read_artifacts(reader: PlanReader) -> _JSONDict:
 def read_state(reader: PlanReader) -> _JSONDict:
     """The runner state payload, the session table, and the workspace."""
     try:
-        snapshot = plans.inspect_plan(reader.plan_dir)
-    except plans.PlanError as error:
+        snapshot = plans_snapshot.inspect_plan(reader.plan_dir)
+    except plans_errors.PlanError as error:
         raise DetailError(
             details.REASON_MALFORMED_PLAN,
             str(error),
@@ -316,7 +320,7 @@ def read_state(reader: PlanReader) -> _JSONDict:
         workspace = workbench_workspace._workspace_projection(
             reader.plan_dir, runtime=payload
         )
-    except plans.PlanError, OSError, ValueError:
+    except plans_errors.PlanError, OSError, ValueError:
         workspace = {}
     next_pending = snapshot.next_pending
     return {
@@ -769,7 +773,7 @@ def read_result(reader: PlanReader) -> _JSONDict:
 # Progress and final review
 
 
-def progress_entry_payload(entry: plans.ProgressEntry) -> _JSONDict:
+def progress_entry_payload(entry: plans_models.ProgressEntry) -> _JSONDict:
     return {
         "session_id": entry.session_id.value,
         "status": entry.status,
@@ -784,10 +788,10 @@ def progress_entry_payload(entry: plans.ProgressEntry) -> _JSONDict:
 
 def read_progress(reader: PlanReader) -> _JSONDict:
     """The plan's progress journal, parsed into entries."""
-    path = plans.progress_path(reader.plan_dir)
+    path = plans_progress.progress_path(reader.plan_dir)
     try:
-        entries = plans.read_progress_entries(reader.plan_dir)
-    except plans.PlanError as error:
+        entries = plans_progress.read_progress_entries(reader.plan_dir)
+    except plans_errors.PlanError as error:
         raise DetailError(
             details.REASON_MALFORMED_PLAN,
             str(error),
@@ -836,7 +840,7 @@ def read_final_review(
         structured_error = str(error)
     try:
         workspace = workbench_workspace._workspace_projection(reader.plan_dir)
-    except plans.PlanError, OSError, ValueError:
+    except plans_errors.PlanError, OSError, ValueError:
         workspace = {}
     return {
         "plan_dir": str(reader.plan_dir),
@@ -918,7 +922,7 @@ def read_questions(
             status=404 if error.reason == qna.REASON_NO_PAUSED_RUN else 400,
             details={"plan_dir": str(plan_dir), **error.details},
         ) from error
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         raise DetailError(
             details.REASON_MALFORMED_PLAN,
             str(error),
@@ -967,8 +971,8 @@ def read_recovery(
             details={"plan_dir": str(canonical)},
         )
     try:
-        snapshot = plans.inspect_plan(canonical)
-    except plans.PlanError as error:
+        snapshot = plans_snapshot.inspect_plan(canonical)
+    except plans_errors.PlanError as error:
         raise DetailError(
             details.REASON_MALFORMED_PLAN,
             str(error),

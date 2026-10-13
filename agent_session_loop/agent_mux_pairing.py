@@ -36,7 +36,7 @@ from . import (
     __version__,
     agent_mux_projection,
     events,
-    plans,
+    plans_files,
     responses,
     state,
     state_locks,
@@ -148,7 +148,7 @@ def _lock_for(state_dir: Path, plan_dir: str | None) -> state.LockInfo | None:
     lock_path = state_dir / state.LOCK_FILE_NAME
     if not lock_path.exists():
         return None
-    expected = plans.canonicalize_path(plan_dir) if plan_dir else state_dir
+    expected = plans_files.canonicalize_path(plan_dir) if plan_dir else state_dir
     return state_locks._read_lock_path(lock_path, expected, reclaim=False)
 
 

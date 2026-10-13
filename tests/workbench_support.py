@@ -5,7 +5,7 @@ needs an inventory that cannot quietly go stale.
 
 * **Isolated fixtures.** :class:`WorkbenchAPIFixture` starts the real local API
   on loopback against a temporary state root and registry, following the
-  pattern ``tests/test_asl_workbench_server.py`` established, and
+  pattern ``tests/asl_workbench_server_support.py`` established, and
   :class:`RecordingWorkbenchServer` stands in for one where only the deep-link
   shape matters. Characterization tests need the behavior, not the machine, so
   nothing here touches the operator's real state directory.
@@ -41,7 +41,7 @@ from typing import Any
 from agent_session_loop import (
     cli,
     events,
-    plans,
+    plans_files,
     state,
     workbench,
     workbench_archive,
@@ -614,15 +614,15 @@ def seed_shell_plans(root: Path) -> ShellCorpus:
                 ),
                 encoding="utf-8",
             )
-        canonical = plans.canonicalize_path(plan_dir)
+        canonical = plans_files.canonicalize_path(plan_dir)
         _seed_shell_runner_state(canonical, state_dir, name, SHELL_RUN_IDS.get(name))
         written.append(canonical)
-    _seed_shell_archive(state_dir, plans.canonicalize_path(plans_root))
+    _seed_shell_archive(state_dir, plans_files.canonicalize_path(plans_root))
     return ShellCorpus(
         root=root,
         state_dir=state_dir,
         registry_path=registry_path,
-        plans_root=plans.canonicalize_path(plans_root),
+        plans_root=plans_files.canonicalize_path(plans_root),
         plan_dirs=tuple(written),
     )
 

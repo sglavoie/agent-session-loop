@@ -11,7 +11,7 @@ from unittest import mock
 from agent_session_loop import (
     config,
     harnesses,
-    plans,
+    plans_payloads,
     run_prompts,
     turn_execution,
 )
@@ -50,7 +50,7 @@ class RunnerSignalAndHarnessConfigTests(unittest.TestCase):
             turn_execution.turn_status_result(
                 result=result,
                 status_changes=(
-                    plans.session_status_change_payload(
+                    plans_payloads.session_status_change_payload(
                         "9",
                         before="pending",
                         after="complete",
@@ -113,7 +113,7 @@ class RunnerSignalAndHarnessConfigTests(unittest.TestCase):
             turn_execution.turn_status_result(
                 result=result,
                 status_changes=(
-                    plans.session_status_change_payload(
+                    plans_payloads.session_status_change_payload(
                         "9",
                         before="pending",
                         after="complete",
@@ -214,7 +214,7 @@ class RunnerSignalAndHarnessConfigTests(unittest.TestCase):
             turn_execution.turn_status_result(
                 result=result,
                 status_changes=(
-                    plans.session_status_change_payload(
+                    plans_payloads.session_status_change_payload(
                         "9",
                         before="pending",
                         after="complete",

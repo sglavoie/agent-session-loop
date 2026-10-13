@@ -185,8 +185,8 @@ class SkillContractDocsTests(unittest.TestCase):
         self.assertIn("one combined read-only review", surfaces["asl"])
         self.assertIn("preserve partial commit SHAs", surfaces["asl"])
 
-        # `plans.READS_REPOSITORIES_PREFIX` puts the colon outside the bold;
-        # any other spelling is prose the parser rejects.
+        # `plans_session_scope.READS_REPOSITORIES_PREFIX` puts the colon outside the
+        # bold; any other spelling is prose the parser rejects.
         for name, text in surfaces.items():
             self.assertNotIn("**Reads repositories:**", text, msg=name)
             self.assertNotIn("**Writes repositories:**", text, msg=name)

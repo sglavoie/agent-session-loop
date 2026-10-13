@@ -6,7 +6,9 @@ import dataclasses
 from unittest import mock
 
 from agent_session_loop import (
-    plans,
+    plans_errors,
+    plans_files,
+    plans_metadata,
     prepare_models,
     prepare_packet,
     prepare_parsing,
@@ -79,7 +81,7 @@ class PrepareResumeAndCacheInvalidationTests(PrepareEndToEndFixtures):
         other_repo = self.tmp_path / "other-repo"
         other_repo.mkdir()
 
-        with self.assertRaisesRegex(plans.PlanError, "does not match"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "does not match"):
             self._prepare(
                 None,
                 _recording_validator([]),
@@ -87,8 +89,8 @@ class PrepareResumeAndCacheInvalidationTests(PrepareEndToEndFixtures):
                 resume_plan_dir=first.plan_dir,
             )
         self.assertEqual(
-            str(plans.canonicalize_path(self.repo)),
-            plans.load_plan_metadata(first.plan_dir).cwd,
+            str(plans_files.canonicalize_path(self.repo)),
+            plans_metadata.load_plan_metadata(first.plan_dir).cwd,
         )
 
     def test_resume_is_idempotent_and_reuses_cached_baselines(self) -> None:
@@ -200,7 +202,7 @@ class PrepareResumeAndCacheInvalidationTests(PrepareEndToEndFixtures):
         assert first.plan_dir is not None
         replacement = prepare_parsing.parse_validator_output(
             _prepare_pipeline_payload(
-                str(plans.canonicalize_path(self.repo)),
+                str(plans_files.canonicalize_path(self.repo)),
                 ("1", "2", "99"),
             )
         )

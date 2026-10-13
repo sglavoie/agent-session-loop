@@ -78,7 +78,13 @@ from . import (
     live_verification,
     overseer_discovery,
     pause_policy,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_metadata,
+    plans_models,
+    plans_payloads,
+    plans_registry,
+    plans_snapshot,
     preflight_auto_repair,
     preflight_runtime_hints,
     run_control,
@@ -103,7 +109,7 @@ class ReadinessStateWriter(Protocol):
     def __call__(
         self,
         plan_dir: Path,
-        new_state: plans.ReadinessState,
+        new_state: plans_models.ReadinessState,
         *,
         expected_sha256: str | None = None,
     ) -> tuple[bool, str | None]: ...
@@ -119,7 +125,7 @@ class SessionStatusReverter(Protocol):
 
     def __call__(
         self,
-        snapshot: plans.PlanSnapshot,
+        snapshot: plans_models.PlanSnapshot,
         session_id: str,
         *,
         failure_note: str,
@@ -132,8 +138,8 @@ class SessionStatusReverter(Protocol):
 #: plan changed). The most-shared primitive in the guard layer; declared here
 #: because this is the first boundary to leave the runner that needs it.
 SnapshotReinspector = Callable[
-    [Path, plans.PlanSnapshot, object | None, plans.PlanSnapshotCache],
-    plans.PlanSnapshot,
+    [Path, plans_models.PlanSnapshot, object | None, plans_snapshot.PlanSnapshotCache],
+    plans_models.PlanSnapshot,
 ]
 
 #: Projects a review verdict already persisted in the plan directory onto the
@@ -391,7 +397,7 @@ def _terminalize_run(
 
 def _final_readiness_state_from_payload(
     payload: dict[str, Any],
-) -> plans.ReadinessState:
+) -> plans_models.ReadinessState:
     if payload.get("paused") or not payload.get("ok"):
         return "reviewed"
     final_snapshot = payload.get("final_snapshot")
@@ -446,16 +452,20 @@ def _registered_repository_root(plan_dir: str | None, alias: str) -> str | None:
     if not plan_dir:
         return None
     try:
-        registry = plans.read_repository_registry(plan_dir)
-        metadata = plans.load_plan_metadata(plan_dir)
-    except plans.PlanError, OSError, ValueError:
+        registry = plans_registry.read_repository_registry(plan_dir)
+        metadata = plans_metadata.load_plan_metadata(plan_dir)
+    except plans_errors.PlanError, OSError, ValueError:
         return None
-    if registry is None or not isinstance(metadata, plans.WorkspacePlanMetadata):
+    if registry is None or not isinstance(
+        metadata, plans_metadata.WorkspacePlanMetadata
+    ):
         return None
     for repository in registry.repositories:
         if repository.alias == alias:
             return str(
-                plans.canonicalize_path(Path(metadata.workspace_root) / repository.path)
+                plans_files.canonicalize_path(
+                    Path(metadata.workspace_root) / repository.path
+                )
             )
     return None
 
@@ -806,12 +816,12 @@ def _record_aborted_turn_exit(
 def _honor_abort_turn(
     listener: run_control.RunControlListener,
     *,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     session_id: str,
     payload: dict[str, Any],
     event_path: Path,
     control_payload: dict[str, Any],
-    plan_cache: plans.PlanSnapshotCache,
+    plan_cache: plans_snapshot.PlanSnapshotCache,
     revert_session_status: SessionStatusReverter,
     reinspect: SnapshotReinspector,
     context: Mapping[str, Any] | None = None,
@@ -864,7 +874,7 @@ def _honor_abort_turn(
 def _honor_stop_after_current(
     listener: run_control.RunControlListener,
     *,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     payload: dict[str, Any],
     event_path: Path,
     control_payload: dict[str, Any],
@@ -889,14 +899,14 @@ def _honor_stop_after_current(
                 persistence=persistence,
             )
         payload["reason"] = "stopped"
-        payload["final_snapshot"] = plans.snapshot_payload(snapshot)
+        payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot)
         persistence.write_state(payload)
 
 
 def _stop_before_review_work(
     listener: run_control.RunControlListener,
     *,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     payload: dict[str, Any],
     event_path: Path,
     control_payload: dict[str, Any],

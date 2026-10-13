@@ -34,7 +34,11 @@ from . import (
     durability,
     events,
     harnesses,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_progress,
+    plans_readiness,
+    plans_snapshot,
     qna,
     responses,
     review_continuation,
@@ -62,8 +66,8 @@ def _workspace_launch_profile(
         return profile, workspace
     if profile.cwd is not None:
         try:
-            requested = plans.canonicalize_path(profile.cwd)
-            bound = plans.canonicalize_path(bound_root)
+            requested = plans_files.canonicalize_path(profile.cwd)
+            bound = plans_files.canonicalize_path(bound_root)
         except (OSError, ValueError) as error:
             raise LaunchError(
                 LAUNCH_REASON_INVALID_PROFILE,
@@ -300,7 +304,7 @@ class WorkbenchRegistry:
             payload = pin.to_payload()
             try:
                 workspace = workbench_workspace._workspace_projection(pin.plan_dir)
-            except plans.PlanError, OSError, ValueError:
+            except plans_errors.PlanError, OSError, ValueError:
                 workspace = {}
             if workspace:
                 payload.update(workspace)
@@ -378,7 +382,7 @@ def _canonical_plan_dir(value: Any) -> str | None:
     if not text:
         return None
     try:
-        return str(plans.canonicalize_path(text))
+        return str(plans_files.canonicalize_path(text))
     except OSError, ValueError:
         return None
 
@@ -835,8 +839,8 @@ def _plan_readiness_payload(
     warnings: list[str],
 ) -> dict[str, str] | None:
     try:
-        metadata = plans.read_readiness_metadata(plan_dir)
-    except (plans.PlanError, OSError, ValueError) as error:
+        metadata = plans_readiness.read_readiness_metadata(plan_dir)
+    except (plans_errors.PlanError, OSError, ValueError) as error:
         warnings.append(f"{plan_dir}: readiness unreadable ({error})")
         return None
     if metadata is None:
@@ -954,8 +958,8 @@ def plans_from_args(args: Any, *, now: datetime | None = None) -> int:
     readiness_filter = getattr(args, "readiness", None)
     if readiness_filter is not None:
         try:
-            readiness_filter = plans.parse_readiness_state(readiness_filter)
-        except plans.PlanError as error:
+            readiness_filter = plans_readiness.parse_readiness_state(readiness_filter)
+        except plans_errors.PlanError as error:
             return _plans_error(
                 args,
                 reason="invalid-readiness",
@@ -1069,7 +1073,7 @@ def _scan_plan_root(
             continue
         if _looks_like_plan_dir(child):
             try:
-                found.append(plans.canonicalize_path(child))
+                found.append(plans_files.canonicalize_path(child))
             except (OSError, ValueError) as error:
                 warnings.append(f"{context}: could not canonicalize {child}: {error}")
     return tuple(found)
@@ -1455,8 +1459,8 @@ def _paused_activity(
 
 def _last_progress_entry_at(plan_dir: Path) -> str | None:
     try:
-        entries = plans.read_progress_entries(plan_dir)
-    except plans.PlanError:
+        entries = plans_progress.read_progress_entries(plan_dir)
+    except plans_errors.PlanError:
         return None
     if not entries:
         return None
@@ -1526,7 +1530,7 @@ def _build_invalid_summary(
         workspace = (
             workbench_workspace._workspace_projection(plan.plan_dir) if exists else {}
         )
-    except plans.PlanError, OSError, ValueError:
+    except plans_errors.PlanError, OSError, ValueError:
         workspace = {}
     if state_paths is not None:
         state_path, events_path, progress_path = state_paths
@@ -1648,8 +1652,8 @@ def build_workbench_summary(
         )
 
     try:
-        snapshot = plans.inspect_plan(plan_dir)
-    except plans.PlanError as error:
+        snapshot = plans_snapshot.inspect_plan(plan_dir)
+    except plans_errors.PlanError as error:
         state_paths = workbench_recovery._summary_base_paths(plan_dir, state_dir)
         return _build_invalid_summary(
             plan,
@@ -1679,7 +1683,7 @@ def build_workbench_summary(
         workspace = workbench_workspace._workspace_projection(
             snapshot.plan_dir, runtime=runner_state
         )
-    except (plans.PlanError, OSError, ValueError) as error:
+    except (plans_errors.PlanError, OSError, ValueError) as error:
         return _build_invalid_summary(
             replace(plan, plan_dir=snapshot.plan_dir, exists=True),
             detail=f"workspace metadata unreadable: {error}",
@@ -2303,7 +2307,7 @@ class LaunchResult:
 
 def _validate_launch_plan_dir(plan_dir: str | Path) -> Path:
     try:
-        canonical = plans.canonicalize_path(plan_dir)
+        canonical = plans_files.canonicalize_path(plan_dir)
     except (OSError, ValueError) as error:
         raise LaunchError(
             LAUNCH_REASON_INVALID_PLAN,

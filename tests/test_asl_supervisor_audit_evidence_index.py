@@ -14,7 +14,7 @@ from agent_session_loop import (
     assurance_models,
     events,
     mailbox_constants,
-    plans,
+    plans_progress,
     repository_evidence,
     review,
     run_prompts,
@@ -444,7 +444,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
     def test_the_progress_journal_is_indexed_with_its_digest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
-            journal = plans.progress_path(plan_dir)
+            journal = plans_progress.progress_path(plan_dir)
             journal.write_text("# Progress Journal\n\n## Session 1\n", encoding="utf-8")
 
             bundle = self._collect(workspace, plan_dir, state_dir, run_dir)

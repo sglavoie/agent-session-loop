@@ -5,7 +5,7 @@ import unittest
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_snapshot,
     review,
     review_continuation,
     review_delta,
@@ -229,7 +229,7 @@ class ReviewCycleReopenTests(RepairCycleFixtures, unittest.TestCase):
             ),
         )
         before_rereview = review_delta._review_cycle_state(
-            self._events_path(), plans.inspect_plan(self.plan_dir)
+            self._events_path(), plans_snapshot.inspect_plan(self.plan_dir)
         )
         self.assertEqual(
             (corrected_fingerprint,), before_rereview["previous_fingerprints"]

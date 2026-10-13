@@ -18,7 +18,7 @@ from agent_session_loop import (
     cli,
     config,
     model_availability,
-    plans,
+    plans_snapshot,
     prepare_commands,
     prepare_expansion,
     prepare_models,
@@ -543,6 +543,6 @@ class SparkFallbackIntegrationTests(unittest.TestCase):
                 payload["turns"][0]["spark_route"]["fallback_reason"],
             )
             status = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_root
+                plans_snapshot.inspect_plan(plan_dir), state_root
             )
             self.assertEqual("complete", status["sessions"][0]["status"])

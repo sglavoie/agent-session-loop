@@ -15,7 +15,10 @@ from typing import Any
 from agent_session_loop import (
     events,
     pause_policy,
-    plans,
+    plans_models,
+    plans_progress,
+    plans_session_ids,
+    plans_snapshot,
     state,
     state_locks,
     state_payloads,
@@ -67,7 +70,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             self.assertEqual(waiting, payload["waiting_for_reply"])
@@ -130,7 +133,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
 
             try:
                 payload = state_status.status_payload(
-                    plans.inspect_plan(plan_dir),
+                    plans_snapshot.inspect_plan(plan_dir),
                     state_dir,
                 )
             finally:
@@ -428,7 +431,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir),
+                plans_snapshot.inspect_plan(plan_dir),
                 state_dir,
             )
             buffer = io.StringIO()
@@ -448,7 +451,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             write_plan(plan_dir, ("pending",))
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             journal = payload["progress_journal"]
@@ -464,10 +467,10 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("complete", "pending"))
 
-            plans.append_progress_entry(
+            plans_progress.append_progress_entry(
                 plan_dir,
-                plans.ProgressEntry(
-                    session_id=plans.parse_session_id("1"),
+                plans_models.ProgressEntry(
+                    session_id=plans_session_ids.parse_session_id("1"),
                     status="complete",
                     completed_at="2026-06-19T14:22:00Z",
                     files_modified=("cli.py",),
@@ -475,7 +478,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             journal = payload["progress_journal"]
@@ -489,13 +492,13 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
-            plans.progress_path(plan_dir).write_text(
+            plans_progress.progress_path(plan_dir).write_text(
                 "# Progress Journal\n\nmissing version comment\n",
                 encoding="utf-8",
             )
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             journal = payload["progress_journal"]

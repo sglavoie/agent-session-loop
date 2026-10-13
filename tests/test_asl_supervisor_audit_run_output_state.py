@@ -11,7 +11,8 @@ from pathlib import Path
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_files,
+    plans_snapshot,
     run_payloads,
     run_selection,
     runner,
@@ -42,7 +43,7 @@ class AuditRunOutputTests(unittest.TestCase):
         lock_info = state.LockInfo(
             path=plan_state / state.LOCK_FILE_NAME,
             pid=123,
-            plan_dir=str(plans.canonicalize_path(plan_dir)),
+            plan_dir=str(plans_files.canonicalize_path(plan_dir)),
             created_at="2026-08-10T10:00:00+00:00",
             stale=False,
             reason="active",
@@ -50,7 +51,7 @@ class AuditRunOutputTests(unittest.TestCase):
         )
         return run_payloads._initial_payload(
             args=args,
-            snapshot=plans.inspect_plan(plan_dir),
+            snapshot=plans_snapshot.inspect_plan(plan_dir),
             state_dir=plan_state,
             run_dir=plan_state / "runs" / RUN_ID,
             event_path=plan_state / events.EVENTS_FILE_NAME,
@@ -252,7 +253,9 @@ class AuditStateProjectionTests(unittest.TestCase):
             encoding="utf-8",
         )
         return (
-            state_status.status_payload(plans.inspect_plan(plan_dir), state_dir),
+            state_status.status_payload(
+                plans_snapshot.inspect_plan(plan_dir), state_dir
+            ),
             plan_state,
         )
 
@@ -328,7 +331,9 @@ class AuditStateProjectionTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        return state_status.status_payload(plans.inspect_plan(plan_dir), state_dir)
+        return state_status.status_payload(
+            plans_snapshot.inspect_plan(plan_dir), state_dir
+        )
 
     def test_a_partial_audit_reports_which_lanes_had_no_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -357,7 +362,7 @@ class AuditStateProjectionTests(unittest.TestCase):
             write_plan(plan_dir, ("pending",))
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), Path(tmp) / "state"
+                plans_snapshot.inspect_plan(plan_dir), Path(tmp) / "state"
             )
             buffer = io.StringIO()
             with redirect_stdout(buffer):

@@ -15,7 +15,12 @@ from typing import Any
 
 from . import (
     events,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_metadata,
+    plans_registry,
+    plans_session_scope,
+    plans_snapshot,
     repository_evidence,
     state,
     state_locks,
@@ -133,14 +138,14 @@ def _check_original_binding(
 
 
 def _proposal(plan_dir: Path, session_id: str, event_path: Path) -> dict[str, Any]:
-    snapshot = plans.inspect_plan(plan_dir)
+    snapshot = plans_snapshot.inspect_plan(plan_dir)
     if snapshot.next_pending is None or snapshot.next_pending.id != session_id:
         raise RecoveryError("session must be the next pending session")
-    registry = plans.read_repository_registry(plan_dir)
-    metadata = plans.load_plan_metadata(plan_dir)
+    registry = plans_registry.read_repository_registry(plan_dir)
+    metadata = plans_metadata.load_plan_metadata(plan_dir)
     if (
         registry is None
-        or not isinstance(metadata, plans.WorkspacePlanMetadata)
+        or not isinstance(metadata, plans_metadata.WorkspacePlanMetadata)
         or metadata.registry_digest != registry.digest
     ):
         raise RecoveryError("an unchanged registered workspace binding is required")
@@ -207,7 +212,7 @@ def accept_ref_updates(
     """Preview by default; accept only an explicitly reviewed, still-current digest."""
     if accept is not None and (reason is None or not reason.strip()):
         raise RecoveryError("acceptance requires an explicit operator reason")
-    plan_dir = plans.canonicalize_path(plan_dir)
+    plan_dir = plans_files.canonicalize_path(plan_dir)
     state_locks.acquire_lock(plan_dir, state_dir, owner="asl-accept-ref-updates")
     try:
         event_path = state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME
@@ -250,7 +255,7 @@ def accept_ref_updates_from_args(args: argparse.Namespace) -> int:
         )
     except (
         RecoveryError,
-        plans.PlanError,
+        plans_errors.PlanError,
         state.StateError,
         workspaces.WorkspaceError,
         OSError,
@@ -278,19 +283,19 @@ def _external_proposal(
     *,
     completed_guard: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    snapshot = plans.inspect_plan(plan_dir)
+    snapshot = plans_snapshot.inspect_plan(plan_dir)
     if snapshot.next_pending is None or snapshot.next_pending.id != session_id:
         raise RecoveryError("session must be the next pending session")
-    registry = plans.read_repository_registry(plan_dir)
-    metadata = plans.load_plan_metadata(plan_dir)
+    registry = plans_registry.read_repository_registry(plan_dir)
+    metadata = plans_metadata.load_plan_metadata(plan_dir)
     if (
         registry is None
-        or not isinstance(metadata, plans.WorkspacePlanMetadata)
+        or not isinstance(metadata, plans_metadata.WorkspacePlanMetadata)
         or metadata.registry_digest != registry.digest
     ):
         raise RecoveryError("an unchanged registered workspace binding is required")
     workspace = workspaces.resolve_workspace(metadata.workspace_root, registry)
-    scope = plans.parse_session_scope(
+    scope = plans_session_scope.parse_session_scope(
         snapshot.next_pending.path.read_text(), registry.aliases
     )
     if (
@@ -701,7 +706,7 @@ def acknowledge_external_changes(
 
     if accept is not None and (reason is None or not reason.strip()):
         raise RecoveryError("acceptance requires an explicit operator reason")
-    plan_dir = plans.canonicalize_path(plan_dir)
+    plan_dir = plans_files.canonicalize_path(plan_dir)
     state_locks.acquire_lock(
         plan_dir, state_dir, owner="asl-acknowledge-external-changes"
     )
@@ -920,7 +925,7 @@ def acknowledge_external_changes_from_args(args: argparse.Namespace) -> int:
         )
     except (
         RecoveryError,
-        plans.PlanError,
+        plans_errors.PlanError,
         state.StateError,
         workspaces.WorkspaceError,
         repository_evidence.RepositoryEvidenceError,

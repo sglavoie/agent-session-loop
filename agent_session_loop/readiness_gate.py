@@ -81,7 +81,12 @@ from typing import Any
 from . import (
     clock,
     events,
-    plans,
+    plans_content_hash,
+    plans_errors,
+    plans_models,
+    plans_payloads,
+    plans_readiness,
+    plans_snapshot,
     preflight,
     preflight_auto_repair,
     preflight_environment,
@@ -212,7 +217,7 @@ def _resume_gate_passed(report: preflight_models.PreflightReport) -> bool:
 
 
 def _reopened_plan_gate_payload(
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     *,
     max_pending_sessions: int | None,
     repair_session_ids: Sequence[str],
@@ -255,7 +260,7 @@ def _regate_reopened_plan(
     payload: dict[str, Any],
     persistence: run_persistence._RunPersistence,
     args: argparse.Namespace,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     repair_session_ids: Sequence[str],
     details: Mapping[str, Any],
     trigger: str = events.REVIEW_REPAIR_REOPENED_EVENT,
@@ -293,7 +298,7 @@ def _regate_reopened_plan(
         f"review repairs reopened {len(gate['repair_session_ids'])} session(s)"
     )
     with persistence.lock:
-        payload["final_snapshot"] = plans.snapshot_payload(snapshot)
+        payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot)
     run_termination._pause_run(
         event_path,
         payload,
@@ -313,7 +318,7 @@ def _review_only_complete_start(
     report: preflight_models.PreflightReport,
     *,
     review_requested: bool,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
 ) -> bool:
     """Return True for a review-only entry from a fully-complete plan.
 
@@ -354,7 +359,7 @@ def _readiness_gate_failure_message(
 
 def write_readiness_state(
     plan_dir: Path,
-    new_state: plans.ReadinessState,
+    new_state: plans_models.ReadinessState,
     *,
     expected_sha256: str | None = None,
 ) -> tuple[bool, str | None]:
@@ -369,17 +374,17 @@ def write_readiness_state(
     sha = expected_sha256
     if sha is None:
         try:
-            sha = plans.stable_readiness_sha256(plan_dir)
-        except plans.PlanError as error:
+            sha = plans_content_hash.stable_readiness_sha256(plan_dir)
+        except plans_errors.PlanError as error:
             return False, str(error)
-    metadata = plans.ReadinessMetadata(
+    metadata = plans_models.ReadinessMetadata(
         state=new_state,
         readiness_sha256=sha,
         checked_at=clock.isoformat(clock.utc_now()),
     )
     try:
-        plans.write_readiness_metadata(plan_dir, metadata)
-    except plans.PlanError as error:
+        plans_readiness.write_readiness_metadata(plan_dir, metadata)
+    except plans_errors.PlanError as error:
         return False, str(error)
     return True, None
 
@@ -405,8 +410,8 @@ def _refresh_active_readiness_state(
 
 def _final_readiness_state(
     payload: dict[str, Any],
-    snapshot: plans.PlanSnapshot,
-) -> plans.ReadinessState:
+    snapshot: plans_models.PlanSnapshot,
+) -> plans_models.ReadinessState:
     if payload.get("paused") or not payload.get("ok"):
         return "reviewed"
     if run_inputs._all_sessions_complete(snapshot):
@@ -459,7 +464,7 @@ def _readiness_gate_blockers(
 def _reduced_preflight_report(
     plan_dir: Path,
     *,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     lock_info: state.LockInfo,
     preflight_kwargs: dict[str, Any],
 ) -> preflight_models.PreflightReport | None:
@@ -502,7 +507,7 @@ def _repair_readiness_gate(
     max_pending_sessions: int | None,
     event_path: Path,
     persistence: run_persistence._RunPersistence,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     review_requested: bool,
     core_skipped: bool = False,
 ) -> tuple[preflight_models.PreflightReport, dict[str, Any]]:
@@ -547,14 +552,14 @@ def _repair_readiness_gate(
                 # reduced path reads must come from a fresh snapshot.
                 reduced = _reduced_preflight_report(
                     plan_dir,
-                    snapshot=plans.inspect_plan(plan_dir),
+                    snapshot=plans_snapshot.inspect_plan(plan_dir),
                     lock_info=lock_info,
                     preflight_kwargs=preflight_kwargs,
                 )
                 if reduced is not None:
                     return reduced
             rerun_report = preflight.run_preflight(plan_dir, **preflight_kwargs)
-        except plans.PlanError:
+        except plans_errors.PlanError:
             return None
         core_skipped = False
         return _strip_own_lock_findings(rerun_report, lock_info=lock_info)
@@ -568,7 +573,7 @@ def _repair_readiness_gate(
         attempted.append("progress-journal-missing")
         try:
             repair_result = progress_repair.repair_progress_journal(plan_dir)
-        except (plans.PlanError, OSError) as error:
+        except (plans_errors.PlanError, OSError) as error:
             errors.append(
                 {
                     "category": "progress-journal-missing",
@@ -608,7 +613,7 @@ def _repair_readiness_gate(
         )
     ):
         attempted.append("manifest-readiness")
-        target_state: plans.ReadinessState = "loop-ready"
+        target_state: plans_models.ReadinessState = "loop-ready"
         if (
             review_requested
             and run_inputs._all_sessions_complete(snapshot)

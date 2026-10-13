@@ -8,7 +8,8 @@ from pathlib import Path
 from agent_session_loop import (
     commit_groups,
     commit_settlement,
-    plans,
+    plans_metadata,
+    plans_registry,
     run_commit,
     run_selection,
 )
@@ -74,9 +75,11 @@ class PausedGroupCommitRecoveryTests(FakeHarnessIntegrationBase):
             specs=self.SETTLEMENT_SPECS,
             contracts_by_id={"1": self.settlement_contract(check_script, repo="SVC")},
         )
-        registry = plans.read_repository_registry(plan_dir)
+        registry = plans_registry.read_repository_registry(plan_dir)
         assert registry is not None
-        plans.save_workspace_plan_metadata(plan_dir, workspace, registry.digest)
+        plans_metadata.save_workspace_plan_metadata(
+            plan_dir, workspace, registry.digest
+        )
 
         first_completed, first_payload = self.run_loop_command(
             mode="success",

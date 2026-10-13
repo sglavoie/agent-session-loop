@@ -11,7 +11,15 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from agent_session_loop import config, events, plans, state, verification
+from agent_session_loop import (
+    config,
+    events,
+    plans_content_hash,
+    plans_models,
+    plans_readiness,
+    state,
+    verification,
+)
 from tests.support import (
     REPO_ROOT,
     _contract_block,
@@ -50,10 +58,10 @@ class RunVerificationEnforcementTests(unittest.TestCase):
         write_plan(self.plan_dir, statuses, contracts_by_id=contracts_by_id)
         if readiness is None:
             return
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state=readiness,
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",

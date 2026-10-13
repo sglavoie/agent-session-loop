@@ -14,7 +14,10 @@ from agent_session_loop import (
     events,
     handoff_correction,
     harnesses,
-    plans,
+    plans_handoff,
+    plans_metadata,
+    plans_registry,
+    plans_snapshot,
     review,
     run_loop,
     state,
@@ -66,9 +69,9 @@ class HandoffCorrectionTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        registry = plans.read_repository_registry(self.plan_dir)
+        registry = plans_registry.read_repository_registry(self.plan_dir)
         assert registry is not None
-        plans.save_workspace_plan_metadata(
+        plans_metadata.save_workspace_plan_metadata(
             self.plan_dir,
             self.workspace_root,
             registry.digest,
@@ -132,10 +135,12 @@ class HandoffCorrectionTests(unittest.TestCase):
         session_path = self.plan_dir / "session-1.md"
         lines = session_path.read_text(encoding="utf-8").splitlines(keepends=True)
         for index, line in enumerate(lines):
-            if line.startswith(plans.STATUS_PREFIX):
-                lines[index] = f"{plans.STATUS_PREFIX} complete\n"
-            elif line.startswith(plans.HANDOFF_FILES_PREFIX):
-                lines[index] = f"{plans.HANDOFF_FILES_PREFIX} {files_modified}\n"
+            if line.startswith(plans_handoff.STATUS_PREFIX):
+                lines[index] = f"{plans_handoff.STATUS_PREFIX} complete\n"
+            elif line.startswith(plans_handoff.HANDOFF_FILES_PREFIX):
+                lines[index] = (
+                    f"{plans_handoff.HANDOFF_FILES_PREFIX} {files_modified}\n"
+                )
         session_path.write_text("".join(lines), encoding="utf-8")
 
     def _harness(self, *files_lines: str):
@@ -268,10 +273,10 @@ class HandoffCorrectionTests(unittest.TestCase):
         # The plan parses again, and it claims the work still has to be handed
         # off, so a relaunch has something to select.
         session_text = (self.plan_dir / "session-1.md").read_text(encoding="utf-8")
-        self.assertIn(f"{plans.STATUS_PREFIX} pending", session_text)
+        self.assertIn(f"{plans_handoff.STATUS_PREFIX} pending", session_text)
         self.assertIn("The status was reset to pending", session_text)
         self.assertIn("OAK:README.md", session_text)
-        snapshot = plans.inspect_plan(self.plan_dir)
+        snapshot = plans_snapshot.inspect_plan(self.plan_dir)
         self.assertEqual(["pending"], [item.status for item in snapshot.sessions])
         self.assertEqual(
             ["pending"],
@@ -384,8 +389,8 @@ class PausedHandoffStatusTests(unittest.TestCase):
             session_path = self.plan_dir / "session-1.md"
             lines = session_path.read_text(encoding="utf-8").splitlines(keepends=True)
             for index, line in enumerate(lines):
-                if line.startswith(plans.STATUS_PREFIX):
-                    lines[index] = f"{plans.STATUS_PREFIX} {status}\n"
+                if line.startswith(plans_handoff.STATUS_PREFIX):
+                    lines[index] = f"{plans_handoff.STATUS_PREFIX} {status}\n"
             session_path.write_text("".join(lines), encoding="utf-8")
             return harnesses.HarnessResult(
                 name="codex",
@@ -417,10 +422,10 @@ class PausedHandoffStatusTests(unittest.TestCase):
         self.assertEqual("blocked", repair["pause_reason"])
 
         session_text = (self.plan_dir / "session-1.md").read_text(encoding="utf-8")
-        self.assertIn(f"{plans.STATUS_PREFIX} pending", session_text)
+        self.assertIn(f"{plans_handoff.STATUS_PREFIX} pending", session_text)
         self.assertIn("there is no paused status value", session_text)
         self.assertEqual(
-            "pending", plans.inspect_plan(self.plan_dir).sessions[0].status
+            "pending", plans_snapshot.inspect_plan(self.plan_dir).sessions[0].status
         )
         self.assertEqual(
             ["pending"],
@@ -434,7 +439,7 @@ class PausedHandoffStatusTests(unittest.TestCase):
         self.assertEqual("plan-status-validity", reopenings[0]["guard"])
         self.assertEqual("blocked", reopenings[0]["reason"])
         self.assertEqual(
-            plans.inspect_plan(self.plan_dir).content_sha256,
+            plans_snapshot.inspect_plan(self.plan_dir).content_sha256,
             reopenings[0]["content_sha256"],
         )
         self.assertEqual(payload["final_snapshot"]["counts"], reopenings[0]["counts"])
@@ -454,7 +459,7 @@ class PausedHandoffStatusTests(unittest.TestCase):
         self.assertEqual("unknown-status", payload["pause_reason"])
         self.assertNotIn("handoff_status_repair", payload["pause_details"])
         self.assertIn(
-            f"{plans.STATUS_PREFIX} paused",
+            f"{plans_handoff.STATUS_PREFIX} paused",
             (self.plan_dir / "session-1.md").read_text(encoding="utf-8"),
         )
         self.assertEqual([], self._payloads(events.SESSION_REOPENED_EVENT))

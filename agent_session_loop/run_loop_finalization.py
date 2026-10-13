@@ -7,7 +7,8 @@ from . import (
     handoff_correction,
     handoff_guards,
     harnesses,
-    plans,
+    plans_errors,
+    plans_payloads,
     review_cycle,
     review_transitions,
     run_inputs,
@@ -44,15 +45,17 @@ def _handle_run_crash(frame: RunFrame, error: BaseException) -> RunResult | None
                 **frame.live_turn_payload,
                 "run_id": frame.ctx.run_id,
                 "turn_index": frame.live_turn_payload.get("turn_index"),
-                **plans.session_identity_payload(str(guard_context["session_id"])),
+                **plans_payloads.session_identity_payload(
+                    str(guard_context["session_id"])
+                ),
                 "status_result": "exception",
                 "exception": {
                     "type": type(error).__name__,
                     "message": str(error),
                 },
-                "before": plans.snapshot_payload(guard_context["before"]),
+                "before": plans_payloads.snapshot_payload(guard_context["before"]),
                 "after": (
-                    plans.snapshot_payload(frame.after)
+                    plans_payloads.snapshot_payload(frame.after)
                     if frame.after is not None
                     else None
                 ),
@@ -201,7 +204,7 @@ def _finalize_run(frame: RunFrame) -> RunResult | None:
             frame.final_review_snapshot = frame.ctx.plan_cache.get(
                 frame.snapshot.plan_dir
             )
-        except plans.PlanError:
+        except plans_errors.PlanError:
             # Preserve the run's existing malformed-plan pause and its last
             # safely computed projection when the final plan is unreadable.
             pass

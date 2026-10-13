@@ -67,7 +67,8 @@ from agent_session_loop import (
     conversations,
     durability,
     events,
-    plans,
+    plans_payloads,
+    plans_session_ids,
     process_tree,
     redirect_admission,
     redirect_continuation,
@@ -1002,7 +1003,7 @@ class ReviewRepairTests(JournalTestCase):
 
     def test_a_runs_own_audit_is_not_redirectable(self) -> None:
         self._write_live_state(
-            session_id="review", session_kind=plans.SESSION_KIND_REVIEW
+            session_id="review", session_kind=plans_payloads.SESSION_KIND_REVIEW
         )
         endpoint, _event = self.enterContext(
             live_redirect_endpoint(self.plan_dir, self.state_dir)
@@ -1035,7 +1036,7 @@ class ReviewRepairTests(JournalTestCase):
 
         # A repair child of 7 is the session id "7.1", which is a different
         # session: the correction was written about the parent's turn.
-        self.assertTrue(plans.is_valid_session_id(f"{SESSION_ID}.1"))
+        self.assertTrue(plans_session_ids.is_valid_session_id(f"{SESSION_ID}.1"))
         self.assertNotEqual(f"{SESSION_ID}.1", pending.session_id)
 
         # And a second acceptance for the repair child starts its own lineage

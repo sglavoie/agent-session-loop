@@ -9,7 +9,9 @@ from unittest import mock
 
 from agent_session_loop import (
     authoring,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_metadata,
     preflight_cli,
     prepare,
     prepare_expand_ingest,
@@ -73,9 +75,9 @@ class PrepareRebindAndCorrectionTests(PrepareEndToEndFixtures):
             (
                 "metadata",
                 mock.patch.object(
-                    plans,
+                    plans_metadata,
                     "save_workspace_plan_metadata",
-                    side_effect=plans.PlanError("injected metadata failure"),
+                    side_effect=plans_errors.PlanError("injected metadata failure"),
                 ),
                 _recording_validator([]),
                 prepare_results.PREPARE_STAGE_METADATA,
@@ -86,7 +88,7 @@ class PrepareRebindAndCorrectionTests(PrepareEndToEndFixtures):
                 "validation",
                 nullcontext(),
                 lambda _packet: (_ for _ in ()).throw(
-                    plans.PlanError("injected validation failure")
+                    plans_errors.PlanError("injected validation failure")
                 ),
                 prepare_results.PREPARE_STAGE_VALIDATION,
             )
@@ -97,7 +99,7 @@ class PrepareRebindAndCorrectionTests(PrepareEndToEndFixtures):
                 mock.patch.object(
                     prepare_expand_ingest,
                     "render_expansion",
-                    side_effect=plans.PlanError("injected expansion failure"),
+                    side_effect=plans_errors.PlanError("injected expansion failure"),
                 ),
                 _recording_validator([]),
                 prepare_results.PREPARE_STAGE_VALIDATION,
@@ -109,7 +111,7 @@ class PrepareRebindAndCorrectionTests(PrepareEndToEndFixtures):
                 mock.patch.object(
                     prepare_expand_ingest,
                     "_apply_one_correction",
-                    side_effect=plans.PlanError("injected correction failure"),
+                    side_effect=plans_errors.PlanError("injected correction failure"),
                 ),
                 _recording_validator(
                     [],
@@ -170,7 +172,7 @@ class PrepareRebindAndCorrectionTests(PrepareEndToEndFixtures):
             target = Path(destination)
             if (
                 target.parent == first.plan_dir
-                and target.name == plans.PLAN_METADATA_FILE_NAME
+                and target.name == plans_metadata.PLAN_METADATA_FILE_NAME
             ):
                 raise OSError("injected publication failure")
             return original_replace(source, destination)
@@ -203,7 +205,7 @@ class PrepareRebindAndCorrectionTests(PrepareEndToEndFixtures):
         legacy_source = self._write_source()
         legacy = self._prepare(legacy_source, _recording_validator([]))
         assert legacy.plan_dir is not None
-        with self.assertRaisesRegex(plans.PlanError, "registered plan"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "registered plan"):
             self._prepare(
                 None,
                 _recording_validator([]),
@@ -224,7 +226,7 @@ class PrepareRebindAndCorrectionTests(PrepareEndToEndFixtures):
             cwd=old_workspace,
         )
         assert registered.plan_dir is not None
-        with self.assertRaisesRegex(plans.PlanError, "changed workspace"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "changed workspace"):
             self._prepare(
                 None,
                 _recording_validator([]),
@@ -236,7 +238,7 @@ class PrepareRebindAndCorrectionTests(PrepareEndToEndFixtures):
         before = self._plan_file_bytes(registered.plan_dir)
         state_locks.acquire_lock(registered.plan_dir, self.state_dir, owner="test")
         try:
-            with self.assertRaisesRegex(plans.PlanError, "active lock"):
+            with self.assertRaisesRegex(plans_errors.PlanError, "active lock"):
                 self._prepare(
                     None,
                     _recording_validator([]),
@@ -262,7 +264,7 @@ class PrepareRebindAndCorrectionTests(PrepareEndToEndFixtures):
         assert registered.plan_dir is not None
         # Simulate the plan that grew a registry only after it was bound in
         # legacy mode: the binding on disk is still version 1.
-        plans.save_plan_metadata(registered.plan_dir, self.repo)
+        plans_metadata.save_plan_metadata(registered.plan_dir, self.repo)
 
         rebound = self._prepare(
             None,
@@ -275,19 +277,19 @@ class PrepareRebindAndCorrectionTests(PrepareEndToEndFixtures):
         self.assertTrue(rebound.ok, rebound)
         assert rebound.workspace_rebind is not None
         self.assertEqual(
-            str(plans.canonicalize_path(self.repo)),
+            str(plans_files.canonicalize_path(self.repo)),
             rebound.workspace_rebind["old"]["workspace_root"],
         )
         self.assertEqual([], rebound.workspace_rebind["old"]["repositories"])
         self.assertEqual(
-            str(plans.canonicalize_path(new_workspace)),
+            str(plans_files.canonicalize_path(new_workspace)),
             rebound.workspace_rebind["new"]["workspace_root"],
         )
-        metadata = plans.load_plan_metadata(registered.plan_dir)
-        self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
-        assert isinstance(metadata, plans.WorkspacePlanMetadata)
+        metadata = plans_metadata.load_plan_metadata(registered.plan_dir)
+        self.assertIsInstance(metadata, plans_metadata.WorkspacePlanMetadata)
+        assert isinstance(metadata, plans_metadata.WorkspacePlanMetadata)
         self.assertEqual(
-            str(plans.canonicalize_path(new_workspace)), metadata.workspace_root
+            str(plans_files.canonicalize_path(new_workspace)), metadata.workspace_root
         )
 
     def test_repository_ambiguity_issue_prevents_loop_ready(self) -> None:
@@ -346,7 +348,9 @@ class PrepareRebindAndCorrectionTests(PrepareEndToEndFixtures):
 
         self.assertFalse(result.ok)
         assert result.plan_dir is not None
-        self.assertFalse((result.plan_dir / plans.PLAN_METADATA_FILE_NAME).exists())
+        self.assertFalse(
+            (result.plan_dir / plans_metadata.PLAN_METADATA_FILE_NAME).exists()
+        )
         self.assertFalse(
             (result.plan_dir / prepare_models.PREPARE_VALIDATION_FILENAME).exists()
         )

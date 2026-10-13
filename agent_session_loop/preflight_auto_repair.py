@@ -11,9 +11,7 @@ from . import (
     responses,
     workspaces,
 )
-from .plans import (
-    PlanError,
-)
+from .plans_errors import PlanError
 from .preflight_hint_resolution import _override_check_id_for_finding
 from .preflight_models import (
     PreflightCategory,

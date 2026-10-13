@@ -26,7 +26,13 @@ import unittest
 from pathlib import Path
 from typing import cast
 
-from agent_session_loop import plans, review, review_session_body, workspaces
+from agent_session_loop import (
+    plans_errors,
+    plans_session_ids,
+    review,
+    review_session_body,
+    workspaces,
+)
 from tests.support import assert_no_runner_import
 
 
@@ -141,7 +147,7 @@ class RescopeBoundsTests(unittest.TestCase):
 
     def _body(self, delta: dict[str, object] | None) -> str:
         return review_session_body.build_generated_review_session_body(
-            plans.parse_session_id("9"),
+            plans_session_ids.parse_session_id("9"),
             review_harness="claude",
             plan_dir=self.plan_dir,
             delta=delta,
@@ -216,7 +222,7 @@ class RescopeBoundsTests(unittest.TestCase):
             f"{review_session_body.REVIEW_SCOPE_DETAIL_HEADING}\n", "", 1
         )
 
-        with self.assertRaises(plans.PlanError):
+        with self.assertRaises(plans_errors.PlanError):
             review_session_body.rescoped_review_session_body(
                 mangled, {"mode": review_session_body.REVIEW_SCOPE_DELTA}
             )
@@ -229,7 +235,7 @@ class RescopeBoundsTests(unittest.TestCase):
         # section rather than refresh it.
         workspace = cast(workspaces.ResolvedWorkspace, object())
 
-        with self.assertRaises(plans.PlanError):
+        with self.assertRaises(plans_errors.PlanError):
             review_session_body.refreshed_review_repository_base(
                 self._body(None), workspace, ()
             )

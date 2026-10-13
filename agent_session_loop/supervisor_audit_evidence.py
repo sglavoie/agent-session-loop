@@ -32,7 +32,12 @@ from . import (
     harnesses,
     mailbox_constants,
     mailbox_vocabulary,
-    plans,
+    plans_discovery,
+    plans_errors,
+    plans_metadata,
+    plans_progress,
+    plans_session_ids,
+    plans_session_scope,
     review,
     state,
     verification,
@@ -1712,7 +1717,9 @@ def _plan_section(
         "manifest": collector.file_digest(plan_dir / "manifest.md", kind="plan"),
         # Every turn claims ``progress_appended``; without this the claim cites
         # nothing, and a journal that was never written goes unreported.
-        "progress": collector.file_digest(plans.progress_path(plan_dir), kind="plan"),
+        "progress": collector.file_digest(
+            plans_progress.progress_path(plan_dir), kind="plan"
+        ),
         "metadata": _plan_metadata(collector, plan_dir),
     }
     for label, key in (("initial", "initial_snapshot"), ("final", "final_snapshot")):
@@ -1737,11 +1744,11 @@ def _plan_section(
 def _plan_metadata(collector: _Collector, plan_dir: Path) -> dict[str, Any]:
     """Read the durable workspace binding without recovering a transaction.
 
-    ``plans.load_plan_metadata`` repairs a pending plan transaction as a side
+    ``plans_metadata.load_plan_metadata`` repairs a pending plan transaction as a side
     effect. An evidence collector must observe the run rather than change it,
     so the file is parsed directly.
     """
-    path = plan_dir / plans.PLAN_METADATA_FILE_NAME
+    path = plan_dir / plans_metadata.PLAN_METADATA_FILE_NAME
     payload, reason = _read_json_file(path)
     if payload is None:
         # A file holding the literal `null` parses to `None` with no reason, so
@@ -1788,8 +1795,8 @@ def _scopes_section(
         return {"available": False, "reason": REASON_NOT_RECORDED}
     sessions: list[dict[str, Any]] = []
     try:
-        session_files = plans.discover_session_files(plan_dir)
-    except plans.PlanError:
+        session_files = plans_discovery.discover_session_files(plan_dir)
+    except plans_errors.PlanError:
         collector.omissions.record("scopes", REASON_UNREADABLE, str(plan_dir))
         return {"available": False, "reason": REASON_UNREADABLE}
     paths = {session_file.path for session_file in session_files}
@@ -1799,7 +1806,7 @@ def _scopes_section(
     paths.update(
         path
         for path in plan_dir.glob("session-*.md")
-        if plans.LOOSE_SESSION_FILE_RE.fullmatch(path.name)
+        if plans_session_ids.LOOSE_SESSION_FILE_RE.fullmatch(path.name)
     )
     for path in sorted(paths):
         entry: dict[str, Any] = {"session": path.stem}
@@ -1811,8 +1818,8 @@ def _scopes_section(
             sessions.append(entry)
             continue
         try:
-            scope = plans.parse_session_scope(text, tuple(aliases))
-        except plans.PlanError, ValueError:
+            scope = plans_session_scope.parse_session_scope(text, tuple(aliases))
+        except plans_errors.PlanError, ValueError:
             entry["available"] = False
             entry["reason"] = REASON_MALFORMED
         else:

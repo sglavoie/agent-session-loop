@@ -9,7 +9,7 @@ from contextlib import redirect_stderr
 from unittest import mock
 
 from agent_session_loop import (
-    plans,
+    plans_errors,
     preflight,
     prepare,
     prepare_expand_ingest,
@@ -121,7 +121,7 @@ class PrepareValidationWaveAndBlockerTests(PrepareEndToEndFixtures):
             if packet.session_ids == ("2",):
                 self.assertTrue(first_started.wait(timeout=5))
                 second_failed.set()
-                raise plans.PlanError("validator service interrupted")
+                raise plans_errors.PlanError("validator service interrupted")
             return _prepare_pipeline_payload(
                 packet.codebase_root,
                 packet.session_ids,

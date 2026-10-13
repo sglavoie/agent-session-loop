@@ -19,7 +19,12 @@ from agent_session_loop import (
     cli,
     clock,
     handoff_guards,
-    plans,
+    plans_content_hash,
+    plans_errors,
+    plans_models,
+    plans_progress,
+    plans_session_ids,
+    plans_snapshot,
     progress_cli,
     progress_repair,
 )
@@ -40,9 +45,9 @@ class ProgressJournalTests(unittest.TestCase):
         discovered_facts: tuple[str, ...] = ("Lockfile X uses Y format.",),
         open_questions: tuple[str, ...] = (),
         blockers: str | None = None,
-    ) -> plans.ProgressEntry:
-        return plans.ProgressEntry(
-            session_id=plans.parse_session_id(session_id),
+    ) -> plans_models.ProgressEntry:
+        return plans_models.ProgressEntry(
+            session_id=plans_session_ids.parse_session_id(session_id),
             status=status,  # type: ignore[arg-type]
             completed_at=completed_at,
             files_modified=files_modified,
@@ -57,12 +62,12 @@ class ProgressJournalTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             plan_dir.mkdir()
 
-            path = plans.append_progress_entry(plan_dir, self._entry())
+            path = plans_progress.append_progress_entry(plan_dir, self._entry())
 
-            self.assertEqual(plans.progress_path(plan_dir), path)
+            self.assertEqual(plans_progress.progress_path(plan_dir), path)
             text = path.read_text(encoding="utf-8")
-            self.assertTrue(text.startswith(plans.PROGRESS_HEADER))
-            self.assertIn(plans.PROGRESS_SCHEMA_COMMENT, text)
+            self.assertTrue(text.startswith(plans_progress.PROGRESS_HEADER))
+            self.assertIn(plans_progress.PROGRESS_SCHEMA_COMMENT, text)
             self.assertIn("## Session 1 — complete (2026-06-19T14:22:00Z)", text)
             self.assertIn("- Files touched: cli.py, plans.py", text)
             self.assertIn("- Decisions: chose option A over B (perf)", text)
@@ -77,7 +82,7 @@ class ProgressJournalTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             plan_dir.mkdir()
 
-            plans.append_progress_entry(plan_dir, self._entry())
+            plans_progress.append_progress_entry(plan_dir, self._entry())
             second = self._entry(
                 session_id="2",
                 completed_at="2026-06-19T15:00:00Z",
@@ -87,9 +92,9 @@ class ProgressJournalTests(unittest.TestCase):
                 open_questions=("Should we cache?",),
                 blockers="needs review",
             )
-            plans.append_progress_entry(plan_dir, second)
+            plans_progress.append_progress_entry(plan_dir, second)
 
-            text = plans.progress_path(plan_dir).read_text(encoding="utf-8")
+            text = plans_progress.progress_path(plan_dir).read_text(encoding="utf-8")
             self.assertLess(
                 text.index("## Session 1 — complete"),
                 text.index("## Session 2 — complete"),
@@ -112,8 +117,8 @@ class ProgressJournalTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             plan_dir.mkdir()
 
-            plans.append_progress_entry(plan_dir, self._entry())
-            path = plans.progress_path(plan_dir)
+            plans_progress.append_progress_entry(plan_dir, self._entry())
+            path = plans_progress.progress_path(plan_dir)
             first_bytes = path.read_bytes()
 
             # Duplicate by (session_id, completed_at) — even with different fields.
@@ -121,7 +126,7 @@ class ProgressJournalTests(unittest.TestCase):
                 files_modified=("totally", "different"),
                 key_decisions="something else entirely",
             )
-            plans.append_progress_entry(plan_dir, duplicate)
+            plans_progress.append_progress_entry(plan_dir, duplicate)
 
             self.assertEqual(first_bytes, path.read_bytes())
 
@@ -130,20 +135,20 @@ class ProgressJournalTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             plan_dir.mkdir()
 
-            plans.append_progress_entry(plan_dir, self._entry())
-            plans.append_progress_entry(
+            plans_progress.append_progress_entry(plan_dir, self._entry())
+            plans_progress.append_progress_entry(
                 plan_dir,
                 self._entry(completed_at="2026-06-19T14:23:00Z"),
             )
 
-            entries = plans.read_progress_entries(plan_dir)
+            entries = plans_progress.read_progress_entries(plan_dir)
             self.assertEqual(2, len(entries))
 
     def test_append_raises_on_version_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             plan_dir.mkdir()
-            path = plans.progress_path(plan_dir)
+            path = plans_progress.progress_path(plan_dir)
             path.write_text(
                 "# Progress Journal\n"
                 "<!-- agent-session-loop progress-journal v2 -->\n"
@@ -157,8 +162,8 @@ class ProgressJournalTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaises(plans.PlanError) as ctx:
-                plans.append_progress_entry(plan_dir, self._entry())
+            with self.assertRaises(plans_errors.PlanError) as ctx:
+                plans_progress.append_progress_entry(plan_dir, self._entry())
             self.assertIn("v2", str(ctx.exception))
             self.assertIn("v1", str(ctx.exception))
 
@@ -166,7 +171,7 @@ class ProgressJournalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             plan_dir.mkdir()
-            path = plans.progress_path(plan_dir)
+            path = plans_progress.progress_path(plan_dir)
             path.write_text(
                 "# Progress Journal\n\n"
                 "## Session 1 — complete (2026-06-19T14:22:00Z)\n"
@@ -178,15 +183,15 @@ class ProgressJournalTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaises(plans.PlanError):
-                plans.read_progress_entries(plan_dir)
+            with self.assertRaises(plans_errors.PlanError):
+                plans_progress.read_progress_entries(plan_dir)
 
     def test_read_progress_entries_returns_empty_when_file_absent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             plan_dir.mkdir()
 
-            self.assertEqual((), plans.read_progress_entries(plan_dir))
+            self.assertEqual((), plans_progress.read_progress_entries(plan_dir))
 
     def test_round_trip_render_then_read_recovers_identical_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -215,13 +220,13 @@ class ProgressJournalTests(unittest.TestCase):
                 ),
             )
             for entry in entries:
-                plans.append_progress_entry(plan_dir, entry)
+                plans_progress.append_progress_entry(plan_dir, entry)
 
-            recovered = plans.read_progress_entries(plan_dir)
+            recovered = plans_progress.read_progress_entries(plan_dir)
             self.assertEqual(entries, recovered)
 
     def test_render_progress_entry_returns_newline_terminated_block(self) -> None:
-        rendered = plans.render_progress_entry(self._entry())
+        rendered = plans_progress.render_progress_entry(self._entry())
         self.assertTrue(rendered.endswith("\n"))
         self.assertTrue(
             rendered.startswith("## Session 1 — complete (2026-06-19T14:22:00Z)")
@@ -232,55 +237,61 @@ class ProgressJournalTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             write_plan(plan_dir, ("pending", "pending"))
 
-            baseline = plans.plan_content_sha256(plan_dir)
-            plans.append_progress_entry(plan_dir, self._entry())
-            self.assertEqual(baseline, plans.plan_content_sha256(plan_dir))
-            plans.append_progress_entry(
+            baseline = plans_content_hash.plan_content_sha256(plan_dir)
+            plans_progress.append_progress_entry(plan_dir, self._entry())
+            self.assertEqual(baseline, plans_content_hash.plan_content_sha256(plan_dir))
+            plans_progress.append_progress_entry(
                 plan_dir,
                 self._entry(
                     session_id="2",
                     completed_at="2026-06-19T15:00:00Z",
                 ),
             )
-            self.assertEqual(baseline, plans.plan_content_sha256(plan_dir))
+            self.assertEqual(baseline, plans_content_hash.plan_content_sha256(plan_dir))
             # Manual mutation (e.g., user edit) of progress.md still ignored.
-            path = plans.progress_path(plan_dir)
+            path = plans_progress.progress_path(plan_dir)
             path.write_text(
                 path.read_text(encoding="utf-8") + "\n<!-- noise -->\n",
                 encoding="utf-8",
             )
-            self.assertEqual(baseline, plans.plan_content_sha256(plan_dir))
+            self.assertEqual(baseline, plans_content_hash.plan_content_sha256(plan_dir))
 
     def test_stable_readiness_sha256_unchanged_when_progress_mutates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_plan(plan_dir, ("pending", "pending"))
 
-            baseline = plans.stable_readiness_sha256(plan_dir)
-            plans.append_progress_entry(plan_dir, self._entry())
-            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
-            plans.append_progress_entry(
+            baseline = plans_content_hash.stable_readiness_sha256(plan_dir)
+            plans_progress.append_progress_entry(plan_dir, self._entry())
+            self.assertEqual(
+                baseline, plans_content_hash.stable_readiness_sha256(plan_dir)
+            )
+            plans_progress.append_progress_entry(
                 plan_dir,
                 self._entry(
                     session_id="2",
                     completed_at="2026-06-19T15:00:00Z",
                 ),
             )
-            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
-            path = plans.progress_path(plan_dir)
+            self.assertEqual(
+                baseline, plans_content_hash.stable_readiness_sha256(plan_dir)
+            )
+            path = plans_progress.progress_path(plan_dir)
             path.write_text(
                 path.read_text(encoding="utf-8") + "\n<!-- noise -->\n",
                 encoding="utf-8",
             )
-            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
+            self.assertEqual(
+                baseline, plans_content_hash.stable_readiness_sha256(plan_dir)
+            )
 
     def test_atomic_write_failure_leaves_original_file_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             plan_dir.mkdir()
 
-            plans.append_progress_entry(plan_dir, self._entry())
-            path = plans.progress_path(plan_dir)
+            plans_progress.append_progress_entry(plan_dir, self._entry())
+            path = plans_progress.progress_path(plan_dir)
             original_bytes = path.read_bytes()
 
             with (
@@ -288,9 +299,9 @@ class ProgressJournalTests(unittest.TestCase):
                     "agent_session_loop.durability.os.replace",
                     side_effect=OSError("boom"),
                 ),
-                self.assertRaises(plans.PlanError),
+                self.assertRaises(plans_errors.PlanError),
             ):
-                plans.append_progress_entry(
+                plans_progress.append_progress_entry(
                     plan_dir,
                     self._entry(
                         session_id="2",
@@ -309,7 +320,7 @@ class ProgressJournalTests(unittest.TestCase):
 class RunnerProgressEntryHelperTests(unittest.TestCase):
     """Unit coverage for ``handoff_guards._append_progress_entry``."""
 
-    def _write_complete_plan(self, plan_dir: Path) -> plans.PlanSnapshot:
+    def _write_complete_plan(self, plan_dir: Path) -> plans_models.PlanSnapshot:
         plan_dir.mkdir(parents=True, exist_ok=True)
         (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
         (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
@@ -341,7 +352,7 @@ class RunnerProgressEntryHelperTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        return plans.inspect_plan(plan_dir)
+        return plans_snapshot.inspect_plan(plan_dir)
 
     def test_append_returns_true_then_false_on_replay(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -356,7 +367,7 @@ class RunnerProgressEntryHelperTests(unittest.TestCase):
                 handoff_guards._append_progress_entry(snapshot, "1", completed_at)
             )
 
-            entries = plans.read_progress_entries(plan_dir)
+            entries = plans_progress.read_progress_entries(plan_dir)
             self.assertEqual(1, len(entries))
             entry = entries[0]
             self.assertEqual("1", entry.session_id.value)
@@ -383,7 +394,7 @@ class RunnerProgressEntryHelperTests(unittest.TestCase):
                 )
             )
 
-            entries = plans.read_progress_entries(plan_dir)
+            entries = plans_progress.read_progress_entries(plan_dir)
             self.assertEqual(2, len(entries))
             self.assertEqual(
                 ["2026-06-19T15:00:00Z", "2026-06-19T16:00:00Z"],
@@ -395,7 +406,7 @@ class RunnerProgressEntryHelperTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             snapshot = self._write_complete_plan(plan_dir)
 
-            with self.assertRaises(plans.PlanError):
+            with self.assertRaises(plans_errors.PlanError):
                 handoff_guards._append_progress_entry(
                     snapshot, "99", "2026-06-19T15:00:00Z"
                 )
@@ -420,8 +431,8 @@ class ProgressCliTests(unittest.TestCase):
         (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
         (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
         for session_id in session_ids:
-            filename = plans.session_id_to_filename(session_id)
-            label = plans.session_id_display_label(session_id)
+            filename = plans_session_ids.session_id_to_filename(session_id)
+            label = plans_session_ids.session_id_display_label(session_id)
             (plan_dir / filename).write_text(
                 "\n".join(
                     [
@@ -497,7 +508,7 @@ class ProgressCliTests(unittest.TestCase):
             self.assertEqual("", err)
             self.assertIn("wrote 4 entries", out)
 
-            entries = plans.read_progress_entries(plan_dir)
+            entries = plans_progress.read_progress_entries(plan_dir)
             self.assertEqual(
                 ["1", "1.1", "2", "10"],
                 [entry.session_id.value for entry in entries],
@@ -525,7 +536,7 @@ class ProgressCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             self._write_completed_plan(plan_dir, ("1",))
-            progress_file = plans.progress_path(plan_dir)
+            progress_file = plans_progress.progress_path(plan_dir)
             progress_file.write_text("preexisting\n", encoding="utf-8")
 
             code, out, err = self._run_backfill(plan_dir)
@@ -542,7 +553,7 @@ class ProgressCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             self._write_completed_plan(plan_dir, ("1", "2"))
-            progress_file = plans.progress_path(plan_dir)
+            progress_file = plans_progress.progress_path(plan_dir)
             progress_file.write_text(
                 "stale and definitely not v1 schema\n", encoding="utf-8"
             )
@@ -550,7 +561,7 @@ class ProgressCliTests(unittest.TestCase):
             code, out, err = self._run_backfill(plan_dir, force=True)
 
             self.assertEqual(0, code, err)
-            entries = plans.read_progress_entries(plan_dir)
+            entries = plans_progress.read_progress_entries(plan_dir)
             self.assertEqual(2, len(entries))
 
     def test_backfill_force_preserves_existing_journal_when_replace_fails(
@@ -559,7 +570,7 @@ class ProgressCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             self._write_completed_plan(plan_dir, ("1", "2"))
-            progress_file = plans.progress_path(plan_dir)
+            progress_file = plans_progress.progress_path(plan_dir)
             progress_file.write_text("old journal contents\n", encoding="utf-8")
 
             with mock.patch(
@@ -586,10 +597,10 @@ class ProgressCliTests(unittest.TestCase):
 
             self.assertEqual(0, code, err)
             self.assertEqual("", err)
-            self.assertIn(plans.PROGRESS_SCHEMA_COMMENT, out)
+            self.assertIn(plans_progress.PROGRESS_SCHEMA_COMMENT, out)
             self.assertIn("## Session 1 — complete", out)
             self.assertIn("## Session 2 — complete", out)
-            self.assertFalse(plans.progress_path(plan_dir).exists())
+            self.assertFalse(plans_progress.progress_path(plan_dir).exists())
 
     def test_backfill_with_no_completed_sessions_writes_header_only(
         self,
@@ -607,9 +618,9 @@ class ProgressCliTests(unittest.TestCase):
             self.assertEqual(0, code, err)
             self.assertEqual(1, replace.call_count)
             self.assertIn("wrote 0 entries", out)
-            journal = plans.progress_path(plan_dir).read_text(encoding="utf-8")
-            self.assertEqual(plans.PROGRESS_HEADER, journal)
-            self.assertEqual((), plans.read_progress_entries(plan_dir))
+            journal = plans_progress.progress_path(plan_dir).read_text(encoding="utf-8")
+            self.assertEqual(plans_progress.PROGRESS_HEADER, journal)
+            self.assertEqual((), plans_progress.read_progress_entries(plan_dir))
 
     def test_progress_prints_existing_journal_to_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -622,7 +633,7 @@ class ProgressCliTests(unittest.TestCase):
             self.assertEqual(0, code, err)
             self.assertEqual("", err)
             self.assertEqual(
-                plans.progress_path(plan_dir).read_text(encoding="utf-8"),
+                plans_progress.progress_path(plan_dir).read_text(encoding="utf-8"),
                 out,
             )
 
@@ -689,7 +700,7 @@ class ProgressCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_plan(plan_dir, ("pending",))
-            plans.progress_path(plan_dir).write_text(
+            plans_progress.progress_path(plan_dir).write_text(
                 "# Progress Journal\n"
                 "<!-- agent-session-loop progress-journal v999 -->\n",
                 encoding="utf-8",
@@ -708,8 +719,8 @@ class ProgressCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             plan_dir.mkdir()
-            initial_entry = plans.ProgressEntry(
-                session_id=plans.parse_session_id("1"),
+            initial_entry = plans_models.ProgressEntry(
+                session_id=plans_session_ids.parse_session_id("1"),
                 status="complete",
                 completed_at="2026-06-19T15:00:00Z",
                 files_modified=("first.py",),
@@ -718,7 +729,7 @@ class ProgressCliTests(unittest.TestCase):
                 open_questions=(),
                 blockers=None,
             )
-            plans.append_progress_entry(plan_dir, initial_entry)
+            plans_progress.append_progress_entry(plan_dir, initial_entry)
 
             buffer = io.StringIO()
             stop = threading.Event()
@@ -744,8 +755,8 @@ class ProgressCliTests(unittest.TestCase):
             )
             thread.start()
             try:
-                second_entry = plans.ProgressEntry(
-                    session_id=plans.parse_session_id("2"),
+                second_entry = plans_models.ProgressEntry(
+                    session_id=plans_session_ids.parse_session_id("2"),
                     status="complete",
                     completed_at="2026-06-19T15:30:00Z",
                     files_modified=("second.py",),
@@ -754,7 +765,7 @@ class ProgressCliTests(unittest.TestCase):
                     open_questions=(),
                     blockers=None,
                 )
-                plans.append_progress_entry(plan_dir, second_entry)
+                plans_progress.append_progress_entry(plan_dir, second_entry)
                 self.assertTrue(
                     seen_new_entry.wait(timeout=2.0),
                     "follow_progress did not pick up the new entry in time",
@@ -810,8 +821,8 @@ class ProgressRepairHelperTests(unittest.TestCase):
         (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
         complete = set(complete_ids) if complete_ids is not None else set(session_ids)
         for session_id in session_ids:
-            filename = plans.session_id_to_filename(session_id)
-            label = plans.session_id_display_label(session_id)
+            filename = plans_session_ids.session_id_to_filename(session_id)
+            label = plans_session_ids.session_id_display_label(session_id)
             status = "complete" if session_id in complete else "pending"
             (plan_dir / filename).write_text(
                 "\n".join(
@@ -845,7 +856,7 @@ class ProgressRepairHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             self._write_completed_plan(plan_dir, ("1", "2"))
-            progress_file = plans.progress_path(plan_dir)
+            progress_file = plans_progress.progress_path(plan_dir)
             self.assertFalse(progress_file.exists())
 
             result = progress_repair.repair_progress_journal(plan_dir)
@@ -855,7 +866,7 @@ class ProgressRepairHelperTests(unittest.TestCase):
             self.assertEqual(2, result.entries_written)
             self.assertEqual(("1", "2"), result.completed_session_ids)
             self.assertFalse(result.journal_replaced)
-            entries = plans.read_progress_entries(plan_dir)
+            entries = plans_progress.read_progress_entries(plan_dir)
             self.assertEqual(
                 ["1", "2"],
                 [entry.session_id.value for entry in entries],
@@ -866,10 +877,10 @@ class ProgressRepairHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             self._write_completed_plan(plan_dir, ("1", "2"))
-            plans.write_progress_journal(plan_dir, ())
+            plans_progress.write_progress_journal(plan_dir, ())
             self.assertEqual(
-                plans.PROGRESS_HEADER,
-                plans.progress_path(plan_dir).read_text(encoding="utf-8"),
+                plans_progress.PROGRESS_HEADER,
+                plans_progress.progress_path(plan_dir).read_text(encoding="utf-8"),
             )
 
             result = progress_repair.repair_progress_journal(plan_dir)
@@ -881,7 +892,7 @@ class ProgressRepairHelperTests(unittest.TestCase):
                 ["1", "2"],
                 [
                     entry.session_id.value
-                    for entry in plans.read_progress_entries(plan_dir)
+                    for entry in plans_progress.read_progress_entries(plan_dir)
                 ],
             )
 
@@ -890,8 +901,8 @@ class ProgressRepairHelperTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             self._write_completed_plan(plan_dir, ("1", "2"))
             stale_only = (
-                plans.ProgressEntry(
-                    session_id=plans.parse_session_id("1"),
+                plans_models.ProgressEntry(
+                    session_id=plans_session_ids.parse_session_id("1"),
                     status="complete",
                     completed_at="2020-01-01T00:00:00Z",
                     files_modified=("stale.py",),
@@ -901,14 +912,14 @@ class ProgressRepairHelperTests(unittest.TestCase):
                     blockers=None,
                 ),
             )
-            plans.write_progress_journal(plan_dir, stale_only)
+            plans_progress.write_progress_journal(plan_dir, stale_only)
 
             result = progress_repair.repair_progress_journal(plan_dir)
 
             self.assertTrue(result.journal_replaced)
             self.assertEqual(2, result.entries_written)
             self.assertEqual(("1", "2"), result.completed_session_ids)
-            entries = plans.read_progress_entries(plan_dir)
+            entries = plans_progress.read_progress_entries(plan_dir)
             self.assertEqual(
                 ["1", "2"],
                 [entry.session_id.value for entry in entries],
@@ -924,7 +935,7 @@ class ProgressRepairHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             self._write_completed_plan(plan_dir, ("1",))
-            progress_file = plans.progress_path(plan_dir)
+            progress_file = plans_progress.progress_path(plan_dir)
             progress_file.write_text(
                 "# Progress Journal\n"
                 "<!-- agent-session-loop progress-journal v999 -->\n"
@@ -937,14 +948,14 @@ class ProgressRepairHelperTests(unittest.TestCase):
             self.assertTrue(result.journal_replaced)
             self.assertEqual(1, result.entries_written)
             self.assertIn(
-                plans.PROGRESS_SCHEMA_COMMENT,
+                plans_progress.PROGRESS_SCHEMA_COMMENT,
                 progress_file.read_text(encoding="utf-8"),
             )
             self.assertEqual(
                 ("1",),
                 tuple(
                     entry.session_id.value
-                    for entry in plans.read_progress_entries(plan_dir)
+                    for entry in plans_progress.read_progress_entries(plan_dir)
                 ),
             )
 
@@ -952,7 +963,7 @@ class ProgressRepairHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             self._write_completed_plan(plan_dir, ("1", "2"), complete_ids=())
-            progress_file = plans.progress_path(plan_dir)
+            progress_file = plans_progress.progress_path(plan_dir)
             self.assertFalse(progress_file.exists())
 
             result = progress_repair.repair_progress_journal(plan_dir)
@@ -961,10 +972,10 @@ class ProgressRepairHelperTests(unittest.TestCase):
             self.assertEqual((), result.completed_session_ids)
             self.assertFalse(result.journal_replaced)
             self.assertEqual(
-                plans.PROGRESS_HEADER,
+                plans_progress.PROGRESS_HEADER,
                 progress_file.read_text(encoding="utf-8"),
             )
-            self.assertEqual((), plans.read_progress_entries(plan_dir))
+            self.assertEqual((), plans_progress.read_progress_entries(plan_dir))
 
     def test_repair_uses_atomic_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -983,10 +994,10 @@ class ProgressRepairHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             self._write_completed_plan(plan_dir, ("1",))
-            snapshot = plans.inspect_plan(plan_dir)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
 
             with mock.patch(
-                "agent_session_loop.progress_repair.plans.inspect_plan"
+                "agent_session_loop.progress_repair.plans_snapshot.inspect_plan"
             ) as inspect:
                 result = progress_repair.repair_progress_journal(
                     plan_dir, snapshot=snapshot

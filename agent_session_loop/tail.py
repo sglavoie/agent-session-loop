@@ -12,7 +12,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import events, plans, state, workspaces
+from . import (
+    events,
+    plans_errors,
+    plans_files,
+    plans_session_ids,
+    plans_snapshot,
+    state,
+    workspaces,
+)
 from .formatting import (
     format_duration_seconds,
     format_turn_finished_message,
@@ -667,7 +675,7 @@ def _add_log_targets(
         path_value = payload.get(f"{stream_name}_path")
         if not isinstance(path_value, str) or not path_value:
             continue
-        path = plans.canonicalize_path(path_value)
+        path = plans_files.canonicalize_path(path_value)
         key = _target_key(path)
         targets.setdefault(
             key,
@@ -795,7 +803,7 @@ def _int_sort_key(value: Any) -> int:
 
 def _session_sort_key(value: Any) -> tuple[tuple[int, ...], str]:
     try:
-        parsed = plans.parse_session_id(value)
+        parsed = plans_session_ids.parse_session_id(value)
     except TypeError, ValueError:
         return ((sys.maxsize,), str(value or ""))
     return (parsed.sort_key, parsed.value)
@@ -1077,7 +1085,7 @@ class TailFollower:
             self._done_event.set()
 
     def _build_loop_from_eof(self) -> _TailFollowLoop:
-        snapshot = plans.inspect_plan(self._plan_dir)
+        snapshot = plans_snapshot.inspect_plan(self._plan_dir)
         plan_state = state.plan_state_dir(snapshot.plan_dir, self._state_dir)
         state_path = plan_state / events.STATE_FILE_NAME
         events_path = plan_state / events.EVENTS_FILE_NAME
@@ -1144,7 +1152,7 @@ def tail_plan(
     if lines <= 0:
         raise TailError("--lines must be a positive integer")
 
-    snapshot = plans.inspect_plan(plan_dir)
+    snapshot = plans_snapshot.inspect_plan(plan_dir)
     plan_state = state.plan_state_dir(snapshot.plan_dir, state_dir)
     state_path = plan_state / events.STATE_FILE_NAME
     events_path = plan_state / events.EVENTS_FILE_NAME
@@ -1194,7 +1202,7 @@ def tail_from_args(args: argparse.Namespace) -> int:
             lines=args.lines,
             follow=not args.no_follow,
         )
-    except (plans.PlanError, TailError, OSError) as error:
+    except (plans_errors.PlanError, TailError, OSError) as error:
         print(f"agent-session-loop tail: {error}", file=sys.stderr)
         return 1
     return 0

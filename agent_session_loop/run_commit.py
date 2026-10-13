@@ -67,7 +67,7 @@ Five invariants survive the move:
   one and left the tree dirty, is a named failure rather than a success.
 
 The module never imports the runner. Everything it needs is either a leaf
-module it reads at the owner — ``clock``, ``plans``, ``durability``,
+module it reads at the owner — ``clock``, the ``plans_*`` modules, ``durability``,
 ``process_tree`` — or a boundary that was extracted before it: the git shell in
 ``review_guard``, the harness selection in ``run_selection``, the workspace
 projection in ``run_prompts``, and the run's write handle in
@@ -94,7 +94,9 @@ from . import (
     config,
     durability,
     harnesses,
-    plans,
+    plans_files,
+    plans_payloads,
+    plans_session_ids,
     process_tree,
     review_guard,
     run_inputs,
@@ -153,8 +155,12 @@ def _commit_paths(
     if commit_index <= 0:
         raise RunError("commit_index must be a positive integer")
     if session_id is not None:
-        session_id = plans.parse_session_id(session_id).value
-    suffix = plans.session_path_label(session_id) if session_id is not None else "end"
+        session_id = plans_session_ids.parse_session_id(session_id).value
+    suffix = (
+        plans_payloads.session_path_label(session_id)
+        if session_id is not None
+        else "end"
+    )
     if repository_alias is not None:
         suffix = f"{suffix}-{run_inputs._repository_path_label(repository_alias)}"
     artifact_dir = run_dir / f"commit-{commit_index:04d}-{suffix}"
@@ -446,7 +452,7 @@ def _paused_work_commit_message(
     the harness failing (see :class:`_CommitGeneration`), and because a marking
     that says the work is *unverified* must read the same every time.
 
-    ``session_label`` is :func:`plans.session_label`'s rendering — ``"session
+    ``session_label`` is :func:`plans_payloads.session_label`'s rendering — ``"session
     3"`` — so the subject and the sentence that opens with it agree on what
     the session is called. ``commit_mode`` is the run's mode, or ``None`` for a
     repair child that owns its own commit; only ``--commit-at-end`` changes
@@ -697,7 +703,7 @@ def _run_asl_commit(
     staging_paths: Sequence[str] = (),
     generation: _CommitGeneration | None = None,
 ) -> dict[str, Any]:
-    canonical_cwd = plans.canonicalize_path(cwd)
+    canonical_cwd = plans_files.canonicalize_path(cwd)
     paths = _commit_paths(
         run_dir,
         commit_index=commit_index,
@@ -752,7 +758,7 @@ def _run_asl_commit(
         clean_after=clean_after,
     )
     session_identity = (
-        plans.session_identity_payload(session_id)
+        plans_payloads.session_identity_payload(session_id)
         if session_id is not None
         else {"session": None, "session_id": None}
     )
@@ -828,7 +834,7 @@ def _commit_started_payload(
         repository_alias=repository_alias,
     )
     session_identity = (
-        plans.session_identity_payload(session_id)
+        plans_payloads.session_identity_payload(session_id)
         if session_id is not None
         else {"session": None, "session_id": None}
     )

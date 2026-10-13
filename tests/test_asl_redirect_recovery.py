@@ -51,7 +51,7 @@ from typing import Any
 from agent_session_loop import (
     clock,
     conversations,
-    plans,
+    plans_snapshot,
     redirect_ack,
     redirect_recovery,
     redirect_store,
@@ -1411,7 +1411,7 @@ class RunLoopRecoveryTests(RecoveryTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.ctx = FakeRunContext(event_path=self.root / "events.jsonl")
-        self.snapshot = plans.inspect_plan(self.plan_dir)
+        self.snapshot = plans_snapshot.inspect_plan(self.plan_dir)
 
     def start_run(self, *, dry_run: bool = False) -> None:
         run_loop_control_redirects._reconcile_stranded_redirects(

@@ -35,7 +35,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict
 
-from . import contracts, plans, repository_evidence, responses
+from . import (
+    contracts,
+    plans_session_ids,
+    plans_snapshot,
+    repository_evidence,
+    responses,
+)
 from .baseline_cache import (
     BASELINE_RESULTS_FILENAME,
     BaselineCache,
@@ -47,7 +53,8 @@ from .baseline_cache import (
     repository_fingerprint,
 )
 from .contracts import CommandCheck, VerificationCheck, VerifyRecipe
-from .plans import PlanError, canonicalize_path
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
 from .verification import (
     CheckResult,
     VerificationContext,
@@ -200,7 +207,9 @@ def collect_baseline_checks(
             )
             if expectation in ("pass", "fail"):
                 collected.append((session_id, check))
-    collected.sort(key=lambda pair: (plans.parse_session_id(pair[0]), pair[1].name))
+    collected.sort(
+        key=lambda pair: (plans_session_ids.parse_session_id(pair[0]), pair[1].name)
+    )
     return collected
 
 
@@ -353,7 +362,7 @@ def run_baseline(
     canonical_dir = canonicalize_path(plan_dir)
     verification_context = context or verification_context_from_plan(plan_dir, cwd)
     canonical_cwd = verification_context.root
-    snapshot = plans.inspect_plan(canonical_dir)
+    snapshot = plans_snapshot.inspect_plan(canonical_dir)
 
     contracts_by_session: dict[str, Any] = {}
     for session in snapshot.sessions:

@@ -12,7 +12,16 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import cli_trace, config, events, plans, state, workbench
+from agent_session_loop import (
+    cli_trace,
+    config,
+    events,
+    plans_files,
+    plans_metadata,
+    plans_registry,
+    state,
+    workbench,
+)
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
@@ -31,7 +40,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
     def _seed_launchable_plan(self, tmp_path: Path) -> Path:
         plan_dir = tmp_path / "plan"
         write_plan(plan_dir, ("pending", "pending"))
-        return plans.canonicalize_path(plan_dir)
+        return plans_files.canonicalize_path(plan_dir)
 
     def test_build_launch_argv_maps_profile_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -159,9 +168,9 @@ class WorkbenchLaunchTests(unittest.TestCase):
             init_multi_repo_workspace(workspace_root, specs)
             plan_dir = tmp_path / "plan"
             write_multi_repo_plan(plan_dir, ("pending",), specs=specs)
-            registry = plans.read_repository_registry(plan_dir)
+            registry = plans_registry.read_repository_registry(plan_dir)
             assert registry is not None
-            plans.save_workspace_plan_metadata(
+            plans_metadata.save_workspace_plan_metadata(
                 plan_dir, workspace_root, registry.digest
             )
 
@@ -193,9 +202,9 @@ class WorkbenchLaunchTests(unittest.TestCase):
             repositories = init_multi_repo_workspace(workspace_root, specs)
             plan_dir = tmp_path / "plan"
             write_multi_repo_plan(plan_dir, ("pending",), specs=specs)
-            registry = plans.read_repository_registry(plan_dir)
+            registry = plans_registry.read_repository_registry(plan_dir)
             assert registry is not None
-            plans.save_workspace_plan_metadata(
+            plans_metadata.save_workspace_plan_metadata(
                 plan_dir, workspace_root, registry.digest
             )
 

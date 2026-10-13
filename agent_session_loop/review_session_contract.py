@@ -56,7 +56,16 @@ from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any
 
-from . import contracts, plans, review, verification, verification_transitions
+from . import (
+    contracts,
+    plans_discovery,
+    plans_errors,
+    plans_handoff,
+    plans_session_ids,
+    review,
+    verification,
+    verification_transitions,
+)
 
 
 def contains_review_session_marker(text: str) -> bool:
@@ -315,7 +324,7 @@ def _broad_review_verification_checks(plan_dir: Path) -> list[dict[str, Any]]:
     sessions cannot collide on a bare name.
     """
     collected: dict[tuple[Any, ...], dict[str, Any]] = {}
-    for session in plans.discover_session_files(plan_dir):
+    for session in plans_discovery.discover_session_files(plan_dir):
         if is_generated_review_session_file(session.path):
             continue
         contract = contracts.read_completion_contract(plan_dir, session.session_id)
@@ -434,7 +443,7 @@ def _generated_review_gate_payloads(
 
 
 def _generated_review_contract_payload(
-    session_id: plans.SessionId,
+    session_id: plans_session_ids.SessionId,
     *,
     plan_dir: Path,
     repository_aliases: Sequence[str] = (),
@@ -507,7 +516,7 @@ def _authenticated_generated_review_contract(
 
 
 def _generated_review_contract_section(
-    session_id: plans.SessionId,
+    session_id: plans_session_ids.SessionId,
     *,
     plan_dir: Path,
     repository_aliases: Sequence[str] = (),
@@ -559,7 +568,7 @@ def _generated_review_contract_section(
 
 def refreshed_generated_review_contract(
     text: str,
-    session_id: plans.SessionId,
+    session_id: plans_session_ids.SessionId,
     *,
     plan_dir: Path,
     repository_aliases: Sequence[str] = (),
@@ -584,9 +593,9 @@ def refreshed_generated_review_contract(
         )
 
     contract_at = refreshed.find(contracts.COMPLETION_CONTRACT_HEADING)
-    handoff_at = refreshed.find(plans.HANDOFF_HEADING, contract_at + 1)
+    handoff_at = refreshed.find(plans_handoff.HANDOFF_HEADING, contract_at + 1)
     if contract_at < 0 or handoff_at < 0:
-        raise plans.PlanError(
+        raise plans_errors.PlanError(
             "generated review is missing its Completion Contract or Handoff"
         )
     section = _generated_review_contract_section(

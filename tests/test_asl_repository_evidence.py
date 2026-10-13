@@ -17,7 +17,8 @@ from agent_session_loop import (
     events,
     external_write_evidence,
     handoff_guards,
-    plans,
+    plans_registry,
+    plans_session_scope,
     repository_evidence,
     review_guard,
     workspace_evidence,
@@ -761,7 +762,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         init_multi_repo_workspace(self.workspace_root, specs)
         self.plan_dir = root / "plan"
         write_multi_repo_plan(self.plan_dir, ("pending",), specs=specs)
-        registry = plans.read_repository_registry(self.plan_dir)
+        registry = plans_registry.read_repository_registry(self.plan_dir)
         assert registry is not None
         self.workspace = workspaces.resolve_workspace(self.workspace_root, registry)
 
@@ -785,7 +786,9 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         }
         evidence = workspace_evidence._workspace_write_guard_evidence(
             workspace=self.workspace,
-            scope=plans.SessionScope(reads=("SVC", "OAK"), writes=("SVC",)),
+            scope=plans_session_scope.SessionScope(
+                reads=("SVC", "OAK"), writes=("SVC",)
+            ),
             comparison=comparison,
             exclude=(),
             include_ignored=False,
@@ -816,7 +819,9 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         )
         evidence = workspace_evidence._workspace_write_guard_evidence(
             workspace=self.workspace,
-            scope=plans.SessionScope(reads=("SVC", "OAK"), writes=("SVC",)),
+            scope=plans_session_scope.SessionScope(
+                reads=("SVC", "OAK"), writes=("SVC",)
+            ),
             comparison={
                 "changed": OrderedDict(
                     (
@@ -854,7 +859,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
     def test_guard_fails_closed_for_unavailable_evidence(self) -> None:
         evidence = workspace_evidence._workspace_write_guard_evidence(
             workspace=self.workspace,
-            scope=plans.SessionScope(reads=("SVC",), writes=("SVC",)),
+            scope=plans_session_scope.SessionScope(reads=("SVC",), writes=("SVC",)),
             comparison={
                 "changed": {},
                 "added": [],
@@ -886,7 +891,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         # only thing that can speak for a write outside them is the path-level
         # verdict.
         clean = {"changed": {}, "added": [], "removed": [], "unavailable": {}}
-        scope = plans.SessionScope(reads=("SVC",), writes=("SVC",))
+        scope = plans_session_scope.SessionScope(reads=("SVC",), writes=("SVC",))
         self.assertTrue(
             workspace_evidence._workspace_write_guard_evidence(
                 workspace=self.workspace,
@@ -983,7 +988,9 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         )
         return workspace_evidence._workspace_write_guard_evidence(
             workspace=self.workspace,
-            scope=plans.SessionScope(reads=("SVC", "OAK"), writes=("SVC",)),
+            scope=plans_session_scope.SessionScope(
+                reads=("SVC", "OAK"), writes=("SVC",)
+            ),
             comparison=repository_evidence.compare_workspace_snapshots(before, after),
             exclude=(),
             include_ignored=False,

@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import unittest
 
-from agent_session_loop import events, plans, preflight_environment
+from agent_session_loop import (
+    events,
+    plans_content_hash,
+    plans_files,
+    plans_metadata,
+    plans_readiness,
+    plans_snapshot,
+    preflight_environment,
+)
 from tests.support_asl_run_readiness import RunReadinessGateFixture
 
 
@@ -17,22 +25,22 @@ class RunReadinessLifecycleTests(RunReadinessGateFixture):
         self._write_plan(("pending",), readiness="loop-ready")
         previous = self.tmp_path / "previous-repo"
         previous.mkdir()
-        plans.save_plan_metadata(self.plan_dir, previous)
+        plans_metadata.save_plan_metadata(self.plan_dir, previous)
 
         completed, payload = self._run()
 
         self.assertEqual(1, completed.returncode, completed.stderr)
         self.assertFalse(payload["ok"])
         self.assertEqual("workspace-error", payload["reason"])
-        metadata = plans.read_readiness_metadata(self.plan_dir)
+        metadata = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertEqual("loop-ready", metadata.state)
         self.assertEqual(
-            plans.stable_readiness_sha256(self.plan_dir),
+            plans_content_hash.stable_readiness_sha256(self.plan_dir),
             metadata.readiness_sha256,
         )
         self.assertEqual(
-            str(plans.canonicalize_path(previous)),
-            plans.load_plan_metadata(self.plan_dir).cwd,
+            str(plans_files.canonicalize_path(previous)),
+            plans_metadata.load_plan_metadata(self.plan_dir).cwd,
         )
 
     def test_lifecycle_returns_to_loop_ready_when_max_sessions_leaves_pending(
@@ -46,10 +54,10 @@ class RunReadinessLifecycleTests(RunReadinessGateFixture):
         self.assertTrue(payload["ok"])
         self.assertEqual("loop-ready", payload["readiness_state_initial"])
         self.assertEqual("loop-ready", payload["readiness_state_final"])
-        metadata = plans.read_readiness_metadata(self.plan_dir)
+        metadata = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertEqual("loop-ready", metadata.state)
         self.assertEqual(
-            plans.stable_readiness_sha256(self.plan_dir),
+            plans_content_hash.stable_readiness_sha256(self.plan_dir),
             metadata.readiness_sha256,
         )
 
@@ -98,7 +106,7 @@ class RunReadinessLifecycleTests(RunReadinessGateFixture):
         # rewrote underneath itself.
         self.assertEqual(
             "pending",
-            plans.inspect_plan(self.plan_dir).status_by_id["1"],
+            plans_snapshot.inspect_plan(self.plan_dir).status_by_id["1"],
         )
 
     def test_timeout_that_tampers_with_another_packet_pauses_on_the_guard(self) -> None:
@@ -194,10 +202,10 @@ class RunReadinessLifecycleTests(RunReadinessGateFixture):
         self.assertEqual("loop-ready", payload["readiness_state_final"])
         self.assertIsNone(payload.get("readiness_state_refresh_error"))
         self.assertIsNotNone(payload.get("readiness_state_refreshed_at"))
-        refreshed_metadata = plans.read_readiness_metadata(self.plan_dir)
+        refreshed_metadata = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertEqual("loop-ready", refreshed_metadata.state)
         self.assertEqual(
-            plans.stable_readiness_sha256(self.plan_dir),
+            plans_content_hash.stable_readiness_sha256(self.plan_dir),
             refreshed_metadata.readiness_sha256,
         )
 
@@ -210,7 +218,7 @@ class RunReadinessLifecycleTests(RunReadinessGateFixture):
         self.assertTrue(payload["paused"])
         self.assertEqual("loop-ready", payload["readiness_state_initial"])
         self.assertEqual("reviewed", payload["readiness_state_final"])
-        metadata = plans.read_readiness_metadata(self.plan_dir)
+        metadata = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertEqual("reviewed", metadata.state)
 
 

@@ -68,7 +68,15 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
-from . import plans, repository_evidence, run_selection, verification, workspaces
+from . import (
+    plans_models,
+    plans_payloads,
+    plans_session_scope,
+    repository_evidence,
+    run_selection,
+    verification,
+    workspaces,
+)
 from .git_subprocess import run_git_or_raise
 from .run_errors import RunError
 
@@ -104,7 +112,7 @@ class WorkspaceEvidenceProbe(Protocol):
         self,
         *,
         workspace: workspaces.ResolvedWorkspace,
-        scope: plans.SessionScope,
+        scope: plans_session_scope.SessionScope,
         comparison: Mapping[str, Any],
         exclude: tuple[str, ...],
         include_ignored: bool,
@@ -452,7 +460,7 @@ def _retained_turn_content_drift(
     record: Mapping[str, Any],
     *,
     workspace: workspaces.ResolvedWorkspace,
-    scope: plans.SessionScope,
+    scope: plans_session_scope.SessionScope,
     plan_dir: Path,
     workspace_evidence: WorkspaceEvidenceProbe,
 ) -> _RetainedContentEvidence:
@@ -548,7 +556,7 @@ def _repair_commit_preflight(
     cwd: Path,
     *,
     verification_context: verification.VerificationContext,
-    session_scope: plans.SessionScope | None,
+    session_scope: plans_session_scope.SessionScope | None,
     workspace_evidence: WorkspaceEvidenceProbe,
     plan_dir: Path | None = None,
     retained_scope_repair: Mapping[str, Any] | None = None,
@@ -718,12 +726,12 @@ def _repair_commit_preflight(
 
 def _validate_commit_at_end_scope(
     *,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     max_sessions: int | None,
 ) -> None:
     if max_sessions is None:
         return
-    pending_count = plans.status_counts(snapshot)["pending"]
+    pending_count = plans_payloads.status_counts(snapshot)["pending"]
     if max_sessions < pending_count:
         raise RunError(
             "--commit-at-end cannot be combined with --max-sessions when "

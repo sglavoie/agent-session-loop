@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent_session_loop import (
-    mailbox_cli,
-)
+from agent_session_loop import mailbox_cli_constants
 from tests.asl_docs_support import read_repo_text
 
 #: The ASL operator guide moved out of the repository README; it carries the
@@ -129,9 +127,9 @@ class SupervisionDocsTests(unittest.TestCase):
                 msg=f"asl skill omits LOST marker: {marker!r}",
             )
         for token in (
-            mailbox_cli.SUPERVISE_TOKEN_LOST,
-            mailbox_cli.SUPERVISE_LOST_HELPER_EXITED,
-            mailbox_cli.SUPERVISE_LOST_HELPER_NEVER_STARTED,
+            mailbox_cli_constants.SUPERVISE_TOKEN_LOST,
+            mailbox_cli_constants.SUPERVISE_LOST_HELPER_EXITED,
+            mailbox_cli_constants.SUPERVISE_LOST_HELPER_NEVER_STARTED,
         ):
             self.assertIn(
                 token,
@@ -139,7 +137,8 @@ class SupervisionDocsTests(unittest.TestCase):
                 msg=f"asl skill omits supervise constant: {token!r}",
             )
         self.assertIn(
-            f"{int(mailbox_cli.SUPERVISE_LIVENESS_GRACE_SECONDS)}-second grace",
+            f"{int(mailbox_cli_constants.SUPERVISE_LIVENESS_GRACE_SECONDS)}"
+            "-second grace",
             normalized,
         )
 

@@ -12,7 +12,11 @@ from pathlib import Path
 from agent_session_loop import (
     commit_message,
     events,
-    plans,
+    plans_content_hash,
+    plans_files,
+    plans_metadata,
+    plans_models,
+    plans_readiness,
     progress_repair,
     run_selection,
 )
@@ -57,7 +61,7 @@ class CommitModeTests(FakeHarnessIntegrationBase):
                 int(git_stdout(repo_dir, "rev-list", "--count", "HEAD")),
             )
 
-            expected_cwd = str(plans.canonicalize_path(repo_dir))
+            expected_cwd = str(plans_files.canonicalize_path(repo_dir))
             commit_records = read_jsonl(commit_log)
             self.assertEqual(2, len(commit_records))
             for record in commit_records:
@@ -318,15 +322,17 @@ class CommitModeTests(FakeHarnessIntegrationBase):
                 check=True,
             )
             progress_repair.repair_progress_journal(plan_dir)
-            plans.write_readiness_metadata(
+            plans_readiness.write_readiness_metadata(
                 plan_dir,
-                plans.ReadinessMetadata(
+                plans_models.ReadinessMetadata(
                     state="loop-ready",
-                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                        plan_dir
+                    ),
                     checked_at="2026-08-08T00:00:00Z",
                 ),
             )
-            plans.save_plan_metadata(plan_dir, plan_dir)
+            plans_metadata.save_plan_metadata(plan_dir, plan_dir)
             subprocess.run(
                 ["git", "add", "-A"], cwd=plan_dir, capture_output=True, check=True
             )

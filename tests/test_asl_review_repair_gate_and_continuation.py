@@ -7,7 +7,9 @@ from unittest import mock
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_errors,
+    plans_progress,
+    plans_snapshot,
     progress_repair,
     readiness_gate,
     review,
@@ -32,7 +34,7 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
         with mock.patch.object(
             review_repair.PlanTransaction,
             "commit",
-            side_effect=plans.PlanError("boom"),
+            side_effect=plans_errors.PlanError("boom"),
         ):
             result = self._materialize()
 
@@ -181,7 +183,7 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
             ],
         )
         self._write_plan([finding], session_one_contract=contract_one)
-        journal = plans.progress_path(self.plan_dir)
+        journal = plans_progress.progress_path(self.plan_dir)
         self.assertFalse(journal.exists())
 
         result = self._materialize(cwd=repo)
@@ -221,7 +223,7 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
         self._write_plan(findings, session_one_contract=contract_one)
 
         authorized = readiness_gate._reopened_plan_gate_payload(
-            plans.inspect_plan(self.plan_dir),
+            plans_snapshot.inspect_plan(self.plan_dir),
             max_pending_sessions=1,
             repair_session_ids=[],
         )
@@ -238,7 +240,7 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
         self.assertEqual(["2.1", "2.2"], repair_session_ids)
 
         regated = readiness_gate._reopened_plan_gate_payload(
-            plans.inspect_plan(self.plan_dir),
+            plans_snapshot.inspect_plan(self.plan_dir),
             max_pending_sessions=1,
             repair_session_ids=repair_session_ids,
         )
@@ -255,7 +257,7 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
         # Same verdict shape from both routes, so the trigger is the only thing
         # that tells an audit which growth a gate authorized.
         self._write_plan([self._finding("F1", "runner")])
-        snapshot = plans.inspect_plan(self.plan_dir)
+        snapshot = plans_snapshot.inspect_plan(self.plan_dir)
 
         repairs = readiness_gate._reopened_plan_gate_payload(
             snapshot, max_pending_sessions=1, repair_session_ids=["2.1"]
@@ -290,7 +292,7 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
         )
 
         disabled = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
 
         self.assertEqual("materialize-repairs", disabled.action)
@@ -303,7 +305,7 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
         self.assertIsNotNone(disabled.current_review_artifact_sha256)
 
         resumed = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir),
+            plans_snapshot.inspect_plan(self.plan_dir),
             event_path,
             max_review_fix_cycles=1,
         )
@@ -329,7 +331,7 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
             },
         )
         exhausted = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
         self.assertEqual(1, exhausted.historical_materializations)
         self.assertEqual(2, exhausted.minimum_required_cap)
@@ -354,7 +356,7 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
         )
 
         malformed = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
         self.assertFalse(malformed.eligible)
         self.assertEqual("artifact-invalid", malformed.blocker)
@@ -367,7 +369,7 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
             encoding="utf-8",
         )
         corrected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
         self.assertTrue(corrected.artifact_valid)
         self.assertTrue(corrected.eligible)
@@ -390,7 +392,7 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
         )
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir),
+            plans_snapshot.inspect_plan(self.plan_dir),
             event_path,
             max_review_fix_cycles=1,
         )

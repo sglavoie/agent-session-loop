@@ -9,7 +9,10 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
-    plans,
+    plans_content_hash,
+    plans_models,
+    plans_readiness,
+    plans_snapshot,
     preflight,
     preflight_models,
 )
@@ -46,26 +49,27 @@ class PreflightResumeTests(unittest.TestCase):
     def _rewrite_readiness(
         self,
         *,
-        state: plans.ReadinessState = "loop-ready",
+        state: plans_models.ReadinessState = "loop-ready",
         sha: str | None = None,
     ) -> None:
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state=state,
-                readiness_sha256=sha or plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=sha
+                or plans_content_hash.stable_readiness_sha256(self.plan_dir),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
 
     def _resume(self, **kwargs: Any) -> preflight_models.PreflightReport | None:
-        kwargs.setdefault("snapshot", plans.inspect_plan(self.plan_dir))
+        kwargs.setdefault("snapshot", plans_snapshot.inspect_plan(self.plan_dir))
         kwargs.setdefault("cwd", self.repo_dir)
         kwargs.setdefault("state_dir", self.xdg_state)
         return preflight.run_resume_preflight(self.plan_dir, **kwargs)
 
     def _unhashed(self, **kwargs: Any) -> tuple[preflight_models.PreflightFinding, ...]:
-        kwargs.setdefault("snapshot", plans.inspect_plan(self.plan_dir))
+        kwargs.setdefault("snapshot", plans_snapshot.inspect_plan(self.plan_dir))
         kwargs.setdefault("cwd", self.repo_dir)
         return preflight.run_unhashed_state_checks(self.plan_dir, **kwargs)
 
@@ -114,7 +118,7 @@ class PreflightResumeTests(unittest.TestCase):
         )
         self.assertEqual({}, report.contracts_by_session)
         self.assertEqual(
-            plans.stable_readiness_sha256(self.plan_dir),
+            plans_content_hash.stable_readiness_sha256(self.plan_dir),
             report.expected_readiness_sha256,
         )
         self.assertEqual("loop-ready", report.readiness.state)

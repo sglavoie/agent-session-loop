@@ -40,7 +40,10 @@ from unittest import mock
 from agent_session_loop import (
     events,
     mailbox_vocabulary,
-    plans,
+    plans_models,
+    plans_payloads,
+    plans_progress,
+    plans_snapshot,
     qna,
     review_guard,
     run_loop_context,
@@ -110,12 +113,12 @@ class FakeRunContext:
         self.event_path = event_path
         self.payload: dict[str, Any] = {}
         self.persistence = RecordingPersistence()
-        self.plan_cache = plans.PlanSnapshotCache()
+        self.plan_cache = plans_snapshot.PlanSnapshotCache()
         self.verification_context = FakeVerificationContext()
-        self.final_snapshots: list[plans.PlanSnapshot] = []
+        self.final_snapshots: list[plans_models.PlanSnapshot] = []
         self.pauses: list[dict[str, Any]] = []
 
-    def record_final_snapshot(self, snapshot: plans.PlanSnapshot) -> None:
+    def record_final_snapshot(self, snapshot: plans_models.PlanSnapshot) -> None:
         self.final_snapshots.append(snapshot)
 
     def pause(
@@ -153,9 +156,11 @@ class PreparationTestCase(unittest.TestCase):
         self.event_path = self.run_dir / events.EVENTS_FILE_NAME
         self.ctx = FakeRunContext(run_dir=self.run_dir, event_path=self.event_path)
 
-    def snapshot(self, statuses: tuple[str, ...] = ("pending",)) -> plans.PlanSnapshot:
+    def snapshot(
+        self, statuses: tuple[str, ...] = ("pending",)
+    ) -> plans_models.PlanSnapshot:
         write_plan(self.plan_dir, statuses)
-        return plans.inspect_plan(self.plan_dir)
+        return plans_snapshot.inspect_plan(self.plan_dir)
 
     def args(self, **overrides: Any) -> argparse.Namespace:
         values: dict[str, Any] = {
@@ -175,9 +180,9 @@ class PreparationTestCase(unittest.TestCase):
             is_review_session=review,
             is_repair_session=repair,
             session_kind=(
-                plans.SESSION_KIND_REVIEW
+                plans_payloads.SESSION_KIND_REVIEW
                 if review
-                else plans.SESSION_KIND_IMPLEMENTATION
+                else plans_payloads.SESSION_KIND_IMPLEMENTATION
             ),
         )
 
@@ -350,7 +355,9 @@ class ClassificationTests(PreparationTestCase):
 
         self.assertFalse(result.is_review_session)
         self.assertFalse(result.is_repair_session)
-        self.assertEqual(plans.SESSION_KIND_IMPLEMENTATION, result.session_kind)
+        self.assertEqual(
+            plans_payloads.SESSION_KIND_IMPLEMENTATION, result.session_kind
+        )
 
     def test_a_generated_review_session_is_review_work(self) -> None:
         snapshot = self.snapshot()
@@ -363,7 +370,7 @@ class ClassificationTests(PreparationTestCase):
             result = turn_preparation.classify_session(path)
 
         self.assertTrue(result.is_review_session)
-        self.assertEqual(plans.SESSION_KIND_REVIEW, result.session_kind)
+        self.assertEqual(plans_payloads.SESSION_KIND_REVIEW, result.session_kind)
 
     def test_a_generated_repair_child_is_still_implementation_work(self) -> None:
         snapshot = self.snapshot()
@@ -377,7 +384,7 @@ class ClassificationTests(PreparationTestCase):
 
         self.assertTrue(result.is_repair_session)
         self.assertEqual(
-            plans.SESSION_KIND_IMPLEMENTATION,
+            plans_payloads.SESSION_KIND_IMPLEMENTATION,
             result.session_kind,
             "a review authored the child, but the child does implementation "
             "work and must not be counted as a review turn",
@@ -431,7 +438,7 @@ class ReviewPreparationTests(PreparationTestCase):
     def test_a_refreshed_contract_forces_a_fresh_plan_image(self) -> None:
         snapshot = self.snapshot()
         session = snapshot.sessions[0]
-        refreshed = plans.inspect_plan(self.plan_dir)
+        refreshed = plans_snapshot.inspect_plan(self.plan_dir)
         with (
             mock.patch.object(
                 turn_preparation.review_session_contract,
@@ -531,7 +538,9 @@ class PacketInputTests(PreparationTestCase):
         self.assertFalse(self.collect(snapshot=snapshot).has_progress)
 
         (self.plan_dir / "session-1.expand.md").write_text("# x\n", encoding="utf-8")
-        (self.plan_dir / plans.PROGRESS_FILE_NAME).write_text("# p\n", encoding="utf-8")
+        (self.plan_dir / plans_progress.PROGRESS_FILE_NAME).write_text(
+            "# p\n", encoding="utf-8"
+        )
 
         inputs = self.collect(snapshot=snapshot)
         self.assertTrue(inputs.has_expansion)

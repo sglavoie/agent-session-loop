@@ -4,11 +4,7 @@ Split from tests/test_asl_core.py."""
 
 from __future__ import annotations
 
-from agent_session_loop import (
-    authoring,
-    contracts,
-    plans,
-)
+from agent_session_loop import authoring, contracts, plans_errors, plans_session_ids
 from tests.asl_core_support import ParserAndStateTestsBase
 
 
@@ -30,7 +26,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             ]
         )
 
-        with self.assertRaisesRegex(plans.PlanError, "fenced code block"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "fenced code block"):
             contracts.parse_completion_contract(text, session_id="1")
 
     def test_parse_completion_contract_rejects_non_json_fence_language(self) -> None:
@@ -52,7 +48,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             ]
         )
 
-        with self.assertRaisesRegex(plans.PlanError, "json"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "json"):
             contracts.parse_completion_contract(text, session_id="1")
 
     def test_parse_completion_contract_validates_session_id_field(self) -> None:
@@ -77,7 +73,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             ]
         )
 
-        with self.assertRaisesRegex(plans.PlanError, "expected '2'"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "expected '2'"):
             contracts.parse_completion_contract(text, session_id="2")
 
     def test_parse_completion_contract_requires_non_empty_checks_list(self) -> None:
@@ -99,7 +95,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             ]
         )
 
-        with self.assertRaisesRegex(plans.PlanError, "non-empty list"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "non-empty list"):
             contracts.parse_completion_contract(text, session_id="1")
 
     def test_parse_completion_contract_rejects_unknown_check_type(self) -> None:
@@ -121,7 +117,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             ]
         )
 
-        with self.assertRaisesRegex(plans.PlanError, "'type' must be one of"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "'type' must be one of"):
             contracts.parse_completion_contract(text, session_id="1")
 
     def test_parse_completion_contract_rejects_an_absence_gate(self) -> None:
@@ -146,7 +142,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             ]
         )
 
-        with self.assertRaises(plans.PlanError) as caught:
+        with self.assertRaises(plans_errors.PlanError) as caught:
             contracts.parse_completion_contract(text, session_id="1")
 
         message = str(caught.exception)
@@ -182,7 +178,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             ]
         )
 
-        with self.assertRaises(plans.PlanError) as caught:
+        with self.assertRaises(plans_errors.PlanError) as caught:
             contracts.parse_completion_contract(text, session_id="1")
 
         self.assertIn("'generated_gate'", str(caught.exception))
@@ -291,7 +287,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                         "- **Status**: pending",
                     ]
                 )
-                with self.assertRaisesRegex(plans.PlanError, pattern):
+                with self.assertRaisesRegex(plans_errors.PlanError, pattern):
                     contracts.parse_completion_contract(text, session_id="1")
 
     def test_parse_completion_contract_command_check_defaults_and_cwd(self) -> None:
@@ -354,10 +350,10 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                     },
                 ]
             },
-            session_id=plans.parse_session_id("1"),
+            session_id=plans_session_ids.parse_session_id("1"),
         )
         contract = contracts.CompletionContract(
-            session_id=plans.parse_session_id("1"),
+            session_id=plans_session_ids.parse_session_id("1"),
             done_when=("done",),
             verify=recipe,
         )
@@ -372,7 +368,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
         self.assertEqual(2, rendered.count('"review_replay": true'))
 
     def test_completion_contract_rejects_invalid_review_replay(self) -> None:
-        with self.assertRaisesRegex(plans.PlanError, "review_replay.*boolean"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "review_replay.*boolean"):
             contracts._parse_verify_payload(
                 {
                     "checks": [
@@ -383,11 +379,13 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                         }
                     ]
                 },
-                session_id=plans.parse_session_id("1"),
+                session_id=plans_session_ids.parse_session_id("1"),
             )
 
     def test_completion_contract_rejects_review_replay_on_diagnostic(self) -> None:
-        with self.assertRaisesRegex(plans.PlanError, "diagnostic.*on_failure_of"):
+        with self.assertRaisesRegex(
+            plans_errors.PlanError, "diagnostic.*on_failure_of"
+        ):
             contracts._parse_verify_payload(
                 {
                     "checks": [
@@ -405,7 +403,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                         },
                     ]
                 },
-                session_id=plans.parse_session_id("1"),
+                session_id=plans_session_ids.parse_session_id("1"),
             )
 
     def test_parse_completion_contract_validates_file_exists_check(self) -> None:
@@ -446,7 +444,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                         "- **Status**: pending",
                     ]
                 )
-                with self.assertRaisesRegex(plans.PlanError, pattern):
+                with self.assertRaisesRegex(plans_errors.PlanError, pattern):
                     contracts.parse_completion_contract(text, session_id="1")
 
     def test_parse_completion_contract_validates_regex_in_file_check(self) -> None:
@@ -487,5 +485,5 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                         "- **Status**: pending",
                     ]
                 )
-                with self.assertRaisesRegex(plans.PlanError, pattern):
+                with self.assertRaisesRegex(plans_errors.PlanError, pattern):
                     contracts.parse_completion_contract(text, session_id="1")

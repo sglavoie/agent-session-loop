@@ -4,10 +4,7 @@ import json
 import unittest
 from unittest import mock
 
-from agent_session_loop import (
-    plans,
-    review_repair,
-)
+from agent_session_loop import plans_errors, review_repair
 from tests.review_repair_support import (
     PublicationWindowFixtures,
     _SimulatedCrash,
@@ -95,7 +92,7 @@ class ReviewRepairPublicationWindowTests(PublicationWindowFixtures, unittest.Tes
         with mock.patch.object(
             review_repair.PlanTransaction,
             "commit",
-            side_effect=plans.PlanError("injected commit failure"),
+            side_effect=plans_errors.PlanError("injected commit failure"),
         ):
             result = self._materialize()
 

@@ -92,7 +92,13 @@ from . import (
     mailbox_cursors,
     mailbox_models,
     mailbox_vocabulary,
-    plans,
+    plans_content_hash,
+    plans_errors,
+    plans_handoff,
+    plans_models,
+    plans_payloads,
+    plans_progress,
+    plans_snapshot,
     redirect_continuation,
     repository_evidence,
     repository_intent,
@@ -171,7 +177,7 @@ def session_status_reverter(
     """
 
     def revert(
-        snapshot: plans.PlanSnapshot,
+        snapshot: plans_models.PlanSnapshot,
         session_id: str,
         *,
         failure_note: str,
@@ -188,7 +194,7 @@ def session_status_reverter(
 
 
 def _session_path_in_snapshot(
-    snapshot: plans.PlanSnapshot, session_id: str
+    snapshot: plans_models.PlanSnapshot, session_id: str
 ) -> Path | None:
     for session in snapshot.sessions:
         if session.id == session_id:
@@ -197,7 +203,7 @@ def _session_path_in_snapshot(
 
 
 def _append_progress_entry(
-    after: plans.PlanSnapshot,
+    after: plans_models.PlanSnapshot,
     session_id: str,
     completed_at: str,
 ) -> bool:
@@ -212,15 +218,17 @@ def _append_progress_entry(
         None,
     )
     if session_status is None:
-        raise plans.PlanError(f"session {session_id!r} not found in plan snapshot")
-    handoff = plans.read_session_handoff(session_status.session)
+        raise plans_errors.PlanError(
+            f"session {session_id!r} not found in plan snapshot"
+        )
+    handoff = plans_handoff.read_session_handoff(session_status.session)
     files_modified: tuple[str, ...] = ()
     if handoff.files_modified:
         inline = handoff.files_modified[0]
         files_modified = tuple(
             part.strip() for part in inline.split(",") if part.strip()
         )
-    entry = plans.ProgressEntry(
+    entry = plans_models.ProgressEntry(
         session_id=handoff.session_id,
         status=handoff.status,
         completed_at=completed_at,
@@ -230,19 +238,19 @@ def _append_progress_entry(
         open_questions=handoff.open_questions,
         blockers=handoff.blockers,
     )
-    existing = plans.read_progress_entries(after.plan_dir)
+    existing = plans_progress.read_progress_entries(after.plan_dir)
     if (
         existing
         and existing[-1].session_id == entry.session_id
         and existing[-1].completed_at == entry.completed_at
     ):
         return False
-    plans.append_progress_entry(after.plan_dir, entry)
+    plans_progress.append_progress_entry(after.plan_dir, entry)
     return True
 
 
 def _revert_session_status_to_pending(
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     session_id: str,
     *,
     failure_note: str,
@@ -265,7 +273,7 @@ def _revert_session_status_to_pending(
     lines = text.splitlines(keepends=False)
     handoff_index: int | None = None
     for index in range(len(lines) - 1, -1, -1):
-        if lines[index].strip() == plans.HANDOFF_HEADING:
+        if lines[index].strip() == plans_handoff.HANDOFF_HEADING:
             handoff_index = index
             break
     if handoff_index is None:
@@ -277,9 +285,9 @@ def _revert_session_status_to_pending(
             break
     from_status: str | None = None
     for index in range(handoff_index + 1, section_end):
-        if lines[index].startswith(plans.STATUS_PREFIX):
-            from_status = lines[index][len(plans.STATUS_PREFIX) :].strip()
-            lines[index] = f"{plans.STATUS_PREFIX} pending"
+        if lines[index].startswith(plans_handoff.STATUS_PREFIX):
+            from_status = lines[index][len(plans_handoff.STATUS_PREFIX) :].strip()
+            lines[index] = f"{plans_handoff.STATUS_PREFIX} pending"
             break
     lines = append_handoff_note(
         lines,
@@ -374,7 +382,7 @@ def _enforce_mailbox_completion_guard(
     event_path: Path,
     payload: dict[str, Any],
     persistence: run_persistence._RunPersistence,
-    after: plans.PlanSnapshot,
+    after: plans_models.PlanSnapshot,
     session_id: str,
     session_label: str,
     session_details: dict[str, Any],
@@ -382,7 +390,7 @@ def _enforce_mailbox_completion_guard(
     state_dir_arg: str | None,
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
-    plan_cache: plans.PlanSnapshotCache,
+    plan_cache: plans_snapshot.PlanSnapshotCache,
     append_handoff_note: HandoffNoteAppender,
     reinspect: run_termination.SnapshotReinspector,
 ) -> bool:
@@ -412,7 +420,7 @@ def _enforce_mailbox_completion_guard(
         **evidence,
     }
     with persistence.lock:
-        payload["final_snapshot"] = plans.snapshot_payload(snapshot_after)
+        payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
         turn_payload["mailbox_completion_guard"] = guard
         durability.write_json_file(paths["result"], turn_payload)
     turn_execution.record_turn_rejected(
@@ -451,8 +459,8 @@ def _enforce_review_mutation_guard(
     payload: dict[str, Any],
     persistence: run_persistence._RunPersistence,
     cwd: Path,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot | None,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot | None,
     fingerprint_before: dict[str, Any],
     exclude: tuple[str, ...],
     include_ignored: bool,
@@ -461,7 +469,7 @@ def _enforce_review_mutation_guard(
     session_details: dict[str, Any],
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
-    plan_cache: plans.PlanSnapshotCache,
+    plan_cache: plans_snapshot.PlanSnapshotCache,
     append_handoff_note: HandoffNoteAppender,
     reinspect: run_termination.SnapshotReinspector,
 ) -> bool:
@@ -563,7 +571,7 @@ def _enforce_review_mutation_guard(
         **evidence,
     }
     with persistence.lock:
-        payload["final_snapshot"] = plans.snapshot_payload(snapshot_after)
+        payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
         turn_payload["review_mutation_guard"] = guard_record
         durability.write_json_file(paths["result"], turn_payload)
     turn_execution.record_turn_rejected(
@@ -593,7 +601,7 @@ def _enforce_review_mutation_guard(
 
 def _terminating_result_disposition(
     result: harnesses.HarnessResult,
-    after: plans.PlanSnapshot | None,
+    after: plans_models.PlanSnapshot | None,
     turn_payload: Mapping[str, Any],
 ) -> str | None:
     """Name the result branch that ends this turn before the status guards.
@@ -641,8 +649,8 @@ def _enforce_plan_artifact_guard(
     event_path: Path,
     payload: dict[str, Any],
     persistence: run_persistence._RunPersistence,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot | None,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot | None,
     digests_before: Mapping[str, str],
     runner_written: tuple[str, ...],
     session_id: str,
@@ -650,7 +658,7 @@ def _enforce_plan_artifact_guard(
     session_details: dict[str, Any],
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
-    plan_cache: plans.PlanSnapshotCache,
+    plan_cache: plans_snapshot.PlanSnapshotCache,
     append_handoff_note: HandoffNoteAppender,
     reinspect: run_termination.SnapshotReinspector,
     result_disposition: str | None = None,
@@ -677,7 +685,7 @@ def _enforce_plan_artifact_guard(
     revert, and no pause that would displace the reason an operator has to act
     on.
     """
-    digests_after = plans.session_artifact_digests(
+    digests_after = plans_content_hash.session_artifact_digests(
         before.plan_dir, exclude_session_id=session_id
     )
     baseline = dict(digests_before)
@@ -777,7 +785,7 @@ def _enforce_plan_artifact_guard(
         **evidence,
     }
     with persistence.lock:
-        payload["final_snapshot"] = plans.snapshot_payload(snapshot_after)
+        payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
         turn_payload["plan_artifact_guard"] = guard_record
         durability.write_json_file(paths["result"], turn_payload)
     turn_execution.record_turn_rejected(

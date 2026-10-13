@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from agent_session_loop import (
-    plans,
+    plans_discovery,
+    plans_handoff,
+    plans_metadata,
+    plans_models,
+    plans_registry,
+    plans_session_scope,
     review,
     review_repair,
     run_loop,
@@ -97,9 +102,9 @@ class RepairChildWriteScopeRegenerationTests(unittest.TestCase):
                 encoding="utf-8",
             )
         self._write_artifact(findings)
-        registry = plans.read_repository_registry(self.plan_dir)
+        registry = plans_registry.read_repository_registry(self.plan_dir)
         assert registry is not None
-        plans.save_workspace_plan_metadata(
+        plans_metadata.save_workspace_plan_metadata(
             self.plan_dir,
             self.workspace_root,
             registry.digest,
@@ -126,10 +131,10 @@ class RepairChildWriteScopeRegenerationTests(unittest.TestCase):
         self.assertTrue(result.ok, result.error)
         return self.plan_dir / "session-2.1.md"
 
-    def _child_status(self) -> plans.SessionStatus:
-        for session in plans.discover_session_files(self.plan_dir):
+    def _child_status(self) -> plans_models.SessionStatus:
+        for session in plans_discovery.discover_session_files(self.plan_dir):
             if session.id == "2.1":
-                return plans.read_session_status(session)
+                return plans_handoff.read_session_status(session)
         raise AssertionError("the repair child was not materialized")
 
     def _regenerate(self) -> dict[str, Any] | None:
@@ -144,7 +149,7 @@ class RepairChildWriteScopeRegenerationTests(unittest.TestCase):
             session=status,
             plan_dir=self.plan_dir,
             workspace=workspace,
-            scope=plans.parse_session_scope(
+            scope=plans_session_scope.parse_session_scope(
                 status.path.read_text(encoding="utf-8"),
                 workspace.registry.aliases,
             ),

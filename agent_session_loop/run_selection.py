@@ -80,7 +80,9 @@ from . import (
     mailbox_models,
     mailbox_vocabulary,
     model_availability,
-    plans,
+    plans_errors,
+    plans_payloads,
+    plans_session_ids,
     prepare_validation_store,
     review_repair,
     spark_status,
@@ -271,7 +273,7 @@ def _session_spark_suitability(
     """Load one conservative preparation marker without blocking a run."""
     try:
         validation = prepare_validation_store.load_prepare_validation(plan_dir)
-    except (OSError, plans.PlanError, ValueError) as error:
+    except (OSError, plans_errors.PlanError, ValueError) as error:
         return False, f"Spark eligibility metadata unreadable: {error}"
     if validation is None:
         return False, "Spark eligibility metadata missing; using baseline"
@@ -370,8 +372,8 @@ def _harness_preflight_failure(
 ) -> tuple[str, dict[str, Any]] | None:
     config_path = config.default_config_path()
     details: dict[str, Any] = {
-        **plans.session_identity_payload(session_id),
-        "session_file": plans.session_id_to_filename(session_id),
+        **plans_payloads.session_identity_payload(session_id),
+        "session_file": plans_session_ids.session_id_to_filename(session_id),
         "requested_harness": requested_harness,
         "config_path": str(config_path),
     }

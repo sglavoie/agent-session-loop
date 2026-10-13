@@ -26,7 +26,11 @@ from typing import TYPE_CHECKING, Any, Literal
 from . import (
     events,
     intervention,
-    plans,
+    plans_errors,
+    plans_models,
+    plans_progress,
+    plans_session_ids,
+    plans_snapshot,
     preflight_models,
     preflight_runtime_hints,
     qna,
@@ -375,7 +379,7 @@ class WorkbenchRecovery:
 class _RecoveryBuildContext:
     """State gathered once for one recovery payload build."""
 
-    snapshot: plans.PlanSnapshot
+    snapshot: plans_models.PlanSnapshot
     state_path: Path
     events_path: Path
     progress_path: Path
@@ -420,7 +424,7 @@ def _summary_base_paths(
     return (
         plan_state / events.STATE_FILE_NAME,
         plan_state / events.EVENTS_FILE_NAME,
-        plans.progress_path(plan_dir),
+        plans_progress.progress_path(plan_dir),
     )
 
 
@@ -511,7 +515,7 @@ def _recovery_base_artifacts(
 
 
 def _build_recovery_context(
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     state_dir: str | Path | None,
     *,
     reclaim: bool = True,
@@ -573,7 +577,7 @@ def _build_recovery_context(
 
 
 def _expired_wait_qna_context(
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     runner_state: Mapping[str, Any],
     state_dir: str | Path | None,
     *,
@@ -1010,7 +1014,7 @@ def _session_file_path(plan_dir: Path, session_id: str | None) -> Path | None:
     if not session_id:
         return None
     try:
-        return plan_dir / plans.session_id_to_filename(session_id)
+        return plan_dir / plans_session_ids.session_id_to_filename(session_id)
     except ValueError:
         return None
 
@@ -2409,8 +2413,8 @@ def build_workbench_recovery(
         )
 
     try:
-        snapshot = plans.inspect_plan(plan.plan_dir)
-    except plans.PlanError as error:
+        snapshot = plans_snapshot.inspect_plan(plan.plan_dir)
+    except plans_errors.PlanError as error:
         state_path, events_path, progress_path = _summary_base_paths(
             plan.plan_dir, state_dir
         )
@@ -2437,7 +2441,7 @@ def build_workbench_recovery(
 
     try:
         context = _build_recovery_context(snapshot, state_dir, reclaim=reclaim)
-    except (plans.PlanError, OSError, ValueError) as error:
+    except (plans_errors.PlanError, OSError, ValueError) as error:
         state_path, events_path, progress_path = _summary_base_paths(
             snapshot.plan_dir, state_dir
         )

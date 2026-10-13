@@ -14,7 +14,9 @@ from . import (
     conversation_resume,
     events,
     guards,
-    plans,
+    plans_errors,
+    plans_handoff,
+    plans_snapshot,
     qna,
     review_guard,
     review_repair,
@@ -53,9 +55,9 @@ def _open_run_state(frame: RunFrame) -> RunResult | None:
     # event set for the next waiter to observe.
     if frame.verification_context is None:
         frame.verification_context = verification.VerificationContext.legacy(frame.cwd)
-    plan_cache = plans.PlanSnapshotCache()
+    plan_cache = plans_snapshot.PlanSnapshotCache()
     frame.normalized_review_handoffs = list(
-        plans.normalize_generated_review_handoff_artifacts(frame.args.plan_dir)
+        plans_handoff.normalize_generated_review_handoff_artifacts(frame.args.plan_dir)
     )
     frame.executed_review_requires_artifact = False
     # ASI-136: a repair publication that died mid-flight owns this plan's files
@@ -68,7 +70,7 @@ def _open_run_state(frame: RunFrame) -> RunResult | None:
             repair_publication_recovery = (
                 review_repair.recover_review_repair_publication(frame.args.plan_dir)
             )
-        except plans.PlanError as error:
+        except plans_errors.PlanError as error:
             repair_publication_recovery = {
                 "recovered": False,
                 "reason": "recovery-failed",

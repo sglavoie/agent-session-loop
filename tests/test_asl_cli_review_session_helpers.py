@@ -10,7 +10,11 @@ from pathlib import Path
 from agent_session_loop import (
     contracts,
     events,
-    plans,
+    plans_discovery,
+    plans_files,
+    plans_handoff,
+    plans_payloads,
+    plans_session_ids,
     review,
     review_session_body,
     review_session_contract,
@@ -26,14 +30,14 @@ class ReviewSessionHelperTests(unittest.TestCase):
     """Generated review-session body, verdict parsing and session-id helper tests."""
 
     def test_review_session_kind_constants(self) -> None:
-        self.assertEqual("implementation", plans.SESSION_KIND_IMPLEMENTATION)
-        self.assertEqual("review", plans.SESSION_KIND_REVIEW)
+        self.assertEqual("implementation", plans_payloads.SESSION_KIND_IMPLEMENTATION)
+        self.assertEqual("review", plans_payloads.SESSION_KIND_REVIEW)
         self.assertEqual(
             (
-                plans.SESSION_KIND_IMPLEMENTATION,
-                plans.SESSION_KIND_REVIEW,
+                plans_payloads.SESSION_KIND_IMPLEMENTATION,
+                plans_payloads.SESSION_KIND_REVIEW,
             ),
-            plans.SESSION_KINDS,
+            plans_payloads.SESSION_KINDS,
         )
         self.assertEqual("final-review.md", review.FINAL_REVIEW_FILENAME)
         self.assertIn("asl:generated-review-session", review.REVIEW_SESSION_MARKER)
@@ -189,7 +193,9 @@ class ReviewSessionHelperTests(unittest.TestCase):
             (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
             (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
 
-            self.assertEqual("1", plans.next_top_level_session_id(plan_dir).value)
+            self.assertEqual(
+                "1", plans_discovery.next_top_level_session_id(plan_dir).value
+            )
 
     def test_next_top_level_session_id_uses_max_top_level_component(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -203,7 +209,9 @@ class ReviewSessionHelperTests(unittest.TestCase):
                 ),
             )
 
-            self.assertEqual("4", plans.next_top_level_session_id(plan_dir).value)
+            self.assertEqual(
+                "4", plans_discovery.next_top_level_session_id(plan_dir).value
+            )
 
     def test_next_top_level_session_id_ignores_expansion_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -213,12 +221,14 @@ class ReviewSessionHelperTests(unittest.TestCase):
                 "# Expansion\n", encoding="utf-8"
             )
 
-            self.assertEqual("2", plans.next_top_level_session_id(plan_dir).value)
+            self.assertEqual(
+                "2", plans_discovery.next_top_level_session_id(plan_dir).value
+            )
 
     def test_build_generated_review_session_body_is_valid_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp)
-            session_id = plans.SessionId((7,))
+            session_id = plans_session_ids.SessionId((7,))
 
             body = review_session_body.build_generated_review_session_body(
                 session_id,
@@ -247,7 +257,10 @@ class ReviewSessionHelperTests(unittest.TestCase):
             # named by absolute path inside the command source.
             self.assertEqual(".", check.cwd)
             self.assertIn(
-                str(plans.canonicalize_path(plan_dir) / review.FINAL_REVIEW_FILENAME),
+                str(
+                    plans_files.canonicalize_path(plan_dir)
+                    / review.FINAL_REVIEW_FILENAME
+                ),
                 check.argv[2],
             )
 
@@ -268,7 +281,7 @@ class ReviewSessionHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp)
             write_plan(plan_dir, ("complete", "complete"))
-            review_id = plans.next_top_level_session_id(plan_dir)
+            review_id = plans_discovery.next_top_level_session_id(plan_dir)
             review_path = plan_dir / review_id.filename
             review_path.write_text(
                 review_session_body.build_generated_review_session_body(
@@ -283,7 +296,7 @@ class ReviewSessionHelperTests(unittest.TestCase):
 
             self.assertIsNotNone(found)
             self.assertEqual(review_id, found.session_id)
-            self.assertEqual(plans.canonicalize_path(review_path), found.path)
+            self.assertEqual(plans_files.canonicalize_path(review_path), found.path)
 
     def test_find_pending_generated_review_session_skips_completed_review(
         self,
@@ -291,7 +304,7 @@ class ReviewSessionHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp)
             write_plan(plan_dir, ("complete",))
-            review_id = plans.next_top_level_session_id(plan_dir)
+            review_id = plans_discovery.next_top_level_session_id(plan_dir)
             review_path = plan_dir / review_id.filename
             body = review_session_body.build_generated_review_session_body(
                 review_id,
@@ -316,7 +329,7 @@ class ReviewSessionHelperTests(unittest.TestCase):
             self.assertTrue(created)
             self.assertEqual("3", session_file.session_id.value)
             self.assertEqual(
-                plans.canonicalize_path(plan_dir / "session-3.md"),
+                plans_files.canonicalize_path(plan_dir / "session-3.md"),
                 session_file.path,
             )
             self.assertTrue(
@@ -324,7 +337,7 @@ class ReviewSessionHelperTests(unittest.TestCase):
                     session_file.path
                 )
             )
-            status = plans.read_session_status(session_file)
+            status = plans_handoff.read_session_status(session_file)
             self.assertEqual("pending", status.status)
 
     def test_ensure_generated_review_session_reuses_pending_review(self) -> None:

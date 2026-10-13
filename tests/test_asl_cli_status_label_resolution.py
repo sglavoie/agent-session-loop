@@ -12,7 +12,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from agent_session_loop import cli, events, plans
+from agent_session_loop import cli, events, plans_files
 from tests.support import (
     REPO_ROOT,
     write_plan,
@@ -25,8 +25,8 @@ def _register_plan_in_state(state_dir: Path, plan_dir: Path) -> None:
     Mirrors the persisted metadata that ``asl sessions`` scans so a bare
     compact label routed through ``asl status`` resolves back to this plan.
     """
-    canonical = plans.canonicalize_path(plan_dir)
-    entry = state_dir / plans.path_sha256(canonical)
+    canonical = plans_files.canonicalize_path(plan_dir)
+    entry = state_dir / plans_files.path_sha256(canonical)
     entry.mkdir(parents=True, exist_ok=True)
     (entry / events.STATE_FILE_NAME).write_text(
         json.dumps({"plan_dir": str(canonical)}, sort_keys=True),
@@ -65,7 +65,7 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
             self.assertEqual("status", payload["command"])
             self.assertEqual("Manifest", payload["plan_title"])
             self.assertEqual(
-                str(plans.canonicalize_path(plan_dir)), payload["plan_dir"]
+                str(plans_files.canonicalize_path(plan_dir)), payload["plan_dir"]
             )
 
     def test_compact_label_text_output_reports_canonical_path(self) -> None:
@@ -81,7 +81,9 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
                 check=True,
             )
             self.assertEqual("Plan title: Manifest", completed.stdout.splitlines()[0])
-            self.assertIn(str(plans.canonicalize_path(plan_dir)), completed.stdout)
+            self.assertIn(
+                str(plans_files.canonicalize_path(plan_dir)), completed.stdout
+            )
 
     def test_full_path_takes_precedence_over_state_lookup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -99,7 +101,7 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
             payload = json.loads(completed.stdout)
             self.assertTrue(payload["ok"])
             self.assertEqual(
-                str(plans.canonicalize_path(plan_dir)), payload["plan_dir"]
+                str(plans_files.canonicalize_path(plan_dir)), payload["plan_dir"]
             )
 
     def test_relative_path_with_directory_component_bypasses_lookup(self) -> None:
@@ -129,7 +131,7 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
             payload = json.loads(completed.stdout)
             self.assertTrue(payload["ok"])
             self.assertEqual(
-                str(plans.canonicalize_path(plan_dir)), payload["plan_dir"]
+                str(plans_files.canonicalize_path(plan_dir)), payload["plan_dir"]
             )
 
     def test_unknown_label_error_uses_plan_reference(self) -> None:
@@ -190,13 +192,13 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
             self.assertEqual("dup-label", payload["plan_reference"])
             expected_candidates = sorted(
                 [
-                    str(plans.canonicalize_path(first)),
-                    str(plans.canonicalize_path(second)),
+                    str(plans_files.canonicalize_path(first)),
+                    str(plans_files.canonicalize_path(second)),
                 ]
             )
             self.assertEqual(expected_candidates, payload["details"]["candidates"])
             self.assertEqual(
-                str(plans.canonicalize_path(state_dir)),
+                str(plans_files.canonicalize_path(state_dir)),
                 payload["details"]["state_root"],
             )
 

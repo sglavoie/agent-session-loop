@@ -55,7 +55,10 @@ from . import (
     mailbox_models,
     mailbox_rendering,
     mailbox_vocabulary,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_models,
+    plans_session_scope,
     qna,
     redirect_ack,
     verification,
@@ -67,7 +70,7 @@ SESSION_RUN_SKILL_NAME = "session-run"
 
 
 def _prompt_plan_dir(plan_dir: str | Path) -> str:
-    plan_dir_text = str(plans.canonicalize_path(plan_dir))
+    plan_dir_text = str(plans_files.canonicalize_path(plan_dir))
     if not plan_dir_text.endswith("/"):
         plan_dir_text += "/"
     return plan_dir_text
@@ -111,25 +114,25 @@ def _workspace_payload_fields(
 
 
 def _session_scope(
-    session: plans.SessionStatus,
+    session: plans_models.SessionStatus,
     workspace: workspaces.ResolvedWorkspace,
-) -> plans.SessionScope:
+) -> plans_session_scope.SessionScope:
     """Read the selected session's exact registry-validated scope."""
     try:
         text = session.path.read_text(encoding="utf-8")
     except OSError as error:
-        raise plans.PlanError(f"cannot read {session.path}: {error}") from error
+        raise plans_errors.PlanError(f"cannot read {session.path}: {error}") from error
     try:
-        return plans.parse_session_scope(text, workspace.registry.aliases)
-    except (plans.SessionScopeError, ValueError) as error:
-        raise plans.PlanError(
+        return plans_session_scope.parse_session_scope(text, workspace.registry.aliases)
+    except (plans_session_scope.SessionScopeError, ValueError) as error:
+        raise plans_errors.PlanError(
             f"invalid repository scope for session {session.id}: {error}"
         ) from error
 
 
 def _workspace_prompt_lines(
     workspace: workspaces.ResolvedWorkspace,
-    scope: plans.SessionScope,
+    scope: plans_session_scope.SessionScope,
 ) -> list[str]:
     """Render bounded repository authority without unrelated resolved roots."""
     lines = [
@@ -533,7 +536,7 @@ def build_session_prompt(
     state_dir: str | Path | None = None,
     pending_guidance: Sequence[mailbox_models.MailboxMessage] = (),
     workspace: workspaces.ResolvedWorkspace | None = None,
-    session_scope: plans.SessionScope | None = None,
+    session_scope: plans_session_scope.SessionScope | None = None,
     corrections: redirect_ack.CarriedCorrections | None = None,
 ) -> str:
     """Build the legacy worker prompt, keeping the skill invocation first.
@@ -604,8 +607,8 @@ def build_harness_invocation(
     resumes ship a prepended ``ASL reply context`` block without changing
     normal session execution.
     """
-    canonical_cwd = plans.canonicalize_path(cwd)
-    canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    canonical_cwd = plans_files.canonicalize_path(cwd)
+    canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
     if prompt is None:
         prompt = build_session_prompt(harness, canonical_plan_dir)
     adapter = harnesses.get_adapter(harness)
@@ -615,7 +618,7 @@ def build_harness_invocation(
         prompt=prompt,
         unsafe_bypass=unsafe_bypass,
         last_message_path=(
-            plans.canonicalize_path(last_message_path)
+            plans_files.canonicalize_path(last_message_path)
             if last_message_path is not None
             else None
         ),
@@ -687,7 +690,7 @@ def build_reply_prompt(
     state_dir: str | Path | None = None,
     pending_guidance: Sequence[mailbox_models.MailboxMessage] = (),
     workspace: workspaces.ResolvedWorkspace | None = None,
-    session_scope: plans.SessionScope | None = None,
+    session_scope: plans_session_scope.SessionScope | None = None,
     corrections: redirect_ack.CarriedCorrections | None = None,
 ) -> str:
     """Build the resumed-turn prompt for ``asl run --reply``.
@@ -797,7 +800,7 @@ def build_resolution_prompt(
     state_dir: str | Path | None = None,
     pending_guidance: Sequence[mailbox_models.MailboxMessage] = (),
     workspace: workspaces.ResolvedWorkspace | None = None,
-    session_scope: plans.SessionScope | None = None,
+    session_scope: plans_session_scope.SessionScope | None = None,
     corrections: redirect_ack.CarriedCorrections | None = None,
 ) -> str:
     """Build an answerless mailbox-resolution continuation prompt.

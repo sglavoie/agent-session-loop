@@ -48,7 +48,7 @@ from unittest import mock
 from agent_session_loop import (
     events,
     intervention,
-    plans,
+    plans_files,
     qna,
     state,
     state_locks,
@@ -427,7 +427,7 @@ class _DetailFixture(WorkbenchAPIFixture):
         if plan_dir.exists():
             shutil.rmtree(plan_dir)
         write_plan(plan_dir, ("pending", "pending"))
-        canonical = plans.canonicalize_path(plan_dir)
+        canonical = plans_files.canonicalize_path(plan_dir)
         plan_state = state.plan_state_dir(canonical, self.state_dir)
         plan_state.mkdir(parents=True, exist_ok=True)
 

@@ -13,7 +13,12 @@ from agent_session_loop import (
     baseline,
     baseline_cache,
     contracts,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_metadata,
+    plans_session_ids,
+    plans_snapshot,
+    plans_transaction,
     prepare_baseline,
     prepare_models,
     prepare_packet,
@@ -52,12 +57,12 @@ class PrepareRegisteredWorkspaceTests(PrepareEndToEndFixtures):
             "session-2.expand.md",
             prepare_models.PREPARE_VALIDATION_FILENAME,
             prepare_models.PREPARE_VALIDATION_CACHE_FILENAME,
-            plans.PLAN_METADATA_FILE_NAME,
+            plans_metadata.PLAN_METADATA_FILE_NAME,
         ):
             self.assertTrue((plan_dir / name).is_file(), name)
         self.assertEqual(
-            str(plans.canonicalize_path(self.repo)),
-            plans.load_plan_metadata(plan_dir).cwd,
+            str(plans_files.canonicalize_path(self.repo)),
+            plans_metadata.load_plan_metadata(plan_dir).cwd,
         )
         manifest = (plan_dir / "manifest.md").read_text(encoding="utf-8")
         self.assertIn("**Readiness**: loop-ready", manifest)
@@ -67,7 +72,7 @@ class PrepareRegisteredWorkspaceTests(PrepareEndToEndFixtures):
         # One validation batch covered both sessions.
         self.assertEqual(1, len(calls))
         self.assertEqual(("1", "2"), calls[0].session_ids)
-        canonical_repo = plans.canonicalize_path(self.repo)
+        canonical_repo = plans_files.canonicalize_path(self.repo)
         self.assertEqual(
             shlex.join(
                 [
@@ -115,9 +120,9 @@ class PrepareRegisteredWorkspaceTests(PrepareEndToEndFixtures):
         self.assertEqual(1, len(calls))
         self.assertEqual(prepare_models.PREPARE_VALIDATION_VERSION, calls[0].version)
         assert result.plan_dir is not None
-        metadata = plans.load_plan_metadata(result.plan_dir)
-        self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
-        assert isinstance(metadata, plans.WorkspacePlanMetadata)
+        metadata = plans_metadata.load_plan_metadata(result.plan_dir)
+        self.assertIsInstance(metadata, plans_metadata.WorkspacePlanMetadata)
+        assert isinstance(metadata, plans_metadata.WorkspacePlanMetadata)
         self.assertEqual(3, metadata.version)
         validation = prepare_validation_store.load_prepare_validation(result.plan_dir)
         assert validation is not None
@@ -150,9 +155,9 @@ class PrepareRegisteredWorkspaceTests(PrepareEndToEndFixtures):
         collected = baseline.collect_baseline_checks(
             {
                 session.id: contracts.read_completion_contract(
-                    result.plan_dir, plans.parse_session_id(session.id)
+                    result.plan_dir, plans_session_ids.parse_session_id(session.id)
                 )
-                for session in plans.inspect_plan(result.plan_dir).sessions
+                for session in plans_snapshot.inspect_plan(result.plan_dir).sessions
             }
         )
         unique_checks = [
@@ -205,9 +210,9 @@ class PrepareRegisteredWorkspaceTests(PrepareEndToEndFixtures):
         self.assertTrue(rebound.ok, rebound)
         self.assertEqual(1, len(calls))
         self.assertEqual(("1", "2"), calls[0].session_ids)
-        metadata = plans.load_plan_metadata(first.plan_dir)
-        self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
-        assert isinstance(metadata, plans.WorkspacePlanMetadata)
+        metadata = plans_metadata.load_plan_metadata(first.plan_dir)
+        self.assertIsInstance(metadata, plans_metadata.WorkspacePlanMetadata)
+        assert isinstance(metadata, plans_metadata.WorkspacePlanMetadata)
         self.assertEqual(str(new_workspace.resolve()), metadata.workspace_root)
         aggregate = prepare_validation_store.load_prepare_validation(first.plan_dir)
         assert aggregate is not None
@@ -270,7 +275,7 @@ class PrepareRegisteredWorkspaceTests(PrepareEndToEndFixtures):
             target = Path(destination)
             if (
                 target.parent == first.plan_dir
-                and target.name == plans.PLAN_METADATA_FILE_NAME
+                and target.name == plans_metadata.PLAN_METADATA_FILE_NAME
             ):
                 raise KeyboardInterrupt("injected publication interruption")
             return original_replace(source_path, destination)
@@ -289,15 +294,19 @@ class PrepareRegisteredWorkspaceTests(PrepareEndToEndFixtures):
                 rebind_workspace=True,
             )
 
-        self.assertTrue((first.plan_dir / plans.PLAN_TRANSACTION_DIR_NAME).is_dir())
-        metadata = plans.load_plan_metadata(first.plan_dir)
-        self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
-        assert isinstance(metadata, plans.WorkspacePlanMetadata)
+        self.assertTrue(
+            (first.plan_dir / plans_transaction.PLAN_TRANSACTION_DIR_NAME).is_dir()
+        )
+        metadata = plans_metadata.load_plan_metadata(first.plan_dir)
+        self.assertIsInstance(metadata, plans_metadata.WorkspacePlanMetadata)
+        assert isinstance(metadata, plans_metadata.WorkspacePlanMetadata)
         self.assertEqual(str(new_workspace.resolve()), metadata.workspace_root)
         validation = prepare_validation_store.load_prepare_validation(first.plan_dir)
         assert validation is not None
         self.assertEqual(str(new_workspace.resolve()), validation.workspace_root)
-        self.assertFalse((first.plan_dir / plans.PLAN_TRANSACTION_DIR_NAME).exists())
+        self.assertFalse(
+            (first.plan_dir / plans_transaction.PLAN_TRANSACTION_DIR_NAME).exists()
+        )
         self.assertIsNone(state_locks.inspect_lock_info(first.plan_dir, self.state_dir))
 
     def test_rebind_staging_is_external_preserves_symlinks_and_rebases_paths(
@@ -326,7 +335,7 @@ class PrepareRegisteredWorkspaceTests(PrepareEndToEndFixtures):
             staged_paths.append(staged_plan_dir)
             self.assertFalse(staged_plan_dir.is_relative_to(self.base_dir))
             self.assertTrue((staged_plan_dir / "operator-link.md").is_symlink())
-            raise plans.PlanError(
+            raise plans_errors.PlanError(
                 f"injected staged failure at {staged_plan_dir}/session-1.md"
             )
 

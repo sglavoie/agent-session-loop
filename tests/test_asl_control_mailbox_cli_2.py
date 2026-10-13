@@ -15,7 +15,9 @@ from agent_session_loop import (
     agent_mux_delivery,
     mailbox,
     mailbox_appenders,
-    mailbox_cli,
+    mailbox_cli_constants,
+    mailbox_cli_outbox,
+    mailbox_cli_replies,
     mailbox_constants,
     mailbox_cursors,
     mailbox_leases,
@@ -37,12 +39,17 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
             run_id="run-old",
         )
         cases = (
-            ("no-active-run", None, question.id, mailbox_cli.ERROR_NO_ACTIVE_RUN),
+            (
+                "no-active-run",
+                None,
+                question.id,
+                mailbox_cli_constants.ERROR_NO_ACTIVE_RUN,
+            ),
             (
                 "paused-run",
                 {"run_id": "run-old", "paused": True},
                 question.id,
-                mailbox_cli.ERROR_NO_ACTIVE_RUN,
+                mailbox_cli_constants.ERROR_NO_ACTIVE_RUN,
             ),
             (
                 "finished-run",
@@ -52,7 +59,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
                     "run_finished_at": "2026-08-01T12:00:00+00:00",
                 },
                 question.id,
-                mailbox_cli.ERROR_NO_ACTIVE_RUN,
+                mailbox_cli_constants.ERROR_NO_ACTIVE_RUN,
             ),
             (
                 "historical-question",
@@ -81,7 +88,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
                         pid=os.getpid(),
                     )
                 code, payload = self.payload_from(
-                    mailbox_cli.inbox_resolve_from_args,
+                    mailbox_cli_replies.inbox_resolve_from_args,
                     self.args(action="continue", to=target),
                 )
                 self.assertEqual(1, code)
@@ -103,12 +110,12 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
         )
 
         code, payload = self.payload_from(
-            mailbox_cli.inbox_resolve_from_args,
+            mailbox_cli_replies.inbox_resolve_from_args,
             self.args(action="continue", to=question.id),
         )
 
         self.assertEqual(1, code)
-        self.assertEqual(mailbox_cli.ERROR_NO_ACTIVE_RUN, payload["reason"])
+        self.assertEqual(mailbox_cli_constants.ERROR_NO_ACTIVE_RUN, payload["reason"])
         self.assertEqual(
             0,
             mailbox.read_mailbox(
@@ -121,12 +128,12 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
         state_path.write_text("{", encoding="utf-8")
 
         code, payload = self.payload_from(
-            mailbox_cli.inbox_resolve_from_args,
+            mailbox_cli_replies.inbox_resolve_from_args,
             self.args(action="continue", to=question.id),
         )
 
         self.assertEqual(1, code)
-        self.assertEqual(mailbox_cli.ERROR_NO_ACTIVE_RUN, payload["reason"])
+        self.assertEqual(mailbox_cli_constants.ERROR_NO_ACTIVE_RUN, payload["reason"])
         view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual(0, view.counts.resolutions)
         self.assertEqual((question,), view.messages)
@@ -170,7 +177,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
         ):
             with self.subTest(reason=expected_reason):
                 code, payload = self.payload_from(
-                    mailbox_cli.inbox_resolve_from_args,
+                    mailbox_cli_replies.inbox_resolve_from_args,
                     self.args(action="continue", to=target),
                 )
                 self.assertEqual(1, code)
@@ -189,7 +196,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
                     note_stdin=True,
                     to=str(uuid.uuid4()),
                 ),
-                mailbox_cli.ERROR_INVALID_NOTE_SOURCE,
+                mailbox_cli_constants.ERROR_INVALID_NOTE_SOURCE,
             ),
             (
                 self.args(
@@ -202,7 +209,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
         for args, expected_reason in invalid_cases:
             with self.subTest(reason=expected_reason):
                 code, payload = self.payload_from(
-                    mailbox_cli.inbox_resolve_from_args,
+                    mailbox_cli_replies.inbox_resolve_from_args,
                     args,
                 )
                 self.assertEqual(1, code)
@@ -230,7 +237,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
 
         with mock.patch("sys.stdin", io.StringIO("")):
             code, payload = self.payload_from(
-                mailbox_cli.inbox_resolve_from_args,
+                mailbox_cli_replies.inbox_resolve_from_args,
                 self.args(
                     action="continue",
                     note_stdin=True,
@@ -271,7 +278,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
             ) as notify,
         ):
             code, resolution_payload = self.payload_from(
-                mailbox_cli.inbox_resolve_from_args,
+                mailbox_cli_replies.inbox_resolve_from_args,
                 self.args(
                     action="continue",
                     note="Private supervisor note.",
@@ -341,7 +348,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
 
         with mock.patch.object(agent_mux_delivery, "notify") as notify:
             code, _payload = self.payload_from(
-                mailbox_cli.inbox_resolve_from_args,
+                mailbox_cli_replies.inbox_resolve_from_args,
                 self.args(action="pause", to=second.id),
             )
 
@@ -379,7 +386,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
             side_effect=RuntimeError("AgentMux unavailable"),
         ):
             code, payload = self.payload_from(
-                mailbox_cli.inbox_resolve_from_args,
+                mailbox_cli_replies.inbox_resolve_from_args,
                 self.args(action="continue", to=question.id),
             )
 
@@ -398,7 +405,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
         original = self._write_projected_lease(supervisor_id, question)
 
         code, payload = self.payload_from(
-            mailbox_cli.outbox_wait_from_args,
+            mailbox_cli_outbox.outbox_wait_from_args,
             self.args(since=0, timeout=0),
         )
 
@@ -437,7 +444,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
             ) as notify,
         ):
             code, payload = self.payload_from(
-                mailbox_cli.outbox_wait_from_args,
+                mailbox_cli_outbox.outbox_wait_from_args,
                 self.args(timeout=0),
             )
 

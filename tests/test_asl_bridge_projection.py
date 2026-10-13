@@ -25,7 +25,7 @@ from agent_session_loop import (
     mailbox_appenders,
     mailbox_vocabulary,
     mailbox_waits,
-    plans,
+    plans_files,
     state,
     workbench,
 )
@@ -115,7 +115,7 @@ class _Corpus:
     def complete_plan(self, name: str = "plan-complete") -> Path:
         plan_dir = self.plans_root / name
         write_plan(plan_dir, ("complete", "complete"))
-        canonical = plans.canonicalize_path(plan_dir)
+        canonical = plans_files.canonicalize_path(plan_dir)
         self.write_state(
             canonical,
             {

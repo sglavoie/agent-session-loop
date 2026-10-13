@@ -12,7 +12,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import plans, session_overview, state
+from agent_session_loop import plans_files, session_overview, state
 
 DEAD_PID = 4_242_424
 
@@ -34,8 +34,8 @@ def _make_plan_state_dir(
     Writes a `state.json` containing the plan_dir so the recent scanner's
     fallback path resolution can find it. Optionally writes `lock.json`.
     """
-    canonical_plan_dir = plans.canonicalize_path(plan_dir)
-    state_dir = state_root / plans.path_sha256(canonical_plan_dir)
+    canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
+    state_dir = state_root / plans_files.path_sha256(canonical_plan_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
     payload: dict[str, object] = {"plan_dir": str(canonical_plan_dir)}
     if state_payload is not None:
@@ -200,7 +200,7 @@ class HelpersTests(unittest.TestCase):
             verbose_label = session_overview.plan_label(plan_dir, verbose=True)
 
             self.assertEqual(
-                str(plans.canonicalize_path(plan_dir)),
+                str(plans_files.canonicalize_path(plan_dir)),
                 verbose_label,
             )
 
@@ -467,7 +467,7 @@ class ScanRunningRowsTests(unittest.TestCase):
             _write_json(
                 state_dir / session_overview.LOCK_JSON_NAME,
                 {
-                    "plan_dir": str(plans.canonicalize_path(plan_dir)),
+                    "plan_dir": str(plans_files.canonicalize_path(plan_dir)),
                     "pid": os.getpid(),
                     "created_at": "2026-06-19T00:00:00+00:00",
                 },
@@ -541,7 +541,7 @@ class ScanRecentRowsTests(unittest.TestCase):
                     run_id="run-1",
                     turn_label=f"{index:04d}",
                     payload=_turn_result_payload(
-                        plan_dir=plans.canonicalize_path(plan_dir),
+                        plan_dir=plans_files.canonicalize_path(plan_dir),
                         run_id="run-1",
                         turn_index=index,
                         session_id=str(index),
@@ -582,7 +582,7 @@ class ScanRecentRowsTests(unittest.TestCase):
                     run_id="run-1",
                     turn_label=f"{index:04d}",
                     payload=_turn_result_payload(
-                        plan_dir=plans.canonicalize_path(plan_dir),
+                        plan_dir=plans_files.canonicalize_path(plan_dir),
                         run_id="run-1",
                         turn_index=index,
                         session_id=str(index),
@@ -610,7 +610,7 @@ class ScanRecentRowsTests(unittest.TestCase):
                 run_id="run-1",
                 turn_label="0001",
                 payload=_turn_result_payload(
-                    plan_dir=plans.canonicalize_path(plan_dir),
+                    plan_dir=plans_files.canonicalize_path(plan_dir),
                     run_id="run-1",
                     turn_index=1,
                     session_id="1",
@@ -642,7 +642,7 @@ class ScanRecentRowsTests(unittest.TestCase):
                 run_id="run-1",
                 turn_label="0001",
                 payload=_turn_result_payload(
-                    plan_dir=plans.canonicalize_path(plan_dir),
+                    plan_dir=plans_files.canonicalize_path(plan_dir),
                     run_id="run-1",
                     turn_index=1,
                     session_id="1",
@@ -655,7 +655,7 @@ class ScanRecentRowsTests(unittest.TestCase):
 
             self.assertEqual((), skipped)
             self.assertEqual(1, len(rows))
-            self.assertEqual(plans.canonicalize_path(plan_dir), rows[0].plan_dir)
+            self.assertEqual(plans_files.canonicalize_path(plan_dir), rows[0].plan_dir)
 
     def test_unresolvable_plan_dir_is_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -701,7 +701,7 @@ class ScanRecentRowsTests(unittest.TestCase):
                 run_id="run-1",
                 turn_label="0002",
                 payload=_turn_result_payload(
-                    plan_dir=plans.canonicalize_path(plan_dir),
+                    plan_dir=plans_files.canonicalize_path(plan_dir),
                     run_id="run-1",
                     turn_index=2,
                     session_id="2",
@@ -911,15 +911,15 @@ class SessionsFromArgsTests(unittest.TestCase):
             lock={"pid": os.getpid()},
             state_payload={"active_turn": alpha_active},
         )
-        alpha_state_dir = state_root / plans.path_sha256(
-            plans.canonicalize_path(plan_alpha)
+        alpha_state_dir = state_root / plans_files.path_sha256(
+            plans_files.canonicalize_path(plan_alpha)
         )
         _make_turn_artifact(
             alpha_state_dir,
             run_id="alpha-run",
             turn_label="0001",
             payload=_turn_result_payload(
-                plan_dir=plans.canonicalize_path(plan_alpha),
+                plan_dir=plans_files.canonicalize_path(plan_alpha),
                 run_id="alpha-run",
                 turn_index=1,
                 session_id="1",
@@ -928,15 +928,15 @@ class SessionsFromArgsTests(unittest.TestCase):
         )
 
         _make_plan_state_dir(state_root, plan_beta)
-        beta_state_dir = state_root / plans.path_sha256(
-            plans.canonicalize_path(plan_beta)
+        beta_state_dir = state_root / plans_files.path_sha256(
+            plans_files.canonicalize_path(plan_beta)
         )
         _make_turn_artifact(
             beta_state_dir,
             run_id="beta-run",
             turn_label="0001",
             payload=_turn_result_payload(
-                plan_dir=plans.canonicalize_path(plan_beta),
+                plan_dir=plans_files.canonicalize_path(plan_beta),
                 run_id="beta-run",
                 turn_index=1,
                 session_id="1",
@@ -963,7 +963,7 @@ class SessionsFromArgsTests(unittest.TestCase):
             self.assertEqual({"running": True, "recent": True}, payload["filters"])
             self.assertEqual(session_overview.DEFAULT_RECENT_LIMIT, payload["limit"])
             self.assertEqual(
-                str(plans.canonicalize_path(state_root)),
+                str(plans_files.canonicalize_path(state_root)),
                 payload["state_root"],
             )
             self.assertEqual(1, len(payload["running"]))
@@ -1047,7 +1047,7 @@ class SessionsFromArgsTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             output = buffer.getvalue()
             self.assertIn(
-                f"State root: {plans.canonicalize_path(state_root)}",
+                f"State root: {plans_files.canonicalize_path(state_root)}",
                 output,
             )
             self.assertIn("Running sessions (1):", output)
@@ -1056,7 +1056,7 @@ class SessionsFromArgsTests(unittest.TestCase):
             self.assertIn("plan beta-plan-dir", output)
             # Default text output omits full plan paths.
             self.assertNotIn(
-                str(plans.canonicalize_path(root / "plans" / "alpha-plan-dir")),
+                str(plans_files.canonicalize_path(root / "plans" / "alpha-plan-dir")),
                 output,
             )
 
@@ -1074,10 +1074,10 @@ class SessionsFromArgsTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             output = buffer.getvalue()
             canonical_alpha = str(
-                plans.canonicalize_path(root / "plans" / "alpha-plan-dir")
+                plans_files.canonicalize_path(root / "plans" / "alpha-plan-dir")
             )
             canonical_beta = str(
-                plans.canonicalize_path(root / "plans" / "beta-plan-dir")
+                plans_files.canonicalize_path(root / "plans" / "beta-plan-dir")
             )
             self.assertIn(canonical_alpha, output)
             self.assertIn(canonical_beta, output)

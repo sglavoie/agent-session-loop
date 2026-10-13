@@ -8,7 +8,10 @@ import unittest
 from pathlib import Path
 
 from agent_session_loop import (
-    plans,
+    plans_content_hash,
+    plans_metadata,
+    plans_models,
+    plans_readiness,
     preflight,
     preflight_auto_repair,
     preflight_cli,
@@ -69,7 +72,7 @@ class RepositoryFootprintPreflightTests(unittest.TestCase):
 
     def test_out_of_root_check_is_red_using_the_stored_plan_metadata(self) -> None:
         self._write_plan(self.first / "README.md", self.second / "README.md")
-        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(self.first))
 
         report = preflight.run_core_preflight(self.plan_dir)
 
@@ -87,7 +90,7 @@ class RepositoryFootprintPreflightTests(unittest.TestCase):
 
     def test_absolute_check_inside_the_bound_root_stays_green(self) -> None:
         self._write_plan(self.first / "README.md")
-        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(self.first))
 
         report = preflight.run_core_preflight(self.plan_dir)
 
@@ -98,7 +101,7 @@ class RepositoryFootprintPreflightTests(unittest.TestCase):
         loose = self.root / "loose.txt"
         loose.write_text("x\n", encoding="utf-8")
         self._write_plan(self.first / "README.md", loose)
-        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(self.first))
 
         report = preflight.run_core_preflight(self.plan_dir)
 
@@ -117,7 +120,7 @@ class RepositoryFootprintPreflightTests(unittest.TestCase):
 
     def test_footprint_blocks_marking_the_plan_loop_ready(self) -> None:
         self._write_plan(self.first / "README.md", self.second / "README.md")
-        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(self.first))
 
         report = preflight.run_core_preflight(self.plan_dir)
 
@@ -128,7 +131,7 @@ class RepositoryFootprintPreflightTests(unittest.TestCase):
 
     def test_payload_carries_a_registry_table_derived_from_disk(self) -> None:
         self._write_plan(self.first / "README.md", self.second / "README.md")
-        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(self.first))
         report = preflight.run_core_preflight(self.plan_dir)
 
         payload = preflight_output._preflight_payload_fields(
@@ -170,7 +173,7 @@ class RepositoryFootprintPreflightTests(unittest.TestCase):
 
     def test_footprint_blockers_are_cleared_by_the_registry_steps(self) -> None:
         self._write_plan(self.first / "README.md", self.second / "README.md")
-        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(self.first))
         report = preflight.run_core_preflight(self.plan_dir)
         self.assertEqual(2, len(self._footprint_findings(report)))
 
@@ -196,7 +199,7 @@ class RepositoryIntentTargetTests(RepositoryIntentFixtures):
         self._write_plan(
             self.first / "README.md", self.second / "src" / "new_module.py"
         )
-        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(self.first))
 
         report = preflight.run_core_preflight(self.plan_dir)
 
@@ -245,7 +248,7 @@ class RepositoryIntentTargetTests(RepositoryIntentFixtures):
 
     def test_single_repository_legacy_plan_is_unchanged(self) -> None:
         self._write_plan(self.first / "README.md", self.first / "src" / "new.py")
-        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(self.first))
 
         report = preflight.run_core_preflight(self.plan_dir)
 
@@ -256,7 +259,7 @@ class RepositoryIntentTargetTests(RepositoryIntentFixtures):
         non_git_root = self.root / "operator-workspace"
         non_git_root.mkdir()
         self._write_plan(self.first / "README.md")
-        plans.save_plan_metadata(self.plan_dir, str(non_git_root))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(non_git_root))
 
         report = preflight.run_core_preflight(self.plan_dir)
 
@@ -280,15 +283,17 @@ class RepositoryIntentTargetTests(RepositoryIntentFixtures):
             manifest.read_text(encoding="utf-8") + f"\n**Split from**: `{source}`\n",
             encoding="utf-8",
         )
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
-        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        plans_metadata.save_plan_metadata(self.plan_dir, str(self.first))
 
         report = preflight.run_core_preflight(self.plan_dir)
 

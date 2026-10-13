@@ -51,7 +51,13 @@ from typing import Any, Literal
 
 from . import (
     authoring,
-    plans,
+    plans_discovery,
+    plans_errors,
+    plans_handoff,
+    plans_models,
+    plans_readiness,
+    plans_registry,
+    plans_session_scope,
     preflight_footprint,
     repository_intent,
     repository_scope,
@@ -68,7 +74,9 @@ from .contracts import (
     VerifyRecipe,
     read_completion_contract,
 )
-from .plans import SessionScope, canonicalize_path, inspect_plan
+from .plans_files import canonicalize_path
+from .plans_session_scope import SessionScope
+from .plans_snapshot import inspect_plan
 from .workspaces import (
     Repository,
     RepositoryRegistry,
@@ -175,7 +183,7 @@ def derive_registration(
         return _not_required(intent)
 
     sessions: list[_SessionSource] = []
-    handoffs: list[plans.SessionHandoff] = []
+    handoffs: list[plans_models.SessionHandoff] = []
     for status in inspect_plan(canonical_dir).sessions:
         sessions.append(
             _SessionSource(
@@ -187,7 +195,7 @@ def derive_registration(
             )
         )
         handoffs.append(
-            plans.read_session_handoff(status.session, repository_registry=None)
+            plans_handoff.read_session_handoff(status.session, repository_registry=None)
         )
 
     derived = _derive(intent, sessions, bound_root=bound_root)
@@ -199,20 +207,20 @@ def derive_registration(
 
 
 def _completed_handoff_refusal(
-    handoffs: list[plans.SessionHandoff], derived: RegistrationPlan
+    handoffs: list[plans_models.SessionHandoff], derived: RegistrationPlan
 ) -> RegistrationResult | None:
     """Refuse a migration that would leave a completed handoff unparsable.
 
     A registry makes every entry in a completed ``Files modified`` list an
     ``Alias:path`` the parser validates, so migrating a plan whose finished
     sessions recorded bare paths would stop the plan from being read at all.
-    The rule is :func:`plans.completed_handoff_registry_blocker`, asked with
+    The rule is :func:`plans_registry.completed_handoff_registry_blocker`, asked with
     the registry and scopes this migration would write; every other surface
     reaches it by running this derivation rather than by repeating it.
     Source-plan mode has no handoffs to invalidate, so it never reaches this.
     """
     for handoff in handoffs:
-        blocker = plans.completed_handoff_registry_blocker(
+        blocker = plans_registry.completed_handoff_registry_blocker(
             handoff,
             scope=derived.scopes.get(handoff.session.id),
             registry_aliases=derived.registry.aliases,
@@ -403,7 +411,7 @@ def register_repositories(
     if isinstance(derived, RegistrationResult):
         return derived
 
-    previous_readiness = plans.read_readiness_metadata(canonical_dir)
+    previous_readiness = plans_readiness.read_readiness_metadata(canonical_dir)
     manifest_path = canonical_dir / "manifest.md"
     staged: list[tuple[str, str]] = [
         (
@@ -416,7 +424,7 @@ def register_repositories(
     sessions_changed: list[str] = []
     # Staging is in-memory, so a failure anywhere in this pass leaves the plan
     # directory untouched: only the single commit below writes bytes.
-    for session in plans.discover_session_files(canonical_dir):
+    for session in plans_discovery.discover_session_files(canonical_dir):
         original = session.path.read_text(encoding="utf-8")
         migrated = _migrate_session(
             original,
@@ -594,7 +602,7 @@ def _migrate_session_lines(
     registry: RepositoryRegistry,
 ) -> list[str]:
     """Rewrite one session, whether it is a file or a source-plan section."""
-    migrated = list(plans.strip_session_scope_lines(lines))
+    migrated = list(plans_session_scope.strip_session_scope_lines(lines))
     if contract is not None:
         migrated = _splice_contract(migrated, contract, registry)
     return _insert_scope(migrated, scope)
@@ -616,7 +624,10 @@ def _insert_scope(lines: list[str], scope: SessionScope) -> list[str]:
     ):
         del lines[index]
 
-    block = ["", *plans.render_session_scope(scope).rstrip("\n").splitlines()]
+    block = [
+        "",
+        *plans_session_scope.render_session_scope(scope).rstrip("\n").splitlines(),
+    ]
     if index < len(lines) and lines[index].strip():
         block.append("")
     return lines[:index] + block + lines[index:]
@@ -931,7 +942,7 @@ def _register_plan_dir_from_args(args: Any) -> int:
 
     try:
         result = register_repositories(plan_dir, cwd=args.cwd)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         return _emit_error(REGISTER_REASON_PLAN_STRUCTURE, str(error))
 
     payload = result_payload(result)
@@ -1011,7 +1022,7 @@ def _register_source_plan_from_args(args: Any) -> int:
 
     try:
         result = register_source_plan(text, cwd=args.cwd)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         return _emit_error(REGISTER_REASON_PLAN_STRUCTURE, str(error))
 
     payload = result_payload(result)

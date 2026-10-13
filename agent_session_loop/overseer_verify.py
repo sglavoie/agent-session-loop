@@ -137,7 +137,10 @@ from . import (
     overseer_dispatch,
     overseer_policy_client,
     overseer_store,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_registry,
+    plans_session_ids,
     verification,
     workspaces,
 )
@@ -323,7 +326,7 @@ def session_under_verification(facts: intervention.RunFacts) -> str:
     if not isinstance(named, str) or not named.strip():
         return ""
     try:
-        return plans.parse_session_id(named).value
+        return plans_session_ids.parse_session_id(named).value
     except ValueError:
         return ""
 
@@ -366,7 +369,7 @@ def select(
 
     try:
         contract = read_contract(plan_dir, session_id)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         return Selection(
             session_id=session_id,
             declared=(),
@@ -409,7 +412,7 @@ def select(
 
     try:
         resolved = context.resolve_check(found)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         return Selection(
             session_id=session_id,
             declared=declared,
@@ -417,8 +420,8 @@ def select(
             detail=str(error),
         )
 
-    root = plans.canonicalize_path(resolved.resolved_root)
-    permitted = {plans.canonicalize_path(item.path) for item in repositories}
+    root = plans_files.canonicalize_path(resolved.resolved_root)
+    permitted = {plans_files.canonicalize_path(item.path) for item in repositories}
     if root not in permitted:
         return Selection(
             session_id=session_id,
@@ -573,7 +576,7 @@ class VerifyAdapter:
 
         try:
             result = self.run_check(selection.check, context=selection.context)
-        except (plans.PlanError, OSError, ValueError) as error:
+        except (plans_errors.PlanError, OSError, ValueError) as error:
             return overseer_dispatch.Receipt.failed(
                 _phrase("check_errored", f"{type(error).__name__}: {error}")
             )
@@ -682,8 +685,8 @@ def _context(
     legacy one differ here by one path and one binding and nowhere else.
     """
     try:
-        registry = plans.read_repository_registry(plan_dir)
-    except plans.PlanError as error:
+        registry = plans_registry.read_repository_registry(plan_dir)
+    except plans_errors.PlanError as error:
         return ("workspace_unrecoverable", str(error))
 
     observed = _observed_run(
@@ -744,7 +747,7 @@ def _context(
 
     try:
         context = verification.verification_context_from_plan(plan_dir, cwd)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         return ("workspace_unrecoverable", str(error))
     # And again once every declared path has been followed to a real root: a
     # location that only becomes another repository after symlinks is a
@@ -888,7 +891,7 @@ def _resolved_bound(
         # authority over is that repository. Stated rather than inherited from
         # how ``cwd`` was chosen, so a later caller that picks the root some
         # other way is checked rather than trusted.
-        root = plans.canonicalize_path(context.root)
+        root = plans_files.canonicalize_path(context.root)
         if len(authorized) == 1 and authorized[0][1] == root:
             return None
         return (
@@ -912,16 +915,16 @@ def _declared_participants(
     registry: workspaces.RepositoryRegistry, workspace_root: str
 ) -> Participants:
     """Where the registry says its repositories are, before Git is consulted."""
-    root = plans.canonicalize_path(workspace_root)
+    root = plans_files.canonicalize_path(workspace_root)
     return tuple(
-        (repository.alias, plans.canonicalize_path(root / repository.path))
+        (repository.alias, plans_files.canonicalize_path(root / repository.path))
         for repository in registry
     )
 
 
 def _observed_participants(observed: overseer_discovery.Candidate) -> Participants:
     return tuple(
-        (declaration.alias, plans.canonicalize_path(declaration.resolved_root))
+        (declaration.alias, plans_files.canonicalize_path(declaration.resolved_root))
         for declaration in observed.repositories
     )
 
@@ -930,13 +933,13 @@ def _authorized_participants(
     repositories: Sequence[overseer_policy_client.Repository],
 ) -> Participants:
     return tuple(
-        (item.alias, plans.canonicalize_path(item.path)) for item in repositories
+        (item.alias, plans_files.canonicalize_path(item.path)) for item in repositories
     )
 
 
 def _resolved_participants(workspace: workspaces.ResolvedWorkspace) -> Participants:
     return tuple(
-        (repository.alias, plans.canonicalize_path(repository.root))
+        (repository.alias, plans_files.canonicalize_path(repository.root))
         for repository in workspace.repositories
     )
 

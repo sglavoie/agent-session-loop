@@ -11,7 +11,10 @@ from typing import Any
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_models,
+    plans_progress,
+    plans_session_ids,
+    plans_snapshot,
     review_continuation,
     review_cycle,
     review_delta,
@@ -76,10 +79,10 @@ class ReviewDeltaScopeBase(unittest.TestCase):
         )
 
     def _record_repair_progress(self, *files: str) -> None:
-        plans.append_progress_entry(
+        plans_progress.append_progress_entry(
             self.plan_dir,
-            plans.ProgressEntry(
-                session_id=plans.parse_session_id("2.1"),
+            plans_models.ProgressEntry(
+                session_id=plans_session_ids.parse_session_id("2.1"),
                 status="complete",
                 completed_at="2026-01-01T00:00:00Z",
                 files_modified=files,
@@ -102,7 +105,7 @@ class ReviewDeltaScopeBase(unittest.TestCase):
     def _scope_section(self, delta: dict[str, Any]) -> str:
         """Return the `### Scope` text the reviewer is actually told to read."""
         body = review_session_body.build_generated_review_session_body(
-            plans.parse_session_id("3"),
+            plans_session_ids.parse_session_id("3"),
             review_harness="codex",
             plan_dir=self.plan_dir,
             delta=delta,
@@ -122,7 +125,7 @@ class ReviewDeltaScopeBase(unittest.TestCase):
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run one all-clear cycle and return its state and event records."""
         write_completed_review_plan(self.plan_dir, [])
-        snapshot = plans.inspect_plan(self.plan_dir)
+        snapshot = plans_snapshot.inspect_plan(self.plan_dir)
         payload: dict[str, Any] = {
             "run_id": "run-1",
             "run_dir": str(self.tmp_path / "run"),
@@ -152,7 +155,7 @@ class ReviewDeltaScopeBase(unittest.TestCase):
                 "review_repo_state": repo_state,
             },
             max_review_fix_cycles=1,
-            plan_cache=plans.PlanSnapshotCache(),
+            plan_cache=plans_snapshot.PlanSnapshotCache(),
             reinspect=session_verification._reinspect_after_plan_mutation,
         )
 
@@ -169,7 +172,7 @@ class ReviewDeltaScopeBase(unittest.TestCase):
         delta, fallback_reason = self._compute()
         self.assertIsNone(fallback_reason)
         return review_session_body.build_generated_review_session_body(
-            plans.parse_session_id("3"),
+            plans_session_ids.parse_session_id("3"),
             review_harness="codex",
             plan_dir=self.plan_dir,
             delta=delta,

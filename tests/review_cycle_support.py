@@ -13,7 +13,12 @@ from unittest import mock
 from agent_session_loop import (
     config,
     events,
-    plans,
+    plans_content_hash,
+    plans_files,
+    plans_models,
+    plans_readiness,
+    plans_session_ids,
+    plans_snapshot,
     review,
     review_cycle,
     review_repair,
@@ -80,7 +85,7 @@ class RepairCycleFixtures:
         finding = _structured_review_finding()
         write_plan_with_ids(self.plan_dir, (("1", "complete"),))
         review_body = review_session_body.build_generated_review_session_body(
-            plans.parse_session_id("2"),
+            plans_session_ids.parse_session_id("2"),
             review_harness="claude",
             plan_dir=self.plan_dir,
         ).replace("- **Status**: pending", "- **Status**: complete")
@@ -104,7 +109,7 @@ class RepairCycleFixtures:
             "run_dir": str(self.tmp_path / "run"),
             "review_cycles": [],
         }
-        snapshot = plans.inspect_plan(self.plan_dir)
+        snapshot = plans_snapshot.inspect_plan(self.plan_dir)
 
         with mock.patch.object(
             review_repair,
@@ -138,7 +143,7 @@ class RepairCycleFixtures:
                     }
                 },
                 max_review_fix_cycles=2,
-                plan_cache=plans.PlanSnapshotCache(),
+                plan_cache=plans_snapshot.PlanSnapshotCache(),
                 reinspect=session_verification._reinspect_after_plan_mutation,
             )
         return action, after, payload, event_path
@@ -151,10 +156,10 @@ class RepairCycleFixtures:
             )
         }
         write_plan(self.plan_dir, ("pending",), contracts_by_id=contracts_by_id)
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -205,8 +210,8 @@ class RepairCycleFixtures:
         return completed, json.loads(completed.stdout)
 
     def _events_path(self) -> Path:
-        plan_state = self.state_dir / plans.path_sha256(
-            plans.canonicalize_path(self.plan_dir)
+        plan_state = self.state_dir / plans_files.path_sha256(
+            plans_files.canonicalize_path(self.plan_dir)
         )
         return plan_state / events.EVENTS_FILE_NAME
 
@@ -238,13 +243,13 @@ class RepairCycleFixtures:
                 (session_id, "complete")
                 for session_id in sorted(
                     session_ids,
-                    key=lambda item: plans.parse_session_id(item).sort_key,
+                    key=lambda item: plans_session_ids.parse_session_id(item).sort_key,
                 )
             ),
         )
         for review_id in review_ids:
             review_body = review_session_body.build_generated_review_session_body(
-                plans.parse_session_id(review_id),
+                plans_session_ids.parse_session_id(review_id),
                 review_harness="claude",
                 plan_dir=plan_dir,
             ).replace("- **Status**: pending", "- **Status**: complete")

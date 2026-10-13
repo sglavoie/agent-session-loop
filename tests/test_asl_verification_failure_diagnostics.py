@@ -9,7 +9,8 @@ from pathlib import Path
 
 from agent_session_loop import (
     contracts,
-    plans,
+    plans_files,
+    plans_session_ids,
     review,
     review_session_contract,
     run_persistence,
@@ -231,7 +232,7 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
     ) -> None:
         """ASI-105 end to end against the real generated gate."""
         with tempfile.TemporaryDirectory() as tmp:
-            plan_dir = plans.canonicalize_path(Path(tmp))
+            plan_dir = plans_files.canonicalize_path(Path(tmp))
             review_path = plan_dir / review.FINAL_REVIEW_FILENAME
             review_path.write_text("no heading anywhere here\n", encoding="utf-8")
             contract = self._materialized_review_contract(plan_dir)
@@ -290,7 +291,7 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
         the identically named one beside them is not.
         """
         with tempfile.TemporaryDirectory() as tmp:
-            plan_dir = plans.canonicalize_path(Path(tmp))
+            plan_dir = plans_files.canonicalize_path(Path(tmp))
             (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
                 "no heading\n", encoding="utf-8"
             )
@@ -341,7 +342,7 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
         with tempfile.TemporaryDirectory() as tmp:
             for aliases in ((), ("repo-a", "repo-b")):
                 payload = review_session_contract._generated_review_contract_payload(
-                    plans.parse_session_id("9"),
+                    plans_session_ids.parse_session_id("9"),
                     plan_dir=Path(tmp),
                     repository_aliases=aliases,
                 )

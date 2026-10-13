@@ -112,7 +112,7 @@ class _EntryFixture:
     def __init__(self, case: unittest.TestCase, statuses: tuple[str, ...]) -> None:
         tmp = tempfile.TemporaryDirectory()
         case.addCleanup(tmp.cleanup)
-        # Resolve the temp root: `plans.inspect_plan` canonicalizes the macOS
+        # Resolve the temp root: `plans_snapshot.inspect_plan` canonicalizes the macOS
         # `/var/folders/...` symlink and a later path comparison would differ.
         self.root = Path(tmp.name).resolve()
         self.plan_dir = self.root / "plan"

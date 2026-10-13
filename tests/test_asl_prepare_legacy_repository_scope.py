@@ -12,7 +12,8 @@ from pathlib import Path
 from agent_session_loop import (
     authoring,
     cli,
-    plans,
+    plans_errors,
+    plans_files,
     preflight_footprint,
     prepare_expand_ingest,
     prepare_models,
@@ -109,7 +110,7 @@ class LegacyRepositoryFootprintPrepareTests(unittest.TestCase):
 
     def test_expand_ingest_refuses_a_v1_payload_with_its_own_reason(self) -> None:
         payload = _validator_payload()
-        payload["codebase_root"] = str(plans.canonicalize_path(self.first))
+        payload["codebase_root"] = str(plans_files.canonicalize_path(self.first))
         batch = self.tmp_path / "batch.json"
         batch.write_text(json.dumps(payload), encoding="utf-8")
         args = cli.build_parser().parse_args(
@@ -154,8 +155,8 @@ class LegacyRepositoryFootprintPrepareTests(unittest.TestCase):
                 }
             ]
         )
-        payload["codebase_root"] = str(plans.canonicalize_path(self.first))
-        with self.assertRaisesRegex(plans.PlanError, "repository ambiguity"):
+        payload["codebase_root"] = str(plans_files.canonicalize_path(self.first))
+        with self.assertRaisesRegex(plans_errors.PlanError, "repository ambiguity"):
             prepare_validation_store.ingest_validator_output(plan_dir, payload)
 
 
@@ -258,7 +259,7 @@ class LegacyRepositoryIntentPrepareTests(unittest.TestCase):
         self,
     ) -> None:
         payload = _validator_payload()
-        payload["codebase_root"] = str(plans.canonicalize_path(self.first))
+        payload["codebase_root"] = str(plans_files.canonicalize_path(self.first))
         batch = self.tmp_path / "batch.json"
         batch.write_text(json.dumps(payload), encoding="utf-8")
         args = cli.build_parser().parse_args(
@@ -289,7 +290,7 @@ class LegacyRepositoryIntentPrepareTests(unittest.TestCase):
         aggregate = prepare_parsing.parse_validator_output(
             {
                 **_validator_payload(),
-                "codebase_root": str(plans.canonicalize_path(self.first)),
+                "codebase_root": str(plans_files.canonicalize_path(self.first)),
             }
         )
         with self.assertRaises(prepare_models.RepositoryRegistryRequiredError):

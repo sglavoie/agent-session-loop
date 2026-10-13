@@ -8,7 +8,7 @@ from pathlib import Path
 
 from agent_session_loop import (
     authoring,
-    plans,
+    plans_errors,
     prepare_corrections,
     prepare_expansion,
     prepare_models,
@@ -262,7 +262,7 @@ class ExpansionRendererTests(unittest.TestCase):
             payload = _validator_payload(session_id="7")
             validation = prepare_parsing.parse_validator_output(payload)
 
-            with self.assertRaisesRegex(plans.PlanError, "missing session file"):
+            with self.assertRaisesRegex(plans_errors.PlanError, "missing session file"):
                 prepare_expansion.write_expansions(plan_dir, validation)
             self.assertFalse((plan_dir / "session-7.expand.md").exists())
 

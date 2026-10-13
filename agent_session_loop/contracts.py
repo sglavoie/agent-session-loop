@@ -6,7 +6,7 @@ JSON block describing executable checks.
 
 The package is stdlib-only, so the machine-executable recipe is JSON rather
 than YAML. The parser validates schema, session IDs, command argv lists,
-timeouts, file checks, and regex checks, and raises :class:`plans.PlanError`
+timeouts, file checks, and regex checks, and raises :class:`plans_errors.PlanError`
 with clear messages for any malformed contract so callers see a consistent
 error surface.
 """
@@ -21,15 +21,11 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
 from .literals import as_literal
-from .plans import (
-    HANDOFF_HEADING,
-    PlanError,
-    SessionId,
-    canonicalize_path,
-    parse_session_id,
-    read_repository_registry,
-    session_id_to_filename,
-)
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
+from .plans_handoff import HANDOFF_HEADING
+from .plans_registry import read_repository_registry
+from .plans_session_ids import SessionId, parse_session_id, session_id_to_filename
 from .workspaces import (
     RepositoryRegistry,
     WorkspaceError,

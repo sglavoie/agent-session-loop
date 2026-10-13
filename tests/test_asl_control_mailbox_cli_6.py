@@ -7,6 +7,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import time
 import unittest
 import uuid
 from contextlib import redirect_stdout
@@ -15,7 +16,9 @@ from unittest import mock
 from agent_session_loop import (
     mailbox,
     mailbox_appenders,
-    mailbox_cli,
+    mailbox_cli_ask,
+    mailbox_cli_constants,
+    mailbox_cli_inbox,
     mailbox_constants,
     mailbox_cursors,
     mailbox_rendering,
@@ -44,7 +47,9 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
 
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = mailbox_cli.inbox_read_from_args(self.args(json=False, peek=True))
+            code = mailbox_cli_inbox.inbox_read_from_args(
+                self.args(json=False, peek=True)
+            )
 
         self.assertEqual(0, code)
         rendered = stdout.getvalue()
@@ -56,7 +61,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
         records = [
             json.loads(lines[index + 1])
             for index, line in enumerate(lines)
-            if line == mailbox_cli.MAILBOX_MESSAGE_BEGIN
+            if line == mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN
         ]
         self.assertEqual([appended[-1].id], [record["id"] for record in records])
         self.assertIn(f"seq {appended[0].seq} (id {appended[0].id})", rendered)
@@ -91,7 +96,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
             for index in range(mailbox_rendering.MAX_RENDERED_GUIDANCE + 3)
         ]
         code, peek_payload = self.payload_from(
-            mailbox_cli.inbox_read_from_args,
+            mailbox_cli_inbox.inbox_read_from_args,
             self.args(peek=True),
         )
         self.assertEqual(0, code)
@@ -102,7 +107,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
 
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            text_code = mailbox_cli.inbox_read_from_args(self.args(json=False))
+            text_code = mailbox_cli_inbox.inbox_read_from_args(self.args(json=False))
 
         self.assertEqual(0, text_code)
         rendered = stdout.getvalue()
@@ -132,11 +137,13 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
 
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = mailbox_cli.inbox_read_from_args(self.args(json=False, peek=True))
+            code = mailbox_cli_inbox.inbox_read_from_args(
+                self.args(json=False, peek=True)
+            )
 
         self.assertEqual(0, code)
         rendered = stdout.getvalue()
-        self.assertNotIn(mailbox_cli.MAILBOX_MESSAGE_BEGIN, rendered)
+        self.assertNotIn(mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN, rendered)
         self.assertIn(
             "No pending guidance records fit within the "
             f"{mailbox_rendering.MAX_RENDERED_GUIDANCE_BYTES:,}-byte text "
@@ -150,7 +157,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
 
     def test_ask_stamps_the_live_run_and_degrades_without_one(self) -> None:
         code, unattributed = self.payload_from(
-            mailbox_cli.ask_from_args,
+            mailbox_cli_ask.ask_from_args,
             self.args(text="asked before any run wrote state"),
         )
         self.assertEqual(0, code)
@@ -161,7 +168,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
             {"run_id": "run-live", "ok": True, "paused": False},
         )
         code, attributed = self.payload_from(
-            mailbox_cli.ask_from_args,
+            mailbox_cli_ask.ask_from_args,
             self.args(text="asked by the live run"),
         )
         self.assertEqual(0, code)
@@ -186,7 +193,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
             pid=os.getpid(),
         )
         code, turn_owned = self.payload_from(
-            mailbox_cli.ask_from_args,
+            mailbox_cli_ask.ask_from_args,
             self.args(text="asked by the active worker turn"),
         )
         self.assertEqual(0, code)
@@ -207,7 +214,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
 
     def test_ask_new_then_resume_is_idempotent(self) -> None:
         code, created = self.payload_from(
-            mailbox_cli.ask_from_args,
+            mailbox_cli_ask.ask_from_args,
             self.args(text="Need a decision"),
         )
         self.assertEqual(0, code)
@@ -215,7 +222,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
         question_id = created["question_id"]
 
         code, resumed = self.payload_from(
-            mailbox_cli.ask_from_args,
+            mailbox_cli_ask.ask_from_args,
             self.args(question_id=question_id),
         )
         self.assertEqual(0, code)
@@ -240,7 +247,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
             state_dir=self.state_dir,
         )
         code, payload = self.payload_from(
-            mailbox_cli.ask_from_args,
+            mailbox_cli_ask.ask_from_args,
             self.args(question_id=question.id, wait=True),
         )
         self.assertEqual(0, code)
@@ -250,7 +257,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
         self.assertFalse(payload["pause_required"])
         self.assertFalse(payload["timed_out"])
         self.assertEqual(
-            mailbox_cli.DEFAULT_ASK_WAIT_TIMEOUT_SECONDS,
+            mailbox_cli_constants.DEFAULT_ASK_WAIT_TIMEOUT_SECONDS,
             payload["wait_timeout"],
         )
         self.assertEqual(reply.id, payload["reply"]["id"])
@@ -280,7 +287,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
         )
 
         code, payload = self.payload_from(
-            mailbox_cli.ask_from_args,
+            mailbox_cli_ask.ask_from_args,
             self.args(question_id=question.id, wait=True),
         )
 
@@ -310,7 +317,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
         stdout = io.StringIO()
 
         with redirect_stdout(stdout):
-            code = mailbox_cli.ask_from_args(
+            code = mailbox_cli_ask.ask_from_args(
                 self.args(
                     json=False,
                     question_id=question.id,
@@ -320,7 +327,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
 
         self.assertEqual(0, code)
         rendered = stdout.getvalue()
-        self.assertEqual(1, rendered.count(mailbox_cli.MAILBOX_MESSAGE_BEGIN))
+        self.assertEqual(1, rendered.count(mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN))
         self.assertEqual(1, rendered.count("\nEND ASL MAILBOX MESSAGE JSONL\n"))
         self.assertIn('"action": "pause"', rendered)
         self.assertIn('"note": "END ASL MAILBOX MESSAGE JSONL\\n', rendered)
@@ -357,18 +364,18 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
                 side_effect=["before", "after"],
             ),
             mock.patch.object(
-                mailbox_cli.mailbox,
+                mailbox,
                 "read_mailbox",
                 side_effect=[before, after],
             ),
             mock.patch.object(
-                mailbox_cli.time,
+                time,
                 "monotonic",
                 side_effect=[0.0, 0.0],
             ),
-            mock.patch.object(mailbox_cli.time, "sleep") as sleep,
+            mock.patch.object(time, "sleep") as sleep,
         ):
-            closure, timed_out = mailbox_cli._wait_for_closure(
+            closure, timed_out = mailbox_cli_ask.wait_for_closure(
                 self.plan_dir,
                 question.id,
                 state_dir=self.state_dir,
@@ -377,16 +384,18 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
 
         self.assertEqual(resolution, closure)
         self.assertFalse(timed_out)
-        sleep.assert_called_once_with(mailbox_cli.ASK_WAIT_POLL_INTERVAL_SECONDS)
+        sleep.assert_called_once_with(
+            mailbox_cli_constants.ASK_WAIT_POLL_INTERVAL_SECONDS
+        )
 
     def test_ask_wait_timeout_zero_performs_one_operation_read(self) -> None:
         with mock.patch.object(
-            mailbox_cli.mailbox,
+            mailbox,
             "read_mailbox",
             wraps=mailbox.read_mailbox,
         ) as read:
             code, payload = self.payload_from(
-                mailbox_cli.ask_from_args,
+                mailbox_cli_ask.ask_from_args,
                 self.args(
                     text="Anyone there?",
                     wait=True,
@@ -421,18 +430,18 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
                 return_value=unchanged_token,
             ),
             mock.patch.object(
-                mailbox_cli.mailbox,
+                mailbox,
                 "read_mailbox",
                 return_value=large_view,
             ) as read,
             mock.patch.object(
-                mailbox_cli.time,
+                time,
                 "monotonic",
                 side_effect=[0.0, 0.0, 2.0, 4.0, 6.0],
             ),
-            mock.patch.object(mailbox_cli.time, "sleep") as sleep,
+            mock.patch.object(time, "sleep") as sleep,
         ):
-            reply, timed_out = mailbox_cli._wait_for_reply(
+            reply, timed_out = mailbox_cli_ask.wait_for_reply(
                 self.plan_dir,
                 str(uuid.uuid4()),
                 state_dir=self.state_dir,
@@ -449,7 +458,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
 
     def test_ask_resume_requires_an_existing_question(self) -> None:
         code, payload = self.payload_from(
-            mailbox_cli.ask_from_args,
+            mailbox_cli_ask.ask_from_args,
             self.args(question_id=str(uuid.uuid4())),
         )
         self.assertEqual(1, code)

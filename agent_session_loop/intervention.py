@@ -41,7 +41,7 @@ from . import (
     mailbox_models,
     mailbox_snapshot,
     mailbox_vocabulary,
-    plans,
+    plans_files,
     qna,
     state,
     state_locks,
@@ -230,7 +230,7 @@ class RunFacts:
 
 def _canonical_plan_dir(plan_dir: str | Path) -> Path:
     try:
-        return plans.canonicalize_path(plan_dir)
+        return plans_files.canonicalize_path(plan_dir)
     except (OSError, ValueError) as error:
         raise InterventionError(
             REASON_INVALID_PLAN,
@@ -248,7 +248,7 @@ def build_run_facts(
 ) -> RunFacts:
     """Classify already-read state, so a projection need not read it twice.
 
-    Mirrors ``mailbox_cli._active_status_run_id``'s definition of a live run:
+    Mirrors ``mailbox_cli_status.active_status_run_id``'s definition of a live run:
     lock held, runner state present, not errored, not paused, not finished.
     """
     run_id = runner_state.get("run_id")

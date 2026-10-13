@@ -19,7 +19,9 @@ from agent_session_loop import (
     cli,
     conversations,
     events,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_snapshot,
     redirect_store,
     state,
     state_abandonment,
@@ -45,10 +47,10 @@ class StateMigrationTestBase(unittest.TestCase):
         # disk (it was renamed away), which is exactly the orphan condition.
         self.new_plan = self.tmp_path / "plans" / "beta"
         write_plan(self.new_plan, ("pending",))
-        self.new_plan = plans.canonicalize_path(self.new_plan)
-        self.old_plan = plans.canonicalize_path(self.tmp_path / "plans" / "alpha")
+        self.new_plan = plans_files.canonicalize_path(self.new_plan)
+        self.old_plan = plans_files.canonicalize_path(self.tmp_path / "plans" / "alpha")
 
-        self.snapshot = plans.inspect_plan(self.new_plan)
+        self.snapshot = plans_snapshot.inspect_plan(self.new_plan)
         self.content_sha256 = self.snapshot.content_sha256
 
         self.old_state_dir = state.plan_state_dir(self.old_plan, self.state_dir)
@@ -385,7 +387,8 @@ class MigrateStateTests(StateMigrationTestBase):
         # would rename the live source's state dir to the target hash.
         write_plan(self.old_plan, ("pending",))
         self.assertEqual(
-            self.content_sha256, plans.inspect_plan(self.old_plan).content_sha256
+            self.content_sha256,
+            plans_snapshot.inspect_plan(self.old_plan).content_sha256,
         )
         self._write_orphan_state()
         with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
@@ -418,7 +421,7 @@ class MigrateStateTests(StateMigrationTestBase):
         self._write_orphan_state()
         not_a_plan = self.tmp_path / "plans" / "empty"
         not_a_plan.mkdir(parents=True, exist_ok=True)
-        with self.assertRaises(plans.PlanError):
+        with self.assertRaises(plans_errors.PlanError):
             state_migration.migrate_plan_state(
                 not_a_plan,
                 from_plan_dir=self.old_plan,
@@ -435,7 +438,7 @@ class MigrateStateTests(StateMigrationTestBase):
             state_dir=self.state_dir,
             apply=True,
         )
-        snapshot = plans.inspect_plan(self.new_plan)
+        snapshot = plans_snapshot.inspect_plan(self.new_plan)
         payload = state_status.status_payload(snapshot, self.state_dir)
         # State is now keyed under the new path: no orphan, runner state reads.
         self.assertEqual([], payload["orphaned_state_candidates"])
@@ -840,7 +843,7 @@ class ConversationRelocationTests(StateMigrationTestBase):
                 session_id=session_id,
                 harness="claude",
                 workspace=workspaces.WorkspaceBinding(
-                    workspace_root=str(plans.canonicalize_path(self.tmp_path)),
+                    workspace_root=str(plans_files.canonicalize_path(self.tmp_path)),
                     registry_digest="a" * 64,
                 ),
                 access_profile="worker",
@@ -857,7 +860,7 @@ class ConversationRelocationTests(StateMigrationTestBase):
             session_id="1",
             harness="claude",
             workspace=workspaces.WorkspaceBinding(
-                workspace_root=str(plans.canonicalize_path(self.tmp_path)),
+                workspace_root=str(plans_files.canonicalize_path(self.tmp_path)),
                 registry_digest="a" * 64,
             ),
             access_profile="worker",
@@ -923,7 +926,7 @@ class ConversationRelocationTests(StateMigrationTestBase):
 
     def test_a_foreign_ledger_refuses_the_migration(self) -> None:
         self._write_orphan_state()
-        stranger = plans.canonicalize_path(self.tmp_path / "plans" / "stranger")
+        stranger = plans_files.canonicalize_path(self.tmp_path / "plans" / "stranger")
         self._seed_conversation(plan_dir=stranger)
         with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
             state_migration.migrate_plan_state(

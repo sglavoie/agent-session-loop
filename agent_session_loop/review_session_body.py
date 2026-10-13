@@ -45,7 +45,7 @@ Three invariants survive the move out of ``runner.py``:
   derived from. It is shared with the delta selector rather than copied;
   ``review_delta`` imports it from here.
 * A scope section that declares a delta but is missing either of its two
-  required sub-headings is a ``plans.PlanError`` rather than a silent
+  required sub-headings is a ``plans_errors.PlanError`` rather than a silent
   rewrite. A body that declares no ``## Delta Review Scope`` at all already
   tells the reviewer to read everything, so ``rescoped_review_session_body``
   returns ``None`` instead of widening what is already widest.
@@ -66,7 +66,18 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import plans, review, review_session_contract, workspaces
+from . import (
+    plans_discovery,
+    plans_errors,
+    plans_files,
+    plans_handoff,
+    plans_models,
+    plans_session_ids,
+    plans_session_scope,
+    review,
+    review_session_contract,
+    workspaces,
+)
 
 # Scope of a generated review session. ``full`` is the fail-open default: any
 # re-review that cannot prove a narrower scope reads everything again.
@@ -262,7 +273,7 @@ def rescoped_review_session_body(
         REVIEW_PRIOR_FINDINGS_HEADING not in section
         or REVIEW_SCOPE_DETAIL_HEADING not in section
     ):
-        raise plans.PlanError(
+        raise plans_errors.PlanError(
             f"a `{REVIEW_SCOPE_HEADING}` section without both a "
             f"`{REVIEW_PRIOR_FINDINGS_HEADING}` and a "
             f"`{REVIEW_SCOPE_DETAIL_HEADING}` heading cannot be re-scoped"
@@ -270,7 +281,7 @@ def rescoped_review_session_body(
     findings_at = start + section.index(REVIEW_PRIOR_FINDINGS_HEADING)
     detail_at = start + section.index(REVIEW_SCOPE_DETAIL_HEADING)
     if findings_at > detail_at:
-        raise plans.PlanError(
+        raise plans_errors.PlanError(
             f"`{REVIEW_PRIOR_FINDINGS_HEADING}` must precede "
             f"`{REVIEW_SCOPE_DETAIL_HEADING}` in a re-scopable review session"
         )
@@ -287,7 +298,7 @@ def rescoped_review_session_body(
 
 
 def build_generated_review_session_body(
-    session_id: plans.SessionId,
+    session_id: plans_session_ids.SessionId,
     *,
     review_harness: str,
     plan_dir: str | Path,
@@ -296,7 +307,7 @@ def build_generated_review_session_body(
     review_bases: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """Render the markdown body of a generated review session file."""
-    canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
     artifact_version = (
         review.REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION
         if workspace is not None
@@ -318,11 +329,13 @@ def build_generated_review_session_body(
     header_lines = [f"# {session_id.display_label}: Final Review", ""]
     repository_lines: list[str] = []
     if workspace is not None:
-        scope = plans.SessionScope(
+        scope = plans_session_scope.SessionScope(
             reads=workspace.registry.aliases,
             writes=(),
         )
-        header_lines.extend(plans.render_session_scope(scope).rstrip().splitlines())
+        header_lines.extend(
+            plans_session_scope.render_session_scope(scope).rstrip().splitlines()
+        )
         header_lines.append("")
         repository_lines = _repository_review_base_lines(workspace, review_bases)
     return "\n".join(
@@ -492,7 +505,7 @@ def refreshed_review_repository_base(
     """Replace the generated review's repository base before execution."""
     lines = text.split("\n")
     if REVIEW_REPOSITORY_BASE_HEADING not in lines:
-        raise plans.PlanError(
+        raise plans_errors.PlanError(
             "repository-aware generated review is missing its ordered "
             "repository review base"
         )
@@ -516,13 +529,13 @@ def refreshed_review_repository_base(
 
 def find_pending_generated_review_session(
     plan_dir: str | Path,
-) -> plans.SessionFile | None:
+) -> plans_models.SessionFile | None:
     """Return the first pending generated review session file, if any."""
-    canonical_dir = plans.canonicalize_path(plan_dir)
-    for session in plans.discover_session_files(canonical_dir):
+    canonical_dir = plans_files.canonicalize_path(plan_dir)
+    for session in plans_discovery.discover_session_files(canonical_dir):
         if not review_session_contract.is_generated_review_session_file(session.path):
             continue
-        status = plans.read_session_status(session)
+        status = plans_handoff.read_session_status(session)
         if status.status == "pending":
             return session
     return None
@@ -535,7 +548,7 @@ def ensure_generated_review_session(
     delta: Mapping[str, Any] | None = None,
     workspace: workspaces.ResolvedWorkspace | None = None,
     review_bases: Sequence[Mapping[str, Any]] = (),
-) -> tuple[plans.SessionFile, bool]:
+) -> tuple[plans_models.SessionFile, bool]:
     """Reuse a pending generated review session, or append a new one.
 
     Returns the canonical ``SessionFile`` and ``True`` when a new session file
@@ -544,12 +557,12 @@ def ensure_generated_review_session(
     scope of a newly written session only; a reused pending session keeps the
     body it was written with.
     """
-    canonical_dir = plans.canonicalize_path(plan_dir)
+    canonical_dir = plans_files.canonicalize_path(plan_dir)
     pending = find_pending_generated_review_session(canonical_dir)
     if pending is not None:
         return pending, False
 
-    session_id = plans.next_top_level_session_id(canonical_dir)
+    session_id = plans_discovery.next_top_level_session_id(canonical_dir)
     body = build_generated_review_session_body(
         session_id,
         review_harness=review_harness,
@@ -560,4 +573,4 @@ def ensure_generated_review_session(
     )
     target_path = canonical_dir / session_id.filename
     target_path.write_text(body, encoding="utf-8")
-    return plans.SessionFile(session_id=session_id, path=target_path), True
+    return plans_models.SessionFile(session_id=session_id, path=target_path), True

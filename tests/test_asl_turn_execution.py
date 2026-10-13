@@ -30,7 +30,8 @@ from agent_session_loop import (
     clock,
     events,
     harnesses,
-    plans,
+    plans_payloads,
+    plans_snapshot,
     process_tree,
     run_persistence,
     run_reporting,
@@ -105,10 +106,10 @@ class TurnExecutorHarness:
         self.root = root
         self.plan_dir = root / "plan"
         write_plan(self.plan_dir, ("pending",))
-        self.before = plans.inspect_plan(self.plan_dir)
+        self.before = plans_snapshot.inspect_plan(self.plan_dir)
         self.persistence = RecordingPersistence()
         self.progress = RecordingProgress()
-        self.plan_cache = plans.PlanSnapshotCache()
+        self.plan_cache = plans_snapshot.PlanSnapshotCache()
         self.event_path = root / "events.jsonl"
         self.turn_index = turn_index
         self.paths = turn_execution.turn_paths(
@@ -139,8 +140,8 @@ class TurnExecutorHarness:
         return {
             "run_id": "run-1",
             "turn_index": self.turn_index,
-            **plans.session_identity_payload("1"),
-            "session_kind": plans.SESSION_KIND_IMPLEMENTATION,
+            **plans_payloads.session_identity_payload("1"),
+            "session_kind": plans_payloads.SESSION_KIND_IMPLEMENTATION,
             "total_sessions": 1,
             "artifact_dir": str(self.paths["artifact_dir"]),
             "prompt": "do the work",
@@ -483,7 +484,7 @@ class TurnExecutorEndingTests(unittest.TestCase):
         self.assertIsInstance(commit.record, MappingProxyType)
         self.assertTrue(commit.record["committed"])
         self.assertEqual(
-            plans.snapshot_payload(commit.published), commit.record["after"]
+            plans_payloads.snapshot_payload(commit.published), commit.record["after"]
         )
         self.assertEqual([events.TURN_FINISHED_EVENT], self.harness.names()[-1:])
         self.assertEqual(1, self.harness.names().count(events.TURN_FINISHED_EVENT))
@@ -563,7 +564,7 @@ class PostResultTerminationPreviewTests(unittest.TestCase):
         tmp = Path(self._tmp.name)
         plan_dir = tmp / "plan"
         write_plan(plan_dir, ("pending",))
-        self.snapshot = plans.inspect_plan(plan_dir)
+        self.snapshot = plans_snapshot.inspect_plan(plan_dir)
         self.paths = {
             name: tmp / file_name
             for name, file_name in (

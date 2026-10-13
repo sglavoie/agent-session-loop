@@ -119,7 +119,7 @@ class _DoctorFixture:
         self.harness = harness
         tmp = tempfile.TemporaryDirectory()
         case.addCleanup(tmp.cleanup)
-        # Resolve the temp root: `plans.canonicalize_path` resolves the macOS
+        # Resolve the temp root: `plans_files.canonicalize_path` resolves the macOS
         # `/var/folders/...` symlink and a later path comparison would differ.
         self.root = Path(tmp.name).resolve()
         self.plan_dir = self.root / "plan"
@@ -371,7 +371,7 @@ class RefusalTests(unittest.TestCase):
     ) -> None:
         source = inspect.getsource(run_doctor.doctor_from_args)
         resolved = source.index("workspaces.resolve_workspace(")
-        compared = source.index("plans.load_plan_metadata(")
+        compared = source.index("plans_metadata.load_plan_metadata(")
         # Comparing a binding that has not resolved yet would report a
         # mismatch against nothing; the order is the invariant.
         self.assertLess(resolved, compared)

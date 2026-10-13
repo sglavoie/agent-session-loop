@@ -6,7 +6,9 @@ from unittest import mock
 
 from agent_session_loop import (
     contracts,
-    plans,
+    plans_errors,
+    plans_handoff,
+    plans_models,
     review,
     review_repair,
     workspaces,
@@ -99,8 +101,8 @@ class ReviewRepairMaterializerTests(MaterializationFixtures, unittest.TestCase):
         self.assertEqual(("F3",), result.children[1].finding_ids)
         for child in result.children:
             self.assertTrue(child.path.is_file())
-            status = plans.read_session_status(
-                plans.SessionFile(child.session_id, child.path)
+            status = plans_handoff.read_session_status(
+                plans_models.SessionFile(child.session_id, child.path)
             )
             self.assertEqual("pending", status.status)
 
@@ -273,7 +275,7 @@ class ReviewRepairMaterializerTests(MaterializationFixtures, unittest.TestCase):
             }
         ]
 
-        with self.assertRaisesRegex(plans.PlanError, "no absence semantics"):
+        with self.assertRaisesRegex(plans_errors.PlanError, "no absence semantics"):
             review_repair._merge_verification_checks("runner", findings)
 
     def test_no_finding_is_omitted_or_assigned_twice(self) -> None:

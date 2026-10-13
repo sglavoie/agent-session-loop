@@ -11,7 +11,9 @@ from typing import Any
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_models,
+    plans_session_ids,
+    plans_snapshot,
     review,
     review_continuation,
     review_cycle,
@@ -36,14 +38,14 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
 
     def _write_repair_children(
         self, findings: list[dict[str, Any]]
-    ) -> plans.PlanSnapshot:
+    ) -> plans_models.PlanSnapshot:
         write_completed_review_plan(self.plan_dir, findings)
         repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
         self.assertTrue(repair_plan.ok, repair_plan.error)
         for group in repair_plan.repair_groups:
             child_path = self.plan_dir / group.proposed_child_id.filename
             child_path.write_text(group.rendered_text, encoding="utf-8")
-        return plans.inspect_plan(self.plan_dir)
+        return plans_snapshot.inspect_plan(self.plan_dir)
 
     def test_repair_group_attempts_reads_event_history(self) -> None:
         events.append_event(
@@ -162,7 +164,7 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
             encoding="utf-8",
         )
         review_body = review_session_body.build_generated_review_session_body(
-            plans.parse_session_id("3"),
+            plans_session_ids.parse_session_id("3"),
             review_harness="claude",
             plan_dir=self.plan_dir,
         ).replace("- **Status**: pending", "- **Status**: complete")
@@ -198,7 +200,7 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
                 },
             ),
         )
-        snapshot = plans.inspect_plan(self.plan_dir)
+        snapshot = plans_snapshot.inspect_plan(self.plan_dir)
         payload: dict[str, Any] = {
             "run_id": "run-1",
             "run_dir": str(self.tmp_path / "run"),
@@ -228,7 +230,7 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
                 }
             },
             max_review_fix_cycles=4,
-            plan_cache=plans.PlanSnapshotCache(),
+            plan_cache=plans_snapshot.PlanSnapshotCache(),
             reinspect=session_verification._reinspect_after_plan_mutation,
         )
 

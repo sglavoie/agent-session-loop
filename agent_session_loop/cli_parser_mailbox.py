@@ -50,7 +50,7 @@ def _add_inbox_commands(
         help="Delivery wait timeout in seconds (default: 30; maximum: 1800)",
     )
     inbox_guidance_parser.set_defaults(
-        handler_ref="mailbox_cli:inbox_guidance_from_args",
+        handler_ref="mailbox_cli_guidance:inbox_guidance_from_args",
     )
 
     inbox_reply_parser = inbox_sub.add_parser(
@@ -83,7 +83,7 @@ def _add_inbox_commands(
         help="Consumption wait timeout in seconds (default: 90; maximum: 1800)",
     )
     inbox_reply_parser.set_defaults(
-        handler_ref="mailbox_cli:inbox_reply_from_args",
+        handler_ref="mailbox_cli_replies:inbox_reply_from_args",
     )
 
     inbox_resolve_parser = inbox_sub.add_parser(
@@ -126,7 +126,7 @@ def _add_inbox_commands(
         help="Read the optional resolution note from standard input",
     )
     inbox_resolve_parser.set_defaults(
-        handler_ref="mailbox_cli:inbox_resolve_from_args",
+        handler_ref="mailbox_cli_replies:inbox_resolve_from_args",
     )
 
     inbox_read_parser = inbox_sub.add_parser(
@@ -140,7 +140,7 @@ def _add_inbox_commands(
         help="Read pending guidance without acknowledging it",
     )
     inbox_read_parser.set_defaults(
-        handler_ref="mailbox_cli:inbox_read_from_args",
+        handler_ref="mailbox_cli_inbox:inbox_read_from_args",
     )
 
     inbox_acknowledge_parser = inbox_sub.add_parser(
@@ -162,7 +162,7 @@ def _add_inbox_commands(
         help="Attempt token from your prompt; it names this attempt only",
     )
     inbox_acknowledge_parser.set_defaults(
-        handler_ref="mailbox_cli:inbox_acknowledge_from_args",
+        handler_ref="mailbox_cli_inbox:inbox_acknowledge_from_args",
     )
 
 
@@ -203,7 +203,7 @@ def _add_worker_message_commands(
             "(default: 90; maximum: 1800)"
         ),
     )
-    ask_parser.set_defaults(handler_ref="mailbox_cli:ask_from_args")
+    ask_parser.set_defaults(handler_ref="mailbox_cli_ask:ask_from_args")
 
     notify_parser = subparsers.add_parser(
         "notify",
@@ -220,7 +220,7 @@ def _add_worker_message_commands(
         action="store_true",
         help="Read the notice body from standard input",
     )
-    notify_parser.set_defaults(handler_ref="mailbox_cli:notify_from_args")
+    notify_parser.set_defaults(handler_ref="mailbox_cli_notify:notify_from_args")
 
 
 def _add_outbox_commands(
@@ -276,7 +276,7 @@ def _add_outbox_commands(
         help="Long-poll timeout in seconds (default: 300; maximum: 1800)",
     )
     outbox_wait_parser.set_defaults(
-        handler_ref="mailbox_cli:outbox_wait_from_args",
+        handler_ref="mailbox_cli_outbox:outbox_wait_from_args",
     )
 
     outbox_supervise_parser = outbox_sub.add_parser(
@@ -301,5 +301,5 @@ def _add_outbox_commands(
         help="Long-poll timeout in seconds (default: 550; maximum: 1800)",
     )
     outbox_supervise_parser.set_defaults(
-        handler_ref="mailbox_cli:outbox_supervise_from_args",
+        handler_ref="mailbox_cli_outbox:outbox_supervise_from_args",
     )

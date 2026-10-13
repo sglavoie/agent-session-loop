@@ -18,7 +18,10 @@ from agent_session_loop import (
     artifacts,
     durability,
     events,
-    plans,
+    plans_content_hash,
+    plans_errors,
+    plans_files,
+    plans_metadata,
 )
 from tests.support import (
     write_plan,
@@ -34,14 +37,17 @@ class PlanMetadataTests(unittest.TestCase):
             plan_dir.mkdir()
             cwd.mkdir()
 
-            path = plans.save_plan_metadata(plan_dir, cwd / ".." / "repo")
-            metadata = plans.load_plan_metadata(plan_dir)
+            path = plans_metadata.save_plan_metadata(plan_dir, cwd / ".." / "repo")
+            metadata = plans_metadata.load_plan_metadata(plan_dir)
 
             self.assertEqual(
-                plans.canonicalize_path(plan_dir) / plans.PLAN_METADATA_FILE_NAME,
+                plans_files.canonicalize_path(plan_dir)
+                / plans_metadata.PLAN_METADATA_FILE_NAME,
                 path,
             )
-            self.assertEqual(plans.PlanMetadata(cwd=str(cwd.resolve())), metadata)
+            self.assertEqual(
+                plans_metadata.PlanMetadata(cwd=str(cwd.resolve())), metadata
+            )
             self.assertEqual(
                 {"cwd": str(cwd.resolve()), "version": 1},
                 json.loads(path.read_text(encoding="utf-8")),
@@ -50,11 +56,11 @@ class PlanMetadataTests(unittest.TestCase):
     def test_missing_returns_none_and_malformed_metadata_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp)
-            self.assertIsNone(plans.load_plan_metadata(plan_dir))
-            path = plan_dir / plans.PLAN_METADATA_FILE_NAME
+            self.assertIsNone(plans_metadata.load_plan_metadata(plan_dir))
+            path = plan_dir / plans_metadata.PLAN_METADATA_FILE_NAME
             path.write_text('{"version": 1, "cwd": "relative"}\n', encoding="utf-8")
-            with self.assertRaisesRegex(plans.PlanError, "canonical absolute"):
-                plans.load_plan_metadata(plan_dir)
+            with self.assertRaisesRegex(plans_errors.PlanError, "canonical absolute"):
+                plans_metadata.load_plan_metadata(plan_dir)
 
     def test_metadata_does_not_change_plan_or_readiness_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -63,13 +69,17 @@ class PlanMetadataTests(unittest.TestCase):
             cwd = root / "repo"
             write_plan(plan_dir, ("pending",))
             cwd.mkdir()
-            content_before = plans.plan_content_sha256(plan_dir)
-            readiness_before = plans.stable_readiness_sha256(plan_dir)
+            content_before = plans_content_hash.plan_content_sha256(plan_dir)
+            readiness_before = plans_content_hash.stable_readiness_sha256(plan_dir)
 
-            plans.save_plan_metadata(plan_dir, cwd)
+            plans_metadata.save_plan_metadata(plan_dir, cwd)
 
-            self.assertEqual(content_before, plans.plan_content_sha256(plan_dir))
-            self.assertEqual(readiness_before, plans.stable_readiness_sha256(plan_dir))
+            self.assertEqual(
+                content_before, plans_content_hash.plan_content_sha256(plan_dir)
+            )
+            self.assertEqual(
+                readiness_before, plans_content_hash.stable_readiness_sha256(plan_dir)
+            )
 
 
 class EventPersistenceTests(unittest.TestCase):

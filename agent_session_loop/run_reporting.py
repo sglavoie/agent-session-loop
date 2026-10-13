@@ -73,7 +73,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from . import clock, plans, tail
+from . import clock, plans_models, plans_payloads, tail
 from .formatting import (
     format_duration_seconds,
     format_turn_finished_message,
@@ -637,11 +637,11 @@ def _compact_value(value: Any, *, fallback: str = "none") -> str:
 
 
 def _compact_status_counts(
-    snapshot: plans.PlanSnapshot | None,
+    snapshot: plans_models.PlanSnapshot | None,
     fallback: dict[str, Any] | None,
 ) -> dict[str, int] | None:
     if snapshot is not None:
-        return plans.status_counts(snapshot)
+        return plans_payloads.status_counts(snapshot)
     if isinstance(fallback, dict):
         counts = fallback.get("counts")
         if isinstance(counts, dict):
@@ -655,7 +655,7 @@ def _compact_status_counts(
 
 
 def _compact_next_pending_id(
-    snapshot: plans.PlanSnapshot | None,
+    snapshot: plans_models.PlanSnapshot | None,
     fallback: dict[str, Any] | None,
 ) -> str | None:
     if snapshot is not None:
@@ -702,7 +702,7 @@ def _compact_status_lines(
     *,
     payload: dict[str, Any],
     control: dict[str, Any],
-    snapshot: plans.PlanSnapshot | None,
+    snapshot: plans_models.PlanSnapshot | None,
     plan_error: str | None = None,
     now: datetime | None = None,
 ) -> list[str]:

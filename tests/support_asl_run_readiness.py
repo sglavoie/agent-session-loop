@@ -11,7 +11,14 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from agent_session_loop import config, events, plans, state
+from agent_session_loop import (
+    config,
+    events,
+    plans_content_hash,
+    plans_models,
+    plans_readiness,
+    state,
+)
 from tests.support import (
     REPO_ROOT,
     _command_contract,
@@ -48,7 +55,7 @@ class RunReadinessGateFixture(unittest.TestCase):
         readiness: str | None = "loop-ready",
         sha_override: str | None = None,
         contracts_by_id: dict[str, str] | None = None,
-    ) -> plans.ReadinessMetadata | None:
+    ) -> plans_models.ReadinessMetadata | None:
         contracts = contracts_by_id or {
             str(index): _contract_block(
                 '{"type": "file_exists", "path": "README.md", '
@@ -60,13 +67,13 @@ class RunReadinessGateFixture(unittest.TestCase):
         write_plan(self.plan_dir, statuses, contracts_by_id=contracts)
         if readiness is None:
             return None
-        sha = sha_override or plans.stable_readiness_sha256(self.plan_dir)
-        metadata = plans.ReadinessMetadata(
+        sha = sha_override or plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        metadata = plans_models.ReadinessMetadata(
             state=readiness,
             readiness_sha256=sha,
             checked_at="2026-06-19T00:00:00Z",
         )
-        plans.write_readiness_metadata(self.plan_dir, metadata)
+        plans_readiness.write_readiness_metadata(self.plan_dir, metadata)
         return metadata
 
     def _run(
@@ -232,11 +239,13 @@ class RunReadinessGateFixture(unittest.TestCase):
             f"# Session 1 Expansion\n\n- Restated from {expansion_cites}\n",
             encoding="utf-8",
         )
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
@@ -244,10 +253,10 @@ class RunReadinessGateFixture(unittest.TestCase):
     def _write_baseline_gated_plan(self) -> None:
         contract = _command_contract('["true"]', session="1", expectation="pass")
         write_plan(self.plan_dir, ("pending",), contracts_by_id={"1": contract})
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",

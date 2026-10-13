@@ -15,7 +15,9 @@ from agent_session_loop import (
     events,
     mailbox,
     mailbox_appenders,
-    mailbox_cli,
+    mailbox_cli_guidance,
+    mailbox_cli_outbox,
+    mailbox_cli_replies,
     mailbox_constants,
     mailbox_cursors,
     mailbox_leases,
@@ -46,7 +48,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
 
         with mock.patch.object(agent_mux_delivery, "notify") as notify:
             code, payload = self.payload_from(
-                mailbox_cli.outbox_wait_from_args,
+                mailbox_cli_outbox.outbox_wait_from_args,
                 self.args(timeout=0),
             )
 
@@ -70,7 +72,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
             side_effect=RuntimeError("AgentMux unavailable"),
         ):
             code, payload = self.payload_from(
-                mailbox_cli.outbox_wait_from_args,
+                mailbox_cli_outbox.outbox_wait_from_args,
                 self.args(timeout=0),
             )
 
@@ -97,7 +99,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
         )
 
         code, payload = self.payload_from(
-            mailbox_cli.inbox_guidance_from_args,
+            mailbox_cli_guidance.inbox_guidance_from_args,
             self.args(text="Keep the parser lazy."),
         )
 
@@ -114,7 +116,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
         with self.subTest(state="missing"):
             self.assertFalse(lease_path.exists())
             code, payload = self.payload_from(
-                mailbox_cli.inbox_guidance_from_args,
+                mailbox_cli_guidance.inbox_guidance_from_args,
                 self.args(text="first"),
             )
             self.assertEqual(0, code)
@@ -136,7 +138,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
                 (raw + b"\n").ljust(mailbox_constants.MAILBOX_LEASE_BYTES, b" ")
             )
             code, payload = self.payload_from(
-                mailbox_cli.inbox_guidance_from_args,
+                mailbox_cli_guidance.inbox_guidance_from_args,
                 self.args(text="second"),
             )
             self.assertEqual(0, code)
@@ -149,7 +151,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
         with self.subTest(state="unprojected-fresh-v2"):
             before = self._lease_on_disk()
             code, payload = self.payload_from(
-                mailbox_cli.inbox_guidance_from_args,
+                mailbox_cli_guidance.inbox_guidance_from_args,
                 self.args(text="third"),
             )
             self.assertEqual(0, code)
@@ -174,12 +176,12 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
         )
 
         with mock.patch.object(
-            mailbox_cli.mailbox_leases,
+            mailbox_leases,
             "read_lease",
             side_effect=unreadable,
         ):
             code, payload = self.payload_from(
-                mailbox_cli.inbox_guidance_from_args,
+                mailbox_cli_guidance.inbox_guidance_from_args,
                 self.args(text="Keep the parser lazy."),
             )
 
@@ -218,7 +220,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
             ) as notify,
         ):
             code, reply_payload = self.payload_from(
-                mailbox_cli.inbox_reply_from_args,
+                mailbox_cli_replies.inbox_reply_from_args,
                 self.args(text="Use one object.", to=question.id),
             )
 
@@ -291,7 +293,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
             ) as notify,
         ):
             code, _payload = self.payload_from(
-                mailbox_cli.inbox_reply_from_args,
+                mailbox_cli_replies.inbox_reply_from_args,
                 self.args(text="Use one object.", to=question.id),
             )
 
@@ -337,7 +339,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
 
         with mock.patch.object(agent_mux_delivery, "notify") as notify:
             code, _payload = self.payload_from(
-                mailbox_cli.inbox_reply_from_args,
+                mailbox_cli_replies.inbox_reply_from_args,
                 self.args(text="Second answer", to=second.id),
             )
 
@@ -382,7 +384,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
             return_value={"final_status": "accepted"},
         ) as notify:
             code, reply_payload = self.payload_from(
-                mailbox_cli.inbox_reply_from_args,
+                mailbox_cli_replies.inbox_reply_from_args,
                 self.args(text="Use one object.", to=question.id),
             )
 
@@ -431,7 +433,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
             return_value={"final_status": "accepted"},
         ) as notify:
             code, reply_payload = self.payload_from(
-                mailbox_cli.inbox_reply_from_args,
+                mailbox_cli_replies.inbox_reply_from_args,
                 self.args(text="Use one object.", to=question.id),
             )
 

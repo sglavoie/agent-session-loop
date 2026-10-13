@@ -6,7 +6,8 @@ import json
 import subprocess
 
 from agent_session_loop import (
-    plans,
+    plans_files,
+    plans_payloads,
     review_session_contract,
     review_transitions,
 )
@@ -46,7 +47,7 @@ class RunReviewHarnessPairTests(RunReviewHarnessLifecycleBase):
             payload["review_verdict"],
         )
         review_path = review_session_contract.final_review_output_path(
-            plans.canonicalize_path(self.plan_dir)
+            plans_files.canonicalize_path(self.plan_dir)
         )
         self.assertTrue(review_path.is_file())
         self.assertEqual(
@@ -84,7 +85,10 @@ class RunReviewHarnessPairTests(RunReviewHarnessLifecycleBase):
         turns = payload["turns"]
         self.assertEqual(["copilot", "claude"], [turn["harness"] for turn in turns])
         self.assertEqual(
-            [plans.SESSION_KIND_IMPLEMENTATION, plans.SESSION_KIND_REVIEW],
+            [
+                plans_payloads.SESSION_KIND_IMPLEMENTATION,
+                plans_payloads.SESSION_KIND_REVIEW,
+            ],
             [turn["session_kind"] for turn in turns],
         )
 
@@ -118,7 +122,10 @@ class RunReviewHarnessPairTests(RunReviewHarnessLifecycleBase):
         turns = payload["turns"]
         self.assertEqual(["codex", "copilot"], [turn["harness"] for turn in turns])
         self.assertEqual(
-            [plans.SESSION_KIND_IMPLEMENTATION, plans.SESSION_KIND_REVIEW],
+            [
+                plans_payloads.SESSION_KIND_IMPLEMENTATION,
+                plans_payloads.SESSION_KIND_REVIEW,
+            ],
             [turn["session_kind"] for turn in turns],
         )
 

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import artifacts, events, plans, run_persistence, state, turn_execution
+from . import artifacts, events, plans_files, run_persistence, state, turn_execution
 
 # Subdirectory (relative to a turn artifact directory) where failed-command
 # gzip artifacts live, matching the runner-managed verification convention.
@@ -297,7 +297,7 @@ def compact_plan_state(
     apply: bool = False,
 ) -> CompactionReport:
     """Compact the state, events, and result records for one plan directory."""
-    canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
     plan_state = state.plan_state_dir(canonical_plan_dir, state_dir)
     stats = _Stats()
 

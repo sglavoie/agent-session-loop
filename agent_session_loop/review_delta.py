@@ -71,7 +71,8 @@ from typing import Any, Protocol
 
 from . import (
     events,
-    plans,
+    plans_errors,
+    plans_models,
     review,
     review_continuation,
     review_guard,
@@ -150,7 +151,7 @@ def _read_prior_review_cycles(event_path: str | Path) -> list[dict[str, Any]]:
 
 def _review_cycle_state(
     event_path: str | Path,
-    snapshot_or_plan_dir: plans.PlanSnapshot | str | Path | None = None,
+    snapshot_or_plan_dir: plans_models.PlanSnapshot | str | Path | None = None,
 ) -> dict[str, Any]:
     """Compatibility wrapper for shared cross-process cap accounting."""
     return review_continuation.review_cycle_state(event_path, snapshot_or_plan_dir)
@@ -166,7 +167,7 @@ def _review_artifact_digests(plan_dir: Path) -> tuple[str | None, str | None]:
     ):
         try:
             digests.append(digest_fn(plan_dir))
-        except plans.PlanError:
+        except plans_errors.PlanError:
             digests.append(None)
     return digests[0], digests[1]
 
@@ -555,7 +556,7 @@ def _compute_registered_review_delta_context(
 
 def _refresh_pending_review_scope(
     *,
-    session: plans.SessionStatus,
+    session: plans_models.SessionStatus,
     event_path: Path,
     plan_dir: Path,
     cwd: Path,

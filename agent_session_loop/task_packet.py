@@ -54,7 +54,14 @@ from . import (
     harnesses,
     mailbox_models,
     mailbox_vocabulary,
-    plans,
+    plans_errors,
+    plans_files,
+    plans_handoff,
+    plans_models,
+    plans_payloads,
+    plans_progress,
+    plans_session_ids,
+    plans_session_scope,
     qna,
     redirect_ack,
     review,
@@ -125,8 +132,8 @@ class SessionTaskPacket:
     reply_block: tuple[str, ...] = field(default_factory=tuple)
     resolution_block: tuple[str, ...] = field(default_factory=tuple)
     workspace: workspaces.ResolvedWorkspace | None = None
-    session_scope: plans.SessionScope | None = None
-    session_kind: str = plans.SESSION_KIND_IMPLEMENTATION
+    session_scope: plans_session_scope.SessionScope | None = None
+    session_kind: str = plans_payloads.SESSION_KIND_IMPLEMENTATION
 
     @property
     def has_correction_context(self) -> bool:
@@ -142,7 +149,7 @@ class SessionTaskPacket:
 
     @property
     def is_review(self) -> bool:
-        return self.session_kind == plans.SESSION_KIND_REVIEW
+        return self.session_kind == plans_payloads.SESSION_KIND_REVIEW
 
     def _justified_repeat_lines(self) -> list[str]:
         """Return the bullets that bound repeated and widened checking.
@@ -292,8 +299,9 @@ class SessionTaskPacket:
                 "fill the `## Handoff` fields for this session only."
             )
             lines.append(
-                f"- Record new facts under `{plans.DISCOVERED_FACTS_HEADING}` "
-                f"and open uncertainties under `{plans.OPEN_QUESTIONS_HEADING}` "
+                f"- Record new facts under `{plans_handoff.DISCOVERED_FACTS_HEADING}` "
+                "and open uncertainties under "
+                f"`{plans_handoff.OPEN_QUESTIONS_HEADING}` "
                 "(flat, top-level bullets)."
             )
             lines.append(
@@ -332,8 +340,9 @@ class SessionTaskPacket:
                 "the `## Handoff` fields for this session only."
             )
             lines.append(
-                f"- Record new facts under `{plans.DISCOVERED_FACTS_HEADING}` and "
-                f"open uncertainties under `{plans.OPEN_QUESTIONS_HEADING}` "
+                "- Record new facts under "
+                f"`{plans_handoff.DISCOVERED_FACTS_HEADING}` and "
+                f"open uncertainties under `{plans_handoff.OPEN_QUESTIONS_HEADING}` "
                 "(flat, top-level bullets)."
             )
             lines.append(
@@ -396,8 +405,8 @@ def build_task_packet(
     harness: str,
     plan_dir: str | Path,
     *,
-    session_id: str | plans.SessionId,
-    predecessor_id: str | plans.SessionId | None = None,
+    session_id: str | plans_session_ids.SessionId,
+    predecessor_id: str | plans_session_ids.SessionId | None = None,
     has_expansion: bool = False,
     has_progress: bool = True,
     reply: str | None = None,
@@ -410,8 +419,8 @@ def build_task_packet(
     state_dir: str | Path | None = None,
     pending_guidance: Sequence[mailbox_models.MailboxMessage] = (),
     workspace: workspaces.ResolvedWorkspace | None = None,
-    session_scope: plans.SessionScope | None = None,
-    session_kind: str = plans.SESSION_KIND_IMPLEMENTATION,
+    session_scope: plans_session_scope.SessionScope | None = None,
+    session_kind: str = plans_payloads.SESSION_KIND_IMPLEMENTATION,
     corrections: redirect_ack.CarriedCorrections | None = None,
 ) -> SessionTaskPacket:
     """Build the compact autonomous-worker packet for one selected session.
@@ -449,10 +458,10 @@ def build_task_packet(
     # unknown harness fails fast the same way the other prompt builders do.
     harnesses.get_adapter(harness)
 
-    if session_kind not in plans.SESSION_KINDS:
+    if session_kind not in plans_payloads.SESSION_KINDS:
         raise ValueError(f"unknown session kind: {session_kind!r}")
-    canonical_dir = plans.canonicalize_path(plan_dir)
-    selected = plans.parse_session_id(session_id)
+    canonical_dir = plans_files.canonicalize_path(plan_dir)
+    selected = plans_session_ids.parse_session_id(session_id)
     if (workspace is None) != (session_scope is None):
         raise ValueError("workspace and session_scope must be provided together")
     pending_guidance_tuple = tuple(pending_guidance)
@@ -462,7 +471,7 @@ def build_task_packet(
     predecessor_value: str | None = None
     predecessor_path: str | None = None
     if predecessor_id is not None:
-        predecessor = plans.parse_session_id(predecessor_id)
+        predecessor = plans_session_ids.parse_session_id(predecessor_id)
         predecessor_value = predecessor.value
         predecessor_path = str(canonical_dir / predecessor.filename)
 
@@ -519,7 +528,9 @@ def build_task_packet(
         session_path=str(canonical_dir / selected.filename),
         context_path=str(canonical_dir / "context.md"),
         progress_path=(
-            str(canonical_dir / plans.PROGRESS_FILE_NAME) if has_progress else None
+            str(canonical_dir / plans_progress.PROGRESS_FILE_NAME)
+            if has_progress
+            else None
         ),
         expansion_path=(
             str(canonical_dir / selected.expansion_filename) if has_expansion else None
@@ -561,7 +572,7 @@ def build_task_packet(
 
 
 def _predecessor_session_id(
-    snapshot: plans.PlanSnapshot, session_id: str
+    snapshot: plans_models.PlanSnapshot, session_id: str
 ) -> str | None:
     """Return the id of the session immediately before ``session_id``.
 
@@ -585,8 +596,8 @@ def _predecessor_session_id(
 def _session_has_expansion(plan_dir: Path, session_id: str) -> bool:
     """Return True when ``session-<id>.expand.md`` exists in ``plan_dir``."""
     try:
-        selected = plans.parse_session_id(session_id)
-    except plans.PlanError:
+        selected = plans_session_ids.parse_session_id(session_id)
+    except plans_errors.PlanError:
         return False
     return (plan_dir / selected.expansion_filename).is_file()
 
@@ -642,7 +653,7 @@ def _build_interactive_help(
     state_dir_arg = getattr(args, "state_dir", None)
     try:
         context = qna.load_qna_context(plan_dir, state_dir=state_dir_arg)
-    except qna.QnAError, plans.PlanError, OSError:
+    except qna.QnAError, plans_errors.PlanError, OSError:
         return None
     # An unresumable conversation is the one pause with no question in it, so
     # it gets the recovery route in place of a reply command rather than

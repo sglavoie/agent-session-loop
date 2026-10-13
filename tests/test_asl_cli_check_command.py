@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import cli, plans
+from agent_session_loop import cli, plans_content_hash
 from tests.support_asl_cli_split import SplitCliHelpers
 
 
@@ -152,7 +152,7 @@ class SplitCheckCommandTests(SplitCliHelpers, unittest.TestCase):
             self.assertEqual(1, second_session.count("**Reads repositories**: OAK"))
             self.assertEqual(1, second_session.count("**Writes repositories**: (none)"))
             self.assertEqual(
-                plans.stable_readiness_sha256(output_dir),
+                plans_content_hash.stable_readiness_sha256(output_dir),
                 payload["readiness"]["readiness_sha256"],
             )
 

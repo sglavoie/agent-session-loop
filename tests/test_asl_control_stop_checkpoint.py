@@ -17,7 +17,9 @@ from agent_session_loop import (
     control_queue,
     events,
     harnesses,
-    plans,
+    plans_handoff,
+    plans_models,
+    plans_session_ids,
     review_session_body,
     run_control,
     run_loop,
@@ -75,10 +77,10 @@ class PreTurnStopCheckpointTests(unittest.TestCase):
             return
 
     def _session_status(self, session_id: str) -> str:
-        return plans.read_session_status(
-            plans.SessionFile(
-                plans.parse_session_id(session_id),
-                self.plan_dir / plans.session_id_to_filename(session_id),
+        return plans_handoff.read_session_status(
+            plans_models.SessionFile(
+                plans_session_ids.parse_session_id(session_id),
+                self.plan_dir / plans_session_ids.session_id_to_filename(session_id),
             )
         ).status
 

@@ -50,14 +50,11 @@ from pathlib import Path
 from . import (
     workspaces,
 )
-from .plans import (
-    PlanError,
-    PlanSnapshot,
-    ReadinessState,
-    canonicalize_path,
-    inspect_plan,
-    read_repository_registry,
-)
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
+from .plans_models import PlanSnapshot, ReadinessState
+from .plans_registry import read_repository_registry
+from .plans_snapshot import inspect_plan
 from .preflight_baseline_checks import _check_baselines, _check_progress_journal
 from .preflight_context import (
     _check_repository_registry,

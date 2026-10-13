@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import durability, plans, process_tree, state
+from . import durability, plans_files, plans_snapshot, process_tree, state
 from .state import (
     LockInfo,
     StateError,
@@ -156,7 +156,7 @@ def _read_lock_path(
     stale = False
     reason = "active"
 
-    if plan_dir and plans.canonicalize_path(plan_dir) != expected_plan_dir:
+    if plan_dir and plans_files.canonicalize_path(plan_dir) != expected_plan_dir:
         stale = True
         reason = "lock plan directory does not match requested plan"
     elif pid is None:
@@ -192,7 +192,7 @@ def _read_lock_path(
 def read_lock_info(
     plan_dir: str | Path, state_dir: str | Path | None = None
 ) -> LockInfo | None:
-    canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
     return _read_lock_path(
         lock_path_for_plan(canonical_plan_dir, state_dir), canonical_plan_dir
     )
@@ -209,7 +209,7 @@ def inspect_lock_info(
     effect, so that its projection is a function of the corpus rather than of
     the order in which it happened to read.
     """
-    canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
     return _read_lock_path(
         lock_path_for_plan(canonical_plan_dir, state_dir),
         canonical_plan_dir,
@@ -268,7 +268,7 @@ def acquire_lock(
     redirect submissions against this run refusable, because there is no
     urgent path to deliver them on.
     """
-    snapshot = plans.inspect_plan(plan_dir)
+    snapshot = plans_snapshot.inspect_plan(plan_dir)
     lock_path = lock_path_for_plan(snapshot.plan_dir, state_dir)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -374,7 +374,7 @@ def unlock_plan(
     *,
     force: bool = False,
 ) -> UnlockResult:
-    canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
     lock_path = lock_path_for_plan(canonical_plan_dir, state_dir)
 
     with _plan_lock_mutex(lock_path) as held:

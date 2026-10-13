@@ -10,7 +10,7 @@ from typing import Any
 from . import (
     events,
     harnesses,
-    plans,
+    plans_payloads,
     redirect_ack,
     redirect_continuation,
     redirect_recovery,
@@ -64,7 +64,7 @@ def _carried_corrections(
     redirect_payload: dict[str, Any] = (
         pending.to_payload()
         if pending is not None and redirected_here
-        else {**plans.session_identity_payload(session_id), "recovered": True}
+        else {**plans_payloads.session_identity_payload(session_id), "recovered": True}
     )
     continuation = redirect_store.RedirectTarget(
         run_id=ctx.run_id,
@@ -89,7 +89,7 @@ def _carried_corrections(
             {
                 "run_id": ctx.run_id,
                 "turn_index": turn_index,
-                **plans.session_identity_payload(session_id),
+                **plans_payloads.session_identity_payload(session_id),
                 "outcome": "carry-failed",
                 "redirect": redirect_payload,
                 "harness": harness,
@@ -110,7 +110,7 @@ def _carried_corrections(
         {
             "run_id": ctx.run_id,
             "turn_index": turn_index,
-            **plans.session_identity_payload(session_id),
+            **plans_payloads.session_identity_payload(session_id),
             "outcome": "carried",
             "redirect": redirect_payload,
             "harness": harness,
@@ -161,7 +161,7 @@ def _annotate_carried_corrections(
             {
                 "run_id": ctx.run_id,
                 "turn_index": turn_index,
-                **plans.session_identity_payload(session_id),
+                **plans_payloads.session_identity_payload(session_id),
                 "outcome": f"{outcome}-failed",
                 "harness": harness,
                 "error": {"reason": error.reason, "message": str(error)},
@@ -174,7 +174,7 @@ def _annotate_carried_corrections(
         {
             "run_id": ctx.run_id,
             "turn_index": turn_index,
-            **plans.session_identity_payload(session_id),
+            **plans_payloads.session_identity_payload(session_id),
             "outcome": outcome,
             "harness": harness,
             **result.to_payload(),
@@ -238,7 +238,7 @@ def _launch_carried_corrections(
         {
             "run_id": ctx.run_id,
             "turn_index": turn_index,
-            **plans.session_identity_payload(session_id),
+            **plans_payloads.session_identity_payload(session_id),
             "outcome": "launching" if error is None else "launching-failed",
             "harness": harness,
             **(result.to_payload() if result is not None else {}),

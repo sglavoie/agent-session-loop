@@ -13,7 +13,7 @@ from agent_session_loop import (
     commit_groups,
     commit_settlement,
     events,
-    plans,
+    plans_metadata,
     state,
     supervisor_audit_checks,
     supervisor_audit_evidence,
@@ -252,7 +252,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
             (history[1] / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
             (history[1] / "session-01.md").rename(history[1] / "session-1.md")
             (history[1] / "session-1.md").write_text("# Session 1\n", encoding="utf-8")
-            (history[1] / plans.PLAN_METADATA_FILE_NAME).write_text(
+            (history[1] / plans_metadata.PLAN_METADATA_FILE_NAME).write_text(
                 json.dumps({"version": 1, "cwd": str(repository)}),
                 encoding="utf-8",
             )

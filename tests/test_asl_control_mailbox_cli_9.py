@@ -7,6 +7,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import time
 import unittest
 import uuid
 from contextlib import redirect_stdout
@@ -16,7 +17,11 @@ from agent_session_loop import (
     agent_mux_delivery,
     mailbox,
     mailbox_appenders,
-    mailbox_cli,
+    mailbox_cli_constants,
+    mailbox_cli_outbox,
+    mailbox_cli_output,
+    mailbox_cli_status,
+    mailbox_cli_waits,
     mailbox_constants,
     mailbox_cursors,
     mailbox_models,
@@ -41,14 +46,14 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
             return_value=supervision_liveness.DEAD,
         ):
             code, payload = self.payload_from(
-                mailbox_cli.outbox_supervise_from_args,
+                mailbox_cli_outbox.outbox_supervise_from_args,
                 self.args(timeout=0, supervision_id=launch),
             )
 
         self.assertEqual(0, code)
-        self.assertEqual(mailbox_cli.SUPERVISE_TOKEN_LOST, payload["state"])
+        self.assertEqual(mailbox_cli_constants.SUPERVISE_TOKEN_LOST, payload["state"])
         self.assertEqual(
-            mailbox_cli.SUPERVISE_LOST_HELPER_EXITED,
+            mailbox_cli_constants.SUPERVISE_LOST_HELPER_EXITED,
             payload["lost_reason"],
         )
         self.assertFalse(payload["timed_out"])
@@ -65,14 +70,14 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         launch = mailbox_validation.new_supervision_id()
         self.age_grace_anchor(
             launch,
-            mailbox_cli.SUPERVISE_LIVENESS_GRACE_SECONDS + 60,
+            mailbox_cli_constants.SUPERVISE_LIVENESS_GRACE_SECONDS + 60,
         )
 
         code, lines = self.supervise_lines(supervision_id=launch)
 
         self.assertEqual(0, code)
         self.assertEqual(
-            f"LOST reason={mailbox_cli.SUPERVISE_LOST_HELPER_NEVER_STARTED}",
+            f"LOST reason={mailbox_cli_constants.SUPERVISE_LOST_HELPER_NEVER_STARTED}",
             lines[0],
         )
         self.assertIn("Active turn: none.", lines)
@@ -98,7 +103,7 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         self.write_active_turn(run_id="run-live", session_id="1", turn_index=2)
         self.age_grace_anchor(
             launch,
-            mailbox_cli.SUPERVISE_LIVENESS_GRACE_SECONDS + 60,
+            mailbox_cli_constants.SUPERVISE_LIVENESS_GRACE_SECONDS + 60,
         )
 
         code, lines = self.supervise_lines(supervision_id=launch)
@@ -111,7 +116,7 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         self.write_liveness_record(launch)
         self.age_grace_anchor(
             launch,
-            mailbox_cli.SUPERVISE_LIVENESS_GRACE_SECONDS + 60,
+            mailbox_cli_constants.SUPERVISE_LIVENESS_GRACE_SECONDS + 60,
         )
 
         with mock.patch.object(
@@ -193,7 +198,7 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         )
         with (
             mock.patch.object(
-                mailbox_cli.mailbox,
+                mailbox,
                 "read_mailbox",
                 side_effect=[empty, landed],
             ),
@@ -203,23 +208,23 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
                 side_effect=[(1, 2, 0, 3), (1, 2, 1, 4)],
             ),
             mock.patch.object(
-                mailbox_cli,
-                "_write_supervisor_lease",
+                mailbox_cli_status,
+                "write_supervisor_lease",
             ),
             mock.patch.object(
-                mailbox_cli.time,
+                time,
                 "monotonic",
                 side_effect=[0.0, 5.0],
             ),
-            mock.patch.object(mailbox_cli.time, "sleep") as sleep,
+            mock.patch.object(time, "sleep") as sleep,
         ):
-            result = mailbox_cli._wait_for_questions(
+            result = mailbox_cli_waits.wait_for_questions(
                 self.plan_dir,
                 state_dir=self.state_dir,
                 since=0,
                 timeout=60,
                 supervisor_id=str(uuid.uuid4()),
-                include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                include=mailbox_cli_constants.OUTBOX_INCLUDE_ALL,
             )
 
         self.assertEqual((record,), result.supervision_ends)
@@ -227,7 +232,7 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         self.assertFalse(result.timed_out)
         self.assertEqual(1, result.next_since)
         self.assertEqual(
-            [mock.call(mailbox_cli.OUTBOX_WAIT_POLL_INTERVAL_SECONDS)],
+            [mock.call(mailbox_cli_constants.OUTBOX_WAIT_POLL_INTERVAL_SECONDS)],
             sleep.call_args_list,
         )
 
@@ -236,11 +241,11 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
     ) -> None:
         baselines = {}
         for include in (
-            mailbox_cli.OUTBOX_INCLUDE_QUESTIONS,
-            mailbox_cli.OUTBOX_INCLUDE_NOTICES,
+            mailbox_cli_constants.OUTBOX_INCLUDE_QUESTIONS,
+            mailbox_cli_constants.OUTBOX_INCLUDE_NOTICES,
         ):
             code, baselines[include] = self.payload_from(
-                mailbox_cli.outbox_wait_from_args,
+                mailbox_cli_outbox.outbox_wait_from_args,
                 self.args(timeout=0, include=include),
             )
             self.assertEqual(0, code)
@@ -258,7 +263,7 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         for include, baseline in baselines.items():
             with self.subTest(include=include):
                 code, payload = self.payload_from(
-                    mailbox_cli.outbox_wait_from_args,
+                    mailbox_cli_outbox.outbox_wait_from_args,
                     self.args(timeout=0, include=include),
                 )
                 self.assertEqual(0, code)
@@ -303,8 +308,8 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
             return_value={"final_status": "accepted"},
         ) as notify:
             code, payload = self.payload_from(
-                mailbox_cli.outbox_wait_from_args,
-                self.args(timeout=0, include=mailbox_cli.OUTBOX_INCLUDE_ALL),
+                mailbox_cli_outbox.outbox_wait_from_args,
+                self.args(timeout=0, include=mailbox_cli_constants.OUTBOX_INCLUDE_ALL),
             )
 
         self.assertEqual(0, code)
@@ -341,8 +346,8 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
 
         with mock.patch.object(agent_mux_delivery, "notify") as notify:
             code, payload = self.payload_from(
-                mailbox_cli.outbox_wait_from_args,
-                self.args(timeout=0, include=mailbox_cli.OUTBOX_INCLUDE_ALL),
+                mailbox_cli_outbox.outbox_wait_from_args,
+                self.args(timeout=0, include=mailbox_cli_constants.OUTBOX_INCLUDE_ALL),
             )
 
         self.assertEqual(0, code)
@@ -358,11 +363,11 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
     def test_outbox_wait_text_renders_the_supervision_end(self) -> None:
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = mailbox_cli.outbox_wait_from_args(
+            code = mailbox_cli_outbox.outbox_wait_from_args(
                 self.args(
                     json=False,
                     timeout=0,
-                    include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                    include=mailbox_cli_constants.OUTBOX_INCLUDE_ALL,
                 )
             )
         self.assertEqual(0, code)
@@ -379,11 +384,11 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         )
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = mailbox_cli.outbox_wait_from_args(
+            code = mailbox_cli_outbox.outbox_wait_from_args(
                 self.args(
                     json=False,
                     timeout=0,
-                    include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                    include=mailbox_cli_constants.OUTBOX_INCLUDE_ALL,
                 )
             )
 
@@ -393,7 +398,9 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
             f"Supervision end {record.id} (seq {record.seq}):",
             lines,
         )
-        rendered = json.loads(lines[lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1])
+        rendered = json.loads(
+            lines[lines.index(mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN) + 1]
+        )
         self.assertEqual(
             {
                 "id": record.id,
@@ -416,7 +423,9 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
             for index in range(30)
         ]
 
-        bounded_lines = mailbox_cli._outbox_supervision_end_text_lines(tuple(appended))
+        bounded_lines = mailbox_cli_output.outbox_supervision_end_text_lines(
+            tuple(appended)
+        )
         bounded = "\n".join(bounded_lines)
         self.assertLessEqual(
             len(bounded.encode("utf-8")),
@@ -425,7 +434,7 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         bounded_records = [
             json.loads(bounded_lines[index + 1])
             for index, line in enumerate(bounded_lines)
-            if line == mailbox_cli.MAILBOX_MESSAGE_BEGIN
+            if line == mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN
         ]
         self.assertEqual(
             [appended[-1].id],
@@ -458,14 +467,14 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         )
         with (
             mock.patch.object(
-                mailbox_cli.mailbox,
+                mailbox,
                 "read_mailbox",
                 side_effect=[transient, view],
             ),
-            mock.patch.object(mailbox_cli.time, "sleep"),
+            mock.patch.object(time, "sleep"),
         ):
             code, payload = self.payload_from(
-                mailbox_cli.outbox_wait_from_args,
+                mailbox_cli_outbox.outbox_wait_from_args,
                 self.args(timeout=1),
             )
         self.assertEqual(0, code)
@@ -478,12 +487,12 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
             path=mailbox_cursors.mailbox_path_for_plan(self.plan_dir, self.state_dir),
         )
         with mock.patch.object(
-            mailbox_cli.mailbox,
+            mailbox,
             "read_mailbox",
             side_effect=error,
         ):
             code, payload = self.payload_from(
-                mailbox_cli.outbox_wait_from_args,
+                mailbox_cli_outbox.outbox_wait_from_args,
                 self.args(timeout=0),
             )
         self.assertEqual(1, code)

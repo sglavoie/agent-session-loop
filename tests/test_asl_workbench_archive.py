@@ -11,7 +11,7 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 
-from agent_session_loop import config, plans, state, workbench, workbench_archive
+from agent_session_loop import config, plans_files, state, workbench, workbench_archive
 from tests.support import (
     _seed_archivable_plan,
     _write_plan_dir,
@@ -891,7 +891,7 @@ class WorkbenchDiscoveryTests(unittest.TestCase):
             tmp_path = Path(tmp).resolve()
             state_root = tmp_path / "state"
             plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
-            plan_state_dir = state_root / plans.path_sha256(plan_dir)
+            plan_state_dir = state_root / plans_files.path_sha256(plan_dir)
             plan_state_dir.mkdir(parents=True)
             (plan_state_dir / "state.json").write_text(
                 json.dumps({"plan_dir": str(plan_dir)}, sort_keys=True),
@@ -1037,7 +1037,7 @@ class WorkbenchDiscoveryTests(unittest.TestCase):
             tmp_path = Path(tmp).resolve()
             state_root = tmp_path / "state"
             plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
-            plan_state_dir = state_root / plans.path_sha256(plan_dir)
+            plan_state_dir = state_root / plans_files.path_sha256(plan_dir)
             plan_state_dir.mkdir(parents=True)
             (plan_state_dir / "state.json").write_text(
                 json.dumps({"plan_dir": str(plan_dir)}, sort_keys=True),

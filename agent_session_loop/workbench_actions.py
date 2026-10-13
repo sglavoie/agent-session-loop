@@ -44,7 +44,7 @@ from typing import Any
 from asl_workbench import actions as portable_actions
 from asl_workbench import operations
 
-from . import intervention, plans, workbench, workbench_operations
+from . import intervention, plans_files, workbench, workbench_operations
 
 #: The ASL intervention action each shared action validates as. ``launch`` has
 #: no row: there is no run to be fresh about before one exists, and what stands
@@ -339,7 +339,7 @@ def reply_to_question(
 
 def _canonical(plan_dir: str | Path) -> Path:
     try:
-        return plans.canonicalize_path(plan_dir)
+        return plans_files.canonicalize_path(plan_dir)
     except (OSError, ValueError) as error:
         raise workbench.LaunchError(
             workbench.LAUNCH_REASON_INVALID_PLAN, f"invalid plan_dir: {error}"

@@ -47,7 +47,12 @@ from agent_session_loop import (
     events,
     handoff_correction,
     handoff_guards,
-    plans,
+    plans_content_hash,
+    plans_errors,
+    plans_models,
+    plans_payloads,
+    plans_snapshot,
+    plans_status_tables,
     readiness_gate,
     review_cycle,
     run_coordination,
@@ -84,7 +89,7 @@ MOVED_CALLS = frozenset(
         "handoff_guards._append_progress_entry",
         "session_verification._enforce_session_verification",
         "session_verification._enforce_review_verdict",
-        "plans.sync_derived_status_ledgers",
+        "plans_status_tables.sync_derived_status_ledgers",
         "readiness_gate._refresh_active_readiness_state",
         "commit_settlement._registered_session_commit_targets",
         "commit_settlement._dirty_commit_targets",
@@ -143,7 +148,7 @@ class FakeRunContext:
         self.persistence = RecordingPersistence()
         self.progress = object()
         self.guard_controller = object()
-        self.plan_cache = plans.PlanSnapshotCache()
+        self.plan_cache = plans_snapshot.PlanSnapshotCache()
         self.session_attempts = continuation_guards.SessionAttempts()
         self.verification_context = argparse.Namespace(workspace=None)
         self.commit_generation = object()
@@ -151,13 +156,13 @@ class FakeRunContext:
         self.seen_external_command_ids: set[str] = set()
         self.completed_count = 0
         self.review_appended = True
-        self.final_snapshots: list[plans.PlanSnapshot] = []
+        self.final_snapshots: list[plans_models.PlanSnapshot] = []
         self.pauses: list[dict[str, Any]] = []
 
-    def record_final_snapshot(self, snapshot: plans.PlanSnapshot) -> None:
+    def record_final_snapshot(self, snapshot: plans_models.PlanSnapshot) -> None:
         self.final_snapshots.append(snapshot)
         with self.persistence.lock:
-            self.payload["final_snapshot"] = plans.snapshot_payload(snapshot)
+            self.payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot)
 
     def pause(
         self,
@@ -172,7 +177,7 @@ class FakeRunContext:
 class FakeTurnExecutor:
     """The publication seam, reduced to what the settlement asks of it."""
 
-    def __init__(self, *, published: plans.PlanSnapshot, record: dict[str, Any]):
+    def __init__(self, *, published: plans_models.PlanSnapshot, record: dict[str, Any]):
         self.published = published
         self.record = record
         self.calls: list[dict[str, Any]] = []
@@ -204,9 +209,9 @@ class SettlementTestCase(unittest.TestCase):
         self.event_path = self.run_dir / events.EVENTS_FILE_NAME
 
         write_plan(self.plan_dir, ("pending", "pending"))
-        self.before = plans.inspect_plan(self.plan_dir)
+        self.before = plans_snapshot.inspect_plan(self.plan_dir)
         write_plan(self.plan_dir, ("complete", "pending"))
-        self.after = plans.inspect_plan(self.plan_dir)
+        self.after = plans_snapshot.inspect_plan(self.plan_dir)
 
         self.ctx = FakeRunContext(run_dir=self.run_dir, event_path=self.event_path)
         self.turn_payload: dict[str, Any] = {"turn": 1}
@@ -265,7 +270,11 @@ class SettlementTestCase(unittest.TestCase):
         self.patch(
             handoff_guards, "_append_progress_entry", self.recorder("progress", True)
         )
-        self.patch(plans, "sync_derived_status_ledgers", self.recorder("ledgers", []))
+        self.patch(
+            plans_status_tables,
+            "sync_derived_status_ledgers",
+            self.recorder("ledgers", []),
+        )
         self.patch(
             readiness_gate,
             "_refresh_active_readiness_state",
@@ -459,7 +468,7 @@ class StatusChangeTests(SettlementTestCase):
 
     def test_a_turn_that_moved_more_than_one_status_is_refused(self) -> None:
         write_plan(self.plan_dir, ("complete", "complete"))
-        settlement = self.settle(after=plans.inspect_plan(self.plan_dir))
+        settlement = self.settle(after=plans_snapshot.inspect_plan(self.plan_dir))
         self.assertEqual(turn_settlement.ACTION_STOP, settlement.action)
         self.assertEqual(
             ["multiple-status-changes"], [p["reason"] for p in self.ctx.pauses]
@@ -541,9 +550,9 @@ class GuardOrderTests(SettlementTestCase):
     def test_ledgers_that_cannot_be_synced_pause_the_run(self) -> None:
         def _raise(*args: Any, **kwargs: Any) -> list[Path]:
             self.trace.append("ledgers")
-            raise plans.PlanError("ledger is malformed")
+            raise plans_errors.PlanError("ledger is malformed")
 
-        self.patch(plans, "sync_derived_status_ledgers", _raise)
+        self.patch(plans_status_tables, "sync_derived_status_ledgers", _raise)
         settlement = self.settle()
         self.assertEqual(turn_settlement.ACTION_STOP, settlement.action)
         self.assertEqual(["malformed-plan"], [p["reason"] for p in self.ctx.pauses])
@@ -761,7 +770,9 @@ class StatusRefusalArtifactAdjudicationTests(SettlementTestCase):
         self.ctx.pause = _pause  # type: ignore[method-assign]
 
     def digests(self, exclude: str = "1") -> dict[str, str]:
-        return plans.session_artifact_digests(self.plan_dir, exclude_session_id=exclude)
+        return plans_content_hash.session_artifact_digests(
+            self.plan_dir, exclude_session_id=exclude
+        )
 
     def rewrite(self, session_number: str) -> None:
         path = self.plan_dir / f"session-{session_number}.md"
@@ -822,13 +833,14 @@ class StatusRefusalArtifactAdjudicationTests(SettlementTestCase):
 
         self.assert_deferred_conviction("no-status-change", ["session-2.md"])
         self.assertEqual(
-            "complete", plans.status_map(plans.inspect_plan(self.plan_dir))["1"]
+            "complete",
+            plans_payloads.status_map(plans_snapshot.inspect_plan(self.plan_dir))["1"],
         )
 
     def test_own_packet_write_on_multiple_status_changes_passes(self) -> None:
         digests_before = self.digests()
         self.rewrite("1")
-        after = plans.inspect_plan(self.plan_dir)
+        after = plans_snapshot.inspect_plan(self.plan_dir)
         # Two statuses moved in the snapshot, but no foreign packet on disk.
         multiple = dataclasses.replace(
             after,
@@ -849,14 +861,14 @@ class StatusRefusalArtifactAdjudicationTests(SettlementTestCase):
         write_plan(self.plan_dir, ("complete", "complete"))
 
         self.settle(
-            after=plans.inspect_plan(self.plan_dir),
+            after=plans_snapshot.inspect_plan(self.plan_dir),
             plan_artifacts_before=digests_before,
         )
 
         self.assert_deferred_conviction("multiple-status-changes", ["session-2.md"])
         self.assertEqual(
             {"1": "complete", "2": "complete"},
-            dict(plans.status_map(plans.inspect_plan(self.plan_dir))),
+            dict(plans_payloads.status_map(plans_snapshot.inspect_plan(self.plan_dir))),
         )
 
     def test_own_packet_write_on_unexpected_status_change_passes(self) -> None:

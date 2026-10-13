@@ -20,12 +20,21 @@ import threading
 from pathlib import Path
 from typing import Any, TextIO
 
-from . import plans, progress_repair, responses, tail
+from . import (
+    plans_errors,
+    plans_files,
+    plans_models,
+    plans_progress,
+    plans_snapshot,
+    progress_repair,
+    responses,
+    tail,
+)
 
 DEFAULT_POLL_INTERVAL_SECONDS = tail.POLL_INTERVAL_SECONDS
 
 
-def _entry_to_json(entry: plans.ProgressEntry) -> dict[str, Any]:
+def _entry_to_json(entry: plans_models.ProgressEntry) -> dict[str, Any]:
     return {
         "session_id": entry.session_id.value,
         "status": entry.status,
@@ -45,17 +54,17 @@ def backfill_progress_from_args(args: argparse.Namespace) -> int:
     dry_run: bool = args.dry_run
 
     try:
-        snapshot = plans.inspect_plan(plan_dir_arg)
+        snapshot = plans_snapshot.inspect_plan(plan_dir_arg)
         entries = progress_repair.build_backfill_entries(snapshot)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         print(
             f"agent-session-loop backfill-progress: {error}",
             file=sys.stderr,
         )
         return 1
 
-    progress_file = plans.progress_path(snapshot.plan_dir)
-    rendered = plans.render_progress_journal(tuple(entries))
+    progress_file = plans_progress.progress_path(snapshot.plan_dir)
+    rendered = plans_progress.render_progress_journal(tuple(entries))
 
     if dry_run:
         sys.stdout.write(rendered)
@@ -73,7 +82,7 @@ def backfill_progress_from_args(args: argparse.Namespace) -> int:
         result = progress_repair.repair_progress_journal(
             snapshot.plan_dir, snapshot=snapshot
         )
-    except (plans.PlanError, OSError) as error:
+    except (plans_errors.PlanError, OSError) as error:
         print(
             f"agent-session-loop backfill-progress: {error}",
             file=sys.stderr,
@@ -101,7 +110,7 @@ def follow_progress(
     """
     out_stream = sys.stdout if out is None else out
     stop = stop_event if stop_event is not None else threading.Event()
-    progress_file = plans.progress_path(plan_dir)
+    progress_file = plans_progress.progress_path(plan_dir)
     try:
         offset = progress_file.stat().st_size if progress_file.exists() else 0
     except OSError:
@@ -129,13 +138,13 @@ def progress_from_args(args: argparse.Namespace) -> int:
     want_json: bool = args.json
     follow: bool = args.tail
 
-    plan_dir = plans.canonicalize_path(plan_dir_arg)
-    progress_file = plans.progress_path(plan_dir)
+    plan_dir = plans_files.canonicalize_path(plan_dir_arg)
+    progress_file = plans_progress.progress_path(plan_dir)
 
     if want_json:
         try:
-            entries = plans.read_progress_entries(plan_dir)
-        except plans.PlanError as error:
+            entries = plans_progress.read_progress_entries(plan_dir)
+        except plans_errors.PlanError as error:
             responses.print_json(
                 responses.error_payload(
                     "progress",

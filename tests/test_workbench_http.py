@@ -40,7 +40,7 @@ mode does:
   mutation rather than two.
 
 Nothing here binds a socket or spawns a process. The transport adapter is
-``agent_session_loop.workbench_server``, and ``tests/test_asl_workbench_server.py``
+``agent_session_loop.workbench_server``, and ``tests/test_asl_workbench_server_*.py``
 drives it over a real loopback server; what is left to assert here is the
 application it adapts.
 """

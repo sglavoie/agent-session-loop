@@ -19,7 +19,25 @@ from pathlib import Path
 from types import ModuleType
 from unittest import mock
 
-from agent_session_loop import authoring, cli, contracts, harnesses, plans, workspaces
+from agent_session_loop import (
+    authoring,
+    cli,
+    contracts,
+    harnesses,
+    plans_content_hash,
+    plans_errors,
+    plans_files,
+    plans_handoff,
+    plans_metadata,
+    plans_models,
+    plans_progress,
+    plans_readiness,
+    plans_session_ids,
+    plans_session_scope,
+    plans_snapshot,
+    plans_transaction,
+    workspaces,
+)
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     _load_script_module,
@@ -34,7 +52,7 @@ class PlanAuthoringTests(unittest.TestCase):
         self, session_id: str, *, done: str = "Tests pass."
     ) -> contracts.CompletionContract:
         return contracts.CompletionContract(
-            session_id=plans.parse_session_id(session_id),
+            session_id=plans_session_ids.parse_session_id(session_id),
             done_when=(done,),
             verify=contracts.VerifyRecipe(
                 checks=(
@@ -270,7 +288,7 @@ class PlanAuthoringTests(unittest.TestCase):
 
     def test_parse_plan_document_rejects_duplicate_ids(self) -> None:
         text = "## Session 1: A\n\nx\n\n## Session 01: B\n\ny\n"
-        with self.assertRaises(plans.PlanError) as raised:
+        with self.assertRaises(plans_errors.PlanError) as raised:
             authoring.parse_plan_document(text)
         message = str(raised.exception)
         self.assertIn("line 5", message)
@@ -340,7 +358,7 @@ class PlanAuthoringTests(unittest.TestCase):
         )
         for source, reason in cases:
             with self.subTest(source=source):
-                with self.assertRaises(plans.PlanError) as raised:
+                with self.assertRaises(plans_errors.PlanError) as raised:
                     authoring.parse_plan_document("context\n" + source + "\n")
                 message = str(raised.exception)
                 self.assertIn("line 2", message)
@@ -668,7 +686,7 @@ class PlanAuthoringTests(unittest.TestCase):
             "### Session 2 / Bad sep\n\ntwo\n\n"
             "## Session 3a: Glued\n\nthree\n"
         )
-        with self.assertRaises(plans.PlanError):
+        with self.assertRaises(plans_errors.PlanError):
             authoring.parse_plan_document(text)
 
         result = authoring.lint_plan_document(text)
@@ -801,7 +819,7 @@ class PlanAuthoringTests(unittest.TestCase):
                 result = authoring.lint_plan_document(text)
                 try:
                     parsed = authoring.parse_plan_document(text)
-                except plans.PlanError as error:
+                except plans_errors.PlanError as error:
                     self.assertTrue(result.findings)
                     self.assertIn(f"line {result.findings[0].line}:", str(error))
                     self.assertEqual(result.findings[0].message, str(error))
@@ -835,8 +853,8 @@ class PlanAuthoringTests(unittest.TestCase):
         contract = self._command_contract("2")
         rendered = authoring.render_completion_contract(contract)
         parsed = contracts.parse_completion_contract(
-            rendered + "\n" + plans.HANDOFF_HEADING + "\n",
-            session_id=plans.parse_session_id("2"),
+            rendered + "\n" + plans_handoff.HANDOFF_HEADING + "\n",
+            session_id=plans_session_ids.parse_session_id("2"),
         )
         self.assertIsNotNone(parsed)
         self.assertEqual(("Tests pass.",), parsed.done_when)
@@ -847,7 +865,7 @@ class PlanAuthoringTests(unittest.TestCase):
 
     def test_render_completion_contract_emits_nondefault_baseline(self) -> None:
         contract = contracts.CompletionContract(
-            session_id=plans.parse_session_id("2"),
+            session_id=plans_session_ids.parse_session_id("2"),
             done_when=("done",),
             verify=contracts.VerifyRecipe(
                 checks=(
@@ -862,8 +880,8 @@ class PlanAuthoringTests(unittest.TestCase):
         rendered = authoring.render_completion_contract(contract)
         self.assertIn('"baseline_expectation": "pass"', rendered)
         parsed = contracts.parse_completion_contract(
-            rendered + "\n" + plans.HANDOFF_HEADING + "\n",
-            session_id=plans.parse_session_id("2"),
+            rendered + "\n" + plans_handoff.HANDOFF_HEADING + "\n",
+            session_id=plans_session_ids.parse_session_id("2"),
         )
         self.assertEqual("pass", parsed.verify.checks[0].baseline_expectation)
 
@@ -875,7 +893,7 @@ class PlanAuthoringTests(unittest.TestCase):
             )
         )
         contract = contracts.CompletionContract(
-            session_id=plans.parse_session_id("2"),
+            session_id=plans_session_ids.parse_session_id("2"),
             done_when=("done",),
             verify=contracts.VerifyRecipe(
                 checks=(
@@ -893,7 +911,9 @@ class PlanAuthoringTests(unittest.TestCase):
             ),
         )
 
-        with self.assertRaisesRegex(plans.PlanError, "without a repository registry"):
+        with self.assertRaisesRegex(
+            plans_errors.PlanError, "without a repository registry"
+        ):
             authoring.render_completion_contract(contract)
 
         rendered = authoring.render_completion_contract(
@@ -917,7 +937,7 @@ class PlanAuthoringTests(unittest.TestCase):
             (workspaces.Repository("SVC", "svc", "https://example.com/svc.git"),)
         )
         contract = contracts.CompletionContract(
-            session_id=plans.parse_session_id("2"),
+            session_id=plans_session_ids.parse_session_id("2"),
             done_when=("done",),
             verify=contracts.VerifyRecipe(
                 checks=(
@@ -970,13 +990,13 @@ class PlanAuthoringTests(unittest.TestCase):
     # -- session-file rendering ----------------------------------------------
 
     def test_render_session_file_requires_contract_by_default(self) -> None:
-        with self.assertRaises(plans.PlanError):
+        with self.assertRaises(plans_errors.PlanError):
             authoring.render_session_file(
                 session_id="1", title="First", instruction_lines=["body"]
             )
 
     def test_render_session_file_rejects_mismatched_contract(self) -> None:
-        with self.assertRaises(plans.PlanError):
+        with self.assertRaises(plans_errors.PlanError):
             authoring.render_session_file(
                 session_id="1",
                 title="First",
@@ -1065,12 +1085,12 @@ class PlanAuthoringTests(unittest.TestCase):
                 "",
                 *self._inline_contract_lines("authored-gate"),
                 "",
-                plans.HANDOFF_HEADING,
+                plans_handoff.HANDOFF_HEADING,
                 "",
             ]
         )
         with self.assertRaisesRegex(
-            plans.PlanError, r"has 2 '## Completion Contract' sections"
+            plans_errors.PlanError, r"has 2 '## Completion Contract' sections"
         ):
             contracts.parse_completion_contract(text, session_id="1")
 
@@ -1087,7 +1107,7 @@ class PlanAuthoringTests(unittest.TestCase):
                 "",
                 *self._inline_contract_lines("inline-gate"),
                 "",
-                plans.HANDOFF_HEADING,
+                plans_handoff.HANDOFF_HEADING,
                 "",
             ]
         )
@@ -1158,13 +1178,13 @@ class PlanAuthoringTests(unittest.TestCase):
         # follows the empty `- **Notes**:` line.
         self.assertIn("- **Notes**:\n", rendered)
         self.assertTrue(rendered.rstrip().endswith("-->"))
-        self.assertIn(plans.DISCOVERED_FACTS_HEADING, rendered)
-        self.assertIn(plans.OPEN_QUESTIONS_HEADING, rendered)
+        self.assertIn(plans_handoff.DISCOVERED_FACTS_HEADING, rendered)
+        self.assertIn(plans_handoff.OPEN_QUESTIONS_HEADING, rendered)
 
     def test_render_session_file_places_scope_before_instruction_separator(
         self,
     ) -> None:
-        scope = plans.SessionScope(reads=("SVC", "OAK"), writes=("SVC",))
+        scope = plans_session_scope.SessionScope(reads=("SVC", "OAK"), writes=("SVC",))
         rendered = authoring.render_session_file(
             session_id="1",
             title="First",
@@ -1182,7 +1202,7 @@ class PlanAuthoringTests(unittest.TestCase):
         )
         self.assertEqual(
             scope,
-            plans.parse_session_scope(rendered, ("SVC", "OAK")),
+            plans_session_scope.parse_session_scope(rendered, ("SVC", "OAK")),
         )
 
     def test_handoff_template_documentation_comment_is_ignored_by_parser(
@@ -1199,14 +1219,14 @@ class PlanAuthoringTests(unittest.TestCase):
             plan_dir = Path(tmp)
             session_path = plan_dir / "session-1.md"
             session_path.write_text(rendered, encoding="utf-8")
-            session_file = plans.SessionFile(
-                session_id=plans.parse_session_id("1"), path=session_path
+            session_file = plans_models.SessionFile(
+                session_id=plans_session_ids.parse_session_id("1"), path=session_path
             )
 
             # The fresh template's documentation comment names the optional
             # headings and a `- ` bullet example; none of it may leak into the
             # parsed handoff.
-            fresh = plans.read_session_handoff(session_file)
+            fresh = plans_handoff.read_session_handoff(session_file)
             self.assertEqual("pending", fresh.status)
             self.assertEqual((), fresh.discovered_facts)
             self.assertEqual((), fresh.open_questions)
@@ -1218,16 +1238,16 @@ class PlanAuthoringTests(unittest.TestCase):
             ) + "\n".join(
                 [
                     "",
-                    plans.DISCOVERED_FACTS_HEADING,
+                    plans_handoff.DISCOVERED_FACTS_HEADING,
                     "- a verified fact",
                     "",
-                    plans.OPEN_QUESTIONS_HEADING,
+                    plans_handoff.OPEN_QUESTIONS_HEADING,
                     "- an open question",
                     "",
                 ]
             )
             session_path.write_text(completed, encoding="utf-8")
-            handoff = plans.read_session_handoff(session_file)
+            handoff = plans_handoff.read_session_handoff(session_file)
             self.assertEqual("complete", handoff.status)
             self.assertEqual(("a verified fact",), handoff.discovered_facts)
             self.assertEqual(("an open question",), handoff.open_questions)
@@ -1284,7 +1304,9 @@ class PlanAuthoringTests(unittest.TestCase):
         self.assertEqual("# Plan\n\nShared context.\n", rendered)
 
     def test_render_progress_skeleton_is_header_only(self) -> None:
-        self.assertEqual(plans.PROGRESS_HEADER, authoring.render_progress_skeleton())
+        self.assertEqual(
+            plans_progress.PROGRESS_HEADER, authoring.render_progress_skeleton()
+        )
         self.assertNotIn("## Session", authoring.render_progress_skeleton())
 
     # -- manifest rendering and table updates -------------------------------
@@ -1292,10 +1314,10 @@ class PlanAuthoringTests(unittest.TestCase):
     def _manifest_spec(self) -> authoring.ManifestSpec:
         sessions = (
             authoring.ManifestSession(
-                session_id=plans.parse_session_id("1"), title="First"
+                session_id=plans_session_ids.parse_session_id("1"), title="First"
             ),
             authoring.ManifestSession(
-                session_id=plans.parse_session_id("2"), title="Second"
+                session_id=plans_session_ids.parse_session_id("2"), title="Second"
             ),
         )
         return authoring.ManifestSpec(
@@ -1307,7 +1329,7 @@ class PlanAuthoringTests(unittest.TestCase):
             content_sha256="c" * 64,
             sessions=sessions,
             split_date="2026-07-10",
-            readiness=plans.ReadinessMetadata(
+            readiness=plans_models.ReadinessMetadata(
                 state="draft",
                 readiness_sha256="d" * 64,
                 checked_at="2026-07-10T00:00:00+00:00",
@@ -1322,7 +1344,7 @@ class PlanAuthoringTests(unittest.TestCase):
         self.assertIn("**Sessions**: 2", rendered)
         self.assertIn("| 1 | First | pending | session-1.md |", rendered)
         self.assertIn("/session-run /plans/out/", rendered)
-        readiness = plans.parse_readiness_metadata(rendered)
+        readiness = plans_readiness.parse_readiness_metadata(rendered)
         self.assertIsNotNone(readiness)
         self.assertEqual("draft", readiness.state)
 
@@ -1354,18 +1376,18 @@ class PlanAuthoringTests(unittest.TestCase):
         updated = authoring.add_manifest_session_row(
             rendered,
             authoring.ManifestSession(
-                session_id=plans.parse_session_id("3"), title="Third"
+                session_id=plans_session_ids.parse_session_id("3"), title="Third"
             ),
         )
         self.assertIn("| 3 | Third | pending | session-3.md |", updated)
         self.assertLess(updated.index("| 2 | Second"), updated.index("| 3 | Third"))
 
     def test_add_manifest_session_row_without_table_raises(self) -> None:
-        with self.assertRaises(plans.PlanError):
+        with self.assertRaises(plans_errors.PlanError):
             authoring.add_manifest_session_row(
                 "# Plan\n\nNo table here.\n",
                 authoring.ManifestSession(
-                    session_id=plans.parse_session_id("1"), title="First"
+                    session_id=plans_session_ids.parse_session_id("1"), title="First"
                 ),
             )
 
@@ -1414,7 +1436,7 @@ class PlanAuthoringTests(unittest.TestCase):
             # A staged path whose parent is a regular file forces a write failure.
             tx.stage("blocker/session-1.md", "nope")
 
-            with self.assertRaises(plans.PlanError):
+            with self.assertRaises(plans_errors.PlanError):
                 tx.commit()
 
             self.assertFalse((plan_dir / "context.md").exists())
@@ -1440,7 +1462,7 @@ class PlanAuthoringTests(unittest.TestCase):
             started = threading.Event()
             reader_results: list[bool] = []
             reader_errors: list[BaseException] = []
-            original_fsync_directory = plans._fsync_directory
+            original_fsync_directory = plans_files._fsync_directory
             calls = 0
 
             def slow_fsync_directory(path: Path) -> None:
@@ -1457,7 +1479,7 @@ class PlanAuthoringTests(unittest.TestCase):
                     return
                 try:
                     reader_results.append(
-                        plans.recover_pending_plan_transaction(plan_dir)
+                        plans_transaction.recover_pending_plan_transaction(plan_dir)
                     )
                 except BaseException as error:
                     reader_errors.append(error)
@@ -1467,7 +1489,7 @@ class PlanAuthoringTests(unittest.TestCase):
                 transaction.stage(name, "NEW\n")
             reader = threading.Thread(target=recover)
             with mock.patch.object(
-                plans, "_fsync_directory", side_effect=slow_fsync_directory
+                plans_files, "_fsync_directory", side_effect=slow_fsync_directory
             ):
                 reader.start()
                 committed = transaction.commit()
@@ -1488,16 +1510,16 @@ class PlanAuthoringTests(unittest.TestCase):
     def test_transaction_recovery_times_out_with_holder_diagnostic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp)
-            transaction_dir = plan_dir / plans.PLAN_TRANSACTION_DIR_NAME
+            transaction_dir = plan_dir / plans_transaction.PLAN_TRANSACTION_DIR_NAME
             transaction_dir.mkdir()
-            (transaction_dir / plans.PLAN_TRANSACTION_JOURNAL_NAME).write_text(
-                '{"version":1,"entries":[]}\n', encoding="utf-8"
-            )
+            (
+                transaction_dir / plans_transaction.PLAN_TRANSACTION_JOURNAL_NAME
+            ).write_text('{"version":1,"entries":[]}\n', encoding="utf-8")
             holder_ready = threading.Event()
             release_holder = threading.Event()
 
             def hold_transaction_lock() -> None:
-                with plans._plan_transaction_mutex(transaction_dir):
+                with plans_transaction._plan_transaction_mutex(transaction_dir):
                     holder_ready.set()
                     release_holder.wait(5)
 
@@ -1509,15 +1531,17 @@ class PlanAuthoringTests(unittest.TestCase):
             started_at = time.monotonic()
             try:
                 with (
-                    mock.patch.object(plans, "PLAN_TRANSACTION_LOCK_WAIT_SECONDS", 0.1),
+                    mock.patch.object(
+                        plans_transaction, "PLAN_TRANSACTION_LOCK_WAIT_SECONDS", 0.1
+                    ),
                     self.assertRaisesRegex(
-                        plans.PlanError,
+                        plans_errors.PlanError,
                         r"timed out after 0\.1s waiting for plan transaction lock "
                         r"at .*transaction\.lock; holder pid \d+ on .* "
                         r"thread 'transaction-test-holder'",
                     ),
                 ):
-                    plans.load_plan_metadata(plan_dir)
+                    plans_metadata.load_plan_metadata(plan_dir)
             finally:
                 release_holder.set()
                 holder.join(timeout=5)
@@ -1535,9 +1559,10 @@ class PlanAuthoringTests(unittest.TestCase):
             )
             self.assertEqual("draft", metadata.state)
             self.assertEqual(
-                plans.stable_readiness_sha256(plan_dir), metadata.readiness_sha256
+                plans_content_hash.stable_readiness_sha256(plan_dir),
+                metadata.readiness_sha256,
             )
-            on_disk = plans.read_readiness_metadata(plan_dir)
+            on_disk = plans_readiness.read_readiness_metadata(plan_dir)
             self.assertEqual(metadata, on_disk)
 
     # -- golden end-to-end determinism --------------------------------------
@@ -1553,14 +1578,14 @@ class PlanAuthoringTests(unittest.TestCase):
             content_sha256="c" * 64,
             sessions=(
                 authoring.ManifestSession(
-                    session_id=plans.parse_session_id("1"), title="First"
+                    session_id=plans_session_ids.parse_session_id("1"), title="First"
                 ),
                 authoring.ManifestSession(
-                    session_id=plans.parse_session_id("2"), title="Second"
+                    session_id=plans_session_ids.parse_session_id("2"), title="Second"
                 ),
             ),
             split_date="2026-07-10",
-            readiness=plans.ReadinessMetadata(
+            readiness=plans_models.ReadinessMetadata(
                 state="draft", readiness_sha256="0" * 64, checked_at="pending"
             ),
             skill_prefix="/",
@@ -1593,7 +1618,7 @@ class PlanAuthoringTests(unittest.TestCase):
             authoring.refresh_readiness_metadata(
                 plan_dir, checked_at="2026-07-10T12:00:00+00:00"
             )
-            snapshot = plans.inspect_plan(plan_dir)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
             self.assertEqual(("1", "2"), snapshot.session_ids)
             self.assertEqual({"1": "pending", "2": "pending"}, snapshot.status_by_id)
             for session in snapshot.sessions:
@@ -1626,11 +1651,12 @@ class PlanAuthoringTests(unittest.TestCase):
             )
 
             self.assertNotEqual(
-                plans.plan_content_sha256(left), plans.plan_content_sha256(right)
+                plans_content_hash.plan_content_sha256(left),
+                plans_content_hash.plan_content_sha256(right),
             )
             self.assertNotEqual(
-                plans.stable_readiness_sha256(left),
-                plans.stable_readiness_sha256(right),
+                plans_content_hash.stable_readiness_sha256(left),
+                plans_content_hash.stable_readiness_sha256(right),
             )
 
     def test_authoring_is_deterministic(self) -> None:
@@ -2094,10 +2120,10 @@ class PlanAuthoringResplitTests(unittest.TestCase):
         )
         replacements = (
             authoring.ManifestSession(
-                session_id=plans.parse_session_id("2.1"), title="Parent: A"
+                session_id=plans_session_ids.parse_session_id("2.1"), title="Parent: A"
             ),
             authoring.ManifestSession(
-                session_id=plans.parse_session_id("2.2"), title="Parent: B"
+                session_id=plans_session_ids.parse_session_id("2.2"), title="Parent: B"
             ),
         )
         updated, changed = authoring.replace_session_status_rows(
@@ -2138,13 +2164,13 @@ class PlanAuthoringResplitTests(unittest.TestCase):
         reparsed = contracts.parse_completion_contract(rendered, session_id="2.1")
         self.assertEqual(contract, reparsed)
 
-        with self.assertRaises(plans.PlanError):
+        with self.assertRaises(plans_errors.PlanError):
             authoring.contract_from_payload(
                 "2.1", [], {"checks": [{"type": "command"}]}
             )
-        with self.assertRaises(plans.PlanError):
+        with self.assertRaises(plans_errors.PlanError):
             authoring.contract_from_payload("2.1", ["Done."], {"checks": []})
-        with self.assertRaises(plans.PlanError):
+        with self.assertRaises(plans_errors.PlanError):
             authoring.contract_from_payload(
                 "2.1",
                 ["Done."],
@@ -2152,7 +2178,7 @@ class PlanAuthoringResplitTests(unittest.TestCase):
             )
         # A non-array done_when fails closed as PlanError rather than raising a
         # TypeError when the payload builder tries to iterate it.
-        with self.assertRaises(plans.PlanError):
+        with self.assertRaises(plans_errors.PlanError):
             authoring.contract_from_payload(
                 "2.1",
                 5,
@@ -2346,7 +2372,7 @@ class PlanAuthoringResplitTests(unittest.TestCase):
 
             for child_id in ("2.1", "2.2"):
                 child_text = (
-                    plan_dir / plans.session_id_to_filename(child_id)
+                    plan_dir / plans_session_ids.session_id_to_filename(child_id)
                 ).read_text(encoding="utf-8")
                 self.assertEqual(1, child_text.count("## Completion Contract"))
                 contract = contracts.parse_completion_contract(
@@ -2359,10 +2385,11 @@ class PlanAuthoringResplitTests(unittest.TestCase):
 
             manifest = (plan_dir / "manifest.md").read_text(encoding="utf-8")
             self.assertIn("**Sessions**: 4", manifest)
-            metadata = plans.read_readiness_metadata(plan_dir)
+            metadata = plans_readiness.read_readiness_metadata(plan_dir)
             self.assertEqual("draft", metadata.state)
             self.assertEqual(
-                plans.stable_readiness_sha256(plan_dir), metadata.readiness_sha256
+                plans_content_hash.stable_readiness_sha256(plan_dir),
+                metadata.readiness_sha256,
             )
             self.assertEqual(
                 metadata.readiness_sha256, result["readiness"]["readiness_sha256"]
@@ -2431,9 +2458,9 @@ class PlanAuthoringResplitTests(unittest.TestCase):
                 mock.patch.object(
                     authoring.PlanTransaction,
                     "commit",
-                    side_effect=plans.PlanError("simulated commit failure"),
+                    side_effect=plans_errors.PlanError("simulated commit failure"),
                 ),
-                self.assertRaises(plans.PlanError),
+                self.assertRaises(plans_errors.PlanError),
             ):
                 self.resplit.resplit_session(
                     plan_dir,

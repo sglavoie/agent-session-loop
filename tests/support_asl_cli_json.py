@@ -11,7 +11,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agent_session_loop import cli, plans, state, workbench
+from agent_session_loop import (
+    cli,
+    plans_content_hash,
+    plans_files,
+    plans_models,
+    plans_readiness,
+    state,
+    workbench,
+)
 from tests.support import (
     patched_env,
     write_plan,
@@ -33,11 +41,11 @@ class JsonCliHelpers(_Base):
         state_value: str,
         checked_at: str,
     ) -> None:
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state=state_value,
-                readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(plan_dir),
                 checked_at=checked_at,
             ),
         )
@@ -118,7 +126,8 @@ class JsonCliHelpers(_Base):
         plan_state.mkdir(parents=True, exist_ok=True)
         (plan_state / "state.json").write_text(
             json.dumps(
-                {"plan_dir": str(plans.canonicalize_path(plan_dir))}, sort_keys=True
+                {"plan_dir": str(plans_files.canonicalize_path(plan_dir))},
+                sort_keys=True,
             ),
             encoding="utf-8",
         )

@@ -8,7 +8,7 @@ asserted here is the contract those modules cannot state, because they exercise
 the run rather than the boundary:
 
 * the module does not import the runner, and needs nothing from it;
-* the only file it opens of its own is the plan manifest, through ``plans`` —
+* the only file it opens of its own is the plan manifest, through ``plans_readiness`` —
   every record it writes into the run payload goes through the
   ``_RunPersistence`` handle the caller supplied, under that handle's lock;
 * ``write_readiness_state`` still satisfies
@@ -35,7 +35,10 @@ from pathlib import Path
 from typing import Any
 
 from agent_session_loop import (
-    plans,
+    plans_content_hash,
+    plans_models,
+    plans_readiness,
+    plans_snapshot,
     preflight,
     preflight_models,
     readiness_gate,
@@ -113,10 +116,10 @@ class ReadinessGateBoundaryTests(unittest.TestCase):
         # The gate reads a lot and writes one thing. Every payload record it
         # owns goes through the caller's mutex, and the single durable write
         # that leaves the run directory is the readiness metadata, which
-        # `plans` owns the format and the atomic replace of.
+        # `plans_readiness` owns the format and the atomic replace of.
         for reach in ("write_text(", "open(", "mkdir(", "unlink(", "durability."):
             self.assertNotIn(reach, self.source, msg=reach)
-        self.assertIn("plans.write_readiness_metadata(", self.source)
+        self.assertIn("plans_readiness.write_readiness_metadata(", self.source)
 
     def test_every_payload_write_goes_through_a_persistence_handle(self) -> None:
         self.assertEqual({"persistence"}, _durable_write_receivers(self.source))
@@ -167,7 +170,7 @@ class GateOrderingTests(unittest.TestCase):
     ) -> preflight_models.PreflightReport:
         readiness = None
         if readiness_state is not None:
-            readiness = plans.ReadinessMetadata(
+            readiness = plans_models.ReadinessMetadata(
                 state=readiness_state,
                 readiness_sha256=recorded_sha,
                 checked_at="2026-09-01T00:00:00Z",
@@ -220,9 +223,9 @@ class GateOrderingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_plan(plan_dir, ("complete", "complete"))
-            complete = plans.inspect_plan(plan_dir)
+            complete = plans_snapshot.inspect_plan(plan_dir)
             write_plan(plan_dir, ("complete", "pending"))
-            pending = plans.inspect_plan(plan_dir)
+            pending = plans_snapshot.inspect_plan(plan_dir)
 
         report = self._report(readiness_state="complete")
         self.assertTrue(
@@ -400,10 +403,11 @@ class ReadinessStateWriteTests(unittest.TestCase):
 
         self.assertTrue(success)
         self.assertIsNone(error)
-        metadata = plans.read_readiness_metadata(self.plan_dir)
+        metadata = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertEqual("loop-ready", metadata.state)
         self.assertEqual(
-            plans.stable_readiness_sha256(self.plan_dir), metadata.readiness_sha256
+            plans_content_hash.stable_readiness_sha256(self.plan_dir),
+            metadata.readiness_sha256,
         )
 
     def test_an_expected_digest_is_recorded_verbatim(self) -> None:
@@ -412,7 +416,8 @@ class ReadinessStateWriteTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            "a" * 64, plans.read_readiness_metadata(self.plan_dir).readiness_sha256
+            "a" * 64,
+            plans_readiness.read_readiness_metadata(self.plan_dir).readiness_sha256,
         )
 
     def test_a_failure_is_reported_rather_than_raised(self) -> None:
@@ -460,9 +465,9 @@ class ReadinessStateWriteTests(unittest.TestCase):
         self.assertEqual(1, len(persistence.state_writes))
 
     def test_the_final_state_reads_the_run_s_verdict_then_the_plan(self) -> None:
-        snapshot = plans.inspect_plan(self.plan_dir)
+        snapshot = plans_snapshot.inspect_plan(self.plan_dir)
         write_plan(self.plan_dir, ("complete", "complete"))
-        finished = plans.inspect_plan(self.plan_dir)
+        finished = plans_snapshot.inspect_plan(self.plan_dir)
 
         self.assertEqual(
             "reviewed",
@@ -486,9 +491,9 @@ class ReopenedPlanGateTests(unittest.TestCase):
         self.tmp_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.plan_dir = self.tmp_dir / "plan"
 
-    def _snapshot(self, statuses: tuple[str, ...]) -> plans.PlanSnapshot:
+    def _snapshot(self, statuses: tuple[str, ...]) -> plans_models.PlanSnapshot:
         write_plan(self.plan_dir, statuses)
-        return plans.inspect_plan(self.plan_dir)
+        return plans_snapshot.inspect_plan(self.plan_dir)
 
     def test_a_plan_within_budget_is_authorized(self) -> None:
         gate = readiness_gate._reopened_plan_gate_payload(

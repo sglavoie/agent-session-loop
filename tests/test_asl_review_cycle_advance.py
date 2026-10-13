@@ -7,7 +7,8 @@ from typing import Any
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_session_ids,
+    plans_snapshot,
     review_continuation,
     review_cycle,
     review_session_body,
@@ -37,7 +38,7 @@ class ReviewCycleAdvanceTests(RepairCycleFixtures, unittest.TestCase):
             (("1", "complete"), ("2.1", "pending")),
         )
         review_body = review_session_body.build_generated_review_session_body(
-            plans.parse_session_id("2"),
+            plans_session_ids.parse_session_id("2"),
             review_harness="claude",
             plan_dir=self.plan_dir,
         ).replace("- **Status**: pending", "- **Status**: complete")
@@ -69,7 +70,7 @@ class ReviewCycleAdvanceTests(RepairCycleFixtures, unittest.TestCase):
                 "findings": [finding],
             }
         }
-        snapshot = plans.inspect_plan(self.plan_dir)
+        snapshot = plans_snapshot.inspect_plan(self.plan_dir)
 
         action, after = review_cycle._advance_review_cycle(
             event_path=event_path,
@@ -85,7 +86,7 @@ class ReviewCycleAdvanceTests(RepairCycleFixtures, unittest.TestCase):
             snapshot=snapshot,
             turn_payload=turn_payload,
             max_review_fix_cycles=2,
-            plan_cache=plans.PlanSnapshotCache(),
+            plan_cache=plans_snapshot.PlanSnapshotCache(),
             reinspect=session_verification._reinspect_after_plan_mutation,
         )
 
@@ -94,7 +95,7 @@ class ReviewCycleAdvanceTests(RepairCycleFixtures, unittest.TestCase):
         # cycle started from, because materialization already wrote to it.
         self.assertIsNot(snapshot, after)
         self.assertEqual(
-            plans.inspect_plan(self.plan_dir).fingerprint, after.fingerprint
+            plans_snapshot.inspect_plan(self.plan_dir).fingerprint, after.fingerprint
         )
         self.assertEqual("malformed-review-repair", payload["pause_reason"])
         cycles = payload["review_cycles"]
@@ -126,7 +127,7 @@ class ReviewCycleAdvanceTests(RepairCycleFixtures, unittest.TestCase):
         # The children were withdrawn, so every projection has to name the plan
         # that is actually on disk: the one the cycle started from.
         self.assertEqual(
-            plans.inspect_plan(self.plan_dir).fingerprint, after.fingerprint
+            plans_snapshot.inspect_plan(self.plan_dir).fingerprint, after.fingerprint
         )
         self.assertNotIn("2.1", [item.id for item in after.sessions])
         projected = payload["final_snapshot"]
@@ -198,7 +199,7 @@ class ReviewCycleAdvanceTests(RepairCycleFixtures, unittest.TestCase):
         self.assertEqual("continue", action)
         self.assertTrue((self.plan_dir / "session-2.1.md").exists())
         self.assertEqual(
-            plans.inspect_plan(self.plan_dir).fingerprint, after.fingerprint
+            plans_snapshot.inspect_plan(self.plan_dir).fingerprint, after.fingerprint
         )
         self.assertIn("2.1", [item.id for item in after.sessions])
         projected = payload["final_snapshot"]
@@ -246,7 +247,7 @@ class ReviewCycleAdvanceTests(RepairCycleFixtures, unittest.TestCase):
         )
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir),
+            plans_snapshot.inspect_plan(self.plan_dir),
             event_path,
             max_review_fix_cycles=2,
         )
@@ -336,7 +337,7 @@ class ReviewCycleAdvanceTests(RepairCycleFixtures, unittest.TestCase):
                 )
 
                 projected = review_continuation.evaluate_review_continuation(
-                    plans.inspect_plan(plan_dir), event_path
+                    plans_snapshot.inspect_plan(plan_dir), event_path
                 )
 
                 self.assertEqual(source_id, projected.review_session_id)
@@ -351,7 +352,7 @@ class ReviewCycleAdvanceTests(RepairCycleFixtures, unittest.TestCase):
         self.assertFalse(event_path.exists())
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir), event_path
+            plans_snapshot.inspect_plan(self.plan_dir), event_path
         )
 
         self.assertEqual("terminal", projected.action)

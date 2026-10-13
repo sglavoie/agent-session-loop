@@ -114,7 +114,12 @@ from . import (
     durability,
     events,
     handoff_guards,
-    plans,
+    plans_errors,
+    plans_handoff,
+    plans_models,
+    plans_payloads,
+    plans_session_scope,
+    plans_snapshot,
     review,
     run_inputs,
     run_persistence,
@@ -150,7 +155,7 @@ class _HandoffDefect:
 
 
 def _classify_mechanical_handoff_defect(
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     session_id: str,
     *,
     registry_aliases: Sequence[str],
@@ -170,10 +175,10 @@ def _classify_mechanical_handoff_defect(
     if session_status is None:
         return None
     try:
-        handoff = plans.read_session_handoff(
+        handoff = plans_handoff.read_session_handoff(
             session_status.session, repository_registry=None
         )
-    except plans.PlanError:
+    except plans_errors.PlanError:
         return None
     if handoff.status != "complete":
         return None
@@ -203,7 +208,7 @@ def _classify_mechanical_handoff_defect(
         return None
     for entry in (part.strip() for part in inline.split(",")):
         try:
-            plans.parse_qualified_path(entry, registry_aliases)
+            plans_session_scope.parse_qualified_path(entry, registry_aliases)
         except ValueError as error:
             return _HandoffDefect(
                 code=HANDOFF_DEFECT_UNQUALIFIED_ENTRY,
@@ -311,8 +316,8 @@ def _correct_malformed_handoff(
     event_path: Path,
     payload: dict[str, Any],
     persistence: run_persistence._RunPersistence,
-    plan_cache: plans.PlanSnapshotCache,
-    before: plans.PlanSnapshot,
+    plan_cache: plans_snapshot.PlanSnapshotCache,
+    before: plans_models.PlanSnapshot,
     workspace: workspaces.ResolvedWorkspace | None,
     run_id: str,
     turn_index: int,
@@ -320,7 +325,7 @@ def _correct_malformed_handoff(
     plan_error: str | None,
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
-) -> tuple[plans.PlanSnapshot | None, dict[str, Any] | None]:
+) -> tuple[plans_models.PlanSnapshot | None, dict[str, Any] | None]:
     """Give a mechanically malformed handoff one bounded chance to be corrected.
 
     Returns the re-inspected snapshot when a correction turn was armed, and the
@@ -345,7 +350,7 @@ def _correct_malformed_handoff(
     evidence: dict[str, Any] = {
         "run_id": run_id,
         "turn_index": turn_index,
-        **plans.session_identity_payload(session_id),
+        **plans_payloads.session_identity_payload(session_id),
         "defect": defect.code,
         "detail": defect.detail,
         "plan_error": plan_error,
@@ -371,7 +376,7 @@ def _correct_malformed_handoff(
         return None, evidence
     try:
         corrected = plan_cache.get_fresh(before.plan_dir)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         # The revert did not restore a readable plan, so something other than
         # this handoff is also broken and no correction turn can be launched.
         evidence["exhausted"] = True
@@ -381,7 +386,7 @@ def _correct_malformed_handoff(
     with persistence.lock:
         turn_payload["handoff_correction"] = evidence
         durability.write_json_file(paths["result"], turn_payload)
-        payload["final_snapshot"] = plans.snapshot_payload(corrected)
+        payload["final_snapshot"] = plans_payloads.snapshot_payload(corrected)
         persistence.append_event(
             event_path, events.TURN_HANDOFF_CORRECTION_EVENT, evidence
         )
@@ -400,12 +405,12 @@ def _uninspectable_handoff_note(plan_error: str) -> str:
 
 def _reopen_uninspectable_handoff(
     *,
-    plan_cache: plans.PlanSnapshotCache,
-    before: plans.PlanSnapshot,
+    plan_cache: plans_snapshot.PlanSnapshotCache,
+    before: plans_models.PlanSnapshot,
     session_id: str,
     plan_error: str | None,
     correction_exhausted: bool,
-) -> tuple[plans.PlanSnapshot | None, dict[str, Any] | None]:
+) -> tuple[plans_models.PlanSnapshot | None, dict[str, Any] | None]:
     """Return a completed handoff the plan cannot be read with to pending.
 
     The bounded correction turn covers the ``Files modified`` shapes a worker
@@ -430,15 +435,15 @@ def _reopen_uninspectable_handoff(
     if session_status is None:
         return None, None
     try:
-        handoff = plans.read_session_handoff(
+        handoff = plans_handoff.read_session_handoff(
             session_status.session, repository_registry=None
         )
-    except plans.PlanError:
+    except plans_errors.PlanError:
         return None, None
     if handoff.status != "complete":
         return None, None
     evidence: dict[str, Any] = {
-        **plans.session_identity_payload(session_id),
+        **plans_payloads.session_identity_payload(session_id),
         "session_path": str(session_path),
         "plan_error": plan_error,
         "reopened": False,
@@ -455,7 +460,7 @@ def _reopen_uninspectable_handoff(
     evidence["reopened"] = reverted.reopened
     try:
         reinspected = plan_cache.get_fresh(before.plan_dir)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         evidence["reinspect_error"] = str(error)
         return None, evidence
     # A defect the bounded correction already failed to fix once is reopened
@@ -478,12 +483,12 @@ def _repair_paused_handoff_status(
     event_path: Path,
     payload: dict[str, Any],
     persistence: run_persistence._RunPersistence,
-    plan_cache: plans.PlanSnapshotCache,
-    after: plans.PlanSnapshot,
+    plan_cache: plans_snapshot.PlanSnapshotCache,
+    after: plans_models.PlanSnapshot,
     session_id: str,
     turn_index: int,
     runner_pause: object,
-) -> tuple[plans.PlanSnapshot, dict[str, Any] | None]:
+) -> tuple[plans_models.PlanSnapshot, dict[str, Any] | None]:
     """Repair the selected session's handoff when its turn paused on purpose.
 
     A worker that emits a structured ``RUNNER_PAUSE`` and also writes a status
@@ -519,7 +524,7 @@ def _repair_paused_handoff_status(
         after.plan_dir, after, reverted, plan_cache
     )
     evidence: dict[str, Any] = {
-        **plans.session_identity_payload(session_id),
+        **plans_payloads.session_identity_payload(session_id),
         "session_path": str(reverted.path),
         "from_status": from_status,
         "to_status": "pending",
@@ -531,13 +536,13 @@ def _repair_paused_handoff_status(
         {
             "run_id": payload.get("run_id"),
             "turn_index": turn_index,
-            **plans.session_identity_payload(session_id),
+            **plans_payloads.session_identity_payload(session_id),
             "from_status": from_status,
             "to_status": "pending",
             "guard": "plan-status-validity",
             "reason": pause_reason,
             **turn_execution.reopened_snapshot_identity(
-                plans.snapshot_payload(repaired)
+                plans_payloads.snapshot_payload(repaired)
             ),
         },
     )

@@ -52,7 +52,12 @@ from agent_session_loop import (
     handoff_correction,
     handoff_guards,
     harnesses,
-    plans,
+    plans_content_hash,
+    plans_errors,
+    plans_handoff,
+    plans_models,
+    plans_progress,
+    plans_snapshot,
     repository_intent,
     run_persistence,
     run_termination,
@@ -308,7 +313,7 @@ class VerifyThenProgressThenLedgersTests(unittest.TestCase):
         return (
             self.source.index("_enforce_session_verification("),
             self.source.index("handoff_guards._append_progress_entry("),
-            self.source.index("plans.sync_derived_status_ledgers("),
+            self.source.index("plans_status_tables.sync_derived_status_ledgers("),
         )
 
     def test_the_loop_verifies_before_it_appends_to_the_journal(self) -> None:
@@ -335,8 +340,8 @@ class _PlanCase(unittest.TestCase):
         write_plan(self.plan_dir, ("complete", "pending"))
         self.appender = _RecordingAppender()
 
-    def snapshot(self) -> plans.PlanSnapshot:
-        return plans.inspect_plan(self.plan_dir)
+    def snapshot(self) -> plans_models.PlanSnapshot:
+        return plans_snapshot.inspect_plan(self.plan_dir)
 
     def session_path(self, session_id: str) -> Path:
         return self.plan_dir / f"session-{session_id}.md"
@@ -351,7 +356,7 @@ class AppendProgressEntryTests(_PlanCase):
                 self.snapshot(), "1", "2026-01-01T00:00:00Z"
             )
         )
-        entries = plans.read_progress_entries(self.plan_dir)
+        entries = plans_progress.read_progress_entries(self.plan_dir)
         self.assertEqual(["1"], [str(entry.session_id) for entry in entries])
         self.assertEqual("2026-01-01T00:00:00Z", entries[0].completed_at)
 
@@ -366,7 +371,7 @@ class AppendProgressEntryTests(_PlanCase):
         self.assertFalse(
             handoff_guards._append_progress_entry(self.snapshot(), "1", stamp)
         )
-        self.assertEqual(1, len(plans.read_progress_entries(self.plan_dir)))
+        self.assertEqual(1, len(plans_progress.read_progress_entries(self.plan_dir)))
 
     def test_a_second_completion_at_a_different_time_is_a_new_row(self) -> None:
         # Idempotence is keyed on the pair, not the session: a session reopened
@@ -381,7 +386,7 @@ class AppendProgressEntryTests(_PlanCase):
                 self.snapshot(), "1", "2026-01-02T00:00:00Z"
             )
         )
-        self.assertEqual(2, len(plans.read_progress_entries(self.plan_dir)))
+        self.assertEqual(2, len(plans_progress.read_progress_entries(self.plan_dir)))
 
     def test_the_inline_files_modified_bullet_is_split_on_commas(self) -> None:
         path = self.session_path("1")
@@ -395,18 +400,18 @@ class AppendProgressEntryTests(_PlanCase):
         handoff_guards._append_progress_entry(
             self.snapshot(), "1", "2026-01-01T00:00:00Z"
         )
-        entry = plans.read_progress_entries(self.plan_dir)[0]
+        entry = plans_progress.read_progress_entries(self.plan_dir)[0]
         self.assertEqual(("a.py", "b.py", "c.py"), entry.files_modified)
 
     def test_a_session_absent_from_the_snapshot_raises_rather_than_writes(self) -> None:
         # The caller records the failure as `progress-journal-append-failed` and
         # carries on; a silent no-op would leave the journal short a row with
         # nothing anywhere saying so.
-        with self.assertRaises(plans.PlanError):
+        with self.assertRaises(plans_errors.PlanError):
             handoff_guards._append_progress_entry(
                 self.snapshot(), "99", "2026-01-01T00:00:00Z"
             )
-        self.assertEqual((), plans.read_progress_entries(self.plan_dir))
+        self.assertEqual((), plans_progress.read_progress_entries(self.plan_dir))
 
 
 class RevertSessionStatusTests(_PlanCase):
@@ -427,7 +432,7 @@ class RevertSessionStatusTests(_PlanCase):
         assert reverted is not None
         self.assertEqual(self.session_path("1"), reverted.path)
         self.assertIn(
-            f"{plans.STATUS_PREFIX} pending",
+            f"{plans_handoff.STATUS_PREFIX} pending",
             reverted.path.read_text(encoding="utf-8"),
         )
         self.assertEqual("pending", self.snapshot().sessions[0].status)
@@ -462,7 +467,9 @@ class RevertSessionStatusTests(_PlanCase):
         self.assertEqual(1, len(self.appender.calls))
         call = self.appender.calls[0]
         lines = self.session_path("1").read_text(encoding="utf-8").splitlines()
-        self.assertEqual(plans.HANDOFF_HEADING, lines[call["handoff_index"]].strip())
+        self.assertEqual(
+            plans_handoff.HANDOFF_HEADING, lines[call["handoff_index"]].strip()
+        )
         self.assertLessEqual(call["section_end"], len(lines))
         self.assertLess(call["handoff_index"], call["section_end"])
         self.assertEqual("plan artifact guard failed", call["note"])
@@ -502,10 +509,10 @@ class RevertSessionStatusTests(_PlanCase):
         )
         self.revert()
         text = path.read_text(encoding="utf-8")
-        self.assertEqual(1, text.count(f"{plans.STATUS_PREFIX} pending"))
+        self.assertEqual(1, text.count(f"{plans_handoff.STATUS_PREFIX} pending"))
         self.assertLess(
-            text.index(f"{plans.STATUS_PREFIX} complete"),
-            text.index(f"{plans.STATUS_PREFIX} pending"),
+            text.index(f"{plans_handoff.STATUS_PREFIX} complete"),
+            text.index(f"{plans_handoff.STATUS_PREFIX} pending"),
         )
 
 
@@ -542,7 +549,7 @@ class RefusalReopeningTruthTests(_PlanCase):
 
     def plan_artifact_guard(self, session_id: str) -> str:
         other = "2" if session_id == "1" else "1"
-        digests_before = plans.session_artifact_digests(
+        digests_before = plans_content_hash.session_artifact_digests(
             self.plan_dir, exclude_session_id=session_id
         )
         path = self.session_path(other)
@@ -565,7 +572,7 @@ class RefusalReopeningTruthTests(_PlanCase):
                 session_details={"session_id": session_id},
                 turn_payload=self.turn_payload,
                 paths={"result": self.result_path},
-                plan_cache=plans.PlanSnapshotCache(),
+                plan_cache=plans_snapshot.PlanSnapshotCache(),
                 append_handoff_note=self.appender,
                 reinspect=session_verification._reinspect_after_revert,
             )
@@ -591,7 +598,7 @@ class RefusalReopeningTruthTests(_PlanCase):
                     state_dir_arg=None,
                     turn_payload=self.turn_payload,
                     paths={"result": self.result_path},
-                    plan_cache=plans.PlanSnapshotCache(),
+                    plan_cache=plans_snapshot.PlanSnapshotCache(),
                     append_handoff_note=self.appender,
                     reinspect=session_verification._reinspect_after_revert,
                 )
@@ -713,7 +720,9 @@ class PlanArtifactAdjudicationTests(_PlanCase):
             after=before,
             digests_before=overrides.pop(
                 "digests_before",
-                plans.session_artifact_digests(self.plan_dir, exclude_session_id="1"),
+                plans_content_hash.session_artifact_digests(
+                    self.plan_dir, exclude_session_id="1"
+                ),
             ),
             runner_written=(),
             session_id="1",
@@ -721,7 +730,7 @@ class PlanArtifactAdjudicationTests(_PlanCase):
             session_details={"session_id": "1"},
             turn_payload=self.turn_payload,
             paths={"result": self.result_path},
-            plan_cache=plans.PlanSnapshotCache(),
+            plan_cache=plans_snapshot.PlanSnapshotCache(),
             append_handoff_note=self.appender,
             reinspect=session_verification._reinspect_after_revert,
             adjudicate_only=True,
@@ -744,7 +753,7 @@ class PlanArtifactAdjudicationTests(_PlanCase):
     def test_a_tampered_packet_is_convicted_without_ending_the_turn_again(
         self,
     ) -> None:
-        digests_before = plans.session_artifact_digests(
+        digests_before = plans_content_hash.session_artifact_digests(
             self.plan_dir, exclude_session_id="1"
         )
         self.tamper()
@@ -757,7 +766,7 @@ class PlanArtifactAdjudicationTests(_PlanCase):
         self.assertTrue(guard["adjudicated_only"])
 
     def test_the_conviction_defers_to_the_pause_that_ended_the_turn(self) -> None:
-        digests_before = plans.session_artifact_digests(
+        digests_before = plans_content_hash.session_artifact_digests(
             self.plan_dir, exclude_session_id="1"
         )
         self.tamper()
@@ -778,7 +787,7 @@ class PlanArtifactAdjudicationTests(_PlanCase):
         self.assertEqual(guard, self.payload["pause_details"]["plan_artifact_guard"])
 
     def test_a_deferred_conviction_does_not_revert_the_session_twice(self) -> None:
-        digests_before = plans.session_artifact_digests(
+        digests_before = plans_content_hash.session_artifact_digests(
             self.plan_dir, exclude_session_id="1"
         )
         self.tamper()
@@ -793,13 +802,13 @@ class PlanArtifactAdjudicationTests(_PlanCase):
         )
         self.assertEqual([], self.appender.calls)
         self.assertEqual(
-            "complete", plans.inspect_plan(self.plan_dir).status_by_id["1"]
+            "complete", plans_snapshot.inspect_plan(self.plan_dir).status_by_id["1"]
         )
 
     def test_a_deferred_conviction_still_rejects_the_turn_in_the_event_log(
         self,
     ) -> None:
-        digests_before = plans.session_artifact_digests(
+        digests_before = plans_content_hash.session_artifact_digests(
             self.plan_dir, exclude_session_id="1"
         )
         self.tamper()
@@ -835,7 +844,7 @@ class TerminatingResultDispositionTests(unittest.TestCase):
     def disposition(
         self,
         *,
-        after: plans.PlanSnapshot | None = None,
+        after: plans_models.PlanSnapshot | None = None,
         turn_payload: dict[str, Any] | None = None,
         **result_fields: Any,
     ) -> str | None:

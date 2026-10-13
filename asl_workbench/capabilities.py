@@ -178,7 +178,16 @@ def _http(
 
 
 # Coverage references used often enough to name once.
-_SERVER_TESTS = "scripts:tests/test_asl_workbench_server.py"
+_SERVER_ARCHIVE_TESTS = "scripts:tests/test_asl_workbench_server_archive.py"
+_SERVER_CONTROL_TESTS = "scripts:tests/test_asl_workbench_server_control.py"
+_SERVER_HTTP_TESTS = "scripts:tests/test_asl_workbench_server_http.py"
+_SERVER_LAUNCH_REPLY_TESTS = "scripts:tests/test_asl_workbench_server_launch_reply.py"
+_SERVER_QUESTIONS_TESTS = "scripts:tests/test_asl_workbench_server_questions.py"
+_SERVER_QUEUE_TESTS = "scripts:tests/test_asl_workbench_server_queue.py"
+_SERVER_RECOVERY_TESTS = "scripts:tests/test_asl_workbench_server_recovery.py"
+_SERVER_REGISTRY_TESTS = "scripts:tests/test_asl_workbench_server_registry.py"
+_SERVER_RUN_RESULTS_TESTS = "scripts:tests/test_asl_workbench_server_run_results.py"
+_SERVER_RUN_STATE_TESTS = "scripts:tests/test_asl_workbench_server_run_state.py"
 _ARCHIVE_TESTS = "scripts:tests/test_asl_workbench_archive.py"
 _ARCHIVE_SERVICE_TESTS = "scripts:tests/test_workbench_archive.py"
 _SUMMARY_TESTS = "scripts:tests/test_asl_workbench_summary.py"
@@ -275,7 +284,7 @@ CAPABILITIES: tuple[Capability, ...] = (
     _http(
         "GET /api/health",
         "Liveness probe; the one route that needs no bearer token.",
-        coverage=(_SERVER_TESTS, _FOUNDATION_TESTS, _HTTP_TESTS),
+        coverage=(_SERVER_HTTP_TESTS, _FOUNDATION_TESTS, _HTTP_TESTS),
     ),
     _http(
         "GET /api/capabilities",
@@ -299,7 +308,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         "filtered set rather than of the page -- so '12 of 340' is a fact the "
         "server knows and the browser could not compute.",
         coverage=(
-            _SERVER_TESTS,
+            _SERVER_QUEUE_TESTS,
             _SUMMARY_TESTS,
             _FOUNDATION_TESTS,
             _CATALOG_TESTS,
@@ -331,81 +340,81 @@ CAPABILITIES: tuple[Capability, ...] = (
     _http(
         "GET /api/plan",
         "One plan's triage summary, for detail and deep-link entry.",
-        coverage=(_SERVER_TESTS, _SUMMARY_TESTS, _CATALOG_TESTS, _DETAIL_TESTS),
+        coverage=(_SERVER_QUEUE_TESTS, _SUMMARY_TESTS, _CATALOG_TESTS, _DETAIL_TESTS),
         changes=("observational-reads",),
     ),
     _http(
         "GET /api/recovery",
         "Recovery center: evidence rows, artifact references, action cards.",
-        coverage=(_RECOVERY_TESTS, _SERVER_TESTS, _DETAIL_TESTS),
+        coverage=(_RECOVERY_TESTS, _SERVER_RECOVERY_TESTS, _DETAIL_TESTS),
         changes=("observational-reads",),
     ),
     _http(
         "GET /api/registry",
         "Registry projection: pins, launch profiles, plan roots, retention.",
-        coverage=(_SERVER_TESTS,),
+        coverage=(_SERVER_REGISTRY_TESTS,),
     ),
     _http(
         "GET /api/artifacts",
         "Artifact descriptors for a plan's turn outputs. The listing is also "
         "the request vocabulary: a named artifact is what a detail read asks "
         "for.",
-        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
+        coverage=(_SERVER_HTTP_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/state",
         "The plan's ASL state payload, including the session table.",
-        coverage=(_SERVER_TESTS, _DOCS_TESTS, _DETAIL_TESTS),
+        coverage=(_SERVER_RUN_STATE_TESTS, _DOCS_TESTS, _DETAIL_TESTS),
         changes=("observational-reads",),
     ),
     _http(
         "GET /api/events",
         "Bounded window over the plan's append-only event journal.",
-        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
+        coverage=(_SERVER_RUN_STATE_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/logs",
         "Bounded stdout/stderr window, transparently reading gzip archives. "
         "Reaches only artifacts the selected plan published, or a path that "
         "plan contains.",
-        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
+        coverage=(_SERVER_RUN_STATE_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/last-message",
         "Truncated preview of the harness's last message.",
-        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
+        coverage=(_SERVER_RUN_RESULTS_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/result",
         "The turn result artifact for the plan's latest run.",
-        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
+        coverage=(_SERVER_RUN_RESULTS_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/verification",
         "Verification artifact and the active check's position.",
-        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
+        coverage=(_SERVER_RUN_RESULTS_TESTS, _DETAIL_TESTS),
         changes=("observational-reads",),
     ),
     _http(
         "GET /api/commits",
         "Commit rows recorded for the plan's sessions.",
-        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
+        coverage=(_SERVER_RUN_RESULTS_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/progress",
         "Progress-journal entries parsed from the plan directory.",
-        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
+        coverage=(_SERVER_RUN_RESULTS_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/final-review",
         "final-review.md and final-review.json for a completed plan.",
-        coverage=(_SERVER_TESTS, _DETAIL_TESTS),
+        coverage=(_SERVER_RUN_RESULTS_TESTS, _DETAIL_TESTS),
     ),
     _http(
         "GET /api/questions",
         "Open ASL questions awaiting an operator reply.",
         coverage=(
-            _SERVER_TESTS,
+            _SERVER_QUESTIONS_TESTS,
             "scripts:tests/test_asl_reply_flows_e2e_live_resolution.py",
             _DETAIL_TESTS,
         ),
@@ -419,7 +428,7 @@ CAPABILITIES: tuple[Capability, ...] = (
     _http(
         "GET /api/conversation-recovery",
         "Conversation recovery card: retained facts and the commands to run.",
-        coverage=(_SERVER_TESTS, _DOCS_TESTS, _CONTROL_TESTS),
+        coverage=(_SERVER_RECOVERY_TESTS, _DOCS_TESTS, _CONTROL_TESTS),
     ),
     _http(
         "GET /api/archive",
@@ -428,7 +437,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         coverage=(
             _ARCHIVE_TESTS,
             _ARCHIVE_SERVICE_TESTS,
-            _SERVER_TESTS,
+            _SERVER_ARCHIVE_TESTS,
             _FOUNDATION_TESTS,
         ),
         # Both changes landed here: the read stopped mutating, and what
@@ -439,35 +448,35 @@ CAPABILITIES: tuple[Capability, ...] = (
         "POST /api/registry/pin",
         "Pin a plan with an optional label and launch profile. Serialized "
         "against every other registry writer by the registry lock.",
-        coverage=(_ARCHIVE_SERVICE_TESTS, _SERVER_TESTS, _CLI_TESTS),
+        coverage=(_ARCHIVE_SERVICE_TESTS, _SERVER_REGISTRY_TESTS, _CLI_TESTS),
     ),
     _http(
         "POST /api/registry/unpin",
         "Remove a registry pin without touching the plan.",
-        coverage=(_ARCHIVE_SERVICE_TESTS, _SERVER_TESTS, _CLI_TESTS),
+        coverage=(_ARCHIVE_SERVICE_TESTS, _SERVER_REGISTRY_TESTS, _CLI_TESTS),
     ),
     _http(
         "POST /api/plan/archive",
         "Archive one plan; requires confirm_plan_dir to match after canonicalization.",
-        coverage=(_ARCHIVE_TESTS, _ARCHIVE_SERVICE_TESTS, _SERVER_TESTS),
+        coverage=(_ARCHIVE_TESTS, _ARCHIVE_SERVICE_TESTS, _SERVER_ARCHIVE_TESTS),
     ),
     _http(
         "POST /api/plans/archive",
         "Bulk archive from the cleanup review bar, reporting per-plan results.",
-        coverage=(_ARCHIVE_TESTS, _ARCHIVE_SERVICE_TESTS, _SERVER_TESTS),
+        coverage=(_ARCHIVE_TESTS, _ARCHIVE_SERVICE_TESTS, _SERVER_ARCHIVE_TESTS),
     ),
     _http(
         "POST /api/plan/delete",
         "Historic delete route, kept as an archive alias with its original "
         "confirmation contract.",
-        coverage=(_ARCHIVE_TESTS, _ARCHIVE_SERVICE_TESTS, _SERVER_TESTS),
+        coverage=(_ARCHIVE_TESTS, _ARCHIVE_SERVICE_TESTS, _SERVER_ARCHIVE_TESTS),
         adapters=("route alias onto POST /api/plan/archive",),
     ),
     _http(
         "POST /api/archive/restore",
         "Restore an archived plan and its state back into place; refuses "
         "rather than overwriting an occupied destination.",
-        coverage=(_ARCHIVE_TESTS, _ARCHIVE_SERVICE_TESTS, _SERVER_TESTS),
+        coverage=(_ARCHIVE_TESTS, _ARCHIVE_SERVICE_TESTS, _SERVER_ARCHIVE_TESTS),
     ),
     _http(
         "POST /api/archive/delete",
@@ -476,7 +485,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         coverage=(
             _ARCHIVE_TESTS,
             _ARCHIVE_SERVICE_TESTS,
-            _SERVER_TESTS,
+            _SERVER_ARCHIVE_TESTS,
             _FOUNDATION_TESTS,
         ),
         changes=("explicit-archive-cleanup",),
@@ -485,7 +494,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         "POST /api/archive/settings",
         "Set the archive retention window: the age at which an entry "
         "becomes a cleanup candidate, not the age at which it is removed.",
-        coverage=(_ARCHIVE_TESTS, _ARCHIVE_SERVICE_TESTS, _SERVER_TESTS),
+        coverage=(_ARCHIVE_TESTS, _ARCHIVE_SERVICE_TESTS, _SERVER_ARCHIVE_TESTS),
         changes=("explicit-archive-cleanup",),
     ),
     _http(
@@ -493,7 +502,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         "Start a run for a plan under a launch profile, keyed for idempotency.",
         coverage=(
             _LAUNCH_TESTS,
-            _SERVER_TESTS,
+            _SERVER_LAUNCH_REPLY_TESTS,
             _DOCS_TESTS,
             _OPERATION_TESTS,
             _ACTION_TESTS,
@@ -503,7 +512,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         "POST /api/reply",
         "Answer an open ASL question with reply_text, streamed to the child.",
         coverage=(
-            _SERVER_TESTS,
+            _SERVER_LAUNCH_REPLY_TESTS,
             "scripts:tests/test_asl_reply_flows_e2e_reply_resume.py",
             _OPERATION_TESTS,
             _ACTION_TESTS,
@@ -518,17 +527,17 @@ CAPABILITIES: tuple[Capability, ...] = (
     _http(
         "POST /api/control/stop-after-current",
         "Queue a stop that lands after the in-flight turn settles.",
-        coverage=(_SERVER_TESTS, _CONTROL_CLI_TESTS, _CONTROL_TESTS),
+        coverage=(_SERVER_CONTROL_TESTS, _CONTROL_CLI_TESTS, _CONTROL_TESTS),
     ),
     _http(
         "POST /api/control/abort",
         "Abort the in-flight turn under ASL's default grace.",
-        coverage=(_SERVER_TESTS, _CONTROL_CLI_TESTS, _CONTROL_TESTS),
+        coverage=(_SERVER_CONTROL_TESTS, _CONTROL_CLI_TESTS, _CONTROL_TESTS),
     ),
     _http(
         "POST /api/control/select-harness",
         "Choose the harness a paused run resumes under.",
-        coverage=(_SERVER_TESTS, _CONTROL_CLI_TESTS, _CONTROL_TESTS),
+        coverage=(_SERVER_CONTROL_TESTS, _CONTROL_CLI_TESTS, _CONTROL_TESTS),
     ),
     _http(
         "POST /api/control/redirect",
@@ -539,7 +548,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         "POST /api/unlock",
         "Release a plan lock the operator has proven dead. The one place "
         "reclaim is still deliberate, now that no read does it.",
-        coverage=(_ARCHIVE_SERVICE_TESTS, _SERVER_TESTS, _RECOVERY_TESTS),
+        coverage=(_ARCHIVE_SERVICE_TESTS, _SERVER_CONTROL_TESTS, _RECOVERY_TESTS),
     ),
     # -- Workbench static assets -------------------------------------------
     Capability(
@@ -587,7 +596,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         compatibility_adapters=(
             "the local provider wires asl_workbench to the Mac services",
         ),
-        regression_coverage=(_CLI_TESTS, _SERVER_TESTS, _DOCS_TESTS),
+        regression_coverage=(_CLI_TESTS, _SERVER_HTTP_TESTS, _DOCS_TESTS),
     ),
     Capability(
         key=f"{SURFACE_WORKBENCH_CLI}:asl workbench connect",
@@ -763,7 +772,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         # this replaces.
         regression_coverage=(
             _DOCS_TESTS,
-            _SERVER_TESTS,
+            _SERVER_RUN_STATE_TESTS,
             _SHELL_TESTS,
             _SHELL_BROWSER_TESTS,
         ),
@@ -786,7 +795,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         # one behind.
         regression_coverage=(
             _DOCS_TESTS,
-            _SERVER_TESTS,
+            _SERVER_CONTROL_TESTS,
             _INTERACTION_TESTS,
             _INTERACTION_BROWSER_TESTS,
         ),
@@ -857,7 +866,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_DOCS_TESTS, _SERVER_TESTS),
+        regression_coverage=(_DOCS_TESTS, _SERVER_RECOVERY_TESTS),
         coverage_gap=GAP_WORKBENCH_BROWSER,
     ),
     Capability(
@@ -1253,7 +1262,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_WORKBENCH,
         owner=OWNER_MAC,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_SERVER_TESTS, _ARCHIVE_TESTS),
+        regression_coverage=(_SERVER_REGISTRY_TESTS, _ARCHIVE_TESTS),
     ),
     Capability(
         key=f"{SURFACE_PERSISTENCE}:asl-plan-state",
@@ -1278,7 +1287,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         owner=OWNER_MAC,
         authority=AUTHORITY_ASL,
         regression_coverage=(
-            _SERVER_TESTS,
+            _SERVER_RUN_STATE_TESTS,
             _HISTORY_TESTS,
         ),
     ),
@@ -1337,7 +1346,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_BOTH,
         owner=OWNER_PORTABLE,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_OPERATION_TESTS, _SERVER_TESTS, _ACTION_TESTS),
+        regression_coverage=(_OPERATION_TESTS, _SERVER_ARCHIVE_TESTS, _ACTION_TESTS),
     ),
     Capability(
         key=f"{SURFACE_PERSISTENCE}:plan-artifacts",
@@ -1347,7 +1356,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         origin=ORIGIN_BOTH,
         owner=OWNER_MAC,
         authority=AUTHORITY_ASL,
-        regression_coverage=(_SERVER_TESTS,),
+        regression_coverage=(_SERVER_RUN_RESULTS_TESTS,),
     ),
     Capability(
         key=f"{SURFACE_PERSISTENCE}:companion-sqlite-store",

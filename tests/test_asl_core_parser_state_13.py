@@ -13,7 +13,7 @@ from agent_session_loop import (
     commit_settlement,
     events,
     pause_policy,
-    plans,
+    plans_snapshot,
     readiness_gate,
     review_cycle,
     review_transitions,
@@ -397,7 +397,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 encoding="utf-8",
             )
 
-            snapshot = plans.inspect_plan(plan_dir)
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
             # A run with a turn in flight holds its lock; without one the
             # status backfill would (correctly) declare the run abandoned.
             state_locks.acquire_lock(plan_dir, state_dir)

@@ -39,7 +39,8 @@ from typing import Any
 
 from agent_session_loop import (
     bridge,
-    plans,
+    plans_metadata,
+    plans_registry,
     workbench,
     workbench_archive,
     workbench_catalog,
@@ -274,7 +275,7 @@ class CatalogShapeTests(unittest.TestCase):
         )
 
     def test_a_manifest_without_a_heading_has_no_title(self) -> None:
-        # Not the directory name, which is what `plans.inspect_plan` falls back
+        # Not the directory name, which is what `plans_snapshot.inspect_plan` falls back
         # to: a field that is usually a title and occasionally a path component
         # is not a field that can be published.
         self.assertIsNone(catalog.manifest_title("Body text with no heading.\n"))
@@ -520,9 +521,11 @@ class CatalogScanTests(unittest.TestCase):
             # The manifest lists the repositories; the metadata is what binds
             # them to a workspace root on this machine. Both are needed before
             # the summary reports a workspace at all.
-            registry = plans.read_repository_registry(plan_dir)
+            registry = plans_registry.read_repository_registry(plan_dir)
             assert registry is not None
-            plans.save_workspace_plan_metadata(plan_dir, workspace, registry.digest)
+            plans_metadata.save_workspace_plan_metadata(
+                plan_dir, workspace, registry.digest
+            )
 
             scan = workbench_catalog.scan(
                 state_dir=tmp_path / "state",

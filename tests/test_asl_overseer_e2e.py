@@ -102,7 +102,8 @@ from agent_session_loop import (
     overseer_policy_client,
     overseer_resume,
     overseer_store,
-    plans,
+    plans_files,
+    plans_snapshot,
     process_tree,
     state,
 )
@@ -255,13 +256,13 @@ class _World:
         workdir = tempfile.TemporaryDirectory(prefix="asl-overseer-e2e-")
         case.addCleanup(workdir.cleanup)
         self.case = case
-        # `plans.canonicalize_path` resolves the macOS `/var` symlink. Every
+        # `plans_files.canonicalize_path` resolves the macOS `/var` symlink. Every
         # path in this fixture is canonical from the start, because the scope a
         # transcript statement carries is the directory AgentMux reports and the
         # scope a claim carries is the run's declared repository roots: the two
         # are compared for equality, so one uncanonicalized string rejects every
         # claim in the module with `scope_widened`.
-        self.root = plans.canonicalize_path(workdir.name)
+        self.root = plans_files.canonicalize_path(workdir.name)
         self.state_root = self.root / "state"
         self.plans_root = self.root / "plans"
         self.plans_root.mkdir(parents=True, exist_ok=True)
@@ -535,7 +536,7 @@ class _World:
         **overrides: Any,
     ) -> Path:
         """One paused run, written the way the runner writes one."""
-        plan_dir = plans.canonicalize_path(self._plan_dir(name))
+        plan_dir = plans_files.canonicalize_path(self._plan_dir(name))
         run_id = f"{name}-run-1"
         repositories = [
             {
@@ -597,7 +598,7 @@ class _World:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def _plan_dir(self, name: str) -> Path:
-        """A plan directory `plans.inspect_plan` will actually accept.
+        """A plan directory `plans_snapshot.inspect_plan` will actually accept.
 
         The lock records the plan's own hashes, so the plan has to be a real
         one: an empty directory is refused before a lock can name it.
@@ -683,7 +684,7 @@ class _World:
 
     def hold_lock(self, plan_dir: Path, pid: int) -> Path:
         """Publish a lock naming ``pid`` as the run's owner."""
-        snapshot = plans.inspect_plan(plan_dir)
+        snapshot = plans_snapshot.inspect_plan(plan_dir)
         lock_path = state.lock_path_for_plan(snapshot.plan_dir, self.state_root)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(
@@ -713,7 +714,7 @@ class _World:
         A paused run is not a running one: the worker releases the plan before
         it exits, which is the state any later resume actually meets.
         """
-        snapshot = plans.inspect_plan(plan_dir)
+        snapshot = plans_snapshot.inspect_plan(plan_dir)
         state.lock_path_for_plan(snapshot.plan_dir, self.state_root).unlink(
             missing_ok=True
         )

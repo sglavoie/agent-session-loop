@@ -30,7 +30,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import contracts, plans, workspaces
+from . import (
+    contracts,
+    plans_errors,
+    plans_files,
+    plans_models,
+    plans_registry,
+    plans_session_ids,
+    plans_session_scope,
+    plans_snapshot,
+    workspaces,
+)
 
 FINAL_REVIEW_FILENAME = "final-review.md"
 FINAL_REVIEW_ARTIFACT_FILENAME = "final-review.json"
@@ -105,7 +115,7 @@ REVIEW_REASON_CONTRADICTORY_ARTIFACT = "contradictory-review-artifact"
 # Message prefix contracts._parse_check interpolates; stripped when re-raising
 # check-validation failures in finding context.
 _CONTRACT_CHECK_MESSAGE_PREFIX_RE = re.compile(r"^session \S+ contract check #[0-9]+ ")
-_CHECK_VALIDATION_SESSION_ID = plans.parse_session_id("1")
+_CHECK_VALIDATION_SESSION_ID = plans_session_ids.parse_session_id("1")
 
 
 class ReviewArtifactError(ValueError):
@@ -129,11 +139,11 @@ def final_review_artifact_path(plan_dir: str | Path) -> Path:
 def final_review_output_sha256(plan_dir: str | Path) -> str:
     """Return the full SHA-256 digest of ``final-review.md``.
 
-    The file is streamed through :func:`plans.file_sha256`, whose fixed-size
+    The file is streamed through :func:`plans_files.file_sha256`, whose fixed-size
     reads keep memory use bounded even when a malformed or manually edited
     review artifact is unexpectedly large.
     """
-    return plans.file_sha256(final_review_output_path(plan_dir))
+    return plans_files.file_sha256(final_review_output_path(plan_dir))
 
 
 def final_review_artifact_sha256(plan_dir: str | Path) -> str:
@@ -143,7 +153,7 @@ def final_review_artifact_sha256(plan_dir: str | Path) -> str:
     repair grouping, done criteria, and verification checks that are excluded
     from :func:`finding_fingerprint` identity.
     """
-    return plans.file_sha256(final_review_artifact_path(plan_dir))
+    return plans_files.file_sha256(final_review_artifact_path(plan_dir))
 
 
 def review_session_version_marker(
@@ -294,10 +304,10 @@ def _validate_evidence_for_registry(
         normalized_path = path.strip()
         if repository_registry is not None:
             try:
-                qualified = plans.parse_qualified_path(
+                qualified = plans_session_scope.parse_qualified_path(
                     normalized_path, repository_registry.aliases
                 )
-            except (plans.PlanError, ValueError) as error:
+            except (plans_errors.PlanError, ValueError) as error:
                 raise ReviewArtifactError(
                     f"finding {finding_id!r} evidence #{index + 1} 'path' "
                     "must be a qualified Alias:path beneath a declared "
@@ -360,7 +370,7 @@ def _validate_verification_checks(
                 session_id=_CHECK_VALIDATION_SESSION_ID,
                 repository_registry=repository_registry,
             )
-        except plans.PlanError as error:
+        except plans_errors.PlanError as error:
             detail = _CONTRACT_CHECK_MESSAGE_PREFIX_RE.sub("", str(error))
             raise ReviewArtifactError(
                 f"finding {finding_id!r} verification check #{index + 1} "
@@ -629,7 +639,7 @@ def load_review_verdict(
         }
 
     try:
-        repository_registry = plans.read_repository_registry(plan_dir)
+        repository_registry = plans_registry.read_repository_registry(plan_dir)
         artifact = parse_review_artifact(
             artifact_text,
             repository_registry=repository_registry,
@@ -643,7 +653,7 @@ def load_review_verdict(
             "review_output_path": str(review_path),
             "review_artifact_path": str(artifact_path),
         }
-    except (ReviewArtifactError, plans.PlanError) as error:
+    except (ReviewArtifactError, plans_errors.PlanError) as error:
         return {
             "ok": False,
             "reason": REVIEW_REASON_MALFORMED_ARTIFACT,
@@ -737,7 +747,7 @@ def _review_verdict_next_steps(
 
 
 def _relevant_review_session_version(
-    snapshot: plans.PlanSnapshot, review_resume: dict[str, Any]
+    snapshot: plans_models.PlanSnapshot, review_resume: dict[str, Any]
 ) -> int | None:
     """Return the generated-review version that governs artifact enforcement.
 
@@ -787,7 +797,7 @@ def review_verdict_payload(
     """
     from . import events, responses, review_continuation, state
 
-    snapshot = plans.inspect_plan(plan_dir)
+    snapshot = plans_snapshot.inspect_plan(plan_dir)
     plan_state = state.plan_state_dir(snapshot.plan_dir, state_dir)
     event_path = plan_state / events.EVENTS_FILE_NAME
     review_resume = review_continuation.evaluate_review_continuation(
@@ -839,7 +849,7 @@ def review_verdict_from_args(args: argparse.Namespace) -> int:
     want_json = bool(args.json)
     try:
         payload = review_verdict_payload(plan_dir_arg, args.state_dir)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         if want_json:
             responses.print_json(
                 responses.error_payload(

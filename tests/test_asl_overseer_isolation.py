@@ -32,7 +32,7 @@ from unittest import mock
 
 from agent_session_loop import (
     overseer_isolation,
-    plans,
+    plans_files,
     run_contention,
     run_entry,
     session_overview,
@@ -102,10 +102,12 @@ class _Corpus:
         return plan_dir
 
     def root_of(self, name: str) -> str:
-        return str(plans.canonicalize_path(self.workspace / name))
+        return str(plans_files.canonicalize_path(self.workspace / name))
 
     def state_dir_for(self, plan_dir: Path) -> Path:
-        return self.state_root / plans.path_sha256(plans.canonicalize_path(plan_dir))
+        return self.state_root / plans_files.path_sha256(
+            plans_files.canonicalize_path(plan_dir)
+        )
 
     def publish(
         self,
@@ -118,7 +120,7 @@ class _Corpus:
     ) -> Path:
         """Publish one plan's ``state.json`` and (optionally) its ``lock.json``."""
         plan_dir = self._plan(name)
-        canonical = plans.canonicalize_path(plan_dir)
+        canonical = plans_files.canonicalize_path(plan_dir)
         state_dir = self.state_dir_for(plan_dir)
         state_dir.mkdir(parents=True, exist_ok=True)
         payload: dict[str, object] = {
@@ -584,7 +586,10 @@ class RecoveryAuthorizationTests(unittest.TestCase):
         def _swap(plan_dir: Any, state_dir: Any = None) -> Any:
             _write_json(
                 self.lock_path,
-                {"plan_dir": str(plans.canonicalize_path(self.target)), **replacement},
+                {
+                    "plan_dir": str(plans_files.canonicalize_path(self.target)),
+                    **replacement,
+                },
             )
             return original
 

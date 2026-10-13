@@ -52,7 +52,7 @@ from . import (
     agent_mux_projection,
     events,
     mailbox_constants,
-    plans,
+    plans_files,
     responses,
     state,
     state_plan_refs,
@@ -863,7 +863,7 @@ def build_export(
     omissions = Omissions()
     root = state.state_root(state_dir)
     selector_digest = (
-        plans.path_sha256(plan_dir) if plan_dir not in (None, "") else None
+        plans_files.path_sha256(plan_dir) if plan_dir not in (None, "") else None
     )
     document: dict[str, Any] = {
         "schema_version": EXPORT_SCHEMA_VERSION,

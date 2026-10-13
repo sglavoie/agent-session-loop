@@ -18,7 +18,7 @@ from agent_session_loop import (
     mailbox_constants,
     mailbox_cursors,
     mailbox_snapshot,
-    plans,
+    plans_snapshot,
     run_coordination,
     state,
     state_status,
@@ -208,7 +208,7 @@ class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
             _write_lock_file(plan_dir, state_dir, pid=os.getpid())
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
 
             status = payload["mailbox"]

@@ -5,11 +5,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from agent_session_loop import (
-    contracts,
-    plans,
-    verification,
-)
+from agent_session_loop import contracts, plans_files, verification
 from tests.support_asl_verification import VerificationExecutorFixtures
 
 
@@ -241,7 +237,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
             self.assertEqual("command", started.kind)
             self.assertEqual(check.argv, started.argv)
             self.assertEqual("SVC", started.repo)
-            self.assertEqual(str(plans.canonicalize_path(repo_root)), started.cwd)
+            self.assertEqual(str(plans_files.canonicalize_path(repo_root)), started.cwd)
             self.assertEqual(started.session_id, contract.session_id)
             self.assertEqual(0, finished.check_index)
             self.assertEqual(1, finished.check_count)
@@ -408,7 +404,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
 
             started = events[0][1]
             self.assertEqual(
-                str(plans.canonicalize_path(repo_root / "nested")),
+                str(plans_files.canonicalize_path(repo_root / "nested")),
                 started.cwd,
             )
 

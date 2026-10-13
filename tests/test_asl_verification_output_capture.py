@@ -11,7 +11,7 @@ from unittest import mock
 from agent_session_loop import (
     artifacts,
     contracts,
-    plans,
+    plans_session_ids,
     process_tree,
     verification,
 )
@@ -249,7 +249,7 @@ class VerificationOutputCaptureTests(VerificationExecutorFixtures):
             repo_root.mkdir()
             artifact_dir = Path(tmp) / "artifacts"
             contract = contracts.CompletionContract(
-                session_id=plans.parse_session_id("1"),
+                session_id=plans_session_ids.parse_session_id("1"),
                 done_when=("done",),
                 verify=contracts.VerifyRecipe(
                     checks=(

@@ -11,7 +11,9 @@ from . import (
     commit_settlement,
     continuation_guards,
     guards,
-    plans,
+    plans_models,
+    plans_payloads,
+    plans_snapshot,
     redirect_recovery,
     run_commit,
     run_control,
@@ -59,7 +61,7 @@ class RunContext:
     reply_state_preserver: run_coordination.ReplyStatePreserver
     audit_context: run_coordination.TerminalAuditContext
     guard_controller: guards.GuardController
-    plan_cache: plans.PlanSnapshotCache
+    plan_cache: plans_snapshot.PlanSnapshotCache
     verification_context: verification.VerificationContext
     commit_generation: run_commit._CommitGeneration
     #: What each session's earlier attempts in *this* run were seen to change.
@@ -119,10 +121,10 @@ class RunContext:
     #: turn ever got far enough to retain work anyone may commit.
     retained_work: commit_settlement.RetainedWorkContext | None = None
 
-    def record_final_snapshot(self, snapshot: plans.PlanSnapshot) -> None:
+    def record_final_snapshot(self, snapshot: plans_models.PlanSnapshot) -> None:
         """Publish the plan image this run ends on, under the write lock."""
         with self.persistence.lock:
-            self.payload["final_snapshot"] = plans.snapshot_payload(snapshot)
+            self.payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot)
 
     def pause(
         self,

@@ -21,7 +21,7 @@ from agent_session_loop import (
     mailbox_rendering,
     mailbox_validation,
     mailbox_vocabulary,
-    plans,
+    plans_snapshot,
     state_status,
     state_status_text,
 )
@@ -385,7 +385,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertEqual(resolution_question.id, resolution.to)
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
             status = payload["mailbox"]
             self.assertFalse(status["full"])
@@ -471,7 +471,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
 
             payload = state_status.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
+                plans_snapshot.inspect_plan(plan_dir), state_dir
             )
             status = payload["mailbox"]
             self.assertFalse(status["full"])
@@ -508,7 +508,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
             with mock.patch.object(mailbox, "read_mailbox", side_effect=read_error):
                 payload = state_status.status_payload(
-                    plans.inspect_plan(plan_dir), state_dir
+                    plans_snapshot.inspect_plan(plan_dir), state_dir
                 )
 
             status = payload["mailbox"]

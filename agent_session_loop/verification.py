@@ -32,7 +32,16 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PureWindowsPath
 from typing import Any, Literal
 
-from . import agent_mux_contract, plans, responses, state, workspaces
+from . import (
+    agent_mux_contract,
+    plans_errors,
+    plans_registry,
+    plans_session_ids,
+    plans_snapshot,
+    responses,
+    state,
+    workspaces,
+)
 from .artifacts import ArtifactError, StreamCapture
 from .contracts import (
     CommandCheck,
@@ -42,7 +51,8 @@ from .contracts import (
     VerificationCheck,
     read_completion_contract,
 )
-from .plans import SessionId, canonicalize_path
+from .plans_files import canonicalize_path
+from .plans_session_ids import SessionId
 from .process_tree import (
     descendant_pids,
     sample_process_table,
@@ -89,7 +99,7 @@ class VerificationContext:
     def __post_init__(self) -> None:
         canonical_root = canonicalize_path(self.root)
         if self.workspace is not None and canonical_root != self.workspace.root:
-            raise plans.PlanError(
+            raise plans_errors.PlanError(
                 "verification workspace root does not match the resolved workspace"
             )
         object.__setattr__(self, "root", canonical_root)
@@ -116,13 +126,15 @@ class VerificationContext:
     @classmethod
     def from_plan(cls, plan_dir: str | Path, cwd: str | Path) -> VerificationContext:
         """Interpret ``cwd`` as a repository root or workspace root by plan mode."""
-        registry = plans.read_repository_registry(plan_dir)
+        registry = plans_registry.read_repository_registry(plan_dir)
         if registry is None:
             return cls.legacy(cwd, plan_dir=plan_dir)
         try:
             workspace = workspaces.resolve_workspace(cwd, registry)
         except workspaces.WorkspaceError as error:
-            raise plans.PlanError(f"invalid verification workspace: {error}") from error
+            raise plans_errors.PlanError(
+                f"invalid verification workspace: {error}"
+            ) from error
         return cls.resolved_workspace(workspace)
 
     @property
@@ -135,13 +147,13 @@ class VerificationContext:
         if self.workspace is None:
             return self.root
         if repo is None:
-            raise plans.PlanError(
+            raise plans_errors.PlanError(
                 "registered verification checks require a repository alias"
             )
         try:
             return self.workspace.get(repo).root
         except workspaces.WorkspaceError as error:
-            raise plans.PlanError(str(error)) from error
+            raise plans_errors.PlanError(str(error)) from error
 
     def resolve_check(self, check: VerificationCheck) -> ResolvedCheckContext:
         selected_root = self.repository_root(check.repo)
@@ -155,7 +167,7 @@ class VerificationContext:
                 or "\\" in value
                 or ".." in candidate.parts
             ):
-                raise plans.PlanError(
+                raise plans_errors.PlanError(
                     f"check {check.name!r} location must stay beneath repository "
                     f"{check.repo}"
                 )
@@ -173,7 +185,7 @@ class VerificationContext:
                     if registered
                     else f"the bound root {selected_root}"
                 )
-                raise plans.PlanError(
+                raise plans_errors.PlanError(
                     f"check {check.name!r} location escapes {target}: {value}"
                 )
             if registered:
@@ -1852,7 +1864,7 @@ def verify_from_args(args: argparse.Namespace) -> int:
     artifact_dir_arg = getattr(args, "artifact_dir", None)
 
     try:
-        session_id = plans.parse_session_id(raw_session)
+        session_id = plans_session_ids.parse_session_id(raw_session)
     except ValueError as error:
         _emit_verify_error(
             want_json=want_json,
@@ -1866,7 +1878,7 @@ def verify_from_args(args: argparse.Namespace) -> int:
 
     try:
         verification_context = verification_context_from_plan(plan_dir_arg, cwd_arg)
-    except (plans.PlanError, OSError) as error:
+    except (plans_errors.PlanError, OSError) as error:
         _emit_verify_error(
             want_json=want_json,
             reason="cwd-error",
@@ -1879,7 +1891,7 @@ def verify_from_args(args: argparse.Namespace) -> int:
 
     try:
         contract = read_completion_contract(plan_dir_arg, session_id)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         _emit_verify_error(
             want_json=want_json,
             reason=VERIFY_EXIT_REASON_MALFORMED_CONTRACT,
@@ -1919,7 +1931,7 @@ def verify_from_args(args: argparse.Namespace) -> int:
     for check in contract.verify.checks:
         try:
             verification_context.resolve_check(check)
-        except plans.PlanError as error:
+        except plans_errors.PlanError as error:
             _emit_verify_error(
                 want_json=want_json,
                 reason=VERIFY_EXIT_REASON_MALFORMED_CONTRACT,
@@ -1955,7 +1967,7 @@ def verify_from_args(args: argparse.Namespace) -> int:
             context=verification_context,
             artifact_dir=artifact_dir_arg,
         )
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         _emit_verify_error(
             want_json=want_json,
             reason=VERIFY_EXIT_REASON_MALFORMED_CONTRACT,
@@ -2183,7 +2195,7 @@ def _contract_check_rows(
     )
     try:
         contract = read_completion_contract(plan_dir, session_id)
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         return [
             _contract_check_session_row(
                 session_id.value, CONTRACT_CHECK_ROW_SCHEMA_ERROR, str(error)
@@ -2205,7 +2217,7 @@ def _contract_check_rows(
             status, reason, detail = _diagnose_contract_check(
                 check, context=verification_context
             )
-        except plans.PlanError as error:
+        except plans_errors.PlanError as error:
             rows.append(
                 {
                     "session": session_id.value,
@@ -2281,19 +2293,19 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
 
     try:
         verification_context = verification_context_from_plan(plan_dir_arg, cwd_arg)
-    except (plans.PlanError, OSError) as error:
+    except (plans_errors.PlanError, OSError) as error:
         return _emit_error(CONTRACT_CHECK_EXIT_REASON_CWD_ERROR, str(error))
 
     try:
-        snapshot = plans.inspect_plan(plan_dir_arg)
-    except plans.PlanError as error:
+        snapshot = plans_snapshot.inspect_plan(plan_dir_arg)
+    except plans_errors.PlanError as error:
         return _emit_error(CONTRACT_CHECK_EXIT_REASON_PLAN_ERROR, str(error))
 
     known_ids = {status.id for status in snapshot.sessions}
     if raw_session is not None:
         try:
-            session_id = plans.parse_session_id(raw_session)
-        except (ValueError, plans.PlanError) as error:
+            session_id = plans_session_ids.parse_session_id(raw_session)
+        except (ValueError, plans_errors.PlanError) as error:
             return _emit_error(CONTRACT_CHECK_EXIT_REASON_INVALID_SESSION, str(error))
         if session_id.value not in known_ids:
             return _emit_error(
@@ -2303,7 +2315,8 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
         session_ids = [session_id]
     else:
         session_ids = [
-            plans.parse_session_id(status.id) for status in snapshot.sessions
+            plans_session_ids.parse_session_id(status.id)
+            for status in snapshot.sessions
         ]
 
     rows: list[dict[str, Any]] = []

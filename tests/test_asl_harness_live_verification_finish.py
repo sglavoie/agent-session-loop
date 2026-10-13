@@ -15,7 +15,7 @@ from agent_session_loop import (
     contracts,
     events,
     live_verification,
-    plans,
+    plans_session_ids,
     run_persistence,
     run_reporting,
     verification,
@@ -363,7 +363,7 @@ class LiveVerificationFinishTests(FakeHarnessIntegrationBase):
                 for index in range(total)
             )
             contract = contracts.CompletionContract(
-                session_id=plans.parse_session_id("1"),
+                session_id=plans_session_ids.parse_session_id("1"),
                 done_when=("done",),
                 verify=contracts.VerifyRecipe(checks=checks, parallel=True),
             )

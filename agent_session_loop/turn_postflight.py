@@ -97,7 +97,10 @@ from . import (
     handoff_correction,
     handoff_guards,
     harnesses,
-    plans,
+    plans_models,
+    plans_payloads,
+    plans_session_scope,
+    plans_snapshot,
     repository_evidence,
     run_persistence,
     session_verification,
@@ -137,7 +140,7 @@ class RunContext(Protocol):
     def persistence(self) -> run_persistence._RunPersistence: ...
 
     @property
-    def plan_cache(self) -> plans.PlanSnapshotCache: ...
+    def plan_cache(self) -> plans_snapshot.PlanSnapshotCache: ...
 
     @property
     def guard_controller(self) -> guards.GuardController: ...
@@ -184,12 +187,12 @@ def _stopped() -> PostTurnGuards:
 def enforce_post_turn_guards(
     ctx: RunContext,
     *,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot | None,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot | None,
     result: harnesses.HarnessResult,
     turn_payload: dict[str, Any],
     workspace: workspaces.ResolvedWorkspace | None,
-    session_scope: plans.SessionScope | None,
+    session_scope: plans_session_scope.SessionScope | None,
     workspace_snapshot_before: repository_evidence.WorkspaceSnapshot | None,
     legacy_snapshot_before: repository_evidence.WorkspaceSnapshot | None,
     review_fingerprint_before: dict[str, Any] | None,
@@ -264,9 +267,9 @@ def enforce_post_turn_guards(
             except RunError as error:
                 with ctx.persistence.lock:
                     ctx.payload["final_snapshot"] = (
-                        plans.snapshot_payload(after)
+                        plans_payloads.snapshot_payload(after)
                         if after is not None
-                        else plans.snapshot_payload(before)
+                        else plans_payloads.snapshot_payload(before)
                     )
                 ctx.pause(
                     reason=events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,

@@ -23,7 +23,10 @@ SPEC.loader.exec_module(resplit)
 
 from agent_session_loop import (  # noqa: E402 - sys.path insert above
     contracts,
-    plans,
+    plans_content_hash,
+    plans_files,
+    plans_session_ids,
+    plans_session_scope,
     state_locks,
 )
 
@@ -36,7 +39,7 @@ def write_session(
     title: str = "Test",
     body: str = "Instructions.",
 ) -> None:
-    (plan_dir / plans.session_id_to_filename(session_id)).write_text(
+    (plan_dir / plans_session_ids.session_id_to_filename(session_id)).write_text(
         "\n".join(
             [
                 f"# Session {session_id}: {title}",
@@ -266,7 +269,7 @@ class ResplitSessionTest(unittest.TestCase):
                 )
                 self.assertEqual(1, child.count("**Reads repositories**: SVC, OAK"))
                 self.assertEqual(1, child.count("**Writes repositories**: SVC"))
-                scope = plans.parse_session_scope(child, ("SVC", "OAK"))
+                scope = plans_session_scope.parse_session_scope(child, ("SVC", "OAK"))
                 self.assertEqual(("SVC", "OAK"), scope.reads)
                 self.assertEqual(("SVC",), scope.writes)
 
@@ -295,7 +298,7 @@ class ResplitSessionTest(unittest.TestCase):
                 result["child_files"],
             )
             self.assertEqual(
-                f"$session-expand {plans.canonicalize_path(plan_dir)}/",
+                f"$session-expand {plans_files.canonicalize_path(plan_dir)}/",
                 result["next_command"],
             )
             self.assertEqual(["manifest.md", "context.md"], result["ledger_updates"])
@@ -371,7 +374,7 @@ class ResplitSessionTest(unittest.TestCase):
 
             self.assertEqual("draft", result["readiness"]["state"])
             self.assertEqual(
-                plans.stable_readiness_sha256(plan_dir),
+                plans_content_hash.stable_readiness_sha256(plan_dir),
                 result["readiness"]["readiness_sha256"],
             )
 
@@ -596,7 +599,9 @@ class ResplitSessionTest(unittest.TestCase):
             self.assertTrue(result["ok"])
 
             for child_id in result["children"]:
-                child_path = plan_dir / plans.session_id_to_filename(child_id)
+                child_path = plan_dir / plans_session_ids.session_id_to_filename(
+                    child_id
+                )
                 child_text = child_path.read_text(encoding="utf-8")
                 contract = contracts.parse_completion_contract(
                     child_text, session_id=child_id
@@ -875,13 +880,13 @@ class ResplitSessionTest(unittest.TestCase):
             explicit_plan_dir, explicit_session = resplit._resolve_cli_target(
                 explicit_args
             )
-            self.assertEqual(plans.canonicalize_path(plan_dir), explicit_plan_dir)
+            self.assertEqual(plans_files.canonicalize_path(plan_dir), explicit_plan_dir)
             self.assertEqual("2.1", explicit_session)
             self.assertEqual(3, resplit._parse_count(explicit_args))
 
             direct_args = parser.parse_args([str(plan_dir / "session-2.1.md"), "2"])
             direct_plan_dir, direct_session = resplit._resolve_cli_target(direct_args)
-            self.assertEqual(plans.canonicalize_path(plan_dir), direct_plan_dir)
+            self.assertEqual(plans_files.canonicalize_path(plan_dir), direct_plan_dir)
             self.assertEqual("2.1", direct_session)
             self.assertEqual(2, resplit._parse_count(direct_args))
 

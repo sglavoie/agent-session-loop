@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import events, plans
+from . import events, plans_files
 from .state import (
     LOCK_FILE_NAME,
     RESULT_FILE_NAME,
@@ -177,7 +177,7 @@ def resolve_plan_reference(raw_value: str, state_root: Path) -> Path:
     existing plan directory shares the requested basename. Discovery is
     read-only and independent of process liveness.
     """
-    original = plans.canonicalize_path(raw_value)
+    original = plans_files.canonicalize_path(raw_value)
     if original.is_dir():
         return original
     if not _is_bare_label(raw_value):
@@ -187,7 +187,7 @@ def resolve_plan_reference(raw_value: str, state_root: Path) -> Path:
     for state_dir in iter_plan_state_dirs(state_root):
         for raw_plan_dir in _collect_plan_dir_strings(state_dir):
             try:
-                candidate = plans.canonicalize_path(raw_plan_dir)
+                candidate = plans_files.canonicalize_path(raw_plan_dir)
             except OSError, ValueError:
                 continue
             key = str(candidate)
@@ -226,7 +226,7 @@ class RunLocation:
 def _recorded_plan_dir(state_dir: Path) -> Path | None:
     for raw_plan_dir in _collect_plan_dir_strings(state_dir):
         try:
-            return plans.canonicalize_path(raw_plan_dir)
+            return plans_files.canonicalize_path(raw_plan_dir)
         except OSError, ValueError:
             continue
     return None
@@ -266,7 +266,7 @@ def find_run_locations(
                 run_id=run_id,
                 state_dir=candidate,
                 plan_dir=(
-                    plans.canonicalize_path(plan_dir)
+                    plans_files.canonicalize_path(plan_dir)
                     if plan_dir is not None
                     else _recorded_plan_dir(candidate)
                 ),

@@ -58,7 +58,9 @@ from . import (
     compact_state,
     events,
     execution_timing,
-    plans,
+    plans_errors,
+    plans_models,
+    plans_snapshot,
     review_continuation,
     review_repair,
     session_overview,
@@ -540,7 +542,7 @@ def _hashable(value: Any) -> Any:
 
 def _repair_session_ids(
     event_records: list[dict[str, Any]],
-    snapshot: plans.PlanSnapshot | None,
+    snapshot: plans_models.PlanSnapshot | None,
 ) -> set[str]:
     """Session ids that are generated review-repair children.
 
@@ -1143,8 +1145,8 @@ def collect_metrics(
         if plan_dir is not None:
             # Metrics remain best-effort for stale state directories. The
             # full event history still supplies an events-only fallback.
-            with contextlib.suppress(plans.PlanError, OSError):
-                snapshot = plans.inspect_plan(plan_dir)
+            with contextlib.suppress(plans_errors.PlanError, OSError):
+                snapshot = plans_snapshot.inspect_plan(plan_dir)
         materialization_keys = review_continuation.reconciled_materialization_keys(
             plan_state_dir / events.EVENTS_FILE_NAME,
             snapshot,

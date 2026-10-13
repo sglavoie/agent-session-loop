@@ -8,7 +8,9 @@ from typing import Any
 from . import (
     commit_settlement,
     harnesses,
-    plans,
+    plans_errors,
+    plans_models,
+    plans_session_scope,
     readiness_gate,
     run_coordination,
     run_prompts,
@@ -28,8 +30,8 @@ def _finish_run_locked(
 
 def _current_session_scope_or_none(
     ctx: RunContext,
-    session: plans.SessionStatus | None,
-) -> plans.SessionScope | None:
+    session: plans_models.SessionStatus | None,
+) -> plans_session_scope.SessionScope | None:
     """Read a session's durable repository scope, or ``None`` if it cannot be.
 
     The run-start refusal below judges a retained scope violation against the
@@ -42,7 +44,7 @@ def _current_session_scope_or_none(
         return None
     try:
         return run_prompts._session_scope(session, workspace)
-    except plans.PlanError:
+    except plans_errors.PlanError:
         return None
 
 

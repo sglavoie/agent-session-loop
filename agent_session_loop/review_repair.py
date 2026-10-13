@@ -81,7 +81,13 @@ from . import (
     baseline,
     contracts,
     durability,
-    plans,
+    plans_discovery,
+    plans_files,
+    plans_models,
+    plans_registry,
+    plans_session_ids,
+    plans_session_scope,
+    plans_transaction,
     preflight,
     preflight_cli,
     preflight_footprint,
@@ -95,7 +101,9 @@ from . import (
     workspaces,
 )
 from .authoring import ManifestSession, PlanTransaction
-from .plans import PlanError, SessionId, canonicalize_path, parse_session_id
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
+from .plans_session_ids import SessionId, parse_session_id
 
 # Generated review-repair session markers. Every materialized repair child
 # carries the base marker (so a version-agnostic reader recognizes it) plus the
@@ -347,7 +355,7 @@ def repair_group_write_repository_sources(
         for evidence in finding["evidence"]:
             path = evidence["path"]
             try:
-                qualified = plans.parse_qualified_path(path)
+                qualified = plans_session_scope.parse_qualified_path(path)
             except (PlanError, ValueError) as error:
                 raise ReviewRepairError(
                     f"repair group {group!r} has evidence path {path!r} that is "
@@ -400,7 +408,7 @@ def required_write_repositories(
 def _plan_artifact_pattern(plan_dir: Path) -> re.Pattern[str]:
     return re.compile(
         re.escape(str(plan_dir))
-        + rf"/session-({plans.SESSION_ID_PATTERN})\.(?:expand\.)?md"
+        + rf"/session-({plans_session_ids.SESSION_ID_PATTERN})\.(?:expand\.)?md"
     )
 
 
@@ -772,7 +780,7 @@ def _build_repair_group_plans(
         read_repositories: tuple[str, ...] = ()
         write_repositories: tuple[str, ...] = ()
         write_repository_sources: dict[str, str] = {}
-        scope: plans.SessionScope | None = None
+        scope: plans_session_scope.SessionScope | None = None
         marker_version = GENERATED_REVIEW_REPAIR_SESSION_VERSION
         if repository_registry is not None:
             write_repository_sources = repair_group_write_repository_sources(
@@ -782,7 +790,7 @@ def _build_repair_group_plans(
             )
             read_repositories = repository_registry.aliases
             write_repositories = tuple(write_repository_sources)
-            scope = plans.SessionScope(
+            scope = plans_session_scope.SessionScope(
                 reads=read_repositories,
                 writes=write_repositories,
             )
@@ -860,11 +868,11 @@ def _build_repair_group_plans(
 
 def find_generated_review_session(
     plan_dir: str | Path,
-) -> plans.SessionFile | None:
+) -> plans_models.SessionFile | None:
     """Return the latest generated review session in ``plan_dir``, if any."""
     canonical_dir = canonicalize_path(plan_dir)
-    candidates: list[plans.SessionFile] = []
-    for session in plans.discover_session_files(canonical_dir):
+    candidates: list[plans_models.SessionFile] = []
+    for session in plans_discovery.discover_session_files(canonical_dir):
         try:
             body = session.path.read_text(encoding="utf-8")
         except OSError:
@@ -877,8 +885,8 @@ def find_generated_review_session(
 
 
 def _existing_children(
-    sessions: Sequence[plans.SessionFile], review_id: SessionId
-) -> list[plans.SessionFile]:
+    sessions: Sequence[plans_models.SessionFile], review_id: SessionId
+) -> list[plans_models.SessionFile]:
     top = review_id.components[0]
     return [
         session
@@ -889,8 +897,8 @@ def _existing_children(
 
 
 def _immediate_successor(
-    sessions: Sequence[plans.SessionFile], review_id: SessionId
-) -> plans.SessionFile | None:
+    sessions: Sequence[plans_models.SessionFile], review_id: SessionId
+) -> plans_models.SessionFile | None:
     top = review_id.components[0]
     later = [session for session in sessions if session.session_id.components[0] > top]
     if not later:
@@ -1088,7 +1096,7 @@ def _validate_children_footprint(
         "non_bypassable_blockers": [],
         "baseline_summary": None,
     }
-    if plans.read_repository_registry(plan_dir) is not None:
+    if plans_registry.read_repository_registry(plan_dir) is not None:
         return clean
     provenance_roots = preflight_footprint.plan_provenance_exempt_roots(plan_dir)
     blockers: list[str] = []
@@ -1378,7 +1386,7 @@ def _open_publication_window(
         raise PlanError(
             f"failed to record the repair publication rollback image: {error}"
         ) from error
-    plans._fsync_directory(canonical_dir)
+    plans_files._fsync_directory(canonical_dir)
     return _PublicationWindow(
         directory=directory, plan_dir=canonical_dir, journal=journal
     )
@@ -1396,7 +1404,7 @@ def _close_publication_window(window: _PublicationWindow) -> None:
     """Retire a completed publication: the new state is now the valid one."""
     shutil.rmtree(window.directory, ignore_errors=True)
     with contextlib.suppress(OSError):
-        plans._fsync_directory(window.plan_dir)
+        plans_files._fsync_directory(window.plan_dir)
 
 
 def _restore_publication_image(
@@ -1430,7 +1438,7 @@ def _restore_publication_image(
         except OSError as error:
             errors.append(f"{relative}: {error}")
     with contextlib.suppress(OSError):
-        plans._fsync_directory(canonical_dir)
+        plans_files._fsync_directory(canonical_dir)
     return {
         "restored": restored,
         "removed": removed,
@@ -1447,7 +1455,7 @@ def _rollback_publication_window(window: _PublicationWindow) -> dict[str, Any]:
     if not record["errors"]:
         shutil.rmtree(window.directory, ignore_errors=True)
         with contextlib.suppress(OSError):
-            plans._fsync_directory(window.plan_dir)
+            plans_files._fsync_directory(window.plan_dir)
     return record
 
 
@@ -1480,7 +1488,7 @@ def recover_review_repair_publication(plan_dir: str | Path) -> dict[str, Any] | 
         # would make every later publication believe a recovery is pending.
         shutil.rmtree(directory, ignore_errors=True)
         with contextlib.suppress(OSError):
-            plans._fsync_directory(canonical_dir)
+            plans_files._fsync_directory(canonical_dir)
         return {
             "recovered": True,
             "reason": "unopened-publication-window",
@@ -1504,12 +1512,12 @@ def recover_review_repair_publication(plan_dir: str | Path) -> dict[str, Any] | 
     # A repair publication straddles the plan transaction, so the transaction's
     # own roll-forward runs first: restoring an image over a half-installed
     # generation would leave the transaction to re-install it afterwards.
-    plans.recover_pending_plan_transaction(canonical_dir)
+    plans_transaction.recover_pending_plan_transaction(canonical_dir)
     record = _restore_publication_image(canonical_dir, journal)
     if not record["errors"]:
         shutil.rmtree(directory, ignore_errors=True)
         with contextlib.suppress(OSError):
-            plans._fsync_directory(canonical_dir)
+            plans_files._fsync_directory(canonical_dir)
     return {"recovered": not record["errors"], "reason": "rolled-back", **record}
 
 
@@ -1569,7 +1577,7 @@ def plan_review_repair_sessions(
     in memory. It never acquires a lock or writes plan/state files.
     """
     canonical_dir = canonicalize_path(plan_dir)
-    repository_registry = plans.read_repository_registry(canonical_dir)
+    repository_registry = plans_registry.read_repository_registry(canonical_dir)
     output_sha256 = _artifact_sha256_or_none(
         review.final_review_output_sha256, canonical_dir
     )
@@ -1648,7 +1656,7 @@ def plan_review_repair_sessions(
             repository_bases=repository_bases,
         )
 
-    sessions = plans.discover_session_files(canonical_dir)
+    sessions = plans_discovery.discover_session_files(canonical_dir)
     grouped = group_findings_by_repair_group(findings)
     proposed_child_ids = tuple(
         parse_session_id(f"{review_id.value}.{index}")
@@ -1852,7 +1860,7 @@ def _materialize(
                 ),
             )
 
-    sessions = plans.discover_session_files(canonical_dir)
+    sessions = plans_discovery.discover_session_files(canonical_dir)
 
     # Stage the fully validated child texts produced by the read-only planner.
     transaction = PlanTransaction(canonical_dir)

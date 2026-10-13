@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import harnesses
-from .plans import PlanError
+from .plans_errors import PlanError
 from .prepare_packet import ValidationTaskPacket
 from .prepare_parsing import _fail, parse_validator_output
 

@@ -39,7 +39,12 @@ from typing import Any
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_files,
+    plans_metadata,
+    plans_models,
+    plans_payloads,
+    plans_registry,
+    plans_snapshot,
     preflight_runtime_hints,
     run_control,
     run_persistence,
@@ -198,8 +203,8 @@ class _TerminationCase(unittest.TestCase):
     def _listener(self) -> run_control.RunControlListener:
         return run_control.RunControlListener(enabled=False)
 
-    def _snapshot(self) -> plans.PlanSnapshot:
-        return plans.inspect_plan(self.plan_dir)
+    def _snapshot(self) -> plans_models.PlanSnapshot:
+        return plans_snapshot.inspect_plan(self.plan_dir)
 
 
 class ReadinessCloseTests(_TerminationCase):
@@ -210,7 +215,7 @@ class ReadinessCloseTests(_TerminationCase):
 
         def writer(
             plan_dir: Path,
-            new_state: plans.ReadinessState,
+            new_state: plans_models.ReadinessState,
             *,
             expected_sha256: str | None = None,
         ) -> tuple[bool, str | None]:
@@ -229,7 +234,7 @@ class ReadinessCloseTests(_TerminationCase):
     def test_a_refused_write_records_the_error_and_no_final_state(self) -> None:
         def writer(
             plan_dir: Path,
-            new_state: plans.ReadinessState,
+            new_state: plans_models.ReadinessState,
             *,
             expected_sha256: str | None = None,
         ) -> tuple[bool, str | None]:
@@ -248,7 +253,7 @@ class ReadinessCloseTests(_TerminationCase):
     def test_an_inactive_lifecycle_never_reaches_the_writer(self) -> None:
         def writer(
             plan_dir: Path,
-            new_state: plans.ReadinessState,
+            new_state: plans_models.ReadinessState,
             *,
             expected_sha256: str | None = None,
         ) -> tuple[bool, str | None]:
@@ -268,7 +273,7 @@ class ReadinessCloseTests(_TerminationCase):
 
         def writer(
             plan_dir: Path,
-            new_state: plans.ReadinessState,
+            new_state: plans_models.ReadinessState,
             *,
             expected_sha256: str | None = None,
         ) -> tuple[bool, str | None]:
@@ -369,9 +374,11 @@ class PauseWriteTests(_TerminationCase):
         repositories = init_multi_repo_workspace(workspace)
         plan_dir = tmp / "plan"
         write_multi_repo_plan(plan_dir, ("complete", "pending"))
-        registry = plans.read_repository_registry(plan_dir)
+        registry = plans_registry.read_repository_registry(plan_dir)
         assert registry is not None
-        plans.save_workspace_plan_metadata(plan_dir, workspace, registry.digest)
+        plans_metadata.save_workspace_plan_metadata(
+            plan_dir, workspace, registry.digest
+        )
 
         message = self._commit_failed_message(
             {
@@ -385,7 +392,7 @@ class PauseWriteTests(_TerminationCase):
             cwd=str(workspace),
         )
 
-        oak_root = str(plans.canonicalize_path(repositories["OAK"]))
+        oak_root = str(plans_files.canonicalize_path(repositories["OAK"]))
         self.assertIn(f"`{oak_root}`", message)
         self.assertIn("repository `OAK`", message)
         self.assertIn("/state/runs/r/commits/3/stderr.log", message)
@@ -593,7 +600,8 @@ class HonoredStopTests(_TerminationCase):
 
         self.assertEqual("stopped", self.payload["reason"])
         self.assertEqual(
-            plans.snapshot_payload(self._snapshot()), self.payload["final_snapshot"]
+            plans_payloads.snapshot_payload(self._snapshot()),
+            self.payload["final_snapshot"],
         )
         self.assertIsNone(listener.state.consume_stop_after_current())
 
@@ -605,7 +613,7 @@ class HonoredStopTests(_TerminationCase):
         seen: dict[str, Any] = {}
 
         def revert(
-            snapshot: plans.PlanSnapshot,
+            snapshot: plans_models.PlanSnapshot,
             session_id: str,
             *,
             failure_note: str,
@@ -618,10 +626,10 @@ class HonoredStopTests(_TerminationCase):
 
         def reinspect(
             plan_dir: Path,
-            fallback: plans.PlanSnapshot,
+            fallback: plans_models.PlanSnapshot,
             path: Path | None,
-            plan_cache: plans.PlanSnapshotCache,
-        ) -> plans.PlanSnapshot:
+            plan_cache: plans_snapshot.PlanSnapshotCache,
+        ) -> plans_models.PlanSnapshot:
             seen["reverted_path"] = path
             return after
 
@@ -632,7 +640,7 @@ class HonoredStopTests(_TerminationCase):
             payload=self.payload,
             event_path=self.event_path,
             control_payload={},
-            plan_cache=plans.PlanSnapshotCache(),
+            plan_cache=plans_snapshot.PlanSnapshotCache(),
             revert_session_status=revert,
             reinspect=reinspect,
             persistence=self.persistence,
@@ -642,7 +650,9 @@ class HonoredStopTests(_TerminationCase):
         self.assertIn("aborted by supervisor request", seen["failure_note"])
         self.assertEqual(reverted_path, seen["reverted_path"])
         self.assertEqual("stopped", self.payload["reason"])
-        self.assertEqual(plans.snapshot_payload(after), self.payload["final_snapshot"])
+        self.assertEqual(
+            plans_payloads.snapshot_payload(after), self.payload["final_snapshot"]
+        )
 
     def test_the_review_stop_records_its_verdict_before_the_stop(self) -> None:
         order: list[str] = []

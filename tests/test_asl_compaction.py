@@ -17,7 +17,7 @@ from agent_session_loop import (
     events,
     harness_failures,
     harnesses,
-    plans,
+    plans_snapshot,
     run_persistence,
     state,
     state_status,
@@ -493,7 +493,7 @@ class StateCompactionTests(unittest.TestCase):
         )
 
         payload = state_status.status_payload(
-            plans.inspect_plan(self.plan_dir), self.state_dir
+            plans_snapshot.inspect_plan(self.plan_dir), self.state_dir
         )
         self.assertTrue(payload["ok"])
         self.assertEqual("r", payload["runner_state"]["run_id"])

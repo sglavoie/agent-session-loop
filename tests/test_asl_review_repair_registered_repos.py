@@ -5,7 +5,8 @@ import unittest
 from agent_session_loop import (
     contracts,
     events,
-    plans,
+    plans_registry,
+    plans_snapshot,
     review,
     review_continuation,
     review_cycle,
@@ -22,7 +23,7 @@ class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.Te
         self,
     ) -> None:
         self._register_plan([self._make_registered_finding("F1", "svc-only", "SVC")])
-        registry = plans.read_repository_registry(self.plan_dir)
+        registry = plans_registry.read_repository_registry(self.plan_dir)
         assert registry is not None
         findings = [
             self._cross_repo_finding(
@@ -190,7 +191,7 @@ class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.Te
         self.assertTrue(materialized.ok, materialized.error)
 
         resume = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(self.plan_dir),
+            plans_snapshot.inspect_plan(self.plan_dir),
             self.tmp_path / "missing-events.jsonl",
             max_review_fix_cycles=1,
         )
@@ -251,7 +252,7 @@ class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.Te
 
         def resume() -> review_continuation.ReviewResume:
             return review_continuation.evaluate_review_continuation(
-                plans.inspect_plan(self.plan_dir),
+                plans_snapshot.inspect_plan(self.plan_dir),
                 self.tmp_path / "missing-events.jsonl",
                 max_review_fix_cycles=1,
             )

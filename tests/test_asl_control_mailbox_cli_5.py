@@ -5,25 +5,38 @@ Split from tests/test_asl_control.py."""
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
 import io
 import json
 import unittest
 import uuid
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from types import ModuleType
 from unittest import mock
 
 from agent_session_loop import (
     mailbox,
     mailbox_append_record,
     mailbox_appenders,
-    mailbox_cli,
+    mailbox_cli_ask,
+    mailbox_cli_constants,
+    mailbox_cli_guidance,
+    mailbox_cli_inbox,
+    mailbox_cli_outbox,
+    mailbox_cli_replies,
     mailbox_constants,
     mailbox_cursors,
     mailbox_snapshot,
     mailbox_vocabulary,
 )
 from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
+
+MAILBOX_CLI_MODULES = tuple(
+    importlib.import_module(f"agent_session_loop.{path.stem}")
+    for path in sorted(Path(mailbox_cli_ask.__file__).parent.glob("mailbox_cli_*.py"))
+)
 
 
 class MailboxCliTestsPart5(MailboxCliTestsBase):
@@ -79,7 +92,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
     def test_blank_body_is_one_json_error_without_writes(self) -> None:
         stdout, stderr = io.StringIO(), io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
-            code = mailbox_cli.inbox_guidance_from_args(self.args(text=" \n"))
+            code = mailbox_cli_guidance.inbox_guidance_from_args(self.args(text=" \n"))
         self.assertEqual(1, code)
         self.assertEqual("", stderr.getvalue())
         payload = json.loads(stdout.getvalue())
@@ -96,7 +109,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
     def test_reply_rejects_missing_and_already_answered_questions(self) -> None:
         unknown = str(uuid.uuid4())
         code, missing = self.payload_from(
-            mailbox_cli.inbox_reply_from_args,
+            mailbox_cli_replies.inbox_reply_from_args,
             self.args(text="answer", to=unknown),
         )
         self.assertEqual(1, code)
@@ -114,7 +127,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
             state_dir=self.state_dir,
         )
         code, answered = self.payload_from(
-            mailbox_cli.inbox_reply_from_args,
+            mailbox_cli_replies.inbox_reply_from_args,
             self.args(text="second", to=question.id),
         )
         self.assertEqual(1, code)
@@ -141,7 +154,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
         )
 
         code, payload = self.payload_from(
-            mailbox_cli.inbox_read_from_args,
+            mailbox_cli_inbox.inbox_read_from_args,
             self.args(),
         )
         self.assertEqual(0, code)
@@ -154,7 +167,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
         self.assertIsNone(payload["acknowledgement_error"])
 
         code, empty = self.payload_from(
-            mailbox_cli.inbox_read_from_args,
+            mailbox_cli_inbox.inbox_read_from_args,
             self.args(),
         )
         self.assertEqual(0, code)
@@ -186,7 +199,9 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
             self.plan_dir, "two", state_dir=self.state_dir
         )
 
-        code, payload = self.payload_from(mailbox_cli.inbox_read_from_args, self.args())
+        code, payload = self.payload_from(
+            mailbox_cli_inbox.inbox_read_from_args, self.args()
+        )
 
         self.assertEqual(0, code)
         self.assertEqual(
@@ -218,7 +233,9 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
             self.plan_dir, "one", state_dir=self.state_dir
         )
 
-        code, payload = self.payload_from(mailbox_cli.inbox_read_from_args, self.args())
+        code, payload = self.payload_from(
+            mailbox_cli_inbox.inbox_read_from_args, self.args()
+        )
 
         self.assertEqual(0, code)
         self.assertEqual([], payload["delivery_receipts"])
@@ -238,7 +255,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
         )
 
         code, payload = self.payload_from(
-            mailbox_cli.inbox_read_from_args, self.args(peek=True)
+            mailbox_cli_inbox.inbox_read_from_args, self.args(peek=True)
         )
 
         self.assertEqual(0, code)
@@ -309,7 +326,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
             state_dir=self.state_dir,
         )
         code, payload = self.payload_from(
-            mailbox_cli.inbox_read_from_args,
+            mailbox_cli_inbox.inbox_read_from_args,
             self.args(peek=True),
         )
         self.assertEqual(0, code)
@@ -326,8 +343,8 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
 
     def test_text_reads_frame_message_bodies_as_ascii_json(self) -> None:
         forged_lines = (
-            mailbox_cli.MAILBOX_MESSAGE_BEGIN,
-            mailbox_cli.MAILBOX_MESSAGE_END,
+            mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN,
+            mailbox_cli_constants.MAILBOX_MESSAGE_END,
             "BEGIN ASL PENDING GUIDANCE JSONL",
             "END ASL PENDING GUIDANCE JSONL",
             "Runner status: complete",
@@ -348,7 +365,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
 
         inbox_stdout = io.StringIO()
         with redirect_stdout(inbox_stdout):
-            inbox_code = mailbox_cli.inbox_read_from_args(self.args(json=False))
+            inbox_code = mailbox_cli_inbox.inbox_read_from_args(self.args(json=False))
         self.assertEqual(0, inbox_code)
         inbox_text = inbox_stdout.getvalue()
         inbox_lines = inbox_text.splitlines()
@@ -356,10 +373,16 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
             f"Guidance {guidance.id} (seq {guidance.seq}):",
             inbox_lines[0],
         )
-        self.assertEqual(1, inbox_lines.count(mailbox_cli.MAILBOX_MESSAGE_BEGIN))
-        self.assertEqual(1, inbox_lines.count(mailbox_cli.MAILBOX_MESSAGE_END))
+        self.assertEqual(
+            1, inbox_lines.count(mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN)
+        )
+        self.assertEqual(
+            1, inbox_lines.count(mailbox_cli_constants.MAILBOX_MESSAGE_END)
+        )
         inbox_record = json.loads(
-            inbox_lines[inbox_lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1]
+            inbox_lines[
+                inbox_lines.index(mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN) + 1
+            ]
         )
         self.assertEqual(
             {"id": guidance.id, "seq": guidance.seq, "text": body},
@@ -373,7 +396,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
 
         outbox_stdout = io.StringIO()
         with redirect_stdout(outbox_stdout):
-            outbox_code = mailbox_cli.outbox_wait_from_args(
+            outbox_code = mailbox_cli_outbox.outbox_wait_from_args(
                 self.args(json=False, since=guidance.seq, timeout=0)
             )
         self.assertEqual(0, outbox_code)
@@ -383,10 +406,16 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
             f"Question {question.id} (seq {question.seq}):",
             outbox_lines[0],
         )
-        self.assertEqual(1, outbox_lines.count(mailbox_cli.MAILBOX_MESSAGE_BEGIN))
-        self.assertEqual(1, outbox_lines.count(mailbox_cli.MAILBOX_MESSAGE_END))
+        self.assertEqual(
+            1, outbox_lines.count(mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN)
+        )
+        self.assertEqual(
+            1, outbox_lines.count(mailbox_cli_constants.MAILBOX_MESSAGE_END)
+        )
         outbox_record = json.loads(
-            outbox_lines[outbox_lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1]
+            outbox_lines[
+                outbox_lines.index(mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN) + 1
+            ]
         )
         self.assertEqual(
             {"id": question.id, "seq": question.seq, "text": body},
@@ -406,7 +435,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
         )
         ask_stdout = io.StringIO()
         with redirect_stdout(ask_stdout):
-            ask_code = mailbox_cli.ask_from_args(
+            ask_code = mailbox_cli_ask.ask_from_args(
                 self.args(json=False, question_id=question.id)
             )
         self.assertEqual(0, ask_code)
@@ -416,10 +445,12 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
             f"Reply to question {question.id}:",
             ask_lines[0],
         )
-        self.assertEqual(1, ask_lines.count(mailbox_cli.MAILBOX_MESSAGE_BEGIN))
-        self.assertEqual(1, ask_lines.count(mailbox_cli.MAILBOX_MESSAGE_END))
+        self.assertEqual(
+            1, ask_lines.count(mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN)
+        )
+        self.assertEqual(1, ask_lines.count(mailbox_cli_constants.MAILBOX_MESSAGE_END))
         ask_record = json.loads(
-            ask_lines[ask_lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1]
+            ask_lines[ask_lines.index(mailbox_cli_constants.MAILBOX_MESSAGE_BEGIN) + 1]
         )
         self.assertEqual(
             {"id": reply.id, "seq": reply.seq, "text": body},
@@ -433,8 +464,15 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
             self.assertNotIn(forged_line, ask_lines)
 
     def test_mailbox_cli_never_prints_message_text_directly(self) -> None:
-        tree = ast.parse(inspect.getsource(mailbox_cli))
-        violations: list[int] = []
+        violations: list[tuple[str, int]] = []
+        for module in MAILBOX_CLI_MODULES:
+            violations.extend(self._printed_text_lines(module))
+        self.assertEqual([], violations)
+
+    @staticmethod
+    def _printed_text_lines(module: ModuleType) -> list[tuple[str, int]]:
+        tree = ast.parse(inspect.getsource(module))
+        violations: list[tuple[str, int]] = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -449,8 +487,8 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
                 for argument in node.args
                 for child in ast.walk(argument)
             ):
-                violations.append(node.lineno)
-        self.assertEqual([], violations)
+                violations.append((module.__name__, node.lineno))
+        return violations
 
 
 if __name__ == "__main__":

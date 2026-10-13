@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from agent_session_loop import conversations, harnesses, plans, workspaces
+from agent_session_loop import conversations, harnesses, plans_files, workspaces
 
 DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
@@ -30,7 +30,7 @@ class ConversationTestBase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.tmp_path = plans.canonicalize_path(self._tmp.name)
+        self.tmp_path = plans_files.canonicalize_path(self._tmp.name)
         self.plan_dir = self.tmp_path / "plan"
         self.plan_dir.mkdir()
         self.plan_state = self.tmp_path / "state" / "plan-hash"

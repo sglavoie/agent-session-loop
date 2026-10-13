@@ -37,7 +37,10 @@ from agent_session_loop import (
     events,
     handoff_correction,
     handoff_guards,
-    plans,
+    plans_errors,
+    plans_handoff,
+    plans_models,
+    plans_snapshot,
     review,
     run_persistence,
     runner,
@@ -314,16 +317,16 @@ class CorrectionTurnTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.session_path = self.plan_dir / "session-1.md"
-        self.before = plans.inspect_plan(self.plan_dir)
+        self.before = plans_snapshot.inspect_plan(self.plan_dir)
         self.event_path = root / "events.jsonl"
         self.result_path = root / "result.json"
         self.persistence = run_persistence._RunPersistence(write_state=False)
-        self.plan_cache = plans.PlanSnapshotCache()
+        self.plan_cache = plans_snapshot.PlanSnapshotCache()
         self.workspace = _resolved_workspace(root)
         self.payload: dict[str, Any] = {"run_id": "run-1"}
         self.turn_payload: dict[str, Any] = {}
 
-    def correct(self) -> tuple[plans.PlanSnapshot | None, dict[str, Any] | None]:
+    def correct(self) -> tuple[plans_models.PlanSnapshot | None, dict[str, Any] | None]:
         return handoff_correction._correct_malformed_handoff(
             event_path=self.event_path,
             payload=self.payload,
@@ -430,7 +433,7 @@ class CorrectionTurnTests(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
-                self.before = plans.inspect_plan(self.plan_dir)
+                self.before = plans_snapshot.inspect_plan(self.plan_dir)
                 # Authored review sessions do not have the generated-review
                 # marker that projects these artifact names away on read.
                 inline = "final-review.md, final-review.json"
@@ -442,8 +445,8 @@ class CorrectionTurnTests(unittest.TestCase):
                 if self.event_path.exists():
                     self.event_path.unlink()
                 before_digests = self.artifact_digests()
-                with self.assertRaises(plans.PlanError):
-                    plans.inspect_plan(self.plan_dir)
+                with self.assertRaises(plans_errors.PlanError):
+                    plans_snapshot.inspect_plan(self.plan_dir)
 
                 corrected, evidence = self.correct()
 
@@ -473,12 +476,14 @@ class CorrectionTurnTests(unittest.TestCase):
                 )
                 if repository_entry == "OAK:README.md":
                     with self.assertRaisesRegex(
-                        plans.PlanError, "outside Writes repositories"
+                        plans_errors.PlanError, "outside Writes repositories"
                     ):
-                        plans.inspect_plan(self.plan_dir)
+                        plans_snapshot.inspect_plan(self.plan_dir)
                 else:
-                    snapshot = plans.inspect_plan(self.plan_dir)
-                    handoff = plans.read_session_handoff(snapshot.sessions[0].session)
+                    snapshot = plans_snapshot.inspect_plan(self.plan_dir)
+                    handoff = plans_handoff.read_session_handoff(
+                        snapshot.sessions[0].session
+                    )
                     self.assertEqual("complete", handoff.status)
                     self.assertEqual(
                         (repository_entry or "(none)",), handoff.files_modified
@@ -565,8 +570,8 @@ class UninspectableReopenTests(unittest.TestCase):
         self.plan_dir = root / "plan"
         write_multi_repo_plan(self.plan_dir, ("pending", "pending"))
         self.session_path = self.plan_dir / "session-1.md"
-        self.before = plans.inspect_plan(self.plan_dir)
-        self.plan_cache = plans.PlanSnapshotCache()
+        self.before = plans_snapshot.inspect_plan(self.plan_dir)
+        self.plan_cache = plans_snapshot.PlanSnapshotCache()
 
     def reopen(self, *, exhausted: bool) -> tuple[Any, dict[str, Any] | None]:
         return handoff_correction._reopen_uninspectable_handoff(

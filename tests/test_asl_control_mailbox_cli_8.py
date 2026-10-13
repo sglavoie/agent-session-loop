@@ -16,7 +16,10 @@ from unittest import mock
 
 from agent_session_loop import (
     mailbox_appenders,
-    mailbox_cli,
+    mailbox_cli_constants,
+    mailbox_cli_models,
+    mailbox_cli_outbox,
+    mailbox_cli_waits,
     mailbox_constants,
     mailbox_cursors,
     mailbox_models,
@@ -42,10 +45,10 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         )
 
         code, payload = self.payload_from(
-            mailbox_cli.outbox_wait_from_args,
+            mailbox_cli_outbox.outbox_wait_from_args,
             self.args(
                 timeout=0,
-                include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                include=mailbox_cli_constants.OUTBOX_INCLUDE_ALL,
                 supervision_id=mailbox_validation.new_supervision_id(),
             ),
         )
@@ -67,8 +70,8 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         )
 
         code, payload = self.payload_from(
-            mailbox_cli.outbox_wait_from_args,
-            self.args(timeout=0, include=mailbox_cli.OUTBOX_INCLUDE_ALL),
+            mailbox_cli_outbox.outbox_wait_from_args,
+            self.args(timeout=0, include=mailbox_cli_constants.OUTBOX_INCLUDE_ALL),
         )
 
         self.assertEqual(0, code)
@@ -78,10 +81,10 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
 
     def test_outbox_wait_rejects_a_malformed_supervision_id(self) -> None:
         code, payload = self.payload_from(
-            mailbox_cli.outbox_wait_from_args,
+            mailbox_cli_outbox.outbox_wait_from_args,
             self.args(
                 timeout=0,
-                include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                include=mailbox_cli_constants.OUTBOX_INCLUDE_ALL,
                 supervision_id="not-a-uuid",
             ),
         )
@@ -104,11 +107,11 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
 
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = mailbox_cli.outbox_wait_from_args(
+            code = mailbox_cli_outbox.outbox_wait_from_args(
                 self.args(
                     json=False,
                     timeout=0,
-                    include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                    include=mailbox_cli_constants.OUTBOX_INCLUDE_ALL,
                     supervision_id=launch,
                 )
             )
@@ -241,7 +244,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         self.assertIn(f"Supervision end {own.id} (seq {own.seq}):", lines)
 
         code, payload = self.payload_from(
-            mailbox_cli.outbox_supervise_from_args,
+            mailbox_cli_outbox.outbox_supervise_from_args,
             self.args(timeout=0, supervision_id=launch),
         )
         self.assertEqual(0, code)
@@ -365,8 +368,8 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
 
         def woke(
             messages: tuple[mailbox_models.MailboxMessage, ...],
-        ) -> mailbox_cli._OutboxWaitResult:
-            return mailbox_cli._OutboxWaitResult(
+        ) -> mailbox_cli_models.OutboxWaitResult:
+            return mailbox_cli_models.OutboxWaitResult(
                 questions=tuple(
                     message
                     for message in messages
@@ -378,11 +381,11 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
                     for message in messages
                     if message.kind == mailbox_vocabulary.KIND_SUPERVISION_END
                 ),
-                include=mailbox_cli.OUTBOX_INCLUDE_SUPERVISION,
+                include=mailbox_cli_constants.OUTBOX_INCLUDE_SUPERVISION,
                 supervisor_id=str(uuid.uuid4()),
                 next_since=messages[-1].seq,
                 timed_out=False,
-                lease_supervision=mailbox_cli._LeaseSupervision(),
+                lease_supervision=mailbox_cli_models.LeaseSupervision(),
                 mailbox_view=mailbox_snapshot.MailboxView(
                     mailbox_path=mailbox_path,
                     messages=messages,
@@ -391,8 +394,8 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
             )
 
         with mock.patch.object(
-            mailbox_cli,
-            "_wait_for_questions",
+            mailbox_cli_waits,
+            "wait_for_questions",
             side_effect=[
                 woke((foreign_end,)),
                 woke((foreign_end, question)),
@@ -416,7 +419,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
 
     def test_outbox_supervise_rejects_a_malformed_supervision_id(self) -> None:
         code, payload = self.payload_from(
-            mailbox_cli.outbox_supervise_from_args,
+            mailbox_cli_outbox.outbox_supervise_from_args,
             self.args(timeout=0, supervision_id="not-a-uuid"),
         )
 
@@ -465,7 +468,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
 
         self.assertEqual(0, code)
         self.assertEqual(
-            f"LOST reason={mailbox_cli.SUPERVISE_LOST_HELPER_EXITED}",
+            f"LOST reason={mailbox_cli_constants.SUPERVISE_LOST_HELPER_EXITED}",
             lines[0],
         )
         self.assertIn("that process is gone", lines[1])

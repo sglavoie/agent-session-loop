@@ -38,7 +38,7 @@ from pathlib import Path
 from asl_workbench import catalog as portable_catalog
 from asl_workbench.catalog import CatalogRecord, PlanCatalog
 
-from . import plans, workbench
+from . import plans_errors, workbench
 
 #: Bound on the manifest bytes read to find a plan's title, matching the
 #: Companion's ``projects.MAX_TITLE_BYTES``. The title is the document's first
@@ -49,7 +49,7 @@ MAX_TITLE_BYTES = 64 * 1024
 def read_plan_title(plan_dir: Path) -> str | None:
     """The plan's title from its ``manifest.md``, or ``None``.
 
-    Deliberately not ``plans.inspect_plan``'s title: that one falls back to the
+    Deliberately not ``plans_snapshot.inspect_plan``'s title: that one falls back to the
     plan directory's name, which is a path component and would put a filesystem
     layout into a field the Pi may cache. A plan with no ``# H1`` has no title
     here, and :func:`asl_workbench.catalog.display_label` picks the next safest
@@ -174,7 +174,7 @@ def scan(
         except (
             OSError,
             ValueError,
-            plans.PlanError,
+            plans_errors.PlanError,
             workbench.WorkbenchError,
             portable_catalog.CatalogError,
         ) as error:

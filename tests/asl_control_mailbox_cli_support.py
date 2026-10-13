@@ -20,7 +20,8 @@ from agent_session_loop import (
     cli,
     mailbox,
     mailbox_appenders,
-    mailbox_cli,
+    mailbox_cli_constants,
+    mailbox_cli_outbox,
     mailbox_cursors,
     mailbox_leases,
     mailbox_models,
@@ -64,8 +65,8 @@ class MailboxCliTestsBase(unittest.TestCase):
             "wait_delivered": False,
             "wait_timeout": None,
             "since": 0,
-            "timeout": mailbox_cli.DEFAULT_OUTBOX_WAIT_TIMEOUT_SECONDS,
-            "include": mailbox_cli.OUTBOX_INCLUDE_QUESTIONS,
+            "timeout": mailbox_cli_constants.DEFAULT_OUTBOX_WAIT_TIMEOUT_SECONDS,
+            "include": mailbox_cli_constants.OUTBOX_INCLUDE_QUESTIONS,
         }
         values.update(overrides)
         return argparse.Namespace(**values)
@@ -195,7 +196,7 @@ class MailboxCliTestsBase(unittest.TestCase):
     ) -> tuple[int, list[str]]:
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = mailbox_cli.outbox_supervise_from_args(
+            code = mailbox_cli_outbox.outbox_supervise_from_args(
                 self.args(json=False, timeout=timeout, **overrides)
             )
         return code, stdout.getvalue().splitlines()

@@ -14,7 +14,8 @@ from unittest import mock
 from agent_session_loop import (
     config,
     harnesses,
-    plans,
+    plans_files,
+    plans_snapshot,
     run_loop,
     session_verification,
     state_locks,
@@ -90,10 +91,10 @@ class RevertSnapshotCacheIntegrationTests(unittest.TestCase):
             )
 
         inspected: list[Path] = []
-        real_inspect_plan = plans.inspect_plan
+        real_inspect_plan = plans_snapshot.inspect_plan
 
         def counting_inspect_plan(plan_dir):
-            inspected.append(plans.canonicalize_path(plan_dir))
+            inspected.append(plans_files.canonicalize_path(plan_dir))
             return real_inspect_plan(plan_dir)
 
         counts_after_revert: list[int] = []
@@ -129,7 +130,7 @@ class RevertSnapshotCacheIntegrationTests(unittest.TestCase):
                 + os.pathsep
                 + os.environ.get("PYTHONPATH", ""),
             ),
-            mock.patch.object(plans, "inspect_plan", counting_inspect_plan),
+            mock.patch.object(plans_snapshot, "inspect_plan", counting_inspect_plan),
             mock.patch.object(harnesses, "run_harness", side_effect=fake_run_harness),
             mock.patch.object(
                 session_verification, "_reinspect_after_revert", recording_reinspect

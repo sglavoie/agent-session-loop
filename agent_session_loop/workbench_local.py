@@ -53,7 +53,7 @@ from asl_workbench.operations import OperationError
 
 from . import (
     intervention,
-    plans,
+    plans_files,
     redirect_admission,
     redirect_cli,
     redirect_store,
@@ -999,7 +999,7 @@ class LocalProvider:
             else workbench_action_rules.ACTION_RESUME
         )
         try:
-            canonical = plans.canonicalize_path(plan_dir)
+            canonical = plans_files.canonicalize_path(plan_dir)
         except (OSError, ValueError) as error:
             raise HttpRefusal(
                 400,

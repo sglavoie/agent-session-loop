@@ -15,12 +15,7 @@ from contextlib import redirect_stderr, redirect_stdout, suppress
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import (
-    plans,
-    state,
-    workbench,
-    workbench_server,
-)
+from agent_session_loop import plans_files, state, workbench, workbench_server
 from tests import support_asl_workbench_static as support_static
 from tests.support import (
     _http_request,
@@ -88,11 +83,11 @@ class WorkbenchHardeningTests(support_static.WorkbenchHardeningCase):
         log_path.write_text("hello world\n", encoding="utf-8")
         self._write_state_with_turn(stdout_path=log_path)
         server = self._start_server()
-        canonical_log = plans.canonicalize_path(log_path)
+        canonical_log = plans_files.canonicalize_path(log_path)
         original_open = Path.open
 
         def race_open(self_path: Path, *args, **kwargs):
-            if plans.canonicalize_path(self_path) == canonical_log:
+            if plans_files.canonicalize_path(self_path) == canonical_log:
                 raise FileNotFoundError(
                     errno.ENOENT, "vanished", os.fspath(canonical_log)
                 )
@@ -128,11 +123,11 @@ class WorkbenchHardeningTests(support_static.WorkbenchHardeningCase):
             encoding="utf-8",
         )
         server = self._start_server()
-        canonical_msg = plans.canonicalize_path(last_msg_path)
+        canonical_msg = plans_files.canonicalize_path(last_msg_path)
         original_open = Path.open
 
         def race_open(self_path: Path, *args, **kwargs):
-            if plans.canonicalize_path(self_path) == canonical_msg:
+            if plans_files.canonicalize_path(self_path) == canonical_msg:
                 raise FileNotFoundError(
                     errno.ENOENT, "vanished", os.fspath(canonical_msg)
                 )
@@ -153,11 +148,11 @@ class WorkbenchHardeningTests(support_static.WorkbenchHardeningCase):
             encoding="utf-8",
         )
         server = self._start_server()
-        canonical_state = plans.canonicalize_path(state_path)
+        canonical_state = plans_files.canonicalize_path(state_path)
         original_open = Path.open
 
         def race_open(self_path: Path, *args, **kwargs):
-            if plans.canonicalize_path(self_path) == canonical_state:
+            if plans_files.canonicalize_path(self_path) == canonical_state:
                 raise FileNotFoundError(
                     errno.ENOENT, "vanished", os.fspath(canonical_state)
                 )
@@ -181,7 +176,7 @@ class WorkbenchHardeningTests(support_static.WorkbenchHardeningCase):
         for index in range(6):
             plan_dir = self.tmp_path / "plans" / f"concurrent-{index}"
             write_plan(plan_dir, ("pending",))
-            plan_dirs.append(plans.canonicalize_path(plan_dir))
+            plan_dirs.append(plans_files.canonicalize_path(plan_dir))
 
         url = f"{self._base_url(server)}/api/registry/pin"
         auth = {"Authorization": f"Bearer {server.token}"}

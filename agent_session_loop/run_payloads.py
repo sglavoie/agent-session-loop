@@ -68,7 +68,7 @@ The parsed arguments, the plan snapshot, the resolved paths, the lock info, the
 run id, the commit mode, the mailbox activation and the verification context all
 enter as parameters, and every collaborator is read at its true owner: the flag
 readers at ``run_inputs``/``run_selection``/``readiness_gate``/``review_guard``,
-the clock at ``clock``, the snapshot and session-kind values at ``plans``, the
+the clock at ``clock``, the snapshot and session-kind values at ``plans_payloads``, the
 turn paths and observed-model block at ``turn_execution``, the seeded control
 block at ``run_coordination``, and the review-verdict repair references at
 ``review_transitions``.
@@ -102,7 +102,9 @@ from . import (
     clock,
     events,
     overseer_discovery,
-    plans,
+    plans_models,
+    plans_payloads,
+    plans_progress,
     qna,
     readiness_gate,
     responses,
@@ -186,7 +188,7 @@ def _run_config_payload(
 def _initial_payload(
     *,
     args: argparse.Namespace,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     state_dir: Path,
     run_dir: Path,
     event_path: Path,
@@ -285,8 +287,8 @@ def _initial_payload(
         commit_groups=[],
         turns=[],
         control=run_coordination.initial_control_payload(),
-        initial_snapshot=plans.snapshot_payload(snapshot),
-        final_snapshot=plans.snapshot_payload(snapshot),
+        initial_snapshot=plans_payloads.snapshot_payload(snapshot),
+        final_snapshot=plans_payloads.snapshot_payload(snapshot),
         allow_not_loop_ready=readiness_gate._allow_not_loop_ready(args),
         readiness_gate=None,
         readiness_state_initial=None,
@@ -311,7 +313,7 @@ def _initial_payload(
 def _dry_run_payload(
     *,
     args: argparse.Namespace,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
     cwd: Path,
     run_dir: Path,
     mailbox_activation: Mapping[str, Any],
@@ -408,9 +410,9 @@ def _dry_run_payload(
         packet_kwargs = {
             "session_id": next_pending.id,
             "session_kind": (
-                plans.SESSION_KIND_REVIEW
+                plans_payloads.SESSION_KIND_REVIEW
                 if is_review_session
-                else plans.SESSION_KIND_IMPLEMENTATION
+                else plans_payloads.SESSION_KIND_IMPLEMENTATION
             ),
             "predecessor_id": task_packet._predecessor_session_id(
                 snapshot, next_pending.id
@@ -418,7 +420,9 @@ def _dry_run_payload(
             "has_expansion": task_packet._session_has_expansion(
                 snapshot.plan_dir, next_pending.id
             ),
-            "has_progress": (snapshot.plan_dir / plans.PROGRESS_FILE_NAME).is_file(),
+            "has_progress": (
+                snapshot.plan_dir / plans_progress.PROGRESS_FILE_NAME
+            ).is_file(),
             "repair_references": repair_references,
             "mailbox_enabled": mailbox_enabled,
             "state_dir": getattr(args, "state_dir", None),
@@ -488,7 +492,7 @@ def _dry_run_payload(
         prompt=prompt,
     )
     return {
-        "next_pending": plans.session_compat_value(next_pending.id),
+        "next_pending": plans_payloads.session_compat_value(next_pending.id),
         "next_pending_id": next_pending.id,
         "prompt": prompt,
         "invocation": run_commit._build_invocation_payload(

@@ -242,7 +242,7 @@ class RetainedWorkContext:
 
     Everything the settlement needs to know about the turn, gathered by the
     caller so this module never reads the loop's context. ``session_label`` is
-    :func:`plans.session_label`'s rendering rather than a bare id, because the
+    :func:`plans_payloads.session_label`'s rendering rather than a bare id, because the
     commit message opens a sentence with it. ``turn_payload`` is the live
     dictionary the run mutates in place: the settlement writes its record onto
     it under :data:`PAUSED_WORK_COMMIT_KEY`, and reads ``workspace_write_guard``

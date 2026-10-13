@@ -13,7 +13,8 @@ from unittest import mock
 
 from agent_session_loop import (
     contracts,
-    plans,
+    plans_errors,
+    plans_files,
     process_tree,
     run_persistence,
     verification,
@@ -373,8 +374,8 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
 
             self.assertEqual("pass", result.status)
             self.assertEqual(
-                str(plans.canonicalize_path(sub)),
-                str(plans.canonicalize_path(result.stdout)),
+                str(plans_files.canonicalize_path(sub)),
+                str(plans_files.canonicalize_path(result.stdout)),
             )
 
     def test_file_exists_check_passes_when_file_present(self) -> None:
@@ -421,7 +422,9 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
             target = root / "outside.txt"
             target.write_text("absolute target\n", encoding="utf-8")
 
-            with self.assertRaisesRegex(plans.PlanError, "escapes the bound root"):
+            with self.assertRaisesRegex(
+                plans_errors.PlanError, "escapes the bound root"
+            ):
                 verification.run_check(
                     contracts.FileExistsCheck(name="absolute-file", path=str(target)),
                     repo_root=repo_root,

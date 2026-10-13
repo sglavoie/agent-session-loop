@@ -63,7 +63,7 @@ from . import (
     mailbox,
     mailbox_models,
     mailbox_snapshot,
-    plans,
+    plans_errors,
     redirect_admission,
     redirect_cli,
     redirect_recovery,
@@ -696,7 +696,7 @@ def build_runs_snapshot(
             if summary.primary_state not in ACTIVE_PRIMARY_STATES:
                 continue
             rows.append(project_row(summary, state_dir=state_dir))
-        except (plans.PlanError, OSError, ValueError) as error:
+        except (plans_errors.PlanError, OSError, ValueError) as error:
             # A plan that vanishes or turns unreadable mid-scan is news, not a
             # reason to drop every other row in the queue.
             warnings.append(

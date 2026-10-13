@@ -6,7 +6,9 @@ import argparse
 
 from . import (
     events,
-    plans,
+    plans_errors,
+    plans_models,
+    plans_payloads,
     redirect_continuation,
     redirect_recovery,
     redirect_restart,
@@ -71,7 +73,7 @@ def _handle_run_control_status(
     try:
         status_snapshot = ctx.plan_cache.get(ctx.plan_dir)
         plan_error = None
-    except plans.PlanError as error:
+    except plans_errors.PlanError as error:
         status_snapshot = None
         plan_error = str(error)
 
@@ -147,7 +149,7 @@ def _redirected_turn_harness(
         {
             "run_id": ctx.run_id,
             "turn_index": turn_index,
-            **plans.session_identity_payload(session_id),
+            **plans_payloads.session_identity_payload(session_id),
             "outcome": "harness-deferred",
             "redirect": pending.to_payload(),
             "deferred_harness": selected,
@@ -157,7 +159,7 @@ def _redirected_turn_harness(
 
 
 def _pause_for_redirect_restart(
-    ctx: RunContext, *, args: argparse.Namespace, snapshot: plans.PlanSnapshot
+    ctx: RunContext, *, args: argparse.Namespace, snapshot: plans_models.PlanSnapshot
 ) -> bool:
     if args.dry_run:
         return False
@@ -189,7 +191,7 @@ def _reconcile_stranded_redirects(
     ctx: RunContext,
     *,
     args: argparse.Namespace,
-    snapshot: plans.PlanSnapshot,
+    snapshot: plans_models.PlanSnapshot,
 ) -> None:
     """Settle what a crashed predecessor left in the redirect journal.
 

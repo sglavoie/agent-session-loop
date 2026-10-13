@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from agent_session_loop import (
-    plans,
+    plans_errors,
+    plans_handoff,
+    plans_models,
+    plans_session_ids,
     review,
     review_delta,
     review_guard,
@@ -45,10 +48,10 @@ class ReviewDeltaRescopingTests(ReviewDeltaScopeBase):
                 self.plan_dir / "session-2.md"
             ),
         )
-        session = plans.SessionFile(
-            session_id=plans.parse_session_id("3"), path=session_path
+        session = plans_models.SessionFile(
+            session_id=plans_session_ids.parse_session_id("3"), path=session_path
         )
-        self.assertEqual("pending", plans.read_session_status(session).status)
+        self.assertEqual("pending", plans_handoff.read_session_status(session).status)
         self.assertEqual(
             original.split("## Completion Contract", 1)[1],
             refreshed.split("## Completion Contract", 1)[1],
@@ -79,7 +82,7 @@ class ReviewDeltaRescopingTests(ReviewDeltaScopeBase):
     def test_a_full_scope_session_is_never_narrowed_by_a_refresh(self) -> None:
         self._record_repair_cycle(repo_head=self._commit("src/base.py", "b\n"))
         full_body = review_session_body.build_generated_review_session_body(
-            plans.parse_session_id("3"),
+            plans_session_ids.parse_session_id("3"),
             review_harness="codex",
             plan_dir=self.plan_dir,
         )
@@ -96,7 +99,7 @@ class ReviewDeltaRescopingTests(ReviewDeltaScopeBase):
             f"{review_session_body.REVIEW_SCOPE_DETAIL_HEADING}\n", "", 1
         )
 
-        with self.assertRaises(plans.PlanError):
+        with self.assertRaises(plans_errors.PlanError):
             review_session_body.rescoped_review_session_body(
                 mangled, self._compute()[0]
             )

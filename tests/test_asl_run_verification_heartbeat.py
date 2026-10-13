@@ -18,7 +18,8 @@ from agent_session_loop import (
     agent_mux_delivery,
     config,
     events,
-    plans,
+    plans_progress,
+    plans_snapshot,
     run_loop,
     session_verification,
     state,
@@ -212,7 +213,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
         # before run_finished. The append itself is silent on success, so the
         # durable evidence is the journal entry that exists by the time the
         # run reports completion.
-        entries = plans.read_progress_entries(self.plan_dir)
+        entries = plans_progress.read_progress_entries(self.plan_dir)
         self.assertEqual(1, len(entries))
         self.assertEqual("1", entries[0].session_id.value)
         self.assertEqual("complete", entries[0].status)
@@ -397,7 +398,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        snapshot = plans.inspect_plan(self.plan_dir)
+        snapshot = plans_snapshot.inspect_plan(self.plan_dir)
         payload = state_status.status_payload(snapshot, self.state_dir)
 
         # Top-level shape mirrors `runner_state` and defaults missing keys.

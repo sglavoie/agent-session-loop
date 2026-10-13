@@ -34,12 +34,14 @@ from . import (
     authoring,
     contracts,
     harnesses,
-    plans,
+    plans_registry,
     preflight,
     preflight_cli,
     repository_intent,
 )
-from .plans import PlanError, canonicalize_path, inspect_plan
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
+from .plans_snapshot import inspect_plan
 from .prepare_baseline import _run_baseline_stage
 from .prepare_commands import _format_resume_command, _format_run_command
 from .prepare_corrections import CorrectionOutcome
@@ -158,7 +160,7 @@ def prepare_plan(
     if rebind_workspace:
         if resume_plan_dir is None:
             raise PlanError("--rebind-workspace requires --resume")
-        registry = plans.read_repository_registry(resume_plan_dir)
+        registry = plans_registry.read_repository_registry(resume_plan_dir)
         if registry is None:
             raise PlanError("--rebind-workspace requires a registered plan")
         return _prepare_workspace_rebind(

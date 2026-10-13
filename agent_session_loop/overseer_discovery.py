@@ -73,7 +73,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from . import clock, events, plans, state, state_plan_refs
+from . import clock, events, plans_files, state, state_plan_refs
 
 #: Name of the contract a run record publishes for this boundary. Carried in
 #: prose rather than in the record itself; the version below is the field.
@@ -442,13 +442,13 @@ def _ineligibility(
 def _identifies(plan_state_dir: Path, plan_dir: str) -> bool:
     """Whether ``plan_dir`` is the plan this state directory was created for.
 
-    The directory name *is* ``plans.path_sha256`` of the plan it belongs to, so
+    The directory name *is* ``plans_files.path_sha256`` of the plan it belongs to, so
     recomputing it costs no read and turns a claimed identity into a checked
     one. A record whose ``plan_dir`` hashes elsewhere is ambiguous identity,
     which the shared requirements say must fail closed rather than pick a side.
     """
     try:
-        return plans.path_sha256(plan_dir) == plan_state_dir.name
+        return plans_files.path_sha256(plan_dir) == plan_state_dir.name
     except OSError, ValueError:
         return False
 

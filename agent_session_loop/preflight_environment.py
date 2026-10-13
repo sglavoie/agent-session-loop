@@ -9,17 +9,15 @@ from pathlib import Path
 from . import (
     harness_compatibility,
     harnesses,
-    plans,
+    plans_session_scope,
     repository_evidence,
     state_locks,
     workspaces,
 )
 from .git_subprocess import run_git
-from .plans import (
-    PlanError,
-    PlanSnapshot,
-    canonicalize_path,
-)
+from .plans_errors import PlanError
+from .plans_files import canonicalize_path
+from .plans_models import PlanSnapshot
 from .preflight_models import COMMIT_MODES, CommitMode, PreflightFinding, _finding
 from .verification import (
     VerificationContext,
@@ -134,10 +132,10 @@ def _check_registered_env_git(
         try:
             if snapshot is None:
                 raise PlanError("current session scope is unavailable")
-            needed = plans.needed_repository_aliases(
+            needed = plans_session_scope.needed_repository_aliases(
                 snapshot, context.workspace.registry
             )
-            committed = plans.commit_repository_aliases(
+            committed = plans_session_scope.commit_repository_aliases(
                 snapshot, context.workspace.registry
             )
         except (PlanError, ValueError, OSError) as error:

@@ -11,7 +11,8 @@ from agent_session_loop import (
     events,
     mailbox_constants,
     mailbox_vocabulary,
-    plans,
+    plans_metadata,
+    plans_session_scope,
     state,
     supervisor_audit_evidence,
 )
@@ -149,11 +150,11 @@ class EvidenceBundleFixture(unittest.TestCase):
         (plan_dir / "context.md").write_text("Plan context.\n", encoding="utf-8")
         (plan_dir / "session-01.md").write_text(
             "# Session 1\n\n"
-            f"{plans.READS_REPOSITORIES_PREFIX} app\n"
-            f"{plans.WRITES_REPOSITORIES_PREFIX} app\n",
+            f"{plans_session_scope.READS_REPOSITORIES_PREFIX} app\n"
+            f"{plans_session_scope.WRITES_REPOSITORIES_PREFIX} app\n",
             encoding="utf-8",
         )
-        (plan_dir / plans.PLAN_METADATA_FILE_NAME).write_text(
+        (plan_dir / plans_metadata.PLAN_METADATA_FILE_NAME).write_text(
             json.dumps({"version": 1, "workspace_root": str(workspace)}),
             encoding="utf-8",
         )

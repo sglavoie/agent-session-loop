@@ -9,9 +9,7 @@ from .contracts import (
     CommandCheck,
     CompletionContract,
 )
-from .plans import (
-    PlanError,
-)
+from .plans_errors import PlanError
 from .preflight_models import PreflightFinding, _finding
 from .verification import (
     VerificationContext,

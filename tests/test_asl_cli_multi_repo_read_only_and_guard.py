@@ -10,7 +10,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import events, plans, state_status
+from agent_session_loop import (
+    events,
+    plans_metadata,
+    plans_registry,
+    plans_snapshot,
+    state_status,
+)
 from tests.support import (
     REPO_ROOT,
 )
@@ -260,7 +266,7 @@ class MultiRepoReadOnlyAndGuardTests(MultiRepoRunnerHelpers, unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             workspace_root, plan_dir, _repositories = self._workspace_plan(tmp_dir)
-            metadata_path = plan_dir / plans.PLAN_METADATA_FILE_NAME
+            metadata_path = plan_dir / plans_metadata.PLAN_METADATA_FILE_NAME
             before = metadata_path.read_bytes()
             moved_root = tmp_dir / "moved-workspace"
             shutil.copytree(workspace_root, moved_root)
@@ -276,19 +282,19 @@ class MultiRepoReadOnlyAndGuardTests(MultiRepoRunnerHelpers, unittest.TestCase):
             tmp_dir = Path(tmp)
             state_dir = tmp_dir / "state"
             workspace_root, plan_dir, _repositories = self._workspace_plan(tmp_dir)
-            registry = plans.read_repository_registry(plan_dir)
+            registry = plans_registry.read_repository_registry(plan_dir)
             assert registry is not None
-            plans.save_workspace_plan_metadata(
+            plans_metadata.save_workspace_plan_metadata(
                 plan_dir,
                 workspace_root,
                 registry.digest,
             )
-            metadata_path = plan_dir / plans.PLAN_METADATA_FILE_NAME
+            metadata_path = plan_dir / plans_metadata.PLAN_METADATA_FILE_NAME
             legacy = json.loads(metadata_path.read_text(encoding="utf-8"))
             legacy["workspace_inventory_excludes"] = ["Library/Protected.dv"]
             metadata_path.write_text(json.dumps(legacy), encoding="utf-8")
             before_run = state_status.status_payload(
-                plans.inspect_plan(plan_dir),
+                plans_snapshot.inspect_plan(plan_dir),
                 state_dir,
             )
             self.assertEqual(
@@ -337,9 +343,11 @@ class MultiRepoReadOnlyAndGuardTests(MultiRepoRunnerHelpers, unittest.TestCase):
 
             moved_root = tmp_dir / "moved-workspace"
             shutil.copytree(workspace_root, moved_root)
-            registry = plans.read_repository_registry(plan_dir)
+            registry = plans_registry.read_repository_registry(plan_dir)
             assert registry is not None
-            plans.save_workspace_plan_metadata(plan_dir, moved_root, registry.digest)
+            plans_metadata.save_workspace_plan_metadata(
+                plan_dir, moved_root, registry.digest
+            )
             resumed = self._run(
                 plan_dir,
                 moved_root,

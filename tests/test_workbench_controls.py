@@ -50,7 +50,7 @@ from agent_session_loop import (
     control_cli,
     control_queue,
     intervention,
-    plans,
+    plans_files,
     redirect_admission,
     redirect_cli,
     redirect_recovery,
@@ -256,7 +256,7 @@ class ControlsTestCase(unittest.TestCase):
         self.state_dir.mkdir()
         self.registry_path = root / "workbench.json"
         write_plan(self.plan_dir, ("pending",))
-        self.canonical_plan_dir = plans.canonicalize_path(self.plan_dir)
+        self.canonical_plan_dir = plans_files.canonicalize_path(self.plan_dir)
         self.wakeup: threading.Event | None = None
         self._server: workbench_server.WorkbenchHTTPServer | None = None
         self.snapshots: list[dict[str, Any]] = []

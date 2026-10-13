@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import config, harnesses, plans, state_locks, task_packet
+from agent_session_loop import config, harnesses, plans_files, state_locks, task_packet
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
@@ -104,7 +104,7 @@ class JsonDoctorUnlockSessionsCliTests(JsonCliHelpers, unittest.TestCase):
             self.assertEqual(str(fake_codex), payload["resolved_executable"])
             self.assertEqual(str(REPO_ROOT), payload["cwd"])
             self.assertEqual(
-                str(plans.canonicalize_path(plan_dir)), payload["plan_dir"]
+                str(plans_files.canonicalize_path(plan_dir)), payload["plan_dir"]
             )
             self.assertEqual(1, payload["next_pending"])
             self.assertEqual("gpt-5", payload["model"])
@@ -404,7 +404,7 @@ class JsonDoctorUnlockSessionsCliTests(JsonCliHelpers, unittest.TestCase):
             self.assertEqual(str(lock_info.path), payload["lock_path"])
             self.assertEqual(str(lock_info.path), payload["details"]["lock_path"])
             self.assertEqual(
-                str(plans.canonicalize_path(plan_dir)),
+                str(plans_files.canonicalize_path(plan_dir)),
                 payload["details"]["plan_dir"],
             )
 

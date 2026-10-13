@@ -48,7 +48,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from agent_session_loop import (
-    plans,
+    plans_files,
     state,
     workbench,
     workbench_archive,
@@ -193,12 +193,12 @@ class _ArchiveFixture(unittest.TestCase):
         self.registry_path = self.tmp_path / workbench.REGISTRY_FILE_NAME
         self.plan_dir = self.tmp_path / "plans" / "alpha"
         write_plan(self.plan_dir, ("pending", "pending"))
-        self.canonical = plans.canonicalize_path(self.plan_dir)
+        self.canonical = plans_files.canonicalize_path(self.plan_dir)
 
     def make_plan(self, name: str) -> Path:
         plan_dir = self.tmp_path / "plans" / name
         write_plan(plan_dir, ("pending", "pending"))
-        return plans.canonicalize_path(plan_dir)
+        return plans_files.canonicalize_path(plan_dir)
 
     def archive_one(self, plan_dir: Path | None = None) -> str:
         target = self.canonical if plan_dir is None else plan_dir

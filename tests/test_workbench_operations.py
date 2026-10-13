@@ -51,7 +51,7 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
-    plans,
+    plans_files,
     state,
     state_locks,
     workbench,
@@ -519,7 +519,7 @@ class JournalFixture:
         self.state_dir.mkdir()
         self.plan_dir = root / "plan"
         write_plan(self.plan_dir, ("pending",))
-        self.canonical = plans.canonicalize_path(self.plan_dir)
+        self.canonical = plans_files.canonicalize_path(self.plan_dir)
         self.journal_path = workbench_operations.journal_path_for_plan(
             self.canonical, self.state_dir
         )
@@ -948,7 +948,7 @@ class LaunchRouteTests(WorkbenchAPIFixture, unittest.TestCase):
         self.install_workbench_api(Path(self._tmp.name))
         self.plan_dir = self.plans_root / "alpha"
         write_plan(self.plan_dir, ("pending", "pending"))
-        self.canonical = plans.canonicalize_path(self.plan_dir)
+        self.canonical = plans_files.canonicalize_path(self.plan_dir)
         self.server = self.start_workbench_server()
         self.journal_path = workbench_operations.journal_path_for_plan(
             self.canonical, self.state_dir

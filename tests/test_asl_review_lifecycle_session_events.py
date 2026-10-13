@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from agent_session_loop import (
     events,
-    plans,
+    plans_content_hash,
+    plans_files,
+    plans_models,
+    plans_readiness,
     review_session_body,
     review_session_contract,
 )
@@ -34,7 +37,7 @@ class RunReviewSessionEventTests(RunReviewHarnessLifecycleBase):
         created_payload = created_events[0]["payload"]
         self.assertEqual(review_session_id, created_payload["session_id"])
         self.assertEqual("claude", created_payload["review_harness"])
-        canonical_plan_dir = plans.canonicalize_path(self.plan_dir)
+        canonical_plan_dir = plans_files.canonicalize_path(self.plan_dir)
         self.assertEqual(
             str(canonical_plan_dir / f"session-{review_session_id}.md"),
             created_payload["review_session_path"],
@@ -81,10 +84,10 @@ class RunReviewSessionEventTests(RunReviewHarnessLifecycleBase):
         self._write_plan(("complete",), readiness=None)
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
         self._write_pending_review_session()
-        sha = plans.stable_readiness_sha256(self.plan_dir)
-        plans.write_readiness_metadata(
+        sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
                 readiness_sha256=sha,
                 checked_at="2026-06-19T00:00:00Z",
@@ -133,11 +136,13 @@ class RunReviewSessionEventTests(RunReviewHarnessLifecycleBase):
         self._write_plan(("complete",), readiness=None)
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
         self._write_pending_review_session()
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )

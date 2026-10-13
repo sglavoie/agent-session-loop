@@ -44,7 +44,7 @@ from typing import Any
 from . import assurance_projection as projection
 from . import (
     events,
-    plans,
+    plans_files,
     state,
     state_assurance_pending,
     state_plan_refs,
@@ -193,7 +193,7 @@ def _path_or_none(value: Any) -> Path | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        return plans.canonicalize_path(value)
+        return plans_files.canonicalize_path(value)
     except OSError, ValueError:
         return None
 

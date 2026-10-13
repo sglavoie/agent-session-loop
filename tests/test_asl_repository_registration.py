@@ -11,7 +11,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import get_args
 
-from agent_session_loop import authoring, plans, repository_registration
+from agent_session_loop import (
+    authoring,
+    plans_content_hash,
+    plans_models,
+    plans_readiness,
+    plans_registry,
+    plans_session_ids,
+    plans_session_scope,
+    plans_snapshot,
+    repository_registration,
+)
 from agent_session_loop.contracts import parse_completion_contract
 from agent_session_loop.workspaces import (
     Repository,
@@ -515,7 +525,7 @@ class MigratedShapeTests(unittest.TestCase):
         )
 
     def test_migrated_session_file_matches_render_session_file(self) -> None:
-        scope = plans.SessionScope(reads=("A", "B"), writes=("A",))
+        scope = plans_session_scope.SessionScope(reads=("A", "B"), writes=("A",))
         legacy = authoring.render_session_file(
             session_id="2",
             title="Thing",
@@ -543,7 +553,7 @@ class MigratedShapeTests(unittest.TestCase):
         self.assertEqual(expected, migrated)
 
     def test_migrating_twice_is_a_fixed_point(self) -> None:
-        scope = plans.SessionScope(reads=("A", "B"), writes=("A",))
+        scope = plans_session_scope.SessionScope(reads=("A", "B"), writes=("A",))
         contract = self._contract(repo="A")
         once = repository_registration._migrate_session(
             authoring.render_session_file(
@@ -574,11 +584,11 @@ class MigratedShapeTests(unittest.TestCase):
             content_sha256="sha",
             sessions=(
                 authoring.ManifestSession(
-                    session_id=plans.parse_session_id("1"), title="One"
+                    session_id=plans_session_ids.parse_session_id("1"), title="One"
                 ),
             ),
             split_date="2026-01-01",
-            readiness=plans.ReadinessMetadata(
+            readiness=plans_models.ReadinessMetadata(
                 state="draft",
                 readiness_sha256="sha",
                 checked_at="2026-01-01T00:00:00+00:00",
@@ -720,7 +730,7 @@ class RegistrationApplicationTests(unittest.TestCase):
             set(result.files),
         )
 
-        registry = plans.read_repository_registry(self.plan_dir)
+        registry = plans_registry.read_repository_registry(self.plan_dir)
         self.assertEqual(("tundra_OAK", "tundra_svc"), registry.aliases)
         manifest = (self.plan_dir / "manifest.md").read_text(encoding="utf-8")
         self.assertLess(
@@ -728,7 +738,7 @@ class RegistrationApplicationTests(unittest.TestCase):
         )
         self.assertIn("**Content SHA-256**: `deadbeef`", manifest)
 
-        snapshot = plans.inspect_plan(self.plan_dir)
+        snapshot = plans_snapshot.inspect_plan(self.plan_dir)
         self.assertEqual(
             ("1", "2"), tuple(status.session.id for status in snapshot.sessions)
         )
@@ -737,7 +747,7 @@ class RegistrationApplicationTests(unittest.TestCase):
             text = self._session_text(session_id)
             self.assertEqual(
                 expected_scope,
-                plans.parse_session_scope(text, registry.aliases),
+                plans_session_scope.parse_session_scope(text, registry.aliases),
                 msg=session_id,
             )
             parsed = parse_completion_contract(
@@ -765,8 +775,10 @@ class RegistrationApplicationTests(unittest.TestCase):
         self.assertEqual(
             metadata_before, _tree_state(self.plan_dir)["plan-metadata.json"]
         )
-        self.assertEqual(plans.stable_readiness_sha256(self.plan_dir), result.readiness)
-        readiness = plans.read_readiness_metadata(self.plan_dir)
+        self.assertEqual(
+            plans_content_hash.stable_readiness_sha256(self.plan_dir), result.readiness
+        )
+        readiness = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertEqual(result.readiness, readiness.readiness_sha256)
         self.assertEqual("reviewed", readiness.state)
         self.assertEqual(FIXED_NOW.isoformat(), readiness.checked_at)
@@ -841,11 +853,12 @@ class RegistrationApplicationTests(unittest.TestCase):
         self.assertIn("src/new.py", refused.detail)
         self.assertEqual((), refused.files)
         self.assertEqual(before, _tree_state(self.plan_dir))
-        self.assertIsNone(plans.read_repository_registry(self.plan_dir))
+        self.assertIsNone(plans_registry.read_repository_registry(self.plan_dir))
         self.assertEqual(
             ("complete", "pending"),
             tuple(
-                status.status for status in plans.inspect_plan(self.plan_dir).sessions
+                status.status
+                for status in plans_snapshot.inspect_plan(self.plan_dir).sessions
             ),
         )
 
@@ -860,7 +873,8 @@ class RegistrationApplicationTests(unittest.TestCase):
         self.assertEqual(
             ("complete", "pending"),
             tuple(
-                status.status for status in plans.inspect_plan(self.plan_dir).sessions
+                status.status
+                for status in plans_snapshot.inspect_plan(self.plan_dir).sessions
             ),
         )
 
@@ -898,7 +912,7 @@ class RegistrationApplicationTests(unittest.TestCase):
         self.assertEqual("contract-path-outside-registry", result.missing_fact)
         self.assertEqual((), result.files)
         self.assertEqual(before, _tree_state(self.plan_dir))
-        self.assertIsNone(plans.read_repository_registry(self.plan_dir))
+        self.assertIsNone(plans_registry.read_repository_registry(self.plan_dir))
 
 
 class SourcePlanRegistrationTests(unittest.TestCase):
@@ -993,14 +1007,16 @@ class SourcePlanRegistrationTests(unittest.TestCase):
             session.session_id.value: session.scope for session in parsed.sessions
         }
         self.assertEqual(
-            plans.SessionScope(
+            plans_session_scope.SessionScope(
                 reads=("tundra_OAK", "tundra_svc"),
                 writes=("tundra_OAK", "tundra_svc"),
             ),
             scopes["1"],
         )
         self.assertEqual(
-            plans.SessionScope(reads=("tundra_OAK",), writes=("tundra_OAK",)),
+            plans_session_scope.SessionScope(
+                reads=("tundra_OAK",), writes=("tundra_OAK",)
+            ),
             scopes["2"],
         )
         self.assertIn("Add the module.", migrated)

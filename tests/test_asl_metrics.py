@@ -20,7 +20,10 @@ from agent_session_loop import (
     events,
     execution_timing,
     metrics,
-    plans,
+    plans_files,
+    plans_payloads,
+    plans_session_ids,
+    plans_snapshot,
     review,
     review_continuation,
     review_repair,
@@ -36,7 +39,7 @@ def _iso(now: datetime, *, hours_ago: float) -> str:
 
 def _make_state_dir(state_root: Path, plan_dir: Path) -> Path:
     plan_dir.mkdir(parents=True, exist_ok=True)
-    state_dir = state_root / plans.path_sha256(plan_dir)
+    state_dir = state_root / plans_files.path_sha256(plan_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "state.json").write_text(
         json.dumps({"plan_dir": str(plan_dir), "version": 2}, sort_keys=True),
@@ -131,7 +134,7 @@ def _write_generated_review_repair_plan(
         plan_dir,
         (("1", "complete"), (review_id, "complete"), (child_id, child_status)),
     )
-    review_path = plan_dir / plans.session_id_to_filename(review_id)
+    review_path = plan_dir / plans_session_ids.session_id_to_filename(review_id)
     review_path.write_text(
         "\n".join(
             (
@@ -142,7 +145,7 @@ def _write_generated_review_repair_plan(
         ),
         encoding="utf-8",
     )
-    child_path = plan_dir / plans.session_id_to_filename(child_id)
+    child_path = plan_dir / plans_session_ids.session_id_to_filename(child_id)
     child_path.write_text(
         "\n".join(
             (
@@ -605,7 +608,7 @@ class MetricsCollectionTests(unittest.TestCase):
         event_path = state_dir / events.EVENTS_FILE_NAME
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(plan_dir), event_path
+            plans_snapshot.inspect_plan(plan_dir), event_path
         )
 
         # The evaluator stays the whole-history cap authority and still
@@ -637,7 +640,7 @@ class MetricsCollectionTests(unittest.TestCase):
         )
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(plan_dir), event_path
+            plans_snapshot.inspect_plan(plan_dir), event_path
         )
         wide = self._collect(since_days=60).review_cycles
         narrow = self._collect().review_cycles
@@ -773,7 +776,7 @@ class MetricsCollectionTests(unittest.TestCase):
         )
 
         projected = review_continuation.evaluate_review_continuation(
-            plans.inspect_plan(plan_dir), event_path
+            plans_snapshot.inspect_plan(plan_dir), event_path
         )
         cycles = self._collect().review_cycles
 
@@ -1606,7 +1609,7 @@ def _timing_turn(
     session_id: str,
     started: float,
     finished: float,
-    session_kind: str | None = plans.SESSION_KIND_IMPLEMENTATION,
+    session_kind: str | None = plans_payloads.SESSION_KIND_IMPLEMENTATION,
 ) -> None:
     payload = {
         "run_id": run_id,

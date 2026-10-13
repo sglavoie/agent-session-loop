@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from agent_session_loop import (
     control_queue,
-    plans,
+    plans_content_hash,
+    plans_handoff,
+    plans_models,
+    plans_payloads,
+    plans_readiness,
+    plans_session_ids,
     review_transitions,
 )
 from tests.review_lifecycle_mutating_claude import MutatingFakeClaudeMixin
@@ -109,11 +114,13 @@ class RunReviewVerdictRetryTests(MutatingFakeClaudeMixin):
         self._write_plan(("complete",), readiness=None)
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
         review_session = self._write_pending_review_session()
-        plans.write_readiness_metadata(
+        plans_readiness.write_readiness_metadata(
             self.plan_dir,
-            plans.ReadinessMetadata(
+            plans_models.ReadinessMetadata(
                 state="loop-ready",
-                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                readiness_sha256=plans_content_hash.stable_readiness_sha256(
+                    self.plan_dir
+                ),
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
@@ -129,7 +136,9 @@ class RunReviewVerdictRetryTests(MutatingFakeClaudeMixin):
         guard = payload["turns"][1]["review_mutation_guard"]
         self.assertFalse(guard["passed"])
         self.assertEqual(["README.md"], guard["changed_paths"]["tracked"])
-        self.assertEqual("pending", plans.read_session_status(review_session).status)
+        self.assertEqual(
+            "pending", plans_handoff.read_session_status(review_session).status
+        )
 
     def test_stop_after_current_converts_review_verdict_retry_to_pause(
         self,
@@ -174,7 +183,7 @@ class RunReviewVerdictRetryTests(MutatingFakeClaudeMixin):
         self.assertEqual("stopped", payload["review_skipped_reason"])
         self.assertEqual("initial-review", payload["review_resume"]["action"])
         self.assertEqual(
-            [plans.SESSION_KIND_IMPLEMENTATION],
+            [plans_payloads.SESSION_KIND_IMPLEMENTATION],
             [turn["session_kind"] for turn in payload["turns"]],
         )
         self.assertEqual([], self._generated_review_sessions())
@@ -221,8 +230,10 @@ class RunReviewVerdictRetryTests(MutatingFakeClaudeMixin):
         self.assertTrue(repair.is_file())
         self.assertEqual(
             "pending",
-            plans.read_session_status(
-                plans.SessionFile(plans.parse_session_id("2.1"), repair)
+            plans_handoff.read_session_status(
+                plans_models.SessionFile(
+                    plans_session_ids.parse_session_id("2.1"), repair
+                )
             ).status,
         )
 

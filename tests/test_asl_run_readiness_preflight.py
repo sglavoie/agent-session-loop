@@ -5,7 +5,10 @@ from __future__ import annotations
 import unittest
 
 from agent_session_loop import (
-    plans,
+    plans_content_hash,
+    plans_files,
+    plans_metadata,
+    plans_readiness,
 )
 from tests.support_asl_run_readiness import RunReadinessGateFixture
 
@@ -35,15 +38,15 @@ class RunReadinessPreflightTests(RunReadinessGateFixture):
         self.assertFalse(repair["journal_replaced"])
         # Readiness lifecycle picks up from the repaired metadata.
         self.assertEqual("complete", payload["readiness_state_final"])
-        metadata = plans.read_readiness_metadata(self.plan_dir)
+        metadata = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertIsNotNone(metadata)
         self.assertEqual(
-            plans.stable_readiness_sha256(self.plan_dir),
+            plans_content_hash.stable_readiness_sha256(self.plan_dir),
             metadata.readiness_sha256,
         )
         self.assertEqual(
-            str(plans.canonicalize_path(self.repo_root)),
-            plans.load_plan_metadata(self.plan_dir).cwd,
+            str(plans_files.canonicalize_path(self.repo_root)),
+            plans_metadata.load_plan_metadata(self.plan_dir).cwd,
         )
 
     def test_run_auto_repairs_when_state_is_reviewed(self) -> None:
@@ -60,7 +63,9 @@ class RunReadinessPreflightTests(RunReadinessGateFixture):
         self.assertTrue(repair_payload["ok"])
         # Metadata was rewritten to ``loop-ready`` and then lifecycled to
         # ``complete`` once the only pending session finished.
-        self.assertEqual("complete", plans.read_readiness_metadata(self.plan_dir).state)
+        self.assertEqual(
+            "complete", plans_readiness.read_readiness_metadata(self.plan_dir).state
+        )
 
     def test_run_auto_repairs_when_state_is_complete_on_pending_plan(self) -> None:
         self._write_plan(("pending",), readiness="complete")
@@ -79,7 +84,9 @@ class RunReadinessPreflightTests(RunReadinessGateFixture):
         repair = repair_payload["auto_repairs"][0]
         self.assertEqual("manifest-readiness", repair["category"])
         self.assertEqual("loop-ready", repair["target_state"])
-        self.assertEqual("complete", plans.read_readiness_metadata(self.plan_dir).state)
+        self.assertEqual(
+            "complete", plans_readiness.read_readiness_metadata(self.plan_dir).state
+        )
 
     def test_run_auto_repairs_when_state_is_running_on_pending_plan(self) -> None:
         self._write_plan(("pending",), readiness="running")
@@ -98,7 +105,9 @@ class RunReadinessPreflightTests(RunReadinessGateFixture):
         repair = repair_payload["auto_repairs"][0]
         self.assertEqual("manifest-readiness", repair["category"])
         self.assertEqual("loop-ready", repair["target_state"])
-        self.assertEqual("complete", plans.read_readiness_metadata(self.plan_dir).state)
+        self.assertEqual(
+            "complete", plans_readiness.read_readiness_metadata(self.plan_dir).state
+        )
 
     def test_run_auto_repairs_when_recorded_sha_does_not_match(self) -> None:
         self._write_plan(
@@ -115,17 +124,17 @@ class RunReadinessPreflightTests(RunReadinessGateFixture):
         repair_payload = payload["readiness_gate_repair"]
         self.assertEqual(["manifest-readiness"], repair_payload["attempted"])
         self.assertTrue(repair_payload["ok"])
-        metadata = plans.read_readiness_metadata(self.plan_dir)
+        metadata = plans_readiness.read_readiness_metadata(self.plan_dir)
         self.assertIsNotNone(metadata)
         self.assertNotEqual("0" * 64, metadata.readiness_sha256)
         self.assertEqual(
-            plans.stable_readiness_sha256(self.plan_dir),
+            plans_content_hash.stable_readiness_sha256(self.plan_dir),
             metadata.readiness_sha256,
         )
 
     def test_loop_ready_start_skips_core_preflight(self) -> None:
         self._write_plan(("pending",), readiness="loop-ready")
-        expected_sha = plans.stable_readiness_sha256(self.plan_dir)
+        expected_sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
 
         completed, payload = self._run()
 
@@ -151,7 +160,7 @@ class RunReadinessPreflightTests(RunReadinessGateFixture):
 
     def test_running_readiness_start_skips_core_preflight(self) -> None:
         self._write_plan_with_unrunnable_probe(readiness="running")
-        expected_sha = plans.stable_readiness_sha256(self.plan_dir)
+        expected_sha = plans_content_hash.stable_readiness_sha256(self.plan_dir)
 
         completed, payload = self._run(max_sessions=1)
 
