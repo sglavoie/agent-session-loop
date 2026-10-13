@@ -90,7 +90,9 @@ class SupervisionEndSignalSeamTest(SupervisionEndBase):
             return result
 
         self._patch(autopilot, "run_autopilot", supervision)
-        self._patch(autopilot, "_deferred_termination_signals", signalling_guard)
+        self._patch(
+            autopilot._termination, "_deferred_termination_signals", signalling_guard
+        )
         previous_term = signal.getsignal(signal.SIGTERM)
         previous_int = signal.getsignal(signal.SIGINT)
 
@@ -391,7 +393,9 @@ class SupervisionEndSignalSeamTest(SupervisionEndBase):
             return result
 
         self._patch(autopilot, "run_autopilot", supervision)
-        self._patch(autopilot, "_deferred_termination_signals", interrupted_guard)
+        self._patch(
+            autopilot._termination, "_deferred_termination_signals", interrupted_guard
+        )
         previous_term = signal.getsignal(signal.SIGTERM)
         previous_int = signal.getsignal(signal.SIGINT)
 

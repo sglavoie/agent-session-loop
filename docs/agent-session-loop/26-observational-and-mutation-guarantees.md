@@ -243,7 +243,7 @@ missing from its shard lists. Individual modules run directly, for example
 runs `PORTABLE_MODULES`, the subset of `FAST_MODULES` that spawns no external
 process at all — no `git`, no shell script, no launchd domain, no harness
 executable, no Kitty. Membership is that mechanical rule rather than a judgement
-call, and the list is hand-curated, so `tests/test_asl_docs.py` pins it as a
+call, and the list is hand-curated, so `tests/test_asl_docs_*.py` pins it as a
 strict subset of `FAST_MODULES`: a module renamed or dropped from the fast lane
 cannot keep the portable lane green by running a name `unittest` would refuse to
 import. This is the lane the Linux CI job gates on. Everything that needs the

@@ -42,8 +42,8 @@ class SuperviseRunMailboxLeaseTest(SuperviseRunInjectedBase):
             captured["kwargs"] = kwargs
             return {"ok": True, "paused": False, "reason": "all-complete"}
 
-        original = autopilot._invoke_run
-        autopilot._invoke_run = fake_invoke_run
+        original = autopilot._supervision_session._invoke_run
+        autopilot._supervision_session._invoke_run = fake_invoke_run
         try:
             result = autopilot.supervise_run(
                 {
@@ -57,7 +57,7 @@ class SuperviseRunMailboxLeaseTest(SuperviseRunInjectedBase):
                 stall_threshold=42.0,
             )
         finally:
-            autopilot._invoke_run = original
+            autopilot._supervision_session._invoke_run = original
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["reason"], "complete")
@@ -103,8 +103,8 @@ class SuperviseRunMailboxLeaseTest(SuperviseRunInjectedBase):
             observed["watcher_enabled_at_launch"] = kwargs["mailbox_watcher"].enabled
             return {"ok": True, "paused": False, "reason": "all-complete"}
 
-        original = autopilot._invoke_run
-        autopilot._invoke_run = fake_invoke_run
+        original = autopilot._supervision_session._invoke_run
+        autopilot._supervision_session._invoke_run = fake_invoke_run
         try:
             result = autopilot.supervise_run(
                 {
@@ -124,7 +124,7 @@ class SuperviseRunMailboxLeaseTest(SuperviseRunInjectedBase):
                 heartbeat=lambda *_: None,
             )
         finally:
-            autopilot._invoke_run = original
+            autopilot._supervision_session._invoke_run = original
 
         self.assertTrue(result["ok"], result)
         self.assertTrue(observed["lease_present_at_launch"])
@@ -263,8 +263,8 @@ class SuperviseRunMailboxLeaseTest(SuperviseRunInjectedBase):
             observed["lease_present_at_launch"] = lease_path.exists()
             return {"ok": True, "paused": False, "reason": "all-complete"}
 
-        original = autopilot._invoke_run
-        autopilot._invoke_run = fake_invoke_run
+        original = autopilot._supervision_session._invoke_run
+        autopilot._supervision_session._invoke_run = fake_invoke_run
         try:
             result = autopilot.supervise_run(
                 {
@@ -286,7 +286,7 @@ class SuperviseRunMailboxLeaseTest(SuperviseRunInjectedBase):
                 heartbeat=lambda *_: None,
             )
         finally:
-            autopilot._invoke_run = original
+            autopilot._supervision_session._invoke_run = original
 
         self.assertTrue(result["ok"], result)
         self.assertIsNone(observed["watcher"])

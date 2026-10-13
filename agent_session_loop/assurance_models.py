@@ -59,7 +59,7 @@ from .literals import as_literal
 ASSURANCE_SCHEMA_VERSION = 1
 
 #: Versions this build can read. Anything else is rejected before any side
-#: effect, mirroring :func:`agent_session_loop.prepare.parse_validator_output`.
+#: effect, mirroring :func:`agent_session_loop.prepare_parsing.parse_validator_output`.
 SUPPORTED_ASSURANCE_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
 
 

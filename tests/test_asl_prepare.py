@@ -28,6 +28,19 @@ from agent_session_loop import (
     plans,
     preflight,
     prepare,
+    prepare_baseline,
+    prepare_cli,
+    prepare_corrections,
+    prepare_expand_ingest,
+    prepare_expansion,
+    prepare_models,
+    prepare_packet,
+    prepare_parsing,
+    prepare_results,
+    prepare_validation_cache,
+    prepare_validation_stage,
+    prepare_validation_store,
+    prepare_validator,
     state,
     verification,
 )
@@ -64,7 +77,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
     @staticmethod
     def _registered_envelope(session: dict) -> dict:
         return {
-            "version": prepare.PREPARE_VALIDATION_VERSION,
+            "version": prepare_models.PREPARE_VALIDATION_VERSION,
             "workspace_root": "/workspace",
             "repositories": [
                 {
@@ -125,26 +138,28 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             ],
         )
 
-        validation = prepare.parse_validator_output(payload)
+        validation = prepare_parsing.parse_validator_output(payload)
 
-        self.assertEqual(prepare.LEGACY_PREPARE_VALIDATION_VERSION, validation.version)
+        self.assertEqual(
+            prepare_models.LEGACY_PREPARE_VALIDATION_VERSION, validation.version
+        )
         self.assertEqual("/repo", validation.codebase_root)
         self.assertEqual(("1",), validation.session_ids)
         session = validation.sessions[0]
         # 1 claim + 1 issue + parsed contract.
         self.assertEqual(3, session.claims_checked)
-        reparsed = prepare.parse_validator_output(validation.to_dict())
+        reparsed = prepare_parsing.parse_validator_output(validation.to_dict())
         self.assertEqual(validation, reparsed)
 
     def test_rejects_wrong_version(self) -> None:
         payload = _validator_payload()
         payload["version"] = 99
         with self.assertRaisesRegex(plans.PlanError, "unsupported version"):
-            prepare.parse_validator_output(payload)
+            prepare_parsing.parse_validator_output(payload)
 
     def test_v2_requires_repo_attribution_on_every_finding_kind(self) -> None:
         payload = {
-            "version": prepare.PREPARE_VALIDATION_VERSION,
+            "version": prepare_models.PREPARE_VALIDATION_VERSION,
             "workspace_root": "/workspace",
             "repositories": [
                 {
@@ -157,7 +172,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             "sessions": _validator_payload()["sessions"],
         }
         with self.assertRaisesRegex(plans.PlanError, "claim #1 'repo'"):
-            prepare.parse_validator_output(payload)
+            prepare_parsing.parse_validator_output(payload)
 
     def test_registered_packet_contains_exact_roots_and_declared_reads(self) -> None:
         specs = DEFAULT_MULTI_REPO_SPECS[:2]
@@ -168,12 +183,12 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             plan_dir = root / "plan"
             self._write_registered_plan(plan_dir, specs)
 
-            packet = prepare.build_validation_packet(
+            packet = prepare_packet.build_validation_packet(
                 plan_dir, ("1", "2"), codebase_root=workspace
             )
             rendered = packet.render()
 
-            self.assertEqual(prepare.PREPARE_VALIDATION_VERSION, packet.version)
+            self.assertEqual(prepare_models.PREPARE_VALIDATION_VERSION, packet.version)
             self.assertEqual(
                 ("SVC", "OAK"), tuple(r.alias for r in packet.repositories)
             )
@@ -190,7 +205,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             init_multi_repo_workspace(workspace, specs)
             plan_dir = root / "plan"
             self._write_registered_plan(plan_dir, specs)
-            packet = prepare.build_validation_packet(
+            packet = prepare_packet.build_validation_packet(
                 plan_dir, ("1",), codebase_root=workspace
             )
             payload = _prepare_pipeline_payload(
@@ -210,7 +225,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
                 },
             )
 
-            result = prepare.ingest_expand_batch(
+            result = prepare_expand_ingest.ingest_expand_batch(
                 plan_dir, payload, expanded="2026-08-08"
             )
 
@@ -286,7 +301,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
                 init_multi_repo_workspace(workspace, specs)
                 plan_dir = root / "plan"
                 self._write_registered_plan(plan_dir, specs)
-                packet = prepare.build_validation_packet(
+                packet = prepare_packet.build_validation_packet(
                     plan_dir, ("1",), codebase_root=workspace
                 )
                 payload = _prepare_pipeline_payload(
@@ -304,7 +319,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
                 }
 
                 with self.assertRaises(plans.PlanError):
-                    prepare.ingest_expand_batch(plan_dir, payload)
+                    prepare_expand_ingest.ingest_expand_batch(plan_dir, payload)
 
                 after = {
                     path.name: path.read_bytes()
@@ -328,7 +343,9 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             }
 
             with self.assertRaisesRegex(plans.PlanError, "require validator output"):
-                prepare.ingest_expand_batch(plan_dir, _validator_payload())
+                prepare_expand_ingest.ingest_expand_batch(
+                    plan_dir, _validator_payload()
+                )
 
             after = {
                 path.name: path.read_bytes()
@@ -345,7 +362,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             init_multi_repo_workspace(workspace, specs)
             plan_dir = root / "plan"
             self._write_registered_plan(plan_dir, specs)
-            packet = prepare.build_validation_packet(
+            packet = prepare_packet.build_validation_packet(
                 plan_dir, ("1",), codebase_root=workspace
             )
             payload = _prepare_pipeline_payload(
@@ -369,7 +386,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             }
 
             with self.assertRaisesRegex(plans.PlanError, "Before starting"):
-                prepare.ingest_expand_batch(plan_dir, payload)
+                prepare_expand_ingest.ingest_expand_batch(plan_dir, payload)
 
             after = {
                 path.name: path.read_bytes()
@@ -383,27 +400,27 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
         payload = _validator_payload()
         payload["extra"] = True
         with self.assertRaisesRegex(plans.PlanError, "unknown keys: extra"):
-            prepare.parse_validator_output(payload)
+            prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_empty_or_missing_sessions(self) -> None:
         payload = _validator_payload()
         payload["sessions"] = []
         with self.assertRaisesRegex(plans.PlanError, "'sessions'"):
-            prepare.parse_validator_output(payload)
+            prepare_parsing.parse_validator_output(payload)
         del payload["sessions"]
         with self.assertRaisesRegex(plans.PlanError, "'sessions'"):
-            prepare.parse_validator_output(payload)
+            prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_duplicate_session_ids(self) -> None:
         payload = _validator_payload()
         payload["sessions"] = [payload["sessions"][0], payload["sessions"][0]]
         with self.assertRaisesRegex(plans.PlanError, "duplicate session id"):
-            prepare.parse_validator_output(payload)
+            prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_invalid_session_id(self) -> None:
         payload = _validator_payload(session_id="01")
         with self.assertRaisesRegex(plans.PlanError, "session_id"):
-            prepare.parse_validator_output(payload)
+            prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_unknown_claim_type(self) -> None:
         payload = _validator_payload(
@@ -418,14 +435,14 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             ]
         )
         with self.assertRaisesRegex(plans.PlanError, "claim_type"):
-            prepare.parse_validator_output(payload)
+            prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_claim_missing_location(self) -> None:
         payload = _validator_payload(
             claims=[{"claim": "x", "claim_type": "P", "line": 1}]
         )
         with self.assertRaisesRegex(plans.PlanError, "location"):
-            prepare.parse_validator_output(payload)
+            prepare_parsing.parse_validator_output(payload)
 
     def test_to_be_created_claim_drops_a_supplied_line(self) -> None:
         payload = _validator_payload(
@@ -433,14 +450,14 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
                 {
                     "claim": "NewTests",
                     "claim_type": "S",
-                    "location": prepare.TO_BE_CREATED_LOCATION,
+                    "location": prepare_models.TO_BE_CREATED_LOCATION,
                     "line": 5,
                     "to_be_created": True,
                 }
             ]
         )
 
-        claim = prepare.parse_validator_output(payload).sessions[0].claims[0]
+        claim = prepare_parsing.parse_validator_output(payload).sessions[0].claims[0]
 
         self.assertTrue(claim.to_be_created)
         self.assertIsNone(claim.line)
@@ -471,7 +488,11 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
                     ]
                 )
 
-                claim = prepare.parse_validator_output(payload).sessions[0].claims[0]
+                claim = (
+                    prepare_parsing.parse_validator_output(payload)
+                    .sessions[0]
+                    .claims[0]
+                )
 
                 self.assertEqual(expected, claim.line)
 
@@ -482,7 +503,9 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             contract_problems=[{"message": "m", "suggested_fix": "f", "repo": "SVC"}],
         )["sessions"][0]
 
-        parsed = prepare.parse_validator_output(self._registered_envelope(session))
+        parsed = prepare_parsing.parse_validator_output(
+            self._registered_envelope(session)
+        )
 
         self.assertEqual("m", parsed.sessions[0].contract_problems[0].message)
 
@@ -505,9 +528,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
 
         packet = mock.Mock(codebase_root="/repo", plan_dir="/plan")
         packet.render.return_value = "PACKET"
-        launch = mock.patch.object(
-            prepare.harnesses, "run_harness", side_effect=run_harness
-        )
+        launch = mock.patch.object(harnesses, "run_harness", side_effect=run_harness)
         return (launch, packet), prompts
 
     def test_launch_validator_repairs_a_rejected_shape(self) -> None:
@@ -518,7 +539,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
         )
 
         with launch, redirect_stderr(io.StringIO()) as stderr:
-            payload = prepare._launch_validator("claude", packet)
+            payload = prepare_validator._launch_validator("claude", packet)
 
         self.assertEqual(good, payload)
         self.assertEqual(2, len(prompts))
@@ -534,9 +555,9 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             redirect_stderr(io.StringIO()),
             self.assertRaisesRegex(plans.PlanError, "invalid JSON"),
         ):
-            prepare._launch_validator("claude", packet)
+            prepare_validator._launch_validator("claude", packet)
 
-        self.assertEqual(1 + prepare.VALIDATOR_REPAIR_ATTEMPTS, len(prompts))
+        self.assertEqual(1 + prepare_validator.VALIDATOR_REPAIR_ATTEMPTS, len(prompts))
 
     def test_legacy_contract_problem_rejects_repo(self) -> None:
         payload = _validator_payload(
@@ -544,7 +565,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             contract_problems=[{"message": "m", "suggested_fix": "f", "repo": "SVC"}],
         )
         with self.assertRaisesRegex(plans.PlanError, "unknown keys: repo"):
-            prepare.parse_validator_output(payload)
+            prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_unknown_issue_type(self) -> None:
         payload = _validator_payload(
@@ -559,12 +580,12 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             ]
         )
         with self.assertRaisesRegex(plans.PlanError, "issue_type"):
-            prepare.parse_validator_output(payload)
+            prepare_parsing.parse_validator_output(payload)
 
     def test_accepts_removal_taxonomy_in_legacy_payload(self) -> None:
         payload = _validator_payload(**self._removal_overrides())
 
-        session = prepare.parse_validator_output(payload).sessions[0]
+        session = prepare_parsing.parse_validator_output(payload).sessions[0]
 
         self.assertEqual("R", session.claims[0].claim_type)
         self.assertIsNone(session.claims[0].repo)
@@ -575,7 +596,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             _validator_payload(**self._removal_overrides(repo="SVC"))["sessions"][0]
         )
 
-        session = prepare.parse_validator_output(payload).sessions[0]
+        session = prepare_parsing.parse_validator_output(payload).sessions[0]
 
         self.assertEqual(
             ("R", "SVC"), (session.claims[0].claim_type, session.claims[0].repo)
@@ -611,7 +632,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
                 }
 
                 with self.assertRaisesRegex(plans.PlanError, label):
-                    prepare.ingest_validator_output(plan_dir, payload)
+                    prepare_validation_store.ingest_validator_output(plan_dir, payload)
 
                 after = {
                     path.name: path.read_bytes()
@@ -625,7 +646,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
                 )["sessions"][0]
                 mutate(registered_session)
                 with self.assertRaisesRegex(plans.PlanError, label):
-                    prepare.parse_validator_output(
+                    prepare_parsing.parse_validator_output(
                         self._registered_envelope(registered_session)
                     )
 
@@ -635,7 +656,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             patterns=[pattern, dict(pattern), dict(pattern), dict(pattern)]
         )
         with self.assertRaisesRegex(plans.PlanError, "at most 3"):
-            prepare.parse_validator_output(payload)
+            prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_correction_with_identical_texts(self) -> None:
         payload = _validator_payload(
@@ -644,7 +665,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             ]
         )
         with self.assertRaisesRegex(plans.PlanError, "must differ"):
-            prepare.parse_validator_output(payload)
+            prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_contract_problems_without_contract_checked(self) -> None:
         payload = _validator_payload(
@@ -652,7 +673,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             contract_problems=[{"message": "m", "suggested_fix": "f"}],
         )
         with self.assertRaisesRegex(plans.PlanError, "contract_checked"):
-            prepare.parse_validator_output(payload)
+            prepare_parsing.parse_validator_output(payload)
 
     def test_rejects_invalid_dependency_direction(self) -> None:
         payload = _validator_payload(
@@ -661,37 +682,37 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             ]
         )
         with self.assertRaisesRegex(plans.PlanError, "direction"):
-            prepare.parse_validator_output(payload)
+            prepare_parsing.parse_validator_output(payload)
 
     # -- bounded batches and packets ------------------------------------------
 
     def test_batch_sessions_bounds_batch_size(self) -> None:
-        batches = prepare.batch_sessions(["1", "2", "2.1", "3", "4"], 2)
+        batches = prepare_packet.batch_sessions(["1", "2", "2.1", "3", "4"], 2)
         self.assertEqual((("1", "2"), ("2.1", "3"), ("4",)), batches)
 
     def test_batch_sessions_rejects_nonpositive_batch_size(self) -> None:
         with self.assertRaisesRegex(plans.PlanError, "batch size"):
-            prepare.batch_sessions(["1"], 0)
+            prepare_packet.batch_sessions(["1"], 0)
 
     def test_build_validation_packet_references_paths_not_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             _write_prepare_plan(plan_dir, ("1", "2"))
 
-            packet = prepare.build_validation_packet(
+            packet = prepare_packet.build_validation_packet(
                 plan_dir, ["1", "2"], codebase_root="/repo"
             )
             rendered = packet.render()
 
             self.assertTrue(
                 rendered.startswith(
-                    f"{prepare.VALIDATION_PACKET_HEADING_PREFIX} — sessions 1, 2"
+                    f"{prepare_models.VALIDATION_PACKET_HEADING_PREFIX} — sessions 1, 2"
                 )
             )
             self.assertIn(str(plan_dir.resolve() / "session-1.md"), rendered)
             self.assertIn(str(plan_dir.resolve() / "context.md"), rendered)
             self.assertIn(
-                f'"version": {prepare.LEGACY_PREPARE_VALIDATION_VERSION}',
+                f'"version": {prepare_models.LEGACY_PREPARE_VALIDATION_VERSION}',
                 rendered,
             )
             self.assertIn("environment and integrations", rendered)
@@ -700,33 +721,33 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             )
             # Plan file contents are referenced, never inlined.
             self.assertNotIn("Update the retry helper", rendered)
-            for issue_type in prepare.ISSUE_TYPES:
+            for issue_type in prepare_models.ISSUE_TYPES:
                 self.assertIn(issue_type, rendered)
 
     def test_validation_prompt_digest_tracks_the_rendered_packet(self) -> None:
-        legacy = prepare._validation_prompt_digest(
-            prepare.LEGACY_PREPARE_VALIDATION_VERSION
+        legacy = prepare_packet._validation_prompt_digest(
+            prepare_models.LEGACY_PREPARE_VALIDATION_VERSION
         )
-        registered = prepare._validation_prompt_digest(
-            prepare.PREPARE_VALIDATION_VERSION
+        registered = prepare_packet._validation_prompt_digest(
+            prepare_models.PREPARE_VALIDATION_VERSION
         )
 
         self.assertNotEqual(legacy, registered)
         self.assertEqual(
             legacy,
-            prepare._validation_prompt_digest(
-                prepare.LEGACY_PREPARE_VALIDATION_VERSION
+            prepare_packet._validation_prompt_digest(
+                prepare_models.LEGACY_PREPARE_VALIDATION_VERSION
             ),
         )
 
-        original_render = prepare.ValidationTaskPacket.render
+        original_render = prepare_packet.ValidationTaskPacket.render
         with mock.patch.object(
-            prepare.ValidationTaskPacket,
+            prepare_packet.ValidationTaskPacket,
             "render",
             lambda packet: original_render(packet) + "\n- Research removal rationale.",
         ):
-            changed = prepare._validation_prompt_digest(
-                prepare.LEGACY_PREPARE_VALIDATION_VERSION
+            changed = prepare_packet._validation_prompt_digest(
+                prepare_models.LEGACY_PREPARE_VALIDATION_VERSION
             )
 
         self.assertNotEqual(legacy, changed)
@@ -736,7 +757,7 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             _write_prepare_plan(plan_dir, ("1",))
             with self.assertRaisesRegex(plans.PlanError, "missing session file"):
-                prepare.build_validation_packet(
+                prepare_packet.build_validation_packet(
                     plan_dir, ["1", "9"], codebase_root="/repo"
                 )
 
@@ -747,57 +768,65 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             _write_prepare_plan(plan_dir, ("1", "2"))
 
-            first = prepare.ingest_validator_output(plan_dir, _validator_payload())
+            first = prepare_validation_store.ingest_validator_output(
+                plan_dir, _validator_payload()
+            )
             self.assertEqual(("1",), first.session_ids)
 
             second_payload = _validator_payload(session_id="2")
-            second = prepare.ingest_validator_output(plan_dir, second_payload)
+            second = prepare_validation_store.ingest_validator_output(
+                plan_dir, second_payload
+            )
             self.assertEqual(("1", "2"), second.session_ids)
 
-            stored = prepare.load_prepare_validation(plan_dir)
+            stored = prepare_validation_store.load_prepare_validation(plan_dir)
             assert stored is not None
             self.assertEqual(("1", "2"), stored.session_ids)
-            self.assertTrue((plan_dir / prepare.PREPARE_VALIDATION_FILENAME).is_file())
+            self.assertTrue(
+                (plan_dir / prepare_models.PREPARE_VALIDATION_FILENAME).is_file()
+            )
 
     def test_merge_replaces_existing_session_entry(self) -> None:
-        base = prepare.parse_validator_output(_validator_payload())
-        update = prepare.parse_validator_output(
+        base = prepare_parsing.parse_validator_output(_validator_payload())
+        update = prepare_parsing.parse_validator_output(
             _validator_payload(title="Updated title")
         )
-        merged = prepare.merge_validations(base, update)
+        merged = prepare_validation_store.merge_validations(base, update)
         self.assertEqual(("1",), merged.session_ids)
         self.assertEqual("Updated title", merged.sessions[0].title)
 
     def test_merge_rejects_codebase_root_mismatch(self) -> None:
-        base = prepare.parse_validator_output(_validator_payload())
+        base = prepare_parsing.parse_validator_output(_validator_payload())
         other = _validator_payload()
         other["codebase_root"] = "/elsewhere"
-        update = prepare.parse_validator_output(other)
+        update = prepare_parsing.parse_validator_output(other)
         with self.assertRaisesRegex(plans.PlanError, "codebase root"):
-            prepare.merge_validations(base, update)
+            prepare_validation_store.merge_validations(base, update)
 
     def test_load_returns_none_when_absent_and_fails_closed_on_garbage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             _write_prepare_plan(plan_dir)
-            self.assertIsNone(prepare.load_prepare_validation(plan_dir))
+            self.assertIsNone(
+                prepare_validation_store.load_prepare_validation(plan_dir)
+            )
 
-            (plan_dir / prepare.PREPARE_VALIDATION_FILENAME).write_text(
+            (plan_dir / prepare_models.PREPARE_VALIDATION_FILENAME).write_text(
                 "{not json", encoding="utf-8"
             )
             with self.assertRaisesRegex(plans.PlanError, "not valid JSON"):
-                prepare.load_prepare_validation(plan_dir)
+                prepare_validation_store.load_prepare_validation(plan_dir)
 
     def test_unknown_validation_cache_version_is_a_safe_cache_miss(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             _write_prepare_plan(plan_dir)
-            (plan_dir / prepare.PREPARE_VALIDATION_CACHE_FILENAME).write_text(
+            (plan_dir / prepare_models.PREPARE_VALIDATION_CACHE_FILENAME).write_text(
                 json.dumps({"version": 0, "obsolete_entries": []}),
                 encoding="utf-8",
             )
 
-            cache = prepare.load_prepare_validation_cache(plan_dir)
+            cache = prepare_validation_cache.load_prepare_validation_cache(plan_dir)
 
         self.assertEqual((), cache.entries)
 
@@ -805,24 +834,24 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             _write_prepare_plan(plan_dir)
-            validation = prepare.parse_validator_output(_validator_payload())
+            validation = prepare_parsing.parse_validator_output(_validator_payload())
             identity = {"validator_schema_version": validation.version}
-            entry = prepare.PrepareValidationCacheEntry(
+            entry = prepare_models.PrepareValidationCacheEntry(
                 session_id=validation.sessions[0].session_id,
-                key=prepare._canonical_json_digest(identity),
+                key=prepare_validation_cache._canonical_json_digest(identity),
                 identity=identity,
                 validation=validation,
             )
-            prepare.save_prepare_validation_cache(
+            prepare_validation_cache.save_prepare_validation_cache(
                 plan_dir,
-                prepare.PrepareValidationCache(entries=(entry,)),
+                prepare_models.PrepareValidationCache(entries=(entry,)),
             )
-            cache_path = plan_dir / prepare.PREPARE_VALIDATION_CACHE_FILENAME
+            cache_path = plan_dir / prepare_models.PREPARE_VALIDATION_CACHE_FILENAME
             payload = json.loads(cache_path.read_text(encoding="utf-8"))
             payload["entries"][0]["validation"]["version"] = 999
             cache_path.write_text(json.dumps(payload), encoding="utf-8")
 
-            cache = prepare.load_prepare_validation_cache(plan_dir)
+            cache = prepare_validation_cache.load_prepare_validation_cache(plan_dir)
 
         self.assertEqual((), cache.entries)
 
@@ -835,20 +864,24 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             payload["sessions"][0]["claims"] = [{"claim": ""}]
 
             with self.assertRaises(plans.PlanError):
-                prepare.ingest_validator_output(plan_dir, payload)
+                prepare_validation_store.ingest_validator_output(plan_dir, payload)
 
             after = {path.name: path.read_bytes() for path in plan_dir.iterdir()}
             self.assertEqual(before, after)
-            self.assertFalse((plan_dir / prepare.PREPARE_VALIDATION_FILENAME).exists())
+            self.assertFalse(
+                (plan_dir / prepare_models.PREPARE_VALIDATION_FILENAME).exists()
+            )
 
     def test_prepare_validation_excluded_from_readiness_hash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             _write_prepare_plan(plan_dir)
             before = plans.stable_readiness_sha256(plan_dir)
-            prepare.ingest_validator_output(plan_dir, _validator_payload())
-            prepare.save_prepare_validation_cache(
-                plan_dir, prepare.PrepareValidationCache()
+            prepare_validation_store.ingest_validator_output(
+                plan_dir, _validator_payload()
+            )
+            prepare_validation_cache.save_prepare_validation_cache(
+                plan_dir, prepare_models.PrepareValidationCache()
             )
             self.assertEqual(before, plans.stable_readiness_sha256(plan_dir))
 
@@ -856,8 +889,12 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
 class ExpansionRendererTests(unittest.TestCase):
     """Expansion rendering and exact factual corrections."""
 
-    def _validation(self, **session_overrides: object) -> prepare.PrepareValidation:
-        return prepare.parse_validator_output(_validator_payload(**session_overrides))
+    def _validation(
+        self, **session_overrides: object
+    ) -> prepare_models.PrepareValidation:
+        return prepare_parsing.parse_validator_output(
+            _validator_payload(**session_overrides)
+        )
 
     # -- rendering -------------------------------------------------------------
 
@@ -885,7 +922,7 @@ class ExpansionRendererTests(unittest.TestCase):
             ],
         )
 
-        rendered = prepare.render_expansion(
+        rendered = prepare_expansion.render_expansion(
             validation.sessions[0], codebase_root="/repo", expanded="2026-07-10"
         )
 
@@ -903,11 +940,11 @@ class ExpansionRendererTests(unittest.TestCase):
         self.assertIn("- **Provides for session 3**: API", rendered)
         self.assertIn("## Contract Issues", rendered)
         self.assertIn("- `1: stale path: point at foo/bar.py`", rendered)
-        self.assertNotIn(prepare.NO_CONTRACT_ISSUES_LINE, rendered)
+        self.assertNotIn(prepare_models.NO_CONTRACT_ISSUES_LINE, rendered)
 
     def test_render_omits_empty_sections_and_marks_clean_contract(self) -> None:
         validation = self._validation(claims=[], issues=[])
-        rendered = prepare.render_expansion(
+        rendered = prepare_expansion.render_expansion(
             validation.sessions[0], codebase_root="/repo", expanded="2026-07-10"
         )
 
@@ -917,7 +954,7 @@ class ExpansionRendererTests(unittest.TestCase):
         self.assertNotIn("## Patterns to Reuse", rendered)
         self.assertNotIn("## Session Dependencies", rendered)
         self.assertIn("## Contract Issues", rendered)
-        self.assertIn(prepare.NO_CONTRACT_ISSUES_LINE, rendered)
+        self.assertIn(prepare_models.NO_CONTRACT_ISSUES_LINE, rendered)
 
     def test_render_to_be_created_claim_row(self) -> None:
         validation = self._validation(
@@ -929,12 +966,12 @@ class ExpansionRendererTests(unittest.TestCase):
                 }
             ]
         )
-        rendered = prepare.render_expansion(
+        rendered = prepare_expansion.render_expansion(
             validation.sessions[0], codebase_root="/repo", expanded="2026-07-10"
         )
         self.assertIn(
-            f"| `NewTests` | S | {prepare.TO_BE_CREATED_LOCATION} | "
-            f"{prepare.TO_BE_CREATED_LINE} |",
+            f"| `NewTests` | S | {prepare_models.TO_BE_CREATED_LOCATION} | "
+            f"{prepare_models.TO_BE_CREATED_LINE} |",
             rendered,
         )
 
@@ -960,7 +997,7 @@ class ExpansionRendererTests(unittest.TestCase):
             ],
         )
 
-        rendered = prepare.render_expansion(
+        rendered = prepare_expansion.render_expansion(
             validation.sessions[0], codebase_root="/repo", expanded="2026-07-10"
         )
 
@@ -996,7 +1033,7 @@ class ExpansionRendererTests(unittest.TestCase):
             ],
         )
 
-        rendered = prepare.render_expansion(
+        rendered = prepare_expansion.render_expansion(
             validation.sessions[0], codebase_root="/repo", expanded="2026-07-10"
         )
 
@@ -1050,7 +1087,7 @@ class ExpansionRendererTests(unittest.TestCase):
 
     def test_render_omits_contract_issues_when_not_checked(self) -> None:
         validation = self._validation(contract_checked=False)
-        rendered = prepare.render_expansion(
+        rendered = prepare_expansion.render_expansion(
             validation.sessions[0], codebase_root="/repo", expanded="2026-07-10"
         )
         self.assertNotIn("## Contract Issues", rendered)
@@ -1063,19 +1100,23 @@ class ExpansionRendererTests(unittest.TestCase):
             _write_prepare_plan(plan_dir)
             validation = self._validation()
 
-            prepare.write_expansions(plan_dir, validation, expanded="2026-07-10")
+            prepare_expansion.write_expansions(
+                plan_dir, validation, expanded="2026-07-10"
+            )
 
             expansion_path = plan_dir / "session-1.expand.md"
             self.assertTrue(expansion_path.is_file())
             session_text = (plan_dir / "session-1.md").read_text(encoding="utf-8")
-            reference = prepare.expansion_reference_line("1")
+            reference = prepare_expansion.expansion_reference_line("1")
             self.assertEqual(1, session_text.count(reference))
             # The reference sits directly under the Before-starting line.
             lines = session_text.splitlines()
             anchor = lines.index(authoring.CONTEXT_REFERENCE_LINE)
             self.assertEqual(reference, lines[anchor + 1])
 
-            prepare.write_expansions(plan_dir, validation, expanded="2026-07-10")
+            prepare_expansion.write_expansions(
+                plan_dir, validation, expanded="2026-07-10"
+            )
             session_text_again = (plan_dir / "session-1.md").read_text(encoding="utf-8")
             self.assertEqual(session_text, session_text_again)
             self.assertEqual(1, session_text_again.count(reference))
@@ -1085,17 +1126,17 @@ class ExpansionRendererTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             _write_prepare_plan(plan_dir)
             payload = _validator_payload(session_id="7")
-            validation = prepare.parse_validator_output(payload)
+            validation = prepare_parsing.parse_validator_output(payload)
 
             with self.assertRaisesRegex(plans.PlanError, "missing session file"):
-                prepare.write_expansions(plan_dir, validation)
+                prepare_expansion.write_expansions(plan_dir, validation)
             self.assertFalse((plan_dir / "session-7.expand.md").exists())
 
     # -- exact factual corrections ----------------------------------------------
 
     def _corrections_validation(
         self, corrections: list[dict]
-    ) -> prepare.PrepareValidation:
+    ) -> prepare_models.PrepareValidation:
         return self._validation(corrections=corrections)
 
     def test_correction_applies_on_exactly_one_match(self) -> None:
@@ -1112,10 +1153,10 @@ class ExpansionRendererTests(unittest.TestCase):
                 ]
             )
 
-            outcomes = prepare.apply_corrections(plan_dir, validation)
+            outcomes = prepare_corrections.apply_corrections(plan_dir, validation)
 
             self.assertEqual(1, len(outcomes))
-            self.assertEqual(prepare.CORRECTION_APPLIED, outcomes[0].status)
+            self.assertEqual(prepare_models.CORRECTION_APPLIED, outcomes[0].status)
             text = (plan_dir / "session-1.md").read_text(encoding="utf-8")
             self.assertIn("`foo/baz.py` to use `load_config`", text)
             # Contract and handoff occurrences of the old path are untouched.
@@ -1136,11 +1177,13 @@ class ExpansionRendererTests(unittest.TestCase):
                 ]
             )
 
-            prepare.apply_corrections(plan_dir, validation)
+            prepare_corrections.apply_corrections(plan_dir, validation)
             text_after_first = (plan_dir / "session-1.md").read_text(encoding="utf-8")
-            outcomes = prepare.apply_corrections(plan_dir, validation)
+            outcomes = prepare_corrections.apply_corrections(plan_dir, validation)
 
-            self.assertEqual(prepare.CORRECTION_ALREADY_APPLIED, outcomes[0].status)
+            self.assertEqual(
+                prepare_models.CORRECTION_ALREADY_APPLIED, outcomes[0].status
+            )
             self.assertEqual(
                 text_after_first,
                 (plan_dir / "session-1.md").read_text(encoding="utf-8"),
@@ -1161,10 +1204,10 @@ class ExpansionRendererTests(unittest.TestCase):
                 ]
             )
 
-            outcomes = prepare.apply_corrections(plan_dir, validation)
+            outcomes = prepare_corrections.apply_corrections(plan_dir, validation)
 
-            self.assertEqual(prepare.CORRECTION_BLOCKED, outcomes[0].status)
-            self.assertEqual(prepare.BLOCKER_AMBIGUOUS, outcomes[0].blocker)
+            self.assertEqual(prepare_models.CORRECTION_BLOCKED, outcomes[0].status)
+            self.assertEqual(prepare_models.BLOCKER_AMBIGUOUS, outcomes[0].blocker)
             self.assertEqual(
                 before, (plan_dir / "session-1.md").read_text(encoding="utf-8")
             )
@@ -1183,10 +1226,10 @@ class ExpansionRendererTests(unittest.TestCase):
                 ]
             )
 
-            outcomes = prepare.apply_corrections(plan_dir, validation)
+            outcomes = prepare_corrections.apply_corrections(plan_dir, validation)
 
-            self.assertEqual(prepare.CORRECTION_BLOCKED, outcomes[0].status)
-            self.assertEqual(prepare.BLOCKER_NOT_FOUND, outcomes[0].blocker)
+            self.assertEqual(prepare_models.CORRECTION_BLOCKED, outcomes[0].status)
+            self.assertEqual(prepare_models.BLOCKER_NOT_FOUND, outcomes[0].blocker)
 
     def test_contract_body_correction_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1203,10 +1246,10 @@ class ExpansionRendererTests(unittest.TestCase):
                 ]
             )
 
-            outcomes = prepare.apply_corrections(plan_dir, validation)
+            outcomes = prepare_corrections.apply_corrections(plan_dir, validation)
 
-            self.assertEqual(prepare.CORRECTION_BLOCKED, outcomes[0].status)
-            self.assertEqual(prepare.BLOCKER_CONTRACT_BODY, outcomes[0].blocker)
+            self.assertEqual(prepare_models.CORRECTION_BLOCKED, outcomes[0].status)
+            self.assertEqual(prepare_models.BLOCKER_CONTRACT_BODY, outcomes[0].blocker)
             self.assertEqual(
                 before, (plan_dir / "session-1.md").read_text(encoding="utf-8")
             )
@@ -1225,10 +1268,10 @@ class ExpansionRendererTests(unittest.TestCase):
                 ]
             )
 
-            outcomes = prepare.apply_corrections(plan_dir, validation)
+            outcomes = prepare_corrections.apply_corrections(plan_dir, validation)
 
-            self.assertEqual(prepare.CORRECTION_BLOCKED, outcomes[0].status)
-            self.assertEqual(prepare.BLOCKER_HANDOFF_BODY, outcomes[0].blocker)
+            self.assertEqual(prepare_models.CORRECTION_BLOCKED, outcomes[0].status)
+            self.assertEqual(prepare_models.BLOCKER_HANDOFF_BODY, outcomes[0].blocker)
 
     def test_heading_correction_is_blocked_as_structural(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1244,10 +1287,10 @@ class ExpansionRendererTests(unittest.TestCase):
                 ]
             )
 
-            outcomes = prepare.apply_corrections(plan_dir, validation)
+            outcomes = prepare_corrections.apply_corrections(plan_dir, validation)
 
-            self.assertEqual(prepare.CORRECTION_BLOCKED, outcomes[0].status)
-            self.assertEqual(prepare.BLOCKER_STRUCTURAL, outcomes[0].blocker)
+            self.assertEqual(prepare_models.CORRECTION_BLOCKED, outcomes[0].status)
+            self.assertEqual(prepare_models.BLOCKER_STRUCTURAL, outcomes[0].blocker)
 
     def test_multiple_corrections_to_one_file_compose(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1268,10 +1311,10 @@ class ExpansionRendererTests(unittest.TestCase):
                 ]
             )
 
-            outcomes = prepare.apply_corrections(plan_dir, validation)
+            outcomes = prepare_corrections.apply_corrections(plan_dir, validation)
 
             self.assertEqual(
-                [prepare.CORRECTION_APPLIED, prepare.CORRECTION_APPLIED],
+                [prepare_models.CORRECTION_APPLIED, prepare_models.CORRECTION_APPLIED],
                 [outcome.status for outcome in outcomes],
             )
             text = (plan_dir / "session-1.md").read_text(encoding="utf-8")
@@ -1310,7 +1353,7 @@ class PrepareCliTests(unittest.TestCase):
     def test_parser_defaults_and_handler_wiring(self) -> None:
         args = cli.build_parser().parse_args(["prepare", "plan.md"])
 
-        self.assertIs(prepare.prepare_from_args, cli.resolve_handler(args))
+        self.assertIs(prepare_cli.prepare_from_args, cli.resolve_handler(args))
         self.assertEqual("plan.md", args.plan)
         self.assertFalse(args.resume)
         self.assertFalse(args.rebind_workspace)
@@ -1320,12 +1363,12 @@ class PrepareCliTests(unittest.TestCase):
         self.assertEqual("codex", args.validator_harness)
         self.assertIsNone(args.validator_model)
         self.assertIsNone(args.validator_effort)
-        self.assertEqual(prepare.DEFAULT_VALIDATOR_JOBS, args.validator_jobs)
+        self.assertEqual(prepare_models.DEFAULT_VALIDATOR_JOBS, args.validator_jobs)
         self.assertEqual(
-            prepare.DEFAULT_VALIDATOR_TIMEOUT_SECONDS, args.validator_timeout
+            prepare_models.DEFAULT_VALIDATOR_TIMEOUT_SECONDS, args.validator_timeout
         )
         self.assertEqual(
-            prepare.DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
+            prepare_models.DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
             args.validator_heartbeat,
         )
         self.assertIsNone(args.review_harness)
@@ -1376,14 +1419,14 @@ class PrepareCliTests(unittest.TestCase):
         plan_dir.mkdir()
         (plan_dir / "manifest.md").write_text("# Plan\n", encoding="utf-8")
         (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
-        rebind_error = prepare._WorkspaceRebindConcurrencyError(
+        rebind_error = prepare_results._WorkspaceRebindConcurrencyError(
             "cannot lock plan for workspace rebind: busy",
             old_workspace={"workspace_root": "/old"},
             new_workspace={"workspace_root": "/new"},
-            stage=prepare.PREPARE_STAGE_WORKSPACE,
+            stage=prepare_results.PREPARE_STAGE_WORKSPACE,
         )
 
-        with mock.patch.object(prepare, "prepare_plan", side_effect=rebind_error):
+        with mock.patch.object(prepare_cli, "prepare_plan", side_effect=rebind_error):
             code, stdout, _stderr = self._run_cli(
                 str(plan_dir),
                 "--resume",
@@ -1398,7 +1441,7 @@ class PrepareCliTests(unittest.TestCase):
         self.assertEqual("workspace-rebind-failed", payload["reason"])
         self.assertTrue(payload["rebind_workspace"])
         self.assertEqual(
-            prepare.PREPARE_STAGE_WORKSPACE,
+            prepare_results.PREPARE_STAGE_WORKSPACE,
             payload["workspace_rebind"]["failure_stage"],
         )
         self.assertEqual("/old", payload["workspace_rebind"]["old"]["workspace_root"])
@@ -1570,7 +1613,7 @@ class PrepareCliTests(unittest.TestCase):
             self.assertEqual("claude", name)
             self.assertTrue(
                 str(kwargs["prompt"]).startswith(
-                    prepare.VALIDATION_PACKET_HEADING_PREFIX
+                    prepare_models.VALIDATION_PACKET_HEADING_PREFIX
                 )
             )
             self.assertEqual("claude-opus-validator", kwargs["model"])
@@ -1591,7 +1634,7 @@ class PrepareCliTests(unittest.TestCase):
             )
 
         with mock.patch.object(
-            prepare.harnesses, "run_harness", side_effect=fake_run_harness
+            harnesses, "run_harness", side_effect=fake_run_harness
         ) as run_mock:
             code, stdout, stderr = self._run_cli(
                 str(source),
@@ -1686,7 +1729,7 @@ class PrepareCliTests(unittest.TestCase):
             self.assertIsNone(kwargs["model"])
             self.assertIsNone(kwargs["effort"])
             self.assertEqual(
-                prepare.DEFAULT_VALIDATOR_TIMEOUT_SECONDS, kwargs["timeout"]
+                prepare_models.DEFAULT_VALIDATOR_TIMEOUT_SECONDS, kwargs["timeout"]
             )
             return harnesses.HarnessResult(
                 argv=["codex"],
@@ -1697,9 +1740,7 @@ class PrepareCliTests(unittest.TestCase):
                 name="codex",
             )
 
-        with mock.patch.object(
-            prepare.harnesses, "run_harness", side_effect=fake_run_harness
-        ):
+        with mock.patch.object(harnesses, "run_harness", side_effect=fake_run_harness):
             code, stdout, stderr = self._run_cli(
                 str(source),
                 "--cwd",
@@ -1756,7 +1797,7 @@ class PrepareCliTests(unittest.TestCase):
             )
 
         with mock.patch.object(
-            prepare.harnesses, "run_harness", side_effect=failing_run_harness
+            harnesses, "run_harness", side_effect=failing_run_harness
         ):
             code, stdout, stderr = self._run_cli(
                 str(source),
@@ -1856,8 +1897,8 @@ class LegacyRepositoryFootprintPrepareTests(unittest.TestCase):
         )
 
     def test_build_validation_packet_refuses_a_multi_repo_legacy_plan(self) -> None:
-        with self.assertRaises(prepare.RepositoryFootprintError) as caught:
-            prepare.build_validation_packet(
+        with self.assertRaises(prepare_models.RepositoryFootprintError) as caught:
+            prepare_packet.build_validation_packet(
                 self.plan_dir, ("1",), codebase_root=self.first
             )
 
@@ -1882,15 +1923,18 @@ class LegacyRepositoryFootprintPrepareTests(unittest.TestCase):
         )
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = prepare.expand_ingest_from_args(args)
+            code = prepare_expand_ingest.expand_ingest_from_args(args)
 
         self.assertEqual(1, code)
         emitted = json.loads(stdout.getvalue())
         self.assertEqual(
-            prepare.EXPAND_INGEST_REASON_REPOSITORY_FOOTPRINT, emitted["reason"]
+            prepare_expand_ingest.EXPAND_INGEST_REASON_REPOSITORY_FOOTPRINT,
+            emitted["reason"],
         )
         self.assertTrue(emitted["repository_footprint"]["registry_required"])
-        self.assertIsNone(prepare.load_prepare_validation(self.plan_dir))
+        self.assertIsNone(
+            prepare_validation_store.load_prepare_validation(self.plan_dir)
+        )
 
     def test_expand_ingest_refuses_a_v1_payload_reporting_repository_ambiguity(
         self,
@@ -1902,7 +1946,7 @@ class LegacyRepositoryFootprintPrepareTests(unittest.TestCase):
         payload = _validator_payload(
             issues=[
                 {
-                    "issue_type": prepare.REPOSITORY_AMBIGUITY_ISSUE,
+                    "issue_type": prepare_models.REPOSITORY_AMBIGUITY_ISSUE,
                     "summary": "`foo/bar.py` names more than one repository",
                     "session_ref": "`foo/bar.py`",
                     "actual": "the path exists in two sibling repositories",
@@ -1912,7 +1956,7 @@ class LegacyRepositoryFootprintPrepareTests(unittest.TestCase):
         )
         payload["codebase_root"] = str(plans.canonicalize_path(self.first))
         with self.assertRaisesRegex(plans.PlanError, "repository ambiguity"):
-            prepare.ingest_validator_output(plan_dir, payload)
+            prepare_validation_store.ingest_validator_output(plan_dir, payload)
 
 
 class LegacyRepositoryIntentPrepareTests(unittest.TestCase):
@@ -1992,8 +2036,10 @@ class LegacyRepositoryIntentPrepareTests(unittest.TestCase):
         self.assertIsNone(payload)
 
     def test_build_validation_packet_refuses_a_multi_repo_intent(self) -> None:
-        with self.assertRaises(prepare.RepositoryRegistryRequiredError) as caught:
-            prepare.build_validation_packet(
+        with self.assertRaises(
+            prepare_models.RepositoryRegistryRequiredError
+        ) as caught:
+            prepare_packet.build_validation_packet(
                 self.plan_dir, ("1",), codebase_root=self.first
             )
 
@@ -2024,35 +2070,42 @@ class LegacyRepositoryIntentPrepareTests(unittest.TestCase):
         )
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = prepare.expand_ingest_from_args(args)
+            code = prepare_expand_ingest.expand_ingest_from_args(args)
 
         self.assertEqual(1, code)
         emitted = json.loads(stdout.getvalue())
         self.assertEqual(
-            prepare.EXPAND_INGEST_REASON_REGISTRY_REQUIRED, emitted["reason"]
+            prepare_expand_ingest.EXPAND_INGEST_REASON_REGISTRY_REQUIRED,
+            emitted["reason"],
         )
         self.assertTrue(emitted["repository_intent"]["registry_required"])
-        self.assertIsNone(prepare.load_prepare_validation(self.plan_dir))
+        self.assertIsNone(
+            prepare_validation_store.load_prepare_validation(self.plan_dir)
+        )
 
     def test_a_stored_aggregate_is_refused_on_resume(self) -> None:
-        aggregate = prepare.parse_validator_output(
+        aggregate = prepare_parsing.parse_validator_output(
             {
                 **_validator_payload(),
                 "codebase_root": str(plans.canonicalize_path(self.first)),
             }
         )
-        with self.assertRaises(prepare.RepositoryRegistryRequiredError):
-            prepare._validate_validation_authority(self.plan_dir, aggregate)
+        with self.assertRaises(prepare_models.RepositoryRegistryRequiredError):
+            prepare_validation_store._validate_validation_authority(
+                self.plan_dir, aggregate
+            )
 
     def test_a_single_repository_legacy_plan_still_prepares(self) -> None:
         plan_dir = self.tmp_path / "single-repo-plan"
         _write_prepare_plan(plan_dir, ("1",))
 
-        packet = prepare.build_validation_packet(
+        packet = prepare_packet.build_validation_packet(
             plan_dir, ("1",), codebase_root=self.first
         )
 
-        self.assertEqual(prepare.LEGACY_PREPARE_VALIDATION_VERSION, packet.version)
+        self.assertEqual(
+            prepare_models.LEGACY_PREPARE_VALIDATION_VERSION, packet.version
+        )
 
 
 class PrepareEndToEndTests(unittest.TestCase):
@@ -2078,7 +2131,7 @@ class PrepareEndToEndTests(unittest.TestCase):
         source: Path | None,
         validator,
         **kwargs: object,
-    ) -> prepare.PrepareResult:
+    ) -> prepare_results.PrepareResult:
         options: dict[str, Any] = {
             "cwd": self.repo,
             "harness": "codex",
@@ -2154,7 +2207,7 @@ class PrepareEndToEndTests(unittest.TestCase):
 
     def test_clean_source_plan_produces_loop_ready_directory(self) -> None:
         source = self._write_source()
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
 
         result = self._prepare(source, _recording_validator(calls))
 
@@ -2171,8 +2224,8 @@ class PrepareEndToEndTests(unittest.TestCase):
             "session-2.md",
             "session-1.expand.md",
             "session-2.expand.md",
-            prepare.PREPARE_VALIDATION_FILENAME,
-            prepare.PREPARE_VALIDATION_CACHE_FILENAME,
+            prepare_models.PREPARE_VALIDATION_FILENAME,
+            prepare_models.PREPARE_VALIDATION_CACHE_FILENAME,
             plans.PLAN_METADATA_FILE_NAME,
         ):
             self.assertTrue((plan_dir / name).is_file(), name)
@@ -2224,7 +2277,7 @@ class PrepareEndToEndTests(unittest.TestCase):
         workspace = self.tmp_path / "workspace"
         repositories = init_multi_repo_workspace(workspace, specs)
         source = self._write_registered_source(specs)
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
 
         result = self._prepare(
             source,
@@ -2234,15 +2287,15 @@ class PrepareEndToEndTests(unittest.TestCase):
 
         self.assertTrue(result.ok, result)
         self.assertEqual(1, len(calls))
-        self.assertEqual(prepare.PREPARE_VALIDATION_VERSION, calls[0].version)
+        self.assertEqual(prepare_models.PREPARE_VALIDATION_VERSION, calls[0].version)
         assert result.plan_dir is not None
         metadata = plans.load_plan_metadata(result.plan_dir)
         self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
         assert isinstance(metadata, plans.WorkspacePlanMetadata)
         self.assertEqual(3, metadata.version)
-        validation = prepare.load_prepare_validation(result.plan_dir)
+        validation = prepare_validation_store.load_prepare_validation(result.plan_dir)
         assert validation is not None
-        self.assertEqual(prepare.PREPARE_VALIDATION_VERSION, validation.version)
+        self.assertEqual(prepare_models.PREPARE_VALIDATION_VERSION, validation.version)
         self.assertEqual(
             ("SVC", "OAK"), tuple(r.alias for r in validation.repositories)
         )
@@ -2291,7 +2344,7 @@ class PrepareEndToEndTests(unittest.TestCase):
             "capture_baseline_repository_evidence",
             wraps=original,
         ) as capture:
-            entries = prepare._cached_baseline_entries(
+            entries = prepare_baseline._cached_baseline_entries(
                 result.plan_dir, context, unique_checks
             )
 
@@ -2322,7 +2375,7 @@ class PrepareEndToEndTests(unittest.TestCase):
         self.assertTrue(first.ok, first)
         assert first.plan_dir is not None
 
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
         rebound = self._prepare(
             None,
             _recording_validator(calls),
@@ -2338,14 +2391,16 @@ class PrepareEndToEndTests(unittest.TestCase):
         self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
         assert isinstance(metadata, plans.WorkspacePlanMetadata)
         self.assertEqual(str(new_workspace.resolve()), metadata.workspace_root)
-        aggregate = prepare.load_prepare_validation(first.plan_dir)
+        aggregate = prepare_validation_store.load_prepare_validation(first.plan_dir)
         assert aggregate is not None
         self.assertEqual(str(new_workspace.resolve()), aggregate.workspace_root)
         self.assertEqual(
             {str(path.resolve()) for path in new_repositories.values()},
             {repository.root for repository in aggregate.repositories},
         )
-        validator_cache = prepare.load_prepare_validation_cache(first.plan_dir)
+        validator_cache = prepare_validation_cache.load_prepare_validation_cache(
+            first.plan_dir
+        )
         cache_entry = validator_cache.entry("1")
         assert cache_entry is not None
         self.assertEqual(
@@ -2421,7 +2476,7 @@ class PrepareEndToEndTests(unittest.TestCase):
         self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
         assert isinstance(metadata, plans.WorkspacePlanMetadata)
         self.assertEqual(str(new_workspace.resolve()), metadata.workspace_root)
-        validation = prepare.load_prepare_validation(first.plan_dir)
+        validation = prepare_validation_store.load_prepare_validation(first.plan_dir)
         assert validation is not None
         self.assertEqual(str(new_workspace.resolve()), validation.workspace_root)
         self.assertFalse((first.plan_dir / plans.PLAN_TRANSACTION_DIR_NAME).exists())
@@ -2448,7 +2503,7 @@ class PrepareEndToEndTests(unittest.TestCase):
         (first.plan_dir / "operator-link.md").symlink_to(external_file)
         staged_paths: list[Path] = []
 
-        def failing_validator(packet: prepare.ValidationTaskPacket) -> object:
+        def failing_validator(packet: prepare_packet.ValidationTaskPacket) -> object:
             staged_plan_dir = Path(packet.plan_dir)
             staged_paths.append(staged_plan_dir)
             self.assertFalse(staged_plan_dir.is_relative_to(self.base_dir))
@@ -2501,12 +2556,12 @@ class PrepareEndToEndTests(unittest.TestCase):
         self.assertFalse(invalid.ok)
         assert invalid.workspace_rebind is not None
         self.assertEqual(
-            prepare.PREPARE_STAGE_WORKSPACE,
+            prepare_results.PREPARE_STAGE_WORKSPACE,
             invalid.workspace_rebind["failure_stage"],
         )
         self.assertEqual(before, self._plan_file_bytes(first.plan_dir))
 
-        def run_rebind(validator=None) -> prepare.PrepareResult:
+        def run_rebind(validator=None) -> prepare_results.PrepareResult:
             return self._prepare(
                 None,
                 validator or _recording_validator([]),
@@ -2525,7 +2580,7 @@ class PrepareEndToEndTests(unittest.TestCase):
                     side_effect=plans.PlanError("injected metadata failure"),
                 ),
                 _recording_validator([]),
-                prepare.PREPARE_STAGE_METADATA,
+                prepare_results.PREPARE_STAGE_METADATA,
             )
         )
         injections.append(
@@ -2535,26 +2590,26 @@ class PrepareEndToEndTests(unittest.TestCase):
                 lambda _packet: (_ for _ in ()).throw(
                     plans.PlanError("injected validation failure")
                 ),
-                prepare.PREPARE_STAGE_VALIDATION,
+                prepare_results.PREPARE_STAGE_VALIDATION,
             )
         )
         injections.append(
             (
                 "expansion",
                 mock.patch.object(
-                    prepare,
+                    prepare_expand_ingest,
                     "render_expansion",
                     side_effect=plans.PlanError("injected expansion failure"),
                 ),
                 _recording_validator([]),
-                prepare.PREPARE_STAGE_VALIDATION,
+                prepare_results.PREPARE_STAGE_VALIDATION,
             )
         )
         injections.append(
             (
                 "correction",
                 mock.patch.object(
-                    prepare,
+                    prepare_expand_ingest,
                     "_apply_one_correction",
                     side_effect=plans.PlanError("injected correction failure"),
                 ),
@@ -2570,7 +2625,7 @@ class PrepareEndToEndTests(unittest.TestCase):
                         ]
                     },
                 ),
-                prepare.PREPARE_STAGE_VALIDATION,
+                prepare_results.PREPARE_STAGE_VALIDATION,
             )
         )
         unsatisfied = {
@@ -2595,7 +2650,7 @@ class PrepareEndToEndTests(unittest.TestCase):
                     prepare, "_run_baseline_stage", return_value=unsatisfied
                 ),
                 _recording_validator([]),
-                prepare.PREPARE_STAGE_BASELINE,
+                prepare_results.PREPARE_STAGE_BASELINE,
             )
         )
         injections.append(
@@ -2607,7 +2662,7 @@ class PrepareEndToEndTests(unittest.TestCase):
                     return_value=(False, "injected preflight failure"),
                 ),
                 _recording_validator([]),
-                prepare.PREPARE_STAGE_PREFLIGHT,
+                prepare_results.PREPARE_STAGE_PREFLIGHT,
             )
         )
 
@@ -2629,7 +2684,7 @@ class PrepareEndToEndTests(unittest.TestCase):
                     authoring.os, "replace", side_effect=fail_publication
                 ),
                 _recording_validator([]),
-                prepare.PREPARE_STAGE_PUBLICATION,
+                prepare_results.PREPARE_STAGE_PUBLICATION,
             )
         )
 
@@ -2743,7 +2798,7 @@ class PrepareEndToEndTests(unittest.TestCase):
         init_multi_repo_workspace(workspace, specs)
         source = self._write_registered_source(specs)
 
-        def ambiguous_validator(packet: prepare.ValidationTaskPacket) -> object:
+        def ambiguous_validator(packet: prepare_packet.ValidationTaskPacket) -> object:
             payload = _prepare_pipeline_payload(
                 packet.codebase_root,
                 packet.session_ids,
@@ -2753,7 +2808,7 @@ class PrepareEndToEndTests(unittest.TestCase):
             )
             payload["sessions"][0]["issues"] = [
                 {
-                    "issue_type": prepare.REPOSITORY_AMBIGUITY_ISSUE,
+                    "issue_type": prepare_models.REPOSITORY_AMBIGUITY_ISSUE,
                     "summary": "`demo/module.py` is not repository-qualified",
                     "session_ref": "`demo/module.py`",
                     "actual": "the path exists in more than one read repository",
@@ -2766,10 +2821,12 @@ class PrepareEndToEndTests(unittest.TestCase):
         result = self._prepare(source, ambiguous_validator, cwd=workspace)
 
         self.assertFalse(result.ok)
-        self.assertEqual(prepare.PREPARE_EXIT_REASON_VALIDATION_FAILED, result.reason)
+        self.assertEqual(
+            prepare_results.PREPARE_EXIT_REASON_VALIDATION_FAILED, result.reason
+        )
         self.assertFalse(result.marked_loop_ready)
         self.assertEqual(
-            prepare.REPOSITORY_AMBIGUITY_ISSUE, result.blockers[0].category
+            prepare_models.REPOSITORY_AMBIGUITY_ISSUE, result.blockers[0].category
         )
         assert result.plan_dir is not None
         self.assertIn(
@@ -2793,7 +2850,7 @@ class PrepareEndToEndTests(unittest.TestCase):
         assert result.plan_dir is not None
         self.assertFalse((result.plan_dir / plans.PLAN_METADATA_FILE_NAME).exists())
         self.assertFalse(
-            (result.plan_dir / prepare.PREPARE_VALIDATION_FILENAME).exists()
+            (result.plan_dir / prepare_models.PREPARE_VALIDATION_FILENAME).exists()
         )
         self.assertEqual([], list(result.plan_dir.glob("*.expand.md")))
 
@@ -2804,7 +2861,7 @@ class PrepareEndToEndTests(unittest.TestCase):
                 "2": "###### SESSION 002 — Finalize ####",
             }
         )
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
 
         result = self._prepare(source, _recording_validator(calls))
 
@@ -2853,7 +2910,9 @@ class PrepareEndToEndTests(unittest.TestCase):
 
         self.assertTrue(result.ok, result)
         self.assertEqual(1, len(result.corrections))
-        self.assertEqual(prepare.CORRECTION_APPLIED, result.corrections[0].status)
+        self.assertEqual(
+            prepare_models.CORRECTION_APPLIED, result.corrections[0].status
+        )
         assert result.plan_dir is not None
         session_text = (result.plan_dir / "session-1.md").read_text(encoding="utf-8")
         self.assertIn("`demo/module.py`", session_text)
@@ -2886,7 +2945,7 @@ class PrepareEndToEndTests(unittest.TestCase):
             _recording_validator([], payload_override={"bogus": True}),
         )
         assert failed.plan_dir is not None
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
 
         resumed = self._prepare(
             None,
@@ -2957,7 +3016,7 @@ class PrepareEndToEndTests(unittest.TestCase):
         # Equivalent checks across sessions deduplicate to one execution.
         self.assertEqual("x", counter.read_text(encoding="utf-8"))
 
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
         resumed = self._prepare(
             None,
             _recording_validator(calls),
@@ -2983,8 +3042,8 @@ class PrepareEndToEndTests(unittest.TestCase):
 
         self.assertTrue(first.ok, first)
         assert first.plan_dir is not None
-        cache = prepare.load_prepare_validation_cache(first.plan_dir)
-        self.assertEqual(prepare.PREPARE_VALIDATION_CACHE_VERSION, cache.version)
+        cache = prepare_validation_cache.load_prepare_validation_cache(first.plan_dir)
+        self.assertEqual(prepare_models.PREPARE_VALIDATION_CACHE_VERSION, cache.version)
         self.assertIsNotNone(cache.entry("1"))
         self.assertIsNotNone(cache.entry("2"))
 
@@ -2996,7 +3055,7 @@ class PrepareEndToEndTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
 
         resumed = self._prepare(
             None,
@@ -3013,8 +3072,8 @@ class PrepareEndToEndTests(unittest.TestCase):
 
         self.assertTrue(first.ok, first)
         assert first.plan_dir is not None
-        (first.plan_dir / prepare.PREPARE_VALIDATION_CACHE_FILENAME).unlink()
-        calls: list[prepare.ValidationTaskPacket] = []
+        (first.plan_dir / prepare_models.PREPARE_VALIDATION_CACHE_FILENAME).unlink()
+        calls: list[prepare_packet.ValidationTaskPacket] = []
 
         resumed = self._prepare(
             None,
@@ -3025,7 +3084,9 @@ class PrepareEndToEndTests(unittest.TestCase):
         self.assertTrue(resumed.ok, resumed)
         self.assertEqual([("1", "2")], [packet.session_ids for packet in calls])
         self.assertTrue(
-            (first.plan_dir / prepare.PREPARE_VALIDATION_CACHE_FILENAME).is_file()
+            (
+                first.plan_dir / prepare_models.PREPARE_VALIDATION_CACHE_FILENAME
+            ).is_file()
         )
 
     def test_cache_refresh_replaces_an_untrusted_historical_aggregate(self) -> None:
@@ -3034,14 +3095,14 @@ class PrepareEndToEndTests(unittest.TestCase):
 
         self.assertTrue(first.ok, first)
         assert first.plan_dir is not None
-        replacement = prepare.parse_validator_output(
+        replacement = prepare_parsing.parse_validator_output(
             _prepare_pipeline_payload(
                 str(plans.canonicalize_path(self.repo)),
                 ("1", "2", "99"),
             )
         )
-        prepare.save_prepare_validation(first.plan_dir, replacement)
-        calls: list[prepare.ValidationTaskPacket] = []
+        prepare_validation_store.save_prepare_validation(first.plan_dir, replacement)
+        calls: list[prepare_packet.ValidationTaskPacket] = []
 
         resumed = self._prepare(
             None,
@@ -3051,7 +3112,7 @@ class PrepareEndToEndTests(unittest.TestCase):
 
         self.assertTrue(resumed.ok, resumed)
         self.assertEqual([], calls)
-        aggregate = prepare.load_prepare_validation(first.plan_dir)
+        aggregate = prepare_validation_store.load_prepare_validation(first.plan_dir)
         assert aggregate is not None
         self.assertEqual(("1", "2"), aggregate.session_ids)
 
@@ -3061,7 +3122,7 @@ class PrepareEndToEndTests(unittest.TestCase):
 
         self.assertTrue(first.ok, first)
         assert first.plan_dir is not None
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
         resumed = self._prepare(
             None,
             _recording_validator(calls),
@@ -3079,7 +3140,7 @@ class PrepareEndToEndTests(unittest.TestCase):
 
         self.assertTrue(first.ok, first)
         assert first.plan_dir is not None
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
         resumed = self._prepare(
             None,
             _recording_validator(calls),
@@ -3102,7 +3163,7 @@ class PrepareEndToEndTests(unittest.TestCase):
             + "\nAdditional shared validation context.\n",
             encoding="utf-8",
         )
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
         resumed = self._prepare(
             None,
             _recording_validator(calls),
@@ -3118,8 +3179,8 @@ class PrepareEndToEndTests(unittest.TestCase):
 
         self.assertTrue(first.ok, first)
         assert first.plan_dir is not None
-        cache = prepare.load_prepare_validation_cache(first.plan_dir)
-        stale_entries: list[prepare.PrepareValidationCacheEntry] = []
+        cache = prepare_validation_cache.load_prepare_validation_cache(first.plan_dir)
+        stale_entries: list[prepare_models.PrepareValidationCacheEntry] = []
         for entry in cache.entries:
             stale_identity = dict(entry.identity)
             stale_identity["validator_schema_version"] = 999
@@ -3127,14 +3188,14 @@ class PrepareEndToEndTests(unittest.TestCase):
                 dataclasses.replace(
                     entry,
                     identity=stale_identity,
-                    key=prepare._canonical_json_digest(stale_identity),
+                    key=prepare_validation_cache._canonical_json_digest(stale_identity),
                 )
             )
-        prepare.save_prepare_validation_cache(
+        prepare_validation_cache.save_prepare_validation_cache(
             first.plan_dir,
-            prepare.PrepareValidationCache(entries=tuple(stale_entries)),
+            prepare_models.PrepareValidationCache(entries=tuple(stale_entries)),
         )
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
         resumed = self._prepare(
             None,
             _recording_validator(calls),
@@ -3150,13 +3211,13 @@ class PrepareEndToEndTests(unittest.TestCase):
 
         self.assertTrue(first.ok, first)
         assert first.plan_dir is not None
-        original_render = prepare.ValidationTaskPacket.render
+        original_render = prepare_packet.ValidationTaskPacket.render
         changed_prompt = mock.patch.object(
-            prepare.ValidationTaskPacket,
+            prepare_packet.ValidationTaskPacket,
             "render",
             lambda packet: original_render(packet) + "\n- Research removal rationale.",
         )
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
         with changed_prompt:
             resumed = self._prepare(
                 None,
@@ -3167,7 +3228,7 @@ class PrepareEndToEndTests(unittest.TestCase):
         self.assertTrue(resumed.ok, resumed)
         self.assertEqual([("1", "2")], [packet.session_ids for packet in calls])
 
-        stable: list[prepare.ValidationTaskPacket] = []
+        stable: list[prepare_packet.ValidationTaskPacket] = []
         with changed_prompt:
             reused = self._prepare(
                 None,
@@ -3184,8 +3245,8 @@ class PrepareEndToEndTests(unittest.TestCase):
 
         self.assertTrue(first.ok, first)
         assert first.plan_dir is not None
-        cache = prepare.load_prepare_validation_cache(first.plan_dir)
-        stale_entries: list[prepare.PrepareValidationCacheEntry] = []
+        cache = prepare_validation_cache.load_prepare_validation_cache(first.plan_dir)
+        stale_entries: list[prepare_models.PrepareValidationCacheEntry] = []
         for entry in cache.entries:
             self.assertIn("prompt_sha256", entry.identity)
             stale_identity = dict(entry.identity)
@@ -3194,14 +3255,14 @@ class PrepareEndToEndTests(unittest.TestCase):
                 dataclasses.replace(
                     entry,
                     identity=stale_identity,
-                    key=prepare._canonical_json_digest(stale_identity),
+                    key=prepare_validation_cache._canonical_json_digest(stale_identity),
                 )
             )
-        prepare.save_prepare_validation_cache(
+        prepare_validation_cache.save_prepare_validation_cache(
             first.plan_dir,
-            prepare.PrepareValidationCache(entries=tuple(stale_entries)),
+            prepare_models.PrepareValidationCache(entries=tuple(stale_entries)),
         )
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
         resumed = self._prepare(
             None,
             _recording_validator(calls),
@@ -3220,7 +3281,7 @@ class PrepareEndToEndTests(unittest.TestCase):
         (self.repo / "validation-cache-input.txt").write_text(
             "repository changed\n", encoding="utf-8"
         )
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
         resumed = self._prepare(
             None,
             _recording_validator(calls),
@@ -3234,7 +3295,7 @@ class PrepareEndToEndTests(unittest.TestCase):
         self,
     ) -> None:
         source = self._write_source()
-        original_ingest = prepare.ingest_expand_batch
+        original_ingest = prepare_expand_ingest.ingest_expand_batch
         changed = False
 
         def mutate_repository_then_ingest(plan_dir, payload, **kwargs):
@@ -3248,7 +3309,7 @@ class PrepareEndToEndTests(unittest.TestCase):
             return original_ingest(plan_dir, payload, **kwargs)
 
         with mock.patch.object(
-            prepare,
+            prepare_validation_stage,
             "ingest_expand_batch",
             side_effect=mutate_repository_then_ingest,
         ):
@@ -3256,7 +3317,7 @@ class PrepareEndToEndTests(unittest.TestCase):
 
         self.assertTrue(first.ok, first)
         assert first.plan_dir is not None
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
         resumed = self._prepare(
             None,
             _recording_validator(calls),
@@ -3294,7 +3355,7 @@ class PrepareEndToEndTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
         resumed = self._prepare(
             None,
             _recording_validator(calls),
@@ -3311,7 +3372,9 @@ class PrepareEndToEndTests(unittest.TestCase):
         first_started = threading.Event()
         second_failed = threading.Event()
 
-        def partly_failing_validator(packet: prepare.ValidationTaskPacket) -> object:
+        def partly_failing_validator(
+            packet: prepare_packet.ValidationTaskPacket,
+        ) -> object:
             first_calls.append(packet.session_ids)
             if packet.session_ids == ("1",):
                 first_started.set()
@@ -3336,17 +3399,19 @@ class PrepareEndToEndTests(unittest.TestCase):
         )
 
         self.assertFalse(failed.ok)
-        self.assertEqual(prepare.PREPARE_EXIT_REASON_VALIDATION_FAILED, failed.reason)
+        self.assertEqual(
+            prepare_results.PREPARE_EXIT_REASON_VALIDATION_FAILED, failed.reason
+        )
         self.assertEqual([("1",), ("2",)], first_calls)
         assert failed.plan_dir is not None
-        cache = prepare.load_prepare_validation_cache(failed.plan_dir)
+        cache = prepare_validation_cache.load_prepare_validation_cache(failed.plan_dir)
         self.assertIsNotNone(cache.entry("1"))
         self.assertIsNone(cache.entry("2"))
         self.assertFalse(
-            (failed.plan_dir / prepare.PREPARE_VALIDATION_FILENAME).exists()
+            (failed.plan_dir / prepare_models.PREPARE_VALIDATION_FILENAME).exists()
         )
 
-        resumed_calls: list[prepare.ValidationTaskPacket] = []
+        resumed_calls: list[prepare_packet.ValidationTaskPacket] = []
         resumed = self._prepare(
             None,
             _recording_validator(resumed_calls),
@@ -3371,7 +3436,9 @@ class PrepareEndToEndTests(unittest.TestCase):
         worker_order: list[str] = []
         ingest_order: list[tuple[str, ...]] = []
 
-        def out_of_order_validator(packet: prepare.ValidationTaskPacket) -> object:
+        def out_of_order_validator(
+            packet: prepare_packet.ValidationTaskPacket,
+        ) -> object:
             nonlocal active, max_active
             session_id = packet.session_ids[0]
             with lock:
@@ -3396,18 +3463,20 @@ class PrepareEndToEndTests(unittest.TestCase):
                 with lock:
                     active -= 1
 
-        original_ingest = prepare.ingest_expand_batch
+        original_ingest = prepare_expand_ingest.ingest_expand_batch
 
         def recording_ingest(plan_dir, payload, **kwargs):
             ingest_order.append(
-                tuple(prepare.parse_validator_output(payload).session_ids)
+                tuple(prepare_parsing.parse_validator_output(payload).session_ids)
             )
             return original_ingest(plan_dir, payload, **kwargs)
 
         stderr = io.StringIO()
         with (
             mock.patch.object(
-                prepare, "ingest_expand_batch", side_effect=recording_ingest
+                prepare_validation_stage,
+                "ingest_expand_batch",
+                side_effect=recording_ingest,
             ),
             redirect_stderr(stderr),
         ):
@@ -3431,7 +3500,7 @@ class PrepareEndToEndTests(unittest.TestCase):
     def test_validator_heartbeats_stay_on_stderr(self) -> None:
         source = self._write_source()
 
-        def slow_validator(packet: prepare.ValidationTaskPacket) -> object:
+        def slow_validator(packet: prepare_packet.ValidationTaskPacket) -> object:
             time.sleep(1.1)
             return _prepare_pipeline_payload(
                 packet.codebase_root,
@@ -3459,7 +3528,9 @@ class PrepareEndToEndTests(unittest.TestCase):
     ) -> None:
         source = self._write_source()
 
-        def contract_problem_validator(packet: prepare.ValidationTaskPacket) -> object:
+        def contract_problem_validator(
+            packet: prepare_packet.ValidationTaskPacket,
+        ) -> object:
             payload = _prepare_pipeline_payload(
                 packet.codebase_root,
                 packet.session_ids,
@@ -3477,15 +3548,21 @@ class PrepareEndToEndTests(unittest.TestCase):
 
         with (
             mock.patch.object(prepare, "_run_baseline_stage") as baseline_stage,
-            mock.patch.object(prepare.preflight, "run_preflight") as run_preflight,
+            mock.patch.object(preflight, "run_preflight") as run_preflight,
         ):
             failed = self._prepare(source, contract_problem_validator)
 
         self.assertFalse(failed.ok)
-        self.assertEqual(prepare.PREPARE_EXIT_REASON_VALIDATION_FAILED, failed.reason)
-        self.assertEqual(prepare.PREPARE_STAGE_VALIDATION, failed.blockers[0].stage)
+        self.assertEqual(
+            prepare_results.PREPARE_EXIT_REASON_VALIDATION_FAILED, failed.reason
+        )
+        self.assertEqual(
+            prepare_results.PREPARE_STAGE_VALIDATION, failed.blockers[0].stage
+        )
         self.assertEqual("1", failed.blockers[0].session_id)
-        self.assertEqual(prepare.CONTRACT_PROBLEM_CATEGORY, failed.blockers[0].category)
+        self.assertEqual(
+            prepare_models.CONTRACT_PROBLEM_CATEGORY, failed.blockers[0].category
+        )
         baseline_stage.assert_not_called()
         run_preflight.assert_not_called()
         assert failed.plan_dir is not None
@@ -3499,7 +3576,7 @@ class PrepareEndToEndTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        calls: list[prepare.ValidationTaskPacket] = []
+        calls: list[prepare_packet.ValidationTaskPacket] = []
         resumed = self._prepare(
             None,
             _recording_validator(calls),
@@ -3573,7 +3650,9 @@ class ExpandIngestCliTests(unittest.TestCase):
         args = cli.build_parser().parse_args(
             ["expand-ingest", "/plan", "--batch-file", "/b.json", "--json"]
         )
-        self.assertIs(prepare.expand_ingest_from_args, cli.resolve_handler(args))
+        self.assertIs(
+            prepare_expand_ingest.expand_ingest_from_args, cli.resolve_handler(args)
+        )
         self.assertEqual("/plan", args.plan_dir)
         self.assertEqual("/b.json", args.batch_file)
         self.assertTrue(args.json)
@@ -3610,7 +3689,7 @@ class ExpandIngestCliTests(unittest.TestCase):
             self.assertEqual(1, body["correction_summary"]["applied"])
             self.assertEqual("applied", body["corrections"][0]["status"])
             # The stored aggregate persisted the batch.
-            stored = prepare.load_prepare_validation(plan_dir)
+            stored = prepare_validation_store.load_prepare_validation(plan_dir)
             assert stored is not None
             self.assertEqual(("1",), stored.session_ids)
             session_text = (plan_dir / "session-1.md").read_text(encoding="utf-8")
@@ -3637,7 +3716,7 @@ class ExpandIngestCliTests(unittest.TestCase):
             body = json.loads(stdout)
             self.assertEqual(["2"], body["sessions"])
             # The aggregate now covers both batches.
-            stored = prepare.load_prepare_validation(plan_dir)
+            stored = prepare_validation_store.load_prepare_validation(plan_dir)
             assert stored is not None
             self.assertEqual(("1", "2"), stored.session_ids)
 
@@ -3660,7 +3739,9 @@ class ExpandIngestCliTests(unittest.TestCase):
             self.assertEqual("validator-schema", body["reason"])
             self.assertIn("validator output rejected", body["error"])
             # Nothing was written.
-            self.assertFalse((plan_dir / prepare.PREPARE_VALIDATION_FILENAME).exists())
+            self.assertFalse(
+                (plan_dir / prepare_models.PREPARE_VALIDATION_FILENAME).exists()
+            )
             self.assertFalse((plan_dir / "session-1.expand.md").exists())
 
     def test_invalid_json_fails_closed_with_validator_schema(self) -> None:
@@ -3728,7 +3809,9 @@ class ExpandIngestCliTests(unittest.TestCase):
             self.assertFalse(body["ok"])
             self.assertEqual("validator-schema", body["reason"])
             # The aggregate was never persisted ahead of the late failure.
-            self.assertFalse((plan_dir / prepare.PREPARE_VALIDATION_FILENAME).exists())
+            self.assertFalse(
+                (plan_dir / prepare_models.PREPARE_VALIDATION_FILENAME).exists()
+            )
             self.assertFalse((plan_dir / "session-1.expand.md").exists())
             # No new artifact and every pre-command file is byte-identical.
             after = {

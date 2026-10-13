@@ -117,9 +117,9 @@ LOCAL_COVERAGE_ALIAS = "scripts"
 #: Browser rows the Playwright shell suite does not reach. It drives the
 #: queue, the responsive shell, the detail panes and both deep-link formats
 #: against both deployments; everything else on this surface is still gated by
-#: the documented smoke checklist that ``tests/test_asl_docs.py`` keeps in step
-#: with the payloads. A row carrying this reason is saying which of the two it
-#: is, rather than claiming coverage it lacks.
+#: the documented smoke checklist that the ``tests/test_asl_docs_*.py`` modules
+#: keep in step with the payloads. A row carrying this reason is saying which
+#: of the two it is, rather than claiming coverage it lacks.
 GAP_WORKBENCH_BROWSER = (
     "not covered by the Playwright shell suite; only the documented smoke checklist"
 )
@@ -193,7 +193,7 @@ _HISTORY_TESTS = "scripts:tests/test_workbench_history.py"
 _OPERATION_TESTS = "scripts:tests/test_workbench_operations.py"
 _ACTION_TESTS = "scripts:tests/test_workbench_launch_reply.py"
 _BRIDGE_TESTS = "scripts:tests/test_asl_bridge_server.py"
-_DOCS_TESTS = "scripts:tests/test_asl_docs.py"
+_DOCS_TESTS = "scripts:tests/test_asl_docs_*.py"
 _CLI_TESTS = "scripts:tests/test_asl_cli_parser_review_guard_and_resume_overlay.py"
 _CONTROL_TESTS = "scripts:tests/test_workbench_controls.py"
 _CONTROL_CLI_TESTS = "scripts:tests/test_asl_control_cli_1.py"
@@ -404,7 +404,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         "Open ASL questions awaiting an operator reply.",
         coverage=(
             _SERVER_TESTS,
-            "scripts:tests/test_asl_reply_flows.py",
+            "scripts:tests/test_asl_reply_flows_e2e_live_resolution.py",
             _DETAIL_TESTS,
         ),
         changes=("observational-reads",),
@@ -502,7 +502,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         "Answer an open ASL question with reply_text, streamed to the child.",
         coverage=(
             _SERVER_TESTS,
-            "scripts:tests/test_asl_reply_flows.py",
+            "scripts:tests/test_asl_reply_flows_e2e_reply_resume.py",
             _OPERATION_TESTS,
             _ACTION_TESTS,
         ),

@@ -244,7 +244,7 @@ class InvokeRunEventsTailerTest(unittest.TestCase):
 
     def _run(self, *, popen, tailer=None, status_probe=None, stall_threshold=90.0):
         beats: list = []
-        payload = autopilot._invoke_run(
+        payload = autopilot._supervision_session._invoke_run(
             self._parsed(),
             chunk_index=1,
             clock=_counter_clock(),

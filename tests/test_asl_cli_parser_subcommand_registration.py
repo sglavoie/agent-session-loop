@@ -17,7 +17,8 @@ from agent_session_loop import (
     control_cli,
     control_queue,
     metrics,
-    prepare,
+    prepare_expand_ingest,
+    prepare_models,
     redirect_ack,
     redirect_admission,
     redirect_store,
@@ -147,8 +148,12 @@ class ParserSubcommandRegistrationTests(unittest.TestCase):
         self.assertEqual("expand-ingest", args.command)
         self.assertEqual("/tmp/plan", args.plan_dir)
         self.assertEqual("/tmp/batch.json", args.batch_file)
-        self.assertEqual("prepare:expand_ingest_from_args", args.handler_ref)
-        self.assertIs(cli.resolve_handler(args), prepare.expand_ingest_from_args)
+        self.assertEqual(
+            "prepare_expand_ingest:expand_ingest_from_args", args.handler_ref
+        )
+        self.assertIs(
+            cli.resolve_handler(args), prepare_expand_ingest.expand_ingest_from_args
+        )
 
     def test_importing_cli_does_not_import_heavy_handler_modules(self) -> None:
         # Guard: `import agent_session_loop.cli` must not eagerly pull in the
@@ -194,15 +199,15 @@ class ParserSubcommandRegistrationTests(unittest.TestCase):
             retention.DEFAULT_MAX_AGE_DAYS, cli._RETENTION_DEFAULT_MAX_AGE_DAYS
         )
         self.assertEqual(
-            prepare.DEFAULT_VALIDATOR_JOBS,
+            prepare_models.DEFAULT_VALIDATOR_JOBS,
             cli._PREPARE_DEFAULT_VALIDATOR_JOBS,
         )
         self.assertEqual(
-            prepare.DEFAULT_VALIDATOR_TIMEOUT_SECONDS,
+            prepare_models.DEFAULT_VALIDATOR_TIMEOUT_SECONDS,
             cli._PREPARE_DEFAULT_VALIDATOR_TIMEOUT_SECONDS,
         )
         self.assertEqual(
-            prepare.DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
+            prepare_models.DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
             cli._PREPARE_DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
         )
         self.assertEqual(

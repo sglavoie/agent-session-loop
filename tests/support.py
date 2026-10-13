@@ -36,7 +36,8 @@ from agent_session_loop import (
     control_signal,
     events,
     plans,
-    prepare,
+    prepare_models,
+    prepare_packet,
     process_tree,
     review,
     review_session_body,
@@ -1278,7 +1279,7 @@ def _validator_payload(**session_overrides: object) -> dict:
     }
     session.update(session_overrides)
     return {
-        "version": prepare.LEGACY_PREPARE_VALIDATION_VERSION,
+        "version": prepare_models.LEGACY_PREPARE_VALIDATION_VERSION,
         "codebase_root": "/repo",
         "sessions": [session],
     }
@@ -1341,16 +1342,18 @@ def _prepare_pipeline_payload(
     session_ids: tuple[str, ...],
     *,
     corrections_by_id: dict[str, list[dict]] | None = None,
-    version: int = prepare.LEGACY_PREPARE_VALIDATION_VERSION,
-    repositories: tuple[prepare.ValidatorRepository, ...] = (),
-    session_repositories: tuple[tuple[prepare.ValidatorRepository, ...], ...] = (),
+    version: int = prepare_models.LEGACY_PREPARE_VALIDATION_VERSION,
+    repositories: tuple[prepare_models.ValidatorRepository, ...] = (),
+    session_repositories: tuple[
+        tuple[prepare_models.ValidatorRepository, ...], ...
+    ] = (),
 ) -> dict:
     """A schema-valid validator payload covering the given sessions."""
     sessions = []
     for index, session_id in enumerate(session_ids):
         repo = (
             session_repositories[index][0].alias
-            if version == prepare.PREPARE_VALIDATION_VERSION
+            if version == prepare_models.PREPARE_VALIDATION_VERSION
             else None
         )
         claim = {
@@ -1383,7 +1386,7 @@ def _prepare_pipeline_payload(
             }
         )
     payload = {"version": version, "sessions": sessions}
-    if version == prepare.PREPARE_VALIDATION_VERSION:
+    if version == prepare_models.PREPARE_VALIDATION_VERSION:
         payload["workspace_root"] = codebase_root
         payload["repositories"] = [repo.to_dict() for repo in repositories]
     else:
@@ -1399,7 +1402,7 @@ def _recording_validator(
 ):
     """A fake validator that records packets and returns valid payloads."""
 
-    def _validator(packet: prepare.ValidationTaskPacket) -> object:
+    def _validator(packet: prepare_packet.ValidationTaskPacket) -> object:
         calls.append(packet)
         if payload_override is not None:
             return payload_override

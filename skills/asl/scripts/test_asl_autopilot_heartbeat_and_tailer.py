@@ -31,7 +31,7 @@ class InvokeRunHeartbeatTest(unittest.TestCase):
         kwargs = {}
         if stall_threshold is not None:
             kwargs["stall_threshold"] = stall_threshold
-        payload = autopilot._invoke_run(
+        payload = autopilot._supervision_session._invoke_run(
             self._parsed(),
             chunk_index=1,
             clock=_counter_clock(),

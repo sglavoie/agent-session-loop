@@ -21,7 +21,9 @@ from agent_session_loop import (
     config,
     events,
     plans,
-    prepare,
+    prepare_models,
+    prepare_packet,
+    prepare_results,
     review,
     review_delta,
     state,
@@ -977,7 +979,7 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
         }
 
     def _validation_payload(self, plan_dir: Path, workspace: Path) -> dict:
-        packet = prepare.build_validation_packet(
+        packet = prepare_packet.build_validation_packet(
             plan_dir,
             ("1", "2"),
             codebase_root=workspace,
@@ -1012,7 +1014,7 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
                 }
             )
         return {
-            "version": prepare.PREPARE_VALIDATION_VERSION,
+            "version": prepare_models.PREPARE_VALIDATION_VERSION,
             "workspace_root": str(workspace.resolve()),
             "repositories": [repo.to_dict() for repo in packet.repositories],
             "sessions": sessions,
@@ -1632,7 +1634,7 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
         )
         self.assertEqual(1, invalid.returncode, invalid.stderr)
         self.assertEqual(
-            prepare.PREPARE_STAGE_WORKSPACE,
+            prepare_results.PREPARE_STAGE_WORKSPACE,
             invalid_payload["workspace_rebind"]["failure_stage"],
         )
         self.assertEqual(before, self._plan_file_bytes(plan_dir))
@@ -1647,7 +1649,7 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
         )
         self.assertEqual(1, validator_failed.returncode, validator_failed.stderr)
         self.assertEqual(
-            prepare.PREPARE_STAGE_VALIDATION,
+            prepare_results.PREPARE_STAGE_VALIDATION,
             validator_payload["workspace_rebind"]["failure_stage"],
         )
         self.assertEqual(before, self._plan_file_bytes(plan_dir))
@@ -1662,7 +1664,7 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
         )
         self.assertEqual(1, baseline_failed.returncode, baseline_failed.stderr)
         self.assertEqual(
-            prepare.PREPARE_STAGE_BASELINE,
+            prepare_results.PREPARE_STAGE_BASELINE,
             baseline_payload["workspace_rebind"]["failure_stage"],
         )
         self.assertEqual(before, self._plan_file_bytes(plan_dir))

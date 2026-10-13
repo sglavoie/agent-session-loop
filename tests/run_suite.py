@@ -158,7 +158,21 @@ FAST_MODULES = (
     "tests.test_workbench_integrations",
     "tests.test_asl_startup_context",
     "tests.test_asl_agent_mux_projection",
-    "tests.test_asl_docs",
+    "tests.test_asl_docs_assurance_and_timing",
+    "tests.test_asl_docs_authoritative_cli",
+    "tests.test_asl_docs_authoritative_lanes",
+    "tests.test_asl_docs_authoritative_pause_metrics",
+    "tests.test_asl_docs_control_and_abort",
+    "tests.test_asl_docs_guidance_and_errors",
+    "tests.test_asl_docs_live_contract",
+    "tests.test_asl_docs_mailbox_protocol",
+    "tests.test_asl_docs_runner_facade",
+    "tests.test_asl_docs_session_skills",
+    "tests.test_asl_docs_skill_contracts",
+    "tests.test_asl_docs_supervision",
+    "tests.test_asl_docs_workbench_cli",
+    "tests.test_asl_docs_workbench_triage",
+    "tests.test_asl_docs_workflow_and_install",
     "tests.test_asl_agent_mux_contract",
     "tests.test_asl_state_migration",
     "tests.test_asl_assurance_projection",
@@ -262,8 +276,8 @@ FAST_MODULES = (
 # product is developed and released against, so the portable lane never reports
 # a pass it did not earn on a machine that has none of them.
 #
-# This is a strict subset of FAST_MODULES; `tests/test_asl_docs.py` enforces
-# that, so a module deleted or renamed cannot survive here as a silent skip.
+# This is a strict subset of FAST_MODULES; `tests/test_asl_docs_authoritative_lanes.py`
+# enforces that, so a module deleted or renamed cannot survive here as a silent skip.
 PORTABLE_MODULES = (
     "tests.test_asl_cli_trace",
     "tests.test_asl_tail",
@@ -426,7 +440,19 @@ INTEGRATION_MODULES = (
     "tests.test_asl_run_workspace_guard_exceptions",
     "tests.test_asl_settled_pause_commit_gate",
     "tests.test_asl_guards",
-    "tests.test_asl_reply_flows",
+    "tests.test_asl_reply_flows_agent_mux_notifications",
+    "tests.test_asl_reply_flows_e2e_live_resolution",
+    "tests.test_asl_reply_flows_e2e_reply_resume",
+    "tests.test_asl_reply_flows_exhausted_mailbox",
+    "tests.test_asl_reply_flows_mailbox_wait_notifications",
+    "tests.test_asl_reply_flows_prompts",
+    "tests.test_asl_reply_flows_question_bounds",
+    "tests.test_asl_reply_flows_run_resume_config",
+    "tests.test_asl_reply_flows_runner_resolution",
+    "tests.test_asl_reply_flows_stdin",
+    "tests.test_asl_reply_flows_suspend_grace",
+    "tests.test_asl_reply_flows_wait_evidence",
+    "tests.test_asl_reply_flows_wait_extension",
     "tests.test_asl_e2e",
     "tests.test_asl_worker_verification",
     "tests.test_asl_review_artifact_schema",

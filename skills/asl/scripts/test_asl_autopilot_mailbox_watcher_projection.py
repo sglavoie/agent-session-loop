@@ -186,7 +186,7 @@ class MailboxWatcherProjectionTest(MailboxWatcherBase):
             return next(statuses, current_status)
 
         final = '{"ok": true, "paused": false, "reason": "all-complete"}'
-        payload = autopilot._invoke_run(
+        payload = autopilot._supervision_session._invoke_run(
             {
                 "argv": ["asl", "run", self.plan_dir, "--json"],
                 "plan_dir": self.plan_dir,
@@ -248,7 +248,7 @@ class MailboxWatcherProjectionTest(MailboxWatcherBase):
         popen = _DeadlinePopen(clock, final)
         progress = []
 
-        payload = autopilot._invoke_run(
+        payload = autopilot._supervision_session._invoke_run(
             {
                 "argv": ["asl", "run", self.plan_dir, "--json"],
                 "plan_dir": self.plan_dir,
@@ -329,7 +329,7 @@ class MailboxWatcherProjectionTest(MailboxWatcherBase):
         self.assertTrue(watcher.establish(now=0.0))
         progress = []
 
-        payload = autopilot._invoke_run(
+        payload = autopilot._supervision_session._invoke_run(
             {
                 "argv": ["asl", "run", self.plan_dir, "--json"],
                 "plan_dir": self.plan_dir,

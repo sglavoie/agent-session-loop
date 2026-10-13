@@ -184,7 +184,7 @@ class InvokeRunHangEscalationTest(unittest.TestCase):
     def _run(self, *, tailer, status_probe=None, **kwargs):
         beats: list = []
         popen = _HangingPopen()
-        payload = autopilot._invoke_run(
+        payload = autopilot._supervision_session._invoke_run(
             self._parsed(),
             chunk_index=1,
             clock=_counter_clock(),
@@ -246,7 +246,7 @@ class InvokeRunHangEscalationTest(unittest.TestCase):
             timeout_count=2,
             stdout='{"ok": true, "paused": false, "reason": "all-complete"}',
         )
-        payload = autopilot._invoke_run(
+        payload = autopilot._supervision_session._invoke_run(
             self._parsed(),
             chunk_index=1,
             clock=_counter_clock(),

@@ -29,12 +29,12 @@ _MAINTENANCE_DEFAULT_MINUTE = 30  # maintenance.DEFAULT_MINUTE
 _MAINTENANCE_DEFAULT_MAX_RUNTIME_SECONDS = (
     900.0  # maintenance.DEFAULT_MAX_RUNTIME_SECONDS
 )
-_PREPARE_DEFAULT_VALIDATOR_JOBS = 2  # prepare.DEFAULT_VALIDATOR_JOBS
+_PREPARE_DEFAULT_VALIDATOR_JOBS = 2  # prepare_models.DEFAULT_VALIDATOR_JOBS
 _PREPARE_DEFAULT_VALIDATOR_TIMEOUT_SECONDS = (
-    900  # prepare.DEFAULT_VALIDATOR_TIMEOUT_SECONDS
+    900  # prepare_models.DEFAULT_VALIDATOR_TIMEOUT_SECONDS
 )
 _PREPARE_DEFAULT_VALIDATOR_HEARTBEAT_SECONDS = (
-    30  # prepare.DEFAULT_VALIDATOR_HEARTBEAT_SECONDS
+    30  # prepare_models.DEFAULT_VALIDATOR_HEARTBEAT_SECONDS
 )
 _CONTROL_DEFAULT_ABORT_GRACE_SECONDS = 120  # control_queue.DEFAULT_ABORT_GRACE_SECONDS
 _CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS = (
@@ -896,7 +896,7 @@ def _add_plan_authoring_commands(
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    prepare_parser.set_defaults(handler_ref="prepare:prepare_from_args")
+    prepare_parser.set_defaults(handler_ref="prepare_cli:prepare_from_args")
 
     expand_ingest_parser = subparsers.add_parser(
         "expand-ingest",
@@ -919,7 +919,9 @@ def _add_plan_authoring_commands(
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    expand_ingest_parser.set_defaults(handler_ref="prepare:expand_ingest_from_args")
+    expand_ingest_parser.set_defaults(
+        handler_ref="prepare_expand_ingest:expand_ingest_from_args"
+    )
 
     register_repositories_parser = subparsers.add_parser(
         "register-repositories",

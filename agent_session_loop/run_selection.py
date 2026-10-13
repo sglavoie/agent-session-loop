@@ -75,7 +75,7 @@ from . import (
     mailbox,
     model_availability,
     plans,
-    prepare,
+    prepare_validation_store,
     review_repair,
     spark_status,
     state,
@@ -264,7 +264,7 @@ def _session_spark_suitability(
 ) -> tuple[bool, str]:
     """Load one conservative preparation marker without blocking a run."""
     try:
-        validation = prepare.load_prepare_validation(plan_dir)
+        validation = prepare_validation_store.load_prepare_validation(plan_dir)
     except (OSError, plans.PlanError, ValueError) as error:
         return False, f"Spark eligibility metadata unreadable: {error}"
     if validation is None:

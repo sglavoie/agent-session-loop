@@ -354,8 +354,8 @@ class SuperviseRunQuotaWaitTest(unittest.TestCase):
             return next(payloads)
 
         wall = _WallClock()
-        original = autopilot._invoke_run
-        autopilot._invoke_run = fake_invoke_run
+        original = autopilot._supervision_session._invoke_run
+        autopilot._supervision_session._invoke_run = fake_invoke_run
         try:
             result = autopilot.supervise_run(
                 {
@@ -374,7 +374,7 @@ class SuperviseRunQuotaWaitTest(unittest.TestCase):
                 wall_clock=wall,
             )
         finally:
-            autopilot._invoke_run = original
+            autopilot._supervision_session._invoke_run = original
         self.assertEqual(result["reason"], "complete", result)
         self.assertEqual(replies, ["use the cached parser", None])
 

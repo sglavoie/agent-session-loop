@@ -674,12 +674,12 @@ def _run_prepare_validator(plan_dir: Path, prompt: str) -> int:
         _write_last_message("not-json\n")
         return 0
 
-    from agent_session_loop import prepare
+    from agent_session_loop import prepare_models, prepare_packet
 
     heading = prompt.splitlines()[0]
     _prefix, _separator, raw_ids = heading.partition(" — sessions ")
     session_ids = tuple(token.strip() for token in raw_ids.split(",") if token.strip())
-    packet = prepare.build_validation_packet(
+    packet = prepare_packet.build_validation_packet(
         plan_dir,
         session_ids,
         codebase_root=Path.cwd(),
@@ -712,7 +712,7 @@ def _run_prepare_validator(plan_dir: Path, prompt: str) -> int:
         "version": packet.version,
         "sessions": sessions,
     }
-    if packet.version == prepare.PREPARE_VALIDATION_VERSION:
+    if packet.version == prepare_models.PREPARE_VALIDATION_VERSION:
         payload["workspace_root"] = packet.codebase_root
         payload["repositories"] = [
             repository.to_dict() for repository in packet.repositories

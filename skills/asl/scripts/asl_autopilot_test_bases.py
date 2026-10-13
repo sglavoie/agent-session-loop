@@ -73,9 +73,9 @@ class SuperviseRunInjectedBase(unittest.TestCase):
 
     def _launch_before(self, moment: str) -> None:
         """Pin the launch instant so scripted runs start after this chunk did."""
-        original = autopilot._utc_now
-        autopilot._utc_now = lambda: datetime.fromisoformat(moment)
-        self.addCleanup(setattr, autopilot, "_utc_now", original)
+        original = autopilot._supervision_session._utc_now
+        autopilot._supervision_session._utc_now = lambda: datetime.fromisoformat(moment)
+        self.addCleanup(setattr, autopilot._supervision_session, "_utc_now", original)
 
 
 class MailboxWatcherBase(unittest.TestCase):

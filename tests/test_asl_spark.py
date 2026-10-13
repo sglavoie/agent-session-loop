@@ -19,7 +19,11 @@ from agent_session_loop import (
     config,
     model_availability,
     plans,
-    prepare,
+    prepare_commands,
+    prepare_expansion,
+    prepare_models,
+    prepare_parsing,
+    prepare_validation_store,
     retry_hints,
     review_guard,
     run_entry,
@@ -59,7 +63,7 @@ class SparkFlagTests(unittest.TestCase):
         self.assertIn("requires the initial --harness", errors[0].message)
 
     def test_prepare_commands_forward_spark(self) -> None:
-        command = prepare._format_run_command(
+        command = prepare_commands._format_run_command(
             Path("/tmp/plan"),
             cwd=Path("/tmp/repo"),
             harness_name="codex",
@@ -150,26 +154,30 @@ class SparkSuitabilityTests(unittest.TestCase):
             "eligible": True,
             "reason": "small explicit change with a settled contract",
         }
-        validation = prepare.parse_validator_output(payload)
+        validation = prepare_parsing.parse_validator_output(payload)
         session = validation.sessions[0]
         self.assertTrue(session.spark.eligible)
         self.assertEqual(
             validation,
-            prepare.parse_validator_output(validation.to_dict()),
+            prepare_parsing.parse_validator_output(validation.to_dict()),
         )
         self.assertIn(
             "**Spark eligible**: yes",
-            prepare.render_expansion(session, codebase_root="/repo"),
+            prepare_expansion.render_expansion(session, codebase_root="/repo"),
         )
 
     def test_missing_and_malformed_markers_use_baseline(self) -> None:
-        missing = prepare.parse_validator_output(_validator_payload()).sessions[0]
+        missing = prepare_parsing.parse_validator_output(_validator_payload()).sessions[
+            0
+        ]
         self.assertFalse(missing.spark.eligible)
         self.assertIn("missing", missing.spark.reason)
 
         malformed_payload = _validator_payload()
         malformed_payload["sessions"][0]["spark"] = {"eligible": "yes"}
-        malformed = prepare.parse_validator_output(malformed_payload).sessions[0]
+        malformed = prepare_parsing.parse_validator_output(malformed_payload).sessions[
+            0
+        ]
         self.assertFalse(malformed.spark.eligible)
         self.assertIn("malformed", malformed.spark.reason)
 
@@ -199,7 +207,7 @@ class SparkExpandIngestTests(unittest.TestCase):
             body = self._ingest(plan_dir, batch)
 
             self.assertEqual([], body["spark_missing"])
-            stored = prepare.load_prepare_validation(plan_dir)
+            stored = prepare_validation_store.load_prepare_validation(plan_dir)
             assert stored is not None
             session = stored.session("1")
             assert session is not None
@@ -422,7 +430,7 @@ class SparkFallbackIntegrationTests(unittest.TestCase):
             second = dict(validation_payload["sessions"][0])
             second["session_id"] = "2"
             validation_payload["sessions"].append(second)
-            (plan_dir / prepare.PREPARE_VALIDATION_FILENAME).write_text(
+            (plan_dir / prepare_models.PREPARE_VALIDATION_FILENAME).write_text(
                 json.dumps(validation_payload), encoding="utf-8"
             )
             install_fake_codex(root)
@@ -485,7 +493,7 @@ class SparkFallbackIntegrationTests(unittest.TestCase):
                 "eligible": True,
                 "reason": "small explicit fixture session",
             }
-            (plan_dir / prepare.PREPARE_VALIDATION_FILENAME).write_text(
+            (plan_dir / prepare_models.PREPARE_VALIDATION_FILENAME).write_text(
                 json.dumps(validation_payload), encoding="utf-8"
             )
             install_fake_codex(root)
