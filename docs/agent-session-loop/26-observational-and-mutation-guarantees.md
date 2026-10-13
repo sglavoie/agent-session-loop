@@ -38,7 +38,7 @@ Go with unknown fields rejected. Both sides recompute the corpus digest, so
 a one-sided edit fails on whichever side drifted instead of surfacing as a
 runtime mismatch against an installed pair.
 `tests/test_asl_bridge_fixtures.py` additionally validates what
-`agent_session_loop.bridge` actually produces — its hello, its snapshot, its
+the `agent_session_loop.bridge_*` modules actually produce — its hello, its snapshot, its
 handshake, and both new refusals — against those schemas, which is what
 keeps the corpus from becoming a self-consistent fiction. The change
 procedure is in the corpus's own `README.md`.
@@ -328,7 +328,7 @@ that no longer exists.
 The bridge's cross-language contract is checked from both sides.
 `tests/test_asl_bridge_fixtures.py` runs in `just test-fast` and verifies that
 `tests/fixtures/agent_mux_contract/` still describes what
-`agent_session_loop.bridge` produces and that the manifest digests match the
+the `agent_session_loop.bridge_*` modules produce and that the manifest digests match the
 files beside them. The other half runs in the client repository: after copying
 the corpus across unchanged, `just asl-integration` in Agent Mux launches the
 installed `asl bridge serve --stdio --protocol 2` against a throwaway plan and

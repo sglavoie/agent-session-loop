@@ -124,7 +124,8 @@ from . import (
     run_inputs,
     run_persistence,
     session_verification,
-    turn_execution,
+    turn_execution_commit,
+    turn_execution_signals,
     workspaces,
 )
 
@@ -502,7 +503,7 @@ def _repair_paused_handoff_status(
     """
     if runner_pause is None:
         return after, None
-    pause_reason = turn_execution.runner_pause_reason(str(runner_pause))
+    pause_reason = turn_execution_signals.runner_pause_reason(str(runner_pause))
     if pause_reason == "runner-pause":
         return after, None
     invalid = run_inputs._invalid_status_pause(after)
@@ -541,7 +542,7 @@ def _repair_paused_handoff_status(
             "to_status": "pending",
             "guard": "plan-status-validity",
             "reason": pause_reason,
-            **turn_execution.reopened_snapshot_identity(
+            **turn_execution_commit.reopened_snapshot_identity(
                 plans_payloads.snapshot_payload(repaired)
             ),
         },

@@ -244,8 +244,8 @@ and every durable write stay in the runner, and the durable event and result
 schemas are unchanged.
 
 Everything that races the run loop from outside it is declared the same way.
-`agent_session_loop/run_coordination.py` owns the three durable slots a
-non-loop actor writes: `waiting_for_reply` belongs to a `WaitStateStore` whose
+the `agent_session_loop/run_coordination_*.py` modules own the three durable
+slots a non-loop actor writes: `waiting_for_reply` belongs to a `WaitStateStore` whose
 every begin, lease stamp, deadline rebase, and clear is a compare-and-set
 against the question that opened the wait, so a lease probe for a wait the loop
 has already finished is dropped rather than resurrecting it; `control` is
@@ -261,7 +261,7 @@ unsupervised ceiling forward and a suspend restarts it at the wake instant. The
 exactly-once reply guarantee is unchanged and now stated in one place: the poll
 loop reads the mailbox without its lock, so `mailbox.finish_wait` re-checks
 under it and whatever closure it finds there overrides the timeout the loop
-arrived with. Like the lane modules, `run_coordination.py` never imports the
+arrived with. Like the lane modules, the `run_coordination_*` modules never import the
 runner — serialized persistence, the AgentMux notification seam, and the
 compacted state projection the audit reads enter through the
 `CoordinationPersistence`, `WaitNotifier`, and `state_snapshot` seams — and the

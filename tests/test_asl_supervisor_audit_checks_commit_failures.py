@@ -10,7 +10,8 @@ from typing import Any
 from agent_session_loop import (
     events,
     supervisor_audit_checks,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_constants,
+    supervisor_audit_evidence_input,
     verification,
 )
 from tests import support_supervisor_audit_checks as checks_support
@@ -224,7 +225,9 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
             self._write_events(history[2], self._events_recording_only_a_skip())
             bundle, _ = self._audit(history)
 
-            shed = supervisor_audit_evidence.tighten_audit_input(bundle, max_bytes=1)
+            shed = supervisor_audit_evidence_input.tighten_audit_input(
+                bundle, max_bytes=1
+            )
             results = {
                 result.check: result
                 for result in supervisor_audit_checks.run_deterministic_checks(
@@ -235,7 +238,8 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
             self.assertTrue(
                 any(
                     entry["section"] == "events"
-                    and entry["reason"] == supervisor_audit_evidence.REASON_SIZE_CAP
+                    and entry["reason"]
+                    == supervisor_audit_evidence_constants.REASON_SIZE_CAP
                     for entry in shed.omissions
                 )
             )

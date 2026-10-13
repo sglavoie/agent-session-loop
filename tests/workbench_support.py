@@ -43,9 +43,9 @@ from agent_session_loop import (
     events,
     plans_files,
     state,
-    workbench,
     workbench_archive,
     workbench_history,
+    workbench_registry_models,
     workbench_remote_reads,
     workbench_server,
 )
@@ -55,7 +55,7 @@ from asl_workbench.credentials import IDENTITY_HEADER, CredentialStore
 from asl_workbench.observation import ObservationPolicy
 from asl_workbench.remote_reads import ReadAnswer
 from asl_workbench.service import RemoteProvider
-from asl_workbench.store import WorkbenchStore
+from asl_workbench.store_workbench import WorkbenchStore
 
 #: The method/path pairs the front end reaches without the ``/api`` prefix. Kept
 #: apart from the API routes because they are served before the route table is
@@ -132,7 +132,7 @@ def workbench_api_routes() -> tuple[str, ...]:
 class RecordingWorkbenchServer:
     """A stand-in for a started Workbench, for tests about link shape.
 
-    :class:`agent_session_loop.bridge.WorkbenchLifecycle` takes a
+    :class:`agent_session_loop.bridge_workers.WorkbenchLifecycle` takes a
     ``server_factory``, so the deep-link contract -- token in the query string,
     plan and focus in the fragment -- can be pinned without binding a socket.
     It records the arguments it was constructed with, which is how "exactly one
@@ -318,14 +318,14 @@ SHELL_ARCHIVE_ENTRIES: tuple[Mapping[str, Any], ...] = (
         "archive_id": "20260731T090000Z-delta",
         "plan_name": "delta",
         "archived_ago": 45 * 24 * 60 * 60,
-        "retention_days": workbench.DEFAULT_ARCHIVE_RETENTION_DAYS,
+        "retention_days": workbench_registry_models.DEFAULT_ARCHIVE_RETENTION_DAYS,
         "summary": "delta: archived long enough ago to have expired",
     },
     {
         "archive_id": "20260916T090000Z-echo",
         "plan_name": "echo",
         "archived_ago": 2 * 24 * 60 * 60,
-        "retention_days": workbench.DEFAULT_ARCHIVE_RETENTION_DAYS,
+        "retention_days": workbench_registry_models.DEFAULT_ARCHIVE_RETENTION_DAYS,
         "summary": "echo: archived recently and still inside the window",
     },
 )
@@ -578,7 +578,7 @@ def seed_shell_plans(root: Path) -> ShellCorpus:
     root = Path(root).resolve()
     state_dir = root / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
-    registry_path = root / workbench.REGISTRY_FILE_NAME
+    registry_path = root / workbench_registry_models.REGISTRY_FILE_NAME
     plans_root = root / "plans"
     plans_root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []

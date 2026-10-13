@@ -22,7 +22,14 @@ from pathlib import Path
 from typing import Any
 
 from agent_session_loop import agent_mux_contract as contract
-from agent_session_loop import bridge, intervention
+from agent_session_loop import (
+    agent_mux_projection,
+    bridge_projection,
+    bridge_protocol,
+    bridge_session,
+    bridge_workers,
+    intervention,
+)
 
 # The identifier the checked-in documents carry in place of the live one.
 PLACEHOLDER_CONTRACT_SET_ID = "asl-amx-1.0000000000000000"
@@ -102,7 +109,7 @@ def resolved(document: Any) -> Any:
     if isinstance(document, list):
         return [resolved(item) for item in document]
     if document == PLACEHOLDER_CONTRACT_SET_ID:
-        return bridge.CONTRACT_SET_ID
+        return agent_mux_projection.CONTRACT_SET_ID
     return document
 
 
@@ -125,7 +132,7 @@ class _Clock:
 
 def session_over_an_empty_corpus(
     tmp: str,
-) -> tuple[bridge.BridgeSession, list[dict[str, Any]], _Clock]:
+) -> tuple[bridge_session.BridgeSession, list[dict[str, Any]], _Clock]:
     """A session whose projection is a real but empty walk the test can replace.
 
     The first snapshot is genuinely built, so the shape under test is the shape
@@ -136,14 +143,14 @@ def session_over_an_empty_corpus(
     plans_root.mkdir()
     state_dir = Path(tmp) / "state"
     snapshots = [
-        bridge.build_runs_snapshot(
+        bridge_projection.build_runs_snapshot(
             state_dir=state_dir,
             plan_roots=(plans_root,),
             include_default_dirs=False,
         )
     ]
     clock = _Clock()
-    session = bridge.BridgeSession(
+    session = bridge_session.BridgeSession(
         snapshot_builder=lambda: snapshots[-1],
         state_dir=state_dir,
         clock=clock,
@@ -152,7 +159,7 @@ def session_over_an_empty_corpus(
 
 
 def request(
-    session: bridge.BridgeSession,
+    session: bridge_session.BridgeSession,
     method: str,
     params: dict[str, Any] | None = None,
     *,
@@ -161,13 +168,13 @@ def request(
     """Round-trip one request through the framing the wire actually uses."""
     frame: dict[str, Any] = {
         "type": "request",
-        "protocol": bridge.PROTOCOL_VERSION,
+        "protocol": bridge_protocol.PROTOCOL_VERSION,
         "id": request_id,
         "method": method,
     }
     if params is not None:
         frame["params"] = params
-    response = session.handle_frame(bridge.encode_frame(frame).rstrip(b"\n"))
+    response = session.handle_frame(bridge_protocol.encode_frame(frame).rstrip(b"\n"))
     assert response is not None
     return response
 
@@ -176,18 +183,24 @@ class ContractVocabularyTests(unittest.TestCase):
     def test_the_bridge_serves_the_corpus_it_ships_with(self) -> None:
         manifest = contract.read_manifest()
 
-        self.assertEqual(bridge.CONTRACT_SET_ID, contract.contract_set_id())
-        self.assertEqual(bridge.CONTRACT_SET_ID, manifest["current_contract_set_id"])
+        self.assertEqual(
+            agent_mux_projection.CONTRACT_SET_ID, contract.contract_set_id()
+        )
+        self.assertEqual(
+            agent_mux_projection.CONTRACT_SET_ID, manifest["current_contract_set_id"]
+        )
 
     def test_the_manifest_pins_the_live_protocol_vocabulary(self) -> None:
         declared = capabilities()
 
-        self.assertEqual(list(bridge.CAPABILITIES), declared["bridge_methods"])
+        self.assertEqual(list(bridge_session.CAPABILITIES), declared["bridge_methods"])
         self.assertEqual(
-            list(bridge.MUTATION_METHODS), declared["bridge_mutation_methods"]
+            list(bridge_protocol.MUTATION_METHODS), declared["bridge_mutation_methods"]
         )
-        self.assertEqual(list(bridge.EVENT_NAMES), declared["bridge_events"])
-        self.assertEqual(list(bridge.ERROR_CODES), declared["bridge_error_codes"])
+        self.assertEqual(list(bridge_protocol.EVENT_NAMES), declared["bridge_events"])
+        self.assertEqual(
+            list(bridge_protocol.ERROR_CODES), declared["bridge_error_codes"]
+        )
 
     def test_the_component_versions_the_contract_set_pins(self) -> None:
         components = contract.current_contract_set(contract.read_manifest())[
@@ -195,34 +208,39 @@ class ContractVocabularyTests(unittest.TestCase):
         ]
 
         self.assertEqual(
-            bridge.PROTOCOL_VERSION,
+            bridge_protocol.PROTOCOL_VERSION,
             components[contract.COMPONENT_BRIDGE_PROTOCOL]["schema_version"],
         )
 
     def test_every_mutation_method_is_a_capability_with_a_handler(self) -> None:
-        for method in bridge.MUTATION_METHODS:
+        for method in bridge_protocol.MUTATION_METHODS:
             with self.subTest(method=method):
-                self.assertIn(method, bridge.CAPABILITIES)
-                self.assertIn(method, bridge.METHOD_HANDLERS)
+                self.assertIn(method, bridge_session.CAPABILITIES)
+                self.assertIn(method, bridge_session.METHOD_HANDLERS)
 
     def test_events_are_not_advertised_as_callable_methods(self) -> None:
         """Protocol 1 mixed the two; a client could not tell them apart."""
-        self.assertEqual(set(), set(bridge.EVENT_NAMES) & set(bridge.CAPABILITIES))
+        self.assertEqual(
+            set(), set(bridge_protocol.EVENT_NAMES) & set(bridge_session.CAPABILITIES)
+        )
 
     def test_protocol_2_appends_error_codes_and_removes_none(self) -> None:
         self.assertEqual(
-            [bridge.ERROR_CONTRACT_SET_MISMATCH, bridge.ERROR_STALE_SNAPSHOT],
-            list(bridge.ERROR_CODES[-2:]),
+            [
+                bridge_protocol.ERROR_CONTRACT_SET_MISMATCH,
+                bridge_protocol.ERROR_STALE_SNAPSHOT,
+            ],
+            list(bridge_protocol.ERROR_CODES[-2:]),
         )
 
 
 class HelloTests(unittest.TestCase):
     def test_the_served_hello_validates_against_the_canonical_schema(self) -> None:
-        self.assertEqual([], problems(bridge.hello_payload(), "hello"))
+        self.assertEqual([], problems(bridge_session.hello_payload(), "hello"))
 
     def test_the_served_hello_matches_the_canonical_fixture(self) -> None:
         expected = resolved(fixture("hello")["document"])
-        served = bridge.hello_payload()
+        served = bridge_session.hello_payload()
 
         self.assertEqual(set(expected), set(served))
         for key in expected:
@@ -237,9 +255,10 @@ class HelloTests(unittest.TestCase):
     ) -> None:
         """One identifier pins every component version, so they cannot drift."""
         self.assertEqual(
-            bridge.CONTRACT_SET_ID, bridge.hello_payload()["contract_set_id"]
+            agent_mux_projection.CONTRACT_SET_ID,
+            bridge_session.hello_payload()["contract_set_id"],
         )
-        self.assertTrue(bridge.hello_payload()["handshake_required"])
+        self.assertTrue(bridge_session.hello_payload()["handshake_required"])
 
     def test_a_protocol_1_hello_is_rejected_by_the_canonical_schema(self) -> None:
         retired = fixture("hello-protocol-1", valid=False)
@@ -258,7 +277,9 @@ class SnapshotTests(unittest.TestCase):
 
         self.assertEqual([], problems(response, "runs_snapshot_response"))
         self.assertTrue(response["ok"])
-        self.assertEqual(bridge.CONTRACT_SET_ID, response["result"]["contract_set_id"])
+        self.assertEqual(
+            agent_mux_projection.CONTRACT_SET_ID, response["result"]["contract_set_id"]
+        )
 
     def test_a_served_snapshot_carries_the_canonical_result_keys(self) -> None:
         expected = set(fixture("runs-snapshot")["document"]["result"])
@@ -273,21 +294,25 @@ class SnapshotTests(unittest.TestCase):
     ) -> None:
         result = fixture("runs-snapshot")["document"]["result"]
 
-        self.assertEqual(bridge.PROTOCOL_VERSION, result["protocol"])
+        self.assertEqual(bridge_protocol.PROTOCOL_VERSION, result["protocol"])
         self.assertEqual(len(result["rows"]), result["row_count"])
         for row in result["rows"]:
             self.assertEqual(ROW_KEYS, set(row))
-            self.assertIn(row["primary_state"], bridge.ACTIVE_PRIMARY_STATES)
-            self.assertLessEqual(set(row["actions"]), set(bridge.CAPABILITIES))
+            self.assertIn(row["primary_state"], bridge_protocol.ACTIVE_PRIMARY_STATES)
+            self.assertLessEqual(set(row["actions"]), set(bridge_session.CAPABILITIES))
             if row["question"] is not None:
                 self.assertEqual(QUESTION_KEYS, set(row["question"]))
-                self.assertIn(row["question"]["context_kind"], bridge.CONTEXT_KINDS)
+                self.assertIn(
+                    row["question"]["context_kind"], bridge_protocol.CONTEXT_KINDS
+                )
 
     def test_the_cadence_block_lets_a_client_label_its_own_staleness(self) -> None:
         cadence = fixture("runs-snapshot")["document"]["result"]["projection"]
 
-        self.assertEqual(set(bridge.PROJECTION_KEYS), set(cadence))
-        self.assertEqual(bridge.POLL_INTERVAL_SECONDS, cadence["interval_seconds"])
+        self.assertEqual(set(bridge_workers.PROJECTION_KEYS), set(cadence))
+        self.assertEqual(
+            bridge_protocol.POLL_INTERVAL_SECONDS, cadence["interval_seconds"]
+        )
         # The declared floor is the one number a client must not believe: the
         # fixture is a corpus that cannot be walked inside it.
         self.assertGreater(
@@ -322,9 +347,9 @@ class HandshakeTests(unittest.TestCase):
             session, snapshots, _ = session_over_an_empty_corpus(tmp)
             response = request(
                 session,
-                bridge.METHOD_HANDSHAKE,
+                bridge_protocol.METHOD_HANDSHAKE,
                 {
-                    "contract_set_id": bridge.CONTRACT_SET_ID,
+                    "contract_set_id": agent_mux_projection.CONTRACT_SET_ID,
                     "snapshot_digest": snapshots[-1]["digest"],
                 },
             )
@@ -335,7 +360,9 @@ class HandshakeTests(unittest.TestCase):
             response["result"].keys(),
         )
         self.assertTrue(response["result"]["mutations_enabled"])
-        self.assertEqual(bridge.CONTRACT_SET_ID, response["result"]["contract_set_id"])
+        self.assertEqual(
+            agent_mux_projection.CONTRACT_SET_ID, response["result"]["contract_set_id"]
+        )
         self.assertEqual(snapshots[-1]["digest"], response["result"]["snapshot_digest"])
 
     def test_a_handshake_against_a_snapshot_the_bridge_no_longer_holds(self) -> None:
@@ -343,9 +370,9 @@ class HandshakeTests(unittest.TestCase):
             session, snapshots, _ = session_over_an_empty_corpus(tmp)
             response = request(
                 session,
-                bridge.METHOD_HANDSHAKE,
+                bridge_protocol.METHOD_HANDSHAKE,
                 {
-                    "contract_set_id": bridge.CONTRACT_SET_ID,
+                    "contract_set_id": agent_mux_projection.CONTRACT_SET_ID,
                     "snapshot_digest": "f" * 64,
                 },
             )
@@ -360,7 +387,7 @@ class HandshakeTests(unittest.TestCase):
             session, _, _ = session_over_an_empty_corpus(tmp)
             response = request(
                 session,
-                bridge.METHOD_HANDSHAKE,
+                bridge_protocol.METHOD_HANDSHAKE,
                 {"contract_set_id": "asl-amx-1.deadbeefdeadbeef"},
             )
             # A mismatch must not cost the client its read-only access.
@@ -368,10 +395,13 @@ class HandshakeTests(unittest.TestCase):
 
         self.assertEqual([], problems(response, "error_response"))
         self.assertFalse(response["ok"])
-        self.assertEqual(bridge.ERROR_CONTRACT_SET_MISMATCH, response["error"]["code"])
+        self.assertEqual(
+            bridge_protocol.ERROR_CONTRACT_SET_MISMATCH, response["error"]["code"]
+        )
         self.assertFalse(response["error"]["retryable"])
         self.assertEqual(
-            bridge.CONTRACT_SET_ID, response["error"]["details"]["contract_set_id"]
+            agent_mux_projection.CONTRACT_SET_ID,
+            response["error"]["details"]["contract_set_id"],
         )
         self.assertTrue(reads["ok"])
 
@@ -381,12 +411,12 @@ class HandshakeTests(unittest.TestCase):
             session, _, _ = session_over_an_empty_corpus(tmp)
             first = request(
                 session,
-                bridge.METHOD_HANDSHAKE,
+                bridge_protocol.METHOD_HANDSHAKE,
                 {"contract_set_id": "asl-amx-1.deadbeefdeadbeef"},
             )
             second = request(
                 session,
-                bridge.METHOD_HANDSHAKE,
+                bridge_protocol.METHOD_HANDSHAKE,
                 {"contract_set_id": "asl-amx-1.0123456789abcdef"},
                 request_id="req-2",
             )
@@ -411,7 +441,9 @@ class MutationGateTests(unittest.TestCase):
             response = request(session, intervention.ACTION_REPLY, self.reply_params())
 
         self.assertEqual([], problems(response, "error_response"))
-        self.assertEqual(bridge.ERROR_CONTRACT_SET_MISMATCH, response["error"]["code"])
+        self.assertEqual(
+            bridge_protocol.ERROR_CONTRACT_SET_MISMATCH, response["error"]["code"]
+        )
         self.assertFalse(response["error"]["retryable"])
 
     def test_a_mutation_after_the_snapshot_moved_is_refused_as_stale(self) -> None:
@@ -419,15 +451,15 @@ class MutationGateTests(unittest.TestCase):
             session, snapshots, clock = session_over_an_empty_corpus(tmp)
             request(
                 session,
-                bridge.METHOD_HANDSHAKE,
+                bridge_protocol.METHOD_HANDSHAKE,
                 {
-                    "contract_set_id": bridge.CONTRACT_SET_ID,
+                    "contract_set_id": agent_mux_projection.CONTRACT_SET_ID,
                     "snapshot_digest": snapshots[-1]["digest"],
                 },
             )
             moved = dict(snapshots[-1])
             moved["warnings"] = ["the corpus moved"]
-            moved["digest"] = bridge.snapshot_digest(moved)
+            moved["digest"] = bridge_projection.snapshot_digest(moved)
             snapshots.append(moved)
             clock.now += 60.0
             response = request(
@@ -438,7 +470,9 @@ class MutationGateTests(unittest.TestCase):
             )
 
         self.assertEqual([], problems(response, "error_response"))
-        self.assertEqual(bridge.ERROR_STALE_SNAPSHOT, response["error"]["code"])
+        self.assertEqual(
+            bridge_protocol.ERROR_STALE_SNAPSHOT, response["error"]["code"]
+        )
         # Retryable in the narrow protocol sense: refresh and handshake again.
         self.assertTrue(response["error"]["retryable"])
         self.assertEqual(
@@ -450,15 +484,15 @@ class MutationGateTests(unittest.TestCase):
             session, snapshots, clock = session_over_an_empty_corpus(tmp)
             request(
                 session,
-                bridge.METHOD_HANDSHAKE,
+                bridge_protocol.METHOD_HANDSHAKE,
                 {
-                    "contract_set_id": bridge.CONTRACT_SET_ID,
+                    "contract_set_id": agent_mux_projection.CONTRACT_SET_ID,
                     "snapshot_digest": snapshots[-1]["digest"],
                 },
             )
             moved = dict(snapshots[-1])
             moved["warnings"] = ["the corpus moved"]
-            moved["digest"] = bridge.snapshot_digest(moved)
+            moved["digest"] = bridge_projection.snapshot_digest(moved)
             snapshots.append(moved)
             clock.now += 60.0
             reads = request(session, "runs.snapshot", request_id="req-2")
@@ -473,14 +507,14 @@ class MutationGateTests(unittest.TestCase):
             session, snapshots, clock = session_over_an_empty_corpus(tmp)
             moved = dict(snapshots[-1])
             moved["warnings"] = ["the corpus moved"]
-            moved["digest"] = bridge.snapshot_digest(moved)
+            moved["digest"] = bridge_projection.snapshot_digest(moved)
             snapshots.append(moved)
             clock.now += 60.0
             response = request(
                 session,
-                bridge.METHOD_HANDSHAKE,
+                bridge_protocol.METHOD_HANDSHAKE,
                 {
-                    "contract_set_id": bridge.CONTRACT_SET_ID,
+                    "contract_set_id": agent_mux_projection.CONTRACT_SET_ID,
                     "snapshot_digest": moved["digest"],
                 },
             )
@@ -496,20 +530,25 @@ class MutationGateTests(unittest.TestCase):
         self.assertTrue(response["result"]["mutations_enabled"])
         self.assertNotIn(
             mutation["error"]["code"],
-            {bridge.ERROR_CONTRACT_SET_MISMATCH, bridge.ERROR_STALE_SNAPSHOT},
+            {
+                bridge_protocol.ERROR_CONTRACT_SET_MISMATCH,
+                bridge_protocol.ERROR_STALE_SNAPSHOT,
+            },
         )
 
     def test_reading_methods_never_require_a_handshake(self) -> None:
-        readable = set(bridge.CAPABILITIES) - set(bridge.MUTATION_METHODS)
+        readable = set(bridge_session.CAPABILITIES) - set(
+            bridge_protocol.MUTATION_METHODS
+        )
 
         self.assertEqual(
             {
-                bridge.METHOD_HANDSHAKE,
+                bridge_protocol.METHOD_HANDSHAKE,
                 "runs.snapshot",
                 "question.get",
                 "workbench.ensure",
-                bridge.METHOD_REDIRECT_STATUS,
-                bridge.METHOD_RECOVER_CONVERSATION,
+                bridge_protocol.METHOD_REDIRECT_STATUS,
+                bridge_protocol.METHOD_RECOVER_CONVERSATION,
             },
             readable,
         )
@@ -522,10 +561,10 @@ class FrameBoundTests(unittest.TestCase):
         ):
             document = json.loads(path.read_text(encoding="utf-8"))["document"]
             with self.subTest(fixture=path.name):
-                encoded = bridge.encode_frame(document)
+                encoded = bridge_protocol.encode_frame(document)
                 self.assertTrue(encoded.endswith(b"\n"))
                 self.assertEqual(1, encoded.count(b"\n"))
-                self.assertLessEqual(len(encoded), bridge.MAX_FRAME_BYTES)
+                self.assertLessEqual(len(encoded), bridge_protocol.MAX_FRAME_BYTES)
 
     def test_the_fixtures_carry_a_placeholder_rather_than_the_live_identifier(
         self,
@@ -536,7 +575,8 @@ class FrameBoundTests(unittest.TestCase):
         ):
             with self.subTest(fixture=path.name):
                 self.assertNotIn(
-                    bridge.CONTRACT_SET_ID, path.read_text(encoding="utf-8")
+                    agent_mux_projection.CONTRACT_SET_ID,
+                    path.read_text(encoding="utf-8"),
                 )
 
 
@@ -546,17 +586,19 @@ class ReceiptAndLinkTests(unittest.TestCase):
         event = fixture("operation-updated-event")["document"]
 
         self.assertEqual(set(receipt), set(event["data"]))
-        self.assertIn(receipt["status"], bridge.OPERATION_STATUSES)
-        self.assertIn(event["data"]["status"], bridge.OPERATION_TERMINAL_STATUSES)
+        self.assertIn(receipt["status"], bridge_protocol.OPERATION_STATUSES)
+        self.assertIn(
+            event["data"]["status"], bridge_protocol.OPERATION_TERMINAL_STATUSES
+        )
         # A receipt only ever describes a mutation, so its method is drawn from
         # the gated subset rather than from every capability.
-        self.assertIn(receipt["method"], bridge.MUTATION_METHODS)
-        self.assertEqual(bridge.EVENT_OPERATION_UPDATED, event["event"])
+        self.assertIn(receipt["method"], bridge_protocol.MUTATION_METHODS)
+        self.assertEqual(bridge_protocol.EVENT_OPERATION_UPDATED, event["event"])
 
     def test_the_stale_token_fixture_uses_a_declared_code(self) -> None:
         error = fixture("stale-action-token-error")["document"]["error"]
 
-        self.assertIn(error["code"], bridge.ERROR_CODES)
+        self.assertIn(error["code"], bridge_protocol.ERROR_CODES)
         self.assertEqual(intervention.REASON_STALE_ACTION_TOKEN, error["code"])
         # A stale token is retryable in the narrow sense the protocol means:
         # refresh the snapshot and reissue. It is not a licence to resubmit the
@@ -567,16 +609,16 @@ class ReceiptAndLinkTests(unittest.TestCase):
     def test_workbench_link_is_a_loopback_url_with_a_declared_focus(self) -> None:
         link = fixture("workbench-link")["document"]["result"]
 
-        self.assertIn(link["focus"], bridge.WORKBENCH_FOCUS_VALUES)
+        self.assertIn(link["focus"], bridge_protocol.WORKBENCH_FOCUS_VALUES)
         self.assertTrue(link["url"].startswith("http://127.0.0.1:"))
         self.assertIn("token=", link["url"])
 
     def test_the_runs_changed_event_names_a_declared_event(self) -> None:
         event = fixture("runs-changed-event")["document"]
 
-        self.assertEqual(bridge.EVENT_RUNS_CHANGED, event["event"])
-        self.assertIn(event["event"], bridge.EVENT_NAMES)
-        self.assertEqual(bridge.PROTOCOL_VERSION, event["protocol"])
+        self.assertEqual(bridge_protocol.EVENT_RUNS_CHANGED, event["event"])
+        self.assertIn(event["event"], bridge_protocol.EVENT_NAMES)
+        self.assertEqual(bridge_protocol.PROTOCOL_VERSION, event["protocol"])
 
 
 if __name__ == "__main__":

@@ -16,7 +16,8 @@ from agent_session_loop import (
     events,
     process_tree,
     run_commit,
-    turn_execution,
+    turn_execution_constants,
+    turn_execution_hang_sentinel,
 )
 from tests.support import (
     read_jsonl,
@@ -51,7 +52,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
         def sample_tree(pid: int):
             return samples.pop(0)
 
-        sentinel = turn_execution.HangSentinel(
+        sentinel = turn_execution_hang_sentinel.HangSentinel(
             sample_tree=sample_tree,
             monotonic=time.monotonic,
             trigger_idle_seconds=120.0,
@@ -92,7 +93,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
 
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
         block = state["active_turn"]["hang_suspected"]
-        self.assertEqual(turn_execution.HANG_REASON_ZERO_CPU, block["reason"])
+        self.assertEqual(turn_execution_constants.HANG_REASON_ZERO_CPU, block["reason"])
         self.assertEqual(4242, block["harness_pid"])
         self.assertEqual(2, block["confirm_samples"])
         self.assertGreaterEqual(block["idle_seconds"], 120.0)
@@ -106,7 +107,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
         ]
         self.assertEqual(1, len(suspected))
         self.assertEqual(
-            turn_execution.HANG_REASON_ZERO_CPU,
+            turn_execution_constants.HANG_REASON_ZERO_CPU,
             suspected[0]["payload"]["hang_suspected"]["reason"],
         )
 
@@ -126,7 +127,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
             if record["name"] == events.TURN_HEARTBEAT_EVENT
         ]
         self.assertEqual(
-            turn_execution.HANG_REASON_ZERO_CPU,
+            turn_execution_constants.HANG_REASON_ZERO_CPU,
             heartbeats[-1]["payload"]["hang_suspected"]["reason"],
         )
 
@@ -142,14 +143,14 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
         ]
         self.assertEqual(1, len(cleared))
         self.assertEqual(
-            turn_execution.HANG_REASON_ZERO_CPU,
+            turn_execution_constants.HANG_REASON_ZERO_CPU,
             cleared[0]["payload"]["hang_suspected"]["reason"],
         )
 
     def _live_turn(
         self, sample_tree, *, result_grace_seconds: float = 45.0
     ) -> run_commit._LiveTurn:
-        sentinel = turn_execution.HangSentinel(
+        sentinel = turn_execution_hang_sentinel.HangSentinel(
             sample_tree=sample_tree,
             monotonic=time.monotonic,
             trigger_idle_seconds=120.0,

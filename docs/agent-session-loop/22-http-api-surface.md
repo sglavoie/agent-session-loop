@@ -339,7 +339,7 @@ guard refusal closes the row `cancelled` on the way past, so a withdrawn
 submission stops holding the plan's run-start scope instead of blocking
 every later one.
 
-**A launched run gets its own session.** `workbench.launch_plan` passes
+**A launched run gets its own session.** `workbench_launch.launch_plan` passes
 `start_new_session=True`, matching the `AbandonProcessGroup` the launchd
 agents already set. A Ctrl-C in the terminal running `asl workbench
 serve`, a connector going away, or a closing terminal each signals a
@@ -413,10 +413,10 @@ backwards-compatible — no existing key is renamed or removed.
 - `urgency_rank` (int) — lower means higher priority; the queue sorts
   ascending by default. Operator-blocking states come first.
 - `urgency_group` (string) — one of `needs-action`, `in-progress`,
-  `ready`, or `complete`. Mirrors `workbench.URGENCY_GROUPS`.
+  `ready`, or `complete`. Mirrors `workbench_summary_model.URGENCY_GROUPS`.
 - `activity_label` (string) — short status string for the row
   ("Awaiting reply", "Running", "Complete", …). Mirrors
-  `workbench.ACTIVITY_LABEL_BY_STATE`.
+  `workbench_summary_model.ACTIVITY_LABEL_BY_STATE`.
 - `concise_reason` (string) — one-line cause behind the current state
   (pause reason, last failure summary, etc.).
 - `last_activity_at` (ISO 8601 string or `null`) — most recent
@@ -424,7 +424,7 @@ backwards-compatible — no existing key is renamed or removed.
 - `last_activity_source` (string or `null`) — provenance of the
   timestamp. One of `active-verification`, `active-turn`,
   `run-finished`, `run-started`, `lock-created`, `progress-journal`.
-  Mirrors `workbench.LAST_ACTIVITY_SOURCES`.
+  Mirrors `workbench_summary_model.LAST_ACTIVITY_SOURCES`.
 - `completed_at` (ISO 8601 string or `null`) — when the plan reached
   `primary_state === "complete"`, sourced from the latest `progress.md`
   entry timestamp and falling back to the runner `run_finished_at`. It
@@ -452,12 +452,12 @@ backwards-compatible — no existing key is renamed or removed.
   compact and full Recovery Center payloads expose the identical object.
 
 Urgency rank constants (lower = higher priority), mirrored from
-`workbench.URGENCY_RANK_BY_STATE`. The `activity_label` column shows
+`workbench_summary_model.URGENCY_RANK_BY_STATE`. The `activity_label` column shows
 the literal UI badge string the queue renders for each state, so
 external readers can predict row text without consulting
-`workbench.ACTIVITY_LABEL_BY_STATE`. A zero-pending, eligible review
+`workbench_summary_model.ACTIVITY_LABEL_BY_STATE`. A zero-pending, eligible review
 continuation keeps the `recent` state but uses the distinct
-`workbench.REVIEW_CONTINUATION_ACTIVITY_LABEL` badge:
+`workbench_summary_model.REVIEW_CONTINUATION_ACTIVITY_LABEL` badge:
 
 | Primary state     | urgency_rank | urgency_group | activity_label                |
 | ----------------- | -----------: | ------------- | ----------------------------- |
@@ -472,8 +472,8 @@ continuation keeps the `recent` state but uses the distinct
 | ready             |           80 | ready         | Ready to run                  |
 | complete          |           90 | complete      | All sessions complete         |
 
-The exported Python constants (`workbench.URGENCY_GROUPS`,
-`workbench.LAST_ACTIVITY_SOURCES`, `workbench.URGENCY_RANK_BY_STATE`,
-`workbench.URGENCY_GROUP_BY_STATE`, `workbench.ACTIVITY_LABEL_BY_STATE`, and
-`workbench.REVIEW_CONTINUATION_ACTIVITY_LABEL`) are the source of truth — keep
+The exported Python constants (`workbench_summary_model.URGENCY_GROUPS`,
+`workbench_summary_model.LAST_ACTIVITY_SOURCES`, `workbench_summary_model.URGENCY_RANK_BY_STATE`,
+`workbench_summary_model.URGENCY_GROUP_BY_STATE`, `workbench_summary_model.ACTIVITY_LABEL_BY_STATE`, and
+`workbench_summary_model.REVIEW_CONTINUATION_ACTIVITY_LABEL`) are the source of truth — keep
 any external code that branches on these strings in sync with that module.

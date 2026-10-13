@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .authoring import PlanTransaction
+from .authoring_transaction import PlanTransaction
 from .contracts import COMPLETION_CONTRACT_HEADING
 from .plans_errors import PlanError
 from .plans_files import canonicalize_path

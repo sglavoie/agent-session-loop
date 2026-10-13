@@ -11,7 +11,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import authoring, cli, repository_registration
+from agent_session_loop import authoring_parse, cli, repository_registration
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     _contract_block,
@@ -150,7 +150,7 @@ class RegisterRepositoriesSourcePlanTests(unittest.TestCase):
             "| tundra_svc | tundra_svc | https://github.com/tundra/SVC |",
             migrated,
         )
-        parsed = authoring.parse_plan_document(migrated)
+        parsed = authoring_parse.parse_plan_document(migrated)
         self.assertEqual(
             [["tundra_OAK", "tundra_svc"], ["tundra_OAK"]],
             [list(session.scope.reads) for session in parsed.sessions],

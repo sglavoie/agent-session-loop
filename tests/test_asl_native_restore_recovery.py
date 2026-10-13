@@ -65,7 +65,7 @@ from agent_session_loop import (
     redirect_store,
     restore_diagnosis,
     state,
-    turn_execution,
+    turn_execution_artifacts,
 )
 from tests.test_asl_codex_app_server import (
     FAKE_APP_SERVER_FIXTURE,
@@ -923,7 +923,7 @@ class RefusedRestoreDispositionTests(unittest.TestCase):
                 self.assertEqual(expected, disposition)
 
     def test_the_turn_record_names_the_refusal_the_run_pauses_under(self) -> None:
-        status = turn_execution.turn_status_result(
+        status = turn_execution_artifacts.turn_status_result(
             result=self._result(),
             status_changes=(),
             pending_completed=(),

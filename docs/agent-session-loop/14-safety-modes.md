@@ -147,7 +147,7 @@ value is recorded as `other`, and an unset variable means `direct`.
 Every launcher that spawns an `asl` child marks it, so a supervisor reading
 `asl metrics` can tell their own calls apart from internal automation. The
 autopilot helper's central child environment marks its `asl run`, `asl status`,
-and `asl questions` subprocesses as `autopilot`; `workbench.launch_plan` marks
+and `asl questions` subprocesses as `autopilot`; `workbench_launch.launch_plan` marks
 its `python -m agent_session_loop run` child as `workbench`; and the install
 verifier marks its `asl status --json` smoke call as `install-verify`. Anything
 left is `direct`. The marker is always applied **after** the launcher's other

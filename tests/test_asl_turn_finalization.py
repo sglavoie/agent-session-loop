@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from agent_session_loop import (
-    assurance_models,
+    assurance_models_findings,
+    assurance_models_summary,
     contracts,
     events,
     handoff_correction,
@@ -25,11 +26,12 @@ from agent_session_loop import (
     review_session_body,
     review_session_contract,
     review_transitions,
-    run_coordination,
+    run_coordination_terminal,
     run_persistence,
     run_termination,
     supervisor_audit,
-    turn_execution,
+    turn_execution_artifacts,
+    turn_execution_commit,
     turn_settlement,
     verification,
     verification_transitions,
@@ -68,20 +70,20 @@ def set_handoff(session_path: Path, *, status: str, files_modified: str | None) 
 
 class TurnFinalizationShapeTests(unittest.TestCase):
     def test_finalization_carries_execution_state_only(self) -> None:
-        fields = tuple(turn_execution.TurnFinalization.__dataclass_fields__)
+        fields = tuple(turn_execution_commit.TurnFinalization.__dataclass_fields__)
         self.assertEqual(("result", "after", "plan_error", "turn_payload"), fields)
 
     def test_finalization_exposes_no_accepted_completion(self) -> None:
         public = [
             name
-            for name in vars(turn_execution.TurnFinalization)
+            for name in vars(turn_execution_commit.TurnFinalization)
             if not name.startswith("_")
-            and callable(getattr(turn_execution.TurnFinalization, name, None))
+            and callable(getattr(turn_execution_commit.TurnFinalization, name, None))
         ]
         self.assertEqual([], public)
 
     def test_execution_phase_never_announces_turn_finished(self) -> None:
-        source = inspect.getsource(turn_execution.finalize_turn_execution)
+        source = inspect.getsource(turn_execution_commit.finalize_turn_execution)
         self.assertIn("TURN_EXECUTION_FINISHED_EVENT", source)
         self.assertNotIn("turn_finished", source)
 
@@ -101,7 +103,7 @@ class TurnFinalizationShapeTests(unittest.TestCase):
         )
 
     def test_turn_result_is_written_durably(self) -> None:
-        source = inspect.getsource(turn_execution.write_turn_artifacts)
+        source = inspect.getsource(turn_execution_artifacts.write_turn_artifacts)
         self.assertIn(
             'durability.write_json_file(paths["result"], payload, durable=True)', source
         )
@@ -1370,7 +1372,7 @@ class DegradedAssuranceTests(unittest.TestCase):
         *,
         issue_ids: tuple[str, ...] = (),
     ) -> dict[str, Any]:
-        return assurance_models.AssuranceSummary(
+        return assurance_models_summary.AssuranceSummary(
             run_id="20260619T150000000000Z-4242",
             state=state,
             eligible=True,
@@ -1378,14 +1380,14 @@ class DegradedAssuranceTests(unittest.TestCase):
             issue_ids=issue_ids,
             new_issue_count=len(issue_ids),
             artifacts=(
-                assurance_models.EvidenceRef(
+                assurance_models_findings.EvidenceRef(
                     kind="state", locator="state/state.json", detail="run state"
                 ),
             ),
         ).to_dict()
 
     def record(self, payload: dict[str, Any]) -> None:
-        run_coordination.record_degraded_assurance(
+        run_coordination_terminal.record_degraded_assurance(
             payload, persistence=self.persistence
         )
 

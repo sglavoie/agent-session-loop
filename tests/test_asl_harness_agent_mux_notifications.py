@@ -16,7 +16,7 @@ from agent_session_loop import (
     config,
     plans_files,
     run_persistence,
-    turn_execution,
+    turn_execution_protocols,
 )
 from tests.harness_integration_base import FakeHarnessIntegrationBase
 from tests.harness_integration_support import LOOP_RUN_TIMEOUT_SECONDS
@@ -83,7 +83,7 @@ class AgentMuxNotificationTests(FakeHarnessIntegrationBase):
                 side_effect=notify_started,
             ),
             mock.patch.object(
-                turn_execution,
+                turn_execution_protocols,
                 "notify_turn_started",
                 side_effect=notify_turn_started,
             ),
@@ -280,7 +280,7 @@ class AgentMuxNotificationTests(FakeHarnessIntegrationBase):
 
         with (
             mock.patch.object(
-                turn_execution,
+                turn_execution_protocols,
                 "notify_turn_started",
                 side_effect=notify_turn_started,
             ),

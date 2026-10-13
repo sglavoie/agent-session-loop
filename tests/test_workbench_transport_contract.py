@@ -50,7 +50,13 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from agent_session_loop import agent_mux_contract
-from asl_workbench import credentials, observation, store, transport
+from asl_workbench import (
+    credentials,
+    observation,
+    store_types,
+    store_workbench,
+    transport,
+)
 from asl_workbench.operations import (
     FORBIDDEN_PERSISTED_KEYS,
     OPERATION_PERSIST_FIELDS,
@@ -249,7 +255,7 @@ class ObservationsReachTheStoreUntranslated(unittest.TestCase):
     """A validated observation is an ingestible one. No shim in between."""
 
     def setUp(self) -> None:
-        self.store = store.WorkbenchStore.open(
+        self.store = store_workbench.WorkbenchStore.open(
             ":memory:", policy=POLICY, created_at=NOW
         )
         self.addCleanup(self.store.close)
@@ -257,10 +263,10 @@ class ObservationsReachTheStoreUntranslated(unittest.TestCase):
     def test_the_transport_views_are_the_stores_ingest_kinds(self) -> None:
         self.assertEqual(
             {
-                store.KIND_HEARTBEAT,
-                store.KIND_SNAPSHOT,
-                store.KIND_HISTORY_BATCH,
-                store.KIND_CATALOG_PAGE,
+                store_types.KIND_HEARTBEAT,
+                store_types.KIND_SNAPSHOT,
+                store_types.KIND_HISTORY_BATCH,
+                store_types.KIND_CATALOG_PAGE,
             },
             set(transport.OBSERVATION_VIEWS),
         )

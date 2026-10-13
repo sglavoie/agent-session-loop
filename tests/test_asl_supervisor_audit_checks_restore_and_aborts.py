@@ -11,7 +11,7 @@ from agent_session_loop import (
     events,
     state,
     supervisor_audit_checks,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_constants,
 )
 from tests import support_supervisor_audit_checks as checks_support
 from tests.support_supervisor_audit import RUN_ID
@@ -408,12 +408,15 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
         # Every replay proof is drawn from bundles written under schema
         # version 1, which spell the count `rejected_count`. Reading only the
         # new key would silently re-judge a damaged log as an undamaged one.
+        legacy_key = (
+            supervisor_audit_evidence_constants.LEGACY_UNPARSABLE_LINE_COUNT_KEY
+        )
         results = supervisor_audit_checks.run_deterministic_checks(
             {
                 "events": {
                     "summary": {
                         "available": True,
-                        supervisor_audit_evidence.LEGACY_UNPARSABLE_LINE_COUNT_KEY: 2,
+                        legacy_key: 2,
                     }
                 }
             }

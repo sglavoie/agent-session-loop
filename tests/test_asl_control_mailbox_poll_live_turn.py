@@ -24,9 +24,10 @@ from agent_session_loop import (
     mailbox_models,
     run_commit,
     run_control,
-    run_coordination,
+    run_coordination_control,
+    run_coordination_mailbox_poll,
     run_persistence,
-    turn_execution,
+    turn_execution_constants,
 )
 from tests.asl_control_support import live_active_turn
 from tests.support import (
@@ -49,11 +50,11 @@ class MailboxPollTests(unittest.TestCase):
         self.event_path = self.tmp / "events.jsonl"
         self.payload: dict[str, object] = {
             "run_id": "run-1",
-            "control": run_coordination.initial_control_payload(),
+            "control": run_coordination_control.initial_control_payload(),
         }
         self.control_payload = dict(self.payload["control"])  # type: ignore[arg-type]
         self.persistence = run_persistence._RunPersistence()
-        self.poll = run_coordination.MailboxPoll(
+        self.poll = run_coordination_mailbox_poll.MailboxPoll(
             plan_dir=self.plan_dir,
             state_dir_arg=str(self.state_dir),
             control_state=run_control.RunControlState(current_harness="codex"),
@@ -200,7 +201,7 @@ class MailboxPollTests(unittest.TestCase):
             command_id="stop-1",
         )
         control_state = run_control.RunControlState(current_harness="codex")
-        poll = run_coordination.MailboxPoll(
+        poll = run_coordination_mailbox_poll.MailboxPoll(
             plan_dir=self.plan_dir,
             state_dir_arg=str(self.state_dir),
             control_state=control_state,
@@ -436,7 +437,7 @@ class LiveTurnWakeupTests(unittest.TestCase):
             active_turn=LiveTurnSchedulerTests.active_turn(),
             heartbeat_interval=30.0,
             poll_callback=poll,
-            poll_interval=turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+            poll_interval=turn_execution_constants.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
             monotonic=clock.monotonic,
             wait=clock.wait,
             wakeup=wakeup,
@@ -467,7 +468,7 @@ class LiveTurnWakeupTests(unittest.TestCase):
             active_turn=LiveTurnSchedulerTests.active_turn(),
             heartbeat_interval=30.0,
             poll_callback=poll,
-            poll_interval=turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+            poll_interval=turn_execution_constants.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
             monotonic=clock.monotonic,
             wait=clock.wait,
             wakeup=wakeup,
@@ -490,7 +491,7 @@ class LiveTurnWakeupTests(unittest.TestCase):
                 active_turn=LiveTurnSchedulerTests.active_turn(),
                 heartbeat_interval=60.0,
                 poll_callback=polled.set,
-                poll_interval=turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+                poll_interval=turn_execution_constants.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
                 wakeup=wakeup,
             )
             with control_signal.open_wakeup_endpoint(tmp_dir, wakeup) as path:
@@ -503,7 +504,7 @@ class LiveTurnWakeupTests(unittest.TestCase):
                 self.assertTrue(polled.wait(timeout=2.0))
             self.assertLess(
                 time.monotonic() - started,
-                turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+                turn_execution_constants.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
             )
 
     def test_stop_wakes_the_poll_thread_without_a_wakeup(self) -> None:
@@ -517,7 +518,7 @@ class LiveTurnWakeupTests(unittest.TestCase):
                 active_turn=LiveTurnSchedulerTests.active_turn(),
                 heartbeat_interval=60.0,
                 poll_callback=lambda: None,
-                poll_interval=turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+                poll_interval=turn_execution_constants.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
                 wakeup=wakeup,
             )
             live_turn.start()

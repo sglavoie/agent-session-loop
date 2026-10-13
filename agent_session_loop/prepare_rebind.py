@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import harnesses, plans_metadata, plans_registry, state, state_locks, workspaces
-from .authoring import PlanTransaction
+from .authoring_transaction import PlanTransaction
 from .baseline_cache import BASELINE_RESULTS_FILENAME, BaselineCache
 from .plans_errors import PlanError
 from .plans_files import canonicalize_path

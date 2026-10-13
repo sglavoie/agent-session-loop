@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import events
-from . import supervisor_audit_evidence as audit_evidence
+from . import supervisor_audit_evidence_constants as audit_evidence_constants
+from . import supervisor_audit_evidence_helpers as audit_evidence_helpers
 from .supervisor_audit_commit_records import (
     _commit_attributions,
     _commit_repository_alias,
@@ -22,9 +23,9 @@ def _write_scope_violated_aliases(guard: Mapping[str, Any]) -> list[str]:
     return [
         str(alias)
         for alias in (
-            audit_evidence._mapping(item).get("alias")
-            or audit_evidence._mapping(item).get("repository")
-            for item in audit_evidence._sequence(guard.get("violations"))
+            audit_evidence_helpers._mapping(item).get("alias")
+            or audit_evidence_helpers._mapping(item).get("repository")
+            for item in audit_evidence_helpers._sequence(guard.get("violations"))
         )
         if alias
     ]
@@ -61,7 +62,7 @@ def _write_scope_violation_fingerprint(
             tuple(
                 sorted(
                     str(path)
-                    for path in audit_evidence._sequence(
+                    for path in audit_evidence_helpers._sequence(
                         violation.get("qualified_paths")
                     )
                     if path
@@ -69,8 +70,8 @@ def _write_scope_violation_fingerprint(
             ),
         )
         for violation in (
-            audit_evidence._mapping(item)
-            for item in audit_evidence._sequence(guard.get("violations"))
+            audit_evidence_helpers._mapping(item)
+            for item in audit_evidence_helpers._sequence(guard.get("violations"))
         )
     ]
     return tuple(sorted(entries))
@@ -151,8 +152,8 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
             reverted.add(session)
 
     for turn in context.turns:
-        result = audit_evidence._mapping(turn.get("result"))
-        guard = audit_evidence._mapping(result.get("workspace_write_guard"))
+        result = audit_evidence_helpers._mapping(turn.get("result"))
+        guard = audit_evidence_helpers._mapping(result.get("workspace_write_guard"))
         if not guard:
             continue
         observed += 1
@@ -172,13 +173,13 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
                 _write_scope_violation_fingerprint(guard),
                 guard.get("reverted_to_pending") is True,
             )
-        if audit_evidence._mapping(guard.get("unavailable")):
+        if audit_evidence_helpers._mapping(guard.get("unavailable")):
             blind.append(f"{turn.get('name')} could not be inventoried")
 
     def _pause(reason: Any, details: Mapping[str, Any]) -> None:
         """Read one scope pause, from the event log or the persisted status."""
         nonlocal observed, paused_any
-        guard = audit_evidence._mapping(details.get("workspace_write_guard"))
+        guard = audit_evidence_helpers._mapping(details.get("workspace_write_guard"))
         observed += 1
         if reason == events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE:
             blind.append("the write guard reported itself unavailable")
@@ -215,10 +216,10 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
     pause_recorded = False
     for record in context.records:
         name = record.get("name")
-        record_payload = audit_evidence._mapping(record.get("payload"))
+        record_payload = audit_evidence_helpers._mapping(record.get("payload"))
         reason = record_payload.get("reason")
-        details = audit_evidence._mapping(record_payload.get("details"))
-        guard = audit_evidence._mapping(details.get("workspace_write_guard"))
+        details = audit_evidence_helpers._mapping(record_payload.get("details"))
+        guard = audit_evidence_helpers._mapping(details.get("workspace_write_guard"))
         if name == events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT:
             observed += 1
             repair_aliases = _write_scope_violated_aliases(guard)
@@ -230,7 +231,7 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
                     "the widened write scope still excludes retained changes "
                     f"({_names(repair_aliases)})"
                 )
-            elif audit_evidence._mapping(guard.get("unavailable")):
+            elif audit_evidence_helpers._mapping(guard.get("unavailable")):
                 blind.append("the widened write scope could not be inventoried")
             elif guard.get("passed") is not True:
                 blind.append(
@@ -255,7 +256,7 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
     ):
         _pause(
             status.get("pause_reason"),
-            audit_evidence._mapping(status.get("pause_details")),
+            audit_evidence_helpers._mapping(status.get("pause_details")),
         )
 
     def _self_observed(entry: Mapping[str, Any]) -> bool:
@@ -267,7 +268,7 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
         guard observed it rather than a later commit that carried the write
         forward, so counting it made every caught head move read as an escape.
         """
-        if entry.get("origin") != audit_evidence.OBSERVED_COMMIT_ORIGIN:
+        if entry.get("origin") != audit_evidence_constants.OBSERVED_COMMIT_ORIGIN:
             return False
         if entry.get("turn") in offending_turns:
             return True

@@ -7,7 +7,14 @@ from __future__ import annotations
 import os
 import urllib.parse
 
-from agent_session_loop import plans_files, plans_metadata, state, workbench
+from agent_session_loop import (
+    plans_files,
+    plans_metadata,
+    state,
+    workbench_registry,
+    workbench_registry_models,
+    workbench_summary_model,
+)
 from tests.asl_workbench_server_support import (
     WorkbenchServerTestCase,
 )
@@ -24,13 +31,13 @@ class WorkbenchServerQueueTests(WorkbenchServerTestCase):
     """Queue and plan summary endpoints."""
 
     def test_queue_exposes_triage_payload_fields(self) -> None:
-        registry = workbench.load_registry(self.registry_path)
-        registry = workbench.upsert_pin(
+        registry = workbench_registry.load_registry(self.registry_path)
+        registry = workbench_registry.upsert_pin(
             registry,
             self.canonical_plan_dir,
             label="Alpha plan",
         )
-        workbench.save_registry(registry, self.registry_path)
+        workbench_registry.save_registry(registry, self.registry_path)
 
         server = self._start_server()
         status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
@@ -48,7 +55,9 @@ class WorkbenchServerQueueTests(WorkbenchServerTestCase):
             "searchable_text",
         ):
             self.assertIn(key, plan_payload)
-        self.assertIn(plan_payload["urgency_group"], workbench.URGENCY_GROUPS)
+        self.assertIn(
+            plan_payload["urgency_group"], workbench_summary_model.URGENCY_GROUPS
+        )
         self.assertIsInstance(plan_payload["urgency_rank"], int)
         self.assertIn("alpha plan", plan_payload["searchable_text"])
 
@@ -59,10 +68,10 @@ class WorkbenchServerQueueTests(WorkbenchServerTestCase):
             "{not-json", encoding="utf-8"
         )
         canonical_broken = plans_files.canonicalize_path(broken)
-        registry = workbench.load_registry(self.registry_path)
-        registry = workbench.upsert_pin(registry, self.canonical_plan_dir)
-        registry = workbench.upsert_pin(registry, canonical_broken)
-        workbench.save_registry(registry, self.registry_path)
+        registry = workbench_registry.load_registry(self.registry_path)
+        registry = workbench_registry.upsert_pin(registry, self.canonical_plan_dir)
+        registry = workbench_registry.upsert_pin(registry, canonical_broken)
+        workbench_registry.save_registry(registry, self.registry_path)
 
         server = self._start_server()
         status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
@@ -95,7 +104,9 @@ class WorkbenchServerQueueTests(WorkbenchServerTestCase):
             "searchable_text",
         ):
             self.assertIn(key, plan_payload)
-        self.assertIn(plan_payload["urgency_group"], workbench.URGENCY_GROUPS)
+        self.assertIn(
+            plan_payload["urgency_group"], workbench_summary_model.URGENCY_GROUPS
+        )
 
     def test_plan_endpoint_names_the_plan_by_its_manifest_title(self) -> None:
         # The queue row calls a plan by its manifest's `# H1`; the detail read
@@ -103,10 +114,11 @@ class WorkbenchServerQueueTests(WorkbenchServerTestCase):
         (self.canonical_plan_dir / "manifest.md").write_text(
             "# Ship the widget\n", encoding="utf-8"
         )
-        registry = workbench.upsert_pin(
-            workbench.load_registry(self.registry_path), self.canonical_plan_dir
+        registry = workbench_registry.upsert_pin(
+            workbench_registry.load_registry(self.registry_path),
+            self.canonical_plan_dir,
         )
-        workbench.save_registry(registry, self.registry_path)
+        workbench_registry.save_registry(registry, self.registry_path)
         server = self._start_server()
         query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
         _, queue, _ = _http_request(f"{self._base_url(server)}/api/queue")
@@ -133,13 +145,13 @@ class WorkbenchServerQueueTests(WorkbenchServerTestCase):
                 "run_id": "run-recovery-summary",
             },
         )
-        registry = workbench.load_registry(self.registry_path)
-        registry = workbench.upsert_pin(
+        registry = workbench_registry.load_registry(self.registry_path)
+        registry = workbench_registry.upsert_pin(
             registry,
             self.canonical_plan_dir,
             label="Alpha plan",
         )
-        workbench.save_registry(registry, self.registry_path)
+        workbench_registry.save_registry(registry, self.registry_path)
 
         server = self._start_server()
         status, queue_body, _ = _http_request(f"{self._base_url(server)}/api/queue")
@@ -179,14 +191,14 @@ class WorkbenchServerQueueTests(WorkbenchServerTestCase):
         # legacy contract still ships in both /api/queue and /api/plan
         # so a future refactor cannot silently regress backwards
         # compatibility.
-        registry = workbench.load_registry(self.registry_path)
-        registry = workbench.upsert_pin(
+        registry = workbench_registry.load_registry(self.registry_path)
+        registry = workbench_registry.upsert_pin(
             registry,
             self.canonical_plan_dir,
             label="Alpha plan",
-            profile=workbench.LaunchProfile(harness="codex"),
+            profile=workbench_registry_models.LaunchProfile(harness="codex"),
         )
-        workbench.save_registry(registry, self.registry_path)
+        workbench_registry.save_registry(registry, self.registry_path)
 
         legacy_keys = (
             "plan_dir",
@@ -270,13 +282,17 @@ class WorkbenchServerQueueTests(WorkbenchServerTestCase):
         # client-side, so a server-side regression here would break the
         # default triage order in the browser too.
         ready_plan = self.canonical_plan_dir
-        registry = workbench.load_registry(self.registry_path)
-        registry = workbench.upsert_pin(registry, ready_plan, label="Ready plan")
+        registry = workbench_registry.load_registry(self.registry_path)
+        registry = workbench_registry.upsert_pin(
+            registry, ready_plan, label="Ready plan"
+        )
 
         complete_dir = self.tmp_path / "plans" / "done"
         write_plan(complete_dir, ("complete", "complete"))
         complete_plan = plans_files.canonicalize_path(complete_dir)
-        registry = workbench.upsert_pin(registry, complete_plan, label="Done plan")
+        registry = workbench_registry.upsert_pin(
+            registry, complete_plan, label="Done plan"
+        )
 
         failed_dir = self.tmp_path / "plans" / "failed"
         write_plan(failed_dir, ("pending", "pending"))
@@ -294,9 +310,11 @@ class WorkbenchServerQueueTests(WorkbenchServerTestCase):
                 "active_verification": None,
             },
         )
-        registry = workbench.upsert_pin(registry, failed_plan, label="Failed plan")
+        registry = workbench_registry.upsert_pin(
+            registry, failed_plan, label="Failed plan"
+        )
 
-        workbench.save_registry(registry, self.registry_path)
+        workbench_registry.save_registry(registry, self.registry_path)
 
         server = self._start_server()
         status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
@@ -319,17 +337,17 @@ class WorkbenchServerQueueTests(WorkbenchServerTestCase):
                 msg=f"{plan_path} expected primary_state={expected_state}",
             )
             self.assertEqual(
-                workbench.URGENCY_RANK_BY_STATE[expected_state],
+                workbench_summary_model.URGENCY_RANK_BY_STATE[expected_state],
                 payload["urgency_rank"],
                 msg=f"{plan_path} urgency_rank drift",
             )
             self.assertEqual(
-                workbench.URGENCY_GROUP_BY_STATE[expected_state],
+                workbench_summary_model.URGENCY_GROUP_BY_STATE[expected_state],
                 payload["urgency_group"],
                 msg=f"{plan_path} urgency_group drift",
             )
             self.assertEqual(
-                workbench.ACTIVITY_LABEL_BY_STATE[expected_state],
+                workbench_summary_model.ACTIVITY_LABEL_BY_STATE[expected_state],
                 payload["activity_label"],
                 msg=f"{plan_path} activity_label drift",
             )
@@ -345,14 +363,14 @@ class WorkbenchServerQueueTests(WorkbenchServerTestCase):
         self.assertEqual(["failed", "ready", "complete"], sorted_by_rank)
 
     def test_queue_returns_summaries_with_registry_pins(self) -> None:
-        registry = workbench.load_registry(self.registry_path)
-        registry = workbench.upsert_pin(
+        registry = workbench_registry.load_registry(self.registry_path)
+        registry = workbench_registry.upsert_pin(
             registry,
             self.canonical_plan_dir,
             label="Alpha plan",
-            profile=workbench.LaunchProfile(harness="codex"),
+            profile=workbench_registry_models.LaunchProfile(harness="codex"),
         )
-        workbench.save_registry(registry, self.registry_path)
+        workbench_registry.save_registry(registry, self.registry_path)
 
         server = self._start_server()
         status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
@@ -364,15 +382,17 @@ class WorkbenchServerQueueTests(WorkbenchServerTestCase):
         plan_payload = plan_payloads[0]
         self.assertEqual(str(self.canonical_plan_dir), plan_payload["plan_dir"])
         self.assertEqual("Alpha plan", plan_payload["label"])
-        self.assertIn(plan_payload["primary_state"], workbench.PRIMARY_STATES)
+        self.assertIn(
+            plan_payload["primary_state"], workbench_summary_model.PRIMARY_STATES
+        )
         self.assertEqual(str(state.state_root(self.state_dir)), body["state_root"])
         self.assertTrue(body["state_root_exists"])
         self.assertEqual([], body["registry_warnings"])
 
     def test_queue_classifies_active_locked_turn_as_running(self) -> None:
-        registry = workbench.load_registry(self.registry_path)
-        registry = workbench.upsert_pin(registry, self.canonical_plan_dir)
-        workbench.save_registry(registry, self.registry_path)
+        registry = workbench_registry.load_registry(self.registry_path)
+        registry = workbench_registry.upsert_pin(registry, self.canonical_plan_dir)
+        workbench_registry.save_registry(registry, self.registry_path)
         _write_state_payload(
             self.canonical_plan_dir,
             self.state_dir,
@@ -405,10 +425,10 @@ class WorkbenchServerQueueTests(WorkbenchServerTestCase):
 
     def test_queue_surfaces_plans_from_registry_plan_roots(self) -> None:
         plan_root = plans_files.canonicalize_path(self.plan_dir.parent)
-        registry = workbench.WorkbenchRegistry(
+        registry = workbench_registry_models.WorkbenchRegistry(
             plan_roots=(str(plan_root),),
         )
-        workbench.save_registry(registry, self.registry_path)
+        workbench_registry.save_registry(registry, self.registry_path)
 
         server = self._start_server()
         status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
@@ -431,7 +451,10 @@ class WorkbenchServerQueueTests(WorkbenchServerTestCase):
         plan_payload = body["plan"]
         self.assertEqual(str(self.canonical_plan_dir), plan_payload["plan_dir"])
         self.assertIn("primary_state", plan_payload)
-        self.assertIn(plan_payload["recommended_action"], workbench.RECOMMENDED_ACTIONS)
+        self.assertIn(
+            plan_payload["recommended_action"],
+            workbench_summary_model.RECOMMENDED_ACTIONS,
+        )
 
     def test_plan_endpoint_rejects_missing_plan_dir(self) -> None:
         server = self._start_server()

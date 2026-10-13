@@ -5,8 +5,8 @@ from __future__ import annotations
 import unittest
 
 from agent_session_loop import (
-    workbench,
-    workbench_recovery,
+    workbench_recovery_models,
+    workbench_summary_model,
 )
 from tests.asl_docs_support import read_repo_text
 
@@ -24,11 +24,11 @@ class WorkbenchTriageDocsTests(unittest.TestCase):
         self.assertIn("### Recovery payload examples", docs)
         self.assertIn("`GET /api/recovery?plan_dir=<path>`", docs)
         self.assertIn("`WorkbenchRecovery.compact_payload()`", docs)
-        self.assertIn("`workbench_recovery.RECOVERY_KINDS`", docs)
+        self.assertIn("`workbench_recovery_models.RECOVERY_KINDS`", docs)
         example_start = docs.index("### Recovery payload examples")
         example_end = docs.index("Representative mappings:", example_start)
         examples = docs[example_start:example_end]
-        for kind in workbench_recovery.RECOVERY_KINDS:
+        for kind in workbench_recovery_models.RECOVERY_KINDS:
             self.assertIn(
                 f"`{kind}`",
                 docs,
@@ -78,7 +78,7 @@ class WorkbenchTriageDocsTests(unittest.TestCase):
             )
         self.assertIn("`RECOVERY_ACTION_TARGETS`", docs)
         self.assertIn("`RECOVERY_ACTION_TARGETS_BY_ID`", docs)
-        for target in workbench_recovery.RECOVERY_ACTION_TARGETS:
+        for target in workbench_recovery_models.RECOVERY_ACTION_TARGETS:
             self.assertIn(
                 f"`{target}`",
                 docs,
@@ -297,10 +297,13 @@ class WorkbenchTriageDocsTests(unittest.TestCase):
     def test_docs_urgency_table_lists_activity_labels(self) -> None:
         # The per-state activity_label column and its zero-pending review
         # continuation override are both documented so external readers can
-        # predict the exact UI badge text without consulting workbench.py.
+        # predict the exact UI badge text without consulting workbench_summary_model.py.
         docs = self._read("docs/agent-session-loop.md")
         self.assertIn("activity_label", docs)
-        for primary_state, label in workbench.ACTIVITY_LABEL_BY_STATE.items():
+        for (
+            primary_state,
+            label,
+        ) in workbench_summary_model.ACTIVITY_LABEL_BY_STATE.items():
             self.assertIn(
                 label,
                 docs,
@@ -309,7 +312,7 @@ class WorkbenchTriageDocsTests(unittest.TestCase):
                     f"{label!r} for state {primary_state!r}"
                 ),
             )
-        self.assertIn(workbench.REVIEW_CONTINUATION_ACTIVITY_LABEL, docs)
+        self.assertIn(workbench_summary_model.REVIEW_CONTINUATION_ACTIVITY_LABEL, docs)
 
 
 if __name__ == "__main__":

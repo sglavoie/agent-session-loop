@@ -45,9 +45,9 @@ def run_from_args(
     """Run one or more pending sessions from CLI arguments.
 
     The package's public entry point, reached by ``cli.py`` through the string
-    ``handler_ref="runner:run_from_args"`` and called by name from
-    ``workbench.py``, ``maintenance.py`` and ``skills/asl/scripts/asl_autopilot.py``.
-    The admission sequence and the resume overlay live in
+    ``handler_ref="runner:run_from_args"`` and called by name from ``maintenance.py``,
+    ``workbench_launch.py`` and ``skills/asl/scripts/asl_autopilot.py``. The admission
+    sequence and the resume overlay live in
     :mod:`agent_session_loop.run_entry`; this shim supplies the one collaborator
     that module may not import, the locked run in
     :mod:`agent_session_loop.run_loop`.

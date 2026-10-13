@@ -17,10 +17,10 @@ from agent_session_loop import (
     events,
     run_commit,
     run_control,
-    run_coordination,
+    run_coordination_control,
     run_persistence,
     run_reporting,
-    turn_execution,
+    turn_execution_signals,
 )
 from tests.harness_integration_base import FakeHarnessIntegrationBase
 from tests.support import (
@@ -101,7 +101,7 @@ class ActivityAndFailurePauseTests(FakeHarnessIntegrationBase):
                 "run_id": "run-1",
                 "harness": "codex",
                 "active_turn": None,
-                "control": run_coordination.initial_control_payload(),
+                "control": run_coordination_control.initial_control_payload(),
             }
             active_turn = {
                 "run_id": "run-1",
@@ -144,7 +144,7 @@ class ActivityAndFailurePauseTests(FakeHarnessIntegrationBase):
             delayed_once = False
             thread_errors: list[BaseException] = []
             original_write_json = durability.write_json_file
-            original_preview_text = turn_execution.preview_text
+            original_preview_text = turn_execution_signals.preview_text
             state_write_count = 0
 
             def delayed_write_json(
@@ -182,7 +182,7 @@ class ActivityAndFailurePauseTests(FakeHarnessIntegrationBase):
 
             def record_control() -> None:
                 try:
-                    run_coordination.record_run_control_action(
+                    run_coordination_control.record_run_control_action(
                         event_path=event_path,
                         payload=payload,
                         control_payload=dict(payload["control"]),
@@ -227,7 +227,7 @@ class ActivityAndFailurePauseTests(FakeHarnessIntegrationBase):
                 )
 
                 with mock.patch.object(
-                    turn_execution, "preview_text", side_effect=delayed_preview
+                    turn_execution_signals, "preview_text", side_effect=delayed_preview
                 ):
                     activity_thread = threading.Thread(target=record_latest_activity)
                     activity_thread.start()

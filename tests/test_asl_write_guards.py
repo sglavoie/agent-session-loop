@@ -107,7 +107,7 @@ DURABLE_WRITE_NAMES = frozenset(
 #: Which module-level function writes directly, and what it writes. Only the
 #: turn result is written here: the session-file revert belongs to
 #: `handoff_guards`, the scope widening to `workspace_evidence`, and the two
-#: events to `turn_execution` and `run_termination`, each of which owns that
+#: events to `turn_execution_commit` and `run_termination`, each of which owns that
 #: write at its own boundary. Stating it per function rather than as a flat
 #: prohibition is what makes a *fourth* writer appearing here a test failure
 #: instead of a review catch.
@@ -213,7 +213,7 @@ class RefusalShapeTests(unittest.TestCase):
                 # The pass lane writes the result too, so the refusal's own
                 # write is the last one rather than the first.
                 written = source.rindex("durability.write_json_file(")
-                recorded = source.rindex("turn_execution.record_turn_rejected(")
+                recorded = source.rindex("turn_execution_commit.record_turn_rejected(")
                 paused = source.index("run_termination._pause_run(")
                 self.assertLess(reverted, reinspected)
                 self.assertLess(reinspected, written)

@@ -29,7 +29,7 @@ and a history import that persists its checkpoint only when the connector says
 the batch was delivered. No archive retention runs, no stale lock is reclaimed,
 and no plan is repaired as a side effect of being described.
 
-**No prose leaves.** :func:`agent_session_loop.bridge.project_row` already
+**No prose leaves.** :func:`agent_session_loop.bridge_projection.project_row` already
 refuses to copy a harness's words into a row, and :func:`project_run` narrows
 further: it keeps a question's *id*, time and count and drops its body, and it
 drops ``plan_dir`` and ``workspace_root`` entirely. A plan's identity on the
@@ -84,7 +84,8 @@ from asl_workbench.remote_actions import (
 from asl_workbench.transport import MAX_FRAME_BYTES
 
 from . import (
-    bridge,
+    bridge_projection,
+    bridge_protocol,
     responses,
     state,
     workbench_catalog,
@@ -123,7 +124,7 @@ LOOP_INTERVAL_SECONDS = 0.2
 #: carries the ones an operator might act on. Borrowed from the bridge rather
 #: than restated so the two projections cannot disagree about what "active"
 #: means.
-ACTIVE_PRIMARY_STATES: tuple[str, ...] = bridge.ACTIVE_PRIMARY_STATES
+ACTIVE_PRIMARY_STATES: tuple[str, ...] = bridge_protocol.ACTIVE_PRIMARY_STATES
 
 #: Live work, which reserves snapshot space after questions that need a reply.
 _LIVE_PRIMARY_STATES = frozenset({"running", "verifying"})
@@ -381,7 +382,7 @@ class AslObservationSource:
             if summary.primary_state not in ACTIVE_PRIMARY_STATES:
                 continue
             try:
-                row = bridge.project_row(summary, state_dir=self.state_dir)
+                row = bridge_projection.project_row(summary, state_dir=self.state_dir)
             except OSError, ValueError:
                 # The plan was classified a moment ago and is unreadable now.
                 # One lost row must not cost the operator the other rows, and

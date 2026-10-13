@@ -11,7 +11,7 @@ from unittest import mock
 
 from agent_session_loop import (
     artifacts,
-    assurance_models,
+    assurance_models_vocab,
     events,
     mailbox_constants,
     plans_progress,
@@ -19,11 +19,11 @@ from agent_session_loop import (
     review,
     run_prompts,
     state,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_constants,
+    supervisor_audit_evidence_helpers,
+    supervisor_audit_evidence_redaction,
 )
-from agent_session_loop.assurance_models import (
-    AssuranceError,
-)
+from agent_session_loop.assurance_models_primitives import AssuranceError
 from tests import support_supervisor_audit_evidence as evidence_support
 
 
@@ -72,7 +72,9 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             text = bundle.to_bytes().decode("utf-8")
 
             self.assertNotIn("/etc/ssh/secret_config", text)
-            self.assertIn(supervisor_audit_evidence.REASON_OUTSIDE_APPROVED_ROOTS, text)
+            self.assertIn(
+                supervisor_audit_evidence_constants.REASON_OUTSIDE_APPROVED_ROOTS, text
+            )
 
     def test_repository_fingerprints_are_reported_as_not_recorded_when_absent(
         self,
@@ -82,7 +84,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
 
             self.assertFalse(payload["repository"]["available"])
             self.assertEqual(
-                supervisor_audit_evidence.REASON_NOT_RECORDED,
+                supervisor_audit_evidence_constants.REASON_NOT_RECORDED,
                 payload["repository"]["reason"],
             )
 
@@ -168,7 +170,9 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
                 row for row in section["sessions"] if row["session"] == "session-02"
             )
             self.assertFalse(row["available"])
-            self.assertEqual(supervisor_audit_evidence.REASON_MALFORMED, row["reason"])
+            self.assertEqual(
+                supervisor_audit_evidence_constants.REASON_MALFORMED, row["reason"]
+            )
 
     def test_generated_bytecode_never_moves_a_tree_digest(self) -> None:
         """Running an interpreter over a skill tree must not restate its version."""
@@ -180,11 +184,17 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             bytecode.parent.mkdir(parents=True)
             bytecode.write_bytes(b"one")
 
-            before = supervisor_audit_evidence._tree_digest(root, patterns=("*",))
+            before = supervisor_audit_evidence_helpers._tree_digest(
+                root, patterns=("*",)
+            )
             bytecode.write_bytes(b"two-and-rather-longer")
-            after = supervisor_audit_evidence._tree_digest(root, patterns=("*",))
+            after = supervisor_audit_evidence_helpers._tree_digest(
+                root, patterns=("*",)
+            )
             source.write_text("version two\n", encoding="utf-8")
-            edited = supervisor_audit_evidence._tree_digest(root, patterns=("*",))
+            edited = supervisor_audit_evidence_helpers._tree_digest(
+                root, patterns=("*",)
+            )
 
             self.assertEqual(before, after)
             self.assertEqual(1, before["file_count"])
@@ -212,9 +222,11 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             self.assertEqual(
                 ["app"], result["workspace_write_guard"]["authorized_aliases"]
             )
-            self.assertEqual(supervisor_audit_evidence.REDACTED, result["auth_token"])
             self.assertEqual(
-                supervisor_audit_evidence.REDACTED, result["authorization"]
+                supervisor_audit_evidence_constants.REDACTED, result["auth_token"]
+            )
+            self.assertEqual(
+                supervisor_audit_evidence_constants.REDACTED, result["authorization"]
             )
 
     def test_a_reply_origin_survives_while_a_remote_is_canonicalized(self) -> None:
@@ -238,7 +250,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
     def test_valid_audit_role_sources_survive_but_arbitrary_source_is_redacted(
         self,
     ) -> None:
-        for source in assurance_models.AUDIT_ROLE_SOURCES:
+        for source in assurance_models_vocab.AUDIT_ROLE_SOURCES:
             with self.subTest(source=source), tempfile.TemporaryDirectory() as tmp:
                 workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
                 self._rewrite_state(
@@ -255,14 +267,16 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
 
                 self.assertEqual(source, status["assurance"]["role"]["source"])
                 self.assertIn(
-                    supervisor_audit_evidence.REASON_APPLICATION_CONTENT,
+                    supervisor_audit_evidence_constants.REASON_APPLICATION_CONTENT,
                     status["assurance"]["source"],
                 )
 
     def test_control_plane_signal_sources_survive_under_any_parent(self) -> None:
         # The runner stamps this provenance under several parents, so the
         # exemption is keyed on the value rather than on the parent name.
-        for source in sorted(supervisor_audit_evidence._CONTROL_PLANE_SOURCE_VALUES):
+        for source in sorted(
+            supervisor_audit_evidence_redaction._CONTROL_PLANE_SOURCE_VALUES
+        ):
             with self.subTest(source=source), tempfile.TemporaryDirectory() as tmp:
                 workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
                 self._rewrite_state(
@@ -292,11 +306,11 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             ]
 
             self.assertIn(
-                supervisor_audit_evidence.REASON_APPLICATION_CONTENT,
+                supervisor_audit_evidence_constants.REASON_APPLICATION_CONTENT,
                 status["action_required"]["source"],
             )
             self.assertIn(
-                supervisor_audit_evidence.REASON_APPLICATION_CONTENT,
+                supervisor_audit_evidence_constants.REASON_APPLICATION_CONTENT,
                 status["pause_details"]["source"],
             )
 
@@ -348,7 +362,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
             written = {}
-            for name in assurance_models.CANONICAL_AUDIT_ARTIFACTS:
+            for name in assurance_models_vocab.CANONICAL_AUDIT_ARTIFACTS:
                 body = f"{name} body".encode()
                 (run_dir / name).write_bytes(body)
                 written[name] = artifacts.sha256_hex(body)
@@ -374,7 +388,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
                 [
                     {
                         "section": "review.artifacts",
-                        "reason": supervisor_audit_evidence.REASON_MISSING,
+                        "reason": supervisor_audit_evidence_constants.REASON_MISSING,
                         "count": 2,
                         "sha256": mock.ANY,
                     }
@@ -464,11 +478,14 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             entry = payload["plan"]["progress"]
 
             self.assertFalse(entry["available"])
-            self.assertEqual(supervisor_audit_evidence.REASON_MISSING, entry["reason"])
+            self.assertEqual(
+                supervisor_audit_evidence_constants.REASON_MISSING, entry["reason"]
+            )
             self.assertTrue(
                 any(
                     omission["section"] == "plan"
-                    and omission["reason"] == supervisor_audit_evidence.REASON_MISSING
+                    and omission["reason"]
+                    == supervisor_audit_evidence_constants.REASON_MISSING
                     for omission in payload["omissions"]
                 )
             )

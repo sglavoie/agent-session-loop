@@ -16,7 +16,7 @@ Two properties of this scan are contracts rather than incidental behaviour:
 
 * **It is uncapped.** Every discovered plan becomes a record, in discovery
   order, whatever its state. The bridge's ``runs.snapshot`` projection keeps
-  only active and actionable rows and stops at ``bridge.MAX_ROWS``, which is
+  only active and actionable rows and stops at ``bridge_protocol.MAX_ROWS``, which is
   correct for a frame an operator intervenes from and wrong for a catalog:
   applied here it would silently drop every healthy ``ready`` and ``complete``
   plan past the cap. A transport that needs bounded payloads pages the result
@@ -38,7 +38,13 @@ from pathlib import Path
 from asl_workbench import catalog as portable_catalog
 from asl_workbench.catalog import CatalogRecord, PlanCatalog
 
-from . import plans_errors, workbench
+from . import (
+    plans_errors,
+    workbench_discovery,
+    workbench_registry_models,
+    workbench_summary,
+    workbench_summary_model,
+)
 
 #: Bound on the manifest bytes read to find a plan's title, matching the
 #: Companion's ``projects.MAX_TITLE_BYTES``. The title is the document's first
@@ -70,10 +76,10 @@ def read_plan_title(plan_dir: Path) -> str | None:
 
 
 def build_summary(
-    discovered: workbench.DiscoveredPlan,
+    discovered: workbench_registry_models.DiscoveredPlan,
     *,
     state_dir: str | Path | None = None,
-) -> workbench.WorkbenchSummary:
+) -> workbench_summary_model.WorkbenchSummary:
     """Classify one discovered plan without repairing it.
 
     ``reclaim=False`` is the whole reason this wrapper exists: the summary
@@ -82,7 +88,7 @@ def build_summary(
     Every catalog path in this module goes through here, so there is one place
     to check that no read reclaims.
     """
-    return workbench.build_workbench_summary(
+    return workbench_summary.build_workbench_summary(
         discovered,
         state_dir=state_dir,
         reclaim=False,
@@ -90,7 +96,7 @@ def build_summary(
 
 
 def record_for_summary(
-    summary: workbench.WorkbenchSummary,
+    summary: workbench_summary_model.WorkbenchSummary,
     *,
     pinned: bool = False,
 ) -> CatalogRecord:
@@ -120,8 +126,8 @@ class CatalogScan:
     """
 
     catalog: PlanCatalog
-    summaries: tuple[workbench.WorkbenchSummary, ...]
-    discovery: workbench.DiscoveryResult
+    summaries: tuple[workbench_summary_model.WorkbenchSummary, ...]
+    discovery: workbench_registry_models.DiscoveryResult
     #: Plans discovery found and this scan could not classify. Held apart from
     #: ``discovery.warnings`` because the two mean different things to a
     #: caller: a discovery warning is about a source, and one of these is about
@@ -137,7 +143,7 @@ class CatalogScan:
 def scan(
     *,
     state_dir: str | Path | None = None,
-    registry: workbench.WorkbenchRegistry | None = None,
+    registry: workbench_registry_models.WorkbenchRegistry | None = None,
     plan_roots: Iterable[str | Path] = (),
     include_default_dirs: bool = True,
 ) -> CatalogScan:
@@ -155,14 +161,14 @@ def scan(
     scan knows exists and could not describe, and a consumer reconciling
     against an incomplete generation must not read its absence as a deletion.
     """
-    discovery = workbench.discover_plans(
+    discovery = workbench_discovery.discover_plans(
         state_root=state_dir,
         registry=registry,
         plan_roots=plan_roots,
         include_default_dirs=include_default_dirs,
     )
     records: list[CatalogRecord] = []
-    summaries: list[workbench.WorkbenchSummary] = []
+    summaries: list[workbench_summary_model.WorkbenchSummary] = []
     failures: list[str] = []
     for discovered in discovery.plans:
         try:
@@ -175,7 +181,7 @@ def scan(
             OSError,
             ValueError,
             plans_errors.PlanError,
-            workbench.WorkbenchError,
+            workbench_registry_models.WorkbenchError,
             portable_catalog.CatalogError,
         ) as error:
             failures.append(
@@ -199,7 +205,7 @@ def scan(
 def scan_catalog(
     *,
     state_dir: str | Path | None = None,
-    registry: workbench.WorkbenchRegistry | None = None,
+    registry: workbench_registry_models.WorkbenchRegistry | None = None,
     plan_roots: Iterable[str | Path] = (),
     include_default_dirs: bool = True,
 ) -> PlanCatalog:

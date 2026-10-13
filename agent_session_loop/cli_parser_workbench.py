@@ -159,5 +159,5 @@ def _add_workbench_commands(
         help="Emit the registry payload as machine-readable JSON",
     )
     workbench_registry_parser.set_defaults(
-        handler_ref="workbench:workbench_registry_from_args",
+        handler_ref="workbench_cli:workbench_registry_from_args",
     )

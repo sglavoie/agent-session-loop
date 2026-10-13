@@ -50,8 +50,11 @@ from pathlib import Path
 from agent_session_loop import (
     plans_files,
     state,
-    workbench,
     workbench_archive,
+    workbench_cli,
+    workbench_discovery,
+    workbench_registry,
+    workbench_registry_models,
     workbench_server,
 )
 from asl_workbench import archive as portable_archive
@@ -190,7 +193,9 @@ class _ArchiveFixture(unittest.TestCase):
         self.tmp_path = Path(self._tmp.name).resolve()
         self.state_dir = self.tmp_path / "state"
         self.state_dir.mkdir()
-        self.registry_path = self.tmp_path / workbench.REGISTRY_FILE_NAME
+        self.registry_path = (
+            self.tmp_path / workbench_registry_models.REGISTRY_FILE_NAME
+        )
         self.plan_dir = self.tmp_path / "plans" / "alpha"
         write_plan(self.plan_dir, ("pending", "pending"))
         self.canonical = plans_files.canonicalize_path(self.plan_dir)
@@ -248,7 +253,8 @@ class RetentionIsAThresholdTests(_ArchiveFixture):
         # Asserted on the module rather than on a call site: a pass that still
         # exists is one import away from being called again, and the next
         # surface to grow an archive view is the one that would call it.
-        self.assertFalse(hasattr(workbench, "maintain_archive"))
+        for module in (workbench_registry, workbench_discovery, workbench_cli):
+            self.assertFalse(hasattr(module, "maintain_archive"))
 
     def test_reviewing_a_wholly_expired_archive_removes_nothing(self) -> None:
         ids = [self.archive_one(self.make_plan(name)) for name in ("a", "b", "c")]
@@ -625,7 +631,7 @@ class SurfaceParityTests(_ArchiveFixture):
         # on top of the first. That is the serialization claim in the small.
         config_home = self.tmp_path / "config"
         with patched_env(XDG_CONFIG_HOME=str(config_home)):
-            registry_path = workbench.default_registry_path()
+            registry_path = workbench_registry.default_registry_path()
             self.registry_path = registry_path
             server = self.start_server()
             second = self.make_plan("beta")
@@ -646,7 +652,7 @@ class SurfaceParityTests(_ArchiveFixture):
             self.assertEqual(0, rc)
             self.assertIn(str(registry_path), stdout.getvalue())
 
-            reloaded = workbench.load_registry(registry_path)
+            reloaded = workbench_registry.load_registry(registry_path)
 
         self.assertEqual(
             [str(self.canonical), str(second)],

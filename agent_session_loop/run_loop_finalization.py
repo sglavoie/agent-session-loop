@@ -13,7 +13,7 @@ from . import (
     review_transitions,
     run_inputs,
     session_verification,
-    turn_execution,
+    turn_execution_constants,
     write_guards,
 )
 from .run_loop_commit_settlement import _settle_paused_retained_work
@@ -258,7 +258,7 @@ def _finalize_run(frame: RunFrame) -> RunResult | None:
     with frame.ctx.persistence.lock:
         frame.exit_code = 0 if frame.ctx.payload["ok"] else 1
         if frame.ctx.payload.get("pause_reason") == "interrupted":
-            frame.exit_code = turn_execution.INTERRUPTED_EXIT
+            frame.exit_code = turn_execution_constants.INTERRUPTED_EXIT
     # The controls outlive the loop so a supervisor can still reach a run that
     # is finalizing: the terminal audit is a harness turn of its own, and an
     # abort arriving during it has to find a live listener and a live drain.

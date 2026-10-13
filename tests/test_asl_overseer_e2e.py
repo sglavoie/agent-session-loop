@@ -85,7 +85,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from agent_session_loop import (
-    bridge,
+    bridge_protocol,
     cli,
     clock,
     events,
@@ -1576,15 +1576,15 @@ class FaultQualificationTests(_WorldCase):
 
     def test_a_fleet_past_the_display_cap_is_still_reported_whole(self) -> None:
         """Discovery is unbounded where the queue view is capped, on purpose."""
-        for index in range(bridge.MAX_ROWS + 4):
+        for index in range(bridge_protocol.MAX_ROWS + 4):
             self.world.write_run(f"fleet-{index:04d}")
-        expected = bridge.MAX_ROWS + 5
+        expected = bridge_protocol.MAX_ROWS + 5
 
         status, payload = self.world.invoke("scan")
 
         self.assertEqual(overseer_cli.EXIT_OK, status, payload["considered"])
         self.assertTrue(payload["complete"])
-        self.assertGreater(expected, bridge.MAX_ROWS)
+        self.assertGreater(expected, bridge_protocol.MAX_ROWS)
         self.assertEqual(expected, payload["considered"])
         self.assertEqual(expected, len(payload["candidates"]))
 

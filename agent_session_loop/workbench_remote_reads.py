@@ -59,7 +59,13 @@ from asl_workbench.transport import (
     MAX_DETAIL_ENTRIES,
 )
 
-from . import workbench, workbench_archive, workbench_catalog, workbench_details
+from . import (
+    workbench_archive,
+    workbench_catalog,
+    workbench_details,
+    workbench_registry,
+    workbench_registry_models,
+)
 
 __all__ = [
     "MAX_ENTRY_BUDGET_BYTES",
@@ -566,12 +572,14 @@ class AslDetailResponder:
             return self._text(kind, reader, request)
         return _Material(entries=[_scrub(self._object(kind, reader))])
 
-    def _registry(self) -> workbench.WorkbenchRegistry:
+    def _registry(self) -> workbench_registry_models.WorkbenchRegistry:
         """The registry, or an empty one. A pin is context, never a dependency."""
         try:
-            return workbench.load_registry(self.registry_path)
-        except workbench.WorkbenchError:
-            return workbench.WorkbenchRegistry(path=workbench.default_registry_path())
+            return workbench_registry.load_registry(self.registry_path)
+        except workbench_registry_models.WorkbenchError:
+            return workbench_registry_models.WorkbenchRegistry(
+                path=workbench_registry.default_registry_path()
+            )
 
     def _object(
         self, kind: str, reader: workbench_details.PlanReader

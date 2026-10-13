@@ -148,7 +148,7 @@ REQUIRED_MEMBERS: frozenset[str] = frozenset(
         f"{PACKAGE_DIRECTORY}/runtime.py",
         f"{PACKAGE_DIRECTORY}/server.py",
         f"{PACKAGE_DIRECTORY}/http.py",
-        f"{PACKAGE_DIRECTORY}/store.py",
+        f"{PACKAGE_DIRECTORY}/store_workbench.py",
         f"{STATIC_DIRECTORY}/index.html",
     }
 )

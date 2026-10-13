@@ -15,7 +15,9 @@ from unittest import mock
 from agent_session_loop import (
     events,
     run_commit,
-    turn_execution,
+    turn_execution_constants,
+    turn_execution_hang_sentinel,
+    turn_execution_protocols,
 )
 from tests.asl_control_hang_sentinel_support import (
     HangSentinelTestsBase,
@@ -76,7 +78,9 @@ class HangSentinelTestsPart2(HangSentinelTestsBase):
 
         retracted = sentinel.note_activity()
         assert retracted is not None
-        self.assertEqual(turn_execution.HANG_REASON_ZERO_CPU, retracted["reason"])
+        self.assertEqual(
+            turn_execution_constants.HANG_REASON_ZERO_CPU, retracted["reason"]
+        )
         self.assertIsNone(sentinel.note_activity())
 
         # Counters restart: a fresh baseline plus two confirming samples are
@@ -90,7 +94,7 @@ class HangSentinelTestsPart2(HangSentinelTestsBase):
 
     def test_new_request_invalidates_a_prior_terminal_result(self) -> None:
         monotonic = {"now": 0.0}
-        sentinel = turn_execution.HangSentinel(
+        sentinel = turn_execution_hang_sentinel.HangSentinel(
             sample_tree=lambda pid: self.tree(5.0),
             monotonic=lambda: monotonic["now"],
             trigger_idle_seconds=120.0,
@@ -140,7 +144,7 @@ class HangSentinelTestsPart2(HangSentinelTestsBase):
                 calls.append(pid)
                 return self.tree(5.0)
 
-            sentinel = turn_execution.HangSentinel(
+            sentinel = turn_execution_hang_sentinel.HangSentinel(
                 sample_tree=sample_tree,
                 monotonic=lambda: 1000.0,
                 trigger_idle_seconds=0.0,
@@ -158,7 +162,7 @@ class HangSentinelTestsPart2(HangSentinelTestsBase):
             )
             live_turn.note_harness_pid(123)
 
-            with mock.patch.object(turn_execution, "notify_turn_heartbeat"):
+            with mock.patch.object(turn_execution_protocols, "notify_turn_heartbeat"):
                 heartbeat = live_turn._record_heartbeat()
 
             self.assertTrue(heartbeat["input_wait_active"])
@@ -168,7 +172,7 @@ class HangSentinelTestsPart2(HangSentinelTestsBase):
 
     def test_note_activity_during_sample_discards_the_assessment(self) -> None:
         sample_calls = {"count": 0}
-        holder: list[turn_execution.HangSentinel] = []
+        holder: list[turn_execution_hang_sentinel.HangSentinel] = []
 
         def sample_tree(pid: int):
             sample_calls["count"] += 1
@@ -178,7 +182,7 @@ class HangSentinelTestsPart2(HangSentinelTestsBase):
                 holder[0].note_activity()
             return self.tree(5.0)
 
-        sentinel = turn_execution.HangSentinel(
+        sentinel = turn_execution_hang_sentinel.HangSentinel(
             sample_tree=sample_tree,
             monotonic=lambda: 0.0,
             trigger_idle_seconds=120.0,
@@ -230,12 +234,12 @@ class HangSentinelTestsPart2(HangSentinelTestsBase):
             clock["now"] = 100.0  # past the 45s result grace
 
             with (
-                mock.patch.object(turn_execution, "notify_turn_heartbeat"),
+                mock.patch.object(turn_execution_protocols, "notify_turn_heartbeat"),
                 mock.patch.object(
-                    turn_execution, "notify_turn_hang_suspected"
+                    turn_execution_protocols, "notify_turn_hang_suspected"
                 ) as suspected_notify,
                 mock.patch.object(
-                    turn_execution, "notify_turn_hang_cleared"
+                    turn_execution_protocols, "notify_turn_hang_cleared"
                 ) as cleared_notify,
             ):
                 # Two warm-up ticks bring the zero-CPU streak up to the
@@ -287,12 +291,12 @@ class HangSentinelTestsPart2(HangSentinelTestsBase):
             clock["now"] = 100.0
 
             with (
-                mock.patch.object(turn_execution, "notify_turn_heartbeat"),
+                mock.patch.object(turn_execution_protocols, "notify_turn_heartbeat"),
                 mock.patch.object(
-                    turn_execution, "notify_turn_hang_suspected"
+                    turn_execution_protocols, "notify_turn_hang_suspected"
                 ) as suspected_notify,
                 mock.patch.object(
-                    turn_execution, "notify_turn_hang_cleared"
+                    turn_execution_protocols, "notify_turn_hang_cleared"
                 ) as cleared_notify,
             ):
                 # Ticks 1-2 confirm the flat CPU streak; tick 3 announces.
@@ -342,7 +346,7 @@ class HangSentinelTestsPart2(HangSentinelTestsBase):
                 calls.append(pid)
                 return self.tree(1.0)
 
-            sentinel = turn_execution.HangSentinel(
+            sentinel = turn_execution_hang_sentinel.HangSentinel(
                 sample_tree=sample_tree,
                 monotonic=time.monotonic,
                 trigger_idle_seconds=0.0,

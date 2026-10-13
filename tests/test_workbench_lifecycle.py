@@ -51,7 +51,7 @@ from asl_workbench.installation import (
     write_json,
 )
 from asl_workbench.integrations import PI_SITE, provision
-from asl_workbench.store import SCHEMA_VERSION
+from asl_workbench.store_types import SCHEMA_VERSION
 from tests.test_workbench_portable import PACKAGE_ROOT, REPOSITORY_ROOT, artifact
 
 OWNER = "owner@example.com"
@@ -104,10 +104,10 @@ def older_store() -> bytes:
     instead would break the *outgoing* release too, and the case worth testing
     is precisely the one where the outgoing release is still fine.
     """
-    source = (PACKAGE_ROOT / "store.py").read_bytes()
+    source = (PACKAGE_ROOT / "store_types.py").read_bytes()
     return artifact(
         {
-            f"{lifecycle.PACKAGE_DIRECTORY}/store.py": source.replace(
+            f"{lifecycle.PACKAGE_DIRECTORY}/store_types.py": source.replace(
                 f"\nSCHEMA_VERSION = {SCHEMA_VERSION}\n".encode(),
                 f"\nSCHEMA_VERSION = {SCHEMA_VERSION - 1}\n".encode(),
             )

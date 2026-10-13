@@ -6,8 +6,9 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from . import assurance_models
-from . import supervisor_audit_evidence as audit_evidence
+from . import assurance_models_vocab
+from . import supervisor_audit_evidence_constants as audit_evidence_constants
+from . import supervisor_audit_evidence_helpers as audit_evidence_helpers
 from .supervisor_audit_vocabulary import _CONTROL_CHAR_RE, RUN_ANCHOR
 
 
@@ -30,11 +31,11 @@ class CheckSpec:
     """
 
     check: str
-    lane: assurance_models.RubricLane
+    lane: assurance_models_vocab.RubricLane
     category: str
     component: str
     invariant_key: str
-    severity: assurance_models.Severity
+    severity: assurance_models_vocab.Severity
     recommendation: str
     replayable: bool = True
 
@@ -43,7 +44,7 @@ class CheckSpec:
 class _Verdict:
     """What one check concluded, before it is stamped with its spec."""
 
-    status: assurance_models.CheckStatus
+    status: assurance_models_vocab.CheckStatus
     detail: str
     evidence: tuple[str, ...]
 
@@ -51,7 +52,7 @@ class _Verdict:
 def _detail(text: str) -> str:
     """Bound and flatten a detail so it survives ``DeterministicResult``."""
     collapsed = " ".join(_CONTROL_CHAR_RE.sub(" ", str(text)).split())
-    return collapsed[: assurance_models.MAX_TEXT_CHARS] or "no detail recorded"
+    return collapsed[: assurance_models_vocab.MAX_TEXT_CHARS] or "no detail recorded"
 
 
 def _names(values: Iterable[Any], *, limit: int = 8) -> str:
@@ -86,40 +87,42 @@ class _CheckContext:
         self.payload = payload
         self.roots = {
             str(name): str(value)
-            for name, value in audit_evidence._mapping(payload.get("roots")).items()
+            for name, value in audit_evidence_helpers._mapping(
+                payload.get("roots")
+            ).items()
         }
         self.declared = {
             str(entry.get("locator"))
-            for entry in audit_evidence._sequence(payload.get("evidence"))
+            for entry in audit_evidence_helpers._sequence(payload.get("evidence"))
             if isinstance(entry, Mapping) and entry.get("locator")
         }
         self.turns = [
             turn
-            for turn in audit_evidence._sequence(payload.get("turns"))
+            for turn in audit_evidence_helpers._sequence(payload.get("turns"))
             if isinstance(turn, Mapping)
         ]
         self.records = [
             record
-            for record in audit_evidence._sequence(
+            for record in audit_evidence_helpers._sequence(
                 self.section("events").get("records")
             )
             if isinstance(record, Mapping)
         ]
         self.omissions = [
             entry
-            for entry in audit_evidence._sequence(payload.get("omissions"))
+            for entry in audit_evidence_helpers._sequence(payload.get("omissions"))
             if isinstance(entry, Mapping)
         ]
 
     def section(self, name: str) -> dict[str, Any]:
-        return audit_evidence._mapping(self.payload.get(name))
+        return audit_evidence_helpers._mapping(self.payload.get(name))
 
     @property
     def events_shed(self) -> bool:
         """Whether the size cap dropped event records the checks would read."""
         return any(
             entry.get("section") == "events"
-            and entry.get("reason") == audit_evidence.REASON_SIZE_CAP
+            and entry.get("reason") == audit_evidence_constants.REASON_SIZE_CAP
             for entry in self.omissions
         )
 
@@ -136,7 +139,7 @@ class _CheckContext:
 
     @property
     def event_summary(self) -> dict[str, Any]:
-        return audit_evidence._mapping(self.section("events").get("summary"))
+        return audit_evidence_helpers._mapping(self.section("events").get("summary"))
 
     def turn_directories(self) -> list[str]:
         return [
@@ -152,6 +155,6 @@ class _CheckContext:
             for locator in dict.fromkeys(candidates)
             if isinstance(locator, str) and locator in self.declared
         ]
-        return tuple(chosen[: assurance_models.MAX_REFERENCES_PER_ITEM]) or (
+        return tuple(chosen[: assurance_models_vocab.MAX_REFERENCES_PER_ITEM]) or (
             RUN_ANCHOR,
         )

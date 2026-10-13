@@ -14,7 +14,9 @@ from agent_session_loop import (
     plans_session_ids,
     review,
     review_session_contract,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_collector,
+    supervisor_audit_evidence_constants,
+    supervisor_audit_evidence_models,
     verification,
 )
 from tests.support_supervisor_audit import RUN_ID, RunHistoryFixture
@@ -401,13 +403,15 @@ class ValidatorDiagnosticProjectionTests(RunHistoryFixture, unittest.TestCase):
             # budget on the gate's own kilobytes of argv, so the reason arrives
             # whole instead of at the edge of a truncation.
             self.assertIn(
-                supervisor_audit_evidence.REASON_APPLICATION_CONTENT, check["stderr"]
+                supervisor_audit_evidence_constants.REASON_APPLICATION_CONTENT,
+                check["stderr"],
             )
             self.assertIn("missing-required-heading", check["detail"])
             self.assertNotIn("path_re", check["detail"])
             self.assertEqual(recorded["detail"], check["detail"])
             self.assertLess(
-                len(check["detail"]), supervisor_audit_evidence.MAX_INLINE_STRING_BYTES
+                len(check["detail"]),
+                supervisor_audit_evidence_constants.MAX_INLINE_STRING_BYTES,
             )
 
     def test_the_failed_gate_stderr_artifact_is_indexed(self) -> None:
@@ -515,7 +519,7 @@ class ValidatorDiagnosticProjectionTests(RunHistoryFixture, unittest.TestCase):
             self.assertEqual(self.GATE, diagnostic["check"])
             self.assertEqual("artifact-unparsable", diagnostic["reason"])
             self.assertIn(
-                supervisor_audit_evidence.REASON_APPLICATION_CONTENT,
+                supervisor_audit_evidence_constants.REASON_APPLICATION_CONTENT,
                 diagnostic["customer_payload"],
             )
             self.assertNotIn(self.APPLICATION_TEXT, json.dumps(check))
@@ -572,7 +576,7 @@ class ValidatorDiagnosticProjectionTests(RunHistoryFixture, unittest.TestCase):
         by recorded evidence the current parser never saw, so it re-derives the
         vocabulary rather than trusting that promotion already checked it.
         """
-        roots = supervisor_audit_evidence.EvidenceRoots.build(
+        roots = supervisor_audit_evidence_models.EvidenceRoots.build(
             run_dir=Path.cwd(), state_dir=Path.cwd(), plan_dir=Path.cwd()
         )
         for field in ("check", "reason"):
@@ -580,13 +584,13 @@ class ValidatorDiagnosticProjectionTests(RunHistoryFixture, unittest.TestCase):
                 diagnostic = {"check": self.GATE, "reason": "artifact-missing"}
                 diagnostic[field] = self.APPLICATION_TOKEN
 
-                projected = supervisor_audit_evidence._Collector(roots).redact(
-                    {"failure_diagnostic": diagnostic}
-                )
+                projected = supervisor_audit_evidence_collector._Collector(
+                    roots
+                ).redact({"failure_diagnostic": diagnostic})
 
                 self.assertNotIn(self.APPLICATION_TOKEN, json.dumps(projected))
                 self.assertIn(
-                    supervisor_audit_evidence.REASON_APPLICATION_CONTENT,
+                    supervisor_audit_evidence_constants.REASON_APPLICATION_CONTENT,
                     projected["failure_diagnostic"][field],
                 )
 
@@ -597,11 +601,11 @@ class ValidatorDiagnosticProjectionTests(RunHistoryFixture, unittest.TestCase):
         control-plane field holding a structure has to be withheld rather than
         raising on the membership test that guards it.
         """
-        roots = supervisor_audit_evidence.EvidenceRoots.build(
+        roots = supervisor_audit_evidence_models.EvidenceRoots.build(
             run_dir=Path.cwd(), state_dir=Path.cwd(), plan_dir=Path.cwd()
         )
 
-        projected = supervisor_audit_evidence._Collector(roots).redact(
+        projected = supervisor_audit_evidence_collector._Collector(roots).redact(
             {
                 "failure_diagnostic": {
                     "check": {"nested": self.APPLICATION_TEXT},
@@ -613,7 +617,7 @@ class ValidatorDiagnosticProjectionTests(RunHistoryFixture, unittest.TestCase):
         self.assertNotIn(self.APPLICATION_TEXT, json.dumps(projected))
         for field in ("check", "reason"):
             self.assertIn(
-                supervisor_audit_evidence.REASON_APPLICATION_CONTENT,
+                supervisor_audit_evidence_constants.REASON_APPLICATION_CONTENT,
                 projected["failure_diagnostic"][field],
             )
 
@@ -626,7 +630,8 @@ class ValidatorDiagnosticProjectionTests(RunHistoryFixture, unittest.TestCase):
             self.assertIsNone(check["failure_diagnostic"])
             self.assertEqual("command exited 1: python3", check["detail"])
             self.assertIn(
-                supervisor_audit_evidence.REASON_APPLICATION_CONTENT, check["stderr"]
+                supervisor_audit_evidence_constants.REASON_APPLICATION_CONTENT,
+                check["stderr"],
             )
             self.assertNotIn(self.APPLICATION_TEXT, json.dumps(check))
 

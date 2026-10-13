@@ -20,7 +20,9 @@ from agent_session_loop import (
     plans_metadata,
     plans_registry,
     state,
-    workbench,
+    workbench_launch,
+    workbench_registry,
+    workbench_registry_models,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -46,7 +48,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             plan_dir = self._seed_launchable_plan(tmp_path)
-            profile = workbench.LaunchProfile(
+            profile = workbench_registry_models.LaunchProfile(
                 cwd="/tmp/repo",
                 harness="codex",
                 harness_model="o4-mini",
@@ -61,7 +63,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 note="launch note",
             )
 
-            argv = workbench.build_launch_argv(
+            argv = workbench_launch.build_launch_argv(
                 plan_dir,
                 profile=profile,
                 state_dir=tmp_path / "state",
@@ -109,12 +111,12 @@ class WorkbenchLaunchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             plan_dir = self._seed_launchable_plan(tmp_path)
-            profile = workbench.LaunchProfile(
+            profile = workbench_registry_models.LaunchProfile(
                 commit_mode="end",
                 unsafe_bypass=False,
             )
 
-            argv = workbench.build_launch_argv(
+            argv = workbench_launch.build_launch_argv(
                 plan_dir,
                 profile=profile,
                 reply_via_stdin=True,
@@ -134,7 +136,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
             tmp_path = Path(tmp)
             plan_dir = self._seed_launchable_plan(tmp_path)
 
-            argv = workbench.build_launch_argv(plan_dir)
+            argv = workbench_launch.build_launch_argv(plan_dir)
 
             self.assertEqual(argv[1:4], ["-m", "agent_session_loop", "run"])
             self.assertEqual(argv[4], str(plan_dir))
@@ -174,7 +176,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 plan_dir, workspace_root, registry.digest
             )
 
-            argv = workbench.build_launch_argv(plan_dir)
+            argv = workbench_launch.build_launch_argv(plan_dir)
 
             self.assertEqual(
                 str(workspace_root.resolve()), argv[argv.index("--cwd") + 1]
@@ -186,7 +188,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 captured.append(process)
                 return process
 
-            launched = workbench.launch_plan(plan_dir, popen_factory=factory)
+            launched = workbench_launch.launch_plan(plan_dir, popen_factory=factory)
             payload = launched.to_payload()
             self.assertEqual(str(workspace_root.resolve()), payload["cwd"])
             self.assertEqual(str(workspace_root.resolve()), payload["workspace_root"])
@@ -208,14 +210,16 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 plan_dir, workspace_root, registry.digest
             )
 
-            with self.assertRaises(workbench.LaunchError) as caught:
-                workbench.build_launch_argv(
+            with self.assertRaises(workbench_launch.LaunchError) as caught:
+                workbench_launch.build_launch_argv(
                     plan_dir,
-                    profile=workbench.LaunchProfile(cwd=str(repositories["SVC"])),
+                    profile=workbench_registry_models.LaunchProfile(
+                        cwd=str(repositories["SVC"])
+                    ),
                 )
 
             self.assertEqual(
-                workbench.LAUNCH_REASON_INVALID_PROFILE, caught.exception.reason
+                workbench_launch.LAUNCH_REASON_INVALID_PROFILE, caught.exception.reason
             )
             self.assertIn("--rebind-workspace", caught.exception.message)
 
@@ -223,10 +227,12 @@ class WorkbenchLaunchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             missing = Path(tmp) / "absent"
 
-            with self.assertRaises(workbench.LaunchError) as ctx:
-                workbench.build_launch_argv(missing)
+            with self.assertRaises(workbench_launch.LaunchError) as ctx:
+                workbench_launch.build_launch_argv(missing)
 
-            self.assertEqual(workbench.LAUNCH_REASON_INVALID_PLAN, ctx.exception.reason)
+            self.assertEqual(
+                workbench_launch.LAUNCH_REASON_INVALID_PLAN, ctx.exception.reason
+            )
 
     def test_invalid_plan_dir_missing_manifest_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -235,10 +241,12 @@ class WorkbenchLaunchTests(unittest.TestCase):
             broken.mkdir()
             (broken / "context.md").write_text("# Context\n", encoding="utf-8")
 
-            with self.assertRaises(workbench.LaunchError) as ctx:
-                workbench.build_launch_argv(broken)
+            with self.assertRaises(workbench_launch.LaunchError) as ctx:
+                workbench_launch.build_launch_argv(broken)
 
-            self.assertEqual(workbench.LAUNCH_REASON_INVALID_PLAN, ctx.exception.reason)
+            self.assertEqual(
+                workbench_launch.LAUNCH_REASON_INVALID_PLAN, ctx.exception.reason
+            )
             self.assertIn("manifest.md", ctx.exception.message)
 
     def test_invalid_plan_dir_missing_context_raises(self) -> None:
@@ -248,49 +256,55 @@ class WorkbenchLaunchTests(unittest.TestCase):
             broken.mkdir()
             (broken / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
 
-            with self.assertRaises(workbench.LaunchError) as ctx:
-                workbench.build_launch_argv(broken)
+            with self.assertRaises(workbench_launch.LaunchError) as ctx:
+                workbench_launch.build_launch_argv(broken)
 
-            self.assertEqual(workbench.LAUNCH_REASON_INVALID_PLAN, ctx.exception.reason)
+            self.assertEqual(
+                workbench_launch.LAUNCH_REASON_INVALID_PLAN, ctx.exception.reason
+            )
             self.assertIn("context.md", ctx.exception.message)
 
     def test_invalid_profile_harness_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             plan_dir = self._seed_launchable_plan(tmp_path)
-            profile = workbench.LaunchProfile(harness="bogus")
+            profile = workbench_registry_models.LaunchProfile(harness="bogus")
 
-            with self.assertRaises(workbench.LaunchError) as ctx:
-                workbench.build_launch_argv(plan_dir, profile=profile)
+            with self.assertRaises(workbench_launch.LaunchError) as ctx:
+                workbench_launch.build_launch_argv(plan_dir, profile=profile)
 
             self.assertEqual(
-                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+                workbench_launch.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
             )
 
     def test_invalid_profile_review_harness_matches_harness(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             plan_dir = self._seed_launchable_plan(tmp_path)
-            profile = workbench.LaunchProfile(harness="codex", review_harness="codex")
+            profile = workbench_registry_models.LaunchProfile(
+                harness="codex", review_harness="codex"
+            )
 
-            with self.assertRaises(workbench.LaunchError) as ctx:
-                workbench.build_launch_argv(plan_dir, profile=profile)
+            with self.assertRaises(workbench_launch.LaunchError) as ctx:
+                workbench_launch.build_launch_argv(plan_dir, profile=profile)
 
             self.assertEqual(
-                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+                workbench_launch.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
             )
 
     def test_invalid_profile_review_model_requires_review_harness(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             plan_dir = self._seed_launchable_plan(tmp_path)
-            profile = workbench.LaunchProfile(review_harness_model="claude-sonnet")
+            profile = workbench_registry_models.LaunchProfile(
+                review_harness_model="claude-sonnet"
+            )
 
-            with self.assertRaises(workbench.LaunchError) as ctx:
-                workbench.build_launch_argv(plan_dir, profile=profile)
+            with self.assertRaises(workbench_launch.LaunchError) as ctx:
+                workbench_launch.build_launch_argv(plan_dir, profile=profile)
 
             self.assertEqual(
-                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+                workbench_launch.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
             )
             self.assertEqual(
                 "review_harness_model requires review_harness", ctx.exception.message
@@ -300,39 +314,39 @@ class WorkbenchLaunchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             plan_dir = self._seed_launchable_plan(tmp_path)
-            profile = workbench.LaunchProfile(commit_mode="weekly")  # type: ignore[arg-type]
+            profile = workbench_registry_models.LaunchProfile(commit_mode="weekly")  # type: ignore[arg-type]
 
-            with self.assertRaises(workbench.LaunchError) as ctx:
-                workbench.build_launch_argv(plan_dir, profile=profile)
+            with self.assertRaises(workbench_launch.LaunchError) as ctx:
+                workbench_launch.build_launch_argv(plan_dir, profile=profile)
 
             self.assertEqual(
-                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+                workbench_launch.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
             )
 
     def test_invalid_profile_non_positive_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             plan_dir = self._seed_launchable_plan(tmp_path)
-            profile = workbench.LaunchProfile(timeout=0)
+            profile = workbench_registry_models.LaunchProfile(timeout=0)
 
-            with self.assertRaises(workbench.LaunchError) as ctx:
-                workbench.build_launch_argv(plan_dir, profile=profile)
+            with self.assertRaises(workbench_launch.LaunchError) as ctx:
+                workbench_launch.build_launch_argv(plan_dir, profile=profile)
 
             self.assertEqual(
-                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+                workbench_launch.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
             )
 
     def test_invalid_profile_negative_review_fix_cap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             plan_dir = self._seed_launchable_plan(tmp_path)
-            profile = workbench.LaunchProfile(max_review_fix_cycles=-1)
+            profile = workbench_registry_models.LaunchProfile(max_review_fix_cycles=-1)
 
-            with self.assertRaises(workbench.LaunchError) as ctx:
-                workbench.build_launch_argv(plan_dir, profile=profile)
+            with self.assertRaises(workbench_launch.LaunchError) as ctx:
+                workbench_launch.build_launch_argv(plan_dir, profile=profile)
 
             self.assertEqual(
-                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+                workbench_launch.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
             )
 
     def test_registry_loader_drops_negative_review_fix_cap_with_warning(
@@ -341,11 +355,13 @@ class WorkbenchLaunchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             plan_dir = self._seed_launchable_plan(tmp_path)
-            registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+            registry_path = tmp_path / workbench_registry_models.REGISTRY_FILE_NAME
             registry_path.write_text(
                 json.dumps(
                     {
-                        "schema_version": workbench.REGISTRY_SCHEMA_VERSION,
+                        "schema_version": (
+                            workbench_registry_models.REGISTRY_SCHEMA_VERSION
+                        ),
                         "pins": [
                             {
                                 "plan_dir": str(plan_dir),
@@ -358,7 +374,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            registry = workbench.load_registry(registry_path)
+            registry = workbench_registry.load_registry(registry_path)
 
             self.assertIsNone(registry.pins[0].profile.max_review_fix_cycles)
             self.assertEqual(
@@ -377,9 +393,11 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 captured.append(proc)
                 return proc
 
-            result = workbench.launch_plan(
+            result = workbench_launch.launch_plan(
                 plan_dir,
-                profile=workbench.LaunchProfile(harness="codex", timeout=42),
+                profile=workbench_registry_models.LaunchProfile(
+                    harness="codex", timeout=42
+                ),
                 state_dir=tmp_path / "state",
                 popen_factory=factory,
             )
@@ -414,7 +432,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 return proc
 
             reply = "answer is 1a"
-            result = workbench.launch_plan(
+            result = workbench_launch.launch_plan(
                 plan_dir,
                 reply_text=reply,
                 popen_factory=factory,
@@ -443,7 +461,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 captured.append(proc)
                 return proc
 
-            result = workbench.resume_plan_with_reply(
+            result = workbench_launch.resume_plan_with_reply(
                 plan_dir,
                 reply_text="resume with option B",
                 popen_factory=factory,
@@ -465,14 +483,16 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 captured.append(proc)
                 return proc
 
-            with self.assertRaises(workbench.LaunchError) as ctx:
-                workbench.launch_plan(
+            with self.assertRaises(workbench_launch.LaunchError) as ctx:
+                workbench_launch.launch_plan(
                     plan_dir,
                     reply_text="   \n  ",
                     popen_factory=factory,
                 )
 
-            self.assertEqual(workbench.LAUNCH_REASON_EMPTY_REPLY, ctx.exception.reason)
+            self.assertEqual(
+                workbench_launch.LAUNCH_REASON_EMPTY_REPLY, ctx.exception.reason
+            )
             self.assertEqual(0, len(captured), "process must not be spawned")
 
     def _spawn_and_capture_env(self, **launch_kwargs) -> dict[str, str]:
@@ -486,7 +506,9 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 captured.append(proc)
                 return proc
 
-            workbench.launch_plan(plan_dir, popen_factory=factory, **launch_kwargs)
+            workbench_launch.launch_plan(
+                plan_dir, popen_factory=factory, **launch_kwargs
+            )
 
             self.assertEqual(1, len(captured))
             env = captured[0].env
@@ -529,11 +551,11 @@ class WorkbenchLaunchTests(unittest.TestCase):
             def factory(argv, **kwargs):
                 raise OSError("permission denied")
 
-            with self.assertRaises(workbench.LaunchError) as ctx:
-                workbench.launch_plan(plan_dir, popen_factory=factory)
+            with self.assertRaises(workbench_launch.LaunchError) as ctx:
+                workbench_launch.launch_plan(plan_dir, popen_factory=factory)
 
             self.assertEqual(
-                workbench.LAUNCH_REASON_PROCESS_FAILED, ctx.exception.reason
+                workbench_launch.LAUNCH_REASON_PROCESS_FAILED, ctx.exception.reason
             )
 
     def test_launch_plan_stdin_failure_kills_child(self) -> None:
@@ -547,15 +569,15 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 captured.append(proc)
                 return proc
 
-            with self.assertRaises(workbench.LaunchError) as ctx:
-                workbench.launch_plan(
+            with self.assertRaises(workbench_launch.LaunchError) as ctx:
+                workbench_launch.launch_plan(
                     plan_dir,
                     reply_text="oops",
                     popen_factory=factory,
                 )
 
             self.assertEqual(
-                workbench.LAUNCH_REASON_PROCESS_FAILED, ctx.exception.reason
+                workbench_launch.LAUNCH_REASON_PROCESS_FAILED, ctx.exception.reason
             )
             self.assertEqual(1, len(captured))
             self.assertEqual(-9, captured[0].returncode)
@@ -582,7 +604,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
             env["FAKE_CODEX_SLEEP"] = "0"
             env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
 
-            profile = workbench.LaunchProfile(
+            profile = workbench_registry_models.LaunchProfile(
                 cwd=str(REPO_ROOT),
                 harness="codex",
                 allow_not_loop_ready=True,
@@ -595,7 +617,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 captured.append(proc)
                 return proc
 
-            result = workbench.launch_plan(
+            result = workbench_launch.launch_plan(
                 plan_dir,
                 profile=profile,
                 state_dir=state_dir,

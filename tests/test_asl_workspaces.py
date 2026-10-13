@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 from agent_session_loop import (
-    authoring,
+    authoring_manifest,
     plans_content_hash,
     plans_errors,
     plans_metadata,
@@ -177,7 +177,7 @@ class RepositoryRegistryTests(unittest.TestCase):
         )
         manifest = (
             "# Manifest\n\n## Repositories\n\n"
-            + authoring.render_repository_registry_table(registry)
+            + authoring_manifest.render_repository_registry_table(registry)
         )
 
         parsed = plans_registry.parse_repository_registry_manifest(manifest)

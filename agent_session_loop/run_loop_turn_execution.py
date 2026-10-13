@@ -17,7 +17,8 @@ from . import (
     run_selection,
     run_termination,
     state,
-    turn_execution,
+    turn_execution_artifacts,
+    turn_execution_executor,
     turn_postflight,
 )
 from .run_loop_control_redirects import _abandon_turn, _close_turn_controls
@@ -32,7 +33,7 @@ def _execute_turn(frame: RunFrame) -> RunResult | LoopSignal | None:
     # acceptance until there is a worker to interrupt.
     frame.turn_redirect.start()
     execution = frame.turn_executor.launch(
-        turn_execution.TurnLaunch(
+        turn_execution_executor.TurnLaunch(
             env=frame.turn_env,
             harness=frame.turn_harness,
             cwd=frame.cwd,
@@ -161,7 +162,7 @@ def _execute_turn(frame: RunFrame) -> RunResult | LoopSignal | None:
             frame.turn_redirect.to_payload()
         )
     # The turn enters run state as executed-but-unaccepted. Every guard
-    # below may still amend or refuse it; `turn_execution.commit_turn`
+    # below may still amend or refuse it; `turn_execution_commit.commit_turn`
     # is what replaces this record with the published one.
     with frame.ctx.persistence.lock:
         frame.ctx.payload["turns"].append(frame.turn_payload)
@@ -169,7 +170,7 @@ def _execute_turn(frame: RunFrame) -> RunResult | LoopSignal | None:
         # standing rather than erasing it.
         if frame.turn_payload.get("observed_model") is not None:
             frame.ctx.payload.update(
-                turn_execution.observed_model_payload(
+                turn_execution_artifacts.observed_model_payload(
                     frame.turn_payload["observed_model"]
                 )
             )

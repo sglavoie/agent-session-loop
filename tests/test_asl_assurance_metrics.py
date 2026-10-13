@@ -10,9 +10,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from agent_session_loop import assurance_ledger as ledger
-from agent_session_loop import assurance_models as models
+from agent_session_loop import (
+    assurance_models_findings,
+    assurance_models_inbox,
+    assurance_models_primitives,
+    assurance_models_summary,
+    assurance_models_vocab,
+    assurance_report,
+)
 from agent_session_loop import assurance_projection as projection
-from agent_session_loop import assurance_report
 from agent_session_loop.assurance_projection import AuditPublication
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +41,7 @@ INPUT_DIGEST = "a" * 64
 OTHER_INPUT_DIGEST = "b" * 64
 
 
-def _finding(**overrides) -> models.Finding:
+def _finding(**overrides) -> assurance_models_findings.Finding:
     payload = {
         "category": "lifecycle",
         "component": "agent_session_loop/runner.py",
@@ -47,18 +53,21 @@ def _finding(**overrides) -> models.Finding:
         "evidence": ("events.jsonl",),
     }
     payload.update(overrides)
-    return models.Finding(**payload)
+    return assurance_models_findings.Finding(**payload)
 
 
-def _artifacts(digest: str | None = INPUT_DIGEST) -> tuple[models.EvidenceRef, ...]:
+def _artifacts(
+    digest: str | None = INPUT_DIGEST,
+) -> tuple[assurance_models_findings.EvidenceRef, ...]:
     return (
-        models.EvidenceRef(
+        assurance_models_findings.EvidenceRef(
             kind="artifact",
-            locator=f"run/{models.AUDIT_INPUT_FILENAME}",
+            locator=f"run/{assurance_models_vocab.AUDIT_INPUT_FILENAME}",
             digest=digest,
         ),
-        models.EvidenceRef(
-            kind="artifact", locator=f"run/{models.AUDIT_REPORT_FILENAME}"
+        assurance_models_findings.EvidenceRef(
+            kind="artifact",
+            locator=f"run/{assurance_models_vocab.AUDIT_REPORT_FILENAME}",
         ),
     )
 
@@ -85,7 +94,10 @@ def _assurance(**overrides) -> dict:
         "new_issue_count": 1,
         "recurring_issue_count": 1,
         "artifacts": [
-            {"kind": "artifact", "locator": f"run/{models.AUDIT_REPORT_FILENAME}"}
+            {
+                "kind": "artifact",
+                "locator": f"run/{assurance_models_vocab.AUDIT_REPORT_FILENAME}",
+            }
         ],
     }
     payload.update(overrides)
@@ -132,7 +144,7 @@ class CoverageMetricsTests(AssuranceReportTestCase):
         )
         self.assertEqual(
             report["audit_states"],
-            {audit_state: 0 for audit_state in models.AUDIT_STATES},
+            {audit_state: 0 for audit_state in assurance_models_vocab.AUDIT_STATES},
         )
 
     def test_coverage_separates_graded_runs_from_merely_recorded_ones(self) -> None:
@@ -150,7 +162,7 @@ class CoverageMetricsTests(AssuranceReportTestCase):
                 eligible=True,
                 reason="timeout",
                 attempts=(
-                    models.AuditAttempt(
+                    assurance_models_summary.AuditAttempt(
                         number=1,
                         outcome="timeout",
                         artifact_dir="supervisor-audit-attempt-1",
@@ -329,7 +341,7 @@ class IdentityMetricsTests(AssuranceReportTestCase):
     def observe_unbound(self, **overrides) -> None:
         """Open an issue the way a guard does, which leaves it unnamed."""
         ledger.append_issue_observation(
-            models.IssueObservation(
+            assurance_models_inbox.IssueObservation(
                 run_id=RUN_B, finding=_finding(**overrides), observed_at=T2
             ),
             state_dir=self.state_dir,
@@ -338,8 +350,8 @@ class IdentityMetricsTests(AssuranceReportTestCase):
 
     def force_binding(self, issue_id: str, key_of: str) -> None:
         """Write a binding the ledger writer refuses, to reach the anomaly."""
-        binding = models.IssueIdentityBinding(
-            identity_key=models.identity_key_for_issue(key_of),
+        binding = assurance_models_inbox.IssueIdentityBinding(
+            identity_key=assurance_models_primitives.identity_key_for_issue(key_of),
             issue_id=issue_id,
             source="reconcile",
             bound_at=T2,
@@ -579,7 +591,7 @@ class RunReportTests(AssuranceReportTestCase):
         self.assertFalse(report["partial"])
         self.assertEqual(
             report["report_path"],
-            str(Path("/runs") / RUN_A / models.AUDIT_REPORT_FILENAME),
+            str(Path("/runs") / RUN_A / assurance_models_vocab.AUDIT_REPORT_FILENAME),
         )
         self.assertEqual(report["open_issue_count"], 1)
         self.assertIsNone(report["open_issue_error"])
@@ -619,7 +631,7 @@ class RunReportTests(AssuranceReportTestCase):
         self.assertEqual(lines[1], "Assurance inbox: 1 open; `asl assurance list`")
         self.assertEqual(
             lines[2],
-            f"Assurance report: /runs/a/{models.AUDIT_REPORT_FILENAME}",
+            f"Assurance report: /runs/a/{assurance_models_vocab.AUDIT_REPORT_FILENAME}",
         )
 
     def test_unread_open_count_says_so_instead_of_guessing(self) -> None:
@@ -726,8 +738,8 @@ class ObserverStructureTests(unittest.TestCase):
         """``asl status`` renders assurance without being able to produce it.
 
         The guarantee is structural: this module's only siblings are the
-        ledger, its models, and its projection, so nothing reachable from a
-        status or metrics command can start a harness.
+        ledger, its models (the ``assurance_models_*`` modules), and its projection,
+        so nothing reachable from a status or metrics command can start a harness.
         """
         source = (REPO_ROOT / "agent_session_loop" / "assurance_report.py").read_text()
         siblings = {
@@ -738,7 +750,12 @@ class ObserverStructureTests(unittest.TestCase):
         }
         self.assertEqual(
             siblings,
-            {"assurance_ledger", "assurance_models", "assurance_projection"},
+            {
+                "assurance_ledger",
+                "assurance_models_primitives",
+                "assurance_models_vocab",
+                "assurance_projection",
+            },
         )
 
 

@@ -10,11 +10,18 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import assurance_cli, cli
+from agent_session_loop import (
+    assurance_cli,
+    assurance_models_findings,
+    assurance_models_inbox,
+    assurance_models_primitives,
+    assurance_models_reconcile,
+    cli,
+)
 from agent_session_loop import assurance_ledger as ledger
-from agent_session_loop import assurance_models as models
 from agent_session_loop import assurance_projection as projection
 from agent_session_loop import assurance_reconcile as reconcile
+from agent_session_loop.assurance_models_primitives import identity_key_for_issue
 from agent_session_loop.assurance_projection import AuditPublication
 
 RUN_ID = "20260810T101112123456Z-4242"
@@ -28,7 +35,7 @@ OTHER_INPUT_DIGEST = "b" * 64
 THIRD_INPUT_DIGEST = "c" * 64
 
 
-def _finding(**overrides) -> models.Finding:
+def _finding(**overrides) -> assurance_models_findings.Finding:
     payload = {
         "category": "lifecycle",
         "component": "agent_session_loop/runner.py",
@@ -41,12 +48,14 @@ def _finding(**overrides) -> models.Finding:
         "localization": ("agent_session_loop/runner.py",),
     }
     payload.update(overrides)
-    return models.Finding(**payload)
+    return assurance_models_findings.Finding(**payload)
 
 
-def _artifacts(digest: str = INPUT_DIGEST) -> tuple[models.EvidenceRef, ...]:
+def _artifacts(
+    digest: str = INPUT_DIGEST,
+) -> tuple[assurance_models_findings.EvidenceRef, ...]:
     return (
-        models.EvidenceRef(
+        assurance_models_findings.EvidenceRef(
             kind="artifact", locator="supervisor-audit-input.json", digest=digest
         ),
     )
@@ -80,11 +89,15 @@ class ReconcileTestCase(unittest.TestCase):
         return projection.publish_audit(publication, state_dir=self.state_dir, **kwargs)
 
     def observe(
-        self, finding: models.Finding, *, run_id: str, state_dir: Path | None = None
+        self,
+        finding: assurance_models_findings.Finding,
+        *,
+        run_id: str,
+        state_dir: Path | None = None,
     ) -> str:
         """Open an issue the way pre-identity history did: minted, never bound."""
         record = ledger.append_issue_observation(
-            models.IssueObservation(
+            assurance_models_inbox.IssueObservation(
                 run_id=run_id, finding=finding, observed_at=TIMESTAMP
             ),
             state_dir=state_dir or self.state_dir,
@@ -156,12 +169,12 @@ class ReconcileTestCase(unittest.TestCase):
         """Rewrite every open suggestion the way a reviewer would."""
         decisions = []
         for item in manifest["decisions"]:
-            if item["decision"] != models.DECISION_REVIEW:
+            if item["decision"] != assurance_models_reconcile.DECISION_REVIEW:
                 decisions.append(item)
-            elif decision == models.DECISION_MERGE:
+            elif decision == assurance_models_reconcile.DECISION_MERGE:
                 decisions.append(
                     {
-                        "decision": models.DECISION_MERGE,
+                        "decision": assurance_models_reconcile.DECISION_MERGE,
                         "source_issue_id": item["issue_ids"][1],
                         "target_issue_id": item["issue_ids"][0],
                         "note": None,
@@ -170,7 +183,7 @@ class ReconcileTestCase(unittest.TestCase):
             else:
                 decisions.append(
                     {
-                        "decision": models.DECISION_KEEP_DISTINCT,
+                        "decision": assurance_models_reconcile.DECISION_KEEP_DISTINCT,
                         "issue_ids": item["issue_ids"],
                         "note": None,
                     }
@@ -180,14 +193,15 @@ class ReconcileTestCase(unittest.TestCase):
     def keep_distinct_only_manifest(self) -> dict:
         """Rule every open pair distinct, and leave the bindings out of it."""
         manifest = self.resolve_reviews(
-            self.preview_manifest(), decision=models.DECISION_KEEP_DISTINCT
+            self.preview_manifest(),
+            decision=assurance_models_reconcile.DECISION_KEEP_DISTINCT,
         )
         return {
             **manifest,
             "decisions": [
                 item
                 for item in manifest["decisions"]
-                if item["decision"] == models.DECISION_KEEP_DISTINCT
+                if item["decision"] == assurance_models_reconcile.DECISION_KEEP_DISTINCT
             ],
         }
 
@@ -203,8 +217,8 @@ class ReconcileTestCase(unittest.TestCase):
 class ManifestSchemaTests(ReconcileTestCase):
     def _manifest(self, decisions: list[dict]) -> dict:
         return {
-            "kind": models.RECONCILIATION_MANIFEST_KIND,
-            "version": models.RECONCILIATION_MANIFEST_VERSION,
+            "kind": assurance_models_reconcile.RECONCILIATION_MANIFEST_KIND,
+            "version": assurance_models_reconcile.RECONCILIATION_MANIFEST_VERSION,
             "catalog_digest": "d" * 64,
             "generated_at": TIMESTAMP,
             "decisions": decisions,
@@ -239,23 +253,25 @@ class ManifestSchemaTests(ReconcileTestCase):
                 },
             ]
         )
-        manifest = models.parse_reconciliation_manifest(payload)
+        manifest = assurance_models_reconcile.parse_reconciliation_manifest(payload)
         self.assertEqual(payload, manifest.to_dict())
-        self.assertEqual(1, len(manifest.of_kind(models.DECISION_BIND)))
+        self.assertEqual(
+            1, len(manifest.of_kind(assurance_models_reconcile.DECISION_BIND))
+        )
         self.assertEqual(1, len(manifest.unresolved))
 
     def test_a_document_of_another_kind_is_refused_as_the_wrong_document(self) -> None:
         payload = self._manifest([])
         payload["kind"] = "assurance-summary"
-        with self.assertRaises(models.AssuranceError) as raised:
-            models.parse_reconciliation_manifest(payload)
+        with self.assertRaises(assurance_models_primitives.AssuranceError) as raised:
+            assurance_models_reconcile.parse_reconciliation_manifest(payload)
         self.assertIn("kind", str(raised.exception))
 
     def test_an_unsupported_version_names_what_this_build_reads(self) -> None:
         payload = self._manifest([])
         payload["version"] = 2
-        with self.assertRaises(models.AssuranceError) as raised:
-            models.parse_reconciliation_manifest(payload)
+        with self.assertRaises(assurance_models_primitives.AssuranceError) as raised:
+            assurance_models_reconcile.parse_reconciliation_manifest(payload)
         self.assertIn("version(s) 1", str(raised.exception))
 
     def test_a_decision_carrying_a_foreign_field_is_refused(self) -> None:
@@ -269,8 +285,8 @@ class ManifestSchemaTests(ReconcileTestCase):
                 }
             ]
         )
-        with self.assertRaises(models.AssuranceError) as raised:
-            models.parse_reconciliation_manifest(payload)
+        with self.assertRaises(assurance_models_primitives.AssuranceError) as raised:
+            assurance_models_reconcile.parse_reconciliation_manifest(payload)
         self.assertIn("target_issue_id", str(raised.exception))
 
     def test_binding_one_key_twice_is_refused_before_anything_is_applied(self) -> None:
@@ -288,8 +304,8 @@ class ManifestSchemaTests(ReconcileTestCase):
                 },
             ]
         )
-        with self.assertRaises(models.AssuranceError) as raised:
-            models.parse_reconciliation_manifest(payload)
+        with self.assertRaises(assurance_models_primitives.AssuranceError) as raised:
+            assurance_models_reconcile.parse_reconciliation_manifest(payload)
         self.assertIn("issue.asi-1", str(raised.exception))
 
     def test_merging_one_issue_twice_is_refused_because_only_one_would_land(
@@ -309,8 +325,8 @@ class ManifestSchemaTests(ReconcileTestCase):
                 },
             ]
         )
-        with self.assertRaises(models.AssuranceError) as raised:
-            models.parse_reconciliation_manifest(payload)
+        with self.assertRaises(assurance_models_primitives.AssuranceError) as raised:
+            assurance_models_reconcile.parse_reconciliation_manifest(payload)
         self.assertIn("ASI-2", str(raised.exception))
 
     def test_a_merge_into_itself_is_refused_by_the_schema(self) -> None:
@@ -323,21 +339,21 @@ class ManifestSchemaTests(ReconcileTestCase):
                 }
             ]
         )
-        with self.assertRaises(models.AssuranceError):
-            models.parse_reconciliation_manifest(payload)
+        with self.assertRaises(assurance_models_primitives.AssuranceError):
+            assurance_models_reconcile.parse_reconciliation_manifest(payload)
 
     def test_a_pair_decision_naming_one_issue_is_refused(self) -> None:
         for kind in ("keep-distinct", "review"):
             with self.subTest(kind=kind):
                 payload = self._manifest([{"decision": kind, "issue_ids": ["ASI-1"]}])
-                with self.assertRaises(models.AssuranceError):
-                    models.parse_reconciliation_manifest(payload)
+                with self.assertRaises(assurance_models_primitives.AssuranceError):
+                    assurance_models_reconcile.parse_reconciliation_manifest(payload)
 
     def test_a_catalog_digest_that_is_not_a_digest_is_refused(self) -> None:
         payload = self._manifest([])
         payload["catalog_digest"] = "not-a-digest"
-        with self.assertRaises(models.AssuranceError):
-            models.parse_reconciliation_manifest(payload)
+        with self.assertRaises(assurance_models_primitives.AssuranceError):
+            assurance_models_reconcile.parse_reconciliation_manifest(payload)
 
 
 class ReconcileWiringTests(ReconcileTestCase):
@@ -415,7 +431,7 @@ class PreviewTests(ReconcileTestCase):
         self.assertEqual([first, second], pair["issue_ids"])
         self.assertIn(projection.MATCH_SUMMARY, pair["reasons"])
         self.assertNotIn(
-            models.DECISION_MERGE,
+            assurance_models_reconcile.DECISION_MERGE,
             [item["decision"] for item in payload["manifest"]["decisions"]],
         )
 
@@ -438,8 +454,12 @@ class PreviewTests(ReconcileTestCase):
 
     def test_the_manifest_is_the_preview_and_validates_as_one(self) -> None:
         self.open_unbound_twins()
-        manifest = models.parse_reconciliation_manifest(self.preview_manifest())
-        self.assertEqual(3, len(manifest.of_kind(models.DECISION_BIND)))
+        manifest = assurance_models_reconcile.parse_reconciliation_manifest(
+            self.preview_manifest()
+        )
+        self.assertEqual(
+            3, len(manifest.of_kind(assurance_models_reconcile.DECISION_BIND))
+        )
         self.assertEqual(1, len(manifest.unresolved))
 
     def test_a_key_another_issue_already_owns_is_reported_blocked_not_offered(
@@ -447,8 +467,8 @@ class PreviewTests(ReconcileTestCase):
     ) -> None:
         first, second = self.open_unbound_twins()
         ledger.append_identity_binding(
-            models.IssueIdentityBinding(
-                identity_key=models.identity_key_for_issue(second),
+            assurance_models_inbox.IssueIdentityBinding(
+                identity_key=assurance_models_primitives.identity_key_for_issue(second),
                 issue_id=first,
                 source="reconcile",
                 bound_at=TIMESTAMP,
@@ -487,7 +507,7 @@ class ApplyTests(ReconcileTestCase):
     def test_a_reviewed_manifest_binds_and_merges_in_one_append(self) -> None:
         self.open_unbound_twins()
         manifest = self.resolve_reviews(
-            self.preview_manifest(), decision=models.DECISION_MERGE
+            self.preview_manifest(), decision=assurance_models_reconcile.DECISION_MERGE
         )
         path = self.write_manifest(manifest)
         before = self.ledger_lines()
@@ -506,7 +526,8 @@ class ApplyTests(ReconcileTestCase):
         first, second = self.open_unbound_twins()
         path = self.write_manifest(
             self.resolve_reviews(
-                self.preview_manifest(), decision=models.DECISION_MERGE
+                self.preview_manifest(),
+                decision=assurance_models_reconcile.DECISION_MERGE,
             )
         )
         code, _, err = self.run_json(
@@ -515,7 +536,9 @@ class ApplyTests(ReconcileTestCase):
         self.assertEqual(0, code, err)
 
         inbox = self.inbox()
-        surviving = inbox.issue_for_identity_key(models.identity_key_for_issue(second))
+        surviving = inbox.issue_for_identity_key(
+            assurance_models_primitives.identity_key_for_issue(second)
+        )
         self.assertIsNotNone(surviving)
         assert surviving is not None
         self.assertEqual(first, surviving.issue_id)
@@ -527,7 +550,8 @@ class ApplyTests(ReconcileTestCase):
         self.open_unbound_twins()
         path = self.write_manifest(
             self.resolve_reviews(
-                self.preview_manifest(), decision=models.DECISION_MERGE
+                self.preview_manifest(),
+                decision=assurance_models_reconcile.DECISION_MERGE,
             )
         )
         code, _, err = self.run_json(
@@ -578,7 +602,7 @@ class ApplyTests(ReconcileTestCase):
     def test_a_manifest_reviewed_against_a_moved_catalog_is_refused(self) -> None:
         self.open_unbound_twins()
         manifest = self.resolve_reviews(
-            self.preview_manifest(), decision=models.DECISION_MERGE
+            self.preview_manifest(), decision=assurance_models_reconcile.DECISION_MERGE
         )
         self.observe(
             _finding(
@@ -606,10 +630,10 @@ class ApplyTests(ReconcileTestCase):
         manifest["decisions"] = [
             item
             for item in manifest["decisions"]
-            if item["decision"] == models.DECISION_BIND
+            if item["decision"] == assurance_models_reconcile.DECISION_BIND
         ] + [
             {
-                "decision": models.DECISION_MERGE,
+                "decision": assurance_models_reconcile.DECISION_MERGE,
                 "source_issue_id": "ASI-99",
                 "target_issue_id": first,
                 "note": None,
@@ -633,20 +657,24 @@ class ApplyTests(ReconcileTestCase):
         manifest = self.preview_manifest()
         manifest["decisions"] = [
             {
-                "decision": models.DECISION_BIND,
+                "decision": assurance_models_reconcile.DECISION_BIND,
                 "issue_id": first,
-                "identity_key": models.identity_key_for_issue(first),
+                "identity_key": assurance_models_primitives.identity_key_for_issue(
+                    first
+                ),
                 "note": None,
             },
             {
-                "decision": models.DECISION_BIND,
+                "decision": assurance_models_reconcile.DECISION_BIND,
                 "issue_id": second,
-                "identity_key": models.identity_key_for_issue(first),
+                "identity_key": assurance_models_primitives.identity_key_for_issue(
+                    first
+                ),
                 "note": None,
             },
         ]
-        with self.assertRaises(models.AssuranceError):
-            models.parse_reconciliation_manifest(manifest)
+        with self.assertRaises(assurance_models_primitives.AssuranceError):
+            assurance_models_reconcile.parse_reconciliation_manifest(manifest)
 
     def test_binding_a_key_to_an_issue_that_merged_away_is_refused(self) -> None:
         first, second = self.open_unbound_twins()
@@ -654,15 +682,15 @@ class ApplyTests(ReconcileTestCase):
         inbox = self.inbox()
         path = self.write_manifest(
             {
-                "kind": models.RECONCILIATION_MANIFEST_KIND,
-                "version": models.RECONCILIATION_MANIFEST_VERSION,
+                "kind": assurance_models_reconcile.RECONCILIATION_MANIFEST_KIND,
+                "version": assurance_models_reconcile.RECONCILIATION_MANIFEST_VERSION,
                 "catalog_digest": inbox.catalog.digest,
                 "generated_at": TIMESTAMP,
                 "decisions": [
                     {
-                        "decision": models.DECISION_BIND,
+                        "decision": assurance_models_reconcile.DECISION_BIND,
                         "issue_id": second,
-                        "identity_key": models.identity_key_for_issue(second),
+                        "identity_key": identity_key_for_issue(second),
                         "note": None,
                     }
                 ],
@@ -700,7 +728,8 @@ class ApplyTests(ReconcileTestCase):
         self.open_unbound_twins()
         path = self.write_manifest(
             self.resolve_reviews(
-                self.preview_manifest(), decision=models.DECISION_MERGE
+                self.preview_manifest(),
+                decision=assurance_models_reconcile.DECISION_MERGE,
             )
         )
         code, out, err = self.run_cli(
@@ -749,7 +778,9 @@ class KeepDistinctTests(ReconcileTestCase):
         self.open_unbound_twins()
         first = self.preview_manifest()
         path = self.write_manifest(
-            self.resolve_reviews(first, decision=models.DECISION_KEEP_DISTINCT)
+            self.resolve_reviews(
+                first, decision=assurance_models_reconcile.DECISION_KEEP_DISTINCT
+            )
         )
         self.apply_path(path)
 
@@ -759,7 +790,7 @@ class KeepDistinctTests(ReconcileTestCase):
             [
                 item
                 for item in second["decisions"]
-                if item["decision"] == models.DECISION_REVIEW
+                if item["decision"] == assurance_models_reconcile.DECISION_REVIEW
             ],
         )
 
@@ -778,7 +809,7 @@ class KeepDistinctTests(ReconcileTestCase):
             [
                 item["issue_ids"]
                 for item in third["decisions"]
-                if item["decision"] == models.DECISION_REVIEW
+                if item["decision"] == assurance_models_reconcile.DECISION_REVIEW
             ],
         )
 
@@ -819,7 +850,7 @@ class KeepDistinctTests(ReconcileTestCase):
         manifest = self.keep_distinct_only_manifest()
         manifest["decisions"] = [
             {
-                "decision": models.DECISION_KEEP_DISTINCT,
+                "decision": assurance_models_reconcile.DECISION_KEEP_DISTINCT,
                 "issue_ids": [first, "ASI-99"],
                 "note": None,
             }
@@ -853,7 +884,7 @@ class KeepDistinctTests(ReconcileTestCase):
         """A record the projection threw out must not answer for a live review."""
         ledger.append_record(
             ledger.KIND_ISSUE_KEPT_DISTINCT,
-            models.IssueKeptDistinct(
+            assurance_models_inbox.IssueKeptDistinct(
                 issue_ids=("ASI-1", "ASI-2"),
                 identity_digests=self.twin_identity_digests(),
                 recorded_at=TIMESTAMP,
@@ -870,7 +901,8 @@ class KeepDistinctTests(ReconcileTestCase):
 
         path = self.write_manifest(
             self.resolve_reviews(
-                self.preview_manifest(), decision=models.DECISION_KEEP_DISTINCT
+                self.preview_manifest(),
+                decision=assurance_models_reconcile.DECISION_KEEP_DISTINCT,
             )
         )
         self.assertEqual(1, self.apply_path(path)["kept_distinct"])
@@ -902,9 +934,10 @@ class ConcurrentApplyTests(ReconcileTestCase):
     def test_a_publisher_that_wins_the_race_makes_the_manifest_stale(self) -> None:
         """A decision reviewed before another writer moved identity never lands."""
         self.open_unbound_twins()
-        manifest = models.parse_reconciliation_manifest(
+        manifest = assurance_models_reconcile.parse_reconciliation_manifest(
             self.resolve_reviews(
-                self.preview_manifest(), decision=models.DECISION_MERGE
+                self.preview_manifest(),
+                decision=assurance_models_reconcile.DECISION_MERGE,
             )
         )
         original = ledger.append_transaction
@@ -934,9 +967,10 @@ class ConcurrentApplyTests(ReconcileTestCase):
 
     def test_an_apply_that_lost_the_race_to_an_identical_one_is_a_no_op(self) -> None:
         self.open_unbound_twins()
-        manifest = models.parse_reconciliation_manifest(
+        manifest = assurance_models_reconcile.parse_reconciliation_manifest(
             self.resolve_reviews(
-                self.preview_manifest(), decision=models.DECISION_MERGE
+                self.preview_manifest(),
+                decision=assurance_models_reconcile.DECISION_MERGE,
             )
         )
         first = reconcile.apply_manifest(manifest, state_dir=self.state_dir)

@@ -20,7 +20,10 @@ from unittest import mock
 from agent_session_loop import (
     assurance_catchup,
     assurance_ledger,
-    assurance_models,
+    assurance_models_findings,
+    assurance_models_inbox,
+    assurance_models_summary,
+    assurance_models_vocab,
     assurance_projection,
     cli,
     config,
@@ -34,7 +37,8 @@ from agent_session_loop import (
     plans_snapshot,
     readiness_gate,
     run_control,
-    run_coordination,
+    run_coordination_mailbox_poll,
+    run_coordination_terminal,
     run_payloads,
     run_persistence,
     run_selection,
@@ -46,12 +50,14 @@ from agent_session_loop import (
     supervisor_audit,
     supervisor_audit_agent,
     supervisor_audit_checks,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_input,
+    supervisor_audit_evidence_models,
     supervisor_audit_vocabulary,
-    turn_execution,
+    turn_execution_constants,
     verification_transitions,
 )
-from agent_session_loop.assurance_models import RUBRIC_LANES, AuditRole
+from agent_session_loop.assurance_models_summary import AuditRole
+from agent_session_loop.assurance_models_vocab import RUBRIC_LANES
 from tests.support import (
     init_git_repo,
     install_fake_codex,
@@ -86,7 +92,7 @@ def _summary(state_name: str = "all-clear", **overrides: object):
         "eligible": True,
     }
     values.update(overrides)
-    return assurance_models.AssuranceSummary(**values)  # type: ignore[arg-type]
+    return assurance_models_summary.AssuranceSummary(**values)  # type: ignore[arg-type]
 
 
 class TerminalOutcomeNamingTests(unittest.TestCase):
@@ -243,9 +249,9 @@ class _RunHistory:
 
     def _bundle(
         self, history: tuple[Path, Path, Path, Path], *, terminal_pending: bool
-    ) -> supervisor_audit_evidence.AuditInput:
+    ) -> supervisor_audit_evidence_models.AuditInput:
         workspace, plan_dir, state_dir, run_dir = history
-        return supervisor_audit_evidence.collect_audit_input(
+        return supervisor_audit_evidence_input.collect_audit_input(
             run_id=RUN_ID,
             run_dir=run_dir,
             state_dir=state_dir,
@@ -255,8 +261,8 @@ class _RunHistory:
         )
 
     def _verdict(
-        self, bundle: supervisor_audit_evidence.AuditInput, check: str
-    ) -> assurance_models.DeterministicResult:
+        self, bundle: supervisor_audit_evidence_models.AuditInput, check: str
+    ) -> assurance_models_findings.DeterministicResult:
         for result in supervisor_audit_checks.run_deterministic_checks(bundle):
             if result.check == check:
                 return result
@@ -478,10 +484,13 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             summary = self._audit(history, self._auditor(history))
 
             self.assertEqual("all-clear", summary.state, summary.reason)
-            for name in assurance_models.CANONICAL_AUDIT_ARTIFACTS:
+            for name in assurance_models_vocab.CANONICAL_AUDIT_ARTIFACTS:
                 self.assertTrue((run_dir / name).exists(), name)
             self.assertEqual(
-                {f"run/{name}" for name in assurance_models.CANONICAL_AUDIT_ARTIFACTS},
+                {
+                    f"run/{name}"
+                    for name in assurance_models_vocab.CANONICAL_AUDIT_ARTIFACTS
+                },
                 {reference.locator for reference in summary.artifacts},
             )
 
@@ -594,7 +603,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                 supervisor_audit.REASON_NO_INDEPENDENT_ROLE, summary.reason
             )
             self.assertEqual([], auditor.prompts)
-            for name in assurance_models.CANONICAL_AUDIT_ARTIFACTS:
+            for name in assurance_models_vocab.CANONICAL_AUDIT_ARTIFACTS:
                 self.assertTrue((run_dir / name).exists(), name)
             self.assertEqual(
                 [
@@ -633,7 +642,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             self.assertTrue(summary.issue_ids)
             self.assertEqual(len(summary.issue_ids), len(findings))
             report = json.loads(
-                (history[3] / assurance_models.AUDIT_REPORT_FILENAME).read_text(
+                (history[3] / assurance_models_vocab.AUDIT_REPORT_FILENAME).read_text(
                     encoding="utf-8"
                 )
             )
@@ -679,7 +688,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                 raise OSError("evidence unreadable")
 
             with mock.patch.object(
-                supervisor_audit_evidence, "collect_audit_input", refuse
+                supervisor_audit_evidence_input, "collect_audit_input", refuse
             ):
                 summary = self._audit(history)
 
@@ -831,9 +840,9 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             history = self._history(Path(tmp))
             root = history[2].parent
             prior = assurance_ledger.append_issue_observation(
-                assurance_models.IssueObservation(
+                assurance_models_inbox.IssueObservation(
                     run_id="20260809T101112123456Z-1111",
-                    finding=assurance_models.Finding(
+                    finding=assurance_models_findings.Finding(
                         category="audit-integrity",
                         component="supervisor-audit",
                         invariant_key=MUTATION_INVARIANT_KEY,
@@ -850,7 +859,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             )
             assurance_ledger.append_record(
                 assurance_ledger.KIND_ISSUE_DISPOSITION,
-                assurance_models.Disposition(
+                assurance_models_inbox.Disposition(
                     issue_id=prior.issue_id,
                     kind="resolve",
                     recorded_at="2026-08-09T10:12:12+00:00",
@@ -886,14 +895,14 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             # names the bundle alone: an operator following a locator here would
             # otherwise be sent to a report this run decided not to publish.
             self.assertEqual(
-                {f"run/{assurance_models.AUDIT_INPUT_FILENAME}"},
+                {f"run/{assurance_models_vocab.AUDIT_INPUT_FILENAME}"},
                 {reference.locator for reference in summary.artifacts},
             )
             self.assertFalse(
-                (run_dir / assurance_models.AUDIT_REPORT_FILENAME).exists()
+                (run_dir / assurance_models_vocab.AUDIT_REPORT_FILENAME).exists()
             )
             self.assertFalse(
-                (run_dir / assurance_models.AUDIT_MARKDOWN_FILENAME).exists()
+                (run_dir / assurance_models_vocab.AUDIT_MARKDOWN_FILENAME).exists()
             )
             self.assertFalse(
                 (run_dir / supervisor_audit_agent.AUDIT_STAGING_DIR_NAME).exists()
@@ -904,7 +913,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             history = self._history(Path(tmp))
             state_dir, run_dir = history[2], history[3]
 
-            canonical = run_dir / assurance_models.AUDIT_REPORT_FILENAME
+            canonical = run_dir / assurance_models_vocab.AUDIT_REPORT_FILENAME
             promoted: list[bool] = []
 
             def refuse(*args: object, **kwargs: object):
@@ -920,7 +929,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             # names existed for the length of the transaction and are given back.
             self.assertFalse(canonical.exists())
             self.assertFalse(
-                (run_dir / assurance_models.AUDIT_MARKDOWN_FILENAME).exists()
+                (run_dir / assurance_models_vocab.AUDIT_MARKDOWN_FILENAME).exists()
             )
             self.assertFalse(
                 (run_dir / supervisor_audit_agent.AUDIT_STAGING_DIR_NAME).exists()
@@ -988,9 +997,9 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
 
     def _context(
         self, payload: dict[str, object]
-    ) -> run_coordination.TerminalAuditContext:
+    ) -> run_coordination_terminal.TerminalAuditContext:
         state_path = Path(str(payload["state_path"]))
-        return run_coordination.TerminalAuditContext(
+        return run_coordination_terminal.TerminalAuditContext(
             plan=supervisor_audit.AuditPlan(
                 config=supervisor_audit.AuditConfig(harness="claude"),
                 role=AuditRole(
@@ -1088,7 +1097,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
         The terminal adjudicator is the sole exception, and it is exercised by
         ``test_an_unearned_success_is_refused_before_the_audit_runs``.
         """
-        for exit_code in (0, 1, turn_execution.INTERRUPTED_EXIT):
+        for exit_code in (0, 1, turn_execution_constants.INTERRUPTED_EXIT):
             with (
                 self.subTest(exit_code=exit_code),
                 tempfile.TemporaryDirectory() as tmp,
@@ -1161,7 +1170,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
                     issue_ids=("ASI-1",),
                     new_issue_count=1,
                     artifacts=(
-                        assurance_models.EvidenceRef(
+                        assurance_models_findings.EvidenceRef(
                             kind="artifact", locator="run/supervisor-audit.json"
                         ),
                     ),
@@ -1303,14 +1312,14 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             self._stage_outcome(payload, "paused")
             with mock.patch.object(supervisor_audit, "audit_terminal_run", interrupt):
                 code = run_termination._terminalize_run(
-                    exit_code=turn_execution.INTERRUPTED_EXIT,
+                    exit_code=turn_execution_constants.INTERRUPTED_EXIT,
                     event_path=Path(str(payload["events_path"])),
                     payload=payload,
                     write_readiness_state=readiness_gate.write_readiness_state,
                     audit_context=self._context(payload),
                 )
 
-            self.assertEqual(turn_execution.INTERRUPTED_EXIT, code)
+            self.assertEqual(turn_execution_constants.INTERRUPTED_EXIT, code)
             assurance = payload["assurance"]
             self.assertEqual("unavailable", assurance["state"])
             self.assertEqual(supervisor_audit.REASON_INTERRUPTED, assurance["reason"])
@@ -1410,7 +1419,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             context = self._context(payload)
             abort = harnesses.AbortSignal()
             persistence = run_persistence._RunPersistence()
-            mailbox_poll = run_coordination.MailboxPoll(
+            mailbox_poll = run_coordination_mailbox_poll.MailboxPoll(
                 plan_dir=plan_dir,
                 state_dir_arg=str(tmp_dir / "state"),
                 control_state=run_control.RunControlState(current_harness="codex"),
@@ -1905,7 +1914,7 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
                 state="findings",
                 eligible=True,
                 findings=(
-                    assurance_models.Finding(
+                    assurance_models_findings.Finding(
                         category="lifecycle",
                         component="agent_session_loop/runner.py",
                         invariant_key="retry.budget-respected",
@@ -1917,7 +1926,7 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
                     ),
                 ),
                 artifacts=(
-                    assurance_models.EvidenceRef(
+                    assurance_models_findings.EvidenceRef(
                         kind="artifact",
                         locator="supervisor-audit-input.json",
                         digest="a" * 64,
@@ -1930,7 +1939,7 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
         )
         assurance_ledger.append_record(
             assurance_ledger.KIND_ISSUE_DISPOSITION,
-            assurance_models.Disposition(
+            assurance_models_inbox.Disposition(
                 issue_id="ASI-1", kind=kind, recorded_at=recorded_at
             ),
             state_dir=root,
@@ -2075,7 +2084,7 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
                 self._process(history, limit=0)
 
     def test_a_run_that_died_mid_audit_is_re_audited_beside_its_leftovers(self) -> None:
-        attempt_dir_name = f"{assurance_models.ATTEMPT_DIR_PREFIX}1"
+        attempt_dir_name = f"{assurance_models_vocab.ATTEMPT_DIR_PREFIX}1"
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
             root = history[2].parent
@@ -2084,7 +2093,7 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
             # What a runner killed after its own audit began leaves behind. The
             # canonical writers create exclusively, so without archiving these
             # the re-audit refuses and reports a no-op as a completed audit.
-            (run_dir / assurance_models.AUDIT_INPUT_FILENAME).write_text(
+            (run_dir / assurance_models_vocab.AUDIT_INPUT_FILENAME).write_text(
                 "{}", encoding="utf-8"
             )
             (run_dir / attempt_dir_name).mkdir()
@@ -2095,19 +2104,19 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
             self.assertEqual(assurance_catchup.OUTCOME_AUDITED, result.outcome)
             self.assertEqual("all-clear", result.state, result.reason)
             self.assertEqual(
-                [assurance_models.AUDIT_INPUT_FILENAME, attempt_dir_name],
+                [assurance_models_vocab.AUDIT_INPUT_FILENAME, attempt_dir_name],
                 list(result.archived_artifacts),
             )
             archive = run_dir / f"{assurance_catchup.ABANDONED_AUDIT_ARCHIVE_PREFIX}1"
             self.assertEqual(
                 "{}",
-                (archive / assurance_models.AUDIT_INPUT_FILENAME).read_text(
+                (archive / assurance_models_vocab.AUDIT_INPUT_FILENAME).read_text(
                     encoding="utf-8"
                 ),
             )
             self.assertTrue((archive / attempt_dir_name).is_dir())
             self.assertTrue(
-                (run_dir / assurance_models.AUDIT_REPORT_FILENAME).is_file()
+                (run_dir / assurance_models_vocab.AUDIT_REPORT_FILENAME).is_file()
             )
             view = assurance_ledger.read_ledger(state_dir=root)
             self.assertEqual(

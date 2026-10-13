@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from . import assurance_ledger as ledger
-from . import assurance_models as models
+from . import assurance_models_primitives, assurance_models_vocab
 from . import assurance_projection as projection
 
 __all__ = [
@@ -155,7 +155,7 @@ def resolve_report_path(
         candidate = artifact.get("locator")
         if not isinstance(candidate, str):
             continue
-        if candidate.rsplit("/", 1)[-1] == models.AUDIT_REPORT_FILENAME:
+        if candidate.rsplit("/", 1)[-1] == assurance_models_vocab.AUDIT_REPORT_FILENAME:
             locator = candidate
             break
     if locator is None:
@@ -246,7 +246,7 @@ class RunAssuranceReport:
 def _open_issue_count(state_dir: str | Path | None) -> tuple[int | None, str | None]:
     try:
         return len(projection.read_projection(state_dir=state_dir).open_issues), None
-    except (OSError, models.AssuranceError) as error:
+    except (OSError, assurance_models_primitives.AssuranceError) as error:
         return None, str(error)
 
 
@@ -400,7 +400,7 @@ def open_issue_run_ids(state_dir: str | Path | None = None) -> OpenIssueRuns:
     """
     try:
         inbox = projection.read_projection(state_dir=state_dir)
-    except (OSError, models.AssuranceError) as error:
+    except (OSError, assurance_models_primitives.AssuranceError) as error:
         return OpenIssueRuns(
             run_ids=frozenset(),
             open_issue_count=0,
@@ -446,7 +446,9 @@ def _empty_metrics(path: Path, error: str | None) -> dict[str, Any]:
             "audited_runs": 0,
             "coverage_rate": None,
         },
-        "audit_states": {audit_state: 0 for audit_state in models.AUDIT_STATES},
+        "audit_states": {
+            audit_state: 0 for audit_state in assurance_models_vocab.AUDIT_STATES
+        },
         "issues": {
             "observations": 0,
             "new": 0,
@@ -593,7 +595,7 @@ def collect_assurance_metrics(
     try:
         view = ledger.read_ledger(state_dir=state_dir)
         inbox = projection.project(view)
-    except (OSError, models.AssuranceError) as error:
+    except (OSError, assurance_models_primitives.AssuranceError) as error:
         return _empty_metrics(path, str(error))
 
     report = _empty_metrics(path, None)
@@ -607,7 +609,7 @@ def collect_assurance_metrics(
         )
         if audit.summary.eligible:
             eligible += 1
-            if audit.state in models.COMPLETED_AUDIT_STATES:
+            if audit.state in assurance_models_vocab.COMPLETED_AUDIT_STATES:
                 audited += 1
         else:
             ineligible += 1

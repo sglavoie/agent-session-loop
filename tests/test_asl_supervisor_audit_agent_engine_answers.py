@@ -15,9 +15,7 @@ from agent_session_loop import (
     supervisor_audit_checks,
     supervisor_audit_vocabulary,
 )
-from agent_session_loop.assurance_models import (
-    RUBRIC_LANES,
-)
+from agent_session_loop.assurance_models_vocab import RUBRIC_LANES
 from tests import support_supervisor_audit_checks as checks_support
 from tests.support_supervisor_audit import FIXED_CLOCK, RUN_ID, ScriptedAuditor
 

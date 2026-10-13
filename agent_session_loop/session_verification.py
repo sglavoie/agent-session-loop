@@ -105,7 +105,7 @@ from . import (
     run_persistence,
     run_reporting,
     run_termination,
-    turn_execution,
+    turn_execution_commit,
     verification,
     verification_transitions,
 )
@@ -198,7 +198,7 @@ def _enforce_review_verdict(
             **repair_payload,
         }
         durability.write_json_file(paths["result"], turn_payload)
-    turn_execution.record_turn_rejected(
+    turn_execution_commit.record_turn_rejected(
         event_path=event_path,
         payload=payload,
         persistence=persistence,
@@ -314,7 +314,7 @@ def _enforce_session_verification(
             payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
             turn_payload["verification"] = refusal.turn_verification(session_id)
             durability.write_json_file(paths["result"], turn_payload)
-        turn_execution.record_turn_rejected(
+        turn_execution_commit.record_turn_rejected(
             event_path=event_path,
             payload=payload,
             persistence=persistence,
@@ -552,7 +552,7 @@ def _enforce_session_verification(
         payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
         turn_payload["verification"].update(repair_payload)
         durability.write_json_file(paths["result"], turn_payload)
-    turn_execution.record_turn_rejected(
+    turn_execution_commit.record_turn_rejected(
         event_path=event_path,
         payload=payload,
         persistence=persistence,

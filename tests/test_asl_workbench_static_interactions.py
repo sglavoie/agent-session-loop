@@ -6,9 +6,9 @@ import unittest
 
 from agent_session_loop import (
     control_queue,
-    workbench,
-    workbench_recovery,
+    workbench_recovery_models,
     workbench_server,
+    workbench_summary_model,
 )
 from tests import support_asl_workbench_static as support_static
 from tests.support import (
@@ -351,7 +351,7 @@ class WorkbenchStaticInteractionTests(support_static.WorkbenchStaticCase):
         # Session 8 regression: the JS frontend hard-codes string
         # vocabularies (activity source labels, recommended action
         # kinds) that mirror Python constants in
-        # agent_session_loop/workbench.py. Drift between the two sides
+        # agent_session_loop/workbench_summary_model.py. Drift between the two sides
         # would silently break preview badges and row-action dispatch.
         # Source the expected values from the Python module so a new
         # entry on either side fails this regression instead of
@@ -361,28 +361,28 @@ class WorkbenchStaticInteractionTests(support_static.WorkbenchStaticCase):
         # ACTIVITY_SOURCE_LABELS keys must cover every Python
         # LAST_ACTIVITY_SOURCES value so the preview badge falls back
         # to a friendly label rather than the raw enum value.
-        for source in workbench.LAST_ACTIVITY_SOURCES:
+        for source in workbench_summary_model.LAST_ACTIVITY_SOURCES:
             self.assertIn(
                 f'"{source}"',
                 decoded,
                 msg=(
                     f"app.js missing last_activity_source enum {source!r}; "
                     "ACTIVITY_SOURCE_LABELS is out of sync with "
-                    "workbench.LAST_ACTIVITY_SOURCES"
+                    "workbench_summary_model.LAST_ACTIVITY_SOURCES"
                 ),
             )
         # ROW_ACTION_FOCUS must cover every RecommendedAction; the
         # session-6 test already checks the dispatcher exists, but
         # this test sources the enum from the Python module so a new
-        # action added to workbench.py without a JS mapping fails here.
-        for action in workbench.RECOMMENDED_ACTIONS:
+        # action added to workbench_summary_model.py without a JS mapping fails here.
+        for action in workbench_summary_model.RECOMMENDED_ACTIONS:
             self.assertIn(
                 f'"{action}"',
                 decoded,
                 msg=(
                     f"app.js missing recommended_action {action!r}; "
                     "ROW_ACTION_FOCUS / handleRowAction is out of sync "
-                    "with workbench.RECOMMENDED_ACTIONS"
+                    "with workbench_summary_model.RECOMMENDED_ACTIONS"
                 ),
             )
         # The JS still branches on the "complete" urgency_group string
@@ -406,9 +406,9 @@ class WorkbenchStaticInteractionTests(support_static.WorkbenchStaticCase):
         js_targets = tuple(_re.findall(r'"([^"]+)"', targets_match.group(1)))
 
         self.assertEqual(
-            tuple(get_args(workbench_recovery.RecoveryActionTarget)), js_targets
+            tuple(get_args(workbench_recovery_models.RecoveryActionTarget)), js_targets
         )
-        self.assertEqual(workbench_recovery.RECOVERY_ACTION_TARGETS, js_targets)
+        self.assertEqual(workbench_recovery_models.RECOVERY_ACTION_TARGETS, js_targets)
 
 
 if __name__ == "__main__":

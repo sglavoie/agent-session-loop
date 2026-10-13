@@ -1,9 +1,9 @@
 """UTC clock helpers shared by the runner and the turn-execution boundary.
 
 These are the run loop's original time primitives, moved to a leaf module so
-``turn_execution`` can stamp turn records without importing the runner. Every
-moment ASL persists is UTC and ISO 8601 with an explicit offset, which is what
-the AgentMux contract corpus requires of a timestamp.
+the ``turn_execution_*`` modules can stamp turn records without importing
+the runner. Every moment ASL persists is UTC and ISO 8601 with an explicit
+offset, which is what the AgentMux contract corpus requires of a timestamp.
 """
 
 from __future__ import annotations

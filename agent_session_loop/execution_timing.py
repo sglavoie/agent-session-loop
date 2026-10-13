@@ -121,7 +121,7 @@ from typing import Any
 
 from . import events, plans_payloads, session_overview
 
-#: Appended by ``turn_execution.TurnRunner.launch`` as a bare string rather
+#: Appended by ``turn_execution_executor.TurnExecutor.launch`` as a bare string rather
 #: than through an ``events`` constant. It is the only evidence that a turn
 #: began, so an interrupted turn is visible as a start no finish answers.
 TURN_STARTED_EVENT = "turn_started"

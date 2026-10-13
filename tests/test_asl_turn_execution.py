@@ -27,6 +27,7 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
+    agent_mux_delivery,
     clock,
     events,
     harnesses,
@@ -35,14 +36,23 @@ from agent_session_loop import (
     process_tree,
     run_persistence,
     run_reporting,
-    turn_execution,
+    turn_execution_argv,
+    turn_execution_artifacts,
+    turn_execution_commit,
+    turn_execution_constants,
+    turn_execution_executor,
+    turn_execution_hang_sentinel,
+    turn_execution_hang_settings,
+    turn_execution_live,
+    turn_execution_protocols,
+    turn_execution_signals,
 )
 
 from .support import assert_no_runner_import, write_plan
 
 
 class RecordingPersistence:
-    """A :class:`turn_execution.TurnPersistence` that keeps what it was told.
+    """A :class:`turn_execution_protocols.TurnPersistence` that keeps what it was told.
 
     Events are kept in order and state writes are kept as snapshots, so a test
     can assert on sequence without reading files back. The lock is real: the
@@ -72,7 +82,7 @@ class RecordingPersistence:
 
 
 class RecordingProgress:
-    """A :class:`turn_execution.TurnProgress` that reports to a list."""
+    """A :class:`turn_execution_protocols.TurnProgress` that reports to a list."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -93,9 +103,7 @@ class RecordingProgress:
 @contextmanager
 def silent_delivery() -> Iterator[None]:
     """Suppress AgentMux delivery: it is a separate seam with its own tests."""
-    with mock.patch.object(
-        turn_execution.agent_mux_delivery, "notify_loop", return_value=None
-    ):
+    with mock.patch.object(agent_mux_delivery, "notify_loop", return_value=None):
         yield
 
 
@@ -112,7 +120,7 @@ class TurnExecutorHarness:
         self.plan_cache = plans_snapshot.PlanSnapshotCache()
         self.event_path = root / "events.jsonl"
         self.turn_index = turn_index
-        self.paths = turn_execution.turn_paths(
+        self.paths = turn_execution_artifacts.turn_paths(
             root / "run", turn_index=turn_index, session_id="1"
         )
         self.payload: dict[str, Any] = {
@@ -121,8 +129,8 @@ class TurnExecutorHarness:
             "active_turn": None,
             "turns": [],
         }
-        self.executor = turn_execution.TurnExecutor(
-            identity=turn_execution.TurnIdentity(
+        self.executor = turn_execution_executor.TurnExecutor(
+            identity=turn_execution_executor.TurnIdentity(
                 run_id="run-1", turn_index=turn_index, session_id="1"
             ),
             paths=self.paths,
@@ -173,8 +181,8 @@ class TurnExecutorHarness:
             "action_required": None,
         }
 
-    def live_turn(self, active_turn: dict[str, Any]) -> turn_execution.LiveTurn:
-        return turn_execution.LiveTurn(
+    def live_turn(self, active_turn: dict[str, Any]) -> turn_execution_live.LiveTurn:
+        return turn_execution_live.LiveTurn(
             payload=self.payload,
             event_path=self.event_path,
             progress=self.progress,
@@ -185,13 +193,13 @@ class TurnExecutorHarness:
             heartbeat_interval=3600.0,
         )
 
-    def launch_spec(self) -> turn_execution.TurnLaunch:
+    def launch_spec(self) -> turn_execution_executor.TurnLaunch:
         invocation = harnesses.HarnessInvocation(
             name="codex",
             argv=["codex", "exec", "do the work"],
             cwd=self.root,
         )
-        return turn_execution.TurnLaunch(
+        return turn_execution_executor.TurnLaunch(
             harness="codex",
             cwd=self.root,
             plan_dir=self.plan_dir,
@@ -208,7 +216,7 @@ class TurnExecutorHarness:
 
     def run(
         self, result: harnesses.HarnessResult | BaseException
-    ) -> turn_execution.TurnExecution:
+    ) -> turn_execution_executor.TurnExecution:
         """Launch a turn whose harness produces ``result`` (or raises it)."""
         active_turn = self.active_turn()
         live_turn = self.live_turn(active_turn)
@@ -244,27 +252,40 @@ class TurnExecutorBoundaryTests(unittest.TestCase):
     """The shape of the boundary itself, independent of any single ending."""
 
     def test_the_run_loop_collaborators_satisfy_the_protocols(self) -> None:
-        # The Protocols exist so turn_execution never imports runner; that is
+        # The Protocols exist so turn_execution_* never import runner; that is
         # only true if the runner's own objects still fit through them.
-        persistence: turn_execution.TurnPersistence = run_persistence._RunPersistence(
-            write_state=False
+        persistence: turn_execution_protocols.TurnPersistence = (
+            run_persistence._RunPersistence(write_state=False)
         )
-        progress: turn_execution.TurnProgress = run_reporting._ProgressReporter(
-            enabled=False
+        progress: turn_execution_protocols.TurnProgress = (
+            run_reporting._ProgressReporter(enabled=False)
         )
         self.assertIsNotNone(persistence.lock)
         self.assertIsNotNone(progress)
 
     def test_turn_execution_does_not_import_the_runner(self) -> None:
-        assert_no_runner_import(self, turn_execution)
+        for module in (
+            turn_execution_argv,
+            turn_execution_artifacts,
+            turn_execution_commit,
+            turn_execution_constants,
+            turn_execution_executor,
+            turn_execution_hang_sentinel,
+            turn_execution_hang_settings,
+            turn_execution_live,
+            turn_execution_protocols,
+            turn_execution_signals,
+        ):
+            with self.subTest(module=module.__name__):
+                assert_no_runner_import(self, module)
 
     def test_transition_records_are_frozen(self) -> None:
         for record in (
-            turn_execution.TurnIdentity,
-            turn_execution.TurnLaunch,
-            turn_execution.TurnExecution,
-            turn_execution.TurnFinalization,
-            turn_execution.TurnCommit,
+            turn_execution_executor.TurnIdentity,
+            turn_execution_executor.TurnLaunch,
+            turn_execution_executor.TurnExecution,
+            turn_execution_commit.TurnFinalization,
+            turn_execution_commit.TurnCommit,
         ):
             with self.subTest(record=record.__name__):
                 self.assertTrue(record.__dataclass_params__.frozen)
@@ -279,8 +300,8 @@ class TurnExecutorEndingTests(unittest.TestCase):
         self.harness = TurnExecutorHarness(Path(self._tmp.name))
 
     def finalize(
-        self, execution: turn_execution.TurnExecution
-    ) -> turn_execution.TurnFinalization:
+        self, execution: turn_execution_executor.TurnExecution
+    ) -> turn_execution_commit.TurnFinalization:
         with silent_delivery():
             return self.harness.executor.finalize(execution, before=self.harness.before)
 
@@ -337,12 +358,14 @@ class TurnExecutorEndingTests(unittest.TestCase):
             "signaled_pids": [123],
         }
         retracted = {
-            "reason": turn_execution.HANG_REASON_RESULT_RECEIVED,
+            "reason": turn_execution_constants.HANG_REASON_RESULT_RECEIVED,
             "harness_pid": 123,
             "recovery": recovery,
         }
         with mock.patch.object(
-            turn_execution.HangSentinel, "note_turn_exit", return_value=retracted
+            turn_execution_hang_sentinel.HangSentinel,
+            "note_turn_exit",
+            return_value=retracted,
         ):
             execution = self.harness.run(harness_result(returncode=137))
         finalization = self.finalize(execution)
@@ -399,7 +422,9 @@ class TurnExecutorEndingTests(unittest.TestCase):
         execution = self.harness.run(KeyboardInterrupt())
 
         self.assertTrue(execution.result.interrupted)
-        self.assertEqual(turn_execution.INTERRUPTED_EXIT, execution.result.returncode)
+        self.assertEqual(
+            turn_execution_constants.INTERRUPTED_EXIT, execution.result.returncode
+        )
         self.assertEqual(["codex", "exec", "do the work"], execution.result.argv)
 
         finalization = self.finalize(execution)
@@ -592,7 +617,7 @@ class PostResultTerminationPreviewTests(unittest.TestCase):
         }
         if shutdown is not None:
             live_turn["harness_shutdown"] = shutdown
-        return turn_execution.write_turn_artifacts(
+        return turn_execution_artifacts.write_turn_artifacts(
             paths=self.paths,
             result=result,
             before=self.snapshot,

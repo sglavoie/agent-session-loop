@@ -17,7 +17,7 @@ from agent_session_loop import (
     readiness_gate,
     run_commit,
     state,
-    turn_execution,
+    turn_execution_constants,
 )
 
 
@@ -110,7 +110,7 @@ class ParserAndStateTestsBase(unittest.TestCase):
     def _detailed_turn(self) -> dict[str, object]:
         check = self._verification_check()
         return {
-            "version": turn_execution.RESULT_SCHEMA_VERSION,
+            "version": turn_execution_constants.RESULT_SCHEMA_VERSION,
             "run_id": "run-1",
             "turn_index": 1,
             "session": 1,

@@ -12,9 +12,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import assurance_models as assurance
-from agent_session_loop import assurance_projection as assurance_projection
 from agent_session_loop import (
+    assurance_models_findings,
     cli,
     cli_trace,
     events,
@@ -28,6 +27,7 @@ from agent_session_loop import (
     review_continuation,
     review_repair,
 )
+from agent_session_loop import assurance_projection as assurance_projection
 from tests.support import write_plan_with_ids
 
 AUDIT_RUN_ID = "20260810T101112123456Z-4242"
@@ -100,7 +100,7 @@ def _append_event(
 
 
 def _publish_audit(state_root: Path, *, recorded_at: str, run_id: str = AUDIT_RUN_ID):
-    finding = assurance.Finding(
+    finding = assurance_models_findings.Finding(
         category="lifecycle",
         component="agent_session_loop/runner.py",
         invariant_key="retry.budget-respected",

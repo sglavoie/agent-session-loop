@@ -28,7 +28,8 @@ from agent_session_loop import (
     run_loop,
     state,
     state_locks,
-    turn_execution,
+    turn_execution_artifacts,
+    turn_execution_constants,
     turn_postflight,
 )
 from tests.support import (
@@ -220,7 +221,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
                 stderr="",
             )
 
-        real_turn_paths = turn_execution.turn_paths
+        real_turn_paths = turn_execution_artifacts.turn_paths
         turn_paths_calls = 0
 
         def fake_turn_paths(*args: object, **kwargs: object):
@@ -266,11 +267,11 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
                 + os.environ.get("PYTHONPATH", ""),
             ),
             mock.patch.object(
-                turn_execution, "LIVE_CONTROL_POLL_INTERVAL_SECONDS", 0.02
+                turn_execution_constants, "LIVE_CONTROL_POLL_INTERVAL_SECONDS", 0.02
             ),
             mock.patch.object(harnesses, "run_harness", side_effect=fake_run_harness),
             mock.patch.object(
-                turn_execution, "turn_paths", side_effect=fake_turn_paths
+                turn_execution_artifacts, "turn_paths", side_effect=fake_turn_paths
             ),
             mock.patch.object(
                 run_control.RunControlListener,
@@ -559,7 +560,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
                 FAKE_CODEX_SLEEP="60",
             ),
             mock.patch.object(
-                turn_execution, "LIVE_CONTROL_POLL_INTERVAL_SECONDS", 0.02
+                turn_execution_constants, "LIVE_CONTROL_POLL_INTERVAL_SECONDS", 0.02
             ),
             mock.patch.object(harnesses, "run_harness", side_effect=spy_run_harness),
             mock.patch.object(

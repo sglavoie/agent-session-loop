@@ -7,7 +7,13 @@ from __future__ import annotations
 import dataclasses
 import json
 
-from agent_session_loop import events, plans_files, state, workbench, workbench_server
+from agent_session_loop import (
+    events,
+    plans_files,
+    state,
+    workbench_server,
+    workbench_summary,
+)
 from tests.asl_workbench_server_support import (
     WorkbenchServerTestCase,
 )
@@ -77,7 +83,7 @@ class WorkbenchServerQueueSortTests(WorkbenchServerTestCase):
         done_dir = self.tmp_path / "plans" / "done"
         write_plan(done_dir, ("complete",))
         canonical = plans_files.canonicalize_path(done_dir)
-        base = workbench.build_workbench_summary(
+        base = workbench_summary.build_workbench_summary(
             _discovered(canonical), state_dir=self.state_dir
         )
         self.assertEqual("complete", base.primary_state)
@@ -107,7 +113,7 @@ class WorkbenchServerQueueSortTests(WorkbenchServerTestCase):
         # oldest, ahead of an active plan that does have activity.
         done_dir = self.tmp_path / "plans" / "done-bare"
         write_plan(done_dir, ("complete",))
-        complete = workbench.build_workbench_summary(
+        complete = workbench_summary.build_workbench_summary(
             _discovered(plans_files.canonicalize_path(done_dir)),
             state_dir=self.state_dir,
         )
@@ -115,7 +121,7 @@ class WorkbenchServerQueueSortTests(WorkbenchServerTestCase):
         self.assertIsNone(complete.completed_at)
 
         active = dataclasses.replace(
-            workbench.build_workbench_summary(
+            workbench_summary.build_workbench_summary(
                 _discovered(self.canonical_plan_dir), state_dir=self.state_dir
             ),
             last_activity_at="2026-06-01T00:00:00Z",

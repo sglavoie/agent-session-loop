@@ -18,7 +18,8 @@ from agent_session_loop import (
     mailbox,
     mailbox_appenders,
     run_control,
-    run_coordination,
+    run_coordination_control,
+    run_coordination_control_drain,
     run_persistence,
 )
 from tests.support import (
@@ -41,7 +42,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
 
         self.payload: dict[str, object] = {
             "run_id": "test-run",
-            "control": run_coordination.initial_control_payload(),
+            "control": run_coordination_control.initial_control_payload(),
             "harness": "codex",
         }
         self.control_payload = dict(self.payload["control"])  # type: ignore[arg-type]
@@ -58,7 +59,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         finalization: bool = False,
     ) -> tuple[control_queue.DrainResult, set[str]]:
         seen = set() if seen_ids is None else seen_ids
-        result = run_coordination.drain_external_control_queue(
+        result = run_coordination_control_drain.drain_external_control_queue(
             plan_dir=self.plan_dir,
             state_dir_arg=str(self.state_dir),
             control_state=control_state,
@@ -252,7 +253,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         self.assertIsNotNone(action)
         assert action is not None
 
-        run_coordination.record_run_control_action(
+        run_coordination_control.record_run_control_action(
             event_path=self.event_path,
             payload=self.payload,
             control_payload=self.control_payload,
@@ -293,7 +294,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         )
         self.assertIsNotNone(clear_action)
         assert clear_action is not None
-        run_coordination.record_run_control_action(
+        run_coordination_control.record_run_control_action(
             event_path=self.event_path,
             payload=self.payload,
             control_payload=self.control_payload,
@@ -450,7 +451,9 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
             control_queue.DEFAULT_ABORT_GRACE_SECONDS,
             self.control_payload["abort_grace_seconds"],
         )
-        self.assertEqual(run_coordination.ABORT_TURN_DEFAULT_REASON, abort.reason)
+        self.assertEqual(
+            run_coordination_control_drain.ABORT_TURN_DEFAULT_REASON, abort.reason
+        )
 
     def test_abort_appends_mailbox_guidance_naming_the_deadline(self) -> None:
         self.queue_abort(grace_seconds=15, reason="rebooting the host")

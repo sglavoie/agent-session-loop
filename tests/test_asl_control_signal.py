@@ -28,7 +28,7 @@ from agent_session_loop import (
     process_tree,
     state,
     state_locks,
-    turn_execution,
+    turn_execution_constants,
 )
 from tests.asl_control_support import LIVE_WAKEUP
 from tests.support import (
@@ -351,7 +351,7 @@ with control_signal.open_wakeup_endpoint(sys.argv[2], event) as path:
         self.assertEqual(0, child.wait(timeout=10))
         self.assertLess(
             time.monotonic() - started,
-            turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+            turn_execution_constants.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
         )
 
     def test_a_process_wearing_the_recorded_identity_is_never_woken(

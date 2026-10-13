@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
-    authoring,
+    authoring_transaction,
     baseline,
     baseline_cache,
     contracts,
@@ -282,7 +282,7 @@ class PrepareRegisteredWorkspaceTests(PrepareEndToEndFixtures):
 
         with (
             mock.patch.object(
-                authoring.os, "replace", side_effect=interrupt_publication
+                authoring_transaction.os, "replace", side_effect=interrupt_publication
             ),
             self.assertRaisesRegex(KeyboardInterrupt, "publication interruption"),
         ):

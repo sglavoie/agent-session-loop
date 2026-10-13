@@ -23,10 +23,10 @@ from agent_session_loop import (
     mailbox_appenders,
     mailbox_leases,
     mailbox_vocabulary,
-    run_coordination,
     run_persistence,
     state,
 )
+from agent_session_loop import run_coordination_constants as wait_budgets
 from tests.reply_flow_support import (
     HELPER_THREAD_JOIN_TIMEOUT_SECONDS,
     QUESTION_PUBLISH_TIMEOUT_SECONDS,
@@ -125,10 +125,10 @@ class MailboxWaitLifecycleTests(rfs.ReplyResumeFlowCase):
                 cwd=tmp_dir,
             )
             env = {
-                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
-                run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
-                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
-                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
+                wait_budgets.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
+                wait_budgets.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
+                wait_budgets.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
+                wait_budgets.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
             }
             with (
                 mock.patch.dict(os.environ, env),
@@ -244,8 +244,8 @@ class MailboxWaitLifecycleTests(rfs.ReplyResumeFlowCase):
                 cwd=tmp_dir,
             )
             env = {
-                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
-                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
+                wait_budgets.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
+                wait_budgets.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
             }
             with (
                 mock.patch.dict(os.environ, env),
@@ -367,10 +367,10 @@ class MailboxWaitLifecycleTests(rfs.ReplyResumeFlowCase):
                 cwd=tmp_dir,
             )
             env = {
-                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
-                run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
-                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
-                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
+                wait_budgets.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
+                wait_budgets.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
+                wait_budgets.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
+                wait_budgets.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
             }
             notified: list[tuple[str, dict[str, Any] | None]] = []
 

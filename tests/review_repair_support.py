@@ -8,7 +8,7 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
-    authoring,
+    authoring_manifest,
     plans_models,
     plans_session_ids,
     progress_repair,
@@ -69,8 +69,8 @@ def _write_repair_ready_plan(
     plan_dir.mkdir(parents=True, exist_ok=True)
     (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
 
-    manifest = authoring.render_manifest(
-        authoring.ManifestSpec(
+    manifest = authoring_manifest.render_manifest(
+        authoring_manifest.ManifestSpec(
             plan_title="Test Plan",
             source_path="/src/plan.md",
             output_dir=str(plan_dir),
@@ -78,10 +78,10 @@ def _write_repair_ready_plan(
             source_fingerprint="fp",
             content_sha256="csha",
             sessions=(
-                authoring.ManifestSession(
+                authoring_manifest.ManifestSession(
                     plans_session_ids.parse_session_id("1"), "One", "complete"
                 ),
-                authoring.ManifestSession(
+                authoring_manifest.ManifestSession(
                     plans_session_ids.parse_session_id("2"), "Review", "complete"
                 ),
             ),
@@ -226,7 +226,10 @@ class PublicationWindowFixtures:
         """Die mid-publication: no in-process rollback, window left on disk."""
         before = self._plan_bytes()
         target = {
-            "authoring": (review_repair.authoring, "refresh_readiness_metadata"),
+            "authoring": (
+                review_repair.authoring_transaction,
+                "refresh_readiness_metadata",
+            ),
             "validating": (review_repair, "_make_children_executable"),
         }[phase]
         with (

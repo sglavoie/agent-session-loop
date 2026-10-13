@@ -22,7 +22,10 @@ from . import (
     review_repair,
     run_commit,
     run_control,
-    run_coordination,
+    run_coordination_control_drain,
+    run_coordination_mailbox_poll,
+    run_coordination_reply_state,
+    run_coordination_terminal,
     run_inputs,
     run_outcome,
     run_payloads,
@@ -157,7 +160,7 @@ def _open_run_state(frame: RunFrame) -> RunResult | None:
     audited_repositories, audited_registry_declared = (
         run_termination._audited_repositories(frame.verification_context)
     )
-    audit_context = run_coordination.TerminalAuditContext(
+    audit_context = run_coordination_terminal.TerminalAuditContext(
         plan=supervisor_audit.plan_audit(frame.args),
         run_dir=run_dir,
         state_dir=frame.state_dir,
@@ -229,7 +232,7 @@ def _open_run_state(frame: RunFrame) -> RunResult | None:
         )
     if frame.commit_group_load_error is not None:
         frame.payload["commit_group_load_error"] = frame.commit_group_load_error
-    reply_state_preserver = run_coordination.ReplyStatePreserver(
+    reply_state_preserver = run_coordination_reply_state.ReplyStatePreserver(
         state_path=frame.state_path,
         event_path=event_path,
         enabled=frame.reply_text is not None and not frame.args.dry_run,
@@ -361,7 +364,7 @@ def _register_control_surfaces(frame: RunFrame) -> RunResult | None:
     if frame.wakeup is None:
         frame.wakeup = threading.Event()
 
-    frame.mailbox_poll = run_coordination.MailboxPoll(
+    frame.mailbox_poll = run_coordination_mailbox_poll.MailboxPoll(
         plan_dir=frame.snapshot.plan_dir,
         state_dir_arg=frame.args.state_dir,
         control_state=frame.ctx.run_controls.state,
@@ -378,7 +381,7 @@ def _register_control_surfaces(frame: RunFrame) -> RunResult | None:
 
     # Drain any commands that were queued before the run started so the
     # first turn already reflects them.
-    run_coordination.drain_external_control_queue(
+    run_coordination_control_drain.drain_external_control_queue(
         plan_dir=frame.snapshot.plan_dir,
         state_dir_arg=frame.args.state_dir,
         control_state=frame.ctx.run_controls.state,

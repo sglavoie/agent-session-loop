@@ -4,7 +4,12 @@ Split from tests/test_asl_core.py."""
 
 from __future__ import annotations
 
-from agent_session_loop import authoring, contracts, plans_errors, plans_session_ids
+from agent_session_loop import (
+    authoring_render,
+    contracts,
+    plans_errors,
+    plans_session_ids,
+)
 from tests.asl_core_support import ParserAndStateTestsBase
 
 
@@ -358,7 +363,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             verify=recipe,
         )
 
-        rendered = authoring.render_completion_contract(contract)
+        rendered = authoring_render.render_completion_contract(contract)
         reparsed = contracts.parse_completion_contract(rendered, session_id="1")
 
         self.assertEqual(

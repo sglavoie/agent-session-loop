@@ -16,7 +16,10 @@ from agent_session_loop import (
     mailbox_models,
     mailbox_snapshot,
     mailbox_vocabulary,
-    run_coordination,
+    run_coordination_constants,
+    run_coordination_mailbox_wait,
+    run_coordination_wait_models,
+    run_coordination_wait_state,
     run_persistence,
 )
 from tests.support import (
@@ -28,7 +31,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
     """Suspend grace windows and unsupervised-seconds tracking."""
 
     def test_stale_lease_inside_suspend_grace_keeps_wait_alive(self) -> None:
-        settings = run_coordination.MailboxWaitSettings(
+        settings = run_coordination_wait_models.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=200.0,
@@ -60,7 +63,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
     def test_stale_lease_after_grace_lapse_exits_supervisor_lost(
         self,
     ) -> None:
-        settings = run_coordination.MailboxWaitSettings(
+        settings = run_coordination_wait_models.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=200.0,
@@ -73,7 +76,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
         )
 
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             result.reason,
         )
         # Detection fired at monotonic 1.0, so the grace covered probes up
@@ -89,14 +92,14 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
         )
         self.assertEqual(3600.0, result.suspend_skew_seconds)
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
             result.suspend_lease_grace_seconds,
         )
         self.assertTrue(all(seconds > 0.0 for seconds in sleeps), sleeps)
 
         with tempfile.TemporaryDirectory() as tmp:
             event_path = Path(tmp) / events.EVENTS_FILE_NAME
-            run_coordination.clear_waiting_for_reply(
+            run_coordination_wait_state.clear_waiting_for_reply(
                 event_path,
                 {
                     "run_id": "run-1",
@@ -117,7 +120,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
             )
             [cleared_event] = read_jsonl(event_path)
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
             cleared_event["payload"]["suspend_lease_grace_seconds"],
         )
         self.assertEqual(
@@ -128,7 +131,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
     def test_lease_turning_fresh_inside_grace_resumes_ratcheting(
         self,
     ) -> None:
-        settings = run_coordination.MailboxWaitSettings(
+        settings = run_coordination_wait_models.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=20.0,
@@ -143,7 +146,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
         )
 
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             result.reason,
         )
         # Stale probes inside the grace stay on the poll cadence; once the
@@ -169,13 +172,13 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
         )
         self.assertEqual(3600.0, result.suspend_skew_seconds)
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
             result.suspend_lease_grace_seconds,
         )
         self.assertTrue(all(seconds > 0.0 for seconds in sleeps), sleeps)
 
     def test_unsupervised_ceiling_fires_despite_active_grace(self) -> None:
-        settings = run_coordination.MailboxWaitSettings(
+        settings = run_coordination_wait_models.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=20.0,
@@ -202,7 +205,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
         self.assertEqual(mailbox_constants.LEASE_EXPIRED, result.lease_reason)
         self.assertEqual(3600.0, result.suspend_skew_seconds)
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
             result.suspend_lease_grace_seconds,
         )
         self.assertTrue(all(seconds > 0.0 for seconds in sleeps), sleeps)
@@ -210,7 +213,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
     def test_unsupervised_seconds_tracks_freshness_not_wait_length(
         self,
     ) -> None:
-        settings = run_coordination.MailboxWaitSettings(
+        settings = run_coordination_wait_models.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=20.0,
@@ -240,7 +243,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
         # stretch is an order of magnitude *smaller*. Wall-clock length and
         # unsupervised length are now genuinely different measurements.
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             fresh.reason,
         )
         self.assertEqual(100.0, fresh_elapsed)
@@ -250,7 +253,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
         self.assertLess(fresh.unsupervised_seconds, stale.unsupervised_seconds)
 
     def test_unsupervised_seconds_excludes_suspended_time(self) -> None:
-        settings = run_coordination.MailboxWaitSettings(
+        settings = run_coordination_wait_models.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=200.0,
@@ -263,7 +266,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
         )
 
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             result.reason,
         )
         # An hour of sleeping machine is not an hour of lost supervision:
@@ -272,7 +275,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
         self.assertEqual(3600.0, result.suspend_skew_seconds)
         self.assertEqual(91.0, elapsed)
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
             result.unsupervised_seconds,
         )
         self.assertLess(result.unsupervised_seconds, elapsed)
@@ -309,7 +312,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
             fresh=False,
             reason=mailbox_constants.LEASE_EXPIRED,
         )
-        settings = run_coordination.MailboxWaitSettings(
+        settings = run_coordination_wait_models.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=20.0,
@@ -344,7 +347,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
                 side_effect=read_lease,
             ),
         ):
-            result = run_coordination.wait_for_mailbox_reply(
+            result = run_coordination_mailbox_wait.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload={},
@@ -363,7 +366,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
         # No suspend here: an unbroken run of fresh probes carried the wait
         # twice past the ceiling, so only the final extension went unproved.
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             result.reason,
         )
         self.assertEqual(supervision_ends, now[0])
@@ -380,7 +383,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             event_path = Path(tmp) / events.EVENTS_FILE_NAME
-            run_coordination.clear_waiting_for_reply(
+            run_coordination_wait_state.clear_waiting_for_reply(
                 event_path,
                 {"run_id": "run-1", "waiting_for_reply": dict(waiting)},
                 reason=result.reason,
@@ -391,7 +394,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
                 unsupervised_seconds=result.unsupervised_seconds,
                 persistence=run_persistence._RunPersistence(write_state=False),
             )
-            run_coordination.clear_waiting_for_reply(
+            run_coordination_wait_state.clear_waiting_for_reply(
                 event_path,
                 {"run_id": "run-1", "waiting_for_reply": dict(waiting)},
                 reason="reply",

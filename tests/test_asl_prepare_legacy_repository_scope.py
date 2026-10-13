@@ -10,7 +10,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from agent_session_loop import (
-    authoring,
+    authoring_render,
     cli,
     plans_errors,
     plans_files,
@@ -66,7 +66,7 @@ class LegacyRepositoryFootprintPrepareTests(unittest.TestCase):
                 [
                     "# Session 1: Test",
                     "",
-                    authoring.CONTEXT_REFERENCE_LINE,
+                    authoring_render.CONTEXT_REFERENCE_LINE,
                     "",
                     "---",
                     "",
@@ -201,7 +201,7 @@ class LegacyRepositoryIntentPrepareTests(unittest.TestCase):
                 [
                     "# Session 1: Test",
                     "",
-                    authoring.CONTEXT_REFERENCE_LINE,
+                    authoring_render.CONTEXT_REFERENCE_LINE,
                     "",
                     "---",
                     "",

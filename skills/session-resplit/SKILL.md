@@ -55,7 +55,7 @@ Never infer by reading or modifying the original source plan outside the split p
 
 ### Step 1: Delegate the mechanics to the helper
 
-All resplit mutations go through `skills/session-resplit/scripts/resplit-session.py` (also reachable through the installed skill directory), which delegates to `agent_session_loop.authoring` — the same rendering, table-mutation, transaction, and readiness API `session-split` uses. It owns input parsing, target/count inference, plan inspection, target validation, lock acquisition, parent archival, atomic child generation, derived-ledger updates, and readiness refresh. If the helper is missing, stop with a clear error; never hand-write child files, hand-edit manifest tables, or reimplement its schemas.
+All resplit mutations go through `skills/session-resplit/scripts/resplit-session.py` (also reachable through the installed skill directory), which delegates to the `agent_session_loop.authoring_*` modules — the same rendering, table-mutation, transaction, and readiness API `session-split` uses. It owns input parsing, target/count inference, plan inspection, target validation, lock acquisition, parent archival, atomic child generation, derived-ledger updates, and readiness refresh. If the helper is missing, stop with a clear error; never hand-write child files, hand-edit manifest tables, or reimplement its schemas.
 
 Your job is the semantic work the helper cannot do: choosing good child boundaries, writing child instructions, and allocating the parent's completion contract across children (Step 2). Supply that through `--child-spec`; everything mechanical belongs to Python.
 
@@ -70,7 +70,7 @@ Read the `--json` payload as the source of truth: on success `{ok:true, parent_i
 
 ### Step 2: Plan the child sessions and allocate the contract
 
-Read the selected parent session's content above its final `## Handoff`. The helper preserves the title/intent, `> **Before starting**` context requirement, expansion-note and previous-session references, and all implementation instructions; it strips any `## Parallel Metadata` block and renders each child deterministically (`## Lineage`, `## Parent Scope`, `## Child Scope`, `## Completion Contract`, `## Handoff`) via `authoring.render_session_file`. Do not author child markdown by hand — supply semantics through `--child-spec`.
+Read the selected parent session's content above its final `## Handoff`. The helper preserves the title/intent, `> **Before starting**` context requirement, expansion-note and previous-session references, and all implementation instructions; it strips any `## Parallel Metadata` block and renders each child deterministically (`## Lineage`, `## Parent Scope`, `## Child Scope`, `## Completion Contract`, `## Handoff`) via `authoring_render.render_session_file`. Do not author child markdown by hand — supply semantics through `--child-spec`.
 
 Create children that are useful execution units, not arbitrary slices. Prefer boundaries based on files, subsystems, phases, tests, or explicit deliverables; when a compact parent paragraph lists deliverables after a colon or in bullets, split on those before falling back to generic phases. State the evidence that makes subdivision useful and where the child sequence first proves the parent’s integration. Use an explicit child spec whenever broad parent checks would otherwise be inherited by every child: allocate focused checks to the child that changes the behavior, keep broad checks at the justified integration boundary, and explain any unavoidable repeated gate.
 
@@ -114,7 +114,7 @@ Because resplitting invalidates the parent expansion and resets readiness to `dr
 - Resplit exactly one pending parent per invocation; never mark a parent `complete` to sideline it (archive it), never overwrite existing child sessions or expansion files, and never leave both the parent and its children at the plan root.
 - Never modify the original source plan referenced by `manifest.md`; treat final handoff statuses as authoritative over derived manifest tables.
 - Preserve dotted session IDs everywhere: filenames, headings, dependencies, lineage, examples, and reports.
-- Never author child files, manifest tables, or contracts by hand — the helper and `agent_session_loop.authoring` own those schemas. This skill supplies boundaries, instructions, and contract allocation only.
+- Never author child files, manifest tables, or contracts by hand — the helper and `agent_session_loop.authoring_*` modules own those schemas. This skill supplies boundaries, instructions, and contract allocation only.
 - Child contracts are never placeholders: derived from the parent contract or supplied per child. Ambiguous allocation fails closed (`no-contract` / `ambiguous-contract`) instead of inserting a `python3 -m unittest` default.
 - Registered children inherit the parent's exact read/write scopes before any explicit later narrowing. Resplitting never broadens repository authority, never converts `(none)` into a write alias, and never strips `repo` from inherited contract checks.
 - Do not read or rewrite `parallel-validation.md` or touch legacy dependency-wave/ownership tables — both this skill and `session-run` ignore them, and their rows stay intact even when they reference the resplit parent.

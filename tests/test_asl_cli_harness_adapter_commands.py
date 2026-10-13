@@ -13,7 +13,7 @@ from agent_session_loop import (
     harness_codex,
     harness_copilot,
     harnesses,
-    turn_execution,
+    turn_execution_signals,
 )
 
 
@@ -307,7 +307,7 @@ class HarnessAdapterCommandTests(unittest.TestCase):
         self.assertNotIn('"type": "system"', result.stdout)
         self.assertEqual(
             "complete",
-            turn_execution.extract_prefixed_line(
+            turn_execution_signals.extract_prefixed_line(
                 result.stdout,
                 events.RUNNER_STATUS_PREFIX,
             ),
@@ -321,7 +321,7 @@ class HarnessAdapterCommandTests(unittest.TestCase):
         )
         self.assertEqual(
             "complete",
-            turn_execution.runner_signals(result)["runner_status"],
+            turn_execution_signals.runner_signals(result)["runner_status"],
         )
         self.assertEqual(
             {
@@ -330,7 +330,7 @@ class HarnessAdapterCommandTests(unittest.TestCase):
                 "source": "stdout",
                 "matched": events.RUNNER_PAUSE_PREFIX,
             },
-            turn_execution.live_action_signal(
+            turn_execution_signals.live_action_signal(
                 "stdout",
                 "claude text: RUNNER_PAUSE: unsafe - wait\n",
             ),

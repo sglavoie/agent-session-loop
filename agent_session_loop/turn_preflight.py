@@ -99,7 +99,7 @@ from . import (
     run_prompts,
     run_selection,
     scope_recovery,
-    turn_execution,
+    turn_execution_live,
     turn_preparation,
     verification,
     workspace_evidence,
@@ -366,7 +366,7 @@ def capture_turn_baselines(
     review_guard_excludes: tuple[str, ...],
     review_guard_include_ignored: bool,
     active_turn: dict[str, Any],
-    live_turn: turn_execution.LiveTurn,
+    live_turn: turn_execution_live.LiveTurn,
     paths: dict[str, Path],
     authorized_external_roots: tuple[Path, ...] = (),
 ) -> TurnBaselines:

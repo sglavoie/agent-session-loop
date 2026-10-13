@@ -10,8 +10,8 @@ from agent_session_loop import (
     artifacts,
     plans_files,
     plans_metadata,
-    workbench,
     workbench_server,
+    workbench_summary_helpers,
 )
 from tests.asl_workbench_server_support import (
     WorkbenchArtifactReadTestCase,
@@ -88,7 +88,7 @@ class WorkbenchServerRunStateTests(WorkbenchArtifactReadTestCase):
         (registered / plans_metadata.PLAN_METADATA_FILE_NAME).write_text(
             "{not-json", encoding="utf-8"
         )
-        (registered / workbench.FINAL_REVIEW_FILE_NAME).write_text(
+        (registered / workbench_summary_helpers.FINAL_REVIEW_FILE_NAME).write_text(
             "# Findings\n", encoding="utf-8"
         )
         server = self._start_server()

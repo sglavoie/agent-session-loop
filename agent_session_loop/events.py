@@ -197,7 +197,7 @@ MAILBOX_ACTIONS: tuple[str, ...] = (
 # review findings above all — is not a live signal and is never retired.
 # ``action_required`` is the current unresolved intervention, not the run's
 # history, and this set is what both readers of that rule retire against:
-# ``turn_execution.clear_live_action_required`` on the durable state a live run
+# ``turn_execution_signals.clear_live_action_required`` on the durable state a live run
 # keeps, and the supervisor audit on the status section it projects into a
 # bundle. Splitting the two would let a bundle advertise an ask the live run had
 # already retired.
@@ -213,9 +213,9 @@ ACTION_REQUIRED_SUPERSEDED_KEY = "action_required_superseded"
 # What retired it. A runner-declared pause — ``blocked``, ``unsafe``,
 # ``malformed-contract`` — is strictly more specific than the harness's generic
 # ask, and the run has stopped on it, so the generic ask can no longer be
-# answered. Nothing else proves this: ``turn_execution.clear_live_action_required``
-# fires only on a new turn or an unpaused finish, and a paused run reaches
-# neither.
+# answered. Nothing else proves this:
+# ``turn_execution_signals.clear_live_action_required`` fires only on a new turn or
+# an unpaused finish, and a paused run reaches neither.
 SUPERSEDED_BY_RUNNER_PAUSE = "runner-declared-pause"
 # Stable, evidence-based harness-failure categories produced by
 # ``agent_session_loop.harness_failures.classify_harness_failure``. A nonzero

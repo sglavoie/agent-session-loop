@@ -14,7 +14,7 @@ from . import (
     plans_transaction,
     workspaces,
 )
-from .authoring import PlanTransaction
+from .authoring_transaction import PlanTransaction
 from .plans_errors import PlanError
 from .plans_files import canonicalize_path
 from .plans_session_ids import parse_session_id

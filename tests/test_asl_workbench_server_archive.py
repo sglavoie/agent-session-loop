@@ -7,7 +7,13 @@ from __future__ import annotations
 import json
 import os
 
-from agent_session_loop import events, plans_files, state, workbench, workbench_archive
+from agent_session_loop import (
+    events,
+    plans_files,
+    state,
+    workbench_archive,
+    workbench_registry,
+)
 from tests.asl_workbench_server_support import (
     WorkbenchServerTestCase,
 )
@@ -24,12 +30,12 @@ class WorkbenchServerArchiveTests(WorkbenchServerTestCase):
         # ``/api/plan/delete`` is now a backward-compatible archive alias: it
         # keeps the confirmation contract but moves the plan into the archive
         # instead of permanently removing it.
-        seeded = workbench.upsert_pin(
-            workbench.load_registry(self.registry_path),
+        seeded = workbench_registry.upsert_pin(
+            workbench_registry.load_registry(self.registry_path),
             self.canonical_plan_dir,
             label="seed",
         )
-        workbench.save_registry(seeded, self.registry_path)
+        workbench_registry.save_registry(seeded, self.registry_path)
         plan_state = state.plan_state_dir(self.canonical_plan_dir, self.state_dir)
         plan_state.mkdir(parents=True, exist_ok=True)
         (plan_state / events.STATE_FILE_NAME).write_text(
@@ -57,7 +63,7 @@ class WorkbenchServerArchiveTests(WorkbenchServerTestCase):
         # The live plan and state are gone from their original locations...
         self.assertFalse(self.canonical_plan_dir.exists())
         self.assertFalse(plan_state.exists())
-        self.assertEqual((), workbench.load_registry(self.registry_path).pins)
+        self.assertEqual((), workbench_registry.load_registry(self.registry_path).pins)
         # ...but the plan is preserved under a fresh archive entry.
         listing = workbench_archive.list_archive_entries(self.state_dir)
         self.assertEqual(1, len(listing.entries))
@@ -85,12 +91,12 @@ class WorkbenchServerArchiveTests(WorkbenchServerTestCase):
         self.assertTrue(self.canonical_plan_dir.exists())
 
     def test_plan_delete_rejects_active_lock(self) -> None:
-        seeded = workbench.upsert_pin(
-            workbench.load_registry(self.registry_path),
+        seeded = workbench_registry.upsert_pin(
+            workbench_registry.load_registry(self.registry_path),
             self.canonical_plan_dir,
             label="seed",
         )
-        workbench.save_registry(seeded, self.registry_path)
+        workbench_registry.save_registry(seeded, self.registry_path)
         plan_state = state.plan_state_dir(self.canonical_plan_dir, self.state_dir)
         plan_state.mkdir(parents=True, exist_ok=True)
         lock_path = plan_state / state.LOCK_FILE_NAME
@@ -120,7 +126,9 @@ class WorkbenchServerArchiveTests(WorkbenchServerTestCase):
         self.assertEqual("active-lock", body["reason"])
         self.assertTrue(self.canonical_plan_dir.exists())
         self.assertTrue(lock_path.exists())
-        self.assertEqual(1, len(workbench.load_registry(self.registry_path).pins))
+        self.assertEqual(
+            1, len(workbench_registry.load_registry(self.registry_path).pins)
+        )
 
     def test_plan_delete_rejects_arbitrary_non_plan_directory(self) -> None:
         target = self.tmp_path / "not-a-plan"
@@ -145,12 +153,12 @@ class WorkbenchServerArchiveTests(WorkbenchServerTestCase):
         missing_plan = plans_files.canonicalize_path(
             self.tmp_path / "plans" / "missing"
         )
-        seeded = workbench.upsert_pin(
-            workbench.load_registry(self.registry_path),
+        seeded = workbench_registry.upsert_pin(
+            workbench_registry.load_registry(self.registry_path),
             missing_plan,
             label="stale",
         )
-        workbench.save_registry(seeded, self.registry_path)
+        workbench_registry.save_registry(seeded, self.registry_path)
         plan_state = state.plan_state_dir(missing_plan, self.state_dir)
         plan_state.mkdir(parents=True, exist_ok=True)
         (plan_state / events.STATE_FILE_NAME).write_text(
@@ -175,7 +183,7 @@ class WorkbenchServerArchiveTests(WorkbenchServerTestCase):
         self.assertTrue(body["state_archived"])
         self.assertTrue(body["pin_archived"])
         self.assertFalse(plan_state.exists())
-        self.assertEqual((), workbench.load_registry(self.registry_path).pins)
+        self.assertEqual((), workbench_registry.load_registry(self.registry_path).pins)
         listing = workbench_archive.list_archive_entries(self.state_dir)
         self.assertEqual(1, len(listing.entries))
         self.assertTrue(listing.entries[0].state_archived)
@@ -465,7 +473,7 @@ class WorkbenchServerArchiveTests(WorkbenchServerTestCase):
         )
         self.assertEqual(200, status)
         self.assertEqual(7, body["archive_retention_days"])
-        reloaded = workbench.load_registry(self.registry_path)
+        reloaded = workbench_registry.load_registry(self.registry_path)
         self.assertEqual(7, reloaded.archive_retention_days)
 
     def test_archive_settings_rejects_non_positive(self) -> None:

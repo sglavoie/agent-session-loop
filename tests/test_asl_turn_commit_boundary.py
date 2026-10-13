@@ -12,7 +12,16 @@ from agent_session_loop import (
     run_commit,
     run_loop,
     runner,
-    turn_execution,
+    turn_execution_argv,
+    turn_execution_artifacts,
+    turn_execution_commit,
+    turn_execution_constants,
+    turn_execution_executor,
+    turn_execution_hang_sentinel,
+    turn_execution_hang_settings,
+    turn_execution_live,
+    turn_execution_protocols,
+    turn_execution_signals,
     turn_postflight,
     turn_preflight,
     turn_preparation,
@@ -99,7 +108,19 @@ def _turn_finished_emitters() -> set[str]:
     across the split rather than gaining a second copy in the run loop.
     """
     emitters: set[str] = set()
-    for scanned in (run_loop, turn_execution):
+    for scanned in (
+        run_loop,
+        turn_execution_argv,
+        turn_execution_artifacts,
+        turn_execution_commit,
+        turn_execution_constants,
+        turn_execution_executor,
+        turn_execution_hang_sentinel,
+        turn_execution_hang_settings,
+        turn_execution_live,
+        turn_execution_protocols,
+        turn_execution_signals,
+    ):
         source = Path(inspect.getsourcefile(scanned) or "").read_text("utf-8")
         for node in ast.walk(ast.parse(source)):
             if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -211,7 +232,7 @@ class TurnCommitSourceTests(unittest.TestCase):
         self.assertEqual({"commit_turn"}, _turn_finished_emitters())
 
     def test_commit_persists_the_result_and_state_before_the_event(self) -> None:
-        source = inspect.getsource(turn_execution.commit_turn)
+        source = inspect.getsource(turn_execution_commit.commit_turn)
         written = source.index('durability.write_json_file(paths["result"]')
         state_written = source.index("persistence.write_state(payload)")
         appended = source.index("TURN_FINISHED_EVENT")
@@ -219,7 +240,7 @@ class TurnCommitSourceTests(unittest.TestCase):
         self.assertLess(state_written, appended)
 
     def test_commit_notifies_consumers_after_the_durable_event(self) -> None:
-        source = inspect.getsource(turn_execution.commit_turn)
+        source = inspect.getsource(turn_execution_commit.commit_turn)
         appended = source.index("TURN_FINISHED_EVENT")
         reported = source.index("progress.turn_finished(")
         notified = source.index("notify_turn_finished(")

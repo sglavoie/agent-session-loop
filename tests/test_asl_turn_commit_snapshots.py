@@ -17,8 +17,8 @@ from agent_session_loop import (
     run_persistence,
     run_reporting,
     session_verification,
-    supervisor_audit_evidence,
-    turn_execution,
+    supervisor_audit_evidence_failures,
+    turn_execution_commit,
 )
 from tests.asl_turn_commit_support import SPECS
 from tests.support import (
@@ -37,7 +37,7 @@ class CommittedTurnImmutabilityTests(unittest.TestCase):
 
     def _commit(self, turn_payload: dict[str, Any]) -> Any:
         payload: dict[str, Any] = {"run_id": "run-1", "turns": [turn_payload]}
-        commit = turn_execution.commit_turn(
+        commit = turn_execution_commit.commit_turn(
             event_path=self.tmp_path / "events.jsonl",
             payload=payload,
             persistence=run_persistence._RunPersistence(write_state=False),
@@ -53,7 +53,7 @@ class CommittedTurnImmutabilityTests(unittest.TestCase):
     def test_commit_returns_the_published_snapshot_it_recorded(self) -> None:
         turn_payload = {"turn_index": 1, "session": "1"}
         payload: dict[str, Any] = {"run_id": "run-1", "turns": [turn_payload]}
-        commit = turn_execution.commit_turn(
+        commit = turn_execution_commit.commit_turn(
             event_path=self.tmp_path / "events.jsonl",
             payload=payload,
             persistence=run_persistence._RunPersistence(write_state=False),
@@ -64,7 +64,7 @@ class CommittedTurnImmutabilityTests(unittest.TestCase):
             plan_cache=plans_snapshot.PlanSnapshotCache(),
             paths={"result": self.tmp_path / "result.json"},
         )
-        self.assertIsInstance(commit, turn_execution.TurnCommit)
+        self.assertIsInstance(commit, turn_execution_commit.TurnCommit)
         self.assertEqual(
             plans_payloads.snapshot_payload(commit.published), commit.record["after"]
         )
@@ -103,7 +103,7 @@ class PublicationSnapshotTests(unittest.TestCase):
         self.snapshot = plans_snapshot.inspect_plan(self.plan_dir)
 
     def publish(self) -> plans_models.PlanSnapshot:
-        return turn_execution.publication_snapshot(
+        return turn_execution_commit.publication_snapshot(
             plans_snapshot.PlanSnapshotCache(), self.snapshot
         )
 
@@ -133,7 +133,7 @@ class PublicationSnapshotTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        with self.assertRaises(turn_execution.TurnCommitRejected) as caught:
+        with self.assertRaises(turn_execution_commit.TurnCommitRejected) as caught:
             self.publish()
         self.assertEqual("unexpected-status-change", caught.exception.reason)
         self.assertEqual(
@@ -145,7 +145,7 @@ class PublicationSnapshotTests(unittest.TestCase):
         self,
     ) -> None:
         (self.plan_dir / "session-1.md").write_text("no handoff\n", encoding="utf-8")
-        with self.assertRaises(turn_execution.TurnCommitRejected) as caught:
+        with self.assertRaises(turn_execution_commit.TurnCommitRejected) as caught:
             self.publish()
         self.assertEqual("malformed-plan", caught.exception.reason)
         self.assertTrue(caught.exception.detail["error"])
@@ -188,21 +188,21 @@ class TurnAnomalyClassificationTests(unittest.TestCase):
 
     def test_unreadable_handoff_is_anomalous(self) -> None:
         self.assertTrue(
-            supervisor_audit_evidence._turn_shows_failure(
+            supervisor_audit_evidence_failures._turn_shows_failure(
                 {"returncode": 0, "plan_error": "session-1.md: no handoff"}
             )
         )
 
     def test_failure_status_result_is_anomalous(self) -> None:
         self.assertTrue(
-            supervisor_audit_evidence._turn_shows_failure(
+            supervisor_audit_evidence_failures._turn_shows_failure(
                 {"returncode": 0, "status_result": "no-status-change"}
             )
         )
 
     def test_accepted_turn_is_not_anomalous(self) -> None:
         self.assertFalse(
-            supervisor_audit_evidence._turn_shows_failure(
+            supervisor_audit_evidence_failures._turn_shows_failure(
                 {"returncode": 0, "status_result": "complete", "plan_error": None}
             )
         )
@@ -211,10 +211,10 @@ class TurnAnomalyClassificationTests(unittest.TestCase):
         self,
     ) -> None:
         self.assertFalse(
-            supervisor_audit_evidence._turn_shows_failure({"returncode": 0})
+            supervisor_audit_evidence_failures._turn_shows_failure({"returncode": 0})
         )
         self.assertTrue(
-            supervisor_audit_evidence._turn_shows_failure({"returncode": 1})
+            supervisor_audit_evidence_failures._turn_shows_failure({"returncode": 1})
         )
 
 

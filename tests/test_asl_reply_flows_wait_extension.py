@@ -19,7 +19,10 @@ from agent_session_loop import (
     mailbox_models,
     mailbox_snapshot,
     mailbox_vocabulary,
-    run_coordination,
+    run_coordination_constants,
+    run_coordination_mailbox_wait,
+    run_coordination_wait_models,
+    run_coordination_wait_state,
     run_persistence,
     state,
 )
@@ -80,7 +83,7 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
                     side_effect=fake_run_harness,
                 ),
                 mock.patch.object(
-                    run_coordination,
+                    run_coordination_mailbox_wait,
                     "wait_for_mailbox_reply",
                     side_effect=AssertionError(
                         "mailbox wait entered without a fresh lease"
@@ -180,7 +183,7 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
             fresh=False,
             reason=mailbox_constants.LEASE_EXPIRED,
         )
-        settings = run_coordination.MailboxWaitSettings(
+        settings = run_coordination_wait_models.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=20.0,
@@ -225,7 +228,7 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
                 side_effect=read_lease,
             ),
         ):
-            result = run_coordination.wait_for_mailbox_reply(
+            result = run_coordination_mailbox_wait.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload={},
@@ -243,7 +246,7 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
 
         self.assertIsNone(result.reply)
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             result.reason,
         )
         self.assertTrue(sleeps)
@@ -286,21 +289,21 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
             fresh=False,
             reason=mailbox_constants.LEASE_EXPIRED,
         )
-        settings = run_coordination.mailbox_reply_wait_settings({})
+        settings = run_coordination_wait_models.mailbox_reply_wait_settings({})
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_BASE_SECONDS,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_BASE_SECONDS,
             settings.base_seconds,
         )
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS,
             settings.lease_extension_seconds,
         )
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS,
             settings.unsupervised_ceiling_seconds,
         )
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_POLL_SECONDS,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_POLL_SECONDS,
             settings.poll_seconds,
         )
         # Four times the ceiling: long enough that any wall-clock bound would
@@ -311,7 +314,7 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
             lease: mailbox_models.MailboxLeaseView,
             *,
             until: float | None = None,
-        ) -> tuple[run_coordination.MailboxWaitResult, float, int]:
+        ) -> tuple[run_coordination_wait_models.MailboxWaitResult, float, int]:
             now = [0.0]
 
             def monotonic() -> float:
@@ -343,7 +346,7 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
                     side_effect=read_lease_seam,
                 ) as read_lease,
             ):
-                result = run_coordination.wait_for_mailbox_reply(
+                result = run_coordination_mailbox_wait.wait_for_mailbox_reply(
                     plan_dir=Path("/tmp/plan"),
                     state_dir_arg=None,
                     payload={},
@@ -371,7 +374,7 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
         # ran two hours, four times the ceiling, and ended only when the
         # supervisor stopped proving liveness.
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             fresh_result.reason,
         )
         self.assertEqual(supervision_ends, fresh_elapsed)
@@ -415,7 +418,7 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
                     "turn_index": 3,
                 },
             }
-            run_coordination.clear_waiting_for_reply(
+            run_coordination_wait_state.clear_waiting_for_reply(
                 event_path,
                 payload,
                 reason=stale_result.reason,

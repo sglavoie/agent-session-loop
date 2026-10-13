@@ -6,7 +6,11 @@ import os
 import signal
 from pathlib import Path
 
-from agent_session_loop import events, state, turn_execution
+from agent_session_loop import (
+    events,
+    state,
+    turn_execution_constants,
+)
 from tests.harness_integration_pty import PtyRunHarnessBase
 from tests.harness_integration_support import STREAM_GATE_TIMEOUT_SECONDS
 from tests.support import (
@@ -221,7 +225,9 @@ class PtyStopAndHelpTests(PtyRunHarnessBase):
             output=output,
         )
 
-        self.assertEqual(turn_execution.INTERRUPTED_EXIT, process.returncode, output)
+        self.assertEqual(
+            turn_execution_constants.INTERRUPTED_EXIT, process.returncode, output
+        )
         self.assertIn(f"Note: {note}", output)
         self.assertIn("Run paused: interrupted", output)
         payload = self.read_run_payload(plan_dir=plan_dir, state_dir=state_dir)

@@ -109,7 +109,7 @@ def _add_plan_authoring_commands(
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    split_parser.set_defaults(handler_ref="authoring:split_from_args")
+    split_parser.set_defaults(handler_ref="authoring_split_cli:split_from_args")
 
     prepare_parser = subparsers.add_parser(
         "prepare",

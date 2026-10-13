@@ -53,7 +53,8 @@ from agent_session_loop import (
     redirect_cli,
     redirect_store,
     state,
-    workbench,
+    workbench_launch,
+    workbench_registry_models,
     workbench_server,
 )
 
@@ -1063,12 +1064,14 @@ class ConversationRecoveryTests(WorkbenchRedirectTestCase):
 class LaunchIdempotencyTests(WorkbenchRedirectTestCase):
     """One run per plan, however many times a reconnecting browser asks."""
 
-    def launch_result(self, *, pid: int, reply: bool = False) -> workbench.LaunchResult:
-        return workbench.LaunchResult(
+    def launch_result(
+        self, *, pid: int, reply: bool = False
+    ) -> workbench_launch.LaunchResult:
+        return workbench_launch.LaunchResult(
             pid=pid,
             argv=("python3", "-m", "agent_session_loop", "run"),
             plan_dir=self.canonical_plan_dir,
-            profile_payload=workbench.LaunchProfile().to_payload(),
+            profile_payload=workbench_registry_models.LaunchProfile().to_payload(),
             reply_provided=reply,
             reply_length=len("go-ok") if reply else None,
             reply_origin="stdin" if reply else None,
@@ -1080,7 +1083,7 @@ class LaunchIdempotencyTests(WorkbenchRedirectTestCase):
         # the operating system whether the run it started is still going.
         result = self.launch_result(pid=os.getpid())
         with mock.patch.object(
-            workbench, "launch_plan", return_value=result
+            workbench_launch, "launch_plan", return_value=result
         ) as patched:
             first_status, first, _ = self.post(
                 "/api/launch",
@@ -1104,7 +1107,7 @@ class LaunchIdempotencyTests(WorkbenchRedirectTestCase):
         """The window a reconnecting browser lands in: spawned, not yet locked."""
         result = self.launch_result(pid=os.getpid())
         with mock.patch.object(
-            workbench, "launch_plan", return_value=result
+            workbench_launch, "launch_plan", return_value=result
         ) as patched:
             self.post("/api/launch", {"plan_dir": str(self.plan_dir), "launch_id": "a"})
             status, body, _ = self.post(
@@ -1118,7 +1121,7 @@ class LaunchIdempotencyTests(WorkbenchRedirectTestCase):
     def test_a_launch_is_refused_while_a_run_holds_the_plan(self) -> None:
         self.write_state()
         self.write_lock()
-        with mock.patch.object(workbench, "launch_plan") as patched:
+        with mock.patch.object(workbench_launch, "launch_plan") as patched:
             status, body, _ = self.post("/api/launch", {"plan_dir": str(self.plan_dir)})
 
         self.assertEqual(409, status)
@@ -1129,7 +1132,7 @@ class LaunchIdempotencyTests(WorkbenchRedirectTestCase):
     def test_a_resent_reply_with_the_same_id_resumes_once(self) -> None:
         result = self.launch_result(pid=os.getpid(), reply=True)
         with mock.patch.object(
-            workbench, "resume_plan_with_reply", return_value=result
+            workbench_launch, "resume_plan_with_reply", return_value=result
         ) as patched:
             first_status, first, _ = self.post(
                 "/api/reply",
@@ -1160,7 +1163,7 @@ class LaunchIdempotencyTests(WorkbenchRedirectTestCase):
         """A malformed request must not consume the idempotency key it carried."""
         result = self.launch_result(pid=os.getpid(), reply=True)
         with mock.patch.object(
-            workbench, "resume_plan_with_reply", return_value=result
+            workbench_launch, "resume_plan_with_reply", return_value=result
         ) as patched:
             status, body, _ = self.post(
                 "/api/reply",
@@ -1191,12 +1194,14 @@ class LaunchIdempotencyTests(WorkbenchRedirectTestCase):
         """
         result = self.launch_result(pid=os.getpid())
         server = self.server()
-        with mock.patch.object(workbench, "launch_plan", return_value=result):
+        with mock.patch.object(workbench_launch, "launch_plan", return_value=result):
             self.post("/api/launch", {"plan_dir": str(self.plan_dir), "launch_id": "a"})
         self.assertEqual(os.getpid(), server.launched_pid(self.canonical_plan_dir))
 
         with (
-            mock.patch.object(workbench, "launch_plan", return_value=result) as patched,
+            mock.patch.object(
+                workbench_launch, "launch_plan", return_value=result
+            ) as patched,
             mock.patch.object(state, "is_pid_running", return_value=False),
         ):
             status, body, _ = self.post(
@@ -1239,7 +1244,7 @@ class LaunchIdempotencyTests(WorkbenchRedirectTestCase):
         other = self.start_server()
         result = self.launch_result(pid=os.getpid())
         with mock.patch.object(
-            workbench, "launch_plan", return_value=result
+            workbench_launch, "launch_plan", return_value=result
         ) as patched:
             self.post("/api/launch", {"plan_dir": str(self.plan_dir), "launch_id": "a"})
             status, body, _ = self.post(

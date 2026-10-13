@@ -18,7 +18,7 @@ from agent_session_loop import (
     plans_models,
     plans_readiness,
     state,
-    workbench,
+    workbench_cli,
 )
 from tests.support import (
     patched_env,
@@ -66,7 +66,7 @@ class JsonCliHelpers(_Base):
         args = cli.build_parser(prog="asl").parse_args(["plans", *argv])
         stdout, stderr = io.StringIO(), io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
-            code = workbench.plans_from_args(args, now=now)
+            code = workbench_cli.plans_from_args(args, now=now)
         return code, stdout.getvalue(), stderr.getvalue()
 
     def _stale_days_verdict(

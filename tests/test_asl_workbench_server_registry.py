@@ -5,7 +5,7 @@ Split from tests/test_asl_workbench_server.py."""
 from __future__ import annotations
 
 from agent_session_loop import (
-    workbench,
+    workbench_registry,
 )
 from tests.asl_workbench_server_support import (
     WorkbenchServerTestCase,
@@ -39,7 +39,7 @@ class WorkbenchServerRegistryTests(WorkbenchServerTestCase):
         )
         self.assertEqual(200, status)
         self.assertTrue(body["ok"])
-        reloaded = workbench.load_registry(self.registry_path)
+        reloaded = workbench_registry.load_registry(self.registry_path)
         self.assertEqual(1, len(reloaded.pins))
         self.assertEqual("Alpha plan", reloaded.pins[0].label)
         self.assertEqual("codex", reloaded.pins[0].profile.harness)
@@ -64,7 +64,7 @@ class WorkbenchServerRegistryTests(WorkbenchServerTestCase):
         self.assertFalse(body["ok"])
         self.assertEqual("invalid-request", body["reason"])
         self.assertIn("max_review_fix_cycles", body["error"])
-        reloaded = workbench.load_registry(self.registry_path)
+        reloaded = workbench_registry.load_registry(self.registry_path)
         self.assertEqual((), reloaded.pins)
 
     def test_registry_pin_names_non_integer_review_fix_cap_in_error(self) -> None:
@@ -89,12 +89,12 @@ class WorkbenchServerRegistryTests(WorkbenchServerTestCase):
         )
 
     def test_registry_unpin_removes_pin(self) -> None:
-        seeded = workbench.upsert_pin(
-            workbench.load_registry(self.registry_path),
+        seeded = workbench_registry.upsert_pin(
+            workbench_registry.load_registry(self.registry_path),
             self.canonical_plan_dir,
             label="seed",
         )
-        workbench.save_registry(seeded, self.registry_path)
+        workbench_registry.save_registry(seeded, self.registry_path)
         server = self._start_server()
 
         status, body, _ = _http_request(
@@ -107,7 +107,7 @@ class WorkbenchServerRegistryTests(WorkbenchServerTestCase):
         self.assertEqual(200, status)
         self.assertTrue(body["ok"])
         self.assertEqual([], body["registry"]["pins"])
-        reloaded = workbench.load_registry(self.registry_path)
+        reloaded = workbench_registry.load_registry(self.registry_path)
         self.assertEqual((), reloaded.pins)
 
     def test_registry_pin_round_trip_preserves_every_profile_field(

@@ -113,7 +113,7 @@ from . import (
     run_prompts,
     run_termination,
     scope_recovery,
-    turn_execution,
+    turn_execution_commit,
     workspace_evidence,
     workspaces,
 )
@@ -371,7 +371,7 @@ def _enforce_workspace_write_guard(
         payload["final_snapshot"] = plans_payloads.snapshot_payload(inspected)
         turn_payload["workspace_write_guard"] = guard_record
         durability.write_json_file(paths["result"], turn_payload)
-    turn_execution.record_turn_rejected(
+    turn_execution_commit.record_turn_rejected(
         event_path=event_path,
         payload=payload,
         persistence=persistence,
@@ -504,7 +504,7 @@ def _enforce_legacy_implementation_write_guard(
         payload["final_snapshot"] = plans_payloads.snapshot_payload(inspected)
         turn_payload["workspace_write_guard"] = guard_record
         durability.write_json_file(paths["result"], turn_payload)
-    turn_execution.record_turn_rejected(
+    turn_execution_commit.record_turn_rejected(
         event_path=event_path,
         payload=payload,
         persistence=persistence,
@@ -787,7 +787,7 @@ def _enforce_protected_path_guard(
             pause_details = payload.get("pause_details")
             if payload.get("paused") and isinstance(pause_details, dict):
                 pause_details["protected_path_guard"] = guard_record
-        turn_execution.record_turn_rejected(
+        turn_execution_commit.record_turn_rejected(
             event_path=event_path,
             payload=payload,
             persistence=persistence,
@@ -819,7 +819,7 @@ def _enforce_protected_path_guard(
         payload["final_snapshot"] = plans_payloads.snapshot_payload(inspected)
         turn_payload["protected_path_guard"] = guard_record
         durability.write_json_file(paths["result"], turn_payload)
-    turn_execution.record_turn_rejected(
+    turn_execution_commit.record_turn_rejected(
         event_path=event_path,
         payload=payload,
         persistence=persistence,

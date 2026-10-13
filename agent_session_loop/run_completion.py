@@ -100,7 +100,7 @@ from . import (
     review_session_contract,
     run_commit,
     run_control,
-    run_coordination,
+    run_coordination_control_drain,
     run_inputs,
     run_persistence,
     run_reporting,
@@ -330,7 +330,7 @@ def complete_plan(
         # The review and its repair children are work that starts
         # *after* the session the operator asked to stop after, so
         # the request has to be visible before either begins.
-        run_coordination.drain_external_control_queue(
+        run_coordination_control_drain.drain_external_control_queue(
             plan_dir=snapshot.plan_dir,
             state_dir_arg=args.state_dir,
             control_state=run_controls.state,

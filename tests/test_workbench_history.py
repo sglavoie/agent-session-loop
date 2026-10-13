@@ -25,7 +25,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from agent_session_loop import events, review, run_coordination, workbench_history
+from agent_session_loop import (
+    events,
+    review,
+    run_coordination_constants,
+    workbench_history,
+)
 from asl_workbench import catalog, history
 
 _T0 = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
@@ -118,7 +123,7 @@ def _wait_cleared(
     *,
     run_id: str | None,
     at: float,
-    reason: str = run_coordination.WAIT_REASON_REPLY,
+    reason: str = run_coordination_constants.WAIT_REASON_REPLY,
     started_at: float | None = None,
     session_id: str = "1",
 ) -> dict[str, object]:
@@ -211,9 +216,9 @@ class VocabularyTests(unittest.TestCase):
         self.assertEqual(
             mapped,
             {
-                run_coordination.WAIT_REASON_REPLY,
-                run_coordination.WAIT_REASON_RESOLUTION,
-                run_coordination.WAIT_REASON_TIMEOUT,
+                run_coordination_constants.WAIT_REASON_REPLY,
+                run_coordination_constants.WAIT_REASON_RESOLUTION,
+                run_coordination_constants.WAIT_REASON_TIMEOUT,
             },
         )
 
@@ -334,7 +339,7 @@ class ClassificationTests(unittest.TestCase):
             history.QUESTION_OUTCOME_UNRESOLVED,
         )
         self.assertEqual(
-            history.question_outcome(run_coordination.WAIT_REASON_REPLY),
+            history.question_outcome(run_coordination_constants.WAIT_REASON_REPLY),
             history.QUESTION_OUTCOME_ANSWERED,
         )
 
@@ -898,7 +903,7 @@ class QuestionTests(HistoryTestCase):
                     "q-1",
                     run_id="run-1",
                     at=50,
-                    reason=run_coordination.WAIT_REASON_TIMEOUT,
+                    reason=run_coordination_constants.WAIT_REASON_TIMEOUT,
                 ),
                 _finished("run-1", at=60, ok=False, paused=True, reason="blocked"),
             ]

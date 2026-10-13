@@ -106,7 +106,7 @@ from asl_workbench.operations import (
     REASON_OPERATION_CONFLICT,
 )
 from asl_workbench.remote_reads import READ_OUTCOMES, ReadAnswer
-from asl_workbench.store import WorkbenchStore
+from asl_workbench.store_workbench import WorkbenchStore
 
 # A fixed moment. Every clock in this file is an argument, so a test asserts
 # about a decision rather than racing one.

@@ -21,7 +21,11 @@ from agent_session_loop import (
     mailbox_snapshot,
     mailbox_vocabulary,
     qna,
-    run_coordination,
+    run_coordination_mailbox_question,
+    run_coordination_mailbox_wait,
+    run_coordination_wait_models,
+    run_coordination_wait_record,
+    run_coordination_wait_state,
     run_persistence,
 )
 from tests.support import (
@@ -51,7 +55,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
         )
         # Base equals hard so the loop never probes the lease: the only
         # state write a rebase could cause is the one under test.
-        settings = run_coordination.MailboxWaitSettings(
+        settings = run_coordination_wait_models.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=4.0,
@@ -59,7 +63,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
             io_grace_seconds=1.0,
         )
         epoch = datetime(2026, 7, 24, 12, 0, 0, tzinfo=UTC)
-        waiting = run_coordination.waiting_for_reply_payload(
+        waiting = run_coordination_wait_record.waiting_for_reply_payload(
             question_id=question_id,
             session_id="9",
             turn_index=3,
@@ -101,7 +105,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
                 "_write_state_payload",
             ) as write_state,
         ):
-            result = run_coordination.wait_for_mailbox_reply(
+            result = run_coordination_mailbox_wait.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload=payload,
@@ -122,7 +126,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             event_path = Path(tmp) / events.EVENTS_FILE_NAME
-            run_coordination.clear_waiting_for_reply(
+            run_coordination_wait_state.clear_waiting_for_reply(
                 event_path,
                 payload,
                 reason=result.reason,
@@ -151,7 +155,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
             run_persistence,
             "_write_state_payload",
         ) as write_state:
-            run_coordination.rebase_waiting_deadlines(
+            run_coordination_wait_state.rebase_waiting_deadlines(
                 payload,
                 question_id="question-this-wait-expected",
                 base_deadline=epoch + timedelta(hours=8, minutes=4),
@@ -198,7 +202,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
             ),
             fresh=True,
         )
-        settings = run_coordination.MailboxWaitSettings(
+        settings = run_coordination_wait_models.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=20.0,
@@ -238,7 +242,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
                 return_value=lease,
             ),
         ):
-            result = run_coordination.wait_for_mailbox_reply(
+            result = run_coordination_mailbox_wait.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload={},
@@ -280,7 +284,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
                 + 1
             ),
         )
-        settings = run_coordination.MailboxWaitSettings(
+        settings = run_coordination_wait_models.MailboxWaitSettings(
             base_seconds=300.0,
             lease_extension_seconds=60.0,
             unsupervised_ceiling_seconds=900.0,
@@ -304,7 +308,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
                 "read_lease",
             ) as read_lease,
         ):
-            result = run_coordination.wait_for_mailbox_reply(
+            result = run_coordination_mailbox_wait.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload={},
@@ -385,7 +389,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
                 appended_reply,
                 exhausted_view.reply_for(question_id),
             )
-            settings = run_coordination.MailboxWaitSettings(
+            settings = run_coordination_wait_models.MailboxWaitSettings(
                 base_seconds=300.0,
                 lease_extension_seconds=60.0,
                 unsupervised_ceiling_seconds=900.0,
@@ -397,7 +401,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
                 mailbox_leases,
                 "read_lease",
             ) as read_lease:
-                result = run_coordination.wait_for_mailbox_reply(
+                result = run_coordination_mailbox_wait.wait_for_mailbox_reply(
                     plan_dir=plan_dir,
                     state_dir_arg=str(state_dir),
                     payload={},
@@ -427,7 +431,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
             write_plan(plan_dir, ("pending",))
             created_at = "0001-01-01T00:00:00+00:00"
             question_text = "Which option?"
-            question_id = run_coordination.mailbox_question_id(
+            question_id = run_coordination_mailbox_question.mailbox_question_id(
                 plan_dir=plan_dir,
                 run_id="run-retry",
                 session_id="1",
@@ -493,14 +497,16 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
                     "reusing a published question must not append"
                 ),
             ) as append_question:
-                reused_question = run_coordination.ensure_mailbox_question(
-                    plan_dir=plan_dir,
-                    state_dir_arg=str(state_dir),
-                    question_id=question_id,
-                    run_id="run-retry",
-                    session_id="1",
-                    turn_index=2,
-                    text=question_text,
+                reused_question = (
+                    run_coordination_mailbox_question.ensure_mailbox_question(
+                        plan_dir=plan_dir,
+                        state_dir_arg=str(state_dir),
+                        question_id=question_id,
+                        run_id="run-retry",
+                        session_id="1",
+                        turn_index=2,
+                        text=question_text,
+                    )
                 )
 
             self.assertEqual(published_question, reused_question)
@@ -559,10 +565,10 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
                         "append_question",
                     ) as append_question,
                     self.assertRaises(
-                        run_coordination.MailboxWaitUnavailable
+                        run_coordination_wait_models.MailboxWaitUnavailable
                     ) as raised,
                 ):
-                    run_coordination.ensure_mailbox_question(
+                    run_coordination_mailbox_question.ensure_mailbox_question(
                         plan_dir=Path("/tmp/plan"),
                         state_dir_arg=None,
                         question_id=question_id,

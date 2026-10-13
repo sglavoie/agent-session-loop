@@ -13,7 +13,7 @@ from agent_session_loop import (
     events,
     mailbox_constants,
     mailbox_vocabulary,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_constants,
 )
 from tests import support_supervisor_audit_evidence as evidence_support
 from tests.support_supervisor_audit import RUN_ID
@@ -148,7 +148,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
 
             self.assertEqual(self.GUIDANCE_ID, guidance["id"])
             self.assertEqual(
-                supervisor_audit_evidence.MAILBOX_OWNERSHIP_DELIVERED,
+                supervisor_audit_evidence_constants.MAILBOX_OWNERSHIP_DELIVERED,
                 guidance["ownership"],
             )
             self.assertEqual(1, section["summary"]["delivered_count"])
@@ -194,7 +194,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
                 )
                 self.assertEqual(self.GUIDANCE_ID, guidance["id"])
                 self.assertEqual(
-                    supervisor_audit_evidence.MAILBOX_OWNERSHIP_DELIVERED,
+                    supervisor_audit_evidence_constants.MAILBOX_OWNERSHIP_DELIVERED,
                     guidance["ownership"],
                 )
                 self.assertEqual(1, section["summary"]["delivered_count"])
@@ -231,7 +231,8 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             self.assertTrue(
                 any(
                     row["section"] == "mailbox"
-                    and row["reason"] == supervisor_audit_evidence.REASON_MISSING
+                    and row["reason"]
+                    == supervisor_audit_evidence_constants.REASON_MISSING
                     for row in bundle.payload["omissions"]
                 )
             )
@@ -271,7 +272,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             self.assertTrue(status["paused"])
             self.assertEqual("blocked", status["pause_reason"])
             self.assertEqual(
-                supervisor_audit_evidence.SUPERSEDED_BY_CONSUMED_RULING,
+                supervisor_audit_evidence_constants.SUPERSEDED_BY_CONSUMED_RULING,
                 superseded["superseded_by"],
             )
             self.assertEqual(signal, superseded["record"])

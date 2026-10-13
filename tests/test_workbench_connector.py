@@ -9,7 +9,7 @@ mapper:
 
 * **a real ASL corpus reaches the store accurately.** :class:`CorpusDeliveryTests`
   builds a plan tree, publishes it through the connector, and ingests every
-  frame into a real :class:`asl_workbench.store.WorkbenchStore`. The rows, the
+  frame into a real :class:`asl_workbench.store_workbench.WorkbenchStore`. The rows, the
   catalog entries, and the endings are then read back out of the store and
   compared against the corpus -- not against the payloads the connector built,
   which would only prove the connector agrees with itself;
@@ -56,7 +56,8 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
-    bridge,
+    bridge_projection,
+    bridge_protocol,
     events,
     intervention,
     plans_files,
@@ -64,7 +65,7 @@ from agent_session_loop import (
     workbench_connector,
     workbench_history,
 )
-from asl_workbench import catalog, history, observation, operations, store
+from asl_workbench import catalog, history, observation, operations, store_workbench
 from asl_workbench import connector as portable
 from asl_workbench.transport import (
     CATALOG_ENTRY_SHAPE,
@@ -382,7 +383,9 @@ def drain(
     return sent
 
 
-def ingest(db: store.WorkbenchStore, frame: dict[str, Any], *, at: float) -> Any:
+def ingest(
+    db: store_workbench.WorkbenchStore, frame: dict[str, Any], *, at: float
+) -> Any:
     """Apply one published frame through the store's real ingestion path."""
     view = frame["payload"]["view"]
     if view == VIEW_HEARTBEAT:
@@ -1129,7 +1132,8 @@ class RemoteActionTests(unittest.TestCase):
 
     def test_the_active_state_list_is_the_bridges_own(self) -> None:
         self.assertEqual(
-            bridge.ACTIVE_PRIMARY_STATES, workbench_connector.ACTIVE_PRIMARY_STATES
+            bridge_protocol.ACTIVE_PRIMARY_STATES,
+            workbench_connector.ACTIVE_PRIMARY_STATES,
         )
 
 
@@ -1739,14 +1743,18 @@ class CorpusTestCase(unittest.TestCase):
     def make_recording_source(self, **overrides: Any) -> RecordingSource:
         return RecordingSource(self.make_source(**overrides))
 
-    def open_store(self, name: str = "workbench.sqlite3") -> store.WorkbenchStore:
-        db = store.WorkbenchStore.open(self.root / name, policy=POLICY, created_at=NOW)
+    def open_store(
+        self, name: str = "workbench.sqlite3"
+    ) -> store_workbench.WorkbenchStore:
+        db = store_workbench.WorkbenchStore.open(
+            self.root / name, policy=POLICY, created_at=NOW
+        )
         self.addCleanup(db.close)
         return db
 
     def publish(
         self,
-        db: store.WorkbenchStore,
+        db: store_workbench.WorkbenchStore,
         *,
         source: Any | None = None,
         connector: Any | None = None,
@@ -2127,7 +2135,7 @@ class PageAndCapTests(CorpusTestCase):
             catalog=mock.Mock(records=records),
         )
 
-        with mock.patch.object(bridge, "project_row", side_effect=rows):
+        with mock.patch.object(bridge_projection, "project_row", side_effect=rows):
             kept, failed, truncated = self.make_source()._runs(  # noqa: SLF001
                 scan
             )

@@ -6,21 +6,22 @@ from pathlib import Path
 from typing import Any
 
 from . import plans_errors, plans_transaction, preflight_footprint
-from . import supervisor_audit_evidence as audit_evidence
+from . import supervisor_audit_evidence_constants as audit_evidence_constants
+from . import supervisor_audit_evidence_helpers as audit_evidence_helpers
 from .supervisor_audit_models import _CheckContext, _inside, _joined, _names, _Verdict
 from .supervisor_audit_vocabulary import _TURN_PATH_KEYS
 
 
 def _check_root_registry_agreement(context: _CheckContext) -> _Verdict:
     plan = context.section("plan")
-    metadata = audit_evidence._mapping(plan.get("metadata"))
+    metadata = audit_evidence_helpers._mapping(plan.get("metadata"))
     registry = context.section("registry")
     evidence = context.evidence(
         metadata.get("reference"),
         context.section("state").get("reference"),
         plan.get("reference"),
     )
-    if audit_evidence.EVIDENCE_ROOT_WORKSPACE not in context.roots:
+    if audit_evidence_constants.EVIDENCE_ROOT_WORKSPACE not in context.roots:
         return _Verdict(
             "unavailable",
             "the run declared no workspace root, so no binding can be compared "
@@ -29,14 +30,14 @@ def _check_root_registry_agreement(context: _CheckContext) -> _Verdict:
         )
 
     bindings: list[tuple[str, Any]] = []
-    content = audit_evidence._mapping(metadata.get("content"))
+    content = audit_evidence_helpers._mapping(metadata.get("content"))
     if metadata.get("available") and content.get("workspace_root") is not None:
         bindings.append(("the plan metadata", content.get("workspace_root")))
     if registry.get("registered"):
         if registry.get("workspace_root") is not None:
             bindings.append(("the run registry", registry.get("workspace_root")))
-        for entry in audit_evidence._sequence(registry.get("repositories")):
-            entry = audit_evidence._mapping(entry)
+        for entry in audit_evidence_helpers._sequence(registry.get("repositories")):
+            entry = audit_evidence_helpers._mapping(entry)
             alias = entry.get("alias") or "an unnamed repository"
             # ``path`` is deliberately workspace-relative in current runner
             # state.  Containment is about the repository ASL actually
@@ -64,7 +65,8 @@ def _check_root_registry_agreement(context: _CheckContext) -> _Verdict:
             else f"{source} resolves to {value}"
         )
         for source, value in bindings
-        if value is None or not _inside(value, audit_evidence.EVIDENCE_ROOT_WORKSPACE)
+        if value is None
+        or not _inside(value, audit_evidence_constants.EVIDENCE_ROOT_WORKSPACE)
     ]
     if disagreeing:
         return _Verdict(
@@ -86,8 +88,8 @@ def _check_repository_intent(context: _CheckContext) -> _Verdict:
     evidence = context.evidence(
         plan.get("reference"), context.section("state").get("reference")
     )
-    plan_root = context.roots.get(audit_evidence.EVIDENCE_ROOT_PLAN)
-    workspace_root = context.roots.get(audit_evidence.EVIDENCE_ROOT_WORKSPACE)
+    plan_root = context.roots.get(audit_evidence_constants.EVIDENCE_ROOT_PLAN)
+    workspace_root = context.roots.get(audit_evidence_constants.EVIDENCE_ROOT_WORKSPACE)
     if not plan_root or not workspace_root or not Path(plan_root).is_dir():
         return _Verdict(
             "unavailable",
@@ -109,8 +111,8 @@ def _check_repository_intent(context: _CheckContext) -> _Verdict:
     exempt = [
         context.roots[name]
         for name in (
-            audit_evidence.EVIDENCE_ROOT_STATE,
-            audit_evidence.EVIDENCE_ROOT_RUN,
+            audit_evidence_constants.EVIDENCE_ROOT_STATE,
+            audit_evidence_constants.EVIDENCE_ROOT_RUN,
         )
         if context.roots.get(name)
     ]
@@ -141,7 +143,7 @@ def _check_repository_intent(context: _CheckContext) -> _Verdict:
         )
     reachable = _names(
         Path(str(root)).name
-        for root in audit_evidence._sequence(report.get("git_roots"))
+        for root in audit_evidence_helpers._sequence(report.get("git_roots"))
     )
     return _Verdict(
         "fail",
@@ -155,10 +157,12 @@ def _check_task_packet_paths(context: _CheckContext) -> _Verdict:
     contradictions: list[str] = []
     references: list[str] = []
     observed = 0
-    workspace_declared = audit_evidence.EVIDENCE_ROOT_WORKSPACE in context.roots
+    workspace_declared = (
+        audit_evidence_constants.EVIDENCE_ROOT_WORKSPACE in context.roots
+    )
     for turn in context.turns:
         directory = turn.get("directory")
-        result = audit_evidence._mapping(turn.get("result"))
+        result = audit_evidence_helpers._mapping(turn.get("result"))
         if not isinstance(directory, str) or result.get("available") is False:
             continue
         references.append(directory)
@@ -173,17 +177,19 @@ def _check_task_packet_paths(context: _CheckContext) -> _Verdict:
                     f"{turn.get('name')} names {value} as its {key} rather than "
                     f"{expected}"
                 )
-        cwd = audit_evidence._mapping(result.get("invocation")).get("cwd")
+        cwd = audit_evidence_helpers._mapping(result.get("invocation")).get("cwd")
         if isinstance(cwd, str) and workspace_declared:
             observed += 1
-            if not _inside(cwd, audit_evidence.EVIDENCE_ROOT_WORKSPACE):
+            if not _inside(cwd, audit_evidence_constants.EVIDENCE_ROOT_WORKSPACE):
                 contradictions.append(
                     f"{turn.get('name')} ran in {cwd}, outside the run's workspace"
                 )
     configured_cwd = context.section("configuration").get("cwd")
     if isinstance(configured_cwd, str) and workspace_declared:
         observed += 1
-        if not _inside(configured_cwd, audit_evidence.EVIDENCE_ROOT_WORKSPACE):
+        if not _inside(
+            configured_cwd, audit_evidence_constants.EVIDENCE_ROOT_WORKSPACE
+        ):
             contradictions.append(
                 f"the run configuration names {configured_cwd} as its working "
                 "directory, outside the run's workspace"

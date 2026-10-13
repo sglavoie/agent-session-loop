@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config, supervisor_audit_checks
-from .assurance_models import AUDIT_INPUT_FILENAME
+from .assurance_models_vocab import AUDIT_INPUT_FILENAME
 
 #: Stored matrices carry a version so a baseline written by an incompatible
 #: harness is rejected instead of silently compared against.

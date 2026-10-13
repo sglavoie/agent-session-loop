@@ -6,7 +6,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from . import commit_groups, events
-from . import supervisor_audit_evidence as audit_evidence
+from . import supervisor_audit_evidence_constants as audit_evidence_constants
+from . import supervisor_audit_evidence_helpers as audit_evidence_helpers
 from .supervisor_audit_checks_commits import _unresolved_commit_group_rows
 from .supervisor_audit_models import _CheckContext, _joined, _Verdict
 from .supervisor_audit_vocabulary import (
@@ -30,10 +31,10 @@ _COMMIT_GROUP_LIFECYCLE_EVENTS = frozenset(
 
 def _session_paused_group_id(group: Any) -> str | None:
     """The id of a ``session-paused`` commit group, or ``None`` for any other."""
-    group = audit_evidence._mapping(group)
-    scope = group.get("scope") or audit_evidence._mapping(group.get("identity")).get(
-        "scope"
-    )
+    group = audit_evidence_helpers._mapping(group)
+    scope = group.get("scope") or audit_evidence_helpers._mapping(
+        group.get("identity")
+    ).get("scope")
     if scope != commit_groups.GROUP_SCOPE_SESSION_PAUSED:
         return None
     group_id = group.get("group_id")
@@ -63,7 +64,7 @@ def _paused_work_settlement_group_ids(
     closed_at: list[int] = []
     for index, record in enumerate(tail):
         name = str(record.get("name") or "")
-        payload = audit_evidence._mapping(record.get("payload"))
+        payload = audit_evidence_helpers._mapping(record.get("payload"))
         if name == events.PAUSED_WORK_COMMITTED_EVENT:
             closed_at.append(index)
             # The close names its own group, so a settlement stays
@@ -92,7 +93,7 @@ def _settles_paused_work(
     if str(record.get("name") or "") not in _PAUSED_WORK_SETTLEMENT_COMMIT_EVENTS:
         return False
     return (
-        audit_evidence._mapping(record.get("payload")).get("group_id")
+        audit_evidence_helpers._mapping(record.get("payload")).get("group_id")
         in settlement_group_ids
     )
 
@@ -116,7 +117,9 @@ def _paused_work_settlement_reason(payload: Mapping[str, Any]) -> str | None:
     error = payload.get("error")
     if isinstance(error, str) and error.strip():
         return error
-    status_result = audit_evidence._mapping(payload.get("commit")).get("status_result")
+    status_result = audit_evidence_helpers._mapping(payload.get("commit")).get(
+        "status_result"
+    )
     if isinstance(status_result, str) and status_result.strip():
         return status_result
     return None
@@ -148,12 +151,14 @@ def _check_paused_work_settlement(context: _CheckContext) -> _Verdict:
     """
     problems: list[str] = []
     settlements = [
-        audit_evidence._mapping(record.get("payload"))
+        audit_evidence_helpers._mapping(record.get("payload"))
         for record in context.records
         if record.get("name") == events.PAUSED_WORK_COMMITTED_EVENT
     ]
     commits = context.section("commits")
-    mirror = audit_evidence._mapping(commits.get(audit_evidence.PAUSED_WORK_COMMIT_KEY))
+    mirror = audit_evidence_helpers._mapping(
+        commits.get(audit_evidence_constants.PAUSED_WORK_COMMIT_KEY)
+    )
     unresolved_scopes = {
         row.get("scope") for row in _unresolved_commit_group_rows(context)
     }
@@ -174,8 +179,10 @@ def _check_paused_work_settlement(context: _CheckContext) -> _Verdict:
                     "commit group for a later run to recover"
                 )
         else:
-            residue = audit_evidence._sequence(
-                audit_evidence._mapping(payload.get("residue")).get("repositories")
+            residue = audit_evidence_helpers._sequence(
+                audit_evidence_helpers._mapping(payload.get("residue")).get(
+                    "repositories"
+                )
             )
             if result == _PAUSED_WORK_RESULT_RESIDUE and not residue:
                 problems.append(

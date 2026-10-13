@@ -7,9 +7,10 @@ outside the JSON contract, the resolution of each finding's identity decision,
 and the merge of agent findings with the deterministic verdicts into the
 canonical audit and its staged reports.
 
-It reads :mod:`.supervisor_audit_evidence` and :mod:`.supervisor_audit_checks`
-and is read by the :mod:`.supervisor_audit` entry module, which launches the
-auditor, runs the attempt loop, and publishes what this module renders.
+It reads the ``supervisor_audit_evidence_*`` modules and
+:mod:`.supervisor_audit_checks` and is read by the :mod:`.supervisor_audit` entry
+module, which launches the auditor, runs the attempt loop, and publishes what
+this module renders.
 """
 
 from __future__ import annotations
@@ -27,19 +28,21 @@ from typing import Any
 from . import (
     artifacts,
     assurance_ledger,
-    assurance_models,
+    assurance_models_artifacts,
+    assurance_models_audit,
+    assurance_models_findings,
+    assurance_models_primitives,
+    assurance_models_vocab,
     assurance_projection,
     durability,
     supervisor_audit_models,
     supervisor_audit_vocabulary,
 )
 from . import supervisor_audit_checks as audit_checks
-from . import supervisor_audit_evidence as audit_evidence
-from .assurance_models import (
-    AttemptOutcome,
-    CheckStatus,
-    Finding,
-)
+from . import supervisor_audit_evidence_constants as audit_evidence_constants
+from . import supervisor_audit_evidence_models as audit_evidence_models
+from .assurance_models_findings import Finding
+from .assurance_models_vocab import AttemptOutcome, CheckStatus
 
 #: Run-relative directory the canonical reports are built in before they become
 #: canonical. Nothing durable ever names a path inside it, so its contents are
@@ -73,8 +76,8 @@ MAX_AGENT_OUTPUT_BYTES = 256 * 1024
 #: source trees the audit profile grants, so a localization pointing anywhere
 #: else describes something the auditor could not have read.
 LOCALIZATION_ROOTS: tuple[str, ...] = (
-    audit_evidence.EVIDENCE_ROOT_PACKAGE,
-    audit_evidence.EVIDENCE_ROOT_SKILLS,
+    audit_evidence_constants.EVIDENCE_ROOT_PACKAGE,
+    audit_evidence_constants.EVIDENCE_ROOT_SKILLS,
 )
 
 #: Why a launched audit reports no agent coverage.
@@ -342,7 +345,7 @@ class AgentAudit:
     defect happened to line up.
     """
 
-    lanes: tuple[assurance_models.LaneEvidence, ...]
+    lanes: tuple[assurance_models_findings.LaneEvidence, ...]
     findings: tuple[Finding, ...]
     identities: tuple[IdentityDecision, ...]
 
@@ -361,7 +364,7 @@ class AgentAudit:
         return tuple(zip(self.findings, self.identities, strict=True))
 
 
-def _inline(text: str, *, limit: int = assurance_models.MAX_TEXT_CHARS) -> str:
+def _inline(text: str, *, limit: int = assurance_models_vocab.MAX_TEXT_CHARS) -> str:
     """Collapse validated text to one line so it can be rendered into a cell."""
     collapsed = " ".join(
         supervisor_audit_vocabulary._CONTROL_CHAR_RE.sub(" ", str(text)).split()
@@ -456,14 +459,14 @@ def build_agent_catalog(catalog: assurance_projection.IdentityCatalog) -> AgentC
     names the identity state a decision was made against, which is what a later
     publisher revalidates, and a sample cannot answer that question.
     """
-    number = assurance_models.issue_id_number
+    number = assurance_models_primitives.issue_id_number
     ranked = sorted(
         catalog.entries,
         key=lambda entry: (entry.last_seen_at, number(entry.issue_id)),
         reverse=True,
     )
     envelope = len(
-        assurance_models.canonical_json_bytes(
+        assurance_models_primitives.canonical_json_bytes(
             {"digest": catalog.digest, "omitted": len(ranked), "issues": []}
         )
     )
@@ -473,7 +476,10 @@ def build_agent_catalog(catalog: assurance_projection.IdentityCatalog) -> AgentC
     used = 0
     for entry in ranked:
         supplied = _agent_catalog_entry(entry)
-        body = len(assurance_models.canonical_json_bytes(supplied.to_dict())) - 1
+        body = (
+            len(assurance_models_primitives.canonical_json_bytes(supplied.to_dict()))
+            - 1
+        )
         # Every entry after the first also pays for the comma that precedes it.
         cost = body + (1 if kept else 0)
         if omitted or used + cost > budget:
@@ -516,7 +522,7 @@ def widen_agent_catalog(
             promoted.append(_agent_catalog_entry(entry))
     if not promoted:
         return supplied
-    number = assurance_models.issue_id_number
+    number = assurance_models_primitives.issue_id_number
     added = frozenset(entry.issue_id for entry in promoted)
     return AgentCatalog(
         digest=supplied.digest,
@@ -545,7 +551,7 @@ def read_identity_catalog(
     except (
         OSError,
         assurance_ledger.LedgerError,
-        assurance_models.AssuranceError,
+        assurance_models_primitives.AssuranceError,
     ):
         return assurance_projection.IdentityCatalog()
     return projection.catalog
@@ -562,7 +568,7 @@ def _agent_schema_block() -> str:
             "schema_version": AGENT_OUTPUT_SCHEMA_VERSION,
             "lanes": [
                 {
-                    "lane": assurance_models.RUBRIC_LANES[0],
+                    "lane": assurance_models_vocab.RUBRIC_LANES[0],
                     "status": "pass|fail|unavailable",
                     "summary": "what the evidence showed for this lane",
                     "evidence": ["<locator from the evidence index>"],
@@ -570,7 +576,7 @@ def _agent_schema_block() -> str:
             ],
             "findings": [
                 {
-                    "lane": assurance_models.RUBRIC_LANES[0],
+                    "lane": assurance_models_vocab.RUBRIC_LANES[0],
                     "severity": "low|medium|high|critical",
                     "category": "identity",
                     "component": "workspace-registry",
@@ -592,7 +598,7 @@ def _agent_schema_block() -> str:
 
 
 def build_audit_prompt(
-    bundle: audit_evidence.AuditInput | Mapping[str, Any],
+    bundle: audit_evidence_models.AuditInput | Mapping[str, Any],
     *,
     catalog: AgentCatalog,
     correction: str | None = None,
@@ -617,19 +623,23 @@ def build_audit_prompt(
     """
     payload = (
         bundle.payload
-        if isinstance(bundle, audit_evidence.AuditInput)
+        if isinstance(bundle, audit_evidence_models.AuditInput)
         else dict(bundle)
     )
     prompt = AUDIT_PROMPT_TEMPLATE.format(
-        package_root=audit_evidence.EVIDENCE_ROOT_PACKAGE,
-        skills_root=audit_evidence.EVIDENCE_ROOT_SKILLS,
-        lane_list="\n".join(f"- {lane}" for lane in assurance_models.RUBRIC_LANES),
+        package_root=audit_evidence_constants.EVIDENCE_ROOT_PACKAGE,
+        skills_root=audit_evidence_constants.EVIDENCE_ROOT_SKILLS,
+        lane_list="\n".join(
+            f"- {lane}" for lane in assurance_models_vocab.RUBRIC_LANES
+        ),
         schema=_agent_schema_block(),
-        catalog=assurance_models.canonical_json_bytes(catalog.to_dict()).decode(
+        catalog=assurance_models_primitives.canonical_json_bytes(
+            catalog.to_dict()
+        ).decode("utf-8"),
+        run_id=payload.get("run_id", "unknown"),
+        bundle=assurance_models_primitives.canonical_json_bytes(payload).decode(
             "utf-8"
         ),
-        run_id=payload.get("run_id", "unknown"),
-        bundle=assurance_models.canonical_json_bytes(payload).decode("utf-8"),
     )
     if candidates:
         prompt = f"{prompt}\n{_candidate_section(candidates)}"
@@ -642,7 +652,7 @@ def _candidate_section(
     candidates: Sequence[assurance_projection.IdentityCandidate],
 ) -> str:
     return AUDIT_CANDIDATE_TEMPLATE.format(
-        candidates=assurance_models.canonical_json_bytes(
+        candidates=assurance_models_primitives.canonical_json_bytes(
             [candidate.to_dict() for candidate in candidates]
         ).decode("utf-8"),
         invariant=assurance_projection.MATCH_INVARIANT,
@@ -697,7 +707,7 @@ def _agent_payload(text: str) -> dict[str, Any]:
 
 def _agent_lanes(
     payload: Mapping[str, Any],
-) -> tuple[assurance_models.LaneEvidence, ...]:
+) -> tuple[assurance_models_findings.LaneEvidence, ...]:
     entries = payload.get("lanes")
     if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
         raise AgentOutputError(
@@ -707,13 +717,15 @@ def _agent_lanes(
     for index, entry in enumerate(entries):
         try:
             lanes.append(
-                assurance_models.parse_lane_evidence(entry, label=f"lane #{index + 1}")
+                assurance_models_findings.parse_lane_evidence(
+                    entry, label=f"lane #{index + 1}"
+                )
             )
-        except assurance_models.AssuranceError as error:
+        except assurance_models_primitives.AssuranceError as error:
             raise AgentOutputError("malformed-output", str(error)) from error
     try:
-        assurance_models.validate_lane_coverage(lanes, require_complete=True)
-    except assurance_models.AssuranceError as error:
+        assurance_models_findings.validate_lane_coverage(lanes, require_complete=True)
+    except assurance_models_primitives.AssuranceError as error:
         raise AgentOutputError("missing-lanes", str(error)) from error
     return tuple(lanes)
 
@@ -749,7 +761,7 @@ def _identity_decision(
             "malformed-output",
             f"{label} 'identity' must set 'decision' to one of "
             f"{', '.join(IDENTITY_DECISIONS)}; got "
-            f"{_inline(str(decision), limit=assurance_models.MAX_TOKEN_CHARS)!r}",
+            f"{_inline(str(decision), limit=assurance_models_vocab.MAX_TOKEN_CHARS)!r}",
         )
     declared = payload.get("issue_id")
     if decision == "new":
@@ -761,8 +773,8 @@ def _identity_decision(
             )
         return IdentityDecision(decision="new")
     try:
-        issue_id = assurance_models.parse_issue_id(declared)
-    except assurance_models.AssuranceError as error:
+        issue_id = assurance_models_primitives.parse_issue_id(declared)
+    except assurance_models_primitives.AssuranceError as error:
         raise AgentOutputError(
             "malformed-output",
             f"{label} 'identity' selects an existing issue and must name the "
@@ -793,10 +805,10 @@ def _agent_findings(
         raise AgentOutputError(
             "malformed-output", "the agent answer must carry a 'findings' list"
         )
-    if len(entries) > assurance_models.MAX_FINDINGS:
+    if len(entries) > assurance_models_vocab.MAX_FINDINGS:
         raise AgentOutputError(
             "malformed-output",
-            f"the agent answer must hold at most {assurance_models.MAX_FINDINGS} "
+            f"the agent answer must hold at most {assurance_models_vocab.MAX_FINDINGS} "
             f"findings; got {len(entries)}",
         )
     findings = []
@@ -822,25 +834,27 @@ def _agent_findings(
         identities.append(_identity_decision(entry, label=label, catalog=catalog))
         try:
             findings.append(
-                assurance_models.parse_finding(
+                assurance_models_findings.parse_finding(
                     {
                         **{
                             str(key): value
                             for key, value in entry.items()
                             if key != "identity"
                         },
-                        "schema_version": assurance_models.ASSURANCE_SCHEMA_VERSION,
+                        "schema_version": (
+                            assurance_models_vocab.ASSURANCE_SCHEMA_VERSION
+                        ),
                     },
                     label=label,
                 )
             )
-        except assurance_models.AssuranceError as error:
+        except assurance_models_primitives.AssuranceError as error:
             raise AgentOutputError("malformed-output", str(error)) from error
     return tuple(findings), tuple(identities)
 
 
 def _validate_agent_references(
-    lanes: Sequence[assurance_models.LaneEvidence],
+    lanes: Sequence[assurance_models_findings.LaneEvidence],
     findings: Sequence[Finding],
     *,
     declared: Iterable[str],
@@ -983,10 +997,12 @@ def _worst(*statuses: CheckStatus) -> CheckStatus:
     )
 
 
-def _status_counts(results: Sequence[assurance_models.DeterministicResult]) -> str:
+def _status_counts(
+    results: Sequence[assurance_models_findings.DeterministicResult],
+) -> str:
     if not results:
         return "no deterministic check reported"
-    counts = {status: 0 for status in assurance_models.CHECK_STATUSES}
+    counts = {status: 0 for status in assurance_models_vocab.CHECK_STATUSES}
     for result in results:
         counts[result.status] += 1
     return ", ".join(f"{count} {status}" for status, count in counts.items() if count)
@@ -999,7 +1015,7 @@ def _anchor(declared: Sequence[str]) -> tuple[str, ...]:
 
 
 def _deterministic_signal(
-    results: Sequence[assurance_models.DeterministicResult],
+    results: Sequence[assurance_models_findings.DeterministicResult],
 ) -> CheckStatus | None:
     """Return what the checks on one lane prove, or ``None`` when they prove nothing.
 
@@ -1016,11 +1032,11 @@ def _deterministic_signal(
 
 
 def _merged_lanes(
-    results: Sequence[assurance_models.DeterministicResult],
+    results: Sequence[assurance_models_findings.DeterministicResult],
     agent: AgentAudit | None,
     *,
     declared: Sequence[str],
-) -> tuple[assurance_models.LaneEvidence, ...]:
+) -> tuple[assurance_models_findings.LaneEvidence, ...]:
     """Reduce deterministic results and agent lanes to one record per lane.
 
     Where both sides carry a signal the worse one wins: an agent that reports
@@ -1034,7 +1050,7 @@ def _merged_lanes(
     """
     reported = {lane.lane: lane for lane in (agent.lanes if agent else ())}
     lanes = []
-    for name in assurance_models.RUBRIC_LANES:
+    for name in assurance_models_vocab.RUBRIC_LANES:
         lane_results = [result for result in results if result.lane == name]
         claim = reported.get(name)
         claimed: CheckStatus = claim.status if claim else "unavailable"
@@ -1047,7 +1063,7 @@ def _merged_lanes(
                     *(ref for result in lane_results for ref in result.evidence),
                 ]
             )
-        )[: assurance_models.MAX_REFERENCES_PER_ITEM]
+        )[: assurance_models_vocab.MAX_REFERENCES_PER_ITEM]
         deterministic_note = f"Deterministic checks: {_status_counts(lane_results)}."
         summary = (
             f"{_inline(claim.summary)} {deterministic_note}"
@@ -1055,7 +1071,7 @@ def _merged_lanes(
             else f"Agent coverage was unavailable for this lane. {deterministic_note}"
         )
         lanes.append(
-            assurance_models.LaneEvidence(
+            assurance_models_findings.LaneEvidence(
                 lane=name,
                 status=status,
                 summary=_inline(summary),
@@ -1072,7 +1088,7 @@ def _merged_findings(
     merged: dict[str, Finding] = {}
     for finding in (*deterministic, *agent):
         merged.setdefault(finding.fingerprint, finding)
-    return tuple(merged.values())[: assurance_models.MAX_FINDINGS]
+    return tuple(merged.values())[: assurance_models_vocab.MAX_FINDINGS]
 
 
 def _identity_selections(
@@ -1099,12 +1115,12 @@ def _identity_selections(
 def render_supervisor_audit(
     *,
     run_id: str,
-    bundle: audit_evidence.AuditInput,
-    results: Sequence[assurance_models.DeterministicResult],
+    bundle: audit_evidence_models.AuditInput,
+    results: Sequence[assurance_models_findings.DeterministicResult],
     generated_at: str,
     agent: AgentAudit | None = None,
     reason: str | None = None,
-) -> assurance_models.SupervisorAudit:
+) -> assurance_models_audit.SupervisorAudit:
     """Build the canonical audit from validated internal data only.
 
     Both reports are rendered from this object, so no byte of agent Markdown
@@ -1118,7 +1134,7 @@ def render_supervisor_audit(
         audit_checks.findings_from_results(results), agent.findings if agent else ()
     )
     if agent is None:
-        state: assurance_models.AuditState = "unavailable"
+        state: assurance_models_vocab.AuditState = "unavailable"
         state_reason = reason or REASON_AGENT_UNAVAILABLE
     elif findings:
         state, state_reason = "findings", None
@@ -1132,7 +1148,7 @@ def render_supervisor_audit(
         state, state_reason = "unavailable", REASON_LANE_COVERAGE
     else:
         state, state_reason = "partial", REASON_LANE_EVIDENCE_ABSENT
-    return assurance_models.SupervisorAudit(
+    return assurance_models_audit.SupervisorAudit(
         run_id=run_id,
         state=state,
         input_digest=bundle.sha256,
@@ -1141,7 +1157,9 @@ def render_supervisor_audit(
         evidence=evidence,
         lanes=lanes,
         findings=findings,
-        deterministic=tuple(results)[: assurance_models.MAX_DETERMINISTIC_RESULTS],
+        deterministic=tuple(results)[
+            : assurance_models_vocab.MAX_DETERMINISTIC_RESULTS
+        ],
     )
 
 
@@ -1149,7 +1167,7 @@ def _markdown_row(*cells: str) -> str:
     return "| " + " | ".join(cell.replace("|", "\\|") for cell in cells) + " |"
 
 
-def render_audit_markdown(audit: assurance_models.SupervisorAudit) -> str:
+def render_audit_markdown(audit: assurance_models_audit.SupervisorAudit) -> str:
     """Render the operator-facing report from the validated audit object."""
     lines = [
         f"# Supervisor audit — {audit.run_id}",
@@ -1247,7 +1265,7 @@ class StagedAuditReports:
     promoted: list[Path] = field(default_factory=list, repr=False, compare=False)
 
     @property
-    def references(self) -> tuple[assurance_models.EvidenceRef, ...]:
+    def references(self) -> tuple[assurance_models_findings.EvidenceRef, ...]:
         """Evidence naming the canonical paths, not the staged ones."""
         return tuple(
             _artifact_reference(canonical, self.run_dir, digest)
@@ -1258,7 +1276,7 @@ class StagedAuditReports:
         """Give both reports their canonical names, or neither of them.
 
         Each link is refused by the filesystem if the canonical name is already
-        taken, which is the same rule :func:`assurance_models.write_new_bytes`
+        taken, which is the same rule :func:`assurance_models_artifacts.write_new_bytes`
         enforces and for the same reason: two reports under one name would mean
         two audits disagree about one run. A failure part-way unlinks whatever
         was already promoted, so the caller can abort with the run directory
@@ -1269,7 +1287,7 @@ class StagedAuditReports:
                 os.link(staged, canonical)
             except OSError as error:
                 self.unpromote()
-                raise assurance_models.AssuranceError(
+                raise assurance_models_primitives.AssuranceError(
                     f"could not promote audit report {canonical}: {error}"
                 ) from error
             self.promoted.append(canonical)
@@ -1283,7 +1301,7 @@ class StagedAuditReports:
                 os.close(descriptor)
         except OSError as error:
             self.unpromote()
-            raise assurance_models.AssuranceError(
+            raise assurance_models_primitives.AssuranceError(
                 f"could not sync audit report directory {self.run_dir}: {error}"
             ) from error
 
@@ -1312,7 +1330,7 @@ class StagedAuditReports:
 
 def stage_audit_reports(
     run_dir: Path | str,
-    audit: assurance_models.SupervisorAudit,
+    audit: assurance_models_audit.SupervisorAudit,
     *,
     durable: bool = True,
 ) -> StagedAuditReports:
@@ -1329,27 +1347,27 @@ def stage_audit_reports(
     try:
         directory.mkdir(parents=True)
     except OSError as error:
-        raise assurance_models.AssuranceError(
+        raise assurance_models_primitives.AssuranceError(
             f"could not create audit staging directory {directory}: {error}"
         ) from error
     entries: list[tuple[Path, Path, str]] = []
     for name, data in (
         (
-            assurance_models.AUDIT_REPORT_FILENAME,
-            assurance_models.canonical_json_bytes(audit.to_dict()),
+            assurance_models_vocab.AUDIT_REPORT_FILENAME,
+            assurance_models_primitives.canonical_json_bytes(audit.to_dict()),
         ),
         (
-            assurance_models.AUDIT_MARKDOWN_FILENAME,
+            assurance_models_vocab.AUDIT_MARKDOWN_FILENAME,
             render_audit_markdown(audit).encode("utf-8"),
         ),
     ):
-        staged = assurance_models.write_audit_artifact(
+        staged = assurance_models_artifacts.write_audit_artifact(
             directory, name, data, durable=durable
         )
         entries.append(
             (
                 staged,
-                root / assurance_models.audit_artifact_name(name),
+                root / assurance_models_artifacts.audit_artifact_name(name),
                 artifacts.sha256_hex(data),
             )
         )
@@ -1363,7 +1381,7 @@ def stage_audit_reports(
 
 def write_audit_reports(
     run_dir: Path | str,
-    audit: assurance_models.SupervisorAudit,
+    audit: assurance_models_audit.SupervisorAudit,
     *,
     durable: bool = True,
 ) -> tuple[Path, Path]:
@@ -1379,9 +1397,9 @@ def write_audit_reports(
 
 def _artifact_reference(
     path: Path, run_dir: Path, digest: str
-) -> assurance_models.EvidenceRef:
-    return assurance_models.EvidenceRef(
+) -> assurance_models_findings.EvidenceRef:
+    return assurance_models_findings.EvidenceRef(
         kind="artifact",
-        locator=f"{audit_evidence.EVIDENCE_ROOT_RUN}/{path.relative_to(run_dir).as_posix()}",
+        locator=f"{audit_evidence_constants.EVIDENCE_ROOT_RUN}/{path.relative_to(run_dir).as_posix()}",
         digest=digest,
     )

@@ -66,11 +66,15 @@ from agent_session_loop import (
     plans_models,
     plans_payloads,
     plans_snapshot,
-    run_coordination,
+    run_coordination_constants,
+    run_coordination_mailbox_question,
+    run_coordination_mailbox_wait,
+    run_coordination_wait_models,
+    run_coordination_wait_state,
     run_loop_context,
     run_termination,
     turn_dispositions,
-    turn_execution,
+    turn_execution_commit,
 )
 from tests import support_asl_run_loop_view as run_loop_view
 
@@ -103,7 +107,7 @@ MOVED_CALLS = frozenset(
         "run_termination._honor_abort_turn",
         "handoff_correction._correct_malformed_handoff",
         "handoff_correction._reopen_uninspectable_handoff",
-        "run_coordination.MailboxWaitCoordinator",
+        "run_coordination_mailbox_wait.MailboxWaitCoordinator",
         "model_availability.suppress_until",
         "_worker_pause_resolution_for_turn",
         "_runner_pause_can_wait_for_mailbox_reply",
@@ -119,9 +123,9 @@ MOVED_CALLS = frozenset(
 #: or was not entered, which only works while the loop resolves them at the
 #: call site rather than binding them once at import.
 INJECTED_SEAMS = (
-    "run_coordination.prepare_mailbox_reply_wait",
-    "run_coordination.wait_for_mailbox_reply",
-    "run_coordination.finish_mailbox_reply_wait_lifecycle",
+    "run_coordination_mailbox_wait.prepare_mailbox_reply_wait",
+    "run_coordination_mailbox_wait.wait_for_mailbox_reply",
+    "run_coordination_mailbox_wait.finish_mailbox_reply_wait_lifecycle",
 )
 
 
@@ -299,7 +303,8 @@ class RunLoopDelegationTests(unittest.TestCase):
         # The counterpart to the assertion above: these three are deliberately
         # *not* imported by the boundary. The loop resolves each one as an
         # attribute of its owning module and passes it in, which is what makes
-        # a caller's patch on ``run_coordination`` take effect; binding them to
+        # a caller's patch on ``run_coordination_mailbox_wait`` take effect; binding
+        # them to
         # a module-level name here would freeze the pre-patch function instead.
         source = run_loop_view.assembled_source()
         tree = ast.parse(source)
@@ -419,7 +424,9 @@ class MalformedPlanTests(DispositionTestCase):
                 "_reopen_uninspectable_handoff",
                 return_value=reopened,
             ),
-            mock.patch.object(turn_execution, "record_turn_rejected") as rejected,
+            mock.patch.object(
+                turn_execution_commit, "record_turn_rejected"
+            ) as rejected,
         ):
             self.rejected = rejected
             return turn_dispositions.settle_malformed_plan(
@@ -497,18 +504,21 @@ class RunnerPauseTests(DispositionTestCase):
 
         with (
             mock.patch.object(
-                run_coordination,
+                run_coordination_mailbox_question,
                 "worker_pause_resolution_for_turn",
                 return_value=resolution_for_turn,
             ),
             mock.patch.object(
-                run_coordination,
+                run_coordination_mailbox_question,
                 "runner_pause_can_wait_for_mailbox_reply",
                 return_value=can_wait,
             ),
-            mock.patch.object(run_coordination, "MailboxWaitCoordinator", coordinator),
             mock.patch.object(
-                run_coordination, "record_mailbox_reply_wait_preparation_failed"
+                run_coordination_mailbox_wait, "MailboxWaitCoordinator", coordinator
+            ),
+            mock.patch.object(
+                run_coordination_wait_state,
+                "record_mailbox_reply_wait_preparation_failed",
             ) as failed,
         ):
             self.coordinator = coordinator
@@ -574,8 +584,8 @@ class RunnerPauseTests(DispositionTestCase):
     ) -> None:
         reply = fake_message(id="reply-1", seq=11, text="do this instead")
         outcome = self.settle(
-            wait_result=run_coordination.MailboxWaitResult(
-                reason=run_coordination.WAIT_REASON_REPLY,
+            wait_result=run_coordination_wait_models.MailboxWaitResult(
+                reason=run_coordination_constants.WAIT_REASON_REPLY,
                 pending_outbox=0,
                 reply=reply,
             )
@@ -602,8 +612,8 @@ class RunnerPauseTests(DispositionTestCase):
             note="proceed",
         )
         outcome = self.settle(
-            wait_result=run_coordination.MailboxWaitResult(
-                reason=run_coordination.WAIT_REASON_RESOLUTION,
+            wait_result=run_coordination_wait_models.MailboxWaitResult(
+                reason=run_coordination_constants.WAIT_REASON_RESOLUTION,
                 pending_outbox=0,
                 resolution=resolution,
             )
@@ -623,8 +633,8 @@ class RunnerPauseTests(DispositionTestCase):
             action=mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
         )
         outcome = self.settle(
-            wait_result=run_coordination.MailboxWaitResult(
-                reason=run_coordination.WAIT_REASON_RESOLUTION,
+            wait_result=run_coordination_wait_models.MailboxWaitResult(
+                reason=run_coordination_constants.WAIT_REASON_RESOLUTION,
                 pending_outbox=0,
                 resolution=resolution,
             )
@@ -641,8 +651,8 @@ class RunnerPauseTests(DispositionTestCase):
 
     def test_a_timed_out_wait_leaves_the_run_paused(self) -> None:
         outcome = self.settle(
-            wait_result=run_coordination.MailboxWaitResult(
-                reason=run_coordination.WAIT_REASON_TIMEOUT, pending_outbox=0
+            wait_result=run_coordination_wait_models.MailboxWaitResult(
+                reason=run_coordination_constants.WAIT_REASON_TIMEOUT, pending_outbox=0
             )
         )
         self.assertIsNone(outcome)
@@ -650,7 +660,9 @@ class RunnerPauseTests(DispositionTestCase):
 
     def test_an_unpreparable_wait_is_recorded_and_the_run_pauses(self) -> None:
         outcome = self.settle(
-            prepare_error=run_coordination.MailboxWaitUnavailable("no-state-path")
+            prepare_error=run_coordination_wait_models.MailboxWaitUnavailable(
+                "no-state-path"
+            )
         )
         self.assertIsNone(outcome)
         self.coordinator.assert_not_called()
@@ -663,7 +675,7 @@ class RunnerPauseTests(DispositionTestCase):
 
     def test_a_disabled_mailbox_asks_for_no_prior_resolution(self) -> None:
         with mock.patch.object(
-            run_coordination, "worker_pause_resolution_for_turn"
+            run_coordination_mailbox_question, "worker_pause_resolution_for_turn"
         ) as lookup:
             self.settle(mailbox_enabled=False, can_wait=False)
         lookup.assert_not_called()

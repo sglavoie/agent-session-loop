@@ -13,7 +13,13 @@ from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import assurance_ledger as ledger
-from agent_session_loop import assurance_models as models
+from agent_session_loop import (
+    assurance_models_findings,
+    assurance_models_inbox,
+    assurance_models_primitives,
+    assurance_models_summary,
+    assurance_models_vocab,
+)
 from agent_session_loop import assurance_projection as projection
 from agent_session_loop.assurance_projection import AuditPublication, ProjectionError
 
@@ -34,13 +40,13 @@ _PUBLISH_WORKER_SOURCE = f"""
 import sys
 from pathlib import Path
 
-from agent_session_loop import assurance_models as models
+from agent_session_loop import assurance_models_findings as findings
 from agent_session_loop import assurance_projection as projection
 
 state_dir = Path(sys.argv[1])
 run_id = sys.argv[2]
 input_digest = sys.argv[3]
-finding = models.Finding(
+finding = findings.Finding(
     category="lifecycle",
     component="agent_session_loop/runner.py",
     invariant_key="retry.budget-respected",
@@ -56,7 +62,7 @@ publication = projection.AuditPublication(
     eligible=True,
     findings=(finding,),
     artifacts=(
-        models.EvidenceRef(
+        findings.EvidenceRef(
             kind="artifact",
             locator="supervisor-audit-input.json",
             digest=input_digest,
@@ -79,7 +85,7 @@ def _worker_digest(index: int) -> str:
     return f"{index:064x}"
 
 
-def _finding(**overrides) -> models.Finding:
+def _finding(**overrides) -> assurance_models_findings.Finding:
     payload = {
         "category": "lifecycle",
         "component": "agent_session_loop/runner.py",
@@ -91,15 +97,19 @@ def _finding(**overrides) -> models.Finding:
         "evidence": ("events.jsonl",),
     }
     payload.update(overrides)
-    return models.Finding(**payload)
+    return assurance_models_findings.Finding(**payload)
 
 
-def _artifacts(digest: str | None = INPUT_DIGEST) -> tuple[models.EvidenceRef, ...]:
+def _artifacts(
+    digest: str | None = INPUT_DIGEST,
+) -> tuple[assurance_models_findings.EvidenceRef, ...]:
     return (
-        models.EvidenceRef(
+        assurance_models_findings.EvidenceRef(
             kind="artifact", locator="supervisor-audit-input.json", digest=digest
         ),
-        models.EvidenceRef(kind="artifact", locator="supervisor-audit.json"),
+        assurance_models_findings.EvidenceRef(
+            kind="artifact", locator="supervisor-audit.json"
+        ),
     )
 
 
@@ -136,8 +146,8 @@ class ProjectionTestCase(unittest.TestCase):
 
     def bind(self, issue_id: str, key_of: str, source: str = "allocation") -> None:
         ledger.append_identity_binding(
-            models.IssueIdentityBinding(
-                identity_key=models.identity_key_for_issue(key_of),
+            assurance_models_inbox.IssueIdentityBinding(
+                identity_key=assurance_models_primitives.identity_key_for_issue(key_of),
                 issue_id=issue_id,
                 source=source,
                 bound_at=LATER_TIMESTAMP,
@@ -148,8 +158,8 @@ class ProjectionTestCase(unittest.TestCase):
 
     def force_binding(self, issue_id: str, key_of: str) -> None:
         """Write a binding the ledger writer refuses, to test replay tolerance."""
-        binding = models.IssueIdentityBinding(
-            identity_key=models.identity_key_for_issue(key_of),
+        binding = assurance_models_inbox.IssueIdentityBinding(
+            identity_key=assurance_models_primitives.identity_key_for_issue(key_of),
             issue_id=issue_id,
             source="reconcile",
             bound_at=LAST_TIMESTAMP,
@@ -183,7 +193,7 @@ class ProjectionTestCase(unittest.TestCase):
         digests = tuple(catalog.identity_digest(issue) or "" for issue in (left, right))
         self.force_record(
             ledger.KIND_ISSUE_KEPT_DISTINCT,
-            models.IssueKeptDistinct(
+            assurance_models_inbox.IssueKeptDistinct(
                 issue_ids=(left, right),
                 identity_digests=digests,
                 recorded_at=LAST_TIMESTAMP,
@@ -207,7 +217,7 @@ class ProjectionTestCase(unittest.TestCase):
                 eligible=True,
                 reason="timeout",
                 attempts=(
-                    models.AuditAttempt(
+                    assurance_models_summary.AuditAttempt(
                         number=1,
                         outcome="timeout",
                         artifact_dir="supervisor-audit-attempt-1",
@@ -225,7 +235,7 @@ class ProjectionTestCase(unittest.TestCase):
         )
         self.force_record(
             ledger.KIND_HUMAN_CLOSEOUT,
-            models.Closeout(
+            assurance_models_inbox.Closeout(
                 run_id=RUN_ID,
                 outcome="reworked",
                 recorded_at=LAST_TIMESTAMP,
@@ -235,7 +245,7 @@ class ProjectionTestCase(unittest.TestCase):
         )
         self.force_record(
             ledger.KIND_IMPROVEMENT_PLAN_DRAFTED,
-            models.ImprovementPlanDraft(
+            assurance_models_inbox.ImprovementPlanDraft(
                 issue_id="ASI-1",
                 harness="codex",
                 output_path="/tmp/improvement.md",
@@ -335,7 +345,7 @@ class PublicationTests(ProjectionTestCase):
         self.assertEqual((), projected.run(RUN_ID).issue_ids)
 
     def test_an_all_clear_audit_carries_no_findings(self) -> None:
-        with self.assertRaises(models.AssuranceError) as caught:
+        with self.assertRaises(assurance_models_primitives.AssuranceError) as caught:
             AuditPublication(
                 run_id=RUN_ID,
                 state="all-clear",
@@ -345,11 +355,11 @@ class PublicationTests(ProjectionTestCase):
         self.assertIn("opens no issue", str(caught.exception))
 
     def test_a_findings_audit_must_carry_a_finding(self) -> None:
-        with self.assertRaises(models.AssuranceError):
+        with self.assertRaises(assurance_models_primitives.AssuranceError):
             AuditPublication(run_id=RUN_ID, state="findings", eligible=True)
 
     def test_one_audit_cannot_report_the_same_identity_twice(self) -> None:
-        with self.assertRaises(models.AssuranceError) as caught:
+        with self.assertRaises(assurance_models_primitives.AssuranceError) as caught:
             AuditPublication(
                 run_id=RUN_ID,
                 state="findings",
@@ -415,7 +425,7 @@ class PublicationTests(ProjectionTestCase):
                 findings=(),
                 reason="timeout",
                 attempts=(
-                    models.AuditAttempt(
+                    assurance_models_summary.AuditAttempt(
                         number=1,
                         outcome="timeout",
                         artifact_dir="supervisor-audit-attempt-1",
@@ -690,7 +700,7 @@ class IdentityResolutionTests(ProjectionTestCase):
         self.assertEqual((RUN_ID,), tuple(run.run_id for run in self.read().runs))
 
     def test_a_selection_for_a_finding_the_publication_lacks_is_refused(self) -> None:
-        with self.assertRaises(models.AssuranceError) as caught:
+        with self.assertRaises(assurance_models_primitives.AssuranceError) as caught:
             _publication(identity_selections={"f" * 64: "ASI-1"})
         self.assertIn(
             "names a finding this publication does not carry", str(caught.exception)
@@ -768,9 +778,11 @@ class IdentityResolutionTests(ProjectionTestCase):
         before = self.ledger_path.read_bytes()
 
         def refuse() -> None:
-            raise models.AssuranceError("the report could not be promoted")
+            raise assurance_models_primitives.AssuranceError(
+                "the report could not be promoted"
+            )
 
-        with self.assertRaises(models.AssuranceError):
+        with self.assertRaises(assurance_models_primitives.AssuranceError):
             self.select(self.RENAMED, "ASI-1", promote=refuse)
 
         self.assertEqual(before, self.ledger_path.read_bytes())
@@ -898,7 +910,7 @@ class LifecycleTests(ProjectionTestCase):
 
     def test_each_disposition_moves_the_issue_through_an_append(self) -> None:
         self.publish(_publication())
-        for kind, expected in models.DISPOSITION_RESULT_STATE.items():
+        for kind, expected in assurance_models_vocab.DISPOSITION_RESULT_STATE.items():
             projection.record_disposition(
                 "ASI-1", kind, state_dir=self.state_dir, recorded_at=LATER_TIMESTAMP
             )
@@ -1100,7 +1112,7 @@ class IdentityTests(ProjectionTestCase):
         # it, which is what an issue carried over from a v1 ledger looks like
         # too. Both must stay readable rather than being treated as damaged.
         ledger.append_issue_observation(
-            models.IssueObservation(
+            assurance_models_inbox.IssueObservation(
                 run_id=THIRD_RUN_ID,
                 finding=_finding(invariant_key="commit.guarded"),
                 observed_at=LAST_TIMESTAMP,
@@ -1158,7 +1170,7 @@ class IdentityTests(ProjectionTestCase):
         # ASI-3 is opened by a guard rather than by a publication, so it holds no
         # key of its own and can only be named by the keys it absorbs.
         ledger.append_issue_observation(
-            models.IssueObservation(
+            assurance_models_inbox.IssueObservation(
                 run_id=THIRD_RUN_ID,
                 finding=_finding(invariant_key="commit.guarded"),
                 observed_at=LAST_TIMESTAMP,
@@ -1423,7 +1435,7 @@ class CatalogTests(ProjectionTestCase):
         # decision reviewed before the key existed was reviewed against an issue
         # nothing durable could name.
         ledger.append_issue_observation(
-            models.IssueObservation(
+            assurance_models_inbox.IssueObservation(
                 run_id=RUN_ID, finding=_finding(), observed_at=TIMESTAMP
             ),
             state_dir=self.state_dir,
@@ -1550,7 +1562,7 @@ class CandidateMatchTests(ProjectionTestCase):
         self.assertEqual(
             ("ASI-1",),
             catalog.issues_sharing_summary_tokens(
-                models.normalize_summary_tokens(distant.summary)
+                assurance_models_findings.normalize_summary_tokens(distant.summary)
             ),
         )
         self.assertEqual((), catalog.candidates(distant))
@@ -1679,7 +1691,7 @@ class CandidateMatchTests(ProjectionTestCase):
             (projection.MATCH_INVARIANT, projection.MATCH_SUMMARY), merged.reasons
         )
         self.assertEqual(0.7, merged.similarity)
-        with self.assertRaises(models.AssuranceError):
+        with self.assertRaises(assurance_models_primitives.AssuranceError):
             left.merged(
                 projection.IdentityCandidate(issue_id="ASI-8", reasons=("invariant",))
             )
@@ -1696,7 +1708,7 @@ class UnavailableAuditTests(ProjectionTestCase):
             eligible=True,
             reason=reason,
             attempts=(
-                models.AuditAttempt(
+                assurance_models_summary.AuditAttempt(
                     number=1,
                     outcome="transport-error",
                     artifact_dir="supervisor-audit-attempt-1",
@@ -1798,7 +1810,7 @@ class UnavailableAuditTests(ProjectionTestCase):
         self.assertEqual(2, result.summary.new_issue_count)
 
     def test_an_unavailable_audit_must_name_its_reason_class(self) -> None:
-        with self.assertRaises(models.AssuranceError):
+        with self.assertRaises(assurance_models_primitives.AssuranceError):
             AuditPublication(run_id=RUN_ID, state="unavailable", eligible=True)
 
 
@@ -1830,7 +1842,7 @@ class KeptDistinctTests(ProjectionTestCase):
         self.publish(_publication())
         self.force_record(
             ledger.KIND_ISSUE_KEPT_DISTINCT,
-            models.IssueKeptDistinct(
+            assurance_models_inbox.IssueKeptDistinct(
                 issue_ids=("ASI-1", "ASI-7"),
                 identity_digests=("a" * 64, "b" * 64),
                 recorded_at=LATER_TIMESTAMP,
@@ -1857,7 +1869,7 @@ class KeptDistinctTests(ProjectionTestCase):
         self.open_two_issues()
         self.force_record(
             ledger.KIND_ISSUE_KEPT_DISTINCT,
-            models.IssueKeptDistinct(
+            assurance_models_inbox.IssueKeptDistinct(
                 issue_ids=("ASI-1", "ASI-2"),
                 identity_digests=("a" * 64, "b" * 64),
                 recorded_at=LATER_TIMESTAMP,
@@ -1951,7 +1963,7 @@ class AnomalyTests(ProjectionTestCase):
         self.publish(_publication())
         self.force_record(
             ledger.KIND_ISSUE_DISPOSITION,
-            models.Disposition(
+            assurance_models_inbox.Disposition(
                 issue_id="ASI-7", kind="resolve", recorded_at=LATER_TIMESTAMP
             ),
         )
@@ -1965,7 +1977,7 @@ class AnomalyTests(ProjectionTestCase):
         self.open_two_issues()
         self.force_record(
             ledger.KIND_ISSUE_MERGED,
-            models.IssueMerge(
+            assurance_models_inbox.IssueMerge(
                 source_issue_id="ASI-1",
                 target_issue_id="ASI-2",
                 recorded_at=LAST_TIMESTAMP,
@@ -1973,7 +1985,7 @@ class AnomalyTests(ProjectionTestCase):
         )
         self.force_record(
             ledger.KIND_ISSUE_MERGED,
-            models.IssueMerge(
+            assurance_models_inbox.IssueMerge(
                 source_issue_id="ASI-2",
                 target_issue_id="ASI-1",
                 recorded_at=LAST_TIMESTAMP,
@@ -1989,7 +2001,9 @@ class AnomalyTests(ProjectionTestCase):
     def test_a_closeout_without_an_audit_record_is_reported(self) -> None:
         self.force_record(
             ledger.KIND_HUMAN_CLOSEOUT,
-            models.Closeout(run_id=RUN_ID, outcome="accepted", recorded_at=TIMESTAMP),
+            assurance_models_inbox.Closeout(
+                run_id=RUN_ID, outcome="accepted", recorded_at=TIMESTAMP
+            ),
         )
         projected = self.read()
         self.assertEqual((), projected.runs)
@@ -2006,7 +2020,7 @@ class AnomalyTests(ProjectionTestCase):
             lambda view: (
                 ledger.PendingRecord(
                     kind=ledger.KIND_ISSUE_OBSERVED,
-                    payload=models.IssueObservation(
+                    payload=assurance_models_inbox.IssueObservation(
                         run_id=THIRD_RUN_ID,
                         finding=_finding(),
                         observed_at=LAST_TIMESTAMP,
@@ -2132,7 +2146,7 @@ class CloseoutTests(ProjectionTestCase):
         ):
             with (
                 self.subTest(**kwargs),
-                self.assertRaises(models.AssuranceError),
+                self.assertRaises(assurance_models_primitives.AssuranceError),
             ):
                 self.closeout(**kwargs)
         self.assertIsNone(self.read().run(RUN_ID).closeout)

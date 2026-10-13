@@ -20,7 +20,7 @@ in-process one:
 * **Admission is serialized between processes.** Every mutating entry point
   here holds ``LOCK_EX`` on the journal fd across the whole read-decide-append,
   which is the same discipline ``redirect_store`` applies to corrections and
-  ``workbench.mutate_registry`` applies to the registry. Two submissions racing
+  ``workbench_registry.mutate_registry`` applies to the registry. Two submissions racing
   from two processes therefore produce one admission and one refusal, never two
   admissions.
 

@@ -10,10 +10,10 @@ records and review evidence all sit on the far side of that boundary and are
 never opened here.
 
 This is deliberately not built on the read-only stdio bridge.
-:func:`agent_session_loop.bridge.build_runs_snapshot` projects the Workbench
-queue: it builds a full ``workbench.build_workbench_summary`` per plan -- which
+:func:`agent_session_loop.bridge_projection.build_runs_snapshot` projects the Workbench
+queue: it builds a full ``workbench_summary.build_workbench_summary`` per plan -- which
 reads turn records, last-message files and review artifacts -- and it bounds the
-result at ``bridge.MAX_ROWS`` because a snapshot is a frame on a wire that a
+result at ``bridge_protocol.MAX_ROWS`` because a snapshot is a frame on a wire that a
 human is about to look at. A fleet inventory is neither of those things: it has
 to see *every* run in the corpus, and it has to see far less of each one. So it
 walks :func:`agent_session_loop.state.iter_plan_state_dirs` itself and opens
@@ -261,7 +261,7 @@ class Inventory:
 def build_inventory(*, state_dir: str | Path | None = None) -> Inventory:
     """Walk the ASL state corpus and describe every run it holds.
 
-    Unbounded by design. The bridge caps its projection at ``bridge.MAX_ROWS``
+    Unbounded by design. The bridge caps its projection at ``bridge_protocol.MAX_ROWS``
     because it serializes a frame for a queue view; an inventory that dropped
     runs past a display limit would silently narrow the fleet the overseer
     watches, and a run it never saw is indistinguishable from a run that does

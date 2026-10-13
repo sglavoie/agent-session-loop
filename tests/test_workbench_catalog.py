@@ -12,7 +12,7 @@ byte-for-byte identical across repeated catalog reads and repeated ``GET
 /api/queue`` polls.
 
 **The catalog is complete.** The bridge's ``runs.snapshot`` projection keeps
-only active and actionable rows and stops at ``bridge.MAX_ROWS``; applied to a
+only active and actionable rows and stops at ``bridge_protocol.MAX_ROWS``; applied to a
 catalog it would drop every healthy ``ready`` and ``complete`` plan past the
 cap. :class:`LargeCatalogTests` builds a corpus well over that cap and requires
 ready, complete, and actionable work to all survive, with the bridge's own cap
@@ -38,12 +38,13 @@ from pathlib import Path
 from typing import Any
 
 from agent_session_loop import (
-    bridge,
+    bridge_protocol,
     plans_metadata,
     plans_registry,
-    workbench,
     workbench_archive,
     workbench_catalog,
+    workbench_registry_models,
+    workbench_summary_model,
 )
 from asl_workbench import catalog
 from tests.support import (
@@ -184,39 +185,47 @@ class VocabularyMirrorTests(unittest.TestCase):
     """The copied vocabularies still match the ones ASL classifies with."""
 
     def test_primary_states_match_asl(self) -> None:
-        self.assertEqual(set(workbench.PRIMARY_STATES), set(catalog.PRIMARY_STATES))
+        self.assertEqual(
+            set(workbench_summary_model.PRIMARY_STATES), set(catalog.PRIMARY_STATES)
+        )
 
     def test_recommended_actions_match_asl(self) -> None:
         self.assertEqual(
-            set(workbench.RECOMMENDED_ACTIONS), set(catalog.RECOMMENDED_ACTIONS)
+            set(workbench_summary_model.RECOMMENDED_ACTIONS),
+            set(catalog.RECOMMENDED_ACTIONS),
         )
 
     def test_urgency_groups_match_asl(self) -> None:
-        self.assertEqual(set(workbench.URGENCY_GROUPS), set(catalog.URGENCY_GROUPS))
+        self.assertEqual(
+            set(workbench_summary_model.URGENCY_GROUPS), set(catalog.URGENCY_GROUPS)
+        )
 
     def test_last_activity_sources_match_asl(self) -> None:
         self.assertEqual(
-            set(workbench.LAST_ACTIVITY_SOURCES), set(catalog.LAST_ACTIVITY_SOURCES)
+            set(workbench_summary_model.LAST_ACTIVITY_SOURCES),
+            set(catalog.LAST_ACTIVITY_SOURCES),
         )
 
     def test_discovery_sources_match_asl(self) -> None:
         self.assertEqual(
-            set(workbench.DISCOVERY_SOURCES), set(catalog.DISCOVERY_SOURCES)
+            set(workbench_registry_models.DISCOVERY_SOURCES),
+            set(catalog.DISCOVERY_SOURCES),
         )
 
     def test_activity_labels_match_asl(self) -> None:
         # The closed vocabulary is what makes `activity_label` cache-safe while
         # `concise_reason` and `next_action_hint` are not: those interpolate a
         # pause message or a plan path, and this one is chosen from a table.
-        live = set(workbench.ACTIVITY_LABEL_BY_STATE.values())
-        live.add(workbench.REVIEW_CONTINUATION_ACTIVITY_LABEL)
+        live = set(workbench_summary_model.ACTIVITY_LABEL_BY_STATE.values())
+        live.add(workbench_summary_model.REVIEW_CONTINUATION_ACTIVITY_LABEL)
         self.assertEqual(live, set(catalog.ACTIVITY_LABELS))
 
     def test_every_state_has_a_rank_and_a_group(self) -> None:
         for name in catalog.PRIMARY_STATES:
-            self.assertIn(name, workbench.URGENCY_RANK_BY_STATE)
+            self.assertIn(name, workbench_summary_model.URGENCY_RANK_BY_STATE)
             self.assertIn(
-                workbench.URGENCY_GROUP_BY_STATE[name], catalog.URGENCY_GROUPS
+                workbench_summary_model.URGENCY_GROUP_BY_STATE[name],
+                catalog.URGENCY_GROUPS,
             )
 
 
@@ -442,12 +451,14 @@ class CatalogScanTests(unittest.TestCase):
             )
             missing = tmp_path / "gone-plan"
 
-            registry = workbench.WorkbenchRegistry(
+            registry = workbench_registry_models.WorkbenchRegistry(
                 pins=(
-                    workbench.RegistryPin(
+                    workbench_registry_models.RegistryPin(
                         plan_dir=str(pinned.resolve()), label="Nightly check"
                     ),
-                    workbench.RegistryPin(plan_dir=str(missing.resolve())),
+                    workbench_registry_models.RegistryPin(
+                        plan_dir=str(missing.resolve())
+                    ),
                 ),
                 plan_roots=(str(roots_dir),),
             )
@@ -721,7 +732,7 @@ class ObservationalReadTests(WorkbenchAPIFixture, unittest.TestCase):
 class LargeCatalogTests(unittest.TestCase):
     """A catalog past the bridge's cap keeps every kind of work."""
 
-    #: Comfortably past `bridge.MAX_ROWS` so the cap, not the fixture size, is
+    #: Comfortably past `bridge_protocol.MAX_ROWS` so the cap, not the fixture size, is
     #: what the assertions are about.
     READY_PLANS = 120
     COMPLETE_PLANS = 120
@@ -731,7 +742,7 @@ class LargeCatalogTests(unittest.TestCase):
         total = self.READY_PLANS + self.COMPLETE_PLANS + self.PAUSED_PLANS
         self.assertGreater(
             total,
-            bridge.MAX_ROWS,
+            bridge_protocol.MAX_ROWS,
             "this test is only meaningful above the projection cap",
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -771,10 +782,10 @@ class LargeCatalogTests(unittest.TestCase):
             # The contrast the catalog exists to fix: the bridge's projection
             # is both capped and filtered to active/actionable states, so it
             # could not have answered any of the above.
-            self.assertEqual(200, bridge.MAX_ROWS)
-            self.assertLess(bridge.MAX_ROWS, total)
-            self.assertNotIn("complete", bridge.ACTIVE_PRIMARY_STATES)
-            self.assertNotIn("ready", bridge.ACTIVE_PRIMARY_STATES)
+            self.assertEqual(200, bridge_protocol.MAX_ROWS)
+            self.assertLess(bridge_protocol.MAX_ROWS, total)
+            self.assertNotIn("complete", bridge_protocol.ACTIVE_PRIMARY_STATES)
+            self.assertNotIn("ready", bridge_protocol.ACTIVE_PRIMARY_STATES)
 
     def test_pages_cover_the_whole_catalog_without_overlap(self) -> None:
         records = tuple(

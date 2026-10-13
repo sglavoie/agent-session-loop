@@ -11,7 +11,7 @@ here and then renders, so what differs between surfaces is the *shape of the
 answer* rather than the answer:
 
 * **The same serialization.** Every registry write goes through
-  ``workbench.mutate_registry``, which holds a flock on ``workbench.json.lock``
+  ``workbench_registry.mutate_registry``, which holds a flock on ``workbench.json.lock``
   across the read-modify-write. A pin submitted from a browser while the CLI is
   unpinning cannot lose to it, and neither can a connector's.
 * **The same confirmations.** Archiving one plan requires its full path retyped;
@@ -44,7 +44,17 @@ from typing import Any
 
 from asl_workbench import archive as portable_archive
 
-from . import durability, plans_errors, plans_files, state, state_locks, workbench
+from . import (
+    durability,
+    plans_errors,
+    plans_files,
+    state,
+    state_locks,
+    workbench_discovery,
+    workbench_registry,
+    workbench_registry_coerce,
+    workbench_registry_models,
+)
 
 # --------------------------------------------------------------------------
 # Storage
@@ -128,7 +138,7 @@ class ArchiveMetadata:
     archived_at: str
     expires_at: str
     summary: str | None = None
-    pin: workbench.RegistryPin | None = None
+    pin: workbench_registry_models.RegistryPin | None = None
     plan_archived: bool = False
     state_archived: bool = False
     archive_dir: Path | None = None
@@ -280,12 +290,12 @@ class ArchivePurgeResult:
 def _is_discovered_plan(
     plan_dir: Path,
     *,
-    registry: workbench.WorkbenchRegistry,
+    registry: workbench_registry_models.WorkbenchRegistry,
     state_dir: str | Path | None,
     plan_roots: Iterable[str | Path],
     include_default_dirs: bool,
 ) -> bool:
-    discovery = workbench.discover_plans(
+    discovery = workbench_discovery.discover_plans(
         state_root=state_dir,
         registry=registry,
         plan_roots=plan_roots,
@@ -303,7 +313,7 @@ def _validate_plan_for_mutation(
     registry_path: str | Path | None,
     plan_roots: Iterable[str | Path],
     include_default_dirs: bool,
-) -> tuple[Path, workbench.WorkbenchRegistry]:
+) -> tuple[Path, workbench_registry_models.WorkbenchRegistry]:
     """Run the shared delete/archive safety gate for a Workbench plan.
 
     Both :func:`delete_plan` (permanent purge of a live plan) and
@@ -323,8 +333,8 @@ def _validate_plan_for_mutation(
         ) from error
 
     try:
-        registry = workbench.load_registry(registry_path)
-    except workbench.WorkbenchError as error:
+        registry = workbench_registry.load_registry(registry_path)
+    except workbench_registry_models.WorkbenchError as error:
         raise error_cls("registry-unreadable", str(error), status=500) from error
 
     discovered = _is_discovered_plan(
@@ -334,7 +344,7 @@ def _validate_plan_for_mutation(
         plan_roots=plan_roots,
         include_default_dirs=include_default_dirs,
     )
-    if not discovered and not workbench._looks_like_plan_dir(canonical):
+    if not discovered and not workbench_discovery._looks_like_plan_dir(canonical):
         raise error_cls(
             "invalid-plan",
             f"refusing to {verb} non-plan path: {canonical}",
@@ -413,17 +423,17 @@ def delete_plan(
     pin_removed = False
 
     def remove_matching_pin(
-        current: workbench.WorkbenchRegistry,
-    ) -> workbench.WorkbenchRegistry:
+        current: workbench_registry_models.WorkbenchRegistry,
+    ) -> workbench_registry_models.WorkbenchRegistry:
         nonlocal pin_removed
         pin_removed = any(pin.plan_dir == str(canonical) for pin in current.pins)
-        return workbench.remove_pin(current, canonical)
+        return workbench_registry.remove_pin(current, canonical)
 
     try:
-        _updated, written_path = workbench.mutate_registry(
+        _updated, written_path = workbench_registry.mutate_registry(
             registry_path, remove_matching_pin
         )
-    except workbench.WorkbenchError as error:
+    except workbench_registry_models.WorkbenchError as error:
         raise PlanDeleteError("registry-unreadable", str(error), status=500) from error
 
     return DeletePlanResult(
@@ -441,7 +451,8 @@ def archive_root(state_dir: str | Path | None = None) -> Path:
 
     Archived entries live at ``<state_root>/archive/<archive_id>/``. This
     directory is a sibling of the per-plan state directories, so the
-    one-level-deep state scan in :func:`~.workbench._iter_state_plan_dirs` never
+    one-level-deep state scan in
+    :func:`~.workbench_discovery._iter_state_plan_dirs` never
     surfaces archived plans as active plan roots.
     """
     return state.state_root(state_dir) / ARCHIVE_DIR_NAME
@@ -472,7 +483,9 @@ def new_archive_id() -> str:
 def archive_entry_dir(archive_id: str, state_dir: str | Path | None = None) -> Path:
     """Return the directory that holds one archive entry."""
     if not _is_valid_archive_id(archive_id):
-        raise workbench.WorkbenchError(f"invalid archive id: {archive_id!r}")
+        raise workbench_registry_models.WorkbenchError(
+            f"invalid archive id: {archive_id!r}"
+        )
     return archive_root(state_dir) / archive_id
 
 
@@ -493,7 +506,7 @@ def compute_expires_at(archived_at: str, retention_days: int) -> str:
     try:
         archived = datetime.fromisoformat(archived_at)
     except (TypeError, ValueError) as error:
-        raise workbench.WorkbenchError(
+        raise workbench_registry_models.WorkbenchError(
             f"invalid archived_at timestamp {archived_at!r}: {error}"
         ) from error
     days = max(0, int(retention_days))
@@ -506,28 +519,30 @@ def _coerce_archive_metadata(
     if not isinstance(raw, Mapping):
         warnings.append(f"{context}: metadata must be a JSON object; skipping")
         return None
-    archive_id = workbench._coerce_optional_str(raw.get("archive_id"))
+    archive_id = workbench_registry_coerce._coerce_optional_str(raw.get("archive_id"))
     if archive_id is None or not _is_valid_archive_id(archive_id):
         warnings.append(f"{context}: missing or invalid archive_id; skipping")
         return None
-    original_plan_dir = workbench._coerce_optional_str(raw.get("original_plan_dir"))
+    original_plan_dir = workbench_registry_coerce._coerce_optional_str(
+        raw.get("original_plan_dir")
+    )
     if original_plan_dir is None:
         warnings.append(f"{context}: missing original_plan_dir; skipping")
         return None
-    archived_at = workbench._coerce_optional_str(raw.get("archived_at"))
-    expires_at = workbench._coerce_optional_str(raw.get("expires_at"))
+    archived_at = workbench_registry_coerce._coerce_optional_str(raw.get("archived_at"))
+    expires_at = workbench_registry_coerce._coerce_optional_str(raw.get("expires_at"))
     if archived_at is None or expires_at is None:
         warnings.append(f"{context}: missing archived_at/expires_at; skipping")
         return None
-    summary = workbench._coerce_optional_str(raw.get("summary"))
+    summary = workbench_registry_coerce._coerce_optional_str(raw.get("summary"))
     pin_raw = raw.get("pin")
     pin = (
-        workbench._coerce_pin(
+        workbench_registry_coerce._coerce_pin(
             pin_raw,
             # Archive metadata does not carry a registry schema version.  Its
             # embedded pin is written from the current in-memory profile, so
             # decode it as the current profile shape.
-            schema_version=workbench.REGISTRY_SCHEMA_VERSION,
+            schema_version=workbench_registry_models.REGISTRY_SCHEMA_VERSION,
             warnings=warnings,
             index=0,
         )
@@ -565,7 +580,7 @@ def save_archive_metadata(
         # 0o600: the mode tempfile.mkstemp gave archive metadata before.
         durability.replace_text(meta_path, serialized, mode=0o600)
     except OSError as error:
-        raise workbench.WorkbenchError(
+        raise workbench_registry_models.WorkbenchError(
             f"cannot write archive metadata {meta_path}: {error}"
         ) from error
     return meta_path
@@ -576,7 +591,8 @@ def load_archive_metadata(
 ) -> ArchiveMetadata | None:
     """Load one archive entry, returning ``None`` when it is absent.
 
-    Malformed JSON or an unreadable file raises :class:`~.workbench.WorkbenchError`.
+    Malformed JSON or an unreadable file raises
+    :class:`~.workbench_registry_models.WorkbenchError`.
     Recoverable field-level problems are attached as ``warnings`` on the
     returned metadata.
     """
@@ -587,13 +603,13 @@ def load_archive_metadata(
     try:
         raw_text = meta_path.read_text(encoding="utf-8")
     except OSError as error:
-        raise workbench.WorkbenchError(
+        raise workbench_registry_models.WorkbenchError(
             f"cannot read archive metadata {meta_path}: {error}"
         ) from error
     try:
         raw = json.loads(raw_text)
     except json.JSONDecodeError as error:
-        raise workbench.WorkbenchError(
+        raise workbench_registry_models.WorkbenchError(
             f"invalid JSON in archive metadata {meta_path}: {error}"
         ) from error
     warnings: list[str] = []
@@ -601,7 +617,7 @@ def load_archive_metadata(
         raw, entry_dir=entry_dir, warnings=warnings, context=f"archive[{archive_id}]"
     )
     if metadata is None:
-        raise workbench.WorkbenchError(
+        raise workbench_registry_models.WorkbenchError(
             f"archive metadata {meta_path} is malformed: " + "; ".join(warnings)
         )
     return replace(metadata, warnings=tuple(warnings))
@@ -675,7 +691,7 @@ def remove_archive_entry(archive_id: str, state_dir: str | Path | None = None) -
         else:
             entry_dir.unlink()
     except OSError as error:
-        raise workbench.WorkbenchError(
+        raise workbench_registry_models.WorkbenchError(
             f"cannot remove archive entry {entry_dir}: {error}"
         ) from error
     return True
@@ -764,17 +780,17 @@ def archive_plan(
     pin_archived = False
 
     def _remove_matching_pin(
-        current: workbench.WorkbenchRegistry,
-    ) -> workbench.WorkbenchRegistry:
+        current: workbench_registry_models.WorkbenchRegistry,
+    ) -> workbench_registry_models.WorkbenchRegistry:
         nonlocal pin_archived
         pin_archived = any(pin.plan_dir == str(canonical) for pin in current.pins)
-        return workbench.remove_pin(current, canonical)
+        return workbench_registry.remove_pin(current, canonical)
 
     try:
-        _updated, written_path = workbench.mutate_registry(
+        _updated, written_path = workbench_registry.mutate_registry(
             registry_path, _remove_matching_pin
         )
-    except workbench.WorkbenchError as error:
+    except workbench_registry_models.WorkbenchError as error:
         raise ArchiveError("registry-unreadable", str(error), status=500) from error
 
     return ArchivePlanResult(
@@ -807,7 +823,7 @@ def restore_archive(
         raise ArchiveError("invalid-archive", f"invalid archive id: {archive_id!r}")
     try:
         metadata = load_archive_metadata(archive_id, state_dir)
-    except workbench.WorkbenchError as error:
+    except workbench_registry_models.WorkbenchError as error:
         raise ArchiveError("invalid-archive", str(error), status=500) from error
     if metadata is None:
         raise ArchiveError("not-found", f"no archive entry {archive_id!r}", status=404)
@@ -872,24 +888,24 @@ def restore_archive(
         pin = metadata.pin
 
         def _restore_pin(
-            current: workbench.WorkbenchRegistry,
-        ) -> workbench.WorkbenchRegistry:
+            current: workbench_registry_models.WorkbenchRegistry,
+        ) -> workbench_registry_models.WorkbenchRegistry:
             nonlocal pin_restored
             pin_restored = True
-            return workbench.upsert_pin(
+            return workbench_registry.upsert_pin(
                 current, original, label=pin.label, profile=pin.profile
             )
 
         try:
-            _updated, written_path = workbench.mutate_registry(
+            _updated, written_path = workbench_registry.mutate_registry(
                 registry_path, _restore_pin
             )
-        except workbench.WorkbenchError as error:
+        except workbench_registry_models.WorkbenchError as error:
             raise ArchiveError("registry-unreadable", str(error), status=500) from error
 
     try:
         remove_archive_entry(archive_id, state_dir)
-    except workbench.WorkbenchError as error:
+    except workbench_registry_models.WorkbenchError as error:
         raise ArchiveError("os-error", str(error), status=500) from error
 
     return RestoreArchiveResult(
@@ -925,7 +941,7 @@ def purge_archive_entries(
             continue
         try:
             removed = remove_archive_entry(archive_id, state_dir)
-        except workbench.WorkbenchError as error:
+        except workbench_registry_models.WorkbenchError as error:
             outcomes.append(ArchivePurgeOutcome(archive_id, False, str(error)))
             continue
         outcomes.append(ArchivePurgeOutcome(archive_id, removed))
@@ -1016,7 +1032,7 @@ def _refuse_archive(
 class RegistryUpdate:
     """A registry written under the lock, plus where it was written."""
 
-    registry: workbench.WorkbenchRegistry
+    registry: workbench_registry_models.WorkbenchRegistry
     path: Path
 
     def to_payload(self) -> dict[str, Any]:
@@ -1118,8 +1134,10 @@ def _mutate(
     place.
     """
     try:
-        updated, written_path = workbench.mutate_registry(registry_path, mutator)
-    except workbench.WorkbenchError as error:
+        updated, written_path = workbench_registry.mutate_registry(
+            registry_path, mutator
+        )
+    except workbench_registry_models.WorkbenchError as error:
         raise ArchiveRefused(
             reason,
             str(error),
@@ -1134,12 +1152,12 @@ def pin_plan(
     *,
     registry_path: str | Path | None = None,
     label: str | None = None,
-    profile: workbench.LaunchProfile | None = None,
+    profile: workbench_registry_models.LaunchProfile | None = None,
 ) -> RegistryUpdate:
     """Pin one plan, or update the pin it already has."""
     return _mutate(
         registry_path,
-        lambda current: workbench.upsert_pin(
+        lambda current: workbench_registry.upsert_pin(
             current, plan_dir, label=label, profile=profile
         ),
         reason=portable_archive.REASON_INVALID_PLAN,
@@ -1153,7 +1171,7 @@ def unpin_plan(
     """Drop one registry pin. The plan itself is untouched."""
     return _mutate(
         registry_path,
-        lambda current: workbench.remove_pin(current, plan_dir),
+        lambda current: workbench_registry.remove_pin(current, plan_dir),
         reason=portable_archive.REASON_INVALID_PLAN,
         details={"plan_dir": plan_dir},
     )
@@ -1174,7 +1192,7 @@ def set_retention(
         raise _refuse_request(error) from error
     return _mutate(
         registry_path,
-        lambda current: workbench.set_archive_retention_days(current, days),
+        lambda current: workbench_registry.set_archive_retention_days(current, days),
         reason=portable_archive.REASON_INVALID_REQUEST,
     )
 
@@ -1338,8 +1356,8 @@ def review_archive(
     left on disk. Emptying it requires :func:`purge_entries` and a typed count.
     """
     try:
-        registry = workbench.load_registry(registry_path)
-    except workbench.WorkbenchError as error:
+        registry = workbench_registry.load_registry(registry_path)
+    except workbench_registry_models.WorkbenchError as error:
         raise ArchiveRefused(
             portable_archive.REASON_REGISTRY_UNREADABLE, str(error)
         ) from error
@@ -1428,7 +1446,7 @@ def unlock(
 def workbench_pin_from_args(args: Any) -> int:
     """``asl workbench pin`` -- the terminal's spelling of :func:`pin_plan`.
 
-    Here rather than in ``workbench`` so the CLI and the HTTP route share more
+    Here rather than in ``workbench_cli`` so the CLI and the HTTP route share more
     than the lock: they refuse the same plan paths with the same reason, and
     only the rendering (stderr and an exit code, versus a status and a JSON
     body) is per-surface.
@@ -1439,7 +1457,9 @@ def workbench_pin_from_args(args: Any) -> int:
         update = pin_plan(
             plan_dir,
             label=getattr(args, "label", None),
-            profile=workbench.LaunchProfile(cwd=cwd) if cwd is not None else None,
+            profile=workbench_registry_models.LaunchProfile(cwd=cwd)
+            if cwd is not None
+            else None,
         )
     except ArchiveRefused as error:
         print(f"agent-session-loop workbench pin: {error.message}", file=sys.stderr)

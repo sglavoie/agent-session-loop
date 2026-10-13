@@ -22,9 +22,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from agent_session_loop import assurance_ledger as ledger
-from agent_session_loop import assurance_models as models
-from agent_session_loop import assurance_projection as projection
 from agent_session_loop import (
+    assurance_models_findings,
+    assurance_models_inbox,
+    assurance_models_summary,
+    assurance_models_vocab,
     assurance_report,
     events,
     harness_claude,
@@ -35,9 +37,11 @@ from agent_session_loop import (
     state,
     supervisor_audit,
     supervisor_audit_agent,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_input,
 )
-from agent_session_loop.assurance_models import RUBRIC_LANES, AuditRole
+from agent_session_loop import assurance_projection as projection
+from agent_session_loop.assurance_models_summary import AuditRole
+from agent_session_loop.assurance_models_vocab import RUBRIC_LANES
 from agent_session_loop.assurance_projection import AuditPublication
 from tests import run_suite
 from tests.support import REPO_ROOT, init_git_repo
@@ -53,10 +57,10 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "tests.test_asl_repository_intent:"
             "ResolveIntentTests.test_same_origin_clones_stay_distinct_repositories",
-            "tests.test_asl_authoring:"
+            "tests.test_asl_authoring_split_footprint:"
             "SplitRepositoryFootprintTests."
             "test_multi_repository_plan_without_a_registry_is_refused",
-            "tests.test_asl_authoring:"
+            "tests.test_asl_authoring_split_footprint:"
             "SplitRepositoryFootprintTests."
             "test_write_path_refuses_contracts_that_span_repositories",
             "tests.test_asl_preflight_repository_registry:"
@@ -583,9 +587,11 @@ class AdvisoryVerdictTests(unittest.TestCase):
             reason=None,
         )
 
-    def _audit(self, history: tuple[Path, Path, Path, Path]) -> models.AssuranceSummary:
+    def _audit(
+        self, history: tuple[Path, Path, Path, Path]
+    ) -> assurance_models_summary.AssuranceSummary:
         workspace, plan_dir, state_dir, run_dir = history
-        bundle = supervisor_audit_evidence.collect_audit_input(
+        bundle = supervisor_audit_evidence_input.collect_audit_input(
             run_id=RUN_ID,
             run_dir=run_dir,
             state_dir=state_dir,
@@ -660,7 +666,10 @@ class ObservationalStatusTests(unittest.TestCase):
         assurance_report,
         projection,
         ledger,
-        models,
+        assurance_models_findings,
+        assurance_models_inbox,
+        assurance_models_summary,
+        assurance_models_vocab,
     )
 
     #: Modules that start an agent turn. The read path may borrow a name from
@@ -722,21 +731,22 @@ T0 = "2026-08-10T10:00:00+00:00"
 WHOLE_HISTORY = datetime(2000, 1, 1, tzinfo=UTC)
 
 
-def _artifacts(digest: str) -> tuple[models.EvidenceRef, ...]:
+def _artifacts(digest: str) -> tuple[assurance_models_findings.EvidenceRef, ...]:
     return (
-        models.EvidenceRef(
+        assurance_models_findings.EvidenceRef(
             kind="artifact",
-            locator=f"run/{models.AUDIT_INPUT_FILENAME}",
+            locator=f"run/{assurance_models_vocab.AUDIT_INPUT_FILENAME}",
             digest=digest,
         ),
-        models.EvidenceRef(
-            kind="artifact", locator=f"run/{models.AUDIT_REPORT_FILENAME}"
+        assurance_models_findings.EvidenceRef(
+            kind="artifact",
+            locator=f"run/{assurance_models_vocab.AUDIT_REPORT_FILENAME}",
         ),
     )
 
 
-def _finding(invariant_key: str) -> models.Finding:
-    return models.Finding(
+def _finding(invariant_key: str) -> assurance_models_findings.Finding:
+    return assurance_models_findings.Finding(
         category="lifecycle",
         component="agent_session_loop/runner.py",
         invariant_key=invariant_key,
@@ -822,7 +832,7 @@ class AppendOnlyLedgerTests(unittest.TestCase):
             (
                 "record a drafted proposal",
                 lambda: projection.record_improvement_plan_draft(
-                    models.ImprovementPlanDraft(
+                    assurance_models_inbox.ImprovementPlanDraft(
                         issue_id="ASI-2",
                         harness="claude",
                         output_path="/tmp/asi-2.md",

@@ -10,7 +10,7 @@ allowed-tools: Bash, Read, Write
 
 Parse a multi-session plan and split it into a persistent directory of smaller, self-contained files: shared context, individual session files with handoff templates, and a manifest with a ready-to-paste serial execution command. The generated plan is serial-only by design — `session-run` auto-advances through sessions in dotted numeric order. By default `asl split` refuses a duplicate plan id before creating any directory; intentional duplicates opt in with `--force-new`, which preserves the numbered sibling suffix behavior.
 
-All file generation is owned by the `asl split` subcommand, which chains the deterministic authoring API (`agent_session_loop.authoring`) end to end. This skill authors only the per-session completion contracts and (optionally) an analysis note; it never hand-writes `context.md`, `session-N.md`, `manifest.md`, or `progress.md`.
+All file generation is owned by the `asl split` subcommand, which chains the deterministic authoring API (the `agent_session_loop.authoring_*` modules) end to end. This skill authors only the per-session completion contracts and (optionally) an analysis note; it never hand-writes `context.md`, `session-N.md`, `manifest.md`, or `progress.md`.
 
 ## Input
 
@@ -47,7 +47,7 @@ If the user explicitly provides a base directory, pass it through with `--base-d
 
 ### Step 2: Validate and Repair the Source Plan
 
-Session detection, boundaries, and heading canonicalization are owned by `agent_session_loop.authoring.parse_plan_document` (which `asl split` runs in Step 6) — its source-only grammar is authoritative, so do not re-derive boundaries by hand. Proceed without asking for normalization approval and without rewriting the source merely to canonicalize a heading's spelling, level, separator, or ID padding. Read the plan normally so you can reason about Steps 3–4; the parser remains the source of truth for the final boundaries.
+Session detection, boundaries, and heading canonicalization are owned by `agent_session_loop.authoring_parse.parse_plan_document` (which `asl split` runs in Step 6) — its source-only grammar is authoritative, so do not re-derive boundaries by hand. Proceed without asking for normalization approval and without rewriting the source merely to canonicalize a heading's spelling, level, separator, or ID padding. Read the plan normally so you can reason about Steps 3–4; the parser remains the source of truth for the final boundaries.
 
 Validate before authoring anything. `asl split --check` runs the same parser, requires no contracts, writes nothing, and — unlike the fail-fast parser — reports every malformed heading in one payload:
 
@@ -155,7 +155,7 @@ Contracts are the only generated content this skill authors; everything else is 
 }
 ```
 
-Contract authoring rules (validated by `agent_session_loop.authoring.contract_from_payload`, which fails closed on any malformed entry):
+Contract authoring rules (validated by `agent_session_loop.authoring_render.contract_from_payload`, which fails closed on any malformed entry):
 
 - Every session states its own verification command and its own done-condition: one contract per session, `done_when` naming what is true when that session ends and `verify.checks` carrying a command that proves it. Never defer either to a later session's contract — a session a successor has to finish cannot converge on its own.
 - `done_when` needs at least one non-trivial bullet derived from the session's own goal (title or first sentence); never leave generic placeholders that read like `<criterion>`.
@@ -219,7 +219,7 @@ Echo the `asl split --json` output as a concise summary:
 ## Important Notes
 
 - Never modify the original plan file; only restructure (never rewrite) content, and save inline plans as source markdown before splitting (`asl split --inline-stdin` does this). A plan repaired in Step 2 follows the same rule: the repaired text is persisted as a new source file, and the user's original is left byte-identical.
-- Deterministic generation is owned by `asl split` / `agent_session_loop.authoring`. This skill authors only session boundaries and completion contracts; it never hand-writes `context.md`, `session-N.md`, `manifest.md`, or `progress.md`.
+- Deterministic generation is owned by `asl split` / the `agent_session_loop.authoring_*` modules. This skill authors only session boundaries and completion contracts; it never hand-writes `context.md`, `session-N.md`, `manifest.md`, or `progress.md`.
 - The generated plan is serial-only. Do not emit `## Parallel Metadata`, dependency waves, worker prompts, or explicit `--session N` commands; do not generate `parallel-validation.md` (the readiness hash ignores it even when a legacy copy lingers). `session-run` accepts only directory auto-advance.
 - Every emitted `session-N.md` carries a parseable `## Completion Contract` above its `## Handoff`; plans without contracts are rejected by `asl preflight` (red `missing-contract`) and by `asl run`'s verification gate (`reason="no-contract"` unless `--allow-not-loop-ready`).
 - Registered plans carry the authoritative ordered registry only in `manifest.md`. Their sessions retain exact read/write scope fields, their completion checks are repository-attributed, and completed handoffs use `Alias:path` entries limited to write aliases. Legacy plans keep the v1 single-root syntax and JSON compatibility surface.

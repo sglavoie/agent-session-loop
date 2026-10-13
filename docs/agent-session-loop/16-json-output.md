@@ -46,7 +46,7 @@ so the durable record of a turn ending can never name artifacts that are not
 on disk, and it stays separate from `turn_finished`, which additionally means
 the turn was accepted.
 `turn_finished` is emitted from exactly one function,
-`turn_execution.commit_turn` — reached through `TurnExecutor.commit` —
+`turn_execution_commit.commit_turn` — reached through `TurnExecutor.commit` —
 and only after every post-execution guard has passed: the workspace and review
 mutation guards, the mailbox completion guard, session verification, the
 progress journal append, the derived status ledger sync, and any per-session

@@ -109,7 +109,7 @@ DURABLE_WRITE_NAMES = frozenset(
 
 #: Which module-level function writes directly, and what it writes. The
 #: session-file revert belongs to `handoff_guards`, the rejection event to
-#: `turn_execution` and the pause event to `run_termination`, each of which owns
+#: `turn_execution_commit` and the pause event to `run_termination`, each of which owns
 #: that write at its own boundary; what is left here is the turn result both
 #: gates write under the mutex, plus the one retry event the verdict gate
 #: appends on its own behalf because the retry budget is its own accounting.
@@ -341,7 +341,7 @@ class RefusalShapeTests(unittest.TestCase):
                 # The accepted lane writes the result too, so the refusal's own
                 # write is the last one rather than the first.
                 written = source.rindex("durability.write_json_file(")
-                recorded = source.rindex("turn_execution.record_turn_rejected(")
+                recorded = source.rindex("turn_execution_commit.record_turn_rejected(")
                 paused = source.rindex("run_termination._pause_run(")
                 self.assertLess(reverted, reinspected)
                 self.assertLess(reinspected, written)

@@ -331,7 +331,7 @@ after a restart.
   same way as any other unauthenticated local devtool.
 - Reply text only ever travels through the child process stdin via
   `asl run --reply-stdin`. `POST /api/reply` accepts the operator answer
-  in the JSON body and forwards it to `workbench.resume_plan_with_reply`,
+  in the JSON body and forwards it to `workbench_launch.resume_plan_with_reply`,
   which writes it to the child stdin and discards the byte buffer. The
   reply text is never persisted in `state.json`, `events.jsonl`, argv,
   or turn artifacts; only the character count surfaces (as

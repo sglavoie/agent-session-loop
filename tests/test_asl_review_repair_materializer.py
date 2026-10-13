@@ -65,7 +65,7 @@ class ReviewRepairMaterializerTests(MaterializationFixtures, unittest.TestCase):
                 return_value=repair_plan,
             ),
             mock.patch.object(
-                review_repair.authoring,
+                review_repair.authoring_render,
                 "render_session_file",
                 side_effect=AssertionError("writer re-rendered a planned child"),
             ),

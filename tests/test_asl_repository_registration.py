@@ -12,7 +12,10 @@ from pathlib import Path
 from typing import get_args
 
 from agent_session_loop import (
-    authoring,
+    authoring_lint,
+    authoring_manifest,
+    authoring_parse,
+    authoring_render,
     plans_content_hash,
     plans_models,
     plans_readiness,
@@ -517,7 +520,7 @@ class MigratedShapeTests(unittest.TestCase):
         }
         if repo is not None:
             check["repo"] = repo
-        return authoring.contract_from_payload(
+        return authoring_render.contract_from_payload(
             "2",
             ["the session lands"],
             {"session": "2", "checks": [check]},
@@ -526,14 +529,14 @@ class MigratedShapeTests(unittest.TestCase):
 
     def test_migrated_session_file_matches_render_session_file(self) -> None:
         scope = plans_session_scope.SessionScope(reads=("A", "B"), writes=("A",))
-        legacy = authoring.render_session_file(
+        legacy = authoring_render.render_session_file(
             session_id="2",
             title="Thing",
             instruction_lines=["Do it."],
             previous_session_id="1",
             contract=self._contract(repo=None),
         )
-        expected = authoring.render_session_file(
+        expected = authoring_render.render_session_file(
             session_id="2",
             title="Thing",
             instruction_lines=["Do it."],
@@ -556,7 +559,7 @@ class MigratedShapeTests(unittest.TestCase):
         scope = plans_session_scope.SessionScope(reads=("A", "B"), writes=("A",))
         contract = self._contract(repo="A")
         once = repository_registration._migrate_session(
-            authoring.render_session_file(
+            authoring_render.render_session_file(
                 session_id="2",
                 title="Thing",
                 instruction_lines=["Do it."],
@@ -575,7 +578,7 @@ class MigratedShapeTests(unittest.TestCase):
         self.assertEqual(once, twice)
 
     def test_migrated_manifest_matches_render_manifest(self) -> None:
-        spec = authoring.ManifestSpec(
+        spec = authoring_manifest.ManifestSpec(
             plan_title="Plan",
             source_path="/tmp/plan.md",
             output_dir="/tmp/plan",
@@ -583,7 +586,7 @@ class MigratedShapeTests(unittest.TestCase):
             source_fingerprint="fp",
             content_sha256="sha",
             sessions=(
-                authoring.ManifestSession(
+                authoring_manifest.ManifestSession(
                     session_id=plans_session_ids.parse_session_id("1"), title="One"
                 ),
             ),
@@ -596,11 +599,11 @@ class MigratedShapeTests(unittest.TestCase):
         )
 
         migrated = repository_registration._insert_registry_table(
-            authoring.render_manifest(spec), self.registry
+            authoring_manifest.render_manifest(spec), self.registry
         )
 
         self.assertEqual(
-            authoring.render_manifest(replace(spec, registry=self.registry)),
+            authoring_manifest.render_manifest(replace(spec, registry=self.registry)),
             migrated,
         )
 
@@ -1001,7 +1004,7 @@ class SourcePlanRegistrationTests(unittest.TestCase):
             migrated.index("## Session 1: First"),
         )
 
-        parsed = authoring.parse_plan_document(migrated)
+        parsed = authoring_parse.parse_plan_document(migrated)
         self.assertEqual(("tundra_OAK", "tundra_svc"), parsed.registry.aliases)
         scopes = {
             session.session_id.value: session.scope for session in parsed.sessions
@@ -1029,7 +1032,7 @@ class SourcePlanRegistrationTests(unittest.TestCase):
             self._source_plan(), cwd=self.svc
         )
 
-        parsed = authoring.parse_plan_document(result.markdown)
+        parsed = authoring_parse.parse_plan_document(result.markdown)
         contracts = {
             session.session_id.value: parse_completion_contract(
                 "\n".join(session.lines),
@@ -1054,7 +1057,7 @@ class SourcePlanRegistrationTests(unittest.TestCase):
             self._source_plan(), cwd=self.svc
         )
 
-        lint = authoring.lint_plan_document(result.markdown, cwd=self.workspace)
+        lint = authoring_lint.lint_plan_document(result.markdown, cwd=self.workspace)
 
         self.assertEqual((), lint.findings)
         self.assertEqual(("1", "2"), lint.session_ids)

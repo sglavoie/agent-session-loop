@@ -40,7 +40,10 @@ from typing import Any
 
 from agent_session_loop import agent_mux_contract as contract
 from agent_session_loop import (
-    bridge,
+    agent_mux_projection,
+    bridge_projection,
+    bridge_protocol,
+    bridge_session,
     events,
     intervention,
     redirect_admission,
@@ -202,13 +205,13 @@ class RedirectBridgeTestCase(unittest.TestCase):
     # -- bridge -----------------------------------------------------------
 
     def snapshot(self) -> dict[str, Any]:
-        return bridge.build_runs_snapshot(
+        return bridge_projection.build_runs_snapshot(
             state_dir=self.state_dir,
             plan_roots=(self.plans_root,),
             include_default_dirs=False,
         )
 
-    def session(self) -> bridge.BridgeSession:
+    def session(self) -> bridge_session.BridgeSession:
         """A bridge session whose projection is a real walk of this corpus.
 
         Each call builds a *new* session over the same corpus, which is what
@@ -216,19 +219,19 @@ class RedirectBridgeTestCase(unittest.TestCase):
         session shares the journal and shares nothing else.
         """
         self.snapshots.append(self.snapshot())
-        return bridge.BridgeSession(
+        return bridge_session.BridgeSession(
             snapshot_builder=lambda: self.snapshots[-1],
             state_dir=self.state_dir,
             clock=self.clock,
         )
 
-    def handshaken(self) -> bridge.BridgeSession:
+    def handshaken(self) -> bridge_session.BridgeSession:
         session = self.session()
         response = self.request(
             session,
-            bridge.METHOD_HANDSHAKE,
+            bridge_protocol.METHOD_HANDSHAKE,
             {
-                "contract_set_id": bridge.CONTRACT_SET_ID,
+                "contract_set_id": agent_mux_projection.CONTRACT_SET_ID,
                 "snapshot_digest": self.snapshots[-1]["digest"],
             },
         )
@@ -237,7 +240,7 @@ class RedirectBridgeTestCase(unittest.TestCase):
 
     def request(
         self,
-        session: bridge.BridgeSession,
+        session: bridge_session.BridgeSession,
         method: str,
         params: dict[str, Any] | None = None,
         *,
@@ -246,13 +249,15 @@ class RedirectBridgeTestCase(unittest.TestCase):
         """Round-trip one request through the framing the wire actually uses."""
         frame: dict[str, Any] = {
             "type": "request",
-            "protocol": bridge.PROTOCOL_VERSION,
+            "protocol": bridge_protocol.PROTOCOL_VERSION,
             "id": request_id,
             "method": method,
         }
         if params is not None:
             frame["params"] = params
-        response = session.handle_frame(bridge.encode_frame(frame).rstrip(b"\n"))
+        response = session.handle_frame(
+            bridge_protocol.encode_frame(frame).rstrip(b"\n")
+        )
         assert response is not None
         return response
 
@@ -273,7 +278,7 @@ class RedirectBridgeTestCase(unittest.TestCase):
 
     def submit(
         self,
-        session: bridge.BridgeSession | None = None,
+        session: bridge_session.BridgeSession | None = None,
         *,
         request_id: str = "req-2",
         **overrides: Any,
@@ -288,7 +293,7 @@ class RedirectBridgeTestCase(unittest.TestCase):
 
     def status(
         self,
-        session: bridge.BridgeSession | None = None,
+        session: bridge_session.BridgeSession | None = None,
         *,
         request_id: str = "req-3",
         **params: Any,
@@ -296,21 +301,21 @@ class RedirectBridgeTestCase(unittest.TestCase):
         active = self.session() if session is None else session
         return self.request(
             active,
-            bridge.METHOD_REDIRECT_STATUS,
+            bridge_protocol.METHOD_REDIRECT_STATUS,
             {"plan_dir": str(self.plan_dir), **params},
             request_id=request_id,
         )
 
     def recovery(
         self,
-        session: bridge.BridgeSession | None = None,
+        session: bridge_session.BridgeSession | None = None,
         *,
         request_id: str = "req-4",
     ) -> dict[str, Any]:
         active = self.session() if session is None else session
         return self.request(
             active,
-            bridge.METHOD_RECOVER_CONVERSATION,
+            bridge_protocol.METHOD_RECOVER_CONVERSATION,
             {"plan_dir": str(self.plan_dir)},
             request_id=request_id,
         )
@@ -322,29 +327,34 @@ class CapabilityTests(RedirectBridgeTestCase):
     def test_the_three_methods_are_advertised_with_handlers(self) -> None:
         for method in (
             intervention.ACTION_REDIRECT,
-            bridge.METHOD_REDIRECT_STATUS,
-            bridge.METHOD_RECOVER_CONVERSATION,
+            bridge_protocol.METHOD_REDIRECT_STATUS,
+            bridge_protocol.METHOD_RECOVER_CONVERSATION,
         ):
             with self.subTest(method=method):
-                self.assertIn(method, bridge.CAPABILITIES)
-                self.assertIn(method, bridge.METHOD_HANDLERS)
-                self.assertIn(method, bridge.hello_payload()["capabilities"])
+                self.assertIn(method, bridge_session.CAPABILITIES)
+                self.assertIn(method, bridge_session.METHOD_HANDLERS)
+                self.assertIn(method, bridge_session.hello_payload()["capabilities"])
 
     def test_only_submission_is_gated(self) -> None:
         """Submitting appends to the journal; the other two write nothing."""
-        self.assertIn(intervention.ACTION_REDIRECT, bridge.MUTATION_METHODS)
-        self.assertNotIn(bridge.METHOD_REDIRECT_STATUS, bridge.MUTATION_METHODS)
-        self.assertNotIn(bridge.METHOD_RECOVER_CONVERSATION, bridge.MUTATION_METHODS)
+        self.assertIn(intervention.ACTION_REDIRECT, bridge_protocol.MUTATION_METHODS)
+        self.assertNotIn(
+            bridge_protocol.METHOD_REDIRECT_STATUS, bridge_protocol.MUTATION_METHODS
+        )
+        self.assertNotIn(
+            bridge_protocol.METHOD_RECOVER_CONVERSATION,
+            bridge_protocol.MUTATION_METHODS,
+        )
 
     def test_the_methods_append_to_the_capability_order(self) -> None:
         """A client compares capability lists byte for byte across restarts."""
         self.assertEqual(
             [
                 intervention.ACTION_REDIRECT,
-                bridge.METHOD_REDIRECT_STATUS,
-                bridge.METHOD_RECOVER_CONVERSATION,
+                bridge_protocol.METHOD_REDIRECT_STATUS,
+                bridge_protocol.METHOD_RECOVER_CONVERSATION,
             ],
-            list(bridge.CAPABILITIES[-3:]),
+            list(bridge_session.CAPABILITIES[-3:]),
         )
 
 
@@ -455,7 +465,9 @@ class MutationGateTests(RedirectBridgeTestCase):
         )
 
         self.assertEqual([], problems(response, "error_response"))
-        self.assertEqual(bridge.ERROR_CONTRACT_SET_MISMATCH, response["error"]["code"])
+        self.assertEqual(
+            bridge_protocol.ERROR_CONTRACT_SET_MISMATCH, response["error"]["code"]
+        )
         self.assertFalse(response["error"]["retryable"])
         self.assertEqual((), self.journal().requests)
 
@@ -464,7 +476,7 @@ class MutationGateTests(RedirectBridgeTestCase):
         session = self.session()
         self.request(
             session,
-            bridge.METHOD_HANDSHAKE,
+            bridge_protocol.METHOD_HANDSHAKE,
             {"contract_set_id": "asl-amx-1.deadbeefdeadbeef"},
         )
 
@@ -475,7 +487,9 @@ class MutationGateTests(RedirectBridgeTestCase):
             request_id="req-2",
         )
 
-        self.assertEqual(bridge.ERROR_CONTRACT_SET_MISMATCH, response["error"]["code"])
+        self.assertEqual(
+            bridge_protocol.ERROR_CONTRACT_SET_MISMATCH, response["error"]["code"]
+        )
         self.assertEqual((), self.journal().requests)
 
     def test_a_handshake_against_a_snapshot_that_moved_is_stale(self) -> None:
@@ -483,7 +497,7 @@ class MutationGateTests(RedirectBridgeTestCase):
         session = self.handshaken()
         moved = dict(self.snapshots[-1])
         moved["warnings"] = ["the corpus moved"]
-        moved["digest"] = bridge.snapshot_digest(moved)
+        moved["digest"] = bridge_projection.snapshot_digest(moved)
         self.snapshots.append(moved)
         self.clock.now += 60.0
 
@@ -494,7 +508,9 @@ class MutationGateTests(RedirectBridgeTestCase):
             request_id="req-2",
         )
 
-        self.assertEqual(bridge.ERROR_STALE_SNAPSHOT, response["error"]["code"])
+        self.assertEqual(
+            bridge_protocol.ERROR_STALE_SNAPSHOT, response["error"]["code"]
+        )
         self.assertTrue(response["error"]["retryable"])
         self.assertEqual((), self.journal().requests)
 
@@ -547,7 +563,9 @@ class FieldBoundTests(RedirectBridgeTestCase):
             wait_seconds=redirect_admission.MAX_ACCEPTANCE_WAIT_SECONDS + 1
         )
 
-        self.assertEqual(bridge.ERROR_INVALID_REQUEST, response["error"]["code"])
+        self.assertEqual(
+            bridge_protocol.ERROR_INVALID_REQUEST, response["error"]["code"]
+        )
         self.assertEqual(
             str(redirect_admission.MAX_ACCEPTANCE_WAIT_SECONDS),
             response["error"]["details"]["maximum"],
@@ -559,7 +577,9 @@ class FieldBoundTests(RedirectBridgeTestCase):
 
         response = self.submit(wait_seconds=-1.0)
 
-        self.assertEqual(bridge.ERROR_INVALID_REQUEST, response["error"]["code"])
+        self.assertEqual(
+            bridge_protocol.ERROR_INVALID_REQUEST, response["error"]["code"]
+        )
 
     def test_a_boolean_wait_is_not_a_number(self) -> None:
         """``True`` is an ``int`` in Python and must not be read as one here."""
@@ -567,7 +587,9 @@ class FieldBoundTests(RedirectBridgeTestCase):
 
         response = self.submit(wait_seconds=True)
 
-        self.assertEqual(bridge.ERROR_INVALID_REQUEST, response["error"]["code"])
+        self.assertEqual(
+            bridge_protocol.ERROR_INVALID_REQUEST, response["error"]["code"]
+        )
 
     def test_the_default_wait_is_the_admission_window(self) -> None:
         """Restating the bound would let the two ends promise different things."""
@@ -586,7 +608,9 @@ class FieldBoundTests(RedirectBridgeTestCase):
 
         response = self.submit(expected_target="session-9")
 
-        self.assertEqual(bridge.ERROR_INVALID_REQUEST, response["error"]["code"])
+        self.assertEqual(
+            bridge_protocol.ERROR_INVALID_REQUEST, response["error"]["code"]
+        )
         self.assertEqual((), self.journal().requests)
 
     def test_an_expected_target_with_a_boolean_turn_index_is_refused(self) -> None:
@@ -601,7 +625,9 @@ class FieldBoundTests(RedirectBridgeTestCase):
             }
         )
 
-        self.assertEqual(bridge.ERROR_INVALID_REQUEST, response["error"]["code"])
+        self.assertEqual(
+            bridge_protocol.ERROR_INVALID_REQUEST, response["error"]["code"]
+        )
 
     def test_an_expected_target_the_journal_would_reject_is_refused(self) -> None:
         self.live_run()
@@ -615,7 +641,9 @@ class FieldBoundTests(RedirectBridgeTestCase):
             }
         )
 
-        self.assertEqual(bridge.ERROR_INVALID_REQUEST, response["error"]["code"])
+        self.assertEqual(
+            bridge_protocol.ERROR_INVALID_REQUEST, response["error"]["code"]
+        )
         self.assertIn("reason", response["error"]["details"])
 
 
@@ -702,7 +730,9 @@ class ReplayIdentityTests(RedirectBridgeTestCase):
         refusal = self.submit(request_id="req-5", text=SECOND_FEEDBACK)
 
         self.assertFalse(refusal["ok"])
-        self.assertEqual(bridge.ERROR_INVALID_REQUEST, refusal["error"]["code"])
+        self.assertEqual(
+            bridge_protocol.ERROR_INVALID_REQUEST, refusal["error"]["code"]
+        )
         self.assertEqual(
             redirect_store.ERROR_REPLAY_CONFLICT, refusal["error"]["details"]["reason"]
         )
@@ -897,7 +927,7 @@ class StatusProjectionTests(RedirectBridgeTestCase):
     def test_the_projection_window_is_bounded_and_says_so(self) -> None:
         """A long-lived plan truncates from the front and reports it."""
         self.live_run()
-        for index in range(bridge.MAX_REDIRECT_OPERATIONS + 2):
+        for index in range(bridge_protocol.MAX_REDIRECT_OPERATIONS + 2):
             redirect_admission.submit_redirect(
                 self.plan_dir,
                 f"correction {index}",
@@ -908,12 +938,14 @@ class StatusProjectionTests(RedirectBridgeTestCase):
 
         result = self.status()["result"]
 
-        self.assertEqual(bridge.MAX_REDIRECT_OPERATIONS, len(result["operations"]))
+        self.assertEqual(
+            bridge_protocol.MAX_REDIRECT_OPERATIONS, len(result["operations"])
+        )
         self.assertTrue(result["truncated"])
         # Truncated from the front: the newest corrections are the ones an
         # operator is asking about.
         self.assertEqual(
-            f"amx-op-{bridge.MAX_REDIRECT_OPERATIONS + 1:03d}",
+            f"amx-op-{bridge_protocol.MAX_REDIRECT_OPERATIONS + 1:03d}",
             result["operations"][-1]["operation_id"],
         )
         self.assertEqual([], problems(self.status(), "redirect_status_response"))
@@ -1155,10 +1187,12 @@ class VocabularyTests(RedirectBridgeTestCase):
     def test_a_redirect_status_is_not_an_operation_receipt_status(self) -> None:
         """A redirect outlives the session that submitted it; a receipt does not."""
         self.assertNotEqual(
-            set(redirect_recovery.OPERATION_STATUSES), set(bridge.OPERATION_STATUSES)
+            set(redirect_recovery.OPERATION_STATUSES),
+            set(bridge_protocol.OPERATION_STATUSES),
         )
         self.assertEqual(
-            list(bridge.OPERATION_STATUSES), self.schema_enum("OperationStatus")
+            list(bridge_protocol.OPERATION_STATUSES),
+            self.schema_enum("OperationStatus"),
         )
 
 

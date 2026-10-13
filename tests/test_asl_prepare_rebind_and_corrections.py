@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
-    authoring,
+    authoring_transaction,
     plans_errors,
     plans_files,
     plans_metadata,
@@ -181,7 +181,7 @@ class PrepareRebindAndCorrectionTests(PrepareEndToEndFixtures):
             (
                 "publication",
                 mock.patch.object(
-                    authoring.os, "replace", side_effect=fail_publication
+                    authoring_transaction.os, "replace", side_effect=fail_publication
                 ),
                 _recording_validator([]),
                 prepare_results.PREPARE_STAGE_PUBLICATION,

@@ -357,7 +357,7 @@ from .service import (
     SubmissionLane,
     UploadLane,
 )
-from .store import (
+from .store_types import (
     COMPANION_SCHEMA_VERSION,
     INGEST_REFUSAL_CODES,
     REFUSED_STALE_GENERATION,
@@ -370,8 +370,8 @@ from .store import (
     IngestResult,
     SourceStatus,
     StoreError,
-    WorkbenchStore,
 )
+from .store_workbench import WorkbenchStore
 from .transport import (
     CAPABILITY_CATALOG,
     CAPABILITY_DETAIL,

@@ -18,8 +18,8 @@ Four contracts:
   boundary publishes.
 * The delegation contract -- `runner.run_from_args` stays a two-line shim with
   the same name and signature, because `cli.py` reaches it through the string
-  `handler_ref="runner:run_from_args"` and `workbench.py`, `maintenance.py` and
-  `skills/asl/scripts/asl_autopilot.py` call it by name. The shim's whole job is
+  `handler_ref="runner:run_from_args"` and `workbench_launch.py`, `maintenance.py`
+  and `skills/asl/scripts/asl_autopilot.py` call it by name. The shim's whole job is
   to supply the one collaborator this module may not import.
 * The seam contract -- `run_locked` is required and keyword-only, and
   `run_loop.run_locked` satisfies the `LockedRun` shape. It is required rather
@@ -462,7 +462,7 @@ class AdmissionOrderTests(unittest.TestCase):
                 run_locked=fixture.locked(raises=KeyboardInterrupt()),
             )
         payload = json.loads(out.getvalue())
-        self.assertEqual(run_entry.turn_execution.INTERRUPTED_EXIT, code)
+        self.assertEqual(run_entry.turn_execution_constants.INTERRUPTED_EXIT, code)
         self.assertEqual("interrupted", payload["pause_reason"])
 
     def test_the_locked_runs_payload_is_the_one_that_is_emitted(self) -> None:

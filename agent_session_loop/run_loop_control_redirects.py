@@ -14,7 +14,8 @@ from . import (
     redirect_restart,
     redirect_store,
     run_control,
-    run_coordination,
+    run_coordination_control,
+    run_coordination_mailbox_poll,
     run_reporting,
     run_termination,
 )
@@ -35,7 +36,7 @@ def _handle_run_control_action(
         context = (
             None if ctx.run_control_context is None else dict(ctx.run_control_context)
         )
-        run_coordination.record_run_control_action(
+        run_coordination_control.record_run_control_action(
             event_path=ctx.event_path,
             payload=ctx.payload,
             control_payload=ctx.control_payload,
@@ -107,7 +108,7 @@ def _abandon_turn(
 
 def _close_turn_controls(
     redirect: redirect_continuation.TurnRedirect,
-    mailbox_poll: run_coordination.MailboxPoll,
+    mailbox_poll: run_coordination_mailbox_poll.MailboxPoll,
 ) -> None:
     """Disarm everything the turn was handed, in the order that proves it.
 

@@ -14,19 +14,22 @@ from agent_session_loop import (
     events,
     supervisor_audit_agent,
     supervisor_audit_checks,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_collector,
+    supervisor_audit_evidence_constants,
+    supervisor_audit_evidence_models,
 )
-from agent_session_loop.assurance_models import (
+from agent_session_loop.assurance_models_artifacts import audit_artifact_name
+from agent_session_loop.assurance_models_audit import SupervisorAudit
+from agent_session_loop.assurance_models_findings import EvidenceRef, LaneEvidence
+from agent_session_loop.assurance_models_primitives import (
+    AssuranceError,
+    canonical_json_bytes,
+    issue_id_number,
+)
+from agent_session_loop.assurance_models_vocab import (
     AUDIT_MARKDOWN_FILENAME,
     AUDIT_REPORT_FILENAME,
     RUBRIC_LANES,
-    AssuranceError,
-    EvidenceRef,
-    LaneEvidence,
-    SupervisorAudit,
-    audit_artifact_name,
-    canonical_json_bytes,
-    issue_id_number,
 )
 from agent_session_loop.assurance_projection import CatalogEntry, IdentityCatalog
 from tests.support_supervisor_audit import RUN_ID
@@ -500,10 +503,10 @@ class PathKeyedRedactionTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name).resolve()
-        roots = supervisor_audit_evidence.EvidenceRoots.build(
+        roots = supervisor_audit_evidence_models.EvidenceRoots.build(
             run_dir=self.root / "run", state_dir=self.root, plan_dir=self.root
         )
-        self.collector = supervisor_audit_evidence._Collector(roots)
+        self.collector = supervisor_audit_evidence_collector._Collector(roots)
 
     def _paths(self, paths: dict[str, Any]) -> dict[str, Any]:
         projected = self.collector.redact(
@@ -521,7 +524,7 @@ class PathKeyedRedactionTests(unittest.TestCase):
     def test_a_real_secret_field_is_still_redacted(self) -> None:
         projected = self.collector.redact({"config": {"token": "abc"}})
         self.assertEqual(
-            supervisor_audit_evidence.REDACTED, projected["config"]["token"]
+            supervisor_audit_evidence_constants.REDACTED, projected["config"]["token"]
         )
 
     def test_a_secret_value_under_a_path_key_is_still_redacted(self) -> None:
@@ -532,7 +535,7 @@ class PathKeyedRedactionTests(unittest.TestCase):
         projected = self._paths({plain: secret, named: "hunter2"})
 
         self.assertNotIn(secret, json.dumps(projected))
-        self.assertEqual(supervisor_audit_evidence.REDACTED, projected[named])
+        self.assertEqual(supervisor_audit_evidence_constants.REDACTED, projected[named])
 
     def test_a_path_key_outside_the_approved_roots_is_withheld(self) -> None:
         outside = "/private/var/lib/pi-monitoring/autopilot/ntfy.token"
@@ -543,7 +546,7 @@ class PathKeyedRedactionTests(unittest.TestCase):
         ((name, value),) = projected.items()
         self.assertTrue(
             name.startswith(
-                f"[{supervisor_audit_evidence.REASON_OUTSIDE_APPROVED_ROOTS}:"
+                f"[{supervisor_audit_evidence_constants.REASON_OUTSIDE_APPROVED_ROOTS}:"
             )
         )
         self.assertEqual("unclassified", value)

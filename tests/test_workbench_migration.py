@@ -8,7 +8,7 @@ will ever actually be given, and a fixture built by the code under test would
 prove the migration can read what it writes rather than what it will find.
 
 So the legacy databases here are built by replaying this package's own
-migrations up to :data:`~asl_workbench.store.COMPANION_SCHEMA_VERSION` and
+migrations up to :data:`~asl_workbench.store_types.COMPANION_SCHEMA_VERSION` and
 inserting rows with SQL. That is the Companion's schema, not an imitation of
 it: migration 3 is the shared one, and the rows go in under the column names
 the Pi wrote them under. What the tests then assert is mostly a negative -- the
@@ -35,7 +35,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from asl_workbench import history, lifecycle, migration, store
+from asl_workbench import (
+    history,
+    lifecycle,
+    migration,
+    store_migrations,
+    store_types,
+)
 from asl_workbench.credentials import (
     ROLE_CONNECTOR,
     Credential,
@@ -104,21 +110,21 @@ def companion_database(path: Path) -> None:
     Companion's ledger stops, so the fixture is the legacy schema rather than a
     hand-copied description of it that could drift from the Pi's.
     """
-    with closing(store.connect(path)) as connection:
-        for version, statements in store.MIGRATIONS:
-            if version > store.COMPANION_SCHEMA_VERSION:
+    with closing(store_migrations.connect(path)) as connection:
+        for version, statements in store_migrations.MIGRATIONS:
+            if version > store_types.COMPANION_SCHEMA_VERSION:
                 break
             for statement in statements:
                 connection.execute(statement)
             connection.execute(f"PRAGMA user_version={int(version)}")
         connection.execute(
             "INSERT INTO service_meta (key, value) VALUES (?, ?)",
-            (store.META_CREATED_AT, json.dumps(1000.0)),
+            (store_types.META_CREATED_AT, json.dumps(1000.0)),
         )
         connection.execute(
             "INSERT INTO service_meta (key, value) VALUES (?, ?)",
             (
-                store.META_PROJECT_CATALOG_PREFIX + UPLOADER,
+                store_types.META_PROJECT_CATALOG_PREFIX + UPLOADER,
                 json.dumps(
                     {
                         PLAN_KEY: {
@@ -710,7 +716,7 @@ class ServiceMigrationTest(LegacyPrefixTestCase):
         # every link the Pi has sent and split every open incident in two.
         prefix = self.service_prefix()
         self.migration().apply()
-        with closing(store.connect(prefix / DATABASE_PATH)) as connection:
+        with closing(store_migrations.connect(prefix / DATABASE_PATH)) as connection:
             self.assertEqual(
                 connection.execute(
                     "SELECT run_key, plan_key, connector_id FROM run_summary"
@@ -737,8 +743,10 @@ class ServiceMigrationTest(LegacyPrefixTestCase):
     def test_the_database_arrives_at_this_releases_schema(self) -> None:
         prefix = self.service_prefix()
         self.migration().apply()
-        with closing(store.connect(prefix / DATABASE_PATH)) as connection:
-            self.assertEqual(store.schema_version(connection), store.SCHEMA_VERSION)
+        with closing(store_migrations.connect(prefix / DATABASE_PATH)) as connection:
+            self.assertEqual(
+                store_migrations.schema_version(connection), store_types.SCHEMA_VERSION
+            )
 
     def test_the_plan_labels_an_operator_saw_survive_the_move(self) -> None:
         # Carried by the schema migration rather than by this module, which is
@@ -746,7 +754,7 @@ class ServiceMigrationTest(LegacyPrefixTestCase):
         # months of history keep the names they were shown under.
         prefix = self.service_prefix()
         self.migration().apply()
-        with closing(store.connect(prefix / DATABASE_PATH)) as connection:
+        with closing(store_migrations.connect(prefix / DATABASE_PATH)) as connection:
             row = connection.execute(
                 "SELECT display_label, title, project_group FROM catalog_entry "
                 "WHERE plan_key = ?",
@@ -1010,7 +1018,9 @@ class RollbackPairingTest(InstallationTestCase):
 
     def observe(self, run_key: str) -> None:
         """Record one run summary, the way an upload would leave one."""
-        with closing(store.connect(self.prefix / DATABASE_PATH)) as connection:
+        with closing(
+            store_migrations.connect(self.prefix / DATABASE_PATH)
+        ) as connection:
             connection.execute(
                 "INSERT INTO run_summary (connector_id, run_key, project, "
                 "plan_key, primary_state, observed_at, received_at) "

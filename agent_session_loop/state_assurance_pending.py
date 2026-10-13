@@ -29,7 +29,7 @@ ASSURANCE_SKIP_SETTLED = "audit-already-settled"
 
 
 # Assurance states that still owe an audit. Mirrors
-# ``run_coordination.AUDITABLE_ASSURANCE_STATES``; kept as a literal here
+# ``run_coordination_terminal.AUDITABLE_ASSURANCE_STATES``; kept as a literal here
 # because state sits below that boundary.
 _ASSURANCE_OWED_STATES = frozenset({"pending", "unavailable"})
 

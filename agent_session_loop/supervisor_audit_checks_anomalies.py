@@ -6,7 +6,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from . import events
-from . import supervisor_audit_evidence as audit_evidence
+from . import supervisor_audit_evidence_constants as audit_evidence_constants
+from . import supervisor_audit_evidence_failures as audit_evidence_failures
+from . import supervisor_audit_evidence_helpers as audit_evidence_helpers
 from .supervisor_audit_checks_failures import (
     _aborted_turns,
     _check_conversation_restore_refusal,
@@ -29,26 +31,26 @@ def _check_resource_anomalies(context: _CheckContext) -> _Verdict:
     automatically_recovered = 0
     for record in context.records:
         name = record.get("name")
-        payload = audit_evidence._mapping(record.get("payload"))
+        payload = audit_evidence_helpers._mapping(record.get("payload"))
         if name == events.TURN_HANG_SUSPECTED_EVENT:
             suspected += 1
         elif name == events.TURN_HANG_CLEARED_EVENT:
             cleared += 1
-            block = audit_evidence._mapping(payload.get("hang_suspected"))
-            recovery = audit_evidence._mapping(block.get("recovery"))
-            if audit_evidence._sequence(recovery.get("signaled_pids")):
+            block = audit_evidence_helpers._mapping(payload.get("hang_suspected"))
+            recovery = audit_evidence_helpers._mapping(block.get("recovery"))
+            if audit_evidence_helpers._sequence(recovery.get("signaled_pids")):
                 automatically_recovered += 1
         elif name == events.PROCESS_SWEEP_EVENT:
-            if audit_evidence._sequence(payload.get("kill_failed")):
+            if audit_evidence_helpers._sequence(payload.get("kill_failed")):
                 anomalies.append(
                     "a post-turn process sweep failed to kill a process it owned"
                 )
-            if audit_evidence._sequence(payload.get("survivors_after")):
+            if audit_evidence_helpers._sequence(payload.get("survivors_after")):
                 anomalies.append("processes survived a post-turn sweep")
     if suspected > cleared:
         anomalies.append(f"{suspected - cleared} suspected hang(s) were never cleared")
     for turn in context.turns:
-        result = audit_evidence._mapping(turn.get("result"))
+        result = audit_evidence_helpers._mapping(turn.get("result"))
         stalled = [
             label
             for key, label in (
@@ -131,7 +133,7 @@ def _worker_pause_exit_verdict(
     if result.get("runner_pause_source") not in {"last_message", "stdout"}:
         problems.append("the pause declaration came from no trusted stream")
     status = context.section("status")
-    details = audit_evidence._mapping(status.get("pause_details"))
+    details = audit_evidence_helpers._mapping(status.get("pause_details"))
     session = str(details.get("session_id", details.get("session")))
     if (
         status.get("paused") is not True
@@ -142,7 +144,7 @@ def _worker_pause_exit_verdict(
     if result.get("status_result") == "complete":
         problems.append("the failed turn also claims accepted completion")
 
-    guard = audit_evidence._mapping(result.get("workspace_write_guard"))
+    guard = audit_evidence_helpers._mapping(result.get("workspace_write_guard"))
     guard_refused = (
         status.get("pause_reason")
         in {
@@ -181,7 +183,7 @@ def _worker_pause_exits(
     for record in context.records:
         if record.get("name") != events.TURN_EXECUTION_FINISHED_EVENT:
             continue
-        payload = audit_evidence._mapping(record.get("payload"))
+        payload = audit_evidence_helpers._mapping(record.get("payload"))
         code = payload.get("returncode")
         if (
             not isinstance(code, int)
@@ -195,7 +197,7 @@ def _worker_pause_exits(
             payload.get("turn_index"),
         )
         for turn in context.turns:
-            result = audit_evidence._mapping(turn.get("result"))
+            result = audit_evidence_helpers._mapping(turn.get("result"))
             if (
                 identity
                 == (
@@ -244,15 +246,15 @@ def _check_unclassified_anomalies(context: _CheckContext) -> _Verdict:
     )
     unread: list[str] = []
     unparsable = summary.get(
-        audit_evidence.UNPARSABLE_LINE_COUNT_KEY,
-        summary.get(audit_evidence.LEGACY_UNPARSABLE_LINE_COUNT_KEY),
+        audit_evidence_constants.UNPARSABLE_LINE_COUNT_KEY,
+        summary.get(audit_evidence_constants.LEGACY_UNPARSABLE_LINE_COUNT_KEY),
     )
     if isinstance(unparsable, int) and unparsable > 0:
         unread.append(f"{unparsable} event log line(s) would not parse")
     for omission in context.omissions:
         if omission.get("reason") in (
-            audit_evidence.REASON_UNREADABLE,
-            audit_evidence.REASON_MALFORMED,
+            audit_evidence_constants.REASON_UNREADABLE,
+            audit_evidence_constants.REASON_MALFORMED,
         ):
             unread.append(
                 f"{omission.get('count')} {omission.get('section')} artifact(s) were "
@@ -284,7 +286,7 @@ def _check_unclassified_anomalies(context: _CheckContext) -> _Verdict:
         name = str(record.get("name") or "")
         if name in _CLASSIFIED_EVENT_NAMES:
             continue
-        payload = audit_evidence._mapping(record.get("payload"))
+        payload = audit_evidence_helpers._mapping(record.get("payload"))
         # `_check_operator_abort` owns every explicitly aborted exit, including
         # missing acknowledgments. Such a defect belongs to that named check.
         if (
@@ -326,7 +328,7 @@ def _check_unclassified_anomalies(context: _CheckContext) -> _Verdict:
             in aborted
         ):
             continue
-        if audit_evidence._payload_shows_failure(payload):
+        if audit_evidence_failures._payload_shows_failure(payload):
             unclassified[name] = unclassified.get(name, 0) + 1
     for name in sorted(unclassified):
         unread.append(

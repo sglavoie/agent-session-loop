@@ -21,7 +21,7 @@ from agent_session_loop import (
     plans_files,
     plans_snapshot,
     qna,
-    run_coordination,
+    run_coordination_wait_state,
     run_persistence,
     state,
     state_locks,
@@ -343,7 +343,7 @@ class QnAContextLoaderTests(unittest.TestCase):
                     "last_lease_activity_at": None,
                 }
             }
-            run_coordination.rebase_waiting_deadlines(
+            run_coordination_wait_state.rebase_waiting_deadlines(
                 raw_payload,
                 question_id="question-1",
                 base_deadline=datetime(2999, 7, 24, 20, 3, 0, tzinfo=UTC),

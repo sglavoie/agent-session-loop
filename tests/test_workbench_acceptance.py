@@ -45,7 +45,7 @@ from tests import workbench_acceptance as acceptance
 PACKAGE_SOURCES: Mapping[str, str] = {
     f"{name}.py": f'"""Synthetic {name}."""\n\n\ndef {name}_entry() -> None:\n'
     "    return None\n"
-    for name in ("lifecycle", "runtime", "server", "http", "store")
+    for name in ("lifecycle", "runtime", "server", "http", "store_workbench")
 } | {"__init__.py": '"""A synthetic Workbench package."""\n\nVERSION = "0"\n'}
 
 
@@ -133,7 +133,10 @@ def setUpModule() -> None:
     first = _commit(root, "package", now - 10800)
     _write(root / "README.md", "second\n")
     second = _commit(root, "docs", now - 9000)
-    _write(package / "store.py", PACKAGE_SOURCES["store.py"] + "\nLIMIT = 1\n")
+    _write(
+        package / "store_workbench.py",
+        PACKAGE_SOURCES["store_workbench.py"] + "\nLIMIT = 1\n",
+    )
     third = _commit(root, "repackage", now - 7200)
 
     _git(root, "checkout", "-q", "-b", "side", first)

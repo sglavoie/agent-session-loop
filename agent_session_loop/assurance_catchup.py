@@ -50,11 +50,8 @@ from . import (
     state_plan_refs,
     supervisor_audit,
 )
-from .assurance_models import (
-    ATTEMPT_DIR_PREFIX,
-    CANONICAL_AUDIT_ARTIFACTS,
-    AssuranceError,
-)
+from .assurance_models_primitives import AssuranceError
+from .assurance_models_vocab import ATTEMPT_DIR_PREFIX, CANONICAL_AUDIT_ARTIFACTS
 
 #: Runs audited per invocation unless the operator raises it. Each audit is a
 #: harness turn under a timeout, so the default bounds one catch-up pass to

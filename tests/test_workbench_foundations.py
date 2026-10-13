@@ -43,7 +43,13 @@ import unittest
 import urllib.parse
 from pathlib import Path
 
-from agent_session_loop import bridge, plans_files, workbench, workbench_archive
+from agent_session_loop import (
+    bridge_protocol,
+    bridge_workers,
+    plans_files,
+    workbench_archive,
+    workbench_registry,
+)
 from asl_workbench import capabilities, changes
 from asl_workbench.compatibility import (
     KIND_FORBIDDEN,
@@ -505,12 +511,12 @@ class LocalAPICharacterizationTests(WorkbenchAPIFixture, unittest.TestCase):
     def test_the_queue_answers_with_the_triage_fields_the_front_end_reads(
         self,
     ) -> None:
-        registry = workbench.upsert_pin(
-            workbench.load_registry(self.registry_path),
+        registry = workbench_registry.upsert_pin(
+            workbench_registry.load_registry(self.registry_path),
             self.canonical_plan_dir,
             label="Alpha plan",
         )
-        workbench.save_registry(registry, self.registry_path)
+        workbench_registry.save_registry(registry, self.registry_path)
         server = self.start_workbench_server()
         status, body, _ = _http_request(f"{self.base_url(server)}/api/queue")
         self.assertEqual(200, status)
@@ -529,7 +535,7 @@ class LocalAPICharacterizationTests(WorkbenchAPIFixture, unittest.TestCase):
         self.assertEqual(401, status)
         self.assertEqual("unauthorized", body["reason"])
         # And the refusal is a refusal: nothing was written.
-        self.assertEqual((), workbench.load_registry(self.registry_path).pins)
+        self.assertEqual((), workbench_registry.load_registry(self.registry_path).pins)
 
     def test_the_same_mutation_with_the_token_is_accepted(self) -> None:
         server = self.start_workbench_server(token="fixed-token")
@@ -541,7 +547,9 @@ class LocalAPICharacterizationTests(WorkbenchAPIFixture, unittest.TestCase):
         )
         self.assertEqual(200, status)
         self.assertTrue(body["ok"])
-        self.assertEqual(1, len(workbench.load_registry(self.registry_path).pins))
+        self.assertEqual(
+            1, len(workbench_registry.load_registry(self.registry_path).pins)
+        )
 
     def test_an_unknown_path_is_404_and_a_wrong_method_is_405(self) -> None:
         # The vocabulary matters to the front end: 404 means "no such route",
@@ -685,9 +693,9 @@ class BridgeDeepLinkTests(unittest.TestCase):
         # token cannot live there; the front end routes on the fragment, so the
         # plan selection cannot live in the query.
         factory, built = recording_server_factory()
-        lifecycle = bridge.WorkbenchLifecycle(server_factory=factory)
+        lifecycle = bridge_workers.WorkbenchLifecycle(server_factory=factory)
         self.addCleanup(lifecycle.stop)
-        url = lifecycle.url("/plans/alpha", bridge.WORKBENCH_FOCUS_REPLY)
+        url = lifecycle.url("/plans/alpha", bridge_protocol.WORKBENCH_FOCUS_REPLY)
 
         parsed = urllib.parse.urlparse(url)
         self.assertEqual("http", parsed.scheme)
@@ -699,7 +707,7 @@ class BridgeDeepLinkTests(unittest.TestCase):
         route, _, fragment_query = parsed.fragment.partition("?")
         self.assertEqual("plan", route)
         self.assertEqual(
-            {"dir": ["/plans/alpha"], "focus": [bridge.WORKBENCH_FOCUS_REPLY]},
+            {"dir": ["/plans/alpha"], "focus": [bridge_protocol.WORKBENCH_FOCUS_REPLY]},
             urllib.parse.parse_qs(fragment_query),
         )
 
@@ -707,28 +715,28 @@ class BridgeDeepLinkTests(unittest.TestCase):
         self,
     ) -> None:
         factory, built = recording_server_factory()
-        lifecycle = bridge.WorkbenchLifecycle(server_factory=factory)
+        lifecycle = bridge_workers.WorkbenchLifecycle(server_factory=factory)
         self.addCleanup(lifecycle.stop)
         self.assertEqual([], built, "the server must start lazily")
-        lifecycle.url("/plans/alpha", bridge.WORKBENCH_FOCUS_ACTIVE)
-        lifecycle.url("/plans/beta", bridge.WORKBENCH_FOCUS_EVENTS)
+        lifecycle.url("/plans/alpha", bridge_protocol.WORKBENCH_FOCUS_ACTIVE)
+        lifecycle.url("/plans/beta", bridge_protocol.WORKBENCH_FOCUS_EVENTS)
         self.assertEqual(1, len(built))
         self.assertEqual(0, built[0].kwargs["port"], "must bind ephemerally")
         self.assertEqual("127.0.0.1", built[0].kwargs["host"])
 
     def test_the_bridge_owned_server_stops_with_the_bridge(self) -> None:
         factory, built = recording_server_factory()
-        lifecycle = bridge.WorkbenchLifecycle(server_factory=factory)
-        lifecycle.url("/plans/alpha", bridge.WORKBENCH_FOCUS_ACTIVE)
+        lifecycle = bridge_workers.WorkbenchLifecycle(server_factory=factory)
+        lifecycle.url("/plans/alpha", bridge_protocol.WORKBENCH_FOCUS_ACTIVE)
         lifecycle.stop()
         self.assertEqual(1, built[0].shutdown_calls)
 
     def test_the_focus_values_the_matrix_relies_on_exist(self) -> None:
         for focus in (
-            bridge.WORKBENCH_FOCUS_REPLY,
-            bridge.WORKBENCH_FOCUS_VERIFICATION,
-            bridge.WORKBENCH_FOCUS_ACTIVE,
-            bridge.WORKBENCH_FOCUS_EVENTS,
+            bridge_protocol.WORKBENCH_FOCUS_REPLY,
+            bridge_protocol.WORKBENCH_FOCUS_VERIFICATION,
+            bridge_protocol.WORKBENCH_FOCUS_ACTIVE,
+            bridge_protocol.WORKBENCH_FOCUS_EVENTS,
         ):
             with self.subTest(focus=focus):
                 self.assertTrue(focus)

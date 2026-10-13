@@ -53,9 +53,11 @@ from . import (
     state_locks,
     state_payloads,
     tail,
-    workbench,
     workbench_catalog,
-    workbench_recovery,
+    workbench_recovery_build,
+    workbench_registry_models,
+    workbench_summary_helpers,
+    workbench_summary_model,
     workbench_workspace,
 )
 from . import events as events_module
@@ -86,7 +88,7 @@ class PlanReader:
 
     plan_dir: Path
     plan_state_dir: Path
-    summary: workbench.WorkbenchSummary
+    summary: workbench_summary_model.WorkbenchSummary
     scope: DetailScope
     state_dir: Path | None = None
 
@@ -127,7 +129,7 @@ def canonical_plan_dir(plan_dir: str | Path) -> Path:
 
 
 def artifact_paths(
-    summary: workbench.WorkbenchSummary, plan_dir: Path
+    summary: workbench_summary_model.WorkbenchSummary, plan_dir: Path
 ) -> dict[str, Path | None]:
     """Every artifact this plan and run published, by name.
 
@@ -142,7 +144,7 @@ def artifact_paths(
         "progress_path": summary.progress_path,
         "final_review_path": summary.final_review_path,
         "final_review_artifact_path": (
-            plan_dir / workbench.FINAL_REVIEW_ARTIFACT_FILE_NAME
+            plan_dir / workbench_summary_helpers.FINAL_REVIEW_ARTIFACT_FILE_NAME
         ),
         "artifact_dir": summary.artifact_dir,
         "stdout_path": summary.stdout_path,
@@ -153,7 +155,7 @@ def artifact_paths(
 
 
 def build_scope(
-    summary: workbench.WorkbenchSummary,
+    summary: workbench_summary_model.WorkbenchSummary,
     plan_dir: Path,
     *,
     plan_state_dir: Path,
@@ -194,7 +196,9 @@ def open_plan(
     canonical = canonical_plan_dir(plan_dir)
     resolved_state_dir = Path(state_dir) if state_dir is not None else None
     plan_state = state.plan_state_dir(canonical, resolved_state_dir)
-    discovered = workbench.DiscoveredPlan(plan_dir=canonical, exists=canonical.is_dir())
+    discovered = workbench_registry_models.DiscoveredPlan(
+        plan_dir=canonical, exists=canonical.is_dir()
+    )
     summary = workbench_catalog.build_summary(discovered, state_dir=resolved_state_dir)
     return PlanReader(
         plan_dir=canonical,
@@ -223,7 +227,7 @@ def read_lock(reader: PlanReader) -> state.LockInfo | None:
 def read_plan(
     plan_dir: str | Path,
     *,
-    registry: workbench.WorkbenchRegistry,
+    registry: workbench_registry_models.WorkbenchRegistry,
     state_dir: str | Path | None = None,
 ) -> _JSONDict:
     """One plan's triage summary, carrying its registry pin when it has one.
@@ -234,7 +238,7 @@ def read_plan(
     """
     canonical = canonical_plan_dir(plan_dir)
     pin = next((p for p in registry.pins if p.plan_dir == str(canonical)), None)
-    discovered = workbench.DiscoveredPlan(
+    discovered = workbench_registry_models.DiscoveredPlan(
         plan_dir=canonical,
         sources=("registry",) if pin is not None else (),
         label=pin.label if pin is not None else None,
@@ -821,7 +825,7 @@ def read_final_review(
     path = (
         Path(resolved)
         if resolved is not None
-        else reader.plan_dir / workbench.FINAL_REVIEW_FILE_NAME
+        else reader.plan_dir / workbench_summary_helpers.FINAL_REVIEW_FILE_NAME
     )
     payload = read_bounded_text(path, max_bytes=max_bytes)
     if payload is None:
@@ -978,8 +982,10 @@ def read_recovery(
             str(error),
             details={"plan_dir": str(canonical)},
         ) from error
-    discovered = workbench.DiscoveredPlan(plan_dir=snapshot.plan_dir, exists=True)
-    recovery = workbench_recovery.build_workbench_recovery(
+    discovered = workbench_registry_models.DiscoveredPlan(
+        plan_dir=snapshot.plan_dir, exists=True
+    )
+    recovery = workbench_recovery_build.build_workbench_recovery(
         discovered,
         state_dir=state_dir,
         reclaim=False,
@@ -1003,7 +1009,7 @@ def search_plans(
     query: object,
     *,
     state_dir: str | Path | None = None,
-    registry: workbench.WorkbenchRegistry | None = None,
+    registry: workbench_registry_models.WorkbenchRegistry | None = None,
     plan_roots: Sequence[str | Path] = (),
     include_default_dirs: bool = True,
 ) -> list[_JSONDict]:

@@ -89,7 +89,7 @@ DURABLE_WRITE_NAMES = frozenset(
 
 #: Keys seeded to an *empty* container, with the container type a later writer
 #: assumes. Each one is indexed without a presence check somewhere in the
-#: package -- `turn_execution` appends to `turns`, `commit_settlement` to
+#: package -- `turn_execution_commit` appends to `turns`, `commit_settlement` to
 #: `commits`, the run loop to `completed_sessions` -- so a key dropped from the
 #: seed turns a mutation into a `KeyError` mid-run rather than at startup.
 SEEDED_CONTAINERS: dict[str, type] = {

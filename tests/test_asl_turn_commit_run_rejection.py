@@ -14,7 +14,7 @@ from agent_session_loop import (
     plans_content_hash,
     plans_snapshot,
     review_guard,
-    turn_execution,
+    turn_execution_commit,
     verification,
 )
 from tests.asl_turn_commit_support import TurnCommitRunCase
@@ -160,7 +160,7 @@ class TurnCommitRejectionTests(TurnCommitRunCase):
         self.assertEqual(1, len(self._payloads(events.SESSION_REOPENED_EVENT)))
 
     def test_publication_drift_pauses_instead_of_crashing_the_loop(self) -> None:
-        rejection = turn_execution.TurnCommitRejected(
+        rejection = turn_execution_commit.TurnCommitRejected(
             reason="unexpected-status-change",
             message="session statuses moved",
             detail={"status_changes": []},
@@ -174,7 +174,7 @@ class TurnCommitRejectionTests(TurnCommitRunCase):
                 ),
             ),
             mock.patch.object(
-                turn_execution, "publication_snapshot", side_effect=rejection
+                turn_execution_commit, "publication_snapshot", side_effect=rejection
             ),
         ):
             exit_code, payload = self._invoke("drift-run")

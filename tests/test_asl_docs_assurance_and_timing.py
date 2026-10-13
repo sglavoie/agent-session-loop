@@ -7,7 +7,8 @@ import unittest
 
 from agent_session_loop import (
     assurance_ledger,
-    assurance_models,
+    assurance_models_primitives,
+    assurance_models_vocab,
     cli,
     mailbox_constants,
     state_assurance_pending,
@@ -43,7 +44,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
 
     def test_every_assurance_state_is_documented_by_name(self) -> None:
         for text in (self.guide, self.docs, self.package_readme):
-            for audit_state in assurance_models.AUDIT_STATES:
+            for audit_state in assurance_models_vocab.AUDIT_STATES:
                 self.assertIn(
                     f"`{audit_state}`",
                     text,
@@ -101,7 +102,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
         self.assertIn("Opting out is the only way to run no checks at all", self.docs)
 
     def test_issue_references_are_documented_in_the_canonical_form(self) -> None:
-        self.assertEqual("ASI-", assurance_models.ISSUE_ID_PREFIX)
+        self.assertEqual("ASI-", assurance_models_primitives.ISSUE_ID_PREFIX)
         for text in (self.guide, self.docs, self.package_readme):
             self.assertIn("ASI-", text, "docs never show a canonical issue id")
 
@@ -113,7 +114,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
         ):
             self.assertIn(name, self.docs, f"docs omit ledger file {name}")
         self.assertIn(state_assurance_pending.ASSURANCE_PENDING_FILE_NAME, self.docs)
-        for name in assurance_models.CANONICAL_AUDIT_ARTIFACTS:
+        for name in assurance_models_vocab.CANONICAL_AUDIT_ARTIFACTS:
             self.assertIn(name, self.docs, f"docs omit audit artifact {name}")
 
     def test_the_mailbox_and_the_ledger_are_documented_as_separate_systems(

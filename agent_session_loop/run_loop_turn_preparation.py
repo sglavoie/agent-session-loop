@@ -16,7 +16,9 @@ from . import (
     run_commit,
     run_selection,
     state,
-    turn_execution,
+    turn_execution_artifacts,
+    turn_execution_constants,
+    turn_execution_executor,
     turn_preflight,
     turn_preparation,
 )
@@ -130,7 +132,7 @@ def _prepare_turn_prompt(frame: RunFrame) -> RunResult | LoopSignal | None:
     )
     frame.active_turn = turn_record.payload
     frame.total_sessions = turn_record.total_sessions
-    log_stream_callback = turn_execution.prepare_stream_logs(frame.paths)
+    log_stream_callback = turn_execution_artifacts.prepare_stream_logs(frame.paths)
     frame.mailbox_poll.set_context(frame.active_turn)
     # Handed to the turn before it starts even though nothing has
     # requested an abort yet: the wait loop can only be cancellable if
@@ -177,7 +179,7 @@ def _prepare_turn_prompt(frame: RunFrame) -> RunResult | LoopSignal | None:
         active_turn=frame.active_turn,
         persistence=frame.ctx.persistence,
         input_wait_probe=functools.partial(
-            turn_execution.worker_input_wait_probe,
+            turn_execution_executor.worker_input_wait_probe,
             plan_dir=frame.before.plan_dir,
             run_id=frame.ctx.run_id,
             session_id=frame.session_id,
@@ -185,14 +187,14 @@ def _prepare_turn_prompt(frame: RunFrame) -> RunResult | LoopSignal | None:
             state_dir=frame.args.state_dir,
         ),
         poll_callback=frame.mailbox_poll,
-        poll_interval=turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+        poll_interval=turn_execution_constants.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
         wakeup=frame.wakeup,
     )
     # One executor per turn: the identity and the artifact paths are
     # what make this turn this turn, so they are bound once here
     # rather than repeated at each of the three transitions below.
-    frame.turn_executor = turn_execution.TurnExecutor(
-        identity=turn_execution.TurnIdentity(
+    frame.turn_executor = turn_execution_executor.TurnExecutor(
+        identity=turn_execution_executor.TurnIdentity(
             run_id=frame.ctx.run_id,
             turn_index=frame.turn_index,
             session_id=frame.session_id,
@@ -204,7 +206,7 @@ def _prepare_turn_prompt(frame: RunFrame) -> RunResult | LoopSignal | None:
         plan_cache=frame.ctx.plan_cache,
     )
 
-    frame.stream_callback = turn_execution.live_stream_callback(
+    frame.stream_callback = turn_execution_artifacts.live_stream_callback(
         log_stream_callback, frame.live_turn
     )
 

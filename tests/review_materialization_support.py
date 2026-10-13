@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_session_loop import (
-    authoring,
+    authoring_manifest,
     events,
     plans_content_hash,
     plans_files,
@@ -85,15 +85,15 @@ class MaterializationFixtures:
 
         if with_manifest_table:
             sessions = (
-                authoring.ManifestSession(
+                authoring_manifest.ManifestSession(
                     plans_session_ids.parse_session_id("1"), "One", "complete"
                 ),
-                authoring.ManifestSession(
+                authoring_manifest.ManifestSession(
                     plans_session_ids.parse_session_id("2"), "Review", "complete"
                 ),
             )
-            manifest = authoring.render_manifest(
-                authoring.ManifestSpec(
+            manifest = authoring_manifest.render_manifest(
+                authoring_manifest.ManifestSpec(
                     plan_title="Test Plan",
                     source_path="/src/plan.md",
                     output_dir=str(self.plan_dir),

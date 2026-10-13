@@ -70,7 +70,7 @@ from asl_workbench.credentials import (
 )
 from asl_workbench.server import ApplicationServer
 from asl_workbench.service import RemoteProvider
-from asl_workbench.store import WorkbenchStore
+from asl_workbench.store_workbench import WorkbenchStore
 from asl_workbench.uplink import Uplink
 from tests.workbench_support import (
     SHELL_OWNER_IDENTITY,

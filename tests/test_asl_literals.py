@@ -15,9 +15,15 @@ import argparse
 import json
 import unittest
 
-from agent_session_loop import assurance_models as models
-from agent_session_loop import contracts, plans_models, plans_readiness, preflight_cli
-from agent_session_loop.assurance_models import AssuranceError
+from agent_session_loop import (
+    assurance_models_findings,
+    assurance_models_vocab,
+    contracts,
+    plans_models,
+    plans_readiness,
+    preflight_cli,
+)
+from agent_session_loop.assurance_models_primitives import AssuranceError
 from agent_session_loop.literals import as_literal, as_optional_literal
 from agent_session_loop.plans_errors import PlanError
 from agent_session_loop.plans_session_ids import parse_session_id
@@ -37,12 +43,16 @@ class AsLiteralAcceptTests(unittest.TestCase):
     """A permitted value comes back narrowed."""
 
     def test_a_permitted_value_is_returned(self) -> None:
-        self.assertEqual(as_literal("high", models.SEVERITIES, "severity"), "high")
+        self.assertEqual(
+            as_literal("high", assurance_models_vocab.SEVERITIES, "severity"), "high"
+        )
 
     def test_every_member_of_a_vocabulary_is_accepted(self) -> None:
-        for lane in models.RUBRIC_LANES:
+        for lane in assurance_models_vocab.RUBRIC_LANES:
             with self.subTest(lane=lane):
-                self.assertEqual(as_literal(lane, models.RUBRIC_LANES, "lane"), lane)
+                self.assertEqual(
+                    as_literal(lane, assurance_models_vocab.RUBRIC_LANES, "lane"), lane
+                )
 
     def test_the_match_is_the_element_from_the_permitted_set(self) -> None:
         """The return is ``allowed``'s own object, which is what mypy narrows.
@@ -53,9 +63,9 @@ class AsLiteralAcceptTests(unittest.TestCase):
         parsed = "".join(["cri", "tical"])
         self.assertIsNot(parsed, "critical")
 
-        narrowed = as_literal(parsed, models.SEVERITIES, "severity")
+        narrowed = as_literal(parsed, assurance_models_vocab.SEVERITIES, "severity")
 
-        self.assertIs(narrowed, models.SEVERITIES[-1])
+        self.assertIs(narrowed, assurance_models_vocab.SEVERITIES[-1])
 
 
 class AsLiteralRaiseTests(unittest.TestCase):
@@ -63,27 +73,29 @@ class AsLiteralRaiseTests(unittest.TestCase):
 
     def test_an_unpermitted_string_raises(self) -> None:
         with self.assertRaises(ValueError):
-            as_literal("catastrophic", models.SEVERITIES, "severity")
+            as_literal("catastrophic", assurance_models_vocab.SEVERITIES, "severity")
 
     def test_the_message_names_the_field_the_choices_and_the_value(self) -> None:
         with self.assertRaises(ValueError) as caught:
-            as_literal("catastrophic", models.SEVERITIES, "finding 'severity'")
+            as_literal(
+                "catastrophic", assurance_models_vocab.SEVERITIES, "finding 'severity'"
+            )
 
         message = str(caught.exception)
         self.assertIn("finding 'severity' must be one of", message)
-        for severity in models.SEVERITIES:
+        for severity in assurance_models_vocab.SEVERITIES:
             self.assertIn(repr(severity), message)
         self.assertIn("got 'catastrophic'", message)
 
     def test_a_near_miss_raises_rather_than_being_normalized(self) -> None:
         for value in ("High", "high ", "hig", "high\n"):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                as_literal(value, models.SEVERITIES, "severity")
+                as_literal(value, assurance_models_vocab.SEVERITIES, "severity")
 
     def test_non_strings_raise(self) -> None:
         for value in (None, 1, True, ["high"], {"severity": "high"}, b"high"):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                as_literal(value, models.SEVERITIES, "severity")
+                as_literal(value, assurance_models_vocab.SEVERITIES, "severity")
 
     def test_a_value_that_claims_equality_still_raises(self) -> None:
         """Membership is tested on a ``str``, not on whatever ``__eq__`` says.
@@ -92,7 +104,7 @@ class AsLiteralRaiseTests(unittest.TestCase):
         durable record, where it would serialize to something unreadable.
         """
         with self.assertRaises(ValueError):
-            as_literal(AlwaysEqual(), models.SEVERITIES, "severity")
+            as_literal(AlwaysEqual(), assurance_models_vocab.SEVERITIES, "severity")
 
     def test_an_empty_permitted_set_raises_even_for_a_plausible_value(self) -> None:
         with self.assertRaises(ValueError) as caught:
@@ -102,14 +114,21 @@ class AsLiteralRaiseTests(unittest.TestCase):
 
     def test_the_caller_chooses_the_error_type(self) -> None:
         with self.assertRaises(AssuranceError):
-            as_literal("nope", models.SEVERITIES, "severity", error=AssuranceError)
+            as_literal(
+                "nope",
+                assurance_models_vocab.SEVERITIES,
+                "severity",
+                error=AssuranceError,
+            )
         with self.assertRaises(PlanError):
-            as_literal("nope", models.SEVERITIES, "severity", error=PlanError)
+            as_literal(
+                "nope", assurance_models_vocab.SEVERITIES, "severity", error=PlanError
+            )
 
     def test_the_default_error_type_is_value_error(self) -> None:
         """``retention``'s convention: no domain error means ``ValueError``."""
         with self.assertRaises(ValueError) as caught:
-            as_literal("nope", models.SEVERITIES, "severity")
+            as_literal("nope", assurance_models_vocab.SEVERITIES, "severity")
 
         self.assertIs(type(caught.exception), ValueError)
 
@@ -125,29 +144,40 @@ class AsOptionalLiteralTests(unittest.TestCase):
     """
 
     def test_none_passes_through(self) -> None:
-        self.assertIsNone(as_optional_literal(None, models.SEVERITIES, "severity"))
+        self.assertIsNone(
+            as_optional_literal(None, assurance_models_vocab.SEVERITIES, "severity")
+        )
 
     def test_a_permitted_value_is_returned_like_the_required_form(self) -> None:
         parsed = "".join(["cri", "tical"])
 
-        narrowed = as_optional_literal(parsed, models.SEVERITIES, "severity")
+        narrowed = as_optional_literal(
+            parsed, assurance_models_vocab.SEVERITIES, "severity"
+        )
 
-        self.assertIs(narrowed, models.SEVERITIES[-1])
+        self.assertIs(narrowed, assurance_models_vocab.SEVERITIES[-1])
 
     def test_an_unpermitted_value_still_raises(self) -> None:
         with self.assertRaises(ValueError):
-            as_optional_literal("catastrophic", models.SEVERITIES, "severity")
+            as_optional_literal(
+                "catastrophic", assurance_models_vocab.SEVERITIES, "severity"
+            )
 
     def test_other_empty_values_are_not_treated_as_absent(self) -> None:
         """Only ``None`` is absence; ``""``, ``0`` and ``[]`` are wrong values."""
         for value in ("", 0, False, [], {}):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                as_optional_literal(value, models.SEVERITIES, "severity")
+                as_optional_literal(
+                    value, assurance_models_vocab.SEVERITIES, "severity"
+                )
 
     def test_the_caller_still_chooses_the_error_type(self) -> None:
         with self.assertRaises(AssuranceError):
             as_optional_literal(
-                "nope", models.SEVERITIES, "severity", error=AssuranceError
+                "nope",
+                assurance_models_vocab.SEVERITIES,
+                "severity",
+                error=AssuranceError,
             )
 
     def test_an_empty_permitted_set_raises_only_for_a_supplied_value(self) -> None:
@@ -161,11 +191,13 @@ class ParseBoundaryTests(unittest.TestCase):
 
     def test_an_unpermitted_evidence_kind_is_rejected(self) -> None:
         with self.assertRaisesRegex(AssuranceError, "'kind' must be one of"):
-            models.parse_evidence_ref({"kind": "guess", "locator": "events.jsonl"})
+            assurance_models_findings.parse_evidence_ref(
+                {"kind": "guess", "locator": "events.jsonl"}
+            )
 
     def test_an_unpermitted_finding_lane_and_severity_are_rejected(self) -> None:
         payload = {
-            "schema_version": models.ASSURANCE_SCHEMA_VERSION,
+            "schema_version": assurance_models_vocab.ASSURANCE_SCHEMA_VERSION,
             "category": "control-plane",
             "component": "runner",
             "invariant_key": "lease.held",
@@ -177,9 +209,11 @@ class ParseBoundaryTests(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(AssuranceError, "'lane' must be one of"):
-            models.parse_finding({**payload, "lane": "made-up-lane"})
+            assurance_models_findings.parse_finding({**payload, "lane": "made-up-lane"})
         with self.assertRaisesRegex(AssuranceError, "'severity' must be one of"):
-            models.parse_finding({**payload, "severity": "catastrophic"})
+            assurance_models_findings.parse_finding(
+                {**payload, "severity": "catastrophic"}
+            )
 
     def test_an_unpermitted_deterministic_result_lane_is_rejected(self) -> None:
         payload = {
@@ -191,7 +225,7 @@ class ParseBoundaryTests(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(AssuranceError, "'lane' must be one of"):
-            models.parse_deterministic_result(payload)
+            assurance_models_findings.parse_deterministic_result(payload)
 
     def test_an_unpermitted_baseline_expectation_raises_a_plan_error(self) -> None:
         """The same helper, a different module's error type."""

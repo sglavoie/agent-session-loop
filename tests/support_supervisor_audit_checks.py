@@ -14,13 +14,12 @@ from agent_session_loop import (
     supervisor_audit,
     supervisor_audit_agent,
     supervisor_audit_checks,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_input,
+    supervisor_audit_evidence_models,
 )
-from agent_session_loop.assurance_models import (
-    RUBRIC_LANES,
-    AuditRole,
-    DeterministicResult,
-)
+from agent_session_loop.assurance_models_findings import DeterministicResult
+from agent_session_loop.assurance_models_summary import AuditRole
+from agent_session_loop.assurance_models_vocab import RUBRIC_LANES
 from tests.support_supervisor_audit import (
     FIXED_CLOCK,
     RUN_ID,
@@ -34,9 +33,11 @@ class DeterministicCheckFixture(RunHistoryFixture, unittest.TestCase):
 
     def _audit(
         self, history: tuple[Path, Path, Path, Path], *, workspace_root: object = ...
-    ) -> tuple[supervisor_audit_evidence.AuditInput, dict[str, DeterministicResult]]:
+    ) -> tuple[
+        supervisor_audit_evidence_models.AuditInput, dict[str, DeterministicResult]
+    ]:
         workspace, plan_dir, state_dir, run_dir = history
-        bundle = supervisor_audit_evidence.collect_audit_input(
+        bundle = supervisor_audit_evidence_input.collect_audit_input(
             run_id=RUN_ID,
             run_dir=run_dir,
             state_dir=state_dir,
@@ -142,7 +143,7 @@ class DeterministicCheckFixture(RunHistoryFixture, unittest.TestCase):
         (retry_dir / "last-message.txt").write_text("Session done.\n", encoding="utf-8")
 
     def _checks_without_the_retry(
-        self, bundle: supervisor_audit_evidence.AuditInput
+        self, bundle: supervisor_audit_evidence_models.AuditInput
     ) -> dict[str, DeterministicResult]:
         """Judge ``bundle`` as if the size cap had shed the clean retry.
 
@@ -274,7 +275,7 @@ class AgentAuditEngineFixture(RunHistoryFixture, unittest.TestCase):
         history: tuple[Path, Path, Path, Path],
         auditor: ScriptedAuditor,
         *,
-        bundle: supervisor_audit_evidence.AuditInput | None = None,
+        bundle: supervisor_audit_evidence_models.AuditInput | None = None,
         sleeps: list[float] | None = None,
         workspace_root: Path | None = None,
         repositories: tuple[str, ...] = ("app",),

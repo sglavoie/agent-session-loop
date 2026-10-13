@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .authoring import PlanTransaction
+from .authoring_transaction import PlanTransaction
 from .plans_errors import PlanError
 from .plans_files import canonicalize_path
 from .plans_session_ids import SessionId, parse_session_id

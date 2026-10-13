@@ -8,19 +8,19 @@ import unittest
 from pathlib import Path
 
 from agent_session_loop import (
-    assurance_models,
+    assurance_models_artifacts,
     harness_failures,
     model_availability,
     state,
     supervisor_audit,
     supervisor_audit_checks,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_input,
 )
-from agent_session_loop.assurance_models import (
+from agent_session_loop.assurance_models_summary import AuditRole
+from agent_session_loop.assurance_models_vocab import (
     MAX_AUDIT_ATTEMPTS,
     MAX_AUDIT_DELIVERY_ATTEMPTS,
     RUBRIC_LANES,
-    AuditRole,
 )
 from tests import support_supervisor_audit_checks as checks_support
 from tests.support_supervisor_audit import FIXED_CLOCK, RUN_ID, ScriptedAuditor
@@ -248,7 +248,7 @@ class AgentAuditEngineTests(checks_support.AgentAuditEngineFixture):
             )
             self.assertEqual([15.0, 60.0], sleeps)
 
-            attempt_dir = history[3] / assurance_models.attempt_dir_name(1)
+            attempt_dir = history[3] / assurance_models_artifacts.attempt_dir_name(1)
             recorded = json.loads(
                 (attempt_dir / supervisor_audit.ATTEMPT_OUTCOME_FILE).read_text(
                     encoding="utf-8"
@@ -356,7 +356,7 @@ class AgentAuditEngineTests(checks_support.AgentAuditEngineFixture):
             self.assertLess(len(auditor.prompts[1]), len(auditor.prompts[0]))
             self.assertEqual([], sleeps)
 
-            attempt_dir = history[3] / assurance_models.attempt_dir_name(1)
+            attempt_dir = history[3] / assurance_models_artifacts.attempt_dir_name(1)
             recorded = json.loads(
                 (attempt_dir / supervisor_audit.ATTEMPT_OUTCOME_FILE).read_text(
                     encoding="utf-8"
@@ -401,7 +401,7 @@ class AgentAuditEngineTests(checks_support.AgentAuditEngineFixture):
             history = self._history(Path(tmp))
             # Already shed as far as it goes, so a tighter ceiling changes
             # nothing and a second launch would be refused identically.
-            bundle = supervisor_audit_evidence.tighten_audit_input(
+            bundle = supervisor_audit_evidence_input.tighten_audit_input(
                 self._bundle(history), max_bytes=1
             )
             auditor = ScriptedAuditor(self._refused_for_size())

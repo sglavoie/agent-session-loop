@@ -20,7 +20,7 @@ Four things live here:
   through the same lock instead of reaching for the real stream.
 * **The progress voice.** :class:`_ProgressReporter` renders every run,
   turn, verification, commit and finish line an operator reads on a non-JSON
-  run. It satisfies :class:`~agent_session_loop.turn_execution.TurnProgress`
+  run. It satisfies :class:`~agent_session_loop.turn_execution_protocols.TurnProgress`
   structurally, which is how the turn boundary reports without importing the
   loop.
 * **The inline tail.** :class:`_InlineTailController` owns the optional
@@ -331,7 +331,7 @@ class _StderrOutputCoordinator:
 class _ProgressReporter:
     """Human-facing progress output for non-JSON runs.
 
-    Satisfies :class:`~agent_session_loop.turn_execution.TurnProgress`
+    Satisfies :class:`~agent_session_loop.turn_execution_protocols.TurnProgress`
     structurally, so the turn boundary reports through this object without
     either module importing the other. Every method here is a sentence and
     nothing more: the reporter decides how a fact reads, never whether the

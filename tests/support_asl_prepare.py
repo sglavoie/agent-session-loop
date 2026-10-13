@@ -10,7 +10,7 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
-    authoring,
+    authoring_render,
     harnesses,
     prepare,
     prepare_models,
@@ -36,7 +36,7 @@ class PrepareValidatorFixtures(unittest.TestCase):
             text = session_path.read_text(encoding="utf-8")
             heading, remainder = text.split("\n", 1)
             session_path.write_text(
-                f"{heading}\n{authoring.CONTEXT_REFERENCE_LINE}\n{remainder}",
+                f"{heading}\n{authoring_render.CONTEXT_REFERENCE_LINE}\n{remainder}",
                 encoding="utf-8",
             )
 

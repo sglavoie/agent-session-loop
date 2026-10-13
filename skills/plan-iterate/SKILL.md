@@ -55,7 +55,7 @@ Parse the plan to identify:
 - **Title**: the `# H1` heading
 - **Sections**: all `## H2` and `### H3` headings with their content
 - **Line count**: approximate size of the plan
-- **Session markers**: boundaries accepted by `agent_session_loop.authoring.parse_plan_document`: case-insensitive H2-H6 ATX headings with zero to three leading spaces, required horizontal whitespace after the opening hashes, and a positive dotted-decimal ID after the `Session` token. Source ID components may be zero-padded and are canonicalized numerically. A heading may use the bare ID or add a non-empty title after `:`, `-`, `–`, or `—`, with optional horizontal whitespace around the separator and optional whitespace-delimited closing hashes.
+- **Session markers**: boundaries accepted by `agent_session_loop.authoring_parse.parse_plan_document`: case-insensitive H2-H6 ATX headings with zero to three leading spaces, required horizontal whitespace after the opening hashes, and a positive dotted-decimal ID after the `Session` token. Source ID components may be zero-padded and are canonicalized numerically. A heading may use the bare ID or add a non-empty title after `:`, `-`, `–`, or `—`, with optional horizontal whitespace around the separator and optional whitespace-delimited closing hashes.
 - **File references**: backtick paths like `src/foo/bar.go`, `internal/replay/replayer.go`
 - **Verification sections**: anything titled Verification, Testing, Test plan, or similar
 

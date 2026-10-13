@@ -14,9 +14,9 @@ ones that would refute them. A check that infers a fault from a record it
 cannot find must therefore ask whether the log was shed before it counts the
 absence as evidence.
 
-The checks read only :mod:`.supervisor_audit_evidence`; the agent audit and the
-:mod:`.supervisor_audit` entry module read them. This module keeps the check
-registry and the runners; the checks themselves live in the sibling
+The checks read only the ``supervisor_audit_evidence_*`` modules; the agent
+audit and the :mod:`.supervisor_audit` entry module read them. This module keeps
+the check registry and the runners; the checks themselves live in the sibling
 ``supervisor_audit_checks_*`` modules, and the shared vocabulary, models and
 helpers in ``supervisor_audit_vocabulary``, ``supervisor_audit_models`` and
 ``supervisor_audit_commit_records``."""
@@ -26,11 +26,9 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
-from . import (
-    assurance_models,
-)
-from . import supervisor_audit_evidence as audit_evidence
-from .assurance_models import Finding
+from . import assurance_models_findings, assurance_models_vocab
+from . import supervisor_audit_evidence_models as audit_evidence_models
+from .assurance_models_findings import Finding
 from .supervisor_audit_checks_anomalies import (
     _check_resource_anomalies,
     _check_unclassified_anomalies,
@@ -447,8 +445,8 @@ DETERMINISTIC_CHECK_SPECS: tuple[CheckSpec, ...] = tuple(spec for spec, _ in _CH
 
 
 def run_deterministic_checks(
-    bundle: audit_evidence.AuditInput | Mapping[str, Any],
-) -> tuple[assurance_models.DeterministicResult, ...]:
+    bundle: audit_evidence_models.AuditInput | Mapping[str, Any],
+) -> tuple[assurance_models_findings.DeterministicResult, ...]:
     """Judge one evidence bundle against every reproducible check.
 
     Each check answers ``pass``, ``fail``, or ``unavailable`` under a stable
@@ -457,11 +455,13 @@ def run_deterministic_checks(
     the same thing as an audit that looked and found nothing.
     """
     payload = (
-        bundle.payload if isinstance(bundle, audit_evidence.AuditInput) else bundle
+        bundle.payload
+        if isinstance(bundle, audit_evidence_models.AuditInput)
+        else bundle
     )
     context = _CheckContext(payload)
     return tuple(
-        assurance_models.DeterministicResult(
+        assurance_models_findings.DeterministicResult(
             check=spec.check,
             lane=spec.lane,
             status=verdict.status,
@@ -474,7 +474,7 @@ def run_deterministic_checks(
 
 
 def findings_from_results(
-    results: Iterable[assurance_models.DeterministicResult],
+    results: Iterable[assurance_models_findings.DeterministicResult],
 ) -> tuple[Finding, ...]:
     """Raise each failing check into a finding under the check's fingerprint."""
     specs = {spec.check: spec for spec in DETERMINISTIC_CHECK_SPECS}
@@ -499,7 +499,7 @@ def findings_from_results(
 
 
 def lane_rollup(
-    results: Iterable[assurance_models.DeterministicResult],
+    results: Iterable[assurance_models_findings.DeterministicResult],
 ) -> dict[str, str]:
     """Reduce results to one status per rubric lane, keeping the worst.
 
@@ -515,5 +515,6 @@ def lane_rollup(
         ):
             worst[result.lane] = result.status
     return {
-        lane: worst.get(lane, "unavailable") for lane in assurance_models.RUBRIC_LANES
+        lane: worst.get(lane, "unavailable")
+        for lane in assurance_models_vocab.RUBRIC_LANES
     }

@@ -11,7 +11,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from agent_session_loop import (
-    authoring,
+    authoring_render,
     contracts,
     mailbox_appenders,
     mailbox_constants,
@@ -81,7 +81,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 )
 
     def test_render_completion_contract_round_trips_parallel_flag(self) -> None:
-        contract = authoring.contract_from_payload(
+        contract = authoring_render.contract_from_payload(
             "1",
             ["something"],
             {
@@ -93,21 +93,23 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             },
         )
 
-        rendered = authoring.render_completion_contract(contract)
+        rendered = authoring_render.render_completion_contract(contract)
         reparsed = contracts.parse_completion_contract(rendered, session_id="1")
 
         self.assertIn('"parallel": true', rendered)
         self.assertTrue(reparsed.verify.parallel)
 
     def test_render_completion_contract_omits_default_parallel_flag(self) -> None:
-        contract = authoring.contract_from_payload(
+        contract = authoring_render.contract_from_payload(
             "1", ["something"], {"checks": [{"type": "file_exists", "path": "a"}]}
         )
 
-        self.assertNotIn("parallel", authoring.render_completion_contract(contract))
+        self.assertNotIn(
+            "parallel", authoring_render.render_completion_contract(contract)
+        )
 
     def test_render_completion_contract_round_trips_failure_diagnostic(self) -> None:
-        contract = authoring.contract_from_payload(
+        contract = authoring_render.contract_from_payload(
             "1",
             ["something"],
             {
@@ -123,7 +125,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             },
         )
 
-        rendered = authoring.render_completion_contract(contract)
+        rendered = authoring_render.render_completion_contract(contract)
         reparsed = contracts.parse_completion_contract(rendered, session_id="1")
 
         self.assertIn('"on_failure_of": [', rendered)
@@ -201,7 +203,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 self.subTest(message=message),
                 self.assertRaisesRegex(plans_errors.PlanError, message),
             ):
-                authoring.contract_from_payload("1", ["something"], payload)
+                authoring_render.contract_from_payload("1", ["something"], payload)
 
     def test_parse_completion_contract_reports_malformed_json(self) -> None:
         text = "\n".join(

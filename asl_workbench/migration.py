@@ -17,7 +17,7 @@ something:
   operator no moment at which to say no.
 * **Identities are copied, never recomputed.** The database moves through
   SQLite's own online backup and then through
-  :func:`asl_workbench.store.migrate`, so every ``run_key``, ``plan_key`` and
+  :func:`asl_workbench.store_migrations.migrate`, so every ``run_key``, ``plan_key`` and
   ``incident_id`` is the one that was already there. A migration that rebuilt
   them from source data would break every link the Pi has published and split
   every open incident in two.
@@ -98,7 +98,8 @@ from .operations import (
     advance_record,
     persist_operation,
 )
-from .store import StoreError, WorkbenchStore
+from .store_types import StoreError
+from .store_workbench import WorkbenchStore
 
 #: The deployment roles, spelled here rather than imported from
 #: :mod:`asl_workbench.lifecycle`: the lifecycle imports this module, and a

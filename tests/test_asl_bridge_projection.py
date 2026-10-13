@@ -18,7 +18,12 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
-    bridge,
+    agent_mux_projection,
+    bridge_projection,
+    bridge_protocol,
+    bridge_server,
+    bridge_session,
+    bridge_workers,
     cli,
     intervention,
     mailbox,
@@ -27,7 +32,10 @@ from agent_session_loop import (
     mailbox_waits,
     plans_files,
     state,
-    workbench,
+    workbench_discovery,
+    workbench_registry_models,
+    workbench_summary,
+    workbench_summary_model,
 )
 
 from .support import (
@@ -52,7 +60,7 @@ class _Corpus:
         self.state_root = tmp_path / "state"
 
     def snapshot(self) -> dict[str, Any]:
-        return bridge.build_runs_snapshot(
+        return bridge_projection.build_runs_snapshot(
             state_dir=self.state_root,
             plan_roots=(self.plans_root,),
             include_default_dirs=False,
@@ -197,7 +205,7 @@ class _Corpus:
 def _request(request_id: str, method: str, **params: Any) -> bytes:
     payload: dict[str, Any] = {
         "type": "request",
-        "protocol": bridge.PROTOCOL_VERSION,
+        "protocol": bridge_protocol.PROTOCOL_VERSION,
         "id": request_id,
         "method": method,
         "params": params,
@@ -207,34 +215,40 @@ def _request(request_id: str, method: str, **params: Any) -> bytes:
 
 class BridgeHelloTests(unittest.TestCase):
     def test_hello_declares_protocol_version_and_ordered_capabilities(self) -> None:
-        payload = bridge.hello_payload()
+        payload = bridge_session.hello_payload()
 
         self.assertEqual("hello", payload["type"])
         self.assertEqual(2, payload["protocol"])
-        self.assertEqual(list(bridge.CAPABILITIES), payload["capabilities"])
+        self.assertEqual(list(bridge_session.CAPABILITIES), payload["capabilities"])
         # The handshake leads because nothing else a client wants to do is
         # available until it has completed one.
         self.assertEqual(
-            [bridge.METHOD_HANDSHAKE, "runs.snapshot"],
+            [bridge_protocol.METHOD_HANDSHAKE, "runs.snapshot"],
             payload["capabilities"][:2],
         )
-        self.assertEqual(list(bridge.EVENT_NAMES), payload["events"])
-        self.assertEqual(list(bridge.MUTATION_METHODS), payload["mutation_methods"])
+        self.assertEqual(list(bridge_protocol.EVENT_NAMES), payload["events"])
+        self.assertEqual(
+            list(bridge_protocol.MUTATION_METHODS), payload["mutation_methods"]
+        )
         self.assertEqual(1024 * 1024, payload["max_frame_bytes"])
         self.assertIsInstance(payload["asl_version"], str)
 
     def test_hello_names_the_contract_set_the_bridge_implements(self) -> None:
-        payload = bridge.hello_payload()
+        payload = bridge_session.hello_payload()
 
-        self.assertEqual(bridge.CONTRACT_SET_ID, payload["contract_set_id"])
+        self.assertEqual(
+            agent_mux_projection.CONTRACT_SET_ID, payload["contract_set_id"]
+        )
         self.assertIs(True, payload["handshake_required"])
 
     def test_hello_frame_is_one_newline_terminated_utf8_line(self) -> None:
-        frame = bridge.encode_frame(bridge.hello_payload())
+        frame = bridge_protocol.encode_frame(bridge_session.hello_payload())
 
         self.assertTrue(frame.endswith(b"\n"))
         self.assertEqual(1, frame.count(b"\n"))
-        self.assertEqual(bridge.hello_payload(), json.loads(frame.decode("utf-8")))
+        self.assertEqual(
+            bridge_session.hello_payload(), json.loads(frame.decode("utf-8"))
+        )
 
 
 class RunsProjectionTests(unittest.TestCase):
@@ -264,9 +278,11 @@ class RunsProjectionTests(unittest.TestCase):
                 "verifying",
                 "running",
             },
-            set(bridge.ACTIVE_PRIMARY_STATES),
+            set(bridge_protocol.ACTIVE_PRIMARY_STATES),
         )
-        excluded = set(workbench.PRIMARY_STATES) - set(bridge.ACTIVE_PRIMARY_STATES)
+        excluded = set(workbench_summary_model.PRIMARY_STATES) - set(
+            bridge_protocol.ACTIVE_PRIMARY_STATES
+        )
         self.assertEqual({"ready", "recent", "complete"}, excluded)
 
     def test_snapshot_serialization_never_carries_question_bodies(self) -> None:
@@ -274,7 +290,7 @@ class RunsProjectionTests(unittest.TestCase):
             corpus = _Corpus(Path(tmp))
             corpus.paused_plan()
 
-            frame = bridge.encode_frame(corpus.snapshot()).decode("utf-8")
+            frame = bridge_protocol.encode_frame(corpus.snapshot()).decode("utf-8")
 
             self.assertNotIn(QUESTION_BODY, frame)
             self.assertNotIn("v1 column", frame)
@@ -366,18 +382,19 @@ class RunsProjectionTests(unittest.TestCase):
             self.assertEqual(str(plan_dir), row["plan_dir"])
             self.assertEqual("20260619T140000Z-1", row["run_id"])
             self.assertEqual(
-                bridge.row_id(str(plan_dir), "20260619T140000Z-1"), row["row_id"]
+                bridge_projection.row_id(str(plan_dir), "20260619T140000Z-1"),
+                row["row_id"],
             )
             self.assertEqual("paused-for-reply", row["primary_state"])
             self.assertEqual("awaiting-reply", row["phase"])
             self.assertEqual("needs-action", row["urgency_group"])
             self.assertEqual(
-                workbench.URGENCY_RANK_BY_STATE["paused-for-reply"],
+                workbench_summary_model.URGENCY_RANK_BY_STATE["paused-for-reply"],
                 row["urgency_rank"],
             )
             self.assertEqual("reply", row["recommended_action"])
             self.assertEqual(
-                workbench.ACTIVITY_LABEL_BY_STATE["paused-for-reply"],
+                workbench_summary_model.ACTIVITY_LABEL_BY_STATE["paused-for-reply"],
                 row["activity_label"],
             )
             self.assertEqual("claude", row["harness"])
@@ -542,11 +559,13 @@ class RunsProjectionTests(unittest.TestCase):
             "warnings": [],
             "truncated": False,
         }
-        digest = bridge.snapshot_digest(snapshot)
+        digest = bridge_projection.snapshot_digest(snapshot)
 
-        self.assertEqual(digest, bridge.snapshot_digest({**snapshot, "digest": digest}))
+        self.assertEqual(
+            digest, bridge_projection.snapshot_digest({**snapshot, "digest": digest})
+        )
         self.assertNotEqual(
-            digest, bridge.snapshot_digest({**snapshot, "row_count": 1})
+            digest, bridge_projection.snapshot_digest({**snapshot, "row_count": 1})
         )
 
 
@@ -581,19 +600,21 @@ class ObservationalReadTests(unittest.TestCase):
                 hostname=socket.gethostname(),
             )
 
-            workbench.build_workbench_summary(
+            workbench_summary.build_workbench_summary(
                 _discovered(plan_dir), state_dir=state_root, reclaim=False
             )
             self.assertTrue(lock_path.exists())
 
-            workbench.build_workbench_summary(
+            workbench_summary.build_workbench_summary(
                 _discovered(plan_dir), state_dir=state_root
             )
             self.assertFalse(lock_path.exists())
 
 
 class BridgeSessionTests(unittest.TestCase):
-    def _session(self, snapshot: dict[str, Any] | None = None) -> bridge.BridgeSession:
+    def _session(
+        self, snapshot: dict[str, Any] | None = None
+    ) -> bridge_session.BridgeSession:
         payload = snapshot or {
             "protocol": 1,
             "rows": [],
@@ -602,7 +623,7 @@ class BridgeSessionTests(unittest.TestCase):
             "truncated": False,
             "digest": "seed",
         }
-        return bridge.BridgeSession(snapshot_builder=lambda: payload)
+        return bridge_session.BridgeSession(snapshot_builder=lambda: payload)
 
     def test_runs_snapshot_request_returns_a_correlated_response(self) -> None:
         response = self._session().handle_frame(_request("req-1", "runs.snapshot"))
@@ -681,7 +702,7 @@ class BridgeSessionTests(unittest.TestCase):
         def explode() -> dict[str, Any]:
             raise RuntimeError("state root vanished")
 
-        session = bridge.BridgeSession(snapshot_builder=explode)
+        session = bridge_session.BridgeSession(snapshot_builder=explode)
 
         response = session.handle_frame(_request("req-1", "runs.snapshot"))
 
@@ -700,7 +721,7 @@ class RunsChangedEventTests(unittest.TestCase):
             "truncated": False,
             "digest": "same",
         }
-        session = bridge.BridgeSession(snapshot_builder=lambda: payload)
+        session = bridge_session.BridgeSession(snapshot_builder=lambda: payload)
 
         first = session.poll()
         second = session.poll()
@@ -713,7 +734,7 @@ class RunsChangedEventTests(unittest.TestCase):
 
     def test_event_sequence_is_monotonic_across_changes(self) -> None:
         digests = iter(["a", "b", "b", "c"])
-        session = bridge.BridgeSession(
+        session = bridge_session.BridgeSession(
             snapshot_builder=lambda: {
                 "protocol": 1,
                 "rows": [],
@@ -738,7 +759,7 @@ class RunsChangedEventTests(unittest.TestCase):
             "truncated": False,
             "digest": "same",
         }
-        session = bridge.BridgeSession(snapshot_builder=lambda: payload)
+        session = bridge_session.BridgeSession(snapshot_builder=lambda: payload)
 
         session.handle_frame(_request("req-1", "runs.snapshot"))
 
@@ -748,22 +769,22 @@ class RunsChangedEventTests(unittest.TestCase):
 
 class FrameBoundTests(unittest.TestCase):
     def test_oversize_inbound_frame_is_rejected_and_the_line_is_drained(self) -> None:
-        oversize = b"x" * (bridge.MAX_FRAME_BYTES + 10) + b"\n"
+        oversize = b"x" * (bridge_protocol.MAX_FRAME_BYTES + 10) + b"\n"
         reader = io.BytesIO(oversize + b'{"type":"request"}\n')
 
-        with self.assertRaises(bridge._FrameTooLarge):
-            bridge.read_frame(reader)
+        with self.assertRaises(bridge_server._FrameTooLarge):
+            bridge_server.read_frame(reader)
 
-        self.assertEqual(b'{"type":"request"}', bridge.read_frame(reader))
+        self.assertEqual(b'{"type":"request"}', bridge_server.read_frame(reader))
 
     def test_frame_of_exactly_the_ceiling_is_accepted(self) -> None:
-        payload = b"y" * bridge.MAX_FRAME_BYTES
+        payload = b"y" * bridge_protocol.MAX_FRAME_BYTES
         reader = io.BytesIO(payload + b"\n")
 
-        self.assertEqual(payload, bridge.read_frame(reader))
+        self.assertEqual(payload, bridge_server.read_frame(reader))
 
     def test_end_of_stream_reads_as_none(self) -> None:
-        self.assertIsNone(bridge.read_frame(io.BytesIO(b"")))
+        self.assertIsNone(bridge_server.read_frame(io.BytesIO(b"")))
 
     def test_per_field_bounds_keep_corrupt_state_inside_the_frame(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -785,15 +806,18 @@ class FrameBoundTests(unittest.TestCase):
             snapshot = corpus.snapshot()
             (row,) = snapshot["rows"]
 
-            self.assertLessEqual(len(row["pause_reason"]), bridge.MAX_TEXT_CHARS)
-            self.assertLessEqual(len(row["run_id"]), bridge.MAX_ID_CHARS)
-            self.assertLessEqual(len(row["harness"]), bridge.MAX_ID_CHARS)
             self.assertLessEqual(
-                len(bridge.encode_frame(snapshot)), bridge.MAX_FRAME_BYTES
+                len(row["pause_reason"]), bridge_protocol.MAX_TEXT_CHARS
+            )
+            self.assertLessEqual(len(row["run_id"]), bridge_protocol.MAX_ID_CHARS)
+            self.assertLessEqual(len(row["harness"]), bridge_protocol.MAX_ID_CHARS)
+            self.assertLessEqual(
+                len(bridge_protocol.encode_frame(snapshot)),
+                bridge_protocol.MAX_FRAME_BYTES,
             )
 
     def test_aggregate_row_bound_is_enforced_before_serialization(self) -> None:
-        self.assertEqual(200, bridge.MAX_ROWS)
+        self.assertEqual(200, bridge_protocol.MAX_ROWS)
         rows = [
             {
                 "urgency_rank": 10,
@@ -801,9 +825,9 @@ class FrameBoundTests(unittest.TestCase):
                 "label": None,
                 "last_activity_at": None,
             }
-            for index in range(bridge.MAX_ROWS + 5)
+            for index in range(bridge_protocol.MAX_ROWS + 5)
         ]
-        ordered = sorted(rows, key=bridge._row_sort_key)
+        ordered = sorted(rows, key=bridge_projection._row_sort_key)
 
         self.assertEqual(rows, ordered)
 
@@ -815,7 +839,7 @@ class FrameBoundTests(unittest.TestCase):
                 "plan_dir": f"/plans/{index:04d}",
                 "last_activity_at": None,
             }
-            for index in range(bridge.MAX_ROWS + 5)
+            for index in range(bridge_protocol.MAX_ROWS + 5)
         ]
         live = [
             {
@@ -832,31 +856,36 @@ class FrameBoundTests(unittest.TestCase):
             "plan_dir": "/plans/recent",
             "last_activity_at": "2026-09-17T16:00:00+00:00",
         }
-        discovered = workbench.DiscoveryResult(plans=tuple(range(len(backlog) + 3)))
+        discovered = workbench_registry_models.DiscoveryResult(
+            plans=tuple(range(len(backlog) + 3))
+        )
         summaries = [
             mock.Mock(primary_state=row["primary_state"])
             for row in [*backlog, *live, recent]
         ]
         with (
-            mock.patch.object(workbench, "discover_plans", return_value=discovered),
             mock.patch.object(
-                workbench, "build_workbench_summary", side_effect=summaries
+                workbench_discovery, "discover_plans", return_value=discovered
             ),
             mock.patch.object(
-                bridge, "project_row", side_effect=[*backlog, *live, recent]
+                workbench_summary, "build_workbench_summary", side_effect=summaries
+            ),
+            mock.patch.object(
+                bridge_projection, "project_row", side_effect=[*backlog, *live, recent]
             ),
         ):
-            snapshot = bridge.build_runs_snapshot()
+            snapshot = bridge_projection.build_runs_snapshot()
         self.assertTrue(snapshot["truncated"])
-        self.assertEqual(bridge.MAX_ROWS, snapshot["row_count"])
+        self.assertEqual(bridge_protocol.MAX_ROWS, snapshot["row_count"])
         for row in [*live, recent]:
             self.assertIn(row, snapshot["rows"])
         self.assertEqual(
-            sorted(snapshot["rows"], key=bridge._row_sort_key), snapshot["rows"]
+            sorted(snapshot["rows"], key=bridge_projection._row_sort_key),
+            snapshot["rows"],
         )
 
 
-class _PrimedProjectionWorker(bridge.ProjectionWorker):
+class _PrimedProjectionWorker(bridge_workers.ProjectionWorker):
     """A worker whose first walk has landed before the loop reads a frame.
 
     A cold `runs.snapshot` is refused retryably by design, and a client answers
@@ -878,10 +907,12 @@ class BridgeServeStdioTests(unittest.TestCase):
         os.close(write_fd)
         writer = io.StringIO()
         with (
-            mock.patch.object(bridge, "ProjectionWorker", _PrimedProjectionWorker),
+            mock.patch.object(
+                bridge_server, "ProjectionWorker", _PrimedProjectionWorker
+            ),
             os.fdopen(read_fd, "rb") as reader,
         ):
-            code = bridge.serve_stdio(
+            code = bridge_server.serve_stdio(
                 reader=reader,
                 writer=writer,
                 diagnostics=io.StringIO(),
@@ -950,7 +981,7 @@ class BridgeServeStdioTests(unittest.TestCase):
             os.close(write_fd)
 
             with os.fdopen(read_fd, "rb") as reader:
-                code = bridge.serve_stdio(
+                code = bridge_server.serve_stdio(
                     reader=reader,
                     writer=BrokenWriter(),
                     diagnostics=io.StringIO(),
@@ -970,7 +1001,7 @@ class BridgeCliTests(unittest.TestCase):
         self.assertEqual("serve", args.bridge_command)
         self.assertTrue(args.stdio)
         self.assertEqual(1, args.protocol)
-        self.assertEqual("bridge:bridge_serve_from_args", args.handler_ref)
+        self.assertEqual("bridge_server:bridge_serve_from_args", args.handler_ref)
 
     def test_bridge_serve_accepts_state_dir_and_repeated_plan_roots(self) -> None:
         args = cli.build_parser().parse_args(
@@ -996,7 +1027,7 @@ class BridgeCliTests(unittest.TestCase):
             ["bridge", "serve", "--stdio", "--protocol", "1"]
         )
 
-        self.assertEqual(2, bridge.bridge_serve_from_args(args))
+        self.assertEqual(2, bridge_server.bridge_serve_from_args(args))
 
 
 if __name__ == "__main__":

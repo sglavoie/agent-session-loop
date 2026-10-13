@@ -13,9 +13,9 @@ from unittest import mock
 from agent_session_loop import (
     agent_mux_delivery,
     events,
-    run_coordination,
+    run_coordination_constants,
     run_persistence,
-    turn_execution,
+    turn_execution_protocols,
 )
 from tests.support import (
     agent_mux_notify_enabled,
@@ -139,7 +139,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
         for wait_reason in (
             "reply",
             "timeout",
-            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             "error",
         ):
             with (
@@ -276,7 +276,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
                     return_value=self._accepted_delivery(),
                 ) as run,
             ):
-                turn_execution.notify_turn_hang_suspected(
+                turn_execution_protocols.notify_turn_hang_suspected(
                     payload,
                     self._active_turn(),
                     hang_reason="result_received_process_alive",
@@ -313,7 +313,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
                     return_value=self._accepted_delivery(),
                 ) as run,
             ):
-                turn_execution.notify_turn_hang_cleared(
+                turn_execution_protocols.notify_turn_hang_cleared(
                     payload,
                     self._active_turn(),
                     hang_reason="output_resumed",
@@ -345,7 +345,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
                     return_value=self._accepted_delivery(),
                 ) as run,
             ):
-                turn_execution.notify_turn_hang_suspected(
+                turn_execution_protocols.notify_turn_hang_suspected(
                     payload,
                     self._active_turn(),
                     hang_reason="zero_cpu_ceiling",
@@ -370,14 +370,14 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
                 ),
                 mock.patch.object(agent_mux_delivery.subprocess, "run") as run,
             ):
-                turn_execution.notify_turn_hang_suspected(
+                turn_execution_protocols.notify_turn_hang_suspected(
                     payload,
                     self._active_turn(),
                     hang_reason="result_received_process_alive",
                     hang_idle_seconds=90.0,
                     harness_pid=4242,
                 )
-                turn_execution.notify_turn_hang_cleared(
+                turn_execution_protocols.notify_turn_hang_cleared(
                     payload,
                     self._active_turn(),
                     hang_reason="output_resumed",

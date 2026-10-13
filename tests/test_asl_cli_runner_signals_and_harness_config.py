@@ -13,7 +13,9 @@ from agent_session_loop import (
     harnesses,
     plans_payloads,
     run_prompts,
-    turn_execution,
+    turn_execution_artifacts,
+    turn_execution_constants,
+    turn_execution_signals,
 )
 from tests.support import (
     patched_env,
@@ -41,13 +43,13 @@ class RunnerSignalAndHarnessConfigTests(unittest.TestCase):
             last_message="Runner status: complete\n",
         )
 
-        signals = turn_execution.runner_signals(result)
+        signals = turn_execution_signals.runner_signals(result)
         self.assertEqual("complete", signals["runner_status"])
         self.assertEqual("last_message", signals["runner_status_source"])
         self.assertNotIn("runner_pause", signals)
         self.assertEqual(
             "complete",
-            turn_execution.turn_status_result(
+            turn_execution_artifacts.turn_status_result(
                 result=result,
                 status_changes=(
                     plans_payloads.session_status_change_payload(
@@ -76,7 +78,7 @@ class RunnerSignalAndHarnessConfigTests(unittest.TestCase):
             last_message="",
         )
 
-        signals = turn_execution.runner_signals(result)
+        signals = turn_execution_signals.runner_signals(result)
         self.assertEqual(
             {"runner_status": "complete", "runner_status_source": "stdout"},
             signals,
@@ -93,11 +95,11 @@ class RunnerSignalAndHarnessConfigTests(unittest.TestCase):
             last_message="",
         )
 
-        signals = turn_execution.runner_signals(result)
+        signals = turn_execution_signals.runner_signals(result)
         self.assertNotIn("runner_status", signals)
         self.assertNotIn("runner_pause", signals)
         self.assertEqual(
-            turn_execution.RUNNER_STATUS_SOURCE_ABSENT,
+            turn_execution_constants.RUNNER_STATUS_SOURCE_ABSENT,
             signals["runner_status_source"],
         )
         self.assertEqual(
@@ -110,7 +112,7 @@ class RunnerSignalAndHarnessConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             "complete",
-            turn_execution.turn_status_result(
+            turn_execution_artifacts.turn_status_result(
                 result=result,
                 status_changes=(
                     plans_payloads.session_status_change_payload(
@@ -126,7 +128,7 @@ class RunnerSignalAndHarnessConfigTests(unittest.TestCase):
             ),
         )
 
-        trusted = turn_execution.runner_signals(
+        trusted = turn_execution_signals.runner_signals(
             harnesses.HarnessResult(
                 name="codex",
                 argv=["codex"],
@@ -143,13 +145,13 @@ class RunnerSignalAndHarnessConfigTests(unittest.TestCase):
 
     def test_live_action_signal_ignores_stderr_runner_pause_text(self) -> None:
         self.assertIsNone(
-            turn_execution.live_action_signal(
+            turn_execution_signals.live_action_signal(
                 "stderr",
                 "RUNNER_PAUSE: unsafe - quoted skill instructions\n",
             )
         )
         self.assertIsNotNone(
-            turn_execution.live_action_signal(
+            turn_execution_signals.live_action_signal(
                 "stderr",
                 "approval required before continuing\n",
             )
@@ -160,19 +162,19 @@ class RunnerSignalAndHarnessConfigTests(unittest.TestCase):
         # approval-handling code streamed its own diff, and the substring match
         # read it as the run stopping for a human.
         self.assertIsNone(
-            turn_execution.live_action_signal(
+            turn_execution_signals.live_action_signal(
                 "stderr",
                 '+    "message": "approval required before continuing",\n',
             )
         )
         self.assertIsNone(
-            turn_execution.live_action_signal(
+            turn_execution_signals.live_action_signal(
                 "stderr",
                 '-    "message": "needs approval",\n',
             )
         )
         self.assertIsNone(
-            turn_execution.live_action_signal(
+            turn_execution_signals.live_action_signal(
                 "stderr",
                 '     "detail": "requires approval"\n',
             )
@@ -180,13 +182,13 @@ class RunnerSignalAndHarnessConfigTests(unittest.TestCase):
 
     def test_a_prompt_on_its_own_line_still_asks(self) -> None:
         self.assertIsNotNone(
-            turn_execution.live_action_signal(
+            turn_execution_signals.live_action_signal(
                 "stderr",
                 "Approval required: run npm install?\n",
             )
         )
         self.assertIsNotNone(
-            turn_execution.live_action_signal(
+            turn_execution_signals.live_action_signal(
                 "stderr",
                 "building the bundle\nwaiting for approval\nstill waiting\n",
             )
@@ -204,14 +206,14 @@ class RunnerSignalAndHarnessConfigTests(unittest.TestCase):
             last_message="Runner status: complete\nRUNNER_PAUSE: none\n",
         )
 
-        signals = turn_execution.runner_signals(result)
+        signals = turn_execution_signals.runner_signals(result)
         self.assertEqual("complete", signals["runner_status"])
         self.assertEqual("last_message", signals["runner_status_source"])
         self.assertNotIn("runner_pause", signals)
         self.assertNotIn("runner_pause_source", signals)
         self.assertEqual(
             "complete",
-            turn_execution.turn_status_result(
+            turn_execution_artifacts.turn_status_result(
                 result=result,
                 status_changes=(
                     plans_payloads.session_status_change_payload(
@@ -240,7 +242,7 @@ class RunnerSignalAndHarnessConfigTests(unittest.TestCase):
             ),
         )
 
-        signals = turn_execution.runner_signals(result)
+        signals = turn_execution_signals.runner_signals(result)
         self.assertEqual(
             "blocked - interactive decision gates",
             signals["runner_pause"],
@@ -249,10 +251,10 @@ class RunnerSignalAndHarnessConfigTests(unittest.TestCase):
 
     def test_live_action_signal_ignores_noop_runner_pause(self) -> None:
         self.assertIsNone(
-            turn_execution.live_action_signal("stdout", "RUNNER_PAUSE: none\n")
+            turn_execution_signals.live_action_signal("stdout", "RUNNER_PAUSE: none\n")
         )
         self.assertIsNotNone(
-            turn_execution.live_action_signal(
+            turn_execution_signals.live_action_signal(
                 "stdout",
                 "RUNNER_PAUSE: blocked - needs input\n",
             )

@@ -5,8 +5,8 @@ Split from tests/test_asl_workbench_static.py."""
 import unittest
 
 from agent_session_loop import (
-    workbench,
     workbench_server,
+    workbench_summary_model,
 )
 from tests import support_asl_workbench_static as support_static
 from tests.support import (
@@ -199,13 +199,16 @@ class WorkbenchStaticQueueStateTests(support_static.WorkbenchStaticCase):
         self.assertIn("stateOrder", decoded)
         self.assertIn("return stateOrder(plan && plan.primary_state);", decoded)
         self.assertNotIn("stateOrder(plan && plan.primary_state) * 10", decoded)
-        for primary_state, rank in workbench.URGENCY_RANK_BY_STATE.items():
+        for (
+            primary_state,
+            rank,
+        ) in workbench_summary_model.URGENCY_RANK_BY_STATE.items():
             self.assertIn(
                 f'"{primary_state}": {rank}',
                 decoded,
                 msg=(
                     f"legacy JS fallback rank for {primary_state!r} must "
-                    "match workbench.URGENCY_RANK_BY_STATE"
+                    "match workbench_summary_model.URGENCY_RANK_BY_STATE"
                 ),
             )
 

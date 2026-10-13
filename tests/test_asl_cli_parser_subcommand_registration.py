@@ -11,7 +11,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from agent_session_loop import (
-    bridge,
+    bridge_protocol,
     cli,
     cli_defaults,
     commit_message,
@@ -26,9 +26,9 @@ from agent_session_loop import (
     repository_registration,
     retention,
     review,
-    turn_execution,
+    turn_execution_constants,
     verification,
-    workbench,
+    workbench_cli,
     workbench_server,
 )
 from tests.support import (
@@ -136,8 +136,8 @@ class ParserSubcommandRegistrationTests(unittest.TestCase):
         self.assertTrue(args.never_run)
         self.assertEqual("reviewed", args.readiness)
         self.assertTrue(args.json)
-        self.assertEqual("workbench:plans_from_args", args.handler_ref)
-        self.assertIs(cli.resolve_handler(args), workbench.plans_from_args)
+        self.assertEqual("workbench_cli:plans_from_args", args.handler_ref)
+        self.assertIs(cli.resolve_handler(args), workbench_cli.plans_from_args)
 
     def test_expand_ingest_subcommand_registers_handler(self) -> None:
         parser = cli.build_parser()
@@ -254,9 +254,11 @@ class ParserSubcommandRegistrationTests(unittest.TestCase):
             cli_defaults._REDIRECT_MAX_ACK_WAIT_SECONDS,
         )
         self.assertEqual(
-            turn_execution.INTERRUPTED_EXIT, cli_defaults._INTERRUPTED_EXIT
+            turn_execution_constants.INTERRUPTED_EXIT, cli_defaults._INTERRUPTED_EXIT
         )
-        self.assertEqual(bridge.PROTOCOL_VERSION, cli_defaults._BRIDGE_PROTOCOL_VERSION)
+        self.assertEqual(
+            bridge_protocol.PROTOCOL_VERSION, cli_defaults._BRIDGE_PROTOCOL_VERSION
+        )
 
     def test_main_returns_interrupted_exit_on_keyboard_interrupt(self) -> None:
         def interrupted(_args: argparse.Namespace) -> int:

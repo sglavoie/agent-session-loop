@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent_session_loop import mailbox_constants, run_coordination
+from agent_session_loop import mailbox_constants, run_coordination_constants
 from tests.asl_docs_support import ASL_GUIDE, read_repo_text
 
 #: The ASL operator guide moved out of the repository README; it carries the
@@ -258,7 +258,9 @@ class MailboxProtocolDocsTests(unittest.TestCase):
         normalized = " ".join(mailbox_docs.split())
 
         # Pin the documented character bound to the constant it describes.
-        self.assertEqual(16000, run_coordination.MAILBOX_QUESTION_TEXT_MAX_CHARS)
+        self.assertEqual(
+            16000, run_coordination_constants.MAILBOX_QUESTION_TEXT_MAX_CHARS
+        )
         self.assertIn(
             "The question body a waiting runner publishes is itself bounded: "
             "at most the first 16,000 characters of the last-message artifact",

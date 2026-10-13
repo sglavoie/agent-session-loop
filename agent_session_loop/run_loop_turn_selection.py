@@ -11,13 +11,13 @@ from . import (
     plans_payloads,
     review_repair,
     run_completion,
-    run_coordination,
+    run_coordination_control_drain,
     run_prompts,
     run_selection,
     run_termination,
     spark_status,
     state,
-    turn_execution,
+    turn_execution_artifacts,
     turn_preflight,
     turn_preparation,
 )
@@ -140,7 +140,7 @@ def _select_turn_harness(frame: RunFrame) -> RunResult | LoopSignal | None:
     with frame.ctx.persistence.lock:
         frame.turn_index = len(frame.ctx.payload["turns"]) + 1
         frame.turns_already_run = bool(frame.ctx.payload["turns"])
-    frame.paths = turn_execution.turn_paths(
+    frame.paths = turn_execution_artifacts.turn_paths(
         frame.ctx.run_dir,
         turn_index=frame.turn_index,
         session_id=frame.session_id,
@@ -151,7 +151,7 @@ def _select_turn_harness(frame: RunFrame) -> RunResult | LoopSignal | None:
         "turn_index": frame.turn_index,
         "total_sessions": sum(plans_payloads.status_counts(frame.before).values()),
     }
-    run_coordination.drain_external_control_queue(
+    run_coordination_control_drain.drain_external_control_queue(
         plan_dir=frame.before.plan_dir,
         state_dir_arg=frame.args.state_dir,
         control_state=frame.ctx.run_controls.state,

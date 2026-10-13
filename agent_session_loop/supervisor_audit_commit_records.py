@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from . import supervisor_audit_evidence as audit_evidence
+from . import supervisor_audit_evidence_commits as audit_evidence_commits
+from . import supervisor_audit_evidence_helpers as audit_evidence_helpers
 from .supervisor_audit_models import _CheckContext
 
 
@@ -19,16 +20,18 @@ def _commit_records(context: _CheckContext) -> list[Mapping[str, Any]]:
     """
     commits = context.section("commits")
     records = [
-        audit_evidence._mapping(item)
-        for item in audit_evidence._sequence(commits.get("commits"))
+        audit_evidence_helpers._mapping(item)
+        for item in audit_evidence_helpers._sequence(commits.get("commits"))
     ]
     records.extend(
-        audit_evidence._mapping(item)
-        for item in audit_evidence._sequence(commits.get("commit_groups"))
+        audit_evidence_helpers._mapping(item)
+        for item in audit_evidence_helpers._sequence(commits.get("commit_groups"))
     )
     records.extend(
-        audit_evidence._mapping(audit_evidence._mapping(item).get("result"))
-        for item in audit_evidence._sequence(commits.get("attempts"))
+        audit_evidence_helpers._mapping(
+            audit_evidence_helpers._mapping(item).get("result")
+        )
+        for item in audit_evidence_helpers._sequence(commits.get("attempts"))
     )
     return [record for record in records if record]
 
@@ -44,7 +47,7 @@ def _commit_repository_alias(record: Mapping[str, Any]) -> str | None:
     for key in ("repository_alias", "repo", "alias", "repository_key", "key"):
         value = record.get(key)
         if isinstance(value, str) and value:
-            return value.split(audit_evidence._WORKTREE_KEY_SEPARATOR, 1)[0]
+            return value.split(audit_evidence_commits._WORKTREE_KEY_SEPARATOR, 1)[0]
     return None
 
 
@@ -73,8 +76,8 @@ def _commit_attributions(
     for record in _commit_records(context):
         session = _write_scope_session(record.get("session_id"))
         nested = [
-            audit_evidence._mapping(item)
-            for item in audit_evidence._sequence(record.get("repositories"))
+            audit_evidence_helpers._mapping(item)
+            for item in audit_evidence_helpers._sequence(record.get("repositories"))
         ]
         if nested:
             pairs.extend(
@@ -90,7 +93,7 @@ def _commit_attributions(
             continue
         aliases = [
             alias
-            for alias in audit_evidence._sequence(record.get("ordered_aliases"))
+            for alias in audit_evidence_helpers._sequence(record.get("ordered_aliases"))
             if isinstance(alias, str) and alias
         ]
         if aliases:
@@ -103,9 +106,9 @@ def _commit_attributions(
 def _guard_head_moves(guard: Mapping[str, Any]) -> set[tuple[str | None, Any]]:
     """The ``(repository, head after)`` pairs one guard record saw move."""
     moves: set[tuple[str | None, Any]] = set()
-    for alias, change in audit_evidence._mapping(guard.get("changed")).items():
-        change = audit_evidence._mapping(change)
-        transition = audit_evidence._mapping(change.get("head_transition"))
+    for alias, change in audit_evidence_helpers._mapping(guard.get("changed")).items():
+        change = audit_evidence_helpers._mapping(change)
+        transition = audit_evidence_helpers._mapping(change.get("head_transition"))
         # Endpoints come from one source, as in _reconcile_observed_commits.
         source = transition if transition else change
         head_after = source.get("after" if transition else "head_after")
@@ -113,7 +116,9 @@ def _guard_head_moves(guard: Mapping[str, Any]) -> set[tuple[str | None, Any]]:
         if isinstance(head_after, str) and head_after and head_after != before:
             moves.add(
                 (
-                    str(alias).split(audit_evidence._WORKTREE_KEY_SEPARATOR, 1)[0],
+                    str(alias).split(audit_evidence_commits._WORKTREE_KEY_SEPARATOR, 1)[
+                        0
+                    ],
                     head_after,
                 )
             )

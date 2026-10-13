@@ -25,7 +25,7 @@ from agent_session_loop import (
     run_loop,
     state,
     state_locks,
-    turn_execution,
+    turn_execution_artifacts,
 )
 from tests.support import (
     REPO_ROOT,
@@ -127,7 +127,7 @@ class PreTurnStopCheckpointTests(unittest.TestCase):
                 stderr="",
             )
 
-        real_turn_paths = turn_execution.turn_paths
+        real_turn_paths = turn_execution_artifacts.turn_paths
         turn_paths_calls = 0
 
         def fake_turn_paths(*args: object, **kwargs: object):
@@ -173,7 +173,7 @@ class PreTurnStopCheckpointTests(unittest.TestCase):
             ),
             mock.patch.object(harnesses, "run_harness", side_effect=fake_run_harness),
             mock.patch.object(
-                turn_execution, "turn_paths", side_effect=fake_turn_paths
+                turn_execution_artifacts, "turn_paths", side_effect=fake_turn_paths
             ),
             mock.patch.object(
                 run_control.RunControlListener,

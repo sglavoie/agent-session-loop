@@ -22,10 +22,12 @@ from agent_session_loop import (
     mailbox_models,
     mailbox_vocabulary,
     qna,
-    run_coordination,
+    run_coordination_mailbox_question,
+    run_coordination_mailbox_wait,
     run_prompts,
     state,
 )
+from agent_session_loop import run_coordination_constants as wait_budgets
 from tests.reply_flow_support import (
     HELPER_THREAD_JOIN_TIMEOUT_SECONDS,
     QUESTION_PUBLISH_TIMEOUT_SECONDS,
@@ -143,10 +145,10 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                 cwd=tmp_dir,
             )
             env = {
-                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
-                run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
-                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
-                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
+                wait_budgets.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
+                wait_budgets.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
+                wait_budgets.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
+                wait_budgets.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
             }
             with (
                 mock.patch.dict(os.environ, env),
@@ -295,10 +297,10 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                 cwd=tmp_dir,
             )
             env = {
-                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
-                run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
-                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
-                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
+                wait_budgets.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
+                wait_budgets.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
+                wait_budgets.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
+                wait_budgets.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
             }
             with (
                 mock.patch.dict(os.environ, env),
@@ -433,7 +435,7 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                     side_effect=fake_run_harness,
                 ),
                 mock.patch.object(
-                    run_coordination,
+                    run_coordination_mailbox_wait,
                     "prepare_mailbox_reply_wait",
                     side_effect=AssertionError(
                         "a correlated worker pause must not publish a second question"
@@ -564,7 +566,8 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                         state_dir=state_dir,
                     )
 
-                    matched = run_coordination.worker_pause_resolution_for_turn(
+                    pauses = run_coordination_mailbox_question
+                    matched = pauses.worker_pause_resolution_for_turn(
                         plan_dir=plan_dir,
                         state_dir_arg=str(state_dir),
                         run_id="run-current",

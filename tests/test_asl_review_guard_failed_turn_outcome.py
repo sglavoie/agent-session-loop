@@ -23,10 +23,10 @@ from agent_session_loop import (
     pause_policy,
     plans_handoff,
     review_session_body,
-    run_coordination,
+    run_coordination_mailbox_wait,
     run_loop,
     state_locks,
-    turn_execution,
+    turn_execution_constants,
 )
 from tests.support import (
     REPO_ROOT,
@@ -173,7 +173,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
                 )
                 stack.enter_context(
                     mock.patch.object(
-                        run_coordination,
+                        run_coordination_mailbox_wait,
                         "prepare_mailbox_reply_wait",
                         side_effect=AssertionError(
                             "the mailbox reply wait must not be reachable "
@@ -260,7 +260,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
 
     def test_interrupted_review_turn_trips_the_guard(self) -> None:
         payload = self._run_locked(
-            returncode=turn_execution.INTERRUPTED_EXIT, interrupted=True
+            returncode=turn_execution_constants.INTERRUPTED_EXIT, interrupted=True
         )
 
         self._assert_guard_pause(payload)

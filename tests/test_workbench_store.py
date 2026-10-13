@@ -35,7 +35,15 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from unittest import mock
 
-from asl_workbench import freshness, incidents, observation, store
+from asl_workbench import (
+    freshness,
+    incidents,
+    observation,
+    store_columns,
+    store_migrations,
+    store_types,
+    store_workbench,
+)
 from asl_workbench.operations import (
     FORBIDDEN_PERSISTED_KEYS,
     OPERATION_PERSIST_FIELDS,
@@ -266,8 +274,8 @@ class StoreCase(unittest.TestCase):
         self.store = self.open_store(created_at=NOW - RETENTION)
         self.wall = NOW
 
-    def open_store(self, *, created_at: float = NOW) -> store.WorkbenchStore:
-        opened = store.WorkbenchStore.open(
+    def open_store(self, *, created_at: float = NOW) -> store_workbench.WorkbenchStore:
+        opened = store_workbench.WorkbenchStore.open(
             self.path, policy=self.policy, created_at=created_at
         )
         self.addCleanup(opened.close)
@@ -367,21 +375,21 @@ def companion_database(path: Path, *, created_at: float) -> None:
     valid stand-in because those tuples are byte-identical to the Companion's.
     ``test_the_inherited_migrations_are_unchanged`` is what holds that.
     """
-    connection = store.connect(path)
+    connection = store_migrations.connect(path)
     try:
-        for version, statements in store.MIGRATIONS:
-            if version > store.COMPANION_SCHEMA_VERSION:
+        for version, statements in store_migrations.MIGRATIONS:
+            if version > store_types.COMPANION_SCHEMA_VERSION:
                 break
             for statement in statements:
                 connection.execute(statement)
         connection.execute(
             "INSERT INTO service_meta (key, value) VALUES (?, ?)",
-            (store.META_CREATED_AT, json.dumps(created_at)),
+            (store_types.META_CREATED_AT, json.dumps(created_at)),
         )
         connection.execute(
             "INSERT INTO service_meta (key, value) VALUES (?, ?)",
             (
-                store.META_PROJECT_CATALOG_PREFIX + CONNECTOR_ID,
+                store_types.META_PROJECT_CATALOG_PREFIX + CONNECTOR_ID,
                 json.dumps(
                     {
                         "plan-alpha": {
@@ -469,7 +477,9 @@ def companion_database(path: Path, *, created_at: float) -> None:
                 NOW - 200,
             ),
         )
-        connection.execute(f"PRAGMA user_version={store.COMPANION_SCHEMA_VERSION}")
+        connection.execute(
+            f"PRAGMA user_version={store_types.COMPANION_SCHEMA_VERSION}"
+        )
         connection.commit()
     finally:
         connection.close()
@@ -484,10 +494,10 @@ class MigrationTests(unittest.TestCase):
         self.path = Path(self.directory.name) / "workbench.sqlite3"
 
     def test_a_fresh_database_arrives_at_the_declared_version(self) -> None:
-        with store.WorkbenchStore.open(
+        with store_workbench.WorkbenchStore.open(
             self.path, policy=POLICY, created_at=NOW
         ) as opened:
-            self.assertEqual(opened.schema_version, store.SCHEMA_VERSION)
+            self.assertEqual(opened.schema_version, store_types.SCHEMA_VERSION)
             self.assertEqual(opened.created_at, NOW)
             self.assertTrue(opened.healthy())
 
@@ -495,54 +505,61 @@ class MigrationTests(unittest.TestCase):
         self,
     ) -> None:
         """Restarting is safe because a current database is a no-op."""
-        with store.WorkbenchStore.open(self.path, policy=POLICY, created_at=NOW):
+        with store_workbench.WorkbenchStore.open(
+            self.path, policy=POLICY, created_at=NOW
+        ):
             pass
-        with store.WorkbenchStore.open(
+        with store_workbench.WorkbenchStore.open(
             self.path, policy=POLICY, created_at=NOW + 5000
         ) as second:
-            self.assertEqual(second.schema_version, store.SCHEMA_VERSION)
+            self.assertEqual(second.schema_version, store_types.SCHEMA_VERSION)
             self.assertEqual(second.created_at, NOW)
 
     def test_a_newer_database_is_refused_rather_than_written_through(self) -> None:
-        with store.WorkbenchStore.open(self.path, policy=POLICY, created_at=NOW):
+        with store_workbench.WorkbenchStore.open(
+            self.path, policy=POLICY, created_at=NOW
+        ):
             pass
-        connection = store.connect(self.path)
+        connection = store_migrations.connect(self.path)
         self.addCleanup(connection.close)
-        connection.execute(f"PRAGMA user_version={store.SCHEMA_VERSION + 1}")
-        with self.assertRaises(store.StoreError):
-            store.migrate(connection)
+        connection.execute(f"PRAGMA user_version={store_types.SCHEMA_VERSION + 1}")
+        with self.assertRaises(store_types.StoreError):
+            store_migrations.migrate(connection)
 
     def test_a_failed_migration_leaves_the_previous_version_intact(self) -> None:
         """Each step commits with its own version bump, so a failure rolls back."""
-        connection = store.connect(self.path)
+        connection = store_migrations.connect(self.path)
         self.addCleanup(connection.close)
-        broken = (*store.MIGRATIONS[:1], (2, ("CREATE TABLE service_meta (x)",)))
+        broken = (
+            *store_migrations.MIGRATIONS[:1],
+            (2, ("CREATE TABLE service_meta (x)",)),
+        )
         with (
-            mock.patch.object(store, "MIGRATIONS", broken),
+            mock.patch.object(store_migrations, "MIGRATIONS", broken),
             self.assertRaises(sqlite3.OperationalError),
         ):
-            store.migrate(connection, created_at=NOW)
-        self.assertEqual(store.schema_version(connection), 1)
+            store_migrations.migrate(connection, created_at=NOW)
+        self.assertEqual(store_migrations.schema_version(connection), 1)
         self.assertEqual(
             connection.execute("SELECT COUNT(*) FROM connector").fetchone()[0], 0
         )
 
     def test_the_inherited_migrations_are_unchanged(self) -> None:
         """Migrations 1 to 3 are the Companion's, so an existing file skips them."""
-        versions = [version for version, _ in store.MIGRATIONS]
+        versions = [version for version, _ in store_migrations.MIGRATIONS]
         self.assertEqual(versions, [1, 2, 3, 4])
-        self.assertEqual(store.MIGRATIONS[2][1], incidents.MIGRATION)
-        self.assertEqual(store.SCHEMA_VERSION, versions[-1])
-        self.assertEqual(store.COMPANION_SCHEMA_VERSION, 3)
+        self.assertEqual(store_migrations.MIGRATIONS[2][1], incidents.MIGRATION)
+        self.assertEqual(store_types.SCHEMA_VERSION, versions[-1])
+        self.assertEqual(store_types.COMPANION_SCHEMA_VERSION, 3)
 
     def test_an_installed_companion_database_keeps_every_row_and_identifier(
         self,
     ) -> None:
         companion_database(self.path, created_at=NOW - RETENTION)
-        with store.WorkbenchStore.open(
+        with store_workbench.WorkbenchStore.open(
             self.path, policy=POLICY, created_at=NOW
         ) as opened:
-            self.assertEqual(opened.schema_version, store.SCHEMA_VERSION)
+            self.assertEqual(opened.schema_version, store_types.SCHEMA_VERSION)
             # Creation time is the installation's, not this upgrade's.
             self.assertEqual(opened.created_at, NOW - RETENTION)
             self.assertEqual(
@@ -570,7 +587,7 @@ class MigrationTests(unittest.TestCase):
         retained history from its plan directory name.
         """
         companion_database(self.path, created_at=NOW - RETENTION)
-        with store.WorkbenchStore.open(
+        with store_workbench.WorkbenchStore.open(
             self.path, policy=POLICY, created_at=NOW
         ) as opened:
             row = opened.runs(now=NOW)[0]
@@ -588,7 +605,9 @@ class MigrationTests(unittest.TestCase):
     ) -> None:
         """A plan the Mac no longer enumerates is genuinely gone."""
         companion_database(self.path, created_at=NOW - RETENTION)
-        opened = store.WorkbenchStore.open(self.path, policy=POLICY, created_at=NOW)
+        opened = store_workbench.WorkbenchStore.open(
+            self.path, policy=POLICY, created_at=NOW
+        )
         self.addCleanup(opened.close)
         opened.ingest_catalog(
             envelope(
@@ -630,7 +649,7 @@ class SchemaBoundaryTests(StoreCase):
     def test_every_stored_column_is_an_allowed_field_or_bookkeeping(self) -> None:
         for table, allowed in self.ALLOWLISTS.items():
             with self.subTest(table=table):
-                bookkeeping = store.SCHEMA_BOOKKEEPING[table]
+                bookkeeping = store_columns.SCHEMA_BOOKKEEPING[table]
                 unexplained = set(self.store.columns(table)) - allowed - bookkeeping
                 self.assertEqual(unexplained, set())
 
@@ -793,9 +812,9 @@ class OrderedIngestionTests(StoreCase):
 
     def test_an_older_observation_is_refused_as_stale(self) -> None:
         self.send_snapshot(observed_at=NOW - 10, runs=[run_row("alpha")])
-        with self.assertRaises(store.IngestRefused) as refusal:
+        with self.assertRaises(store_types.IngestRefused) as refusal:
             self.send_snapshot(observed_at=NOW - 20, runs=[run_row("beta")])
-        self.assertEqual(refusal.exception.code, store.REFUSED_STALE_OBSERVATION)
+        self.assertEqual(refusal.exception.code, store_types.REFUSED_STALE_OBSERVATION)
         self.assertEqual(self.run_keys(), {"alpha"})
 
     def test_a_superseded_bridge_session_is_refused_as_a_stale_generation(
@@ -803,11 +822,11 @@ class OrderedIngestionTests(StoreCase):
     ) -> None:
         """Same instant, older bridge: the generation is what breaks the tie."""
         self.send_snapshot(observed_at=NOW - 10, generation=5, runs=[run_row("alpha")])
-        with self.assertRaises(store.IngestRefused) as refusal:
+        with self.assertRaises(store_types.IngestRefused) as refusal:
             self.send_snapshot(
                 observed_at=NOW - 10, generation=3, runs=[run_row("beta")]
             )
-        self.assertEqual(refusal.exception.code, store.REFUSED_STALE_GENERATION)
+        self.assertEqual(refusal.exception.code, store_types.REFUSED_STALE_GENERATION)
         self.assertEqual(self.run_keys(), {"alpha"})
 
     def test_a_restarted_connector_is_not_locked_out_by_its_reset_counter(
@@ -820,9 +839,9 @@ class OrderedIngestionTests(StoreCase):
 
     def test_an_old_heartbeat_cannot_overwrite_a_newer_one(self) -> None:
         self.send_heartbeat(observed_at=NOW - 10, generation=4)
-        with self.assertRaises(store.IngestRefused) as refusal:
+        with self.assertRaises(store_types.IngestRefused) as refusal:
             self.send_heartbeat(observed_at=NOW - 20, generation=4)
-        self.assertEqual(refusal.exception.code, store.REFUSED_STALE_OBSERVATION)
+        self.assertEqual(refusal.exception.code, store_types.REFUSED_STALE_OBSERVATION)
         status = self.store.connector_statuses(now=NOW)[0]
         self.assertEqual(status.last_heartbeat_at, NOW - 10)
 
@@ -852,7 +871,7 @@ class OrderedIngestionTests(StoreCase):
             observed_at=NOW - 20, runs=[run_row("alpha"), run_row("beta")]
         )
         before = self.store.connector_statuses(now=NOW)[0]
-        with self.assertRaises(store.IngestInvalid):
+        with self.assertRaises(store_types.IngestInvalid):
             self.send_snapshot(
                 observed_at=NOW - 10,
                 runs=[run_row("gamma"), run_row("delta"), run_row("gamma")],
@@ -864,7 +883,7 @@ class OrderedIngestionTests(StoreCase):
 
     def test_an_unknown_refusal_code_cannot_be_invented(self) -> None:
         with self.assertRaises(AssertionError):
-            raise store.IngestRefused("made-up", "detail")
+            raise store_types.IngestRefused("made-up", "detail")
 
 
 # --------------------------------------------------------------------------
@@ -1190,13 +1209,13 @@ class CatalogTests(StoreCase):
             generation="gen-2",
             entries=[catalog_entry("plan-a")],
         )
-        with self.assertRaises(store.IngestRefused) as refusal:
+        with self.assertRaises(store_types.IngestRefused) as refusal:
             self.send_catalog(
                 observed_at=NOW - 20,
                 generation="gen-1",
                 entries=[catalog_entry("plan-b")],
             )
-        self.assertEqual(refusal.exception.code, store.REFUSED_STALE_OBSERVATION)
+        self.assertEqual(refusal.exception.code, store_types.REFUSED_STALE_OBSERVATION)
         self.assertEqual(set(self.plans_by_key()), {"plan-a"})
 
     def test_a_page_that_repeats_a_plan_is_refused_without_partial_writes(
@@ -1207,7 +1226,7 @@ class CatalogTests(StoreCase):
             generation="gen-1",
             entries=[catalog_entry("plan-a")],
         )
-        with self.assertRaises(store.IngestInvalid):
+        with self.assertRaises(store_types.IngestInvalid):
             self.send_catalog(
                 observed_at=NOW - 10,
                 generation="gen-2",
@@ -1482,7 +1501,7 @@ class RetentionTests(StoreCase):
         first = self.send_snapshot(observed_at=NOW, runs=[run_row("fresh")])
         self.assertGreaterEqual(first.pruned, 1)
         self.send_heartbeat(observed_at=NOW + 1)
-        self.assertEqual(self.store.meta(store.META_LAST_PRUNED_AT), NOW)
+        self.assertEqual(self.store.meta(store_types.META_LAST_PRUNED_AT), NOW)
 
     def test_an_incident_still_publishing_is_never_deleted(self) -> None:
         with self.store.transaction() as connection:
@@ -1965,7 +1984,7 @@ class IncidentDeliveryTests(IncidentCase):
         self.ready()
         self.engine.tick()
         published = self.diagnostics()[0]
-        with self.assertRaises(store.IngestRefused):
+        with self.assertRaises(store_types.IngestRefused):
             self.send_snapshot(
                 observed_at=NOW - 100, runs=[run_row("run-1")], received_at=self.wall
             )

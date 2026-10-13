@@ -139,10 +139,10 @@ MAX_EXCERPT_CHARS = 4000
 #: How many records of one family :func:`expand` may name.
 MAX_EXCERPT_RECORDS = 50
 
-#: Artifact directory prefixes under ``runs/<run_id>/``. ``turn_execution`` and
-#: ``run_commit`` build these names inline rather than publishing them, so they
-#: are restated here; the suffix after the zero-padded index varies and is never
-#: matched on.
+#: Artifact directory prefixes under ``runs/<run_id>/``.
+#: ``turn_execution_artifacts`` and ``run_commit`` build these names inline
+#: rather than publishing them, so they are restated here; the suffix after
+#: the zero-padded index varies and is never matched on.
 TURN_PREFIX = "turn-"
 COMMIT_PREFIX = "commit-"
 

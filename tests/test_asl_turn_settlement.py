@@ -55,13 +55,13 @@ from agent_session_loop import (
     plans_status_tables,
     readiness_gate,
     review_cycle,
-    run_coordination,
+    run_coordination_control_drain,
     run_inputs,
     run_loop_context,
     run_selection,
     run_termination,
     session_verification,
-    turn_execution,
+    turn_execution_commit,
     turn_settlement,
 )
 from tests import support_asl_run_loop_view as run_loop_view
@@ -181,13 +181,15 @@ class FakeTurnExecutor:
         self.published = published
         self.record = record
         self.calls: list[dict[str, Any]] = []
-        self.rejection: turn_execution.TurnCommitRejected | None = None
+        self.rejection: turn_execution_commit.TurnCommitRejected | None = None
 
-    def commit(self, **kwargs: Any) -> turn_execution.TurnCommit:
+    def commit(self, **kwargs: Any) -> turn_execution_commit.TurnCommit:
         self.calls.append(kwargs)
         if self.rejection is not None:
             raise self.rejection
-        return turn_execution.TurnCommit(published=self.published, record=self.record)
+        return turn_execution_commit.TurnCommit(
+            published=self.published, record=self.record
+        )
 
 
 class SettlementTestCase(unittest.TestCase):
@@ -258,7 +260,7 @@ class SettlementTestCase(unittest.TestCase):
             self.recorder("verification", False),
         )
         self.patch(
-            run_coordination,
+            run_coordination_control_drain,
             "drain_external_control_queue",
             self.recorder("drain", None),
         )
@@ -317,7 +319,7 @@ class SettlementTestCase(unittest.TestCase):
 
         publish = self.turn_executor.commit
 
-        def _commit(**kwargs: Any) -> turn_execution.TurnCommit:
+        def _commit(**kwargs: Any) -> turn_execution_commit.TurnCommit:
             self.trace.append("turn-commit")
             return publish(**kwargs)
 
@@ -561,7 +563,7 @@ class GuardOrderTests(SettlementTestCase):
     def test_a_rejected_turn_commit_pauses_with_the_rejection_s_own_reason(
         self,
     ) -> None:
-        self.turn_executor.rejection = turn_execution.TurnCommitRejected(
+        self.turn_executor.rejection = turn_execution_commit.TurnCommitRejected(
             reason="plan-changed",
             message="the plan moved under the accepted snapshot",
             detail={"path": "session-1.md"},

@@ -5,7 +5,7 @@ Five closed envelopes move between a Mac connector and the Pi service:
 * a **request** the service hands down -- publish a catalog page, publish
   history, refresh observations, read one detail, submit one mutation;
 * an **observation** the connector uploads, which is the cache-safe material
-  :mod:`asl_workbench.store` retains;
+  :mod:`asl_workbench.store_workbench` retains;
 * a **detail**, the one answer that may carry prose, read online and never
   written down;
 * an **operation** update, which is a mutation's state moving through
@@ -224,7 +224,7 @@ CAPABILITIES_BY_KIND: Mapping[str, frozenset[str]] = {
 # --------------------------------------------------------------------------
 
 #: The four uploads a connector makes. The names match
-#: :mod:`asl_workbench.store`'s ``KIND_*`` constants exactly, so a validated
+#: :mod:`asl_workbench.store_types`'s ``KIND_*`` constants exactly, so a validated
 #: observation envelope is ingestible without translation; the test module
 #: asserts that equality rather than leaving it to a comment.
 VIEW_HEARTBEAT = "heartbeat"
@@ -687,7 +687,7 @@ CATALOG_ENTRY_SHAPE = _Shape(
 )
 
 #: One shape per observation view. The payload bodies are the ones
-#: :mod:`asl_workbench.store` already reads, so a validated envelope goes
+#: :mod:`asl_workbench.store_workbench` already reads, so a validated envelope goes
 #: straight to ``ingest_*`` with no field renamed in between.
 OBSERVATION_SHAPES: Mapping[str, _Shape] = {
     VIEW_HEARTBEAT: _Shape(

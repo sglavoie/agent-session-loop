@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import plans_metadata, repository_intent, responses
-from .authoring import PlanTransaction
+from .authoring_transaction import PlanTransaction
 from .plans_errors import PlanError
 from .plans_files import canonicalize_path
 from .prepare_corrections import CorrectionOutcome, _apply_one_correction
@@ -58,7 +58,7 @@ def ingest_expand_batch(
     applies its exact factual corrections — staging **every** write (the
     aggregate, each expansion document, each session reference insertion, and
     each applied correction) into one
-    :class:`~agent_session_loop.authoring.PlanTransaction` that commits
+    :class:`~agent_session_loop.authoring_transaction.PlanTransaction` that commits
     atomically.
 
     All parsing happens before the transaction is staged, and every late
@@ -150,7 +150,8 @@ def expand_ingest_from_args(args: Any) -> int:
     stored ``prepare-validation.json`` aggregate, (re)renders the batch's
     ``session-<id>.expand.md`` files, and applies every proposed factual
     correction — all through one atomic
-    :class:`~agent_session_loop.authoring.PlanTransaction`. A malformed payload
+    :class:`~agent_session_loop.authoring_transaction.PlanTransaction`.
+    A malformed payload
     (or any late rendering/correction failure) fails closed with
     ``reason: "validator-schema"`` and the :class:`PlanError` message verbatim,
     leaving every pre-command file byte-identical and creating no new artifact.

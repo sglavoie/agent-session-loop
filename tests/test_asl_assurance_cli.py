@@ -14,6 +14,8 @@ from unittest import mock
 
 from agent_session_loop import (
     assurance_cli,
+    assurance_models_findings,
+    assurance_models_inbox,
     cli,
     harnesses,
     state,
@@ -21,7 +23,6 @@ from agent_session_loop import (
 )
 from agent_session_loop import assurance_draft as draft
 from agent_session_loop import assurance_ledger as ledger
-from agent_session_loop import assurance_models as models
 from agent_session_loop import assurance_projection as projection
 from agent_session_loop.assurance_projection import AuditPublication
 
@@ -35,7 +36,7 @@ INPUT_DIGEST = "a" * 64
 OTHER_INPUT_DIGEST = "b" * 64
 
 
-def _finding(**overrides) -> models.Finding:
+def _finding(**overrides) -> assurance_models_findings.Finding:
     payload = {
         "category": "lifecycle",
         "component": "agent_session_loop/runner.py",
@@ -47,15 +48,19 @@ def _finding(**overrides) -> models.Finding:
         "evidence": ("events.jsonl",),
     }
     payload.update(overrides)
-    return models.Finding(**payload)
+    return assurance_models_findings.Finding(**payload)
 
 
-def _artifacts(digest: str | None = INPUT_DIGEST) -> tuple[models.EvidenceRef, ...]:
+def _artifacts(
+    digest: str | None = INPUT_DIGEST,
+) -> tuple[assurance_models_findings.EvidenceRef, ...]:
     return (
-        models.EvidenceRef(
+        assurance_models_findings.EvidenceRef(
             kind="artifact", locator="supervisor-audit-input.json", digest=digest
         ),
-        models.EvidenceRef(kind="artifact", locator="supervisor-audit.json"),
+        assurance_models_findings.EvidenceRef(
+            kind="artifact", locator="supervisor-audit.json"
+        ),
     )
 
 
@@ -438,7 +443,7 @@ class AssuranceIdentityTests(AssuranceCliTestCase):
     def observe_unbound(self, **overrides) -> None:
         """Open an issue the way a guard does, which leaves it unnamed."""
         ledger.append_issue_observation(
-            models.IssueObservation(
+            assurance_models_inbox.IssueObservation(
                 run_id=THIRD_RUN_ID,
                 finding=_finding(**overrides),
                 observed_at=LAST_TIMESTAMP,
@@ -1175,7 +1180,9 @@ class AssurancePlanTests(AssuranceCliTestCase):
             argv.extend([f"--{name.replace('_', '-')}", value])
         return argv
 
-    def drafted_plans(self, issue_id: str) -> tuple[models.ImprovementPlanDraft, ...]:
+    def drafted_plans(
+        self, issue_id: str
+    ) -> tuple[assurance_models_inbox.ImprovementPlanDraft, ...]:
         issue = self.inbox().issue(issue_id)
         assert issue is not None
         return issue.plans
@@ -1589,7 +1596,10 @@ class AssurancePlanTests(AssuranceCliTestCase):
         self.assertEqual(
             {
                 "assurance_ledger",
-                "assurance_models",
+                "assurance_models_artifacts",
+                "assurance_models_inbox",
+                "assurance_models_primitives",
+                "assurance_models_vocab",
                 "assurance_projection",
                 "harnesses",
                 "state",

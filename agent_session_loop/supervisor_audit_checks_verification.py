@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from . import events, verification
-from . import supervisor_audit_evidence as audit_evidence
+from . import supervisor_audit_evidence_failures as audit_evidence_failures
+from . import supervisor_audit_evidence_helpers as audit_evidence_helpers
 from .supervisor_audit_checks_success import _accepted_verification_is_accounted_for
 from .supervisor_audit_models import _CheckContext, _joined, _Verdict
 
@@ -14,7 +15,7 @@ def _check_review_independence(context: _CheckContext) -> _Verdict:
     review_section = context.section("review")
     run_state = context.section("state")
     evidence = context.evidence(run_state.get("reference"))
-    if not review_section and not audit_evidence._sequence(
+    if not review_section and not audit_evidence_helpers._sequence(
         context.section("verification").get("sessions")
     ):
         return _Verdict(
@@ -102,7 +103,7 @@ def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
             events.VERIFICATION_FINISHED_EVENT,
         ):
             continue
-        payload = audit_evidence._mapping(record.get("payload"))
+        payload = audit_evidence_helpers._mapping(record.get("payload"))
         key = (payload.get("run_id"), payload.get("turn_index"))
         if name == events.VERIFICATION_FINISHED_EVENT:
             outcomes[key] = payload
@@ -110,11 +111,13 @@ def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
             executed.setdefault(key, []).append(payload)
 
     sessions = [
-        audit_evidence._mapping(session)
-        for session in audit_evidence._sequence(
+        audit_evidence_helpers._mapping(session)
+        for session in audit_evidence_helpers._sequence(
             context.section("verification").get("sessions")
         )
-        if audit_evidence._mapping(audit_evidence._mapping(session).get("verification"))
+        if audit_evidence_helpers._mapping(
+            audit_evidence_helpers._mapping(session).get("verification")
+        )
     ]
     if not executed and not outcomes and not sessions:
         return _Verdict(
@@ -127,13 +130,13 @@ def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
     blind: list[str] = []
     failing_total = 0
     for session in sessions:
-        outcome = audit_evidence._mapping(session.get("verification"))
+        outcome = audit_evidence_helpers._mapping(session.get("verification"))
         if outcome.get("passed") is False:
             acceptance = outcome.get("acceptance")
             if acceptance is not None:
                 deferred = [
-                    audit_evidence._mapping(entry)
-                    for entry in audit_evidence._sequence(
+                    audit_evidence_helpers._mapping(entry)
+                    for entry in audit_evidence_helpers._sequence(
                         outcome.get("deferred_failures")
                     )
                 ]
@@ -160,11 +163,15 @@ def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
             continue
         failed = [
             entry
-            for entry in audit_evidence._sequence(outcome.get("checks"))
-            if audit_evidence._payload_shows_failure(audit_evidence._mapping(entry))
+            for entry in audit_evidence_helpers._sequence(outcome.get("checks"))
+            if audit_evidence_failures._payload_shows_failure(
+                audit_evidence_helpers._mapping(entry)
+            )
         ]
         failing_total += len(failed)
-        absorbed = len(audit_evidence._sequence(outcome.get("diagnostic_failures")))
+        absorbed = len(
+            audit_evidence_helpers._sequence(outcome.get("diagnostic_failures"))
+        )
         if len(failed) > absorbed:
             problems.append(
                 f"the verification recorded for {session.get('turn')} passed while "
@@ -178,7 +185,7 @@ def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
         failures = [
             payload
             for payload in executed.get(key, ())
-            if audit_evidence._payload_shows_failure(payload)
+            if audit_evidence_failures._payload_shows_failure(payload)
         ]
         failing_total += len(failures)
         outcome = outcomes.get(key)
@@ -199,8 +206,8 @@ def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
             if acceptance is not None:
                 failing_total += len(failures)
                 accepted_names = list(
-                    audit_evidence._sequence(
-                        audit_evidence._mapping(acceptance).get(
+                    audit_evidence_helpers._sequence(
+                        audit_evidence_helpers._mapping(acceptance).get(
                             "deferred_failure_names"
                         )
                     )

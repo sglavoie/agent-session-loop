@@ -456,7 +456,7 @@ export function parseActivityTimestamp(value) {
 
 export function stateOrder(primaryState) {
   // Legacy fallback when payload pre-dates triage fields. Keep aligned
-  // with workbench.URGENCY_RANK_BY_STATE ordering so visual tiers stay
+  // with workbench_summary_model.URGENCY_RANK_BY_STATE ordering so visual tiers stay
   // stable across server upgrades.
   const ranking = {
     "paused-for-reply": 10,

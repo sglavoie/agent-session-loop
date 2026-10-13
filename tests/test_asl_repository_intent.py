@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import authoring, repository_intent
+from agent_session_loop import authoring_render, repository_intent
 from agent_session_loop.workspaces import canonicalize_filesystem_path
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -99,7 +99,7 @@ class CandidateExtractionTests(unittest.TestCase):
         )
 
     def test_contract_checks_yield_path_and_cwd_surfaces(self) -> None:
-        contract = authoring.contract_from_payload(
+        contract = authoring_render.contract_from_payload(
             "1",
             ["done"],
             {

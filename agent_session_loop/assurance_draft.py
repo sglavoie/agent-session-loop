@@ -34,16 +34,16 @@ from pathlib import Path
 from typing import Any
 
 from . import assurance_ledger as ledger
-from . import assurance_models, harnesses, state, state_plan_refs
+from . import assurance_models_artifacts, harnesses, state, state_plan_refs
 from . import assurance_projection as projection
-from .assurance_models import (
-    HARNESS_NAMES,
-    MAX_LOCATOR_CHARS,
+from .assurance_models_inbox import ImprovementPlanDraft
+from .assurance_models_primitives import (
     AssuranceError,
-    ImprovementPlanDraft,
     canonical_json_bytes,
     parse_issue_id,
 )
+from .assurance_models_vocab import MAX_LOCATOR_CHARS
+from .harnesses import HARNESS_NAMES
 
 #: Seconds granted to the single drafting turn. Drafting gets no retry: a
 #: rejected reply is a refusal an operator sees, not a budget to spend twice.
@@ -560,7 +560,7 @@ def draft_improvement_plan(
 
     document = validate_draft_markdown(result.last_message).encode("utf-8")
     try:
-        assurance_models.write_new_bytes(target, document)
+        assurance_models_artifacts.write_new_bytes(target, document)
     except AssuranceError as error:
         raise DraftError(
             REASON_OUTPUT_UNWRITABLE, f"could not write {target}: {error}"

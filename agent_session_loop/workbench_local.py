@@ -58,13 +58,16 @@ from . import (
     redirect_cli,
     redirect_store,
     state,
-    workbench,
     workbench_actions,
     workbench_archive,
     workbench_catalog,
     workbench_controls,
     workbench_details,
     workbench_history,
+    workbench_launch,
+    workbench_registry,
+    workbench_registry_models,
+    workbench_summary_model,
 )
 
 _JSONDict = dict[str, Any]
@@ -229,9 +232,10 @@ _ARCHIVE_BLOCKING_STATES = frozenset({"verifying", "running"})
 
 def sort_summaries_oldest_first(
     summaries: (
-        list[workbench.WorkbenchSummary] | tuple[workbench.WorkbenchSummary, ...]
+        list[workbench_summary_model.WorkbenchSummary]
+        | tuple[workbench_summary_model.WorkbenchSummary, ...]
     ),
-) -> list[workbench.WorkbenchSummary]:
+) -> list[workbench_summary_model.WorkbenchSummary]:
     """Sort plans oldest-activity-first; plans with no activity sort oldest.
 
     Complete plans are ordered by ``completed_at`` so cleanup surfaces the
@@ -239,7 +243,7 @@ def sort_summaries_oldest_first(
     ``last_activity_at``. Missing timestamps sort oldest either way.
     """
 
-    def sort_key(summary: workbench.WorkbenchSummary) -> tuple[int, str]:
+    def sort_key(summary: workbench_summary_model.WorkbenchSummary) -> tuple[int, str]:
         if summary.primary_state == "complete":
             activity = summary.completed_at
         else:
@@ -253,7 +257,7 @@ def sort_summaries_oldest_first(
 
 
 def _augment_archivable(
-    payload: _JSONDict, summary: workbench.WorkbenchSummary
+    payload: _JSONDict, summary: workbench_summary_model.WorkbenchSummary
 ) -> _JSONDict:
     """Add ``archivable`` / ``archive_blocker`` fields to a queue plan payload."""
     blocked = summary.primary_state in _ARCHIVE_BLOCKING_STATES
@@ -327,7 +331,7 @@ def _history_record(entry: Any, labels: Mapping[str, _JSONDict]) -> _JSONDict:
 
     The portable entry knows its plan by digest and never by path, so the label
     and the title are joined on here from the catalog -- exactly as
-    :meth:`asl_workbench.store.WorkbenchStore.history` joins them on from
+    :meth:`asl_workbench.store_workbench.WorkbenchStore.history` joins them on from
     ``catalog_entry``. A plan the scan no longer sees keeps its ending and
     loses only its title, which is the right way round: the run happened.
     """
@@ -347,7 +351,7 @@ def _history_record(entry: Any, labels: Mapping[str, _JSONDict]) -> _JSONDict:
 
 
 def _augment_catalog_keys(
-    payload: _JSONDict, summary: workbench.WorkbenchSummary
+    payload: _JSONDict, summary: workbench_summary_model.WorkbenchSummary
 ) -> _JSONDict:
     """Add the catalog identities a row carries in either mode.
 
@@ -403,7 +407,7 @@ def _coerce_optional_bool(value: Any) -> bool | None:
     return value
 
 
-def _coerce_commit_mode(value: Any) -> workbench.CommitMode | None:
+def _coerce_commit_mode(value: Any) -> workbench_registry_models.CommitMode | None:
     """Narrow a request's ``commit_mode`` to the vocabulary, or refuse it.
 
     Unlike the harness names -- which the launch path resolves against a
@@ -414,16 +418,18 @@ def _coerce_commit_mode(value: Any) -> workbench.CommitMode | None:
     text = _coerce_optional_str(value)
     if text is None:
         return None
-    mode = next((mode for mode in workbench.COMMIT_MODES if mode == text), None)
+    mode = next(
+        (mode for mode in workbench_registry_models.COMMIT_MODES if mode == text), None
+    )
     if mode is None:
         raise invalid_request(
             "field 'commit_mode' must be one of "
-            + ", ".join(repr(each) for each in workbench.COMMIT_MODES)
+            + ", ".join(repr(each) for each in workbench_registry_models.COMMIT_MODES)
         )
     return mode
 
 
-def coerce_profile_payload(raw: Any) -> workbench.LaunchProfile | None:
+def coerce_profile_payload(raw: Any) -> workbench_registry_models.LaunchProfile | None:
     """Build a launch profile from a request payload, or refuse the payload.
 
     The field names are :data:`asl_workbench.actions.LAUNCH_PROFILE_FIELDS`,
@@ -435,7 +441,7 @@ def coerce_profile_payload(raw: Any) -> workbench.LaunchProfile | None:
         return None
     if not isinstance(raw, Mapping):
         raise invalid_request("profile must be a JSON object when provided")
-    return workbench.LaunchProfile(
+    return workbench_registry_models.LaunchProfile(
         cwd=_coerce_optional_str(raw.get("cwd")),
         harness=_coerce_optional_str(raw.get("harness")),
         harness_model=_coerce_optional_str(raw.get("harness_model")),
@@ -525,10 +531,10 @@ class LocalProvider:
 
     # -- Reads --------------------------------------------------------------
 
-    def _registry(self) -> workbench.WorkbenchRegistry:
+    def _registry(self) -> workbench_registry_models.WorkbenchRegistry:
         try:
-            return workbench.load_registry(self.config.registry_path)
-        except workbench.WorkbenchError as error:
+            return workbench_registry.load_registry(self.config.registry_path)
+        except workbench_registry_models.WorkbenchError as error:
             raise HttpRefusal(500, "registry-unreadable", str(error)) from error
 
     def _open_plan(self, call: Call) -> workbench_details.PlanReader:
@@ -547,7 +553,7 @@ class LocalProvider:
         return Response.success(reason="ok", status="ok")
 
     def _scan(
-        self, registry: workbench.WorkbenchRegistry
+        self, registry: workbench_registry_models.WorkbenchRegistry
     ) -> workbench_catalog.CatalogScan:
         # One non-reclaiming catalog scan answers the queue. Polling the queue
         # no longer empties expired archive entries or reclaims plan locks: a
@@ -1003,7 +1009,7 @@ class LocalProvider:
         except (OSError, ValueError) as error:
             raise HttpRefusal(
                 400,
-                workbench.LAUNCH_REASON_INVALID_PLAN,
+                workbench_launch.LAUNCH_REASON_INVALID_PLAN,
                 f"invalid plan_dir: {error}",
                 details={"plan_dir": plan_dir},
             ) from error
@@ -1033,7 +1039,7 @@ class LocalProvider:
                     error.message,
                     details={"plan_dir": str(canonical)},
                 ) from error
-            except workbench.LaunchError as error:
+            except workbench_launch.LaunchError as error:
                 raise HttpRefusal(
                     400, error.reason, error.message, details={"plan_dir": plan_dir}
                 ) from error

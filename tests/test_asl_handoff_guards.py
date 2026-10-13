@@ -63,7 +63,7 @@ from agent_session_loop import (
     run_termination,
     runner,
     session_verification,
-    turn_execution,
+    turn_execution_commit,
     turn_settlement,
 )
 from tests.support import assert_no_runner_import, called_names, write_plan
@@ -640,7 +640,7 @@ class RefusalReopeningTruthTests(_PlanCase):
         ):
             with self.subTest(from_status=from_status):
                 self.setUp()
-                turn_execution.record_turn_rejected(
+                turn_execution_commit.record_turn_rejected(
                     event_path=self.event_path,
                     payload=self.payload,
                     persistence=self.persistence,

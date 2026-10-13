@@ -95,7 +95,7 @@ OPERATION_METHODS: tuple[str, ...] = (
 #: Mutations that are *not* plan-scoped, named here rather than left out, so a
 #: later session adding one to the journal has to decide where its exclusion
 #: scope lives rather than discovering the question. The registry already has
-#: its own serialized transaction (``workbench.mutate_registry`` holds a flock
+#: its own serialized transaction (``workbench_registry.mutate_registry`` holds a flock
 #: on ``workbench.json.lock``), and the archive collection is a separate
 #: boundary with its own confirmation contract.
 UNSCOPED_MUTATIONS: tuple[str, ...] = (

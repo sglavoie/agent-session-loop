@@ -14,7 +14,7 @@ from agent_session_loop import (
     review_session_body,
     run_persistence,
     session_verification,
-    workbench_recovery,
+    workbench_recovery_build,
 )
 from tests.review_cycle_support import RepairCycleFixtures
 from tests.support import (
@@ -359,7 +359,7 @@ class ReviewCycleAdvanceTests(RepairCycleFixtures, unittest.TestCase):
         self.assertFalse(projected.eligible)
         self.assertEqual("all-clear", projected.source_disposition)
         self.assertEqual("all-clear", projected.blocker)
-        recovery = workbench_recovery.build_workbench_recovery(
+        recovery = workbench_recovery_build.build_workbench_recovery(
             _discovered(self.plan_dir), state_dir=self.state_dir
         )
         self.assertEqual("none", recovery.kind)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from . import events, state
-from . import supervisor_audit_evidence as audit_evidence
+from . import supervisor_audit_evidence_constants as audit_evidence_constants
 
 #: Historical artifact name, retained when interpreting old audit evidence.
 MUTATION_ARTIFACT_NAME = "supervisor-audit-mutation.json"
@@ -17,7 +17,7 @@ WORKSPACE_CHANGE_ARTIFACT_NAME = "supervisor-audit-workspace-change.json"
 #: The locator every check falls back to. ``collect_audit_input`` registers the
 #: run directory first, so this is always in the evidence index, and a result
 #: that read nothing else still says where it looked.
-RUN_ANCHOR = audit_evidence.EVIDENCE_ROOT_RUN
+RUN_ANCHOR = audit_evidence_constants.EVIDENCE_ROOT_RUN
 
 
 #: Event names a deterministic check reads. A record that reports a failure
@@ -25,7 +25,7 @@ RUN_ANCHOR = audit_evidence.EVIDENCE_ROOT_RUN
 #: unread, which is what keeps the rubric's last lane honest.
 _CLASSIFIED_EVENT_NAMES = frozenset(
     {
-        audit_evidence._RUN_STARTED_EVENT,
+        audit_evidence_constants._RUN_STARTED_EVENT,
         events.COMMIT_FINISHED_EVENT,
         # Earned by `_check_paused_work_settlement`, which grades every field
         # of this record. It is listed here only because that check owns it:

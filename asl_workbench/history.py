@@ -214,7 +214,7 @@ QUESTION_OUTCOMES: tuple[str, ...] = (
     QUESTION_OUTCOME_UNRESOLVED,
 )
 
-#: ASL's ``run_coordination`` wait reasons that name a specific ending. Every
+#: ASL's ``run_coordination_constants`` wait reasons that name a specific ending. Every
 #: other reason -- and there are many, because an I/O fault ends a wait too --
 #: is :data:`QUESTION_OUTCOME_UNRESOLVED`.
 WAIT_REASON_OUTCOMES: tuple[tuple[str, str], ...] = (

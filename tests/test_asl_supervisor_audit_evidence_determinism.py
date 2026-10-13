@@ -10,11 +10,16 @@ from pathlib import Path
 from typing import Any
 
 from agent_session_loop import (
-    assurance_models,
+    assurance_models_primitives,
     events,
     mailbox_constants,
     mailbox_vocabulary,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_collector,
+    supervisor_audit_evidence_constants,
+    supervisor_audit_evidence_failures,
+    supervisor_audit_evidence_input,
+    supervisor_audit_evidence_models,
+    supervisor_audit_evidence_shedding,
 )
 from tests import support_supervisor_audit_evidence as evidence_support
 from tests.support_supervisor_audit import RUN_ID
@@ -72,12 +77,14 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             payload = bundle.payload
 
             self.assertLessEqual(
-                len(bundle.to_bytes()), supervisor_audit_evidence.AUDIT_INPUT_MAX_BYTES
+                len(bundle.to_bytes()),
+                supervisor_audit_evidence_constants.AUDIT_INPUT_MAX_BYTES,
             )
             self.assertTrue(
                 any(
                     entry["section"] == "events"
-                    and entry["reason"] == supervisor_audit_evidence.REASON_SIZE_CAP
+                    and entry["reason"]
+                    == supervisor_audit_evidence_constants.REASON_SIZE_CAP
                     for entry in payload["omissions"]
                 )
             )
@@ -112,7 +119,9 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
                 "name": name,
                 "created_at": None,
                 "version": 2,
-                "priority": supervisor_audit_evidence._event_priority(name, payload),
+                "priority": supervisor_audit_evidence_failures._event_priority(
+                    name, payload
+                ),
                 "payload": payload,
             }
 
@@ -133,25 +142,28 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             "turns": [],
             "omissions": [],
         }
-        collector = supervisor_audit_evidence._Collector(
-            supervisor_audit_evidence.EvidenceRoots(roots=())
+        collector = supervisor_audit_evidence_collector._Collector(
+            supervisor_audit_evidence_models.EvidenceRoots(roots=())
         )
         budget = (
             len(
-                assurance_models.canonical_json_bytes(
+                assurance_models_primitives.canonical_json_bytes(
                     {**payload, "events": {"records": closing}}
                 )
             )
             + 2048
         )
 
-        supervisor_audit_evidence._shed(payload, collector, max_bytes=budget)
+        supervisor_audit_evidence_shedding._shed(payload, collector, max_bytes=budget)
 
         names = [item["name"] for item in payload["events"]["records"]]
         self.assertIn(events.RUN_PAUSED_EVENT, names)
         self.assertIn(events.TURN_REJECTED_EVENT, names)
         self.assertEqual(
-            0, supervisor_audit_evidence._event_priority(events.TURN_REJECTED_EVENT, {})
+            0,
+            supervisor_audit_evidence_failures._event_priority(
+                events.TURN_REJECTED_EVENT, {}
+            ),
         )
 
     def test_tightening_a_bundle_sends_less_of_the_same_evidence(self) -> None:
@@ -160,7 +172,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             size = len(bundle.to_bytes())
             digest = bundle.sha256
 
-            tightened = supervisor_audit_evidence.tighten_audit_input(
+            tightened = supervisor_audit_evidence_input.tighten_audit_input(
                 bundle, max_bytes=size // 2
             )
 
@@ -181,7 +193,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
                 (entry["section"], entry["reason"]): entry for entry in bundle.omissions
             }
 
-            tightened = supervisor_audit_evidence.tighten_audit_input(
+            tightened = supervisor_audit_evidence_input.tighten_audit_input(
                 bundle, max_bytes=len(bundle.to_bytes()) // 2
             )
             after = {
@@ -197,13 +209,16 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             for key, entry in before.items():
                 self.assertGreaterEqual(after[key]["count"], entry["count"], key)
                 self.assertEqual(64, len(after[key]["sha256"]), key)
-            events_cap = ("events", supervisor_audit_evidence.REASON_SIZE_CAP)
+            events_cap = ("events", supervisor_audit_evidence_constants.REASON_SIZE_CAP)
             self.assertGreater(after[events_cap]["count"], before[events_cap]["count"])
             # And the second pass gives up in the same order the first would
             # have: previews are trimmed before whole turns are dropped, which
             # only holds because the previews inside the payload were recovered
             # as shrinkable rather than left invisible to it.
-            previews_cap = ("previews", supervisor_audit_evidence.REASON_SIZE_CAP)
+            previews_cap = (
+                "previews",
+                supervisor_audit_evidence_constants.REASON_SIZE_CAP,
+            )
             self.assertNotIn(previews_cap, before)
             self.assertIn(previews_cap, after)
 
@@ -213,7 +228,9 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             text = bundle.to_bytes().decode("utf-8")
 
             self.assertNotIn("transfer_funds", text)
-            self.assertIn(supervisor_audit_evidence.REASON_APPLICATION_CONTENT, text)
+            self.assertIn(
+                supervisor_audit_evidence_constants.REASON_APPLICATION_CONTENT, text
+            )
 
     def test_credentials_never_reach_the_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -236,11 +253,13 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
 
             self.assertFalse(last_message["available"])
             self.assertEqual(
-                supervisor_audit_evidence.REASON_MISSING, last_message["reason"]
+                supervisor_audit_evidence_constants.REASON_MISSING,
+                last_message["reason"],
             )
             self.assertTrue(
                 any(
-                    entry["reason"] == supervisor_audit_evidence.REASON_MISSING
+                    entry["reason"]
+                    == supervisor_audit_evidence_constants.REASON_MISSING
                     and entry["count"] >= 1
                     and len(entry["sha256"]) == 64
                     for entry in payload["omissions"]
@@ -260,13 +279,14 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             self.assertEqual(
                 1,
                 payload["events"]["summary"][
-                    supervisor_audit_evidence.UNPARSABLE_LINE_COUNT_KEY
+                    supervisor_audit_evidence_constants.UNPARSABLE_LINE_COUNT_KEY
                 ],
             )
             self.assertTrue(
                 any(
                     entry["section"] == "events"
-                    and entry["reason"] == supervisor_audit_evidence.REASON_MALFORMED
+                    and entry["reason"]
+                    == supervisor_audit_evidence_constants.REASON_MALFORMED
                     for entry in payload["omissions"]
                 )
             )
@@ -326,12 +346,13 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             self.assertEqual([], payload["mailbox"]["records"])
             self.assertFalse(summary["available"])
             self.assertEqual(
-                supervisor_audit_evidence.REASON_MISSING, summary["reason"]
+                supervisor_audit_evidence_constants.REASON_MISSING, summary["reason"]
             )
             self.assertTrue(
                 any(
                     entry["section"] == "mailbox"
-                    and entry["reason"] == supervisor_audit_evidence.REASON_MISSING
+                    and entry["reason"]
+                    == supervisor_audit_evidence_constants.REASON_MISSING
                     for entry in payload["omissions"]
                 )
             )
@@ -349,14 +370,15 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             self.assertEqual(
                 1,
                 payload["mailbox"]["summary"][
-                    supervisor_audit_evidence.UNPARSABLE_LINE_COUNT_KEY
+                    supervisor_audit_evidence_constants.UNPARSABLE_LINE_COUNT_KEY
                 ],
             )
             self.assertEqual(6, len(payload["mailbox"]["records"]))
             self.assertTrue(
                 any(
                     entry["section"] == "mailbox"
-                    and entry["reason"] == supervisor_audit_evidence.REASON_MALFORMED
+                    and entry["reason"]
+                    == supervisor_audit_evidence_constants.REASON_MALFORMED
                     and len(entry["sha256"]) == 64
                     for entry in payload["omissions"]
                 )
@@ -380,7 +402,8 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             self.assertTrue(
                 any(
                     entry["section"] == "mailbox"
-                    and entry["reason"] == supervisor_audit_evidence.REASON_SIZE_CAP
+                    and entry["reason"]
+                    == supervisor_audit_evidence_constants.REASON_SIZE_CAP
                     for entry in payload["omissions"]
                 )
             )

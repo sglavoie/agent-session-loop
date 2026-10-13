@@ -6,7 +6,7 @@ import unittest
 from datetime import UTC, datetime
 
 from agent_session_loop import (
-    turn_execution,
+    turn_execution_hang_sentinel,
 )
 
 
@@ -50,7 +50,7 @@ class HangSentinelTestsBase(unittest.TestCase):
         samples: list[list[dict[str, object]] | None],
         *,
         monotonic=None,
-    ) -> tuple[turn_execution.HangSentinel, list[int]]:
+    ) -> tuple[turn_execution_hang_sentinel.HangSentinel, list[int]]:
         sample_calls: list[int] = []
         queue = list(samples)
 
@@ -58,7 +58,7 @@ class HangSentinelTestsBase(unittest.TestCase):
             sample_calls.append(pid)
             return queue.pop(0) if queue else None
 
-        sentinel = turn_execution.HangSentinel(
+        sentinel = turn_execution_hang_sentinel.HangSentinel(
             sample_tree=sample_tree,
             monotonic=(lambda: 0.0) if monotonic is None else monotonic,
             trigger_idle_seconds=120.0,
@@ -69,7 +69,7 @@ class HangSentinelTestsBase(unittest.TestCase):
         return sentinel, sample_calls
 
 
-class _AfterEvaluateSentinel(turn_execution.HangSentinel):
+class _AfterEvaluateSentinel(turn_execution_hang_sentinel.HangSentinel):
     """Sentinel whose ``evaluate`` runs a one-shot hook after returning.
 
     Deterministically reproduces the F-003 window: the hook fires after the

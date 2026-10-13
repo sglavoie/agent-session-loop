@@ -6,7 +6,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from . import commit_groups, events
-from . import supervisor_audit_evidence as audit_evidence
+from . import supervisor_audit_evidence_constants as audit_evidence_constants
+from . import supervisor_audit_evidence_failures as audit_evidence_failures
+from . import supervisor_audit_evidence_helpers as audit_evidence_helpers
 from .supervisor_audit_models import _CheckContext, _joined, _names, _Verdict
 from .supervisor_audit_vocabulary import (
     _COMMIT_RESULTS,
@@ -23,22 +25,22 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
     references: list[str] = []
 
     activity = [
-        f"{audit_evidence.EVIDENCE_ROOT_RUN}/{name}"
+        f"{audit_evidence_constants.EVIDENCE_ROOT_RUN}/{name}"
         for name in (MUTATION_ARTIFACT_NAME, WORKSPACE_CHANGE_ARTIFACT_NAME)
-        if f"{audit_evidence.EVIDENCE_ROOT_RUN}/{name}" in context.declared
+        if f"{audit_evidence_constants.EVIDENCE_ROOT_RUN}/{name}" in context.declared
     ]
     references.extend(activity)
 
     writable = {
         str(alias)
-        for session in audit_evidence._sequence(scopes.get("sessions"))
-        for alias in audit_evidence._sequence(
-            audit_evidence._mapping(session).get("writes")
+        for session in audit_evidence_helpers._sequence(scopes.get("sessions"))
+        for alias in audit_evidence_helpers._sequence(
+            audit_evidence_helpers._mapping(session).get("writes")
         )
     }
     attempts = [
-        audit_evidence._mapping(item)
-        for item in audit_evidence._sequence(commits.get("attempts"))
+        audit_evidence_helpers._mapping(item)
+        for item in audit_evidence_helpers._sequence(commits.get("attempts"))
     ]
     # A commit the guard observed is by definition one the runner never ran, so
     # the commit mode it would have run under is absent for the same reason the
@@ -46,7 +48,7 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
     ran = [
         attempt
         for attempt in attempts
-        if attempt.get("origin") != audit_evidence.OBSERVED_COMMIT_ORIGIN
+        if attempt.get("origin") != audit_evidence_constants.OBSERVED_COMMIT_ORIGIN
     ]
     repair_commit_mode = commits.get("repair_commit_mode")
     if ran and not commits.get("commit_mode") and repair_commit_mode != "per-child":
@@ -57,7 +59,7 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
     for attempt in attempts:
         if isinstance(attempt.get("reference"), str):
             references.append(attempt["reference"])
-        result = audit_evidence._mapping(attempt.get("result"))
+        result = audit_evidence_helpers._mapping(attempt.get("result"))
         if result.get("available") is False:
             contradictions.append(
                 f"{attempt.get('name')} wrote no readable commit result"
@@ -75,7 +77,7 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
     history_rewrites = 0
     unguarded: list[str] = []
     for turn in context.turns:
-        result = audit_evidence._mapping(turn.get("result"))
+        result = audit_evidence_helpers._mapping(turn.get("result"))
         if result.get("available") is False or turn.get("anomalous") is True:
             continue
         # Registered workspaces guard review turns as well. Legacy runs have a
@@ -88,17 +90,19 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
             continue
         if isinstance(turn.get("directory"), str):
             references.append(turn["directory"])
-        guard = audit_evidence._mapping(result.get("workspace_write_guard"))
+        guard = audit_evidence_helpers._mapping(result.get("workspace_write_guard"))
         if not guard:
             unguarded.append(str(turn.get("name")))
             continue
         guarded += 1
-        for raw_changes in audit_evidence._mapping(guard.get("changed")).values():
-            changes = audit_evidence._mapping(raw_changes)
+        for raw_changes in audit_evidence_helpers._mapping(
+            guard.get("changed")
+        ).values():
+            changes = audit_evidence_helpers._mapping(raw_changes)
             if changes.get("head_changed") is not True:
                 continue
             head_moves += 1
-            transition = audit_evidence._mapping(changes.get("head_transition"))
+            transition = audit_evidence_helpers._mapping(changes.get("head_transition"))
             if not transition:
                 contradictions.append(
                     f"{turn.get('name')} changed HEAD without recording its "
@@ -171,11 +175,11 @@ def _worker_commits_added(guard: Mapping[str, Any]) -> list[str] | None:
     overstate one of them.
     """
     added: list[str] = []
-    for raw_changes in audit_evidence._mapping(guard.get("changed")).values():
-        changes = audit_evidence._mapping(raw_changes)
+    for raw_changes in audit_evidence_helpers._mapping(guard.get("changed")).values():
+        changes = audit_evidence_helpers._mapping(raw_changes)
         if changes.get("head_changed") is not True:
             continue
-        transition = audit_evidence._mapping(changes.get("head_transition"))
+        transition = audit_evidence_helpers._mapping(changes.get("head_transition"))
         count = transition.get("commits_added")
         relation = transition.get("relation")
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
@@ -217,13 +221,13 @@ def _check_commit_after_verification(context: _CheckContext) -> _Verdict:
     retained: list[str] = []
     blind: list[str] = []
     for turn in context.turns:
-        result = audit_evidence._mapping(turn.get("result"))
+        result = audit_evidence_helpers._mapping(turn.get("result"))
         if result.get("available") is False:
             continue
         name = str(turn.get("name"))
         if isinstance(turn.get("directory"), str):
             references.append(turn["directory"])
-        guard = audit_evidence._mapping(result.get("workspace_write_guard"))
+        guard = audit_evidence_helpers._mapping(result.get("workspace_write_guard"))
         if not guard:
             blind.append(name)
             continue
@@ -232,7 +236,8 @@ def _check_commit_after_verification(context: _CheckContext) -> _Verdict:
         # result's. A verification that failed after a clean exit is only in
         # the second, and it is the shape ASI-142 was reported for.
         if not (
-            turn.get("anomalous") is True or audit_evidence._turn_shows_failure(result)
+            turn.get("anomalous") is True
+            or audit_evidence_failures._turn_shows_failure(result)
         ):
             continue
         added = _worker_commits_added(guard)
@@ -316,11 +321,11 @@ def _check_commit_failure_accounting(context: _CheckContext) -> _Verdict:
         if record.get("name") != events.COMMIT_FINISHED_EVENT:
             continue
         recorded += 1
-        payload = audit_evidence._mapping(record.get("payload"))
-        if not audit_evidence._commit_shows_failure(payload):
+        payload = audit_evidence_helpers._mapping(record.get("payload"))
+        if not audit_evidence_failures._commit_shows_failure(payload):
             continue
         failures += 1
-        label = audit_evidence._commit_record_label(payload)
+        label = audit_evidence_failures._commit_record_label(payload)
         references.append(str(payload.get("artifact_dir")))
         status_result = payload.get("status_result")
         returncode = payload.get("returncode")
@@ -389,13 +394,15 @@ def _unresolved_commit_group_rows(context: _CheckContext) -> list[dict[str, Any]
     section = context.section("commits")
     if "unresolved_commit_groups" in section:
         return [
-            audit_evidence._mapping(row)
-            for row in audit_evidence._sequence(section["unresolved_commit_groups"])
+            audit_evidence_helpers._mapping(row)
+            for row in audit_evidence_helpers._sequence(
+                section["unresolved_commit_groups"]
+            )
         ]
     return [
-        audit_evidence._mapping(row)
-        for row in audit_evidence._sequence(section.get("commit_groups"))
-        if audit_evidence._mapping(row).get("status")
+        audit_evidence_helpers._mapping(row)
+        for row in audit_evidence_helpers._sequence(section.get("commit_groups"))
+        if audit_evidence_helpers._mapping(row).get("status")
         == commit_groups.GROUP_STATUS_FAILED
     ]
 
@@ -428,7 +435,7 @@ def _check_commit_group_resolution(context: _CheckContext) -> _Verdict:
     unresolved = _unresolved_commit_group_rows(context)
     references = [
         str(attempt.get("reference"))
-        for attempt in audit_evidence._sequence(
+        for attempt in audit_evidence_helpers._sequence(
             context.section("commits").get("attempts")
         )
         if isinstance(attempt, Mapping)

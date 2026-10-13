@@ -23,7 +23,7 @@ from agent_session_loop import (
     supervisor_audit,
     supervisor_audit_agent,
 )
-from agent_session_loop.assurance_models import (
+from agent_session_loop.assurance_models_vocab import (
     AUDIT_REPORT_FILENAME,
     MAX_AUDIT_ATTEMPT_RECORDS,
     RUBRIC_LANES,

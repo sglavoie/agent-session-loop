@@ -29,7 +29,8 @@ from agent_session_loop import (
     mailbox_snapshot,
     mailbox_vocabulary,
     run_control,
-    run_coordination,
+    run_coordination_control,
+    run_coordination_mailbox_poll,
     run_persistence,
 )
 from tests.support import read_jsonl
@@ -625,10 +626,10 @@ class MailboxPollDeliveryTests(unittest.TestCase):
         self.event_path = self.tmp / "events.jsonl"
         self.payload: dict[str, Any] = {
             "run_id": "run-1",
-            "control": run_coordination.initial_control_payload(),
+            "control": run_coordination_control.initial_control_payload(),
         }
         self.persistence = run_persistence._RunPersistence()
-        self.poll = run_coordination.MailboxPoll(
+        self.poll = run_coordination_mailbox_poll.MailboxPoll(
             plan_dir=self.plan_dir,
             state_dir_arg=str(self.state_dir),
             control_state=run_control.RunControlState(current_harness="codex"),

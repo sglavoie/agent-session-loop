@@ -58,17 +58,13 @@ from . import assurance_ledger as ledger
 from . import assurance_projection as projection
 from . import assurance_reconcile as reconcile
 from . import responses, state, state_plan_refs
-from .assurance_models import (
-    CLOSEOUT_OUTCOMES,
+from .assurance_models_primitives import AssuranceError, issue_id_number, parse_issue_id
+from .assurance_models_reconcile import (
     DECISION_MERGE,
-    ISSUE_STATES,
-    SEVERITIES,
-    AssuranceError,
     ReconciliationManifest,
-    issue_id_number,
-    parse_issue_id,
     parse_reconciliation_manifest,
 )
+from .assurance_models_vocab import CLOSEOUT_OUTCOMES, ISSUE_STATES, SEVERITIES
 
 COMMAND_ASSURANCE_LIST = "assurance-list"
 COMMAND_ASSURANCE_SHOW = "assurance-show"

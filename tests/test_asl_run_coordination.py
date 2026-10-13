@@ -1,6 +1,6 @@
 """The typed coordination boundary, exercised without the run loop.
 
-``run_coordination`` owns the three places a run is raced from outside: a
+The ``run_coordination_*`` modules own the three places a run is raced from outside: a
 supervisor answering through the mailbox, an operator queueing control
 commands from another process, and a terminal audit that can be cancelled
 mid-flight. These tests drive it through collaborators defined here rather
@@ -44,18 +44,44 @@ from agent_session_loop import (
     mailbox_waits,
     qna,
     run_control,
-    run_coordination,
+    run_coordination_control,
+    run_coordination_control_drain,
+    run_coordination_mailbox_poll,
+    run_coordination_mailbox_question,
+    run_coordination_mailbox_wait,
+    run_coordination_reply_state,
+    run_coordination_seams,
+    run_coordination_terminal,
+    run_coordination_wait_models,
+    run_coordination_wait_record,
+    run_coordination_wait_state,
     supervisor_audit,
 )
+from agent_session_loop import run_coordination_constants as wait_budgets
 
 from .support import assert_no_runner_import
+
+COORDINATION_MODULES = (
+    wait_budgets,
+    run_coordination_control,
+    run_coordination_control_drain,
+    run_coordination_mailbox_poll,
+    run_coordination_mailbox_question,
+    run_coordination_mailbox_wait,
+    run_coordination_reply_state,
+    run_coordination_seams,
+    run_coordination_terminal,
+    run_coordination_wait_models,
+    run_coordination_wait_record,
+    run_coordination_wait_state,
+)
 
 RUN_ID = "run-coordination-1"
 SESSION_ID = "3"
 
 
 class RecordingPersistence:
-    """A :class:`run_coordination.CoordinationPersistence` that keeps its calls.
+    """A :class:`run_coordination_seams.CoordinationPersistence` that keeps its calls.
 
     Events are kept in order and state writes are kept as snapshots, so a test
     can assert on sequence without reading files back. The lock is real: the
@@ -90,7 +116,7 @@ class RecordingPersistence:
 
 
 class RecordingNotifier:
-    """A :class:`run_coordination.WaitNotifier` that records both lifecycle calls."""
+    """A :class:`WaitNotifier` that records both lifecycle calls."""
 
     def __init__(self) -> None:
         self.started: list[tuple[str, str | None]] = []
@@ -106,7 +132,7 @@ class RecordingNotifier:
 
 
 class RecordingPhase:
-    """A :class:`run_coordination.FinalizationPhase` that records open and close."""
+    """A :class:`FinalizationPhase` that records open and close."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -160,7 +186,7 @@ def lease_view(
     )
 
 
-def settings(**overrides: float) -> run_coordination.MailboxWaitSettings:
+def settings(**overrides: float) -> run_coordination_wait_models.MailboxWaitSettings:
     values: dict[str, float] = {
         "base_seconds": 300.0,
         "lease_extension_seconds": 60.0,
@@ -169,12 +195,12 @@ def settings(**overrides: float) -> run_coordination.MailboxWaitSettings:
         "io_grace_seconds": 10.0,
     }
     values.update(overrides)
-    return run_coordination.MailboxWaitSettings(**values)
+    return run_coordination_wait_models.MailboxWaitSettings(**values)
 
 
 def waiting_payload(question_id: str, *, turn_index: int = 1) -> dict[str, Any]:
     started_at = clock.utc_now()
-    return run_coordination.waiting_for_reply_payload(
+    return run_coordination_wait_record.waiting_for_reply_payload(
         question_id=question_id,
         session_id=SESSION_ID,
         turn_index=turn_index,
@@ -231,8 +257,8 @@ class CoordinationTestCase(unittest.TestCase):
         self.persistence = RecordingPersistence()
         self.payload: dict[str, Any] = {"run_id": RUN_ID}
 
-    def store(self) -> run_coordination.WaitStateStore:
-        return run_coordination.WaitStateStore(
+    def store(self) -> run_coordination_wait_state.WaitStateStore:
+        return run_coordination_wait_state.WaitStateStore(
             event_path=self.event_path,
             payload=self.payload,
             persistence=self.persistence,
@@ -257,7 +283,9 @@ class CoordinationBoundaryTests(unittest.TestCase):
     """The boundary's own shape, independent of any wait it coordinates."""
 
     def test_run_coordination_does_not_import_the_runner(self) -> None:
-        assert_no_runner_import(self, run_coordination)
+        for module in COORDINATION_MODULES:
+            with self.subTest(module=module.__name__):
+                assert_no_runner_import(self, module)
 
 
 class WaitStateStoreTests(CoordinationTestCase):
@@ -322,8 +350,8 @@ class WaitStateStoreTests(CoordinationTestCase):
         store = self.store()
         store.begin(waiting_payload("question-1"), pending_outbox=0)
         store.clear(
-            run_coordination.MailboxWaitResult(
-                reason=run_coordination.WAIT_REASON_TIMEOUT, pending_outbox=0
+            run_coordination_wait_models.MailboxWaitResult(
+                reason=wait_budgets.WAIT_REASON_TIMEOUT, pending_outbox=0
             )
         )
         moment = clock.utc_now()
@@ -351,11 +379,11 @@ class WaitStateStoreTests(CoordinationTestCase):
 
         reason = store.clear(None)
 
-        self.assertEqual(reason, run_coordination.WAIT_REASON_ERROR)
+        self.assertEqual(reason, wait_budgets.WAIT_REASON_ERROR)
         self.assertNotIn("waiting_for_reply", self.payload)
         cleared = self.persistence.payloads(events.MAILBOX_EVENT)[-1]
         self.assertEqual(cleared["action"], events.MAILBOX_ACTION_WAIT_CLEARED)
-        self.assertEqual(cleared["reason"], run_coordination.WAIT_REASON_ERROR)
+        self.assertEqual(cleared["reason"], wait_budgets.WAIT_REASON_ERROR)
         self.assertNotIn("pending_outbox", cleared)
 
     def test_clearing_on_a_resolution_publishes_its_closure_metadata(self) -> None:
@@ -370,14 +398,14 @@ class WaitStateStoreTests(CoordinationTestCase):
         )
 
         reason = store.clear(
-            run_coordination.MailboxWaitResult(
-                reason=run_coordination.WAIT_REASON_RESOLUTION,
+            run_coordination_wait_models.MailboxWaitResult(
+                reason=wait_budgets.WAIT_REASON_RESOLUTION,
                 pending_outbox=0,
                 resolution=resolution,
             )
         )
 
-        self.assertEqual(reason, run_coordination.WAIT_REASON_RESOLUTION)
+        self.assertEqual(reason, wait_budgets.WAIT_REASON_RESOLUTION)
         cleared = self.persistence.payloads(events.MAILBOX_EVENT)[-1]
         self.assertEqual(
             cleared["resolution_action"], mailbox_vocabulary.RESOLUTION_ACTION_PAUSE
@@ -387,10 +415,10 @@ class WaitStateStoreTests(CoordinationTestCase):
 
     def test_partial_resolution_metadata_is_refused(self) -> None:
         with self.assertRaises(ValueError):
-            run_coordination.clear_waiting_for_reply(
+            run_coordination_wait_state.clear_waiting_for_reply(
                 self.event_path,
                 self.payload,
-                reason=run_coordination.WAIT_REASON_RESOLUTION,
+                reason=wait_budgets.WAIT_REASON_RESOLUTION,
                 pending_outbox=0,
                 resolution_action=mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
                 persistence=self.persistence,
@@ -434,8 +462,9 @@ class WaitStateStoreTests(CoordinationTestCase):
             try:
                 release.wait(timeout=5.0)
                 store.clear(
-                    run_coordination.MailboxWaitResult(
-                        reason=run_coordination.WAIT_REASON_TIMEOUT, pending_outbox=0
+                    run_coordination_wait_models.MailboxWaitResult(
+                        reason=wait_budgets.WAIT_REASON_TIMEOUT,
+                        pending_outbox=0,
                     )
                 )
             except BaseException as error:  # noqa: BLE001 - reported, not swallowed
@@ -462,13 +491,15 @@ class WaitStateStoreTests(CoordinationTestCase):
 class ReplyRaceTests(CoordinationTestCase):
     """A closure committed as the wait gives up wins, and is consumed once."""
 
-    def timed_out(self, **overrides: Any) -> run_coordination.MailboxWaitResult:
-        return run_coordination.MailboxWaitResult.unclosed(
-            run_coordination.WAIT_REASON_TIMEOUT,
+    def timed_out(
+        self, **overrides: Any
+    ) -> run_coordination_wait_models.MailboxWaitResult:
+        return run_coordination_wait_models.MailboxWaitResult.unclosed(
+            wait_budgets.WAIT_REASON_TIMEOUT,
             pending_outbox=overrides.pop("pending_outbox", 1),
             evidence=overrides.pop(
                 "evidence",
-                run_coordination.LeaseEvidence.observed(
+                run_coordination_wait_record.LeaseEvidence.observed(
                     lease_view(fresh=False, updated_at="2026-01-01T00:00:00+00:00"),
                     unsupervised_seconds=42.0,
                 ),
@@ -479,9 +510,9 @@ class ReplyRaceTests(CoordinationTestCase):
         self,
         question: mailbox_models.MailboxMessage,
         wait_start: mailbox_models.MailboxMessage,
-        result: run_coordination.MailboxWaitResult,
-    ) -> run_coordination.MailboxWaitResult:
-        return run_coordination.finish_mailbox_reply_wait_lifecycle(
+        result: run_coordination_wait_models.MailboxWaitResult,
+    ) -> run_coordination_wait_models.MailboxWaitResult:
+        return run_coordination_mailbox_wait.finish_mailbox_reply_wait_lifecycle(
             plan_dir=self.plan_dir,
             state_dir_arg=self.state_dir_arg,
             question_id=question.id,
@@ -499,7 +530,7 @@ class ReplyRaceTests(CoordinationTestCase):
 
         result = self.finish(question, wait_start, self.timed_out())
 
-        self.assertEqual(result.reason, run_coordination.WAIT_REASON_REPLY)
+        self.assertEqual(result.reason, wait_budgets.WAIT_REASON_REPLY)
         self.assertEqual(result.reply, reply)
         self.assertIsNone(result.resolution)
         self.assertEqual(result.closure_id, reply.id)
@@ -529,7 +560,7 @@ class ReplyRaceTests(CoordinationTestCase):
 
         result = self.finish(question, wait_start, self.timed_out())
 
-        self.assertEqual(result.reason, run_coordination.WAIT_REASON_RESOLUTION)
+        self.assertEqual(result.reason, wait_budgets.WAIT_REASON_RESOLUTION)
         self.assertEqual(result.resolution, resolution)
         self.assertIsNone(result.reply)
 
@@ -548,8 +579,8 @@ class ReplyRaceTests(CoordinationTestCase):
             kind=mailbox_vocabulary.KIND_REPLY,
             created_at=clock.isoformat(clock.utc_now()),
         )
-        arrived = run_coordination.MailboxWaitResult(
-            reason=run_coordination.WAIT_REASON_REPLY,
+        arrived = run_coordination_wait_models.MailboxWaitResult(
+            reason=wait_budgets.WAIT_REASON_REPLY,
             pending_outbox=0,
             reply=stale_reply,
         )
@@ -564,7 +595,7 @@ class ReplyRaceTests(CoordinationTestCase):
 
         result = self.finish(question, wait_start, self.timed_out())
 
-        self.assertEqual(result.reason, run_coordination.WAIT_REASON_TIMEOUT)
+        self.assertEqual(result.reason, wait_budgets.WAIT_REASON_TIMEOUT)
         self.assertIsNone(result.closure)
 
     def test_the_same_wait_cannot_be_finished_twice(self) -> None:
@@ -598,8 +629,8 @@ class MailboxWaitCoordinatorTests(CoordinationTestCase):
         self,
         question: mailbox_models.MailboxMessage,
         wait_start: mailbox_models.MailboxMessage,
-    ) -> run_coordination.PreparedMailboxWait:
-        return run_coordination.PreparedMailboxWait(
+    ) -> run_coordination_wait_models.PreparedMailboxWait:
+        return run_coordination_wait_models.PreparedMailboxWait(
             context=qna_context(
                 self.plan_dir, self.state_dir, last_message=question.text or ""
             ),
@@ -613,12 +644,12 @@ class MailboxWaitCoordinatorTests(CoordinationTestCase):
 
     def coordinator(
         self,
-        prepared: run_coordination.PreparedMailboxWait,
+        prepared: run_coordination_wait_models.PreparedMailboxWait,
         *,
         wait_for_reply,
         notifier: RecordingNotifier | None = None,
-    ) -> run_coordination.MailboxWaitCoordinator:
-        return run_coordination.MailboxWaitCoordinator(
+    ) -> run_coordination_mailbox_wait.MailboxWaitCoordinator:
+        return run_coordination_mailbox_wait.MailboxWaitCoordinator(
             plan_dir=self.plan_dir,
             state_dir_arg=self.state_dir_arg,
             prepared=prepared,
@@ -634,26 +665,32 @@ class MailboxWaitCoordinatorTests(CoordinationTestCase):
         prepared = self.prepared(question, wait_start)
         notifier = RecordingNotifier()
 
-        def poll(**_kwargs: Any) -> run_coordination.MailboxWaitResult:
+        def poll(**_kwargs: Any) -> run_coordination_wait_models.MailboxWaitResult:
             # The supervisor answers in the window between the loop's last
             # unlocked read and the locked commit below.
             mailbox_appenders.append_reply(
                 self.plan_dir, question.id, "answered", state_dir=self.state_dir_arg
             )
-            return run_coordination.MailboxWaitResult(
-                reason=run_coordination.WAIT_REASON_TIMEOUT, pending_outbox=1
+            return run_coordination_wait_models.MailboxWaitResult(
+                reason=wait_budgets.WAIT_REASON_TIMEOUT, pending_outbox=1
             )
 
         result = self.coordinator(
             prepared, wait_for_reply=poll, notifier=notifier
         ).run()
 
-        self.assertEqual(result.reason, run_coordination.WAIT_REASON_REPLY)
+        self.assertEqual(result.reason, wait_budgets.WAIT_REASON_REPLY)
         self.assertNotIn("waiting_for_reply", self.payload)
         self.assertEqual(notifier.started, [(question.id, question.text)])
         self.assertEqual(
             notifier.ended,
-            [(question.id, run_coordination.WAIT_REASON_REPLY, result.closure_id)],
+            [
+                (
+                    question.id,
+                    wait_budgets.WAIT_REASON_REPLY,
+                    result.closure_id,
+                )
+            ],
         )
         self.assertEqual(
             [
@@ -672,12 +709,12 @@ class MailboxWaitCoordinatorTests(CoordinationTestCase):
         notifier = RecordingNotifier()
         observed: list[tuple[bool, int]] = []
 
-        def poll(**_kwargs: Any) -> run_coordination.MailboxWaitResult:
+        def poll(**_kwargs: Any) -> run_coordination_wait_models.MailboxWaitResult:
             observed.append(
                 ("waiting_for_reply" in self.payload, len(notifier.started))
             )
-            return run_coordination.MailboxWaitResult(
-                reason=run_coordination.WAIT_REASON_TIMEOUT, pending_outbox=0
+            return run_coordination_wait_models.MailboxWaitResult(
+                reason=wait_budgets.WAIT_REASON_TIMEOUT, pending_outbox=0
             )
 
         self.coordinator(prepared, wait_for_reply=poll, notifier=notifier).run()
@@ -689,7 +726,7 @@ class MailboxWaitCoordinatorTests(CoordinationTestCase):
         prepared = self.prepared(question, wait_start)
         notifier = RecordingNotifier()
 
-        def poll(**_kwargs: Any) -> run_coordination.MailboxWaitResult:
+        def poll(**_kwargs: Any) -> run_coordination_wait_models.MailboxWaitResult:
             raise RuntimeError("poll exploded")
 
         coordinator = self.coordinator(prepared, wait_for_reply=poll, notifier=notifier)
@@ -698,21 +735,22 @@ class MailboxWaitCoordinatorTests(CoordinationTestCase):
 
         self.assertNotIn("waiting_for_reply", self.payload)
         self.assertEqual(
-            notifier.ended, [(question.id, run_coordination.WAIT_REASON_ERROR, None)]
+            notifier.ended,
+            [(question.id, wait_budgets.WAIT_REASON_ERROR, None)],
         )
         cleared = self.persistence.payloads(events.MAILBOX_EVENT)[-1]
         self.assertEqual(cleared["action"], events.MAILBOX_ACTION_WAIT_CLEARED)
-        self.assertEqual(cleared["reason"], run_coordination.WAIT_REASON_ERROR)
+        self.assertEqual(cleared["reason"], wait_budgets.WAIT_REASON_ERROR)
 
     def test_the_injected_poll_receives_the_prepared_wait_verbatim(self) -> None:
         question, wait_start = self.open_wait()
         prepared = self.prepared(question, wait_start)
         seen: dict[str, Any] = {}
 
-        def poll(**kwargs: Any) -> run_coordination.MailboxWaitResult:
+        def poll(**kwargs: Any) -> run_coordination_wait_models.MailboxWaitResult:
             seen.update(kwargs)
-            return run_coordination.MailboxWaitResult(
-                reason=run_coordination.WAIT_REASON_TIMEOUT, pending_outbox=0
+            return run_coordination_wait_models.MailboxWaitResult(
+                reason=wait_budgets.WAIT_REASON_TIMEOUT, pending_outbox=0
             )
 
         self.coordinator(prepared, wait_for_reply=poll).run()
@@ -729,12 +767,15 @@ class MailboxWaitCoordinatorTests(CoordinationTestCase):
 
         result = self.coordinator(
             prepared,
-            wait_for_reply=lambda **_kwargs: run_coordination.MailboxWaitResult(
-                reason=run_coordination.WAIT_REASON_TIMEOUT, pending_outbox=0
+            wait_for_reply=lambda **_kwargs: (
+                run_coordination_wait_models.MailboxWaitResult(
+                    reason=wait_budgets.WAIT_REASON_TIMEOUT,
+                    pending_outbox=0,
+                )
             ),
         ).run()
 
-        self.assertEqual(result.reason, run_coordination.WAIT_REASON_TIMEOUT)
+        self.assertEqual(result.reason, wait_budgets.WAIT_REASON_TIMEOUT)
         self.assertNotIn("waiting_for_reply", self.payload)
 
 
@@ -749,8 +790,8 @@ class ReplyStatePreserverTests(CoordinationTestCase):
 
     def preserver(
         self, *, enabled: bool = True
-    ) -> run_coordination.ReplyStatePreserver:
-        return run_coordination.ReplyStatePreserver(
+    ) -> run_coordination_reply_state.ReplyStatePreserver:
+        return run_coordination_reply_state.ReplyStatePreserver(
             state_path=self.state_path, event_path=self.event_path, enabled=enabled
         )
 
@@ -779,7 +820,7 @@ class ReplyStatePreserverTests(CoordinationTestCase):
 
     def test_a_file_that_did_not_exist_is_removed_again(self) -> None:
         missing = Path(self.tmp.name) / "absent.json"
-        preserver = run_coordination.ReplyStatePreserver(
+        preserver = run_coordination_reply_state.ReplyStatePreserver(
             state_path=missing, event_path=self.event_path, enabled=True
         )
         missing.write_text("created\n", encoding="utf-8")
@@ -803,7 +844,7 @@ class SupervisionCursorTests(unittest.TestCase):
     """Loss, recovery, and suspend move the cursor's ratchets one way only."""
 
     def cursor(self, clocks: FakeClock, **overrides: float):
-        return run_coordination.SupervisionCursor(
+        return run_coordination_wait_models.SupervisionCursor(
             settings=settings(**overrides),
             started=clocks.monotonic(),
             monotonic=clocks.monotonic,
@@ -890,7 +931,7 @@ class SupervisionCursorTests(unittest.TestCase):
         self.assertAlmostEqual(cursor.suspend_skew_seconds, 600.0, places=6)
         self.assertEqual(
             cursor.suspend_lease_grace_seconds,
-            run_coordination.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
+            wait_budgets.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
         )
         self.assertEqual(cursor.last_fresh_lease, clocks.monotonic_value)
         # The ceiling restarts at the wake instant: nobody could prove liveness
@@ -927,7 +968,7 @@ class SupervisionCursorTests(unittest.TestCase):
         clocks.advance(2.0, wall_extra=600.0)
         cursor.observe_clock()
         clocks.advance(
-            run_coordination.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS + 1.0
+            wait_budgets.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS + 1.0
         )
 
         verdict = cursor.observe_lease(lease_view(fresh=False), clocks.monotonic())
@@ -949,7 +990,7 @@ class SupervisionCursorTests(unittest.TestCase):
         self.assertIsNone(probed.to_payload()["lease_supervisor_id"])
 
     def test_a_zero_suspend_is_absence_rather_than_a_measurement(self) -> None:
-        evidence = run_coordination.LeaseEvidence.observed(
+        evidence = run_coordination_wait_record.LeaseEvidence.observed(
             lease_view(fresh=True, updated_at="2026-01-01T00:00:00+00:00")
         )
 
@@ -962,41 +1003,44 @@ class MailboxWaitSettingsTests(unittest.TestCase):
     """Environment overrides are a narrow seam that can only fail safe."""
 
     def test_the_defaults_are_the_production_budgets(self) -> None:
-        resolved = run_coordination.mailbox_reply_wait_settings({})
+        resolved = run_coordination_wait_models.mailbox_reply_wait_settings({})
 
         self.assertEqual(
-            resolved.base_seconds, run_coordination.MAILBOX_REPLY_WAIT_BASE_SECONDS
+            resolved.base_seconds,
+            wait_budgets.MAILBOX_REPLY_WAIT_BASE_SECONDS,
         )
         self.assertEqual(
             resolved.unsupervised_ceiling_seconds,
-            run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS,
+            wait_budgets.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS,
         )
 
     def test_a_nonsense_override_falls_back_rather_than_raising(self) -> None:
-        resolved = run_coordination.mailbox_reply_wait_settings(
+        resolved = run_coordination_wait_models.mailbox_reply_wait_settings(
             {
-                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "not-a-number",
-                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "-1",
-                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "inf",
+                wait_budgets.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "not-a-number",
+                wait_budgets.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "-1",
+                wait_budgets.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "inf",
             }
         )
 
         self.assertEqual(
-            resolved.base_seconds, run_coordination.MAILBOX_REPLY_WAIT_BASE_SECONDS
+            resolved.base_seconds,
+            wait_budgets.MAILBOX_REPLY_WAIT_BASE_SECONDS,
         )
         self.assertEqual(
-            resolved.poll_seconds, run_coordination.MAILBOX_REPLY_WAIT_POLL_SECONDS
+            resolved.poll_seconds,
+            wait_budgets.MAILBOX_REPLY_WAIT_POLL_SECONDS,
         )
         self.assertEqual(
             resolved.io_grace_seconds,
-            run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS,
+            wait_budgets.MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS,
         )
 
     def test_a_base_beyond_the_ceiling_is_clamped_not_raised(self) -> None:
-        resolved = run_coordination.mailbox_reply_wait_settings(
+        resolved = run_coordination_wait_models.mailbox_reply_wait_settings(
             {
-                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "10000",
-                run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "60",
+                wait_budgets.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "10000",
+                wait_budgets.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "60",
             }
         )
 
@@ -1010,7 +1054,7 @@ class ControlDrainTestCase(CoordinationTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.control_state = run_control.RunControlState(current_harness="codex")
-        self.control_payload = run_coordination.initial_control_payload()
+        self.control_payload = run_coordination_control.initial_control_payload()
         self.seen_ids: set[str] = set()
         self.run_control_lock = threading.RLock()
 
@@ -1028,7 +1072,7 @@ class ControlDrainTestCase(CoordinationTestCase):
             "run_control_lock": self.run_control_lock,
         }
         kwargs.update(overrides)
-        return run_coordination.drain_external_control_queue(**kwargs)
+        return run_coordination_control_drain.drain_external_control_queue(**kwargs)
 
     def queue(self, command: str, **kwargs: Any) -> control_queue.ControlCommand:
         return control_queue.append_command(
@@ -1129,7 +1173,9 @@ class ControlDrainTests(ControlDrainTestCase):
 
     def test_an_unreadable_queue_degrades_to_an_empty_drain(self) -> None:
         with mock.patch.object(
-            run_coordination.control_queue, "drain_queue", side_effect=OSError("nope")
+            run_coordination_control_drain.control_queue,
+            "drain_queue",
+            side_effect=OSError("nope"),
         ):
             result = self.drain()
 
@@ -1148,7 +1194,7 @@ class ControlDrainTests(ControlDrainTestCase):
 
         self.queue(control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT, command_id="cmd-1")
         with mock.patch.object(
-            run_coordination.control_queue, "drain_queue", watching_drain
+            run_coordination_control_drain.control_queue, "drain_queue", watching_drain
         ):
             self.drain(wakeup=wakeup)
 
@@ -1284,7 +1330,7 @@ class AbortCancellationTests(ControlDrainTestCase):
         abort = harnesses.AbortSignal()
         action = run_control.RunControlState().request_abort_turn()
 
-        run_coordination.arm_requested_abort(
+        run_coordination_control_drain.arm_requested_abort(
             action,
             abort=abort,
             plan_dir=self.plan_dir,
@@ -1293,18 +1339,20 @@ class AbortCancellationTests(ControlDrainTestCase):
             mailbox_enabled=False,
         )
 
-        self.assertEqual(abort.reason, run_coordination.ABORT_TURN_DEFAULT_REASON)
+        self.assertEqual(
+            abort.reason, run_coordination_control_drain.ABORT_TURN_DEFAULT_REASON
+        )
 
     def test_a_failed_guidance_append_does_not_lose_the_armed_abort(self) -> None:
         abort = harnesses.AbortSignal()
         action = run_control.RunControlState().request_abort_turn(reason="stop")
 
         with mock.patch.object(
-            run_coordination.mailbox_appenders,
+            run_coordination_mailbox_poll.mailbox_appenders,
             "append_guidance",
             side_effect=OSError("mailbox gone"),
         ):
-            run_coordination.arm_requested_abort(
+            run_coordination_control_drain.arm_requested_abort(
                 action,
                 abort=abort,
                 plan_dir=self.plan_dir,
@@ -1329,26 +1377,26 @@ class HarnessNameGuardTests(unittest.TestCase):
     def test_every_known_harness_narrows_to_itself(self) -> None:
         for name in harnesses.HARNESS_NAMES:
             with self.subTest(harness=name):
-                self.assertEqual(run_coordination.harness_name(name), name)
+                self.assertEqual(run_coordination_control.harness_name(name), name)
 
     def test_an_unknown_name_degrades_to_no_harness(self) -> None:
-        self.assertIsNone(run_coordination.harness_name("gpt-9"))
-        self.assertIsNone(run_coordination.harness_name(None))
-        self.assertIsNone(run_coordination.harness_name(""))
+        self.assertIsNone(run_coordination_control.harness_name("gpt-9"))
+        self.assertIsNone(run_coordination_control.harness_name(None))
+        self.assertIsNone(run_coordination_control.harness_name(""))
 
 
 class ControlPayloadTests(unittest.TestCase):
     """The ``control`` slot and its event can never disagree."""
 
     def test_a_consumed_abort_clears_the_pending_fields(self) -> None:
-        control_payload = run_coordination.initial_control_payload()
+        control_payload = run_coordination_control.initial_control_payload()
         state = run_control.RunControlState()
         requested = state.request_abort_turn(grace_seconds=30, reason="stop")
-        run_coordination.apply_run_control_action(control_payload, requested)
+        run_coordination_control.apply_run_control_action(control_payload, requested)
         control_payload["abort_deadline"] = "2026-01-01T00:00:00+00:00"
 
         consumed = state.consume_abort_turn()
-        run_coordination.apply_run_control_action(control_payload, consumed)
+        run_coordination_control.apply_run_control_action(control_payload, consumed)
 
         self.assertFalse(control_payload["abort_turn_requested"])
         self.assertIsNone(control_payload["abort_grace_seconds"])
@@ -1360,11 +1408,11 @@ class ControlPayloadTests(unittest.TestCase):
         )
 
     def test_a_pending_abort_keeps_the_grace_it_was_requested_with(self) -> None:
-        control_payload = run_coordination.initial_control_payload()
+        control_payload = run_coordination_control.initial_control_payload()
         state = run_control.RunControlState()
 
         requested = state.request_abort_turn(grace_seconds=30, reason="stop")
-        run_coordination.apply_run_control_action(control_payload, requested)
+        run_coordination_control.apply_run_control_action(control_payload, requested)
 
         self.assertTrue(control_payload["abort_turn_requested"])
         self.assertEqual(control_payload["abort_grace_seconds"], 30)
@@ -1372,8 +1420,8 @@ class ControlPayloadTests(unittest.TestCase):
 
     def test_every_action_name_has_an_event_action_and_a_message(self) -> None:
         self.assertEqual(
-            set(run_coordination.RUN_CONTROL_EVENT_ACTIONS),
-            set(run_coordination.RUN_CONTROL_EVENT_MESSAGES),
+            set(run_coordination_control.RUN_CONTROL_EVENT_ACTIONS),
+            set(run_coordination_control.RUN_CONTROL_EVENT_MESSAGES),
         )
 
 
@@ -1402,7 +1450,7 @@ class TerminalAssuranceTests(CoordinationTestCase):
             state="pending",
             reason=None,
         )
-        self.context = run_coordination.TerminalAuditContext(
+        self.context = run_coordination_terminal.TerminalAuditContext(
             plan=self.audit_plan,
             run_dir=self.run_dir,
             state_dir=self.state_dir,
@@ -1421,7 +1469,7 @@ class TerminalAssuranceTests(CoordinationTestCase):
             "state_snapshot": dict,
         }
         kwargs.update(overrides)
-        return run_coordination.TerminalAssuranceCoordinator(**kwargs)
+        return run_coordination_terminal.TerminalAssuranceCoordinator(**kwargs)
 
     def summary(self, state: str) -> supervisor_audit.AssuranceSummary:
         return supervisor_audit.AssuranceSummary(
@@ -1430,7 +1478,7 @@ class TerminalAssuranceTests(CoordinationTestCase):
 
     def test_a_completed_audit_publishes_its_verdict_and_closes_the_phase(self) -> None:
         with mock.patch.object(
-            run_coordination.supervisor_audit,
+            run_coordination_terminal.supervisor_audit,
             "audit_terminal_run",
             return_value=self.summary("all-clear"),
         ):
@@ -1447,7 +1495,7 @@ class TerminalAssuranceTests(CoordinationTestCase):
 
     def test_a_cancelled_audit_closes_the_phase_as_cancelled(self) -> None:
         with mock.patch.object(
-            run_coordination.supervisor_audit,
+            run_coordination_terminal.supervisor_audit,
             "audit_terminal_run",
             side_effect=supervisor_audit.AuditCancelled("aborted"),
         ):
@@ -1462,7 +1510,7 @@ class TerminalAssuranceTests(CoordinationTestCase):
         self,
     ) -> None:
         with mock.patch.object(
-            run_coordination.supervisor_audit,
+            run_coordination_terminal.supervisor_audit,
             "audit_terminal_run",
             side_effect=KeyboardInterrupt,
         ):
@@ -1476,7 +1524,7 @@ class TerminalAssuranceTests(CoordinationTestCase):
 
     def test_the_cancelled_run_keeps_the_outcome_it_had_already_earned(self) -> None:
         with mock.patch.object(
-            run_coordination.supervisor_audit,
+            run_coordination_terminal.supervisor_audit,
             "audit_terminal_run",
             side_effect=supervisor_audit.AuditCancelled("aborted"),
         ):
@@ -1487,7 +1535,7 @@ class TerminalAssuranceTests(CoordinationTestCase):
     def test_an_unexpected_failure_still_closes_the_phase(self) -> None:
         with (
             mock.patch.object(
-                run_coordination.supervisor_audit,
+                run_coordination_terminal.supervisor_audit,
                 "audit_terminal_run",
                 side_effect=RuntimeError("auditor exploded"),
             ),
@@ -1501,7 +1549,7 @@ class TerminalAssuranceTests(CoordinationTestCase):
         abort = harnesses.AbortSignal()
         abort.arm("stop auditing")
         with mock.patch.object(
-            run_coordination.supervisor_audit,
+            run_coordination_terminal.supervisor_audit,
             "audit_terminal_run",
             return_value=self.summary("all-clear"),
         ) as audit:
@@ -1520,7 +1568,7 @@ class TerminalAssuranceTests(CoordinationTestCase):
             return copied
 
         with mock.patch.object(
-            run_coordination.supervisor_audit,
+            run_coordination_terminal.supervisor_audit,
             "audit_terminal_run",
             return_value=self.summary("all-clear"),
         ) as audit:
@@ -1538,7 +1586,7 @@ class TerminalAssuranceTests(CoordinationTestCase):
         }
 
         with mock.patch.object(
-            run_coordination.supervisor_audit, "audit_terminal_run"
+            run_coordination_terminal.supervisor_audit, "audit_terminal_run"
         ) as audit:
             outcome = self.coordinator().run()
 
@@ -1555,7 +1603,7 @@ class TerminalAssuranceTests(CoordinationTestCase):
         }
 
         with mock.patch.object(
-            run_coordination.supervisor_audit, "audit_terminal_run"
+            run_coordination_terminal.supervisor_audit, "audit_terminal_run"
         ) as audit:
             outcome = self.coordinator().run()
 
@@ -1580,7 +1628,7 @@ class DegradedAssuranceTests(CoordinationTestCase):
             }
         )
 
-        run_coordination.record_degraded_assurance(
+        run_coordination_terminal.record_degraded_assurance(
             self.payload, persistence=self.persistence
         )
 
@@ -1595,7 +1643,7 @@ class DegradedAssuranceTests(CoordinationTestCase):
         self.payload["assurance"] = {"state": "skipped"}
         self.payload["assurance_degraded"] = {"stale": True}
 
-        run_coordination.record_degraded_assurance(
+        run_coordination_terminal.record_degraded_assurance(
             self.payload, persistence=self.persistence
         )
 
@@ -1609,30 +1657,32 @@ class QuestionTextTests(CoordinationTestCase):
     def test_a_short_message_is_the_question_verbatim(self) -> None:
         context = qna_context(self.plan_dir, self.state_dir, last_message="short")
 
-        self.assertEqual(run_coordination.mailbox_question_text(context), "short")
+        self.assertEqual(
+            run_coordination_mailbox_question.mailbox_question_text(context), "short"
+        )
 
     def test_an_oversized_message_is_truncated_deterministically(self) -> None:
-        body = "x" * (run_coordination.MAILBOX_QUESTION_TEXT_MAX_CHARS + 500)
+        body = "x" * (wait_budgets.MAILBOX_QUESTION_TEXT_MAX_CHARS + 500)
         context = qna_context(self.plan_dir, self.state_dir, last_message=body)
 
-        first = run_coordination.mailbox_question_text(context)
-        second = run_coordination.mailbox_question_text(context)
+        first = run_coordination_mailbox_question.mailbox_question_text(context)
+        second = run_coordination_mailbox_question.mailbox_question_text(context)
 
         self.assertEqual(first, second)
         self.assertTrue(
-            first.startswith("x" * run_coordination.MAILBOX_QUESTION_TEXT_MAX_CHARS)
+            first.startswith("x" * wait_budgets.MAILBOX_QUESTION_TEXT_MAX_CHARS)
         )
         self.assertIn("question truncated", first)
         self.assertIn(str(context.last_message_path), first)
 
     def test_the_question_id_is_stable_across_retries_of_one_turn(self) -> None:
-        first = run_coordination.mailbox_question_id(
+        first = run_coordination_mailbox_question.mailbox_question_id(
             plan_dir=self.plan_dir, run_id=RUN_ID, session_id=SESSION_ID, turn_index=1
         )
-        second = run_coordination.mailbox_question_id(
+        second = run_coordination_mailbox_question.mailbox_question_id(
             plan_dir=self.plan_dir, run_id=RUN_ID, session_id=SESSION_ID, turn_index=1
         )
-        other_turn = run_coordination.mailbox_question_id(
+        other_turn = run_coordination_mailbox_question.mailbox_question_id(
             plan_dir=self.plan_dir, run_id=RUN_ID, session_id=SESSION_ID, turn_index=2
         )
 

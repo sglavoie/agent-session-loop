@@ -113,7 +113,7 @@ from . import (
     run_selection,
     state,
     task_packet,
-    turn_execution,
+    turn_execution_argv,
     verification,
     workspace_evidence,
     workspaces,
@@ -756,7 +756,7 @@ def prepare_turn_prompt(
         if reply.reply_seq is not None:
             reply_identity["reply_seq"] = reply.reply_seq
         reply_source: dict[str, Any] | None = reply_identity
-        persisted_prompt = turn_execution.reply_argv_placeholder(len(reply_text))
+        persisted_prompt = turn_execution_argv.reply_argv_placeholder(len(reply_text))
         resolution_source: dict[str, Any] | None = None
     elif resolution is not None:
         resolution_context = resolution.context
@@ -797,7 +797,7 @@ def prepare_turn_prompt(
         prompt_kind = "resolution"
         reply_source = None
         resolution_source = task_packet._resolution_source_metadata(resolution)
-        persisted_prompt = turn_execution.resolution_argv_placeholder(
+        persisted_prompt = turn_execution_argv.resolution_argv_placeholder(
             resolution.action,
             resolution_source["note_length"],
         )

@@ -20,7 +20,7 @@ from agent_session_loop import (
     state,
     state_locks,
     task_packet,
-    turn_execution,
+    turn_execution_constants,
 )
 from tests.harness_integration_base import FakeHarnessIntegrationBase
 from tests.support import (
@@ -255,7 +255,7 @@ class ExternalQueueAndSelectionTests(FakeHarnessIntegrationBase):
                     side_effect=fake_for_run,
                 ),
                 mock.patch.object(
-                    turn_execution,
+                    turn_execution_constants,
                     "LIVE_CONTROL_POLL_INTERVAL_SECONDS",
                     0.01,
                 ),

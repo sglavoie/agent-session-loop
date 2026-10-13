@@ -6,7 +6,12 @@ from __future__ import annotations
 
 import urllib.parse
 
-from agent_session_loop import plans_files, plans_metadata, plans_registry, workbench
+from agent_session_loop import (
+    plans_files,
+    plans_metadata,
+    plans_registry,
+    workbench_registry,
+)
 from tests.asl_workbench_server_support import (
     WorkbenchServerTestCase,
 )
@@ -116,13 +121,13 @@ class WorkbenchServerRecoveryTests(WorkbenchServerTestCase):
 
     def test_warning_details_remain_full_recovery_only(self) -> None:
         _write_raw_state_payload(self.canonical_plan_dir, self.state_dir, "[]")
-        registry = workbench.load_registry(self.registry_path)
-        registry = workbench.upsert_pin(
+        registry = workbench_registry.load_registry(self.registry_path)
+        registry = workbench_registry.upsert_pin(
             registry,
             self.canonical_plan_dir,
             label="Alpha plan",
         )
-        workbench.save_registry(registry, self.registry_path)
+        workbench_registry.save_registry(registry, self.registry_path)
 
         server = self._start_server(token="warning-boundary-token")
         status, queue_body, _ = _http_request(f"{self._base_url(server)}/api/queue")

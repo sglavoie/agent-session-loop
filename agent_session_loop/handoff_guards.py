@@ -33,7 +33,7 @@ Durable records this boundary writes:
   guard reverted a session, so the published snapshot never describes the plan
   as it was before the revert.
 * One ``turn-rejected`` event and one ``run-paused`` event per failed guard,
-  through ``turn_execution.record_turn_rejected`` and
+  through ``turn_execution_commit.record_turn_rejected`` and
   ``run_termination._pause_run``.
 
 Nothing here imports the runner. The event path, the payload, the persistence
@@ -106,7 +106,7 @@ from . import (
     review_guard,
     run_persistence,
     run_termination,
-    turn_execution,
+    turn_execution_commit,
     workspaces,
 )
 
@@ -423,7 +423,7 @@ def _enforce_mailbox_completion_guard(
         payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
         turn_payload["mailbox_completion_guard"] = guard
         durability.write_json_file(paths["result"], turn_payload)
-    turn_execution.record_turn_rejected(
+    turn_execution_commit.record_turn_rejected(
         event_path=event_path,
         payload=payload,
         persistence=persistence,
@@ -574,7 +574,7 @@ def _enforce_review_mutation_guard(
         payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
         turn_payload["review_mutation_guard"] = guard_record
         durability.write_json_file(paths["result"], turn_payload)
-    turn_execution.record_turn_rejected(
+    turn_execution_commit.record_turn_rejected(
         event_path=event_path,
         payload=payload,
         persistence=persistence,
@@ -749,7 +749,7 @@ def _enforce_plan_artifact_guard(
             pause_details = payload.get("pause_details")
             if payload.get("paused") and isinstance(pause_details, dict):
                 pause_details["plan_artifact_guard"] = adjudicated_record
-        turn_execution.record_turn_rejected(
+        turn_execution_commit.record_turn_rejected(
             event_path=event_path,
             payload=payload,
             persistence=persistence,
@@ -788,7 +788,7 @@ def _enforce_plan_artifact_guard(
         payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
         turn_payload["plan_artifact_guard"] = guard_record
         durability.write_json_file(paths["result"], turn_payload)
-    turn_execution.record_turn_rejected(
+    turn_execution_commit.record_turn_rejected(
         event_path=event_path,
         payload=payload,
         persistence=persistence,

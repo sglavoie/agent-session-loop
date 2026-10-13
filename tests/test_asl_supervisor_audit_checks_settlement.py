@@ -16,13 +16,11 @@ from agent_session_loop import (
     plans_metadata,
     state,
     supervisor_audit_checks,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_constants,
     supervisor_audit_vocabulary,
 )
-from agent_session_loop.assurance_models import (
-    RUBRIC_LANES,
-    DeterministicResult,
-)
+from agent_session_loop.assurance_models_findings import DeterministicResult
+from agent_session_loop.assurance_models_vocab import RUBRIC_LANES
 from tests import support_supervisor_audit_checks as checks_support
 from tests.support import init_git_repo
 from tests.support_supervisor_audit import RUN_ID
@@ -123,7 +121,9 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
         payload = self._read_state(history[2])
         resolved = self._settlement_record() if mirror is ... else mirror
         if resolved is not None:
-            payload[supervisor_audit_evidence.PAUSED_WORK_COMMIT_KEY] = resolved
+            payload[supervisor_audit_evidence_constants.PAUSED_WORK_COMMIT_KEY] = (
+                resolved
+            )
         if unresolved is not None:
             payload["unresolved_commit_groups"] = unresolved
         self._write_state(history[2], payload)
@@ -163,7 +163,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
         # copies from drifting apart silently.
         self.assertEqual(
             commit_settlement.PAUSED_WORK_COMMIT_KEY,
-            supervisor_audit_evidence.PAUSED_WORK_COMMIT_KEY,
+            supervisor_audit_evidence_constants.PAUSED_WORK_COMMIT_KEY,
         )
         source = inspect.getsource(commit_settlement._settle_paused_retained_work)
         for result in supervisor_audit_vocabulary._PAUSED_WORK_RESULTS:

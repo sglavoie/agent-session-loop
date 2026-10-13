@@ -31,7 +31,7 @@ from unittest import mock
 
 from agent_session_loop import (
     agent_mux_delivery,
-    authoring,
+    authoring_render,
     config,
     control_signal,
     events,
@@ -47,7 +47,8 @@ from agent_session_loop import (
     review_session_body,
     run_control,
     state,
-    workbench,
+    workbench_registry,
+    workbench_registry_models,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -882,19 +883,19 @@ def _seed_archivable_plan(
     Returns ``(state_dir, registry_path, canonical_plan_dir)``.
     """
     state_dir = tmp_path / "state"
-    registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+    registry_path = tmp_path / workbench_registry_models.REGISTRY_FILE_NAME
     plan_dir = tmp_path / "plans" / "alpha"
     if create_plan:
         _write_plan_dir(plan_dir)
     canonical = plans_files.canonicalize_path(plan_dir)
     if with_pin:
-        seeded = workbench.upsert_pin(
-            workbench.load_registry(registry_path),
+        seeded = workbench_registry.upsert_pin(
+            workbench_registry.load_registry(registry_path),
             canonical,
             label="Alpha",
-            profile=workbench.LaunchProfile(harness="codex"),
+            profile=workbench_registry_models.LaunchProfile(harness="codex"),
         )
-        workbench.save_registry(seeded, registry_path)
+        workbench_registry.save_registry(seeded, registry_path)
     if with_state:
         plan_state = state.plan_state_dir(canonical, state_dir)
         plan_state.mkdir(parents=True, exist_ok=True)
@@ -1039,7 +1040,9 @@ def live_redirect_endpoint(plan_dir: Path, state_root: Path):
         yield path, event
 
 
-def _discovered(plan_dir: Path, **overrides) -> workbench.DiscoveredPlan:
+def _discovered(
+    plan_dir: Path, **overrides
+) -> workbench_registry_models.DiscoveredPlan:
     kwargs = {
         "plan_dir": plan_dir,
         "sources": ("state",),
@@ -1048,7 +1051,7 @@ def _discovered(plan_dir: Path, **overrides) -> workbench.DiscoveredPlan:
         "exists": True,
     }
     kwargs.update(overrides)
-    return workbench.DiscoveredPlan(**kwargs)
+    return workbench_registry_models.DiscoveredPlan(**kwargs)
 
 
 class _FakePopen:
@@ -1221,7 +1224,7 @@ def _write_prepare_plan(plan_dir: Path, session_ids: tuple[str, ...] = ("1",)) -
             [
                 f"# {plans_session_ids.session_id_display_label(session_id)}: Test",
                 "",
-                authoring.CONTEXT_REFERENCE_LINE,
+                authoring_render.CONTEXT_REFERENCE_LINE,
                 "",
                 "---",
                 "",

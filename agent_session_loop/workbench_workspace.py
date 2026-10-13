@@ -7,7 +7,8 @@ This module computes that projection once, from runtime state when a run has
 recorded one and from prepared plan metadata before the first run.
 
 It is the lowest Workbench layer: it imports only the ``plans_*`` modules, so
-``workbench`` and ``workbench_recovery`` can both read it without importing each other.
+``workbench`` and the ``workbench_recovery_*`` modules can both read it without
+importing each other.
 """
 
 from __future__ import annotations

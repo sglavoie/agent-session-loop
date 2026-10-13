@@ -8,37 +8,47 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import assurance_models as models
-from agent_session_loop.assurance_models import AssuranceError
+from agent_session_loop import (
+    assurance_models_artifacts,
+    assurance_models_audit,
+    assurance_models_findings,
+    assurance_models_inbox,
+    assurance_models_primitives,
+    assurance_models_summary,
+    assurance_models_vocab,
+)
+from agent_session_loop.assurance_models_primitives import AssuranceError
 
 RUN_ID = "20260810T101112123456Z-4242"
 TIMESTAMP = "2026-08-10T10:11:12+00:00"
 DIGEST = "a" * 64
 
 
-def _evidence() -> tuple[models.EvidenceRef, ...]:
+def _evidence() -> tuple[assurance_models_findings.EvidenceRef, ...]:
     return (
-        models.EvidenceRef(kind="event", locator="events.jsonl"),
-        models.EvidenceRef(kind="state", locator="state.json", digest=DIGEST),
-        models.EvidenceRef(
+        assurance_models_findings.EvidenceRef(kind="event", locator="events.jsonl"),
+        assurance_models_findings.EvidenceRef(
+            kind="state", locator="state.json", digest=DIGEST
+        ),
+        assurance_models_findings.EvidenceRef(
             kind="task-packet", locator="turns/1/task-packet.json", detail="turn 1"
         ),
     )
 
 
-def _lanes(status: str = "pass") -> tuple[models.LaneEvidence, ...]:
+def _lanes(status: str = "pass") -> tuple[assurance_models_findings.LaneEvidence, ...]:
     return tuple(
-        models.LaneEvidence(
+        assurance_models_findings.LaneEvidence(
             lane=lane,
             status=status,
             summary=f"{lane} judged from the event ledger",
             evidence=("events.jsonl",),
         )
-        for lane in models.RUBRIC_LANES
+        for lane in assurance_models_vocab.RUBRIC_LANES
     )
 
 
-def _finding(**overrides) -> models.Finding:
+def _finding(**overrides) -> assurance_models_findings.Finding:
     payload = {
         "category": "lifecycle",
         "component": "agent_session_loop/runner.py",
@@ -50,10 +60,10 @@ def _finding(**overrides) -> models.Finding:
         "evidence": ("events.jsonl",),
     }
     payload.update(overrides)
-    return models.Finding(**payload)
+    return assurance_models_findings.Finding(**payload)
 
 
-def _audit(**overrides) -> models.SupervisorAudit:
+def _audit(**overrides) -> assurance_models_audit.SupervisorAudit:
     payload = {
         "run_id": RUN_ID,
         "state": "all-clear",
@@ -63,7 +73,7 @@ def _audit(**overrides) -> models.SupervisorAudit:
         "lanes": _lanes(),
     }
     payload.update(overrides)
-    return models.SupervisorAudit(**payload)
+    return assurance_models_audit.SupervisorAudit(**payload)
 
 
 class VocabularyTests(unittest.TestCase):
@@ -79,24 +89,27 @@ class VocabularyTests(unittest.TestCase):
                 "resources-stalls",
                 "unknown-anomalies",
             ),
-            models.RUBRIC_LANES,
+            assurance_models_vocab.RUBRIC_LANES,
         )
 
     def test_audit_states_match_the_persisted_vocabulary(self) -> None:
         self.assertEqual(
             ("all-clear", "findings", "partial", "unavailable", "skipped", "pending"),
-            models.AUDIT_STATES,
+            assurance_models_vocab.AUDIT_STATES,
         )
 
     def test_severities_are_ordered_low_to_critical(self) -> None:
-        self.assertEqual(("low", "medium", "high", "critical"), models.SEVERITIES)
+        self.assertEqual(
+            ("low", "medium", "high", "critical"), assurance_models_vocab.SEVERITIES
+        )
 
     def test_every_disposition_names_the_state_it_produces(self) -> None:
         self.assertEqual(
-            set(models.DISPOSITION_KINDS), set(models.DISPOSITION_RESULT_STATE)
+            set(assurance_models_vocab.DISPOSITION_KINDS),
+            set(assurance_models_vocab.DISPOSITION_RESULT_STATE),
         )
-        for state in models.DISPOSITION_RESULT_STATE.values():
-            self.assertIn(state, models.ISSUE_STATES)
+        for state in assurance_models_vocab.DISPOSITION_RESULT_STATE.values():
+            self.assertIn(state, assurance_models_vocab.ISSUE_STATES)
 
 
 class FingerprintTests(unittest.TestCase):
@@ -124,7 +137,7 @@ class FingerprintTests(unittest.TestCase):
         material = "\x1f".join(
             (
                 "assurance-finding",
-                str(models.ASSURANCE_SCHEMA_VERSION),
+                str(assurance_models_vocab.ASSURANCE_SCHEMA_VERSION),
                 "lifecycle",
                 "agent_session_loop/runner.py",
                 "retry.budget-respected",
@@ -140,8 +153,8 @@ class FingerprintTests(unittest.TestCase):
         # The signature is the guarantee: there is no parameter through which a
         # run id, timestamp, or summary could reach the digest.
         with self.assertRaises(TypeError):
-            models.finding_fingerprint(  # type: ignore[call-arg]
-                schema_version=models.ASSURANCE_SCHEMA_VERSION,
+            assurance_models_findings.finding_fingerprint(  # type: ignore[call-arg]
+                schema_version=assurance_models_vocab.ASSURANCE_SCHEMA_VERSION,
                 category="lifecycle",
                 component="runner",
                 invariant_key="retry.budget-respected",
@@ -150,7 +163,7 @@ class FingerprintTests(unittest.TestCase):
 
     def test_unknown_schema_version_is_rejected(self) -> None:
         with self.assertRaisesRegex(AssuranceError, "unsupported"):
-            models.finding_fingerprint(
+            assurance_models_findings.finding_fingerprint(
                 schema_version=99,
                 category="lifecycle",
                 component="runner",
@@ -162,7 +175,7 @@ class FingerprintTests(unittest.TestCase):
         payload["fingerprint"] = "c" * 64
 
         with self.assertRaisesRegex(AssuranceError, "does not match"):
-            models.parse_finding(payload)
+            assurance_models_findings.parse_finding(payload)
 
 
 class AllClearTests(unittest.TestCase):
@@ -172,7 +185,7 @@ class AllClearTests(unittest.TestCase):
 
     def test_all_clear_needs_every_lane_to_pass(self) -> None:
         lanes = list(_lanes())
-        lanes[2] = models.LaneEvidence(
+        lanes[2] = assurance_models_findings.LaneEvidence(
             lane=lanes[2].lane,
             status="unavailable",
             summary="The event ledger was truncated.",
@@ -237,11 +250,11 @@ class EvidenceReferenceTests(unittest.TestCase):
                 self.subTest(locator=locator),
                 self.assertRaises(AssuranceError),
             ):
-                models.EvidenceRef(kind="artifact", locator=locator)
+                assurance_models_findings.EvidenceRef(kind="artifact", locator=locator)
 
     def test_a_reference_to_undeclared_evidence_is_rejected(self) -> None:
         lanes = list(_lanes())
-        lanes[0] = models.LaneEvidence(
+        lanes[0] = assurance_models_findings.LaneEvidence(
             lane=lanes[0].lane,
             status="pass",
             summary="Judged from an artifact the audit never declared.",
@@ -253,7 +266,7 @@ class EvidenceReferenceTests(unittest.TestCase):
 
     def test_a_lane_must_name_evidence(self) -> None:
         with self.assertRaisesRegex(AssuranceError, "at least one evidence locator"):
-            models.LaneEvidence(
+            assurance_models_findings.LaneEvidence(
                 lane="resources-stalls",
                 status="pass",
                 summary="Nothing to see here.",
@@ -264,23 +277,29 @@ class EvidenceReferenceTests(unittest.TestCase):
         with self.assertRaisesRegex(AssuranceError, "repeats locator"):
             _audit(
                 evidence=_evidence()
-                + (models.EvidenceRef(kind="event", locator="events.jsonl"),)
+                + (
+                    assurance_models_findings.EvidenceRef(
+                        kind="event", locator="events.jsonl"
+                    ),
+                )
             )
 
     def test_a_malformed_digest_is_rejected(self) -> None:
         with self.assertRaisesRegex(AssuranceError, "SHA-256 hex digest"):
-            models.EvidenceRef(kind="artifact", locator="report.json", digest="beef")
+            assurance_models_findings.EvidenceRef(
+                kind="artifact", locator="report.json", digest="beef"
+            )
 
 
 class BoundsTests(unittest.TestCase):
     def test_oversized_text_is_rejected(self) -> None:
         with self.assertRaisesRegex(AssuranceError, "at most"):
-            _finding(summary="x" * (models.MAX_TEXT_CHARS + 1))
+            _finding(summary="x" * (assurance_models_vocab.MAX_TEXT_CHARS + 1))
 
     def test_oversized_reference_lists_are_rejected(self) -> None:
         locators = tuple(
             f"turns/{index}/log.txt"
-            for index in range(models.MAX_REFERENCES_PER_ITEM + 1)
+            for index in range(assurance_models_vocab.MAX_REFERENCES_PER_ITEM + 1)
         )
 
         with self.assertRaisesRegex(AssuranceError, "at most"):
@@ -303,14 +322,14 @@ class BoundsTests(unittest.TestCase):
         payload["extra"] = True
 
         with self.assertRaisesRegex(AssuranceError, "unknown key"):
-            models.parse_supervisor_audit(payload)
+            assurance_models_audit.parse_supervisor_audit(payload)
 
     def test_unknown_schema_version_is_rejected_before_anything_else(self) -> None:
         payload = _audit().to_dict()
         payload["schema_version"] = 99
 
         with self.assertRaisesRegex(AssuranceError, "unsupported"):
-            models.parse_supervisor_audit(payload)
+            assurance_models_audit.parse_supervisor_audit(payload)
 
     def test_duplicate_findings_in_one_audit_are_rejected(self) -> None:
         with self.assertRaisesRegex(AssuranceError, "repeats fingerprint"):
@@ -324,8 +343,8 @@ class RoundTripTests(unittest.TestCase):
 
         self.assertEqual(model, reparsed)
         self.assertEqual(
-            models.canonical_json_bytes(payload),
-            models.canonical_json_bytes(reparsed.to_dict()),
+            assurance_models_primitives.canonical_json_bytes(payload),
+            assurance_models_primitives.canonical_json_bytes(reparsed.to_dict()),
         )
 
     def test_audit_round_trips(self) -> None:
@@ -333,7 +352,7 @@ class RoundTripTests(unittest.TestCase):
             state="findings",
             findings=(_finding(),),
             deterministic=(
-                models.DeterministicResult(
+                assurance_models_findings.DeterministicResult(
                     check="state-event-agreement",
                     lane="truthfulness-observability",
                     status="fail",
@@ -344,31 +363,35 @@ class RoundTripTests(unittest.TestCase):
             ),
         )
 
-        self._assert_round_trips(audit, models.parse_supervisor_audit)
+        self._assert_round_trips(audit, assurance_models_audit.parse_supervisor_audit)
 
     def test_summary_round_trips(self) -> None:
-        summary = models.AssuranceSummary(
+        summary = assurance_models_summary.AssuranceSummary(
             run_id=RUN_ID,
             state="findings",
             eligible=True,
-            role=models.AuditRole(
+            role=assurance_models_summary.AuditRole(
                 harness="claude",
                 implementation_harness="codex",
                 source="review",
                 timeout_seconds=600.0,
             ),
             attempts=(
-                models.AuditAttempt(number=1, outcome="malformed-output"),
-                models.AuditAttempt(
+                assurance_models_summary.AuditAttempt(
+                    number=1, outcome="malformed-output"
+                ),
+                assurance_models_summary.AuditAttempt(
                     number=2,
                     outcome="ok",
                     duration_seconds=42.5,
-                    artifact_dir=models.attempt_dir_name(2),
+                    artifact_dir=assurance_models_artifacts.attempt_dir_name(2),
                 ),
             ),
             artifacts=(
-                models.EvidenceRef(
-                    kind="artifact", locator=models.AUDIT_REPORT_FILENAME, digest=DIGEST
+                assurance_models_findings.EvidenceRef(
+                    kind="artifact",
+                    locator=assurance_models_vocab.AUDIT_REPORT_FILENAME,
+                    digest=DIGEST,
                 ),
             ),
             issue_ids=("ASI-7", "ASI-9"),
@@ -379,36 +402,40 @@ class RoundTripTests(unittest.TestCase):
             duration_seconds=90.0,
         )
 
-        self._assert_round_trips(summary, models.parse_assurance_summary)
+        self._assert_round_trips(
+            summary, assurance_models_summary.parse_assurance_summary
+        )
 
     def test_observation_round_trips(self) -> None:
-        observation = models.IssueObservation(
+        observation = assurance_models_inbox.IssueObservation(
             run_id=RUN_ID,
             finding=_finding(),
             observed_at=TIMESTAMP,
-            audit_artifact=models.AUDIT_REPORT_FILENAME,
+            audit_artifact=assurance_models_vocab.AUDIT_REPORT_FILENAME,
         )
 
-        self._assert_round_trips(observation, models.parse_issue_observation)
+        self._assert_round_trips(
+            observation, assurance_models_inbox.parse_issue_observation
+        )
 
     def test_disposition_round_trips(self) -> None:
-        disposition = models.Disposition(
+        disposition = assurance_models_inbox.Disposition(
             issue_id=42, kind="accept-risk", recorded_at=TIMESTAMP, note="known"
         )
 
         self.assertEqual("ASI-42", disposition.issue_id)
         self.assertEqual("accepted-risk", disposition.result_state)
-        self._assert_round_trips(disposition, models.parse_disposition)
+        self._assert_round_trips(disposition, assurance_models_inbox.parse_disposition)
 
     def test_merge_round_trips(self) -> None:
-        merge = models.IssueMerge(
+        merge = assurance_models_inbox.IssueMerge(
             source_issue_id="ASI-9", target_issue_id=7, recorded_at=TIMESTAMP
         )
 
-        self._assert_round_trips(merge, models.parse_issue_merge)
+        self._assert_round_trips(merge, assurance_models_inbox.parse_issue_merge)
 
     def test_closeout_round_trips(self) -> None:
-        closeout = models.Closeout(
+        closeout = assurance_models_inbox.Closeout(
             run_id=RUN_ID,
             outcome="reworked",
             recorded_at=TIMESTAMP,
@@ -419,10 +446,10 @@ class RoundTripTests(unittest.TestCase):
             replaces="20260809T090000000000Z-11",
         )
 
-        self._assert_round_trips(closeout, models.parse_closeout)
+        self._assert_round_trips(closeout, assurance_models_inbox.parse_closeout)
 
     def test_improvement_plan_draft_round_trips(self) -> None:
-        draft = models.ImprovementPlanDraft(
+        draft = assurance_models_inbox.ImprovementPlanDraft(
             issue_id=7,
             harness="claude",
             output_path="/Users/operator/plans/asi-7.md",
@@ -432,16 +459,18 @@ class RoundTripTests(unittest.TestCase):
         )
 
         self.assertEqual("ASI-7", draft.issue_id)
-        self._assert_round_trips(draft, models.parse_improvement_plan_draft)
+        self._assert_round_trips(
+            draft, assurance_models_inbox.parse_improvement_plan_draft
+        )
 
     def test_equal_durations_serialize_to_equal_bytes(self) -> None:
-        integral = models.AuditRole(
+        integral = assurance_models_summary.AuditRole(
             harness="claude",
             implementation_harness="codex",
             source="explicit",
             timeout_seconds=600,
         )
-        fractional = models.AuditRole(
+        fractional = assurance_models_summary.AuditRole(
             harness="claude",
             implementation_harness="codex",
             source="explicit",
@@ -449,8 +478,8 @@ class RoundTripTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            models.canonical_json_bytes(integral.to_dict()),
-            models.canonical_json_bytes(fractional.to_dict()),
+            assurance_models_primitives.canonical_json_bytes(integral.to_dict()),
+            assurance_models_primitives.canonical_json_bytes(fractional.to_dict()),
         )
 
     def test_canonical_bytes_are_key_order_independent(self) -> None:
@@ -458,13 +487,13 @@ class RoundTripTests(unittest.TestCase):
         shuffled = dict(reversed(list(payload.items())))
 
         self.assertEqual(
-            models.canonical_json_bytes(payload),
-            models.canonical_json_bytes(shuffled),
+            assurance_models_primitives.canonical_json_bytes(payload),
+            assurance_models_primitives.canonical_json_bytes(shuffled),
         )
 
 
 class ImprovementPlanDraftTests(unittest.TestCase):
-    def _draft(self, **overrides) -> models.ImprovementPlanDraft:
+    def _draft(self, **overrides) -> assurance_models_inbox.ImprovementPlanDraft:
         fields = {
             "issue_id": "ASI-7",
             "harness": "claude",
@@ -473,7 +502,7 @@ class ImprovementPlanDraftTests(unittest.TestCase):
             "drafted_at": TIMESTAMP,
         }
         fields.update(overrides)
-        return models.ImprovementPlanDraft(**fields)
+        return assurance_models_inbox.ImprovementPlanDraft(**fields)
 
     def test_the_model_carries_no_prompt_or_response_text(self) -> None:
         self.assertEqual(
@@ -498,22 +527,24 @@ class ImprovementPlanDraftTests(unittest.TestCase):
 
     def test_an_oversized_output_path_is_rejected(self) -> None:
         with self.assertRaisesRegex(AssuranceError, "at most"):
-            self._draft(output_path="x" * (models.MAX_LOCATOR_CHARS + 1))
+            self._draft(
+                output_path="x" * (assurance_models_vocab.MAX_LOCATOR_CHARS + 1)
+            )
 
     def test_unknown_keys_are_rejected(self) -> None:
         payload = self._draft().to_dict()
         payload["response"] = "the full model reply"
 
         with self.assertRaisesRegex(AssuranceError, "unknown key"):
-            models.parse_improvement_plan_draft(payload)
+            assurance_models_inbox.parse_improvement_plan_draft(payload)
 
 
 class IssueIdTests(unittest.TestCase):
     def test_canonical_and_shorthand_forms_agree(self) -> None:
-        self.assertEqual("ASI-42", models.parse_issue_id("ASI-42"))
-        self.assertEqual("ASI-42", models.parse_issue_id("42"))
-        self.assertEqual("ASI-42", models.parse_issue_id(42))
-        self.assertEqual(42, models.issue_id_number("ASI-42"))
+        self.assertEqual("ASI-42", assurance_models_primitives.parse_issue_id("ASI-42"))
+        self.assertEqual("ASI-42", assurance_models_primitives.parse_issue_id("42"))
+        self.assertEqual("ASI-42", assurance_models_primitives.parse_issue_id(42))
+        self.assertEqual(42, assurance_models_primitives.issue_id_number("ASI-42"))
 
     def test_ambiguous_and_invalid_forms_are_rejected(self) -> None:
         for value in ("ASI-0", "0", "-1", "ASI-007", "asi-42", "ASI-", "", 0, True):
@@ -521,14 +552,21 @@ class IssueIdTests(unittest.TestCase):
                 self.subTest(value=value),
                 self.assertRaises(AssuranceError),
             ):
-                models.parse_issue_id(value)
+                assurance_models_primitives.parse_issue_id(value)
 
 
 class IdentityKeyTests(unittest.TestCase):
     def test_a_key_is_minted_from_an_allocated_issue_id(self) -> None:
-        self.assertEqual("issue.asi-42", models.identity_key_for_issue("ASI-42"))
-        self.assertEqual("issue.asi-42", models.identity_key_for_issue(42))
-        self.assertEqual("ASI-42", models.issue_id_for_identity_key("issue.asi-42"))
+        self.assertEqual(
+            "issue.asi-42", assurance_models_primitives.identity_key_for_issue("ASI-42")
+        )
+        self.assertEqual(
+            "issue.asi-42", assurance_models_primitives.identity_key_for_issue(42)
+        )
+        self.assertEqual(
+            "ASI-42",
+            assurance_models_primitives.issue_id_for_identity_key("issue.asi-42"),
+        )
 
     def test_keys_outside_the_minted_space_are_rejected(self) -> None:
         for value in (
@@ -545,15 +583,17 @@ class IdentityKeyTests(unittest.TestCase):
             None,
         ):
             with self.subTest(value=value), self.assertRaises(AssuranceError):
-                models.parse_identity_key(value)
+                assurance_models_primitives.parse_identity_key(value)
 
     def test_an_oversized_key_is_rejected_before_it_is_matched(self) -> None:
         with self.assertRaisesRegex(AssuranceError, "identity key"):
-            models.parse_identity_key(f"issue.asi-{'1' * models.MAX_TOKEN_CHARS}")
+            assurance_models_primitives.parse_identity_key(
+                f"issue.asi-{'1' * assurance_models_vocab.MAX_TOKEN_CHARS}"
+            )
 
 
 class IssueIdentityBindingTests(unittest.TestCase):
-    def _binding(self, **overrides) -> models.IssueIdentityBinding:
+    def _binding(self, **overrides) -> assurance_models_inbox.IssueIdentityBinding:
         payload = {
             "identity_key": "issue.asi-1",
             "issue_id": "ASI-1",
@@ -561,12 +601,13 @@ class IssueIdentityBindingTests(unittest.TestCase):
             "bound_at": TIMESTAMP,
         }
         payload.update(overrides)
-        return models.IssueIdentityBinding(**payload)
+        return assurance_models_inbox.IssueIdentityBinding(**payload)
 
     def test_a_binding_round_trips_through_its_parser(self) -> None:
         binding = self._binding(source="merge", issue_id="ASI-9", note="reviewed")
         self.assertEqual(
-            binding, models.parse_issue_identity_binding(binding.to_dict())
+            binding,
+            assurance_models_inbox.parse_issue_identity_binding(binding.to_dict()),
         )
 
     def test_the_key_names_the_issue_it_was_minted_with(self) -> None:
@@ -599,56 +640,66 @@ class IssueIdentityBindingTests(unittest.TestCase):
         payload["reason"] = "the agent decided so"
 
         with self.assertRaisesRegex(AssuranceError, "unknown key"):
-            models.parse_issue_identity_binding(payload)
+            assurance_models_inbox.parse_issue_identity_binding(payload)
 
     def test_an_oversized_note_is_rejected(self) -> None:
         with self.assertRaises(AssuranceError):
-            self._binding(note="n" * (models.MAX_TEXT_CHARS + 1))
+            self._binding(note="n" * (assurance_models_vocab.MAX_TEXT_CHARS + 1))
 
 
 class NormalizedFindingTextTests(unittest.TestCase):
     def test_a_localization_pointer_normalizes_to_the_file_it_names(self) -> None:
         self.assertEqual(
             "agent_session_loop/runner.py",
-            models.normalize_localization("agent_session_loop/runner.py:8129"),
+            assurance_models_findings.normalize_localization(
+                "agent_session_loop/runner.py:8129"
+            ),
         )
         self.assertEqual(
             "agent_session_loop/runner.py",
-            models.normalize_localization("agent_session_loop/runner.py:8129:14"),
+            assurance_models_findings.normalize_localization(
+                "agent_session_loop/runner.py:8129:14"
+            ),
         )
         self.assertEqual(
             "agent_session_loop/runner.py",
-            models.normalize_localization("agent_session_loop/runner.py"),
+            assurance_models_findings.normalize_localization(
+                "agent_session_loop/runner.py"
+            ),
         )
 
     def test_two_sightings_of_one_file_normalize_together(self) -> None:
         self.assertEqual(
-            models.normalize_localization("skills/asl/SKILL.md:12"),
-            models.normalize_localization("skills/asl/SKILL.md:4001"),
+            assurance_models_findings.normalize_localization("skills/asl/SKILL.md:12"),
+            assurance_models_findings.normalize_localization(
+                "skills/asl/SKILL.md:4001"
+            ),
         )
 
     def test_a_version_in_a_filename_survives_normalization(self) -> None:
         self.assertEqual(
             "agent_session_loop/state_v2.py",
-            models.normalize_localization("agent_session_loop/state_v2.py"),
+            assurance_models_findings.normalize_localization(
+                "agent_session_loop/state_v2.py"
+            ),
         )
 
     def test_summary_tokens_are_lowercased_sorted_and_deduplicated(self) -> None:
         self.assertEqual(
             ("after", "budget", "exhausted", "ran", "retry"),
-            models.normalize_summary_tokens(
+            assurance_models_findings.normalize_summary_tokens(
                 "A retry ran after the budget was exhausted; the retry ran."
             ),
         )
 
     def test_rewording_a_summary_keeps_the_shared_tokens(self) -> None:
         first = set(
-            models.normalize_summary_tokens(
+            assurance_models_findings.normalize_summary_tokens(
                 "A retry ran after the budget was exhausted."
             )
         )
         second = set(
-            models.normalize_summary_tokens(
+            assurance_models_findings.normalize_summary_tokens(
                 "The retry budget was exhausted and a retry still ran."
             )
         )
@@ -657,53 +708,75 @@ class NormalizedFindingTextTests(unittest.TestCase):
     def test_a_negation_is_never_dropped_as_a_stopword(self) -> None:
         for word in ("not", "no", "never", "none", "nor", "without", "nothing"):
             with self.subTest(word=word):
-                self.assertNotIn(word, models.SUMMARY_STOPWORDS)
+                self.assertNotIn(word, assurance_models_findings.SUMMARY_STOPWORDS)
         self.assertNotEqual(
-            models.normalize_summary_tokens("The guard fired."),
-            models.normalize_summary_tokens("The guard did not fire."),
+            assurance_models_findings.normalize_summary_tokens("The guard fired."),
+            assurance_models_findings.normalize_summary_tokens(
+                "The guard did not fire."
+            ),
         )
 
     def test_punctuation_and_path_separators_split_summary_tokens(self) -> None:
         self.assertEqual(
             ("guard", "py", "runner", "scope"),
-            models.normalize_summary_tokens("`runner.py` scope-guard"),
+            assurance_models_findings.normalize_summary_tokens(
+                "`runner.py` scope-guard"
+            ),
         )
 
     def test_an_empty_summary_yields_no_tokens(self) -> None:
-        self.assertEqual((), models.normalize_summary_tokens("   -- ,, "))
+        self.assertEqual(
+            (), assurance_models_findings.normalize_summary_tokens("   -- ,, ")
+        )
 
     def test_an_invariant_key_splits_into_sorted_segments(self) -> None:
         self.assertEqual(
             ("budget", "respected", "retry"),
-            models.normalize_invariant_tokens("retry.budget-respected"),
+            assurance_models_findings.normalize_invariant_tokens(
+                "retry.budget-respected"
+            ),
         )
 
     def test_renaming_one_segment_keeps_the_others(self) -> None:
         self.assertEqual(
             {"budget", "retry"},
-            set(models.normalize_invariant_tokens("retry.budget-respected"))
-            & set(models.normalize_invariant_tokens("retry.budget-clamped")),
+            set(
+                assurance_models_findings.normalize_invariant_tokens(
+                    "retry.budget-respected"
+                )
+            )
+            & set(
+                assurance_models_findings.normalize_invariant_tokens(
+                    "retry.budget-clamped"
+                )
+            ),
         )
 
     def test_unrelated_invariants_share_no_segment(self) -> None:
         self.assertEqual(
             set(),
-            set(models.normalize_invariant_tokens("retry.budget-respected"))
-            & set(models.normalize_invariant_tokens("scope.no-escape")),
+            set(
+                assurance_models_findings.normalize_invariant_tokens(
+                    "retry.budget-respected"
+                )
+            )
+            & set(
+                assurance_models_findings.normalize_invariant_tokens("scope.no-escape")
+            ),
         )
 
     def test_no_stopword_is_dropped_from_an_invariant_key(self) -> None:
         self.assertEqual(
             ("do", "not", "the", "thing"),
-            models.normalize_invariant_tokens("the.do-not-thing"),
+            assurance_models_findings.normalize_invariant_tokens("the.do-not-thing"),
         )
 
 
 class SummaryInvariantTests(unittest.TestCase):
-    def _summary(self, **overrides) -> models.AssuranceSummary:
+    def _summary(self, **overrides) -> assurance_models_summary.AssuranceSummary:
         payload = {"run_id": RUN_ID, "state": "pending", "eligible": True}
         payload.update(overrides)
-        return models.AssuranceSummary(**payload)
+        return assurance_models_summary.AssuranceSummary(**payload)
 
     def test_counts_must_account_for_every_issue(self) -> None:
         with self.assertRaisesRegex(AssuranceError, "must account for exactly"):
@@ -735,7 +808,9 @@ class SummaryInvariantTests(unittest.TestCase):
         with self.assertRaisesRegex(AssuranceError, "has not run"):
             self._summary(
                 state="pending",
-                attempts=(models.AuditAttempt(number=1, outcome="ok"),),
+                attempts=(
+                    assurance_models_summary.AuditAttempt(number=1, outcome="ok"),
+                ),
             )
 
     def test_findings_must_name_its_issues(self) -> None:
@@ -747,15 +822,19 @@ class SummaryInvariantTests(unittest.TestCase):
             self._summary(
                 state="unavailable",
                 reason="agent-timeout",
-                attempts=(models.AuditAttempt(number=2, outcome="timeout"),),
+                attempts=(
+                    assurance_models_summary.AuditAttempt(number=2, outcome="timeout"),
+                ),
             )
 
     def test_attempts_past_both_budgets_are_rejected(self) -> None:
         with self.assertRaisesRegex(
-            AssuranceError, f"between 1 and {models.MAX_AUDIT_ATTEMPT_RECORDS}"
+            AssuranceError,
+            f"between 1 and {assurance_models_vocab.MAX_AUDIT_ATTEMPT_RECORDS}",
         ):
-            models.AuditAttempt(
-                number=models.MAX_AUDIT_ATTEMPT_RECORDS + 1, outcome="ok"
+            assurance_models_summary.AuditAttempt(
+                number=assurance_models_vocab.MAX_AUDIT_ATTEMPT_RECORDS + 1,
+                outcome="ok",
             )
 
 
@@ -764,7 +843,7 @@ class AuditRoleTests(unittest.TestCase):
         self,
     ) -> None:
         with self.assertRaisesRegex(AssuranceError, "must differ"):
-            models.AuditRole(
+            assurance_models_summary.AuditRole(
                 harness="codex",
                 implementation_harness="codex",
                 source="explicit",
@@ -772,7 +851,7 @@ class AuditRoleTests(unittest.TestCase):
             )
 
     def test_the_audit_harness_may_equal_the_review_harness(self) -> None:
-        role = models.AuditRole(
+        role = assurance_models_summary.AuditRole(
             harness="claude",
             implementation_harness="codex",
             source="review",
@@ -784,7 +863,7 @@ class AuditRoleTests(unittest.TestCase):
 
     def test_an_unknown_harness_is_rejected(self) -> None:
         with self.assertRaisesRegex(AssuranceError, "'harness' must be one of"):
-            models.AuditRole(
+            assurance_models_summary.AuditRole(
                 harness="gemini",
                 implementation_harness="codex",
                 source="explicit",
@@ -796,14 +875,20 @@ class ArtifactWriterTests(unittest.TestCase):
     def test_a_canonical_artifact_is_written_exactly_once(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             run_dir = Path(raw_dir)
-            written = models.write_audit_artifact(
-                run_dir, models.AUDIT_REPORT_FILENAME, b"{}\n", durable=False
+            written = assurance_models_artifacts.write_audit_artifact(
+                run_dir,
+                assurance_models_vocab.AUDIT_REPORT_FILENAME,
+                b"{}\n",
+                durable=False,
             )
 
             self.assertEqual(b"{}\n", written.read_bytes())
             with self.assertRaisesRegex(AssuranceError, "already exists"):
-                models.write_audit_artifact(
-                    run_dir, models.AUDIT_REPORT_FILENAME, b"{}\n", durable=False
+                assurance_models_artifacts.write_audit_artifact(
+                    run_dir,
+                    assurance_models_vocab.AUDIT_REPORT_FILENAME,
+                    b"{}\n",
+                    durable=False,
                 )
             self.assertEqual(b"{}\n", written.read_bytes())
 
@@ -819,18 +904,21 @@ class ArtifactWriterTests(unittest.TestCase):
                     self.subTest(name=name),
                     self.assertRaises(AssuranceError),
                 ):
-                    models.write_audit_artifact(
+                    assurance_models_artifacts.write_audit_artifact(
                         Path(raw_dir), name, b"{}\n", durable=False
                     )
 
     def test_an_unbounded_payload_never_reaches_the_run_directory(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             run_dir = Path(raw_dir)
-            oversized = b"x" * (models.MAX_ARTIFACT_BYTES + 1)
+            oversized = b"x" * (assurance_models_vocab.MAX_ARTIFACT_BYTES + 1)
 
             with self.assertRaisesRegex(AssuranceError, "over the"):
-                models.write_audit_artifact(
-                    run_dir, models.AUDIT_INPUT_FILENAME, oversized, durable=False
+                assurance_models_artifacts.write_audit_artifact(
+                    run_dir,
+                    assurance_models_vocab.AUDIT_INPUT_FILENAME,
+                    oversized,
+                    durable=False,
                 )
 
             self.assertEqual([], list(run_dir.iterdir()))
@@ -838,16 +926,19 @@ class ArtifactWriterTests(unittest.TestCase):
     def test_audit_json_is_written_canonically(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             audit = _audit()
-            path = models.write_audit_json(
-                Path(raw_dir), models.AUDIT_REPORT_FILENAME, audit.to_dict()
+            path = assurance_models_artifacts.write_audit_json(
+                Path(raw_dir),
+                assurance_models_vocab.AUDIT_REPORT_FILENAME,
+                audit.to_dict(),
             )
 
             self.assertEqual(
-                models.canonical_json_bytes(audit.to_dict()), path.read_bytes()
+                assurance_models_primitives.canonical_json_bytes(audit.to_dict()),
+                path.read_bytes(),
             )
             self.assertEqual(
                 audit,
-                models.parse_supervisor_audit(
+                assurance_models_audit.parse_supervisor_audit(
                     json.loads(path.read_text(encoding="utf-8"))
                 ),
             )
@@ -855,13 +946,13 @@ class ArtifactWriterTests(unittest.TestCase):
     def test_each_attempt_gets_its_own_directory(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             run_dir = Path(raw_dir)
-            first = models.create_attempt_dir(run_dir, 1)
-            second = models.create_attempt_dir(run_dir, 2)
+            first = assurance_models_artifacts.create_attempt_dir(run_dir, 1)
+            second = assurance_models_artifacts.create_attempt_dir(run_dir, 2)
 
             self.assertEqual("supervisor-audit-attempt-1", first.name)
             self.assertEqual("supervisor-audit-attempt-2", second.name)
             with self.assertRaisesRegex(AssuranceError, "already exists"):
-                models.create_attempt_dir(run_dir, 1)
+                assurance_models_artifacts.create_attempt_dir(run_dir, 1)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from agent_session_loop import (
-    authoring,
+    authoring_render,
     plans_errors,
     plans_metadata,
     prepare_expand_ingest,
@@ -291,7 +291,7 @@ class PrepareValidatorPayloadTests(PrepareValidatorFixtures):
             session_path = plan_dir / "session-1.md"
             session_path.write_text(
                 session_path.read_text(encoding="utf-8").replace(
-                    authoring.CONTEXT_REFERENCE_LINE + "\n", ""
+                    authoring_render.CONTEXT_REFERENCE_LINE + "\n", ""
                 ),
                 encoding="utf-8",
             )

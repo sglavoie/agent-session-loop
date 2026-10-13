@@ -14,7 +14,8 @@ from unittest import mock
 
 from agent_session_loop import (
     process_tree,
-    turn_execution,
+    turn_execution_constants,
+    turn_execution_hang_sentinel,
 )
 
 
@@ -43,8 +44,8 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
         ]
 
     def suspected_result(
-        self, sentinel: turn_execution.HangSentinel
-    ) -> turn_execution.HangAssessment:
+        self, sentinel: turn_execution_hang_sentinel.HangSentinel
+    ) -> turn_execution_hang_sentinel.HangAssessment:
         sentinel.note_harness_pid(123)
         sentinel.note_final_result()
         sentinel.evaluate(idle_seconds=60.0, now=self.NOW)
@@ -53,8 +54,8 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
         self.assertEqual("suspected", assessment.transition)
         return assessment
 
-    def make_sentinel(self) -> turn_execution.HangSentinel:
-        return turn_execution.HangSentinel(
+    def make_sentinel(self) -> turn_execution_hang_sentinel.HangSentinel:
+        return turn_execution_hang_sentinel.HangSentinel(
             sample_tree=lambda pid: self.tree(),
             monotonic=lambda: 100.0,
             trigger_idle_seconds=120.0,
@@ -104,7 +105,8 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
         sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
         assessment = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
         self.assertEqual(
-            turn_execution.HANG_REASON_ZERO_CPU, assessment.suspected["reason"]
+            turn_execution_constants.HANG_REASON_ZERO_CPU,
+            assessment.suspected["reason"],
         )
 
         with mock.patch.object(
@@ -117,7 +119,7 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
 
     def root_sentinel(self):
         ticks = [100.0]
-        sentinel = turn_execution.HangSentinel(
+        sentinel = turn_execution_hang_sentinel.HangSentinel(
             sample_tree=lambda pid: self.tree()[:1],
             monotonic=lambda: ticks[0],
             confirm_samples=2,
@@ -214,7 +216,8 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
             released = sentinel.recover_post_result(assessment)
             recovery = released.suspected["recovery"]
             self.assertEqual(
-                turn_execution.POST_RESULT_STDIN_RELEASE_POLICY, recovery["policy"]
+                turn_execution_constants.POST_RESULT_STDIN_RELEASE_POLICY,
+                recovery["policy"],
             )
             self.assertEqual("background-tasks", recovery["hold_reason"])
             self.assertTrue(recovery["released"])
@@ -233,7 +236,7 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
             )
             self.assertEqual([(123, signal.SIGTERM)], kills)
             self.assertEqual(
-                turn_execution.POST_RESULT_STDIN_RELEASE_POLICY,
+                turn_execution_constants.POST_RESULT_STDIN_RELEASE_POLICY,
                 term.suspected["recovery"]["previous_attempt"]["policy"],
             )
         self.assertEqual(1, held.releases)
@@ -338,7 +341,7 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
             self.addCleanup(process_tree.clear_process_tree, process.pid)
             try:
                 self.assertEqual("terminal-result\n", process.stdout.readline())
-                sentinel = turn_execution.HangSentinel(
+                sentinel = turn_execution_hang_sentinel.HangSentinel(
                     confirm_samples=1,
                     result_grace_seconds=0,
                     root_shutdown_grace_seconds=0,

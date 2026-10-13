@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from agent_session_loop import (
-    authoring,
+    authoring_render,
     plans_errors,
     prepare_corrections,
     prepare_expansion,
@@ -245,7 +245,7 @@ class ExpansionRendererTests(unittest.TestCase):
             self.assertEqual(1, session_text.count(reference))
             # The reference sits directly under the Before-starting line.
             lines = session_text.splitlines()
-            anchor = lines.index(authoring.CONTEXT_REFERENCE_LINE)
+            anchor = lines.index(authoring_render.CONTEXT_REFERENCE_LINE)
             self.assertEqual(reference, lines[anchor + 1])
 
             prepare_expansion.write_expansions(

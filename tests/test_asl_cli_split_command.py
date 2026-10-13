@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import authoring, cli, harnesses, preflight
+from agent_session_loop import authoring_split_cli, cli, harnesses, preflight
 from tests.support_asl_cli_split import SplitCliHelpers
 
 
@@ -20,8 +20,8 @@ class SplitCommandTests(SplitCliHelpers, unittest.TestCase):
         parsed = parser.parse_args(
             ["split", "--plan-file", "P.md", "--contracts-file", "c.json"]
         )
-        self.assertEqual("authoring:split_from_args", parsed.handler_ref)
-        self.assertIs(cli.resolve_handler(parsed), authoring.split_from_args)
+        self.assertEqual("authoring_split_cli:split_from_args", parsed.handler_ref)
+        self.assertIs(cli.resolve_handler(parsed), authoring_split_cli.split_from_args)
         self.assertEqual("auto", parsed.skill_prefix)
         self.assertFalse(parsed.inline_stdin)
         # A source is required and the two sources are mutually exclusive.

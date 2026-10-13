@@ -8,7 +8,12 @@ import json
 import unittest
 import urllib.parse
 
-from agent_session_loop import plans_metadata, plans_progress, plans_registry, workbench
+from agent_session_loop import (
+    plans_metadata,
+    plans_progress,
+    plans_registry,
+    workbench_summary_helpers,
+)
 from tests.asl_workbench_server_support import (
     WorkbenchArtifactReadTestCase,
 )
@@ -313,7 +318,7 @@ class WorkbenchServerRunResultTests(WorkbenchArtifactReadTestCase):
         plans_metadata.save_workspace_plan_metadata(
             registered, workspace_root, registry.digest
         )
-        (registered / workbench.FINAL_REVIEW_FILE_NAME).write_text(
+        (registered / workbench_summary_helpers.FINAL_REVIEW_FILE_NAME).write_text(
             "# Findings\n", encoding="utf-8"
         )
         server = self._start_server()

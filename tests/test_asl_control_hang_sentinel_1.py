@@ -8,7 +8,7 @@ import unittest
 from datetime import timedelta
 
 from agent_session_loop import (
-    turn_execution,
+    turn_execution_constants,
 )
 from tests.asl_control_hang_sentinel_support import (
     HangSentinelTestsBase,
@@ -41,7 +41,7 @@ class HangSentinelTests(HangSentinelTestsBase):
         self.assertEqual("suspected", third.transition)
         block = third.suspected
         assert block is not None
-        self.assertEqual(turn_execution.HANG_REASON_ZERO_CPU, block["reason"])
+        self.assertEqual(turn_execution_constants.HANG_REASON_ZERO_CPU, block["reason"])
         self.assertEqual(123, block["harness_pid"])
         self.assertEqual(180.0, block["idle_seconds"])
         self.assertEqual(2, block["confirm_samples"])
@@ -80,7 +80,7 @@ class HangSentinelTests(HangSentinelTestsBase):
         self.assertIsNone(cleared.suspected)
         assert cleared.retracted is not None
         self.assertEqual(
-            turn_execution.HANG_REASON_ZERO_CPU, cleared.retracted["reason"]
+            turn_execution_constants.HANG_REASON_ZERO_CPU, cleared.retracted["reason"]
         )
         self.assertAlmostEqual(15.0, cleared.retracted["cpu_delta_seconds"], places=6)
 
@@ -127,7 +127,9 @@ class HangSentinelTests(HangSentinelTestsBase):
         self.assertEqual("suspected", assessment.transition)
         block = assessment.suspected
         assert block is not None
-        self.assertEqual(turn_execution.HANG_REASON_RESULT_RECEIVED, block["reason"])
+        self.assertEqual(
+            turn_execution_constants.HANG_REASON_RESULT_RECEIVED, block["reason"]
+        )
         self.assertEqual(123, block["harness_pid"])
         self.assertEqual(123, block["process_tree"][0]["pid"])
         self.assertEqual([123] * 3, calls)
@@ -198,7 +200,9 @@ class HangSentinelTests(HangSentinelTestsBase):
         refreshed = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
         block = refreshed.suspected
         assert block is not None
-        self.assertEqual(turn_execution.HANG_REASON_RESULT_RECEIVED, block["reason"])
+        self.assertEqual(
+            turn_execution_constants.HANG_REASON_RESULT_RECEIVED, block["reason"]
+        )
         self.assertIsNone(block["process_tree"])
         self.assertEqual("process tree sample failed", block["process_tree_error"])
         # A failed sample publishes no CPU evidence at all.
@@ -255,7 +259,8 @@ class HangSentinelTests(HangSentinelTestsBase):
         self.assertEqual("cleared", cleared.transition)
         assert cleared.retracted is not None
         self.assertEqual(
-            turn_execution.HANG_REASON_RESULT_RECEIVED, cleared.retracted["reason"]
+            turn_execution_constants.HANG_REASON_RESULT_RECEIVED,
+            cleared.retracted["reason"],
         )
         assert cleared.cpu_progress is not None
         self.assertTrue(cleared.cpu_progress["progressing"])
@@ -359,7 +364,7 @@ class HangSentinelTests(HangSentinelTestsBase):
         self.assertEqual("suspected", confirmed.transition)
         assert confirmed.suspected is not None
         self.assertEqual(
-            turn_execution.HANG_REASON_ZERO_CPU, confirmed.suspected["reason"]
+            turn_execution_constants.HANG_REASON_ZERO_CPU, confirmed.suspected["reason"]
         )
         self.assertEqual(0.0, confirmed.suspected["cpu_delta_seconds"])
 

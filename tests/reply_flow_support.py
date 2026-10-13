@@ -28,11 +28,13 @@ from agent_session_loop import (
     mailbox_snapshot,
     mailbox_vocabulary,
     qna,
-    run_coordination,
+    run_coordination_mailbox_wait,
+    run_coordination_wait_models,
     run_persistence,
     runner,
     state,
 )
+from agent_session_loop import run_coordination_constants as wait_budgets
 from tests.support import (
     REPO_ROOT,
     _contract_block,
@@ -160,12 +162,14 @@ class ReplyResumeFlowCase(unittest.TestCase):
     def _run_suspend_grace_wait(
         self,
         *,
-        settings: run_coordination.MailboxWaitSettings,
+        settings: run_coordination_wait_models.MailboxWaitSettings,
         lease_fresh_from: float | None = None,
         lease_stale_from: float | None = None,
         reply_from: float | None = None,
         suspend_seconds: float = 3600.0,
-    ) -> tuple[run_coordination.MailboxWaitResult, float, list[float], list[float]]:
+    ) -> tuple[
+        run_coordination_wait_models.MailboxWaitResult, float, list[float], list[float]
+    ]:
         """Run a wait whose first poll sleep hides a machine suspend.
 
         The wall clock jumps ``suspend_seconds`` during the first sleep, so
@@ -267,7 +271,7 @@ class ReplyResumeFlowCase(unittest.TestCase):
                 side_effect=read_lease,
             ),
         ):
-            result = run_coordination.wait_for_mailbox_reply(
+            result = run_coordination_mailbox_wait.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload={},
@@ -456,10 +460,10 @@ class EndToEndReplyResumeCase(unittest.TestCase):
         env = self._base_env("reply-aware")
         env.update(
             {
-                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "3",
-                run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "5",
-                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.02",
-                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.1",
+                wait_budgets.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "3",
+                wait_budgets.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "5",
+                wait_budgets.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.02",
+                wait_budgets.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.1",
             }
         )
         process = subprocess.Popen(

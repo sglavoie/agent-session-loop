@@ -77,7 +77,8 @@ from agent_session_loop import (
     run_entry,
     state,
     supervision_liveness,
-    workbench,
+    workbench_launch,
+    workbench_registry_models,
 )
 from tests.support import (
     _FakePopen,
@@ -566,7 +567,10 @@ class LaunchRestoration(_ResumeCase):
     """The launch is read back from the run's metadata, or it is refused."""
 
     def test_the_profile_fields_are_the_launchers_own_fields(self) -> None:
-        declared = {field.name for field in dataclasses.fields(workbench.LaunchProfile)}
+        declared = {
+            field.name
+            for field in dataclasses.fields(workbench_registry_models.LaunchProfile)
+        }
         self.assertEqual(declared, set(overseer_resume.PROFILE_FIELDS))
 
     def test_every_restored_field_survives_the_resume_overlay(self) -> None:
@@ -1106,8 +1110,8 @@ class NoInventedReply(_ResumeCase):
             captured.append(process)
             return process
 
-        with self.assertRaises(workbench.LaunchError):
-            workbench.launch_plan(
+        with self.assertRaises(workbench_launch.LaunchError):
+            workbench_launch.launch_plan(
                 self.launchable_plan(),
                 reply_text="   \n ",
                 popen_factory=factory,
@@ -1124,7 +1128,7 @@ class NoInventedReply(_ResumeCase):
             return process
 
         reply = "the answer is option B"
-        result = workbench.launch_plan(
+        result = workbench_launch.launch_plan(
             self.launchable_plan(),
             reply_text=reply,
             popen_factory=factory,
@@ -1713,7 +1717,7 @@ class LaunchIsolationTests(unittest.TestCase):
         Nothing on the route is replaced except the spawn itself, which the
         launcher already exposes as ``popen_factory``: the adapter's default
         ``launch`` runs, and so do ``intervention.resume_recovered_run`` and
-        ``workbench.launch_plan``, which is where the narrowing has to happen.
+        ``workbench_launch.launch_plan``, which is where the narrowing has to happen.
         """
         context = self.context()
 
@@ -1730,10 +1734,10 @@ class LaunchIsolationTests(unittest.TestCase):
 
     def manual_child(self) -> _FakePopen:
         """The child an ordinary operator-driven resume starts, for contrast."""
-        profile = workbench.LaunchProfile(**self.context().profile)
+        profile = workbench_registry_models.LaunchProfile(**self.context().profile)
 
         def launch(factory: Any) -> None:
-            workbench.launch_plan(
+            workbench_launch.launch_plan(
                 self.plan_dir,
                 profile=profile,
                 reply_text=None,

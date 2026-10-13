@@ -12,8 +12,10 @@ from pathlib import Path
 
 from agent_session_loop import (
     cli,
-    workbench,
     workbench_archive,
+    workbench_cli,
+    workbench_registry,
+    workbench_registry_models,
     workbench_server,
 )
 from tests.support import (
@@ -199,7 +201,9 @@ class WorkbenchServeCliTests(unittest.TestCase):
         args = parser.parse_args(["workbench", "registry", "--json"])
         self.assertEqual("registry", args.workbench_command)
         self.assertTrue(args.json)
-        self.assertIs(workbench.workbench_registry_from_args, cli.resolve_handler(args))
+        self.assertIs(
+            workbench_cli.workbench_registry_from_args, cli.resolve_handler(args)
+        )
 
 
 class WorkbenchCliHandlerTests(unittest.TestCase):
@@ -222,10 +226,10 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
                 with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
                     rc = workbench_archive.workbench_pin_from_args(args)
                 self.assertEqual(0, rc)
-                registry_path = workbench.default_registry_path()
+                registry_path = workbench_registry.default_registry_path()
                 self.assertTrue(registry_path.is_file())
                 self.assertIn(str(registry_path), stdout.getvalue())
-                reloaded = workbench.load_registry(registry_path)
+                reloaded = workbench_registry.load_registry(registry_path)
             self.assertEqual(1, len(reloaded.pins))
             pin = reloaded.pins[0]
             self.assertEqual(str(plan_dir), pin.plan_dir)
@@ -249,7 +253,7 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
                     pin_handler = workbench_archive.workbench_pin_from_args
                     self.assertEqual(0, pin_handler(first))
                     self.assertEqual(0, pin_handler(second))
-                reloaded = workbench.load_registry()
+                reloaded = workbench_registry.load_registry()
             self.assertEqual(1, len(reloaded.pins))
             pin = reloaded.pins[0]
             self.assertEqual("Second", pin.label)
@@ -272,17 +276,17 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
             tmp_path = Path(tmp).resolve()
             plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
             with patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))):
-                seeded = workbench.upsert_pin(
-                    workbench.load_registry(),
+                seeded = workbench_registry.upsert_pin(
+                    workbench_registry.load_registry(),
                     plan_dir,
                     label="seed",
                 )
-                workbench.save_registry(seeded)
+                workbench_registry.save_registry(seeded)
                 args = argparse.Namespace(plan_dir=str(plan_dir))
                 with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                     rc = workbench_archive.workbench_unpin_from_args(args)
                 self.assertEqual(0, rc)
-                reloaded = workbench.load_registry()
+                reloaded = workbench_registry.load_registry()
             self.assertEqual((), reloaded.pins)
 
     def test_unpin_handler_is_idempotent_for_missing_pin(self) -> None:
@@ -300,14 +304,14 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
             tmp_path = Path(tmp).resolve()
             plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
             with patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))):
-                seeded = workbench.upsert_pin(
-                    workbench.load_registry(), plan_dir, label="Alpha"
+                seeded = workbench_registry.upsert_pin(
+                    workbench_registry.load_registry(), plan_dir, label="Alpha"
                 )
-                workbench.save_registry(seeded)
+                workbench_registry.save_registry(seeded)
                 args = argparse.Namespace(json=False)
                 stdout = io.StringIO()
                 with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
-                    rc = workbench.workbench_registry_from_args(args)
+                    rc = workbench_cli.workbench_registry_from_args(args)
                 self.assertEqual(0, rc)
             text = stdout.getvalue()
             self.assertIn("Pins (1)", text)
@@ -320,17 +324,17 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
             tmp_path = Path(tmp).resolve()
             plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
             with patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))):
-                seeded = workbench.upsert_pin(
-                    workbench.load_registry(),
+                seeded = workbench_registry.upsert_pin(
+                    workbench_registry.load_registry(),
                     plan_dir,
                     label="Alpha",
-                    profile=workbench.LaunchProfile(cwd=str(tmp_path)),
+                    profile=workbench_registry_models.LaunchProfile(cwd=str(tmp_path)),
                 )
-                workbench.save_registry(seeded)
+                workbench_registry.save_registry(seeded)
                 args = argparse.Namespace(json=True)
                 stdout = io.StringIO()
                 with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
-                    rc = workbench.workbench_registry_from_args(args)
+                    rc = workbench_cli.workbench_registry_from_args(args)
                 self.assertEqual(0, rc)
             payload = json.loads(stdout.getvalue())
             self.assertTrue(payload["ok"])

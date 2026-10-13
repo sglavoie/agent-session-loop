@@ -14,12 +14,10 @@ from agent_session_loop import (
     supervisor_audit,
     supervisor_audit_agent,
 )
-from agent_session_loop.assurance_models import (
-    MAX_AUDIT_ATTEMPTS,
-    AuditAttempt,
-    Finding,
-    IssueObservation,
-)
+from agent_session_loop.assurance_models_findings import Finding
+from agent_session_loop.assurance_models_inbox import IssueObservation
+from agent_session_loop.assurance_models_summary import AuditAttempt
+from agent_session_loop.assurance_models_vocab import MAX_AUDIT_ATTEMPTS
 from tests import support_supervisor_audit_checks as checks_support
 from tests.support_supervisor_audit import RUN_ID, RunHistoryFixture, ScriptedAuditor
 

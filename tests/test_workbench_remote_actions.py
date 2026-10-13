@@ -65,9 +65,10 @@ from agent_session_loop import (
     mailbox_appenders,
     plans_files,
     state,
-    workbench,
     workbench_archive,
+    workbench_launch,
     workbench_operations,
+    workbench_registry_models,
     workbench_remote_actions,
 )
 from asl_workbench import archive as portable_archive
@@ -1299,13 +1300,13 @@ class PerformerTestCase(unittest.TestCase):
             },
         )
 
-    def launch_result(self, *, reply: bool = False) -> workbench.LaunchResult:
+    def launch_result(self, *, reply: bool = False) -> workbench_launch.LaunchResult:
         """What a spawn would have returned, without a spawn happening."""
-        return workbench.LaunchResult(
+        return workbench_launch.LaunchResult(
             pid=4242,
             argv=("python3", "-m", "agent_session_loop", "run"),
             plan_dir=self.plan_dir,
-            profile_payload=workbench.LaunchProfile().to_payload(),
+            profile_payload=workbench_registry_models.LaunchProfile().to_payload(),
             reply_provided=reply,
             reply_length=len(REPLY_TEXT) if reply else None,
             reply_origin="stdin" if reply else None,
@@ -1540,7 +1541,7 @@ class PerformerTests(PerformerTestCase):
 
     def test_a_delivered_launch_is_the_launch_the_browser_makes(self) -> None:
         with mock.patch.object(
-            workbench, "launch_plan", return_value=self.launch_result()
+            workbench_launch, "launch_plan", return_value=self.launch_result()
         ) as launched:
             result = self.performer.perform(
                 self.request(operation_id="op-l", method=METHOD_LAUNCH),
@@ -1555,7 +1556,7 @@ class PerformerTests(PerformerTestCase):
 
     def test_a_relaunch_of_the_same_operation_spawns_nothing(self) -> None:
         with mock.patch.object(
-            workbench, "launch_plan", return_value=self.launch_result()
+            workbench_launch, "launch_plan", return_value=self.launch_result()
         ) as launched:
             first = self.performer.perform(
                 self.request(operation_id="op-l", method=METHOD_LAUNCH),
@@ -1576,7 +1577,7 @@ class PerformerTests(PerformerTestCase):
         self.make_paused()
 
         with mock.patch.object(
-            workbench,
+            workbench_launch,
             "resume_plan_with_reply",
             return_value=self.launch_result(reply=True),
         ) as resumed:

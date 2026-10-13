@@ -106,7 +106,7 @@ class ReviewRepairPublicationWindowTests(PublicationWindowFixtures, unittest.Tes
 
         with (
             mock.patch.object(
-                review_repair.authoring,
+                review_repair.authoring_transaction,
                 "refresh_readiness_metadata",
                 side_effect=KeyboardInterrupt(),
             ),

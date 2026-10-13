@@ -17,7 +17,8 @@ from . import (
     redirect_recovery,
     run_commit,
     run_control,
-    run_coordination,
+    run_coordination_reply_state,
+    run_coordination_terminal,
     run_persistence,
     run_reporting,
     run_termination,
@@ -58,8 +59,8 @@ class RunContext:
     persistence: run_persistence._RunPersistence
     progress: run_reporting._ProgressReporter
     inline_tail: run_reporting._InlineTailController
-    reply_state_preserver: run_coordination.ReplyStatePreserver
-    audit_context: run_coordination.TerminalAuditContext
+    reply_state_preserver: run_coordination_reply_state.ReplyStatePreserver
+    audit_context: run_coordination_terminal.TerminalAuditContext
     guard_controller: guards.GuardController
     plan_cache: plans_snapshot.PlanSnapshotCache
     verification_context: verification.VerificationContext

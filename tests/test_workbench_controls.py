@@ -46,7 +46,9 @@ from pathlib import Path
 from typing import Any
 
 from agent_session_loop import (
-    bridge,
+    agent_mux_projection,
+    bridge_projection,
+    bridge_protocol,
     control_cli,
     control_queue,
     intervention,
@@ -58,6 +60,7 @@ from agent_session_loop import (
     workbench_controls,
     workbench_server,
 )
+from agent_session_loop.bridge_session import BridgeSession
 from asl_workbench import controls
 
 from .support import (
@@ -235,7 +238,7 @@ class PortableControlRulesTests(unittest.TestCase):
 
     def test_both_surfaces_take_their_ceiling_from_here(self) -> None:
         self.assertEqual(
-            controls.MAX_REDIRECT_OPERATIONS, bridge.MAX_REDIRECT_OPERATIONS
+            controls.MAX_REDIRECT_OPERATIONS, bridge_protocol.MAX_REDIRECT_OPERATIONS
         )
         self.assertEqual(
             controls.MAX_REDIRECT_OPERATIONS, workbench_server.MAX_REDIRECT_OPERATIONS
@@ -415,25 +418,25 @@ class ControlsTestCase(unittest.TestCase):
             f"http://{active.bound_host}:{active.bound_port}{path}", timeout=30.0
         )
 
-    def bridge_session(self) -> bridge.BridgeSession:
+    def bridge_session(self) -> BridgeSession:
         self.snapshots.append(
-            bridge.build_runs_snapshot(
+            bridge_projection.build_runs_snapshot(
                 state_dir=self.state_dir,
                 plan_roots=(self.plans_root,),
                 include_default_dirs=False,
             )
         )
-        return bridge.BridgeSession(
+        return BridgeSession(
             snapshot_builder=lambda: self.snapshots[-1], state_dir=self.state_dir
         )
 
-    def handshaken(self) -> bridge.BridgeSession:
+    def handshaken(self) -> BridgeSession:
         session = self.bridge_session()
         response = self.frame(
             session,
-            bridge.METHOD_HANDSHAKE,
+            bridge_protocol.METHOD_HANDSHAKE,
             {
-                "contract_set_id": bridge.CONTRACT_SET_ID,
+                "contract_set_id": agent_mux_projection.CONTRACT_SET_ID,
                 "snapshot_digest": self.snapshots[-1]["digest"],
             },
         )
@@ -442,7 +445,7 @@ class ControlsTestCase(unittest.TestCase):
 
     def frame(
         self,
-        session: bridge.BridgeSession,
+        session: BridgeSession,
         method: str,
         params: dict[str, Any] | None = None,
         *,
@@ -450,13 +453,15 @@ class ControlsTestCase(unittest.TestCase):
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "type": "request",
-            "protocol": bridge.PROTOCOL_VERSION,
+            "protocol": bridge_protocol.PROTOCOL_VERSION,
             "id": request_id,
             "method": method,
         }
         if params is not None:
             payload["params"] = params
-        response = session.handle_frame(bridge.encode_frame(payload).rstrip(b"\n"))
+        response = session.handle_frame(
+            bridge_protocol.encode_frame(payload).rstrip(b"\n")
+        )
         assert response is not None
         return response
 
@@ -960,7 +965,7 @@ class SurfaceParityTests(ControlsTestCase):
         return self.post("/api/control/redirect", body)
 
     def bridge_redirect(
-        self, session: bridge.BridgeSession | None = None, **overrides: Any
+        self, session: BridgeSession | None = None, **overrides: Any
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "plan_dir": str(self.plan_dir),
@@ -1068,7 +1073,9 @@ class SurfaceParityTests(ControlsTestCase):
         bridge_response = self.bridge_redirect(wait_seconds=over)
 
         self.assertEqual(400, http_status)
-        self.assertEqual(bridge.ERROR_INVALID_REQUEST, bridge_response["error"]["code"])
+        self.assertEqual(
+            bridge_protocol.ERROR_INVALID_REQUEST, bridge_response["error"]["code"]
+        )
         self.assertEqual((), self.journal().requests)
 
     def test_both_reads_report_an_interrupted_correction_at_the_same_stage(
@@ -1096,7 +1103,7 @@ class SurfaceParityTests(ControlsTestCase):
         )
         bridge_body = self.frame(
             self.bridge_session(),
-            bridge.METHOD_REDIRECT_STATUS,
+            bridge_protocol.METHOD_REDIRECT_STATUS,
             {"plan_dir": str(self.plan_dir)},
             request_id="req-status",
         )["result"]
@@ -1121,7 +1128,7 @@ class SurfaceParityTests(ControlsTestCase):
         )
         bridge_body = self.frame(
             self.bridge_session(),
-            bridge.METHOD_RECOVER_CONVERSATION,
+            bridge_protocol.METHOD_RECOVER_CONVERSATION,
             {"plan_dir": str(self.plan_dir)},
             request_id="req-recovery",
         )["result"]

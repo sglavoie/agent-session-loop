@@ -19,7 +19,11 @@ from agent_session_loop import (
     mailbox_snapshot,
     mailbox_vocabulary,
     qna,
-    run_coordination,
+    run_coordination_constants,
+    run_coordination_mailbox_wait,
+    run_coordination_wait_models,
+    run_coordination_wait_record,
+    run_coordination_wait_state,
     run_persistence,
     state,
     state_payloads,
@@ -81,7 +85,7 @@ class MailboxWaitEvidenceTests(rfs.ReplyResumeFlowCase):
         # One extension outruns the ceiling, so a proved supervisor whose next
         # liveness check falls beyond the ceiling still ends at it — the only
         # way a timeout can name a lease that was fresh when last read.
-        settings = run_coordination.MailboxWaitSettings(
+        settings = run_coordination_wait_models.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=20.0,
             unsupervised_ceiling_seconds=8.0,
@@ -92,7 +96,7 @@ class MailboxWaitEvidenceTests(rfs.ReplyResumeFlowCase):
         def run_wait(
             view: mailbox_snapshot.MailboxView,
             lease: mailbox_models.MailboxLeaseView,
-        ) -> run_coordination.MailboxWaitResult:
+        ) -> run_coordination_wait_models.MailboxWaitResult:
             now = [0.0]
 
             def sleep(seconds: float) -> None:
@@ -115,7 +119,7 @@ class MailboxWaitEvidenceTests(rfs.ReplyResumeFlowCase):
                     return_value=lease,
                 ),
             ):
-                return run_coordination.wait_for_mailbox_reply(
+                return run_coordination_mailbox_wait.wait_for_mailbox_reply(
                     plan_dir=Path("/tmp/plan"),
                     state_dir_arg=None,
                     payload={},
@@ -131,10 +135,10 @@ class MailboxWaitEvidenceTests(rfs.ReplyResumeFlowCase):
                     sleep=sleep,
                 )
 
-        def clear(result: run_coordination.MailboxWaitResult) -> dict:
+        def clear(result: run_coordination_wait_models.MailboxWaitResult) -> dict:
             with tempfile.TemporaryDirectory() as tmp:
                 event_path = Path(tmp) / events.EVENTS_FILE_NAME
-                run_coordination.clear_waiting_for_reply(
+                run_coordination_wait_state.clear_waiting_for_reply(
                     event_path,
                     {
                         "run_id": "run-1",
@@ -156,7 +160,7 @@ class MailboxWaitEvidenceTests(rfs.ReplyResumeFlowCase):
 
         lost = run_wait(waiting_view, stale_lease)
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             lost.reason,
         )
         self.assertEqual(lease_updated_at, lost.lease_updated_at)
@@ -238,7 +242,7 @@ class MailboxWaitEvidenceTests(rfs.ReplyResumeFlowCase):
             ),
             fresh=True,
         )
-        settings = run_coordination.MailboxWaitSettings(
+        settings = run_coordination_wait_models.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=8.0,
@@ -248,7 +252,7 @@ class MailboxWaitEvidenceTests(rfs.ReplyResumeFlowCase):
 
         def run_wait(
             failing_view: mailbox_snapshot.MailboxView,
-        ) -> run_coordination.MailboxWaitResult:
+        ) -> run_coordination_wait_models.MailboxWaitResult:
             now = [0.0]
             token = [0]
 
@@ -278,7 +282,7 @@ class MailboxWaitEvidenceTests(rfs.ReplyResumeFlowCase):
                     return_value=fresh_lease,
                 ),
             ):
-                return run_coordination.wait_for_mailbox_reply(
+                return run_coordination_mailbox_wait.wait_for_mailbox_reply(
                     plan_dir=Path("/tmp/plan"),
                     state_dir_arg=None,
                     payload={},
@@ -339,7 +343,7 @@ class MailboxWaitEvidenceTests(rfs.ReplyResumeFlowCase):
             fresh=False,
             reason=mailbox_constants.LEASE_EXPIRED,
         )
-        settings = run_coordination.MailboxWaitSettings(
+        settings = run_coordination_wait_models.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=20.0,
@@ -350,7 +354,7 @@ class MailboxWaitEvidenceTests(rfs.ReplyResumeFlowCase):
         suspend_seconds = 8 * 3600.0
         # Well past the awake grace, so the lapse is judged on freshness alone.
         supervision_ends = 100.0
-        waiting = run_coordination.waiting_for_reply_payload(
+        waiting = run_coordination_wait_record.waiting_for_reply_payload(
             question_id=question_id,
             session_id="9",
             turn_index=3,
@@ -400,7 +404,7 @@ class MailboxWaitEvidenceTests(rfs.ReplyResumeFlowCase):
                 side_effect=read_lease,
             ),
         ):
-            result = run_coordination.wait_for_mailbox_reply(
+            result = run_coordination_mailbox_wait.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload=payload,
@@ -419,7 +423,7 @@ class MailboxWaitEvidenceTests(rfs.ReplyResumeFlowCase):
 
         self.assertIsNone(result.reply)
         self.assertEqual(
-            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination_constants.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             result.reason,
         )
         self.assertEqual(suspend_seconds, result.suspend_skew_seconds)
@@ -477,7 +481,7 @@ class MailboxWaitEvidenceTests(rfs.ReplyResumeFlowCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             event_path = Path(tmp) / events.EVENTS_FILE_NAME
-            run_coordination.clear_waiting_for_reply(
+            run_coordination_wait_state.clear_waiting_for_reply(
                 event_path,
                 payload,
                 reason=result.reason,

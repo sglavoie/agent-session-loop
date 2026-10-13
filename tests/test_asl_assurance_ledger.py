@@ -13,8 +13,14 @@ from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import assurance_ledger as ledger
-from agent_session_loop import assurance_models as models
-from agent_session_loop import state
+from agent_session_loop import (
+    assurance_models_findings,
+    assurance_models_inbox,
+    assurance_models_primitives,
+    assurance_models_summary,
+    assurance_models_vocab,
+    state,
+)
 from agent_session_loop.assurance_ledger import LedgerError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -32,10 +38,11 @@ import sys
 from pathlib import Path
 
 from agent_session_loop import assurance_ledger as ledger
-from agent_session_loop import assurance_models as models
+from agent_session_loop import assurance_models_findings as findings
+from agent_session_loop import assurance_models_inbox as inbox
 
 state_dir = Path(sys.argv[1])
-finding = models.Finding(
+finding = findings.Finding(
     category="lifecycle",
     component="agent_session_loop/runner.py",
     invariant_key=sys.argv[2],
@@ -45,7 +52,7 @@ finding = models.Finding(
     recommendation="Clamp the retry counter before relaunching.",
     evidence=("events.jsonl",),
 )
-observation = models.IssueObservation(
+observation = inbox.IssueObservation(
     run_id="{RUN_ID}", finding=finding, observed_at="{TIMESTAMP}"
 )
 record = ledger.append_issue_observation(observation, state_dir=state_dir)
@@ -53,7 +60,7 @@ sys.stdout.write(record.issue_id)
 """
 
 
-def _finding(**overrides) -> models.Finding:
+def _finding(**overrides) -> assurance_models_findings.Finding:
     payload = {
         "category": "lifecycle",
         "component": "agent_session_loop/runner.py",
@@ -65,20 +72,20 @@ def _finding(**overrides) -> models.Finding:
         "evidence": ("events.jsonl",),
     }
     payload.update(overrides)
-    return models.Finding(**payload)
+    return assurance_models_findings.Finding(**payload)
 
 
-def _observation(**overrides) -> models.IssueObservation:
+def _observation(**overrides) -> assurance_models_inbox.IssueObservation:
     payload = {
         "run_id": RUN_ID,
         "finding": _finding(),
         "observed_at": TIMESTAMP,
     }
     payload.update(overrides)
-    return models.IssueObservation(**payload)
+    return assurance_models_inbox.IssueObservation(**payload)
 
 
-def _binding(**overrides) -> models.IssueIdentityBinding:
+def _binding(**overrides) -> assurance_models_inbox.IssueIdentityBinding:
     payload = {
         "identity_key": "issue.asi-1",
         "issue_id": "ASI-1",
@@ -86,13 +93,13 @@ def _binding(**overrides) -> models.IssueIdentityBinding:
         "bound_at": TIMESTAMP,
     }
     payload.update(overrides)
-    return models.IssueIdentityBinding(**payload)
+    return assurance_models_inbox.IssueIdentityBinding(**payload)
 
 
-def _summary(**overrides) -> models.AssuranceSummary:
+def _summary(**overrides) -> assurance_models_summary.AssuranceSummary:
     payload = {"run_id": RUN_ID, "state": "pending", "eligible": True}
     payload.update(overrides)
-    return models.AssuranceSummary(**payload)
+    return assurance_models_summary.AssuranceSummary(**payload)
 
 
 class LedgerTestCase(unittest.TestCase):
@@ -164,7 +171,9 @@ class AppendTests(LedgerTestCase):
         )
         ledger.append_record(
             ledger.KIND_ISSUE_DISPOSITION,
-            models.Disposition(issue_id="ASI-1", kind="resolve", recorded_at=TIMESTAMP),
+            assurance_models_inbox.Disposition(
+                issue_id="ASI-1", kind="resolve", recorded_at=TIMESTAMP
+            ),
             state_dir=self.state_dir,
         )
         view = self.read()
@@ -195,13 +204,13 @@ class AppendTests(LedgerTestCase):
             ),
             (
                 ledger.KIND_ISSUE_DISPOSITION,
-                models.Disposition(
+                assurance_models_inbox.Disposition(
                     issue_id="ASI-1", kind="accept-risk", recorded_at=TIMESTAMP
                 ),
             ),
             (
                 ledger.KIND_ISSUE_MERGED,
-                models.IssueMerge(
+                assurance_models_inbox.IssueMerge(
                     source_issue_id="ASI-1",
                     target_issue_id="ASI-2",
                     recorded_at=TIMESTAMP,
@@ -209,7 +218,7 @@ class AppendTests(LedgerTestCase):
             ),
             (
                 ledger.KIND_ISSUE_KEPT_DISTINCT,
-                models.IssueKeptDistinct(
+                assurance_models_inbox.IssueKeptDistinct(
                     issue_ids=("ASI-1", "ASI-2"),
                     identity_digests=(DIGEST, OTHER_DIGEST),
                     recorded_at=TIMESTAMP,
@@ -217,13 +226,13 @@ class AppendTests(LedgerTestCase):
             ),
             (
                 ledger.KIND_HUMAN_CLOSEOUT,
-                models.Closeout(
+                assurance_models_inbox.Closeout(
                     run_id=RUN_ID, outcome="accepted", recorded_at=TIMESTAMP
                 ),
             ),
             (
                 ledger.KIND_IMPROVEMENT_PLAN_DRAFTED,
-                models.ImprovementPlanDraft(
+                assurance_models_inbox.ImprovementPlanDraft(
                     issue_id="ASI-1",
                     harness="codex",
                     output_path="/tmp/improve-asi-1.md",
@@ -260,7 +269,7 @@ class AppendTests(LedgerTestCase):
         self.assertEqual(ledger.ERROR_INVALID_PAYLOAD, caught.exception.reason)
 
     def test_audit_kind_must_agree_with_its_summary_state(self) -> None:
-        with self.assertRaises(models.AssuranceError) as caught:
+        with self.assertRaises(assurance_models_primitives.AssuranceError) as caught:
             ledger.append_record(
                 ledger.KIND_AUDIT_COMPLETED, _summary(), state_dir=self.state_dir
             )
@@ -269,12 +278,12 @@ class AppendTests(LedgerTestCase):
 
     def test_a_record_larger_than_the_cap_is_refused(self) -> None:
         artifacts = tuple(
-            models.EvidenceRef(
+            assurance_models_findings.EvidenceRef(
                 kind="artifact",
                 locator=f"turns/{index}/{'p' * 400}.json",
-                detail="d" * models.MAX_TEXT_CHARS,
+                detail="d" * assurance_models_vocab.MAX_TEXT_CHARS,
             )
-            for index in range(models.MAX_EVIDENCE_ENTRIES)
+            for index in range(assurance_models_vocab.MAX_EVIDENCE_ENTRIES)
         )
         with self.assertRaises(LedgerError) as caught:
             ledger.append_record(
@@ -514,7 +523,9 @@ class IssueIdTests(LedgerTestCase):
         )
         ledger.append_record(
             ledger.KIND_ISSUE_DISPOSITION,
-            models.Disposition(issue_id="ASI-2", kind="resolve", recorded_at=TIMESTAMP),
+            assurance_models_inbox.Disposition(
+                issue_id="ASI-2", kind="resolve", recorded_at=TIMESTAMP
+            ),
             state_dir=self.state_dir,
         )
         lines = self.ledger_path.read_text(encoding="utf-8").splitlines()
@@ -559,7 +570,7 @@ class IssueIdTests(LedgerTestCase):
         self.assertEqual([], failures)
         self.assertEqual(
             [f"ASI-{number}" for number in range(1, workers + 1)],
-            sorted(allocated, key=models.issue_id_number),
+            sorted(allocated, key=assurance_models_primitives.issue_id_number),
         )
         view = self.read()
         self.assertEqual(workers, len(view.records))
@@ -591,7 +602,7 @@ class IssueIdTests(LedgerTestCase):
             allocated.append(stdout.strip())
         self.assertEqual(
             [f"ASI-{number}" for number in range(1, workers + 1)],
-            sorted(allocated, key=models.issue_id_number),
+            sorted(allocated, key=assurance_models_primitives.issue_id_number),
         )
         view = self.read()
         self.assertEqual(workers, len(view.records))
@@ -625,7 +636,7 @@ class SchemaVersionTests(LedgerTestCase):
 
     def test_a_complete_v1_history_reads_back_unchanged(self) -> None:
         observation = _observation()
-        merge = models.IssueMerge(
+        merge = assurance_models_inbox.IssueMerge(
             source_issue_id="ASI-2", target_issue_id="ASI-1", recorded_at=TIMESTAMP
         )
         lines = [
@@ -633,14 +644,14 @@ class SchemaVersionTests(LedgerTestCase):
             self._v1_line("audit_pending", _summary()),
             self._v1_line(
                 "issue_disposition",
-                models.Disposition(
+                assurance_models_inbox.Disposition(
                     issue_id="ASI-1", kind="resolve", recorded_at=TIMESTAMP
                 ),
             ),
             self._v1_line("issue_merged", merge),
             self._v1_line(
                 "human_closeout",
-                models.Closeout(
+                assurance_models_inbox.Closeout(
                     run_id=RUN_ID, outcome="accepted", recorded_at=TIMESTAMP
                 ),
             ),
@@ -655,7 +666,7 @@ class SchemaVersionTests(LedgerTestCase):
     def test_a_line_claiming_a_kind_its_version_predates_is_an_unknown_kind(
         self,
     ) -> None:
-        ruling = models.IssueKeptDistinct(
+        ruling = assurance_models_inbox.IssueKeptDistinct(
             issue_ids=("ASI-1", "ASI-2"),
             identity_digests=(DIGEST, OTHER_DIGEST),
             recorded_at=TIMESTAMP,
@@ -732,7 +743,7 @@ class IdentityBindingTests(LedgerTestCase):
         )
         ledger.append_record(
             ledger.KIND_ISSUE_MERGED,
-            models.IssueMerge(
+            assurance_models_inbox.IssueMerge(
                 source_issue_id="ASI-2",
                 target_issue_id="ASI-1",
                 recorded_at=LATER_TIMESTAMP,
@@ -746,7 +757,7 @@ class IdentityBindingTests(LedgerTestCase):
         self.observe("commit.guard-held")
         ledger.append_record(
             ledger.KIND_ISSUE_MERGED,
-            models.IssueMerge(
+            assurance_models_inbox.IssueMerge(
                 source_issue_id="ASI-2", target_issue_id="ASI-1", recorded_at=TIMESTAMP
             ),
             state_dir=self.state_dir,
@@ -802,7 +813,7 @@ class IdentityBindingTests(LedgerTestCase):
         self.observe("commit.guard-held")
         ledger.append_record(
             ledger.KIND_ISSUE_MERGED,
-            models.IssueMerge(
+            assurance_models_inbox.IssueMerge(
                 source_issue_id="ASI-2", target_issue_id="ASI-1", recorded_at=TIMESTAMP
             ),
             state_dir=self.state_dir,
@@ -850,8 +861,8 @@ class IdentityBindingTests(LedgerTestCase):
 
     def test_a_binding_larger_than_the_cap_is_refused(self) -> None:
         self.observe()
-        with self.assertRaises(models.AssuranceError):
-            _binding(note="n" * (models.MAX_TEXT_CHARS + 1))
+        with self.assertRaises(assurance_models_primitives.AssuranceError):
+            _binding(note="n" * (assurance_models_vocab.MAX_TEXT_CHARS + 1))
 
     def test_an_unknown_payload_key_is_rejected_not_ignored(self) -> None:
         payload = _binding().to_dict()

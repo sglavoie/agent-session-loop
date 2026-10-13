@@ -10,7 +10,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from agent_session_loop import (
-    authoring,
+    authoring_render,
     cli,
     prepare_expand_ingest,
     prepare_models,
@@ -179,9 +179,9 @@ class ExpandIngestCliTests(unittest.TestCase):
             # been prepared.
             session_1 = plan_dir / "session-1.md"
             anchored = session_1.read_text(encoding="utf-8")
-            self.assertIn(authoring.CONTEXT_REFERENCE_LINE, anchored)
+            self.assertIn(authoring_render.CONTEXT_REFERENCE_LINE, anchored)
             session_1.write_text(
-                anchored.replace(authoring.CONTEXT_REFERENCE_LINE + "\n", ""),
+                anchored.replace(authoring_render.CONTEXT_REFERENCE_LINE + "\n", ""),
                 encoding="utf-8",
             )
 

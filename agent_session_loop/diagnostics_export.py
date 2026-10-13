@@ -243,7 +243,7 @@ REDACTION_POLICY: tuple[dict[str, str], ...] = (
 def canonical_json_bytes(payload: Any) -> bytes:
     """Serialize to stable, newline-terminated UTF-8 JSON.
 
-    Restated here rather than imported from :mod:`assurance_models` so the
+    Restated here rather than imported from :mod:`assurance_models_primitives` so the
     export stays readable by a consumer that has only this module's contract:
     the byte-equality promise is this function, and it should be visible beside
     the promise.

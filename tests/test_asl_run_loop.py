@@ -99,12 +99,12 @@ MOVED_SYMBOLS = (
 #: loop no longer has a runner to spell them through, and a caller patching the
 #: owner is only heard while the loop reads the owner.
 OWNED_ELSEWHERE = (
-    "run_coordination.MailboxPoll",
-    "run_coordination.ReplyStatePreserver",
-    "run_coordination.TerminalAuditContext",
-    "run_coordination.drain_external_control_queue",
-    "turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS",
-    "turn_execution.turn_paths",
+    "run_coordination_mailbox_poll.MailboxPoll",
+    "run_coordination_reply_state.ReplyStatePreserver",
+    "run_coordination_terminal.TerminalAuditContext",
+    "run_coordination_control_drain.drain_external_control_queue",
+    "turn_execution_constants.LIVE_CONTROL_POLL_INTERVAL_SECONDS",
+    "turn_execution_artifacts.turn_paths",
     "clock.utc_now",
     "plans_payloads.snapshot_payload",
 )

@@ -31,9 +31,14 @@ from pathlib import Path
 from typing import Any
 
 from agent_session_loop import assurance_ledger as ledger
-from agent_session_loop import assurance_models as models
+from agent_session_loop import (
+    assurance_models_findings,
+    maintenance,
+    plans_files,
+    retention,
+    state,
+)
 from agent_session_loop import assurance_projection as projection
-from agent_session_loop import maintenance, plans_files, retention, state
 
 NOW = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
 AUDIT_STAMP = "2026-06-01T00:00:00+00:00"
@@ -132,7 +137,7 @@ class MaintenanceTestBase(unittest.TestCase):
 
     def _pin_run(self, run_id: str) -> None:
         """Open a real assurance issue against `run_id`, pinning its artifacts."""
-        finding = models.Finding(
+        finding = assurance_models_findings.Finding(
             category="lifecycle",
             component="agent_session_loop/runner.py",
             invariant_key="retry.budget",

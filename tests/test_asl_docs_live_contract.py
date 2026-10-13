@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import unittest
 
-from agent_session_loop import events, mailbox, qna, run_coordination, state_payloads
+from agent_session_loop import (
+    events,
+    mailbox,
+    qna,
+    run_coordination_constants,
+    state_payloads,
+)
 from tests.asl_docs_support import ASL_GUIDE, read_repo_text
 
 #: The ASL operator guide moved out of the repository README; it carries the
@@ -60,7 +66,7 @@ class LiveContractDocsTests(unittest.TestCase):
             "matching it against the id the operation named",
             "A guard refusal closes the row `cancelled` on the way past",
             "A launched run gets its own session.",
-            "`workbench.launch_plan` passes `start_new_session=True`, matching "
+            "`workbench_launch.launch_plan` passes `start_new_session=True`, matching "
             "the `AbandonProcessGroup` the launchd agents already set",
         ):
             self.assertIn(
@@ -288,7 +294,7 @@ class LiveContractDocsTests(unittest.TestCase):
         live_wait_docs = mailbox_docs.split("### Live reply wait and fallback", 1)[
             1
         ].split("\n### ", 1)[0]
-        for reason in run_coordination.MAILBOX_REPLY_WAIT_PREPARATION_REASONS:
+        for reason in run_coordination_constants.MAILBOX_REPLY_WAIT_PREPARATION_REASONS:
             self.assertIn(
                 f"`{reason}`",
                 live_wait_docs,

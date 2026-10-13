@@ -30,7 +30,9 @@ from agent_session_loop import (
     guards,
     harnesses,
     intervention,
-    run_coordination,
+    run_control,
+    run_coordination_control,
+    run_coordination_control_drain,
     state,
     state_status,
 )
@@ -1118,7 +1120,7 @@ class GuardDrainTests(unittest.TestCase):
         self.plan_state.mkdir(parents=True, exist_ok=True)
         self.event_path = self.plan_state / events.EVENTS_FILE_NAME
         self.payload: dict[str, Any] = {"run_id": "run-1"}
-        self.control_payload = run_coordination.initial_control_payload()
+        self.control_payload = run_coordination_control.initial_control_payload()
         self.persistence = _RecordingPersistence(self.append_event)
         self.controller = guards.GuardController(
             run_id="run-1",
@@ -1145,10 +1147,10 @@ class GuardDrainTests(unittest.TestCase):
         ]
 
     def drain(self) -> None:
-        run_coordination.drain_external_control_queue(
+        run_coordination_control_drain.drain_external_control_queue(
             plan_dir=self.plan_dir,
             state_dir_arg=str(self.state_dir),
-            control_state=run_coordination.run_control.RunControlState(),
+            control_state=run_control.RunControlState(),
             seen_ids=set(),
             payload=self.payload,
             event_path=self.event_path,
@@ -1232,7 +1234,7 @@ class GuardDrainTests(unittest.TestCase):
 
     def test_expiry_records_the_guards_it_ended(self) -> None:
         self.controller.add([("git", "push")])
-        run_coordination.expire_run_guards(
+        run_coordination_control.expire_run_guards(
             controller=self.controller,
             event_path=self.event_path,
             payload=self.payload,
@@ -1255,7 +1257,7 @@ class GuardDrainTests(unittest.TestCase):
         self.assertEqual([], self.control_payload["guards"])
 
     def test_expiry_of_an_empty_gate_records_nothing(self) -> None:
-        run_coordination.expire_run_guards(
+        run_coordination_control.expire_run_guards(
             controller=self.controller,
             event_path=self.event_path,
             payload=self.payload,

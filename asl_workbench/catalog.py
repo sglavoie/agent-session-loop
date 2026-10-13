@@ -205,7 +205,7 @@ PRIVATE_FIELDS: tuple[str, ...] = (
 
 # -- Bounds -----------------------------------------------------------------
 
-#: Sixteen hex characters, the width ASL's ``bridge.row_id`` and the
+#: Sixteen hex characters, the width ASL's ``bridge_projection.row_id`` and the
 #: Companion's ``identity`` module both use.
 KEY_CHARS = 16
 

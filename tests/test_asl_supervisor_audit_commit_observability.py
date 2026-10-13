@@ -12,12 +12,10 @@ from typing import Any
 from agent_session_loop import (
     state,
     supervisor_audit_checks,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_constants,
     supervisor_audit_vocabulary,
 )
-from agent_session_loop.assurance_models import (
-    DeterministicResult,
-)
+from agent_session_loop.assurance_models_findings import DeterministicResult
 from tests.support_supervisor_audit import RunHistoryFixture
 
 
@@ -79,7 +77,8 @@ class CommitObservabilityTests(RunHistoryFixture, unittest.TestCase):
             self.assertEqual(1, len(commits["commit_groups"]))
             projected = commits["commits"][0]
             self.assertEqual(
-                supervisor_audit_evidence.OBSERVED_COMMIT_ORIGIN, projected["origin"]
+                supervisor_audit_evidence_constants.OBSERVED_COMMIT_ORIGIN,
+                projected["origin"],
             )
             self.assertEqual("app", projected["repository_alias"])
             self.assertEqual(self.HEAD_BEFORE, projected["head_before"])
@@ -391,7 +390,7 @@ class CommitObservabilityTests(RunHistoryFixture, unittest.TestCase):
             self.assertNotIn("run/commit-0001-session-01-app/stderr.log", locators)
             self.assertEqual(1, len(omitted))
             self.assertEqual(
-                supervisor_audit_evidence.REASON_MISSING, omitted[0]["reason"]
+                supervisor_audit_evidence_constants.REASON_MISSING, omitted[0]["reason"]
             )
             self.assertEqual(2, omitted[0]["count"])
 

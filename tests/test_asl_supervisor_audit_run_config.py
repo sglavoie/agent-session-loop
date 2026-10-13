@@ -18,12 +18,12 @@ from agent_session_loop import (
     state,
     supervisor_audit,
 )
-from agent_session_loop.assurance_models import (
+from agent_session_loop.assurance_models_primitives import AssuranceError
+from agent_session_loop.assurance_models_vocab import (
     MAX_AUDIT_ATTEMPT_RECORDS,
     MAX_AUDIT_ATTEMPTS,
     MAX_AUDIT_DELIVERY_ATTEMPTS,
     MAX_AUDIT_SHRINK_ATTEMPTS,
-    AssuranceError,
 )
 from tests.support_supervisor_audit import RUN_ID, namespace, parse
 

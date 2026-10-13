@@ -156,7 +156,7 @@ without raising — a target whose ``git status`` cannot be read is recorded wit
 
 The module never imports the runner. Everything it needs is either a leaf it
 reads at the owner — ``clock``, ``commit_groups``, ``events``,
-``turn_execution`` — or a boundary extracted before it: the git shell in
+``turn_execution_executor`` — or a boundary extracted before it: the git shell in
 ``review_guard``, the run's write handle in ``run_persistence``, the progress
 voice in ``run_reporting``, and the commit subprocess in ``run_commit``. The
 two things it still needs from the loop enter as callbacks rather than as
@@ -183,7 +183,7 @@ from . import (
     run_persistence,
     run_reporting,
     run_selection,
-    turn_execution,
+    turn_execution_signals,
     verification,
 )
 from .run_errors import RunError
@@ -1339,7 +1339,7 @@ def _finish_run(
         payload["active_turn"] = None
         payload["active_verification"] = None
         if not payload.get("paused"):
-            turn_execution.clear_live_action_required(payload)
+            turn_execution_signals.clear_live_action_required(payload)
         finalize_readiness(payload)
         persistence.append_event(
             event_path,

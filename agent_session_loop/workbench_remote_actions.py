@@ -89,11 +89,12 @@ from asl_workbench.remote_actions import (
 
 from . import (
     intervention,
-    workbench,
     workbench_actions,
     workbench_archive,
     workbench_controls,
+    workbench_launch,
     workbench_operations,
+    workbench_registry_models,
 )
 from .workbench_remote_reads import PlanIndex
 
@@ -185,7 +186,7 @@ class AslMutationPerformer:
         include_default_dirs: bool = True,
         registry_path: str | Path | None = None,
         index: PlanIndex | None = None,
-        profile: workbench.LaunchProfile | None = None,
+        profile: workbench_registry_models.LaunchProfile | None = None,
     ) -> None:
         self.state_dir = state_dir
         self.registry_path = registry_path
@@ -235,7 +236,7 @@ class AslMutationPerformer:
             return MutationResult(status=OPERATION_REJECTED, reason=error.reason)
         except workbench_actions.ActionRefused as error:
             return MutationResult(status=OPERATION_REJECTED, reason=error.reason)
-        except workbench.LaunchError as error:
+        except workbench_launch.LaunchError as error:
             return MutationResult(status=OPERATION_REJECTED, reason=error.reason)
         except workbench_controls.ControlRefused as error:
             return MutationResult(status=OPERATION_REJECTED, reason=error.reason)
@@ -747,7 +748,7 @@ class _Journal:
 
 _STATED_REFUSALS = (
     MutationRefused,
-    workbench.LaunchError,
+    workbench_launch.LaunchError,
     workbench_actions.ActionRefused,
     workbench_archive.ArchiveRefused,
     workbench_controls.ControlRefused,

@@ -42,7 +42,7 @@ Planning is read-only, and materialization is deterministic and atomic:
   post-authoring gate.
 - All child files, the manifest table/count refresh, and any predecessor
   reference repoint are staged in a single
-  :class:`~agent_session_loop.authoring.PlanTransaction` and committed
+  :class:`~agent_session_loop.authoring_transaction.PlanTransaction` and committed
   atomically, so a failed materialization leaves no partially authored plan.
 - Every durable write happens inside a publication window
   (:data:`REPAIR_PUBLICATION_DIR_NAME`) whose rollback image is fsynced before
@@ -59,7 +59,7 @@ Planning is read-only, and materialization is deterministic and atomic:
 
 The canonical review-finding grammar lives in
 :mod:`agent_session_loop.review`; contract construction/validation and the
-atomic transaction live in :mod:`agent_session_loop.authoring`.
+atomic transaction live in :mod:`agent_session_loop.authoring_transaction`.
 """
 
 from __future__ import annotations
@@ -77,7 +77,9 @@ from pathlib import Path
 from typing import Any
 
 from . import (
-    authoring,
+    authoring_manifest,
+    authoring_render,
+    authoring_transaction,
     baseline,
     contracts,
     durability,
@@ -100,7 +102,8 @@ from . import (
     verification,
     workspaces,
 )
-from .authoring import ManifestSession, PlanTransaction
+from .authoring_manifest import ManifestSession
+from .authoring_transaction import PlanTransaction
 from .plans_errors import PlanError
 from .plans_files import canonicalize_path
 from .plans_session_ids import SessionId, parse_session_id
@@ -813,13 +816,13 @@ def _build_repair_group_plans(
             plan_dir=plan_dir,
         )
         try:
-            contract = authoring.contract_from_payload(
+            contract = authoring_render.contract_from_payload(
                 child_id,
                 done_when,
                 {"session": child_id.value, "checks": list(checks)},
                 repository_registry=repository_registry,
             )
-            rendered_text = authoring.render_session_file(
+            rendered_text = authoring_render.render_session_file(
                 session_id=child_id,
                 title=title,
                 instruction_lines=body_lines,
@@ -1898,12 +1901,14 @@ def _materialize(
         new_manifest = manifest_text
         try:
             for row in manifest_rows:
-                new_manifest = authoring.add_manifest_session_row(new_manifest, row)
+                new_manifest = authoring_manifest.add_manifest_session_row(
+                    new_manifest, row
+                )
         except PlanError:
             # No session-status table to update; leave the table untouched but
             # still refresh the derived session count when present.
             new_manifest = manifest_text
-        new_manifest = authoring.replace_manifest_sessions_count(
+        new_manifest = authoring_manifest.replace_manifest_sessions_count(
             new_manifest, len(sessions) + len(children)
         )
         if new_manifest != manifest_text:
@@ -1917,7 +1922,7 @@ def _materialize(
         except OSError:
             successor_text = None
         if successor_text is not None:
-            updated, changed = authoring.replace_previous_session_reference(
+            updated, changed = authoring_manifest.replace_previous_session_reference(
                 successor_text, review_id, children[-1].session_id
             )
             if changed:
@@ -1953,7 +1958,9 @@ def _materialize(
     try:
         # Authoring succeeded — refresh readiness to draft (children not yet
         # executable). Mirrors the prepare-pipeline post-authoring contract.
-        authoring.refresh_readiness_metadata(canonical_dir, state="draft", now=now)
+        authoring_transaction.refresh_readiness_metadata(
+            canonical_dir, state="draft", now=now
+        )
 
         loop_ready = False
         blockers: tuple[str, ...] = ()

@@ -35,7 +35,7 @@ from agent_session_loop import (
     run_prompts,
     run_selection,
     task_packet,
-    turn_execution,
+    turn_execution_argv,
     workspaces,
 )
 from tests.support import (
@@ -1356,7 +1356,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
             context=self._make_context(),
         )
 
-        sanitized = turn_execution.sanitize_resolution_argv(
+        sanitized = turn_execution_argv.sanitize_resolution_argv(
             ["codex", "exec", prompt],
             full_prompt=prompt,
             action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
@@ -1389,7 +1389,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
 
         for resolution_source in invalid_sources:
             with self.subTest(resolution_source=resolution_source):
-                sanitized = turn_execution.persisted_result_argv(
+                sanitized = turn_execution_argv.persisted_result_argv(
                     ["codex", "exec", prompt],
                     live_turn={
                         "prompt_kind": "resolution",

@@ -21,7 +21,8 @@ from agent_session_loop import (
     run_persistence,
     state,
     state_status,
-    turn_execution,
+    turn_execution_artifacts,
+    turn_execution_signals,
 )
 from tests.support import (
     CLAUDE_SESSION_LIMIT_FIXTURE,
@@ -796,24 +797,24 @@ class HarnessFailureClassificationTests(unittest.TestCase):
 
     def test_turn_status_result_uses_classified_reason(self) -> None:
         result = self._result(stderr="429 Too Many Requests")
-        status = turn_execution.turn_status_result(
+        status = turn_execution_artifacts.turn_status_result(
             result=result,
             status_changes=(),
             pending_completed=(),
             session_id="5",
-            runner_signals=turn_execution.runner_signals(result),
+            runner_signals=turn_execution_signals.runner_signals(result),
             plan_error=None,
         )
         self.assertEqual(events.PAUSE_REASON_QUOTA_EXHAUSTED, status)
 
     def test_turn_status_result_generic_failure_stays_nonzero_exit(self) -> None:
         result = self._result(stderr="fake codex failure")
-        status = turn_execution.turn_status_result(
+        status = turn_execution_artifacts.turn_status_result(
             result=result,
             status_changes=(),
             pending_completed=(),
             session_id="5",
-            runner_signals=turn_execution.runner_signals(result),
+            runner_signals=turn_execution_signals.runner_signals(result),
             plan_error=None,
         )
         self.assertEqual(events.PAUSE_REASON_NONZERO_EXIT, status)

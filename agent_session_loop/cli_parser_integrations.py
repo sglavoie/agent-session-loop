@@ -50,7 +50,7 @@ def _add_bridge_commands(
         metavar="DIR",
         help="Extra plan root directory to scan for plans (may be repeated)",
     )
-    bridge_serve_parser.set_defaults(handler_ref="bridge:bridge_serve_from_args")
+    bridge_serve_parser.set_defaults(handler_ref="bridge_server:bridge_serve_from_args")
 
 
 def _add_agent_mux_commands(

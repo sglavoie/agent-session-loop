@@ -14,8 +14,8 @@ from agent_session_loop import (
     pause_policy,
     review_continuation,
     run_persistence,
-    turn_execution,
-    workbench_recovery,
+    turn_execution_constants,
+    workbench_recovery_models,
 )
 from tests.asl_docs_support import (
     ASL_GUIDE,
@@ -135,11 +135,11 @@ class AuthoritativePauseMetricsDocsTests(unittest.TestCase):
         # The helper's escalation classes are the runner's persisted hang
         # reasons plus the helper-only idle-ceiling class.
         self.assertEqual(
-            turn_execution.HANG_REASON_RESULT_RECEIVED,
+            turn_execution_constants.HANG_REASON_RESULT_RECEIVED,
             autopilot.HANG_CLASS_RESULT_RECEIVED,
         )
         self.assertEqual(
-            turn_execution.HANG_REASON_ZERO_CPU, autopilot.HANG_CLASS_ZERO_CPU
+            turn_execution_constants.HANG_REASON_ZERO_CPU, autopilot.HANG_CLASS_ZERO_CPU
         )
 
         skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(encoding="utf-8")
@@ -201,7 +201,7 @@ class AuthoritativePauseMetricsDocsTests(unittest.TestCase):
             "`unknown-disposition` blocker.",
             self.docs,
         )
-        for recovery_kind in workbench_recovery.RECOVERY_KINDS:
+        for recovery_kind in workbench_recovery_models.RECOVERY_KINDS:
             self.assertIn(f"`{recovery_kind}`", self.docs)
 
     def test_review_metrics_additive_fields_are_documented(self) -> None:
@@ -239,8 +239,8 @@ class AuthoritativePauseMetricsDocsTests(unittest.TestCase):
                 REPO_ROOT / "skills" / "asl" / "SKILL.md"
             ).read_text(encoding="utf-8"),
             "skills/asl/scripts/asl_autopilot*.py": autopilot_module_sources(),
-            "agent_session_loop/workbench.py": (
-                REPO_ROOT / "agent_session_loop" / "workbench.py"
+            "agent_session_loop/workbench_launch.py": (
+                REPO_ROOT / "agent_session_loop" / "workbench_launch.py"
             ).read_text(encoding="utf-8"),
         }
         unsupported_guidance = (
@@ -260,7 +260,7 @@ class AuthoritativePauseMetricsDocsTests(unittest.TestCase):
     def test_state_schema_docs_match_authoritative_versions(self) -> None:
         self.assertEqual(3, agent_mux_projection.STATE_SCHEMA_VERSION)
         self.assertEqual(2, run_persistence.COMPACT_STATE_SCHEMA_VERSION)
-        self.assertEqual(2, turn_execution.RESULT_SCHEMA_VERSION)
+        self.assertEqual(2, turn_execution_constants.RESULT_SCHEMA_VERSION)
         self.assertEqual(2, events.EVENT_SCHEMA_VERSION)
         state_files = self.docs.split("## State Files", 1)[1].split("\n## ", 1)[0]
         self.assertIn(
@@ -312,7 +312,7 @@ class AuthoritativePauseMetricsDocsTests(unittest.TestCase):
         )
         for producer in (
             "autopilot helper's central child environment",
-            "`workbench.launch_plan` marks",
+            "`workbench_launch.launch_plan` marks",
             "verifier marks its `asl status --json` smoke call",
         ):
             self.assertIn(producer, section)

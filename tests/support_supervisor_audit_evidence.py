@@ -14,7 +14,8 @@ from agent_session_loop import (
     plans_metadata,
     plans_session_scope,
     state,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_input,
+    supervisor_audit_evidence_models,
 )
 from tests.support import init_git_repo
 from tests.support_supervisor_audit import RUN_ID
@@ -257,8 +258,8 @@ class EvidenceBundleFixture(unittest.TestCase):
         state_dir: Path,
         run_dir: Path,
         **overrides: object,
-    ) -> supervisor_audit_evidence.AuditInput:
-        return supervisor_audit_evidence.collect_audit_input(
+    ) -> supervisor_audit_evidence_models.AuditInput:
+        return supervisor_audit_evidence_input.collect_audit_input(
             run_id=RUN_ID,
             run_dir=run_dir,
             state_dir=state_dir,

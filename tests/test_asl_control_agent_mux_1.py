@@ -19,7 +19,7 @@ from agent_session_loop import (
     run_persistence,
     run_selection,
     run_termination,
-    turn_execution,
+    turn_execution_protocols,
 )
 from tests.asl_control_agent_mux_support import AgentMuxNotificationIntegrationTestsBase
 from tests.support import (
@@ -206,7 +206,7 @@ class AgentMuxNotificationIntegrationTests(AgentMuxNotificationIntegrationTestsB
                 ) as run,
             ):
                 run_persistence._notify_agent_mux_loop_started(payload)
-                turn_execution.notify_turn_started(payload, active_turn)
+                turn_execution_protocols.notify_turn_started(payload, active_turn)
 
             self.assertEqual(2, run.call_count)
             start_args, start_kwargs = run.call_args_list[0]

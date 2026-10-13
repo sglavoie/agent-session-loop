@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import events
-from . import supervisor_audit_evidence as audit_evidence
+from . import supervisor_audit_evidence_helpers as audit_evidence_helpers
 from .supervisor_audit_models import _CheckContext, _joined, _Verdict
 
 
@@ -18,8 +18,8 @@ def _harness_failure_classification(context: _CheckContext) -> dict[str, Any]:
     status = context.section("status")
     if status.get("paused") is not True:
         return {}
-    details = audit_evidence._mapping(status.get("pause_details"))
-    return audit_evidence._mapping(details.get("failure_classification"))
+    details = audit_evidence_helpers._mapping(status.get("pause_details"))
+    return audit_evidence_helpers._mapping(details.get("failure_classification"))
 
 
 def _classified_failure_sessions(context: _CheckContext) -> set[Any]:
@@ -32,7 +32,7 @@ def _classified_failure_sessions(context: _CheckContext) -> set[Any]:
     """
     if not _harness_failure_classification(context).get("reason"):
         return set()
-    session = audit_evidence._mapping(
+    session = audit_evidence_helpers._mapping(
         context.section("status").get("pause_details")
     ).get("session")
     return set() if session is None else {session}
@@ -43,7 +43,7 @@ def _restore_refusal_records(context: _CheckContext) -> list[dict[str, Any]]:
         payload
         for record in context.records
         if record.get("name") == events.CONVERSATION_CONTINUATION_EVENT
-        and (payload := audit_evidence._mapping(record.get("payload"))).get(
+        and (payload := audit_evidence_helpers._mapping(record.get("payload"))).get(
             "disposition"
         )
         == "restore-refused"
@@ -53,8 +53,10 @@ def _restore_refusal_records(context: _CheckContext) -> list[dict[str, Any]]:
 def _check_conversation_restore_refusal(context: _CheckContext) -> _Verdict:
     """Grade the refusal that bypasses the ordinary harness-failure classifier."""
     status = context.section("status")
-    details = audit_evidence._mapping(status.get("pause_details"))
-    refusal = audit_evidence._mapping(details.get("conversation_restore_refused"))
+    details = audit_evidence_helpers._mapping(status.get("pause_details"))
+    refusal = audit_evidence_helpers._mapping(
+        details.get("conversation_restore_refused")
+    )
     records = _restore_refusal_records(context)
     evidence = context.evidence(
         context.event_summary.get("reference"),
@@ -114,7 +116,7 @@ def _check_conversation_restore_refusal(context: _CheckContext) -> _Verdict:
             for event in context.records
             if event.get("name") == events.TURN_EXECUTION_FINISHED_EVENT
             and str(
-                (payload := audit_evidence._mapping(event.get("payload"))).get(
+                (payload := audit_evidence_helpers._mapping(event.get("payload"))).get(
                     "session_id", payload.get("session")
                 )
             )
@@ -162,7 +164,7 @@ def _abort_turn_records(context: _CheckContext, action: str) -> list[dict[str, A
     for record in context.records:
         if record.get("name") != events.RUN_CONTROL_EVENT:
             continue
-        payload = audit_evidence._mapping(record.get("payload"))
+        payload = audit_evidence_helpers._mapping(record.get("payload"))
         if payload.get("action") == action:
             payloads.append(payload)
     return payloads
@@ -198,10 +200,11 @@ def _check_operator_abort(context: _CheckContext) -> _Verdict:
     )
     honored = _abort_turn_records(context, events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED)
     aborted_exits = [
-        audit_evidence._mapping(record.get("payload"))
+        audit_evidence_helpers._mapping(record.get("payload"))
         for record in context.records
         if record.get("name") == events.TURN_EXECUTION_FINISHED_EVENT
-        and audit_evidence._mapping(record.get("payload")).get("aborted") is True
+        and audit_evidence_helpers._mapping(record.get("payload")).get("aborted")
+        is True
     ]
     if not honored and not aborted_exits:
         return _Verdict(
@@ -289,7 +292,7 @@ def _check_retryable_transport_failure(context: _CheckContext) -> _Verdict:
 
     reason = classification.get("reason")
     retryable = classification.get("retryable")
-    policy = audit_evidence._mapping(status.get("pause_policy"))
+    policy = audit_evidence_helpers._mapping(status.get("pause_policy"))
     if not policy:
         return _Verdict(
             "unavailable",

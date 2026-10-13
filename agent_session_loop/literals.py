@@ -18,7 +18,7 @@ absence of knowledge, not a licence to guess, and a durable record written from
 a guess is unrecoverable.
 
 The exception type is the caller's, because the raise is part of that module's
-parse contract: :mod:`agent_session_loop.assurance_models` raises
+parse contract: :mod:`agent_session_loop.assurance_models_primitives` raises
 ``AssuranceError``, :mod:`agent_session_loop.contracts` raises ``PlanError``,
 and code with no domain error of its own gets ``ValueError``.
 """

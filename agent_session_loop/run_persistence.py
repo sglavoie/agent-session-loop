@@ -547,7 +547,7 @@ class _AgentMuxWaitNotifier:
     """Bind a live wait's lifecycle to this run's AgentMux projection.
 
     The coordination boundary announces a wait through
-    :class:`run_coordination.WaitNotifier` rather than reaching for the
+    :class:`run_coordination_seams.WaitNotifier` rather than reaching for the
     projection itself, because who hears about a wait is a runner concern and
     the delivery seam is already fail-open here: ``_notify_agent_mux_loop``
     swallows its own errors, so neither call can end a wait a supervisor is

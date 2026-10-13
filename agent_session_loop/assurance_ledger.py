@@ -27,7 +27,7 @@ around what a crash, a race, or a lost cache may do to it:
   matters is derived from the ledger bytes. Deleting the index changes nothing
   but speed.
 * **Only bounded metadata is stored.** Each record kind is parsed through the
-  matching :mod:`agent_session_loop.assurance_models` model, and every record is
+  matching ``assurance_models_*`` model, and every record is
   additionally capped in bytes, so prompts, logs, diffs, and harness responses
   cannot reach the ledger even by accident. The ledger holds references to those
   artifacts, not their contents.
@@ -48,11 +48,7 @@ from typing import Any, Literal
 
 from . import durability, state
 from .artifacts import sha256_hex
-from .assurance_models import (
-    COMPLETED_AUDIT_STATES,
-    ISSUE_ID_PREFIX,
-    AssuranceError,
-    AssuranceSummary,
+from .assurance_models_inbox import (
     Closeout,
     Disposition,
     ImprovementPlanDraft,
@@ -60,19 +56,24 @@ from .assurance_models import (
     IssueKeptDistinct,
     IssueMerge,
     IssueObservation,
-    canonical_json_bytes,
-    issue_id_number,
-    parse_assurance_summary,
     parse_closeout,
     parse_disposition,
-    parse_identity_key,
     parse_improvement_plan_draft,
-    parse_issue_id,
     parse_issue_identity_binding,
     parse_issue_kept_distinct,
     parse_issue_merge,
     parse_issue_observation,
 )
+from .assurance_models_primitives import (
+    ISSUE_ID_PREFIX,
+    AssuranceError,
+    canonical_json_bytes,
+    issue_id_number,
+    parse_identity_key,
+    parse_issue_id,
+)
+from .assurance_models_summary import AssuranceSummary, parse_assurance_summary
+from .assurance_models_vocab import COMPLETED_AUDIT_STATES
 
 #: Canonical ledger, its lock, and its rebuildable cache, all directly under the
 #: state root because the inbox spans every plan rather than belonging to one.

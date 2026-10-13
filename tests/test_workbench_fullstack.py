@@ -93,10 +93,10 @@ from agent_session_loop import (
     events,
     intervention,
     state,
-    workbench,
     workbench_actions,
     workbench_archive,
     workbench_connector,
+    workbench_launch,
     workbench_operations,
     workbench_remote_actions,
     workbench_remote_reads,
@@ -121,7 +121,8 @@ from asl_workbench.installation import (
     PRIVATE_FILE_MODE,
 )
 from asl_workbench.service import RemoteProvider
-from asl_workbench.store import StoreError, WorkbenchStore
+from asl_workbench.store_types import StoreError
+from asl_workbench.store_workbench import WorkbenchStore
 from tests.workbench_support import (
     SHELL_FROZEN_NOW,
     SHELL_OWNER_IDENTITY,
@@ -1908,13 +1909,13 @@ class InertLaunchTests(unittest.TestCase):
 
     def inert(self) -> Any:
         """Patch only the interpreter, leaving every other launcher decision."""
-        real = workbench.launch_plan
+        real = workbench_launch.launch_plan
 
         def launch(plan_dir: Any, **kwargs: Any) -> Any:
             kwargs["python_executable"] = str(self.interpreter)
             return real(plan_dir, **kwargs)
 
-        return mock.patch.object(workbench, "launch_plan", launch)
+        return mock.patch.object(workbench_launch, "launch_plan", launch)
 
     def reap(self, pid: int) -> None:
         """End the child and collect it, so no test leaves a process behind.
@@ -1968,7 +1969,7 @@ class InertLaunchTests(unittest.TestCase):
                 "/api/launch", {"plan_dir": str(self.root / "nowhere")}
             )
         self.assertEqual(400, status)
-        self.assertEqual(workbench.LAUNCH_REASON_INVALID_PLAN, body["reason"])
+        self.assertEqual(workbench_launch.LAUNCH_REASON_INVALID_PLAN, body["reason"])
 
     def test_a_repeated_launch_id_replays_rather_than_spawning_again(self) -> None:
         plan_dir = self.corpus.plan_dir("bravo")

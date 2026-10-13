@@ -6,7 +6,7 @@ differ in -- execution -- and it executes very differently from the Mac,
 because it is not standing on the plans it is describing:
 
 * **A retained observation answers what it can.** Health, the summary, the
-  queue, and one plan's row come out of :class:`~asl_workbench.store.
+  queue, and one plan's row come out of :class:`~asl_workbench.store_workbench.
   WorkbenchStore`, which holds what a connector published and nothing else.
   Each of those answers carries the freshness of the observation it was built
   from, because an answer about a run that is a minute old is a different
@@ -143,7 +143,8 @@ from .remote_reads import (
     READ_OUTCOMES,
     ReadAnswer,
 )
-from .store import DEFAULT_READ_LIMIT, MAX_READ_LIMIT, WorkbenchStore
+from .store_types import DEFAULT_READ_LIMIT, MAX_READ_LIMIT
+from .store_workbench import WorkbenchStore
 from .transport import MAX_DETAIL_BYTES, MAX_DETAIL_ENTRIES, REQUEST_MUTATE
 
 __all__ = [

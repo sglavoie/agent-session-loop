@@ -58,7 +58,8 @@ from .credentials import ROLE_CAPABILITIES, ROLE_CONNECTOR
 from .operations import OPERATION_DISPATCHED
 from .remote_actions import MAX_BODY_CHARS
 from .remote_reads import DetailReadClient, ReadAnswer, RemoteReadError
-from .store import IngestInvalid, IngestRefused, WorkbenchStore
+from .store_types import IngestInvalid, IngestRefused
+from .store_workbench import WorkbenchStore
 from .transport import (
     DIRECTION_UP,
     KIND_DETAIL,

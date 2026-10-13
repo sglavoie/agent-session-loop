@@ -19,7 +19,7 @@ the deterministic text that marks the work as unverified.
 
 The module also owns :class:`_LiveTurn`, the loop's live turn holder. It is
 here rather than beside the turn boundary because the only thing it adds to
-``turn_execution.LiveTurn`` is the run's own serialized persistence, and a
+``turn_execution_live.LiveTurn`` is the run's own serialized persistence, and a
 holder that binds a run's collaborators belongs with the loop's records rather
 than with the boundary it specializes.
 
@@ -103,7 +103,7 @@ from . import (
     run_persistence,
     run_prompts,
     run_selection,
-    turn_execution,
+    turn_execution_live,
     verification,
 )
 from .run_errors import RunError
@@ -127,7 +127,7 @@ COMMIT_SUBPROCESS_GRACE_SECONDS = 120
 _COMMIT_DRAIN_SECONDS = 5
 
 
-class _LiveTurn(turn_execution.LiveTurn):
+class _LiveTurn(turn_execution_live.LiveTurn):
     """The live turn as the run loop builds it.
 
     Binds the run's own serialized persistence, which the boundary requires

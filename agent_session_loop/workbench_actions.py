@@ -25,7 +25,7 @@ on the Mac or a supervisor sent it from the Pi:
   returned ``Popen`` consumes it. A reply promises that an operator's words
   were read, which no ``Popen`` can establish, so it is ``accepted`` and waits
   for a run to say it read them.
-* **The same worker.** ``workbench.launch_plan`` and ``intervention`` do the
+* **The same worker.** ``workbench_launch.launch_plan`` and ``intervention`` do the
   actual work, unchanged. Nothing here reimplements a launch, a mailbox append,
   or the registered workspace binding a prepared plan is launched against.
 
@@ -44,7 +44,13 @@ from typing import Any
 from asl_workbench import actions as portable_actions
 from asl_workbench import operations
 
-from . import intervention, plans_files, workbench, workbench_operations
+from . import (
+    intervention,
+    plans_files,
+    workbench_launch,
+    workbench_operations,
+    workbench_registry_models,
+)
 
 #: The ASL intervention action each shared action validates as. ``launch`` has
 #: no row: there is no run to be fresh about before one exists, and what stands
@@ -79,7 +85,7 @@ class ActionOutcome:
     operation: dict[str, Any]
     facts: intervention.RunFacts
     replayed: bool = False
-    launch: workbench.LaunchResult | None = None
+    launch: workbench_launch.LaunchResult | None = None
     closure_id: str | None = None
     question_id: str | None = None
     #: The admission this action was let through by, kept so a surface can
@@ -105,7 +111,7 @@ def perform(
     operation_id: str | None = None,
     state_dir: str | Path | None = None,
     reply_text: str | None = None,
-    profile: workbench.LaunchProfile | None = None,
+    profile: workbench_registry_models.LaunchProfile | None = None,
     action_token: str | None = None,
     question_id: str | None = None,
     run_id: str | None = None,
@@ -214,7 +220,7 @@ def perform(
             state_dir=state_dir,
             question_id=selected,
         )
-    except workbench.LaunchError as error:
+    except workbench_launch.LaunchError as error:
         _close_out(
             canonical,
             identifier,
@@ -255,7 +261,7 @@ def launch_run(
     plan_dir: str | Path,
     *,
     operation_id: str | None = None,
-    profile: workbench.LaunchProfile | None = None,
+    profile: workbench_registry_models.LaunchProfile | None = None,
     state_dir: str | Path | None = None,
     guard: Guard | None = None,
     deliver_by: float | None = None,
@@ -279,7 +285,7 @@ def resume_with_reply(
     *,
     reply_text: str,
     operation_id: str | None = None,
-    profile: workbench.LaunchProfile | None = None,
+    profile: workbench_registry_models.LaunchProfile | None = None,
     state_dir: str | Path | None = None,
     action_token: str | None = None,
     question_id: str | None = None,
@@ -341,8 +347,8 @@ def _canonical(plan_dir: str | Path) -> Path:
     try:
         return plans_files.canonicalize_path(plan_dir)
     except (OSError, ValueError) as error:
-        raise workbench.LaunchError(
-            workbench.LAUNCH_REASON_INVALID_PLAN, f"invalid plan_dir: {error}"
+        raise workbench_launch.LaunchError(
+            workbench_launch.LAUNCH_REASON_INVALID_PLAN, f"invalid plan_dir: {error}"
         ) from error
 
 
@@ -354,7 +360,7 @@ def _inspect(
     Every action but a launch is *about* something the facts name -- a run, a
     question -- so an unreadable plan is that action's refusal and is raised.
     A launch names nothing yet, and the authority on whether a directory can be
-    launched is ``workbench.launch_plan``, which says so in launch vocabulary.
+    launched is ``workbench_launch.launch_plan``, which says so in launch vocabulary.
     Refusing here first would replace that answer with a vaguer one.
     """
     try:
@@ -434,19 +440,21 @@ def _carry_out(
     action: str,
     *,
     reply_text: str | None,
-    profile: workbench.LaunchProfile | None,
+    profile: workbench_registry_models.LaunchProfile | None,
     state_dir: str | Path | None,
     question_id: str | None,
-) -> tuple[workbench.LaunchResult | None, str | None]:
+) -> tuple[workbench_launch.LaunchResult | None, str | None]:
     """Do the work ASL already knows how to do, and nothing besides."""
     if action == portable_actions.ACTION_LAUNCH:
         return (
-            workbench.launch_plan(plan_dir, profile=profile, state_dir=state_dir),
+            workbench_launch.launch_plan(
+                plan_dir, profile=profile, state_dir=state_dir
+            ),
             None,
         )
     if action == portable_actions.ACTION_RESUME:
         return (
-            workbench.resume_plan_with_reply(
+            workbench_launch.resume_plan_with_reply(
                 plan_dir,
                 reply_text=reply_text if reply_text is not None else "",
                 profile=profile,

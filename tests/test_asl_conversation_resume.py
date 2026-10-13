@@ -36,8 +36,8 @@ from agent_session_loop import (
     preflight_runtime_hints,
     run_entry,
     run_flags,
-    turn_execution,
-    workbench_recovery,
+    turn_execution_executor,
+    workbench_recovery_models,
     workspaces,
 )
 
@@ -584,9 +584,11 @@ class RecoveryPauseRegistrationTests(unittest.TestCase):
         """
         self.assertEqual(
             "conversation-recovery",
-            workbench_recovery.PAUSE_REASON_RECOVERY_KIND_BY_REASON[self.reason],
+            workbench_recovery_models.PAUSE_REASON_RECOVERY_KIND_BY_REASON[self.reason],
         )
-        self.assertNotIn(self.reason, workbench_recovery.GENERIC_RECOVERY_PAUSE_REASONS)
+        self.assertNotIn(
+            self.reason, workbench_recovery_models.GENERIC_RECOVERY_PAUSE_REASONS
+        )
 
     def test_a_repair_hint_explains_the_two_ways_forward(self) -> None:
         hint = preflight_runtime_hints.RUNTIME_REPAIR_HINTS[self.reason]
@@ -811,12 +813,12 @@ class TurnLaunchWiringTests(unittest.TestCase):
     """The decision reaches the adapter through the turn launch, unaltered."""
 
     def test_the_launch_carries_both_halves_of_continuity(self) -> None:
-        annotations = turn_execution.TurnLaunch.__annotations__
+        annotations = turn_execution_executor.TurnLaunch.__annotations__
         self.assertIn("resume_conversation_id", annotations)
         self.assertIn("on_conversation", annotations)
 
     def test_the_executor_forwards_both_halves_to_the_harness(self) -> None:
-        source = inspect.getsource(turn_execution.TurnExecutor.launch)
+        source = inspect.getsource(turn_execution_executor.TurnExecutor.launch)
         self.assertIn("resume_conversation_id=launch.resume_conversation_id", source)
         self.assertIn("on_conversation=launch.on_conversation", source)
 

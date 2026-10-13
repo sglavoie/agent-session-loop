@@ -9,8 +9,8 @@ from agent_session_loop import (
     control_queue,
     control_signal,
     events,
-    run_coordination,
-    turn_execution,
+    run_coordination_control,
+    turn_execution_constants,
 )
 from tests.asl_docs_support import read_repo_text
 
@@ -38,7 +38,9 @@ class ControlAndAbortDocsTests(unittest.TestCase):
         self.assertEqual(0.5, control_cli.CONTROL_WAIT_POLL_INTERVAL_SECONDS)
         self.assertEqual(60.0, control_cli.DEFAULT_CONTROL_WAIT_TIMEOUT_SECONDS)
         self.assertEqual(1800.0, control_cli.MAX_CONTROL_WAIT_TIMEOUT_SECONDS)
-        self.assertEqual(5.0, turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS)
+        self.assertEqual(
+            5.0, turn_execution_constants.LIVE_CONTROL_POLL_INTERVAL_SECONDS
+        )
 
         self.assertIn(
             "end the in-flight turn after a bounded grace window (default "
@@ -123,12 +125,12 @@ class ControlAndAbortDocsTests(unittest.TestCase):
             if action != events.RUN_CONTROL_ACTION_COMMAND_OBSERVED
         )
         self.assertLessEqual(
-            set(run_coordination.RUN_CONTROL_EVENT_ACTIONS.values()),
+            set(run_coordination_control.RUN_CONTROL_EVENT_ACTIONS.values()),
             set(last_action_values),
         )
         self.assertNotIn(
             events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
-            set(run_coordination.RUN_CONTROL_EVENT_ACTIONS.values()),
+            set(run_coordination_control.RUN_CONTROL_EVENT_ACTIONS.values()),
         )
         last_action_docs = state_files.split("`last_action` is one of", 1)[1]
         for action in last_action_values:

@@ -19,7 +19,9 @@ from agent_session_loop import (
     mailbox_cursors,
     mailbox_snapshot,
     plans_snapshot,
-    run_coordination,
+    run_coordination_constants,
+    run_coordination_mailbox_question,
+    run_coordination_wait_models,
     state,
     state_status,
 )
@@ -38,7 +40,7 @@ class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
     def test_oversized_last_message_yields_bounded_retry_stable_question(
         self,
     ) -> None:
-        cap = run_coordination.MAILBOX_QUESTION_TEXT_MAX_CHARS
+        cap = run_coordination_constants.MAILBOX_QUESTION_TEXT_MAX_CHARS
         oversized = "".join(f"line {index}\n" for index in range(cap // 4))
         self.assertGreater(len(oversized), cap)
         artifact_path = Path("/tmp/artifacts/last-message.txt")
@@ -46,10 +48,10 @@ class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
         # Two independent preparations of the same turn read the same
         # artifact; their bodies must be byte-identical or the reuse
         # equality check in _ensure_mailbox_question degrades the retry.
-        first_text = run_coordination.mailbox_question_text(
+        first_text = run_coordination_mailbox_question.mailbox_question_text(
             self._question_context(oversized, artifact_path)
         )
-        retried_text = run_coordination.mailbox_question_text(
+        retried_text = run_coordination_mailbox_question.mailbox_question_text(
             self._question_context(oversized, artifact_path)
         )
         self.assertEqual(first_text.encode("utf-8"), retried_text.encode("utf-8"))
@@ -65,13 +67,13 @@ class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
-            question_id = run_coordination.mailbox_question_id(
+            question_id = run_coordination_mailbox_question.mailbox_question_id(
                 plan_dir=plan_dir,
                 run_id="run-bounded",
                 session_id="1",
                 turn_index=2,
             )
-            published = run_coordination.ensure_mailbox_question(
+            published = run_coordination_mailbox_question.ensure_mailbox_question(
                 plan_dir=plan_dir,
                 state_dir_arg=str(state_dir),
                 question_id=question_id,
@@ -89,7 +91,7 @@ class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
                     "a retried preparation must reuse the bounded question"
                 ),
             ) as append_question:
-                reused = run_coordination.ensure_mailbox_question(
+                reused = run_coordination_mailbox_question.ensure_mailbox_question(
                     plan_dir=plan_dir,
                     state_dir_arg=str(state_dir),
                     question_id=question_id,
@@ -103,18 +105,18 @@ class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
             append_question.assert_not_called()
 
     def test_last_message_at_exact_boundary_is_not_truncated(self) -> None:
-        cap = run_coordination.MAILBOX_QUESTION_TEXT_MAX_CHARS
+        cap = run_coordination_constants.MAILBOX_QUESTION_TEXT_MAX_CHARS
         artifact_path = Path("/tmp/artifacts/last-message.txt")
         at_boundary = "b" * cap
         self.assertEqual(
             at_boundary,
-            run_coordination.mailbox_question_text(
+            run_coordination_mailbox_question.mailbox_question_text(
                 self._question_context(at_boundary, artifact_path)
             ),
         )
 
         over_boundary = "b" * (cap + 1)
-        bounded = run_coordination.mailbox_question_text(
+        bounded = run_coordination_mailbox_question.mailbox_question_text(
             self._question_context(over_boundary, artifact_path)
         )
         self.assertNotEqual(over_boundary, bounded)
@@ -148,9 +150,11 @@ class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
                 mailbox_appenders,
                 "append_question",
             ) as append_question,
-            self.assertRaises(run_coordination.MailboxWaitUnavailable) as raised,
+            self.assertRaises(
+                run_coordination_wait_models.MailboxWaitUnavailable
+            ) as raised,
         ):
-            run_coordination.ensure_mailbox_question(
+            run_coordination_mailbox_question.ensure_mailbox_question(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 question_id="00000000-0000-4000-8000-000000000042",
@@ -172,14 +176,14 @@ class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
             run_id = "run-that-times-out"
-            question_id = run_coordination.mailbox_question_id(
+            question_id = run_coordination_mailbox_question.mailbox_question_id(
                 plan_dir=plan_dir,
                 run_id=run_id,
                 session_id="1",
                 turn_index=2,
             )
 
-            question = run_coordination.ensure_mailbox_question(
+            question = run_coordination_mailbox_question.ensure_mailbox_question(
                 plan_dir=plan_dir,
                 state_dir_arg=str(state_dir),
                 question_id=question_id,

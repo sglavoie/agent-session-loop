@@ -11,11 +11,10 @@ from agent_session_loop import (
     events,
     run_commit,
     supervisor_audit_checks,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_constants,
+    supervisor_audit_evidence_models,
 )
-from agent_session_loop.assurance_models import (
-    DeterministicResult,
-)
+from agent_session_loop.assurance_models_findings import DeterministicResult
 from tests import support_supervisor_audit_checks as checks_support
 from tests.support_supervisor_audit import RUN_ID
 
@@ -67,14 +66,14 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
         self._write_state(state_dir, payload)
 
     def _shed_events(
-        self, bundle: supervisor_audit_evidence.AuditInput
+        self, bundle: supervisor_audit_evidence_models.AuditInput
     ) -> dict[str, DeterministicResult]:
         """Drop the bundle's event records the way the size cap drops them."""
         bundle.payload["events"]["records"] = []
         bundle.payload.setdefault("omissions", []).append(
             {
                 "section": "events",
-                "reason": supervisor_audit_evidence.REASON_SIZE_CAP,
+                "reason": supervisor_audit_evidence_constants.REASON_SIZE_CAP,
                 "count": 2,
             }
         )
@@ -235,7 +234,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
             # it is the violation as the guard saw it, not a later commit that
             # carried the write forward (ASI-9).
             self.assertIn(
-                supervisor_audit_evidence.OBSERVED_COMMIT_ORIGIN,
+                supervisor_audit_evidence_constants.OBSERVED_COMMIT_ORIGIN,
                 [c.get("origin") for c in bundle.payload["commits"]["commits"]],
             )
             self.assertEqual("pass", results["scope-escape"].status)

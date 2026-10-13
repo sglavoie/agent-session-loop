@@ -6,7 +6,7 @@ makes any of them safe to keep is the same one: *the schema is not the
 allowlist*. A table can only hold what its columns hold, but a table grows a
 column the moment somebody adds one, and the widened wire shape that motivated
 the column is usually the same change. So the boundary lives here, as data, and
-:mod:`asl_workbench.store` projects every record through it on the way in and
+:mod:`asl_workbench.store_workbench` projects every record through it on the way in and
 on the way out. ``tests/test_workbench_store.py`` then asserts the other
 direction: every column in the schema is a name on one of these lists or is
 ingestion bookkeeping the source never sent.

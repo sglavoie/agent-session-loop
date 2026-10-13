@@ -22,7 +22,7 @@ This is the entry module of the supervisor audit and the only one the run
 loop and the assurance commands call: it plans the audit, drives the attempt
 loop, and publishes the terminal audit through :func:`audit_terminal_run`. The
 work it orchestrates lives below it, and dependencies flow one way:
-:mod:`.supervisor_audit_evidence` collects the bounded evidence bundle,
+:mod:`.supervisor_audit_evidence_input` collects the bounded evidence bundle,
 :mod:`.supervisor_audit_checks` grades it deterministically, and
 :mod:`.supervisor_audit_agent` owns the auditor's prompt and answer contract,
 identity resolution, and the rendered reports.
@@ -41,7 +41,12 @@ from typing import Any
 
 from . import (
     artifacts,
-    assurance_models,
+    assurance_models_artifacts,
+    assurance_models_audit,
+    assurance_models_findings,
+    assurance_models_primitives,
+    assurance_models_summary,
+    assurance_models_vocab,
     assurance_projection,
     assurance_report,
     events,
@@ -54,13 +59,17 @@ from . import (
 )
 from . import supervisor_audit_agent as audit_agent
 from . import supervisor_audit_checks as audit_checks
-from . import supervisor_audit_evidence as audit_evidence
-from .assurance_models import (
+from . import supervisor_audit_evidence_commits as audit_evidence_commits
+from . import supervisor_audit_evidence_constants as audit_evidence_constants
+from . import supervisor_audit_evidence_helpers as audit_evidence_helpers
+from . import supervisor_audit_evidence_input as audit_evidence_input
+from . import supervisor_audit_evidence_models as audit_evidence_models
+from . import supervisor_audit_evidence_redaction as audit_evidence_redaction
+from .assurance_models_primitives import AssuranceError
+from .assurance_models_summary import AssuranceSummary, AuditRole
+from .assurance_models_vocab import (
     MAX_AUDIT_ATTEMPT_RECORDS,
-    AssuranceError,
-    AssuranceSummary,
     AttemptOutcome,
-    AuditRole,
     AuditRoleSource,
     AuditState,
 )
@@ -415,15 +424,15 @@ def _without_remote_tracking_refs(changes: Mapping[str, Any]) -> dict[str, Any]:
     """
     filtered = dict(changes)
     for key in ("refs_added", "refs_removed", "refs_changed"):
-        entries = audit_evidence._sequence(changes.get(key))
+        entries = audit_evidence_helpers._sequence(changes.get(key))
         if not entries:
             continue
         filtered[key] = [
             entry
             for entry in entries
-            if not str(audit_evidence._mapping(entry).get("ref") or "").startswith(
-                audit_evidence._REMOTE_TRACKING_REF_PREFIX
-            )
+            if not str(
+                audit_evidence_helpers._mapping(entry).get("ref") or ""
+            ).startswith(audit_evidence_commits._REMOTE_TRACKING_REF_PREFIX)
         ]
     return filtered
 
@@ -440,10 +449,12 @@ def _mutation_comparison(comparison: Mapping[str, Any]) -> dict[str, Any] | None
     """
     changed = {
         repository: filtered
-        for repository, raw in audit_evidence._mapping(
+        for repository, raw in audit_evidence_helpers._mapping(
             comparison.get("changed")
         ).items()
-        for filtered in (_without_remote_tracking_refs(audit_evidence._mapping(raw)),)
+        for filtered in (
+            _without_remote_tracking_refs(audit_evidence_helpers._mapping(raw)),
+        )
         if filtered.get("head_changed") is True
         or any(filtered.get(key) for key in _MUTATION_CHANGE_KEYS)
     }
@@ -542,8 +553,8 @@ def _record_workspace_change(
     losing this artifact cannot turn the already-unavailable audit into a
     usable verdict. The attempt archive also retains the comparison.
     """
-    with contextlib.suppress(OSError, assurance_models.AssuranceError):
-        assurance_models.write_audit_json(
+    with contextlib.suppress(OSError, assurance_models_primitives.AssuranceError):
+        assurance_models_artifacts.write_audit_json(
             run_dir,
             supervisor_audit_vocabulary.WORKSPACE_CHANGE_ARTIFACT_NAME,
             {
@@ -773,7 +784,8 @@ def _redacted_classification(
     """Classify a failed launch, with credentials stripped from its evidence."""
     classification = harness_failures.classify_harness_failure(result)
     return replace(
-        classification, evidence=audit_evidence._redact_secrets(classification.evidence)
+        classification,
+        evidence=audit_evidence_redaction._redact_secrets(classification.evidence),
     )
 
 
@@ -806,7 +818,7 @@ def _harness_tail(text: str) -> str:
     """
     if not text:
         return ""
-    encoded = audit_evidence._redact_secrets(text).encode("utf-8")
+    encoded = audit_evidence_redaction._redact_secrets(text).encode("utf-8")
     if len(encoded) <= MAX_HARNESS_TAIL_BYTES:
         return encoded.decode("utf-8", errors="ignore")
     return encoded[-MAX_HARNESS_TAIL_BYTES:].decode("utf-8", errors="ignore")
@@ -853,7 +865,7 @@ RETRYABLE_ATTEMPT_OUTCOMES: frozenset[str] = (
 REASON_IDENTITY_AMBIGUOUS = "identity-ambiguous"
 
 #: The attempt outcome an identity-ambiguous answer is recorded under.
-#: :data:`assurance_models.ATTEMPT_OUTCOMES` is a closed vocabulary persisted
+#: :data:`assurance_models_vocab.ATTEMPT_OUTCOMES` is a closed vocabulary persisted
 #: inside audit reports, so this reuses the token for an identity that cannot be
 #: resolved against the catalog rather than widening the wire contract; the
 #: audit-level reason carries the distinction, and the detail names the issues.
@@ -878,8 +890,8 @@ MAX_HARNESS_TAIL_BYTES = 16 * 1024
 class AgentAuditOutcome:
     """The audit an engine run produced, with the attempts that produced it."""
 
-    audit: assurance_models.SupervisorAudit
-    attempts: tuple[assurance_models.AuditAttempt, ...]
+    audit: assurance_models_audit.SupervisorAudit
+    attempts: tuple[assurance_models_summary.AuditAttempt, ...]
     agent_covered: bool
     #: The validated answer behind ``audit``, kept because the canonical audit
     #: carries no identity: allocation reads the decisions from here.
@@ -913,15 +925,15 @@ def _reason_token(value: Any, fallback: str) -> str:
     outcome keeps one recurring failure deduplicating into one inbox issue.
     """
     try:
-        return assurance_models.parse_reason_token(value)
-    except assurance_models.AssuranceError:
+        return assurance_models_primitives.parse_reason_token(value)
+    except assurance_models_primitives.AssuranceError:
         return fallback
 
 
 def _bounded_argv(argv: Sequence[str], *, prompt: str) -> list[str]:
     """Replace the inlined prompt with its digest so an attempt record stays small."""
     return [
-        f"[prompt sha256:{audit_evidence._sha256_text(prompt)}]"
+        f"[prompt sha256:{audit_evidence_helpers._sha256_text(prompt)}]"
         if item == prompt
         else item
         for item in argv
@@ -944,13 +956,13 @@ def _write_attempt_artifacts(
     archive of an attempt must not lose the verdict the attempt produced.
     """
     try:
-        directory = assurance_models.create_attempt_dir(run_dir, number)
-        assurance_models.write_new_bytes(
+        directory = assurance_models_artifacts.create_attempt_dir(run_dir, number)
+        assurance_models_artifacts.write_new_bytes(
             directory / ATTEMPT_PROMPT_FILE, prompt.encode("utf-8"), durable=durable
         )
-        assurance_models.write_new_bytes(
+        assurance_models_artifacts.write_new_bytes(
             directory / ATTEMPT_MESSAGE_FILE,
-            audit_evidence._truncate_utf8(
+            audit_evidence_helpers._truncate_utf8(
                 attempt.last_message, audit_agent.MAX_AGENT_OUTPUT_BYTES
             ).encode("utf-8"),
             durable=durable,
@@ -960,12 +972,12 @@ def _write_attempt_artifacts(
             (ATTEMPT_STDERR_FILE, attempt.stderr_tail),
         ):
             if stream:
-                assurance_models.write_new_bytes(
+                assurance_models_artifacts.write_new_bytes(
                     directory / name, stream.encode("utf-8"), durable=durable
                 )
-        assurance_models.write_new_bytes(
+        assurance_models_artifacts.write_new_bytes(
             directory / ATTEMPT_OUTCOME_FILE,
-            assurance_models.canonical_json_bytes(
+            assurance_models_primitives.canonical_json_bytes(
                 {
                     "number": number,
                     "outcome": outcome,
@@ -983,9 +995,9 @@ def _write_attempt_artifacts(
             ),
             durable=durable,
         )
-    except OSError, assurance_models.AssuranceError:
+    except OSError, assurance_models_primitives.AssuranceError:
         return None
-    return assurance_models.attempt_dir_name(number)
+    return assurance_models_artifacts.attempt_dir_name(number)
 
 
 def _delivery_is_retryable(attempt: AuditAttemptResult) -> bool:
@@ -1051,7 +1063,7 @@ def _record_capacity_outage(
 def run_agent_audit(
     role: AuditRole,
     *,
-    bundle: audit_evidence.AuditInput,
+    bundle: audit_evidence_models.AuditInput,
     run_id: str,
     run_dir: Path | str,
     workspace_root: Path | str,
@@ -1059,7 +1071,7 @@ def run_agent_audit(
     repositories: Sequence[str],
     registry_declared: bool = True,
     state_dir: Path | str | None = None,
-    results: Sequence[assurance_models.DeterministicResult] | None = None,
+    results: Sequence[assurance_models_findings.DeterministicResult] | None = None,
     stream_callback: harnesses.StreamCallback | None = None,
     abort: harnesses.AbortSignal | None = None,
     durable: bool = True,
@@ -1071,11 +1083,11 @@ def run_agent_audit(
 
     Two budgets are spent, not one, because a bad answer and an undelivered
     request are different failures. The agent may produce at most
-    :data:`assurance_models.MAX_AUDIT_ATTEMPTS` unusable *answers*, each retry a
+    :data:`assurance_models_vocab.MAX_AUDIT_ATTEMPTS` unusable *answers*, each retry a
     fresh invocation told only which validation rule the previous one broke. A
     launch that never reached the agent — a timeout or a transport/capacity
     failure — is charged instead to
-    :data:`assurance_models.MAX_AUDIT_DELIVERY_ATTEMPTS` and retried after a
+    :data:`assurance_models_vocab.MAX_AUDIT_DELIVERY_ATTEMPTS` and retried after a
     backoff with the identical prompt, since there is no answer to correct and
     the outage is the provider's doing. When either budget runs out the audit is
     ``unavailable`` under the reason that exhausted it — but it still carries the
@@ -1084,7 +1096,7 @@ def run_agent_audit(
     consequence of the first.
 
     A third budget,
-    :data:`assurance_models.MAX_AUDIT_SHRINK_ATTEMPTS`, covers the one failure
+    :data:`assurance_models_vocab.MAX_AUDIT_SHRINK_ATTEMPTS`, covers the one failure
     that is the caller's own: a provider that refuses the request for size
     before the agent runs. That attempt is retried with the bundle shed to
     :data:`AUDIT_INPUT_OVERFLOW_SHRINK_RATIO` of the size that was refused. Only
@@ -1121,7 +1133,7 @@ def run_agent_audit(
     # selection for naming an issue a concurrent publisher had just moved.
     inbox = audit_agent.read_identity_catalog(state_dir)
     catalog = audit_agent.build_agent_catalog(inbox)
-    attempts: list[assurance_models.AuditAttempt] = []
+    attempts: list[assurance_models_summary.AuditAttempt] = []
     correction: str | None = None
     candidates: tuple[assurance_projection.IdentityCandidate, ...] = ()
     candidates_offered = False
@@ -1187,7 +1199,7 @@ def run_agent_audit(
             outcome, detail = attempt.outcome, attempt.reason
             unavailable_reason = _reason_token(attempt.reason, attempt.outcome)
         attempts.append(
-            assurance_models.AuditAttempt(
+            assurance_models_summary.AuditAttempt(
                 number=number,
                 outcome=outcome,
                 artifact_dir=_write_attempt_artifacts(
@@ -1221,7 +1233,7 @@ def run_agent_audit(
                 ),
             )
         if _refused_for_size(attempt) and (
-            shrinks_spent < assurance_models.MAX_AUDIT_SHRINK_ATTEMPTS
+            shrinks_spent < assurance_models_vocab.MAX_AUDIT_SHRINK_ATTEMPTS
         ):
             # The provider refused the request before the agent ran, so there is
             # no answer to correct and no outage to wait out: what has to change
@@ -1232,10 +1244,11 @@ def run_agent_audit(
             # by digest: a pass that drops nothing still restates the omissions
             # it inherited, so digests differ where the evidence does not.
             refused_bytes = len(prompt_bundle.to_bytes())
-            tightened = audit_evidence.tighten_audit_input(
+            tightened = audit_evidence_input.tighten_audit_input(
                 prompt_bundle,
                 max_bytes=int(
-                    refused_bytes * audit_evidence.AUDIT_INPUT_OVERFLOW_SHRINK_RATIO
+                    refused_bytes
+                    * audit_evidence_constants.AUDIT_INPUT_OVERFLOW_SHRINK_RATIO
                 ),
             )
             if len(tightened.to_bytes()) < refused_bytes:
@@ -1247,7 +1260,7 @@ def run_agent_audit(
             # and no candidate offer is consumed: the next launch repeats it
             # verbatim once the provider has had time to recover.
             deliveries_spent += 1
-            if deliveries_spent >= assurance_models.MAX_AUDIT_DELIVERY_ATTEMPTS:
+            if deliveries_spent >= assurance_models_vocab.MAX_AUDIT_DELIVERY_ATTEMPTS:
                 break
             delay = AUDIT_TRANSPORT_RETRY_DELAYS_SECONDS[
                 min(deliveries_spent - 1, len(AUDIT_TRANSPORT_RETRY_DELAYS_SECONDS) - 1)
@@ -1262,7 +1275,7 @@ def run_agent_audit(
         if outcome not in RETRYABLE_ANSWER_OUTCOMES:
             break
         answers_spent += 1
-        if answers_spent >= assurance_models.MAX_AUDIT_ATTEMPTS:
+        if answers_spent >= assurance_models_vocab.MAX_AUDIT_ATTEMPTS:
             break
         if matched:
             correction = None
@@ -1290,7 +1303,7 @@ def run_agent_audit(
 
 
 def _deterministic_only_audit(
-    bundle: audit_evidence.AuditInput, *, run_id: str, generated_at: str
+    bundle: audit_evidence_models.AuditInput, *, run_id: str, generated_at: str
 ) -> AgentAuditOutcome:
     """Grade a run with no independent auditor available.
 
@@ -1332,7 +1345,7 @@ def _publish_evidence_failure(
     """
     path = run_dir / UNAVAILABLE_ARTIFACT_NAME
     try:
-        recorded = assurance_models.canonical_json_bytes(
+        recorded = assurance_models_primitives.canonical_json_bytes(
             {
                 "run_id": run_id,
                 "reason": REASON_EVIDENCE_UNAVAILABLE,
@@ -1340,7 +1353,7 @@ def _publish_evidence_failure(
                 "recorded_at": completed.isoformat(),
             }
         )
-        assurance_models.write_new_bytes(path, recorded, durable=durable)
+        assurance_models_artifacts.write_new_bytes(path, recorded, durable=durable)
         result = assurance_projection.publish_audit(
             assurance_projection.AuditPublication(
                 run_id=run_id,
@@ -1359,7 +1372,7 @@ def _publish_evidence_failure(
             ),
             state_dir=ledger_state_dir,
         )
-    except OSError, assurance_models.AssuranceError:
+    except OSError, assurance_models_primitives.AssuranceError:
         return None
     return result.summary
 
@@ -1415,7 +1428,7 @@ def audit_terminal_run(
     started = clock()
 
     def pending(
-        artifacts: Sequence[assurance_models.EvidenceRef] = (),
+        artifacts: Sequence[assurance_models_findings.EvidenceRef] = (),
     ) -> AssuranceSummary:
         return AssuranceSummary(
             run_id=run_id,
@@ -1428,7 +1441,7 @@ def audit_terminal_run(
 
     try:
         run_dir.mkdir(parents=True, exist_ok=True)
-        bundle = audit_evidence.collect_audit_input(
+        bundle = audit_evidence_input.collect_audit_input(
             run_id=run_id,
             run_dir=run_dir,
             state_dir=state_dir,
@@ -1438,7 +1451,7 @@ def audit_terminal_run(
             workspace_snapshot=workspace_snapshot,
             terminal_pending=True,
         )
-    except (OSError, assurance_models.AssuranceError) as error:
+    except (OSError, assurance_models_primitives.AssuranceError) as error:
         recorded = _publish_evidence_failure(
             run_id=run_id,
             run_dir=run_dir,
@@ -1481,7 +1494,7 @@ def audit_terminal_run(
             input_path, run_dir, bundle.sha256
         )
         audit_artifacts = (input_reference, *staged.references)
-    except OSError, assurance_models.AssuranceError:
+    except OSError, assurance_models_primitives.AssuranceError:
         return pending()
 
     completed = clock()
@@ -1505,7 +1518,7 @@ def audit_terminal_run(
             state_dir=ledger_state_dir,
             promote=staged.promote,
         )
-    except OSError, assurance_models.AssuranceError:
+    except OSError, assurance_models_primitives.AssuranceError:
         # Promotion runs inside the append lock, so a failure after it leaves
         # canonical reports no record names. Releasing them keeps the pending
         # summary honest, since it names only the evidence bundle, and leaves the

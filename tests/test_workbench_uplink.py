@@ -28,7 +28,7 @@ from asl_workbench.operations import (
     OPERATION_DISPATCHED,
     OPERATION_PENDING,
 )
-from asl_workbench.store import WorkbenchStore
+from asl_workbench.store_workbench import WorkbenchStore
 from asl_workbench.transport import (
     REQUEST_DETAIL,
     REQUEST_MUTATE,

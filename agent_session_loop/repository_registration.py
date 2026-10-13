@@ -20,7 +20,7 @@ outcomes, never a third:
   naming the one fact ASL could not observe).
 
 :func:`register_repositories` applies a :class:`RegistrationPlan` to disk in
-one :class:`~.authoring.PlanTransaction`, editing only the regions the
+one :class:`~.authoring_transaction.PlanTransaction`, editing only the regions the
 registry format defines and leaving every other byte — prose, handoffs,
 ``plan-metadata.json`` — verbatim.
 
@@ -50,7 +50,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from . import (
-    authoring,
+    authoring_manifest,
+    authoring_parse,
+    authoring_paths,
+    authoring_render,
+    authoring_source_models,
+    authoring_transaction,
     plans_discovery,
     plans_errors,
     plans_handoff,
@@ -246,7 +251,7 @@ def register_source_plan(text: str, *, cwd: str | Path) -> RegistrationResult:
     result carries the migrated markdown instead of a list of written files.
     """
     bound_root = canonicalize_filesystem_path(cwd)
-    parsed = authoring.parse_plan_document(text)
+    parsed = authoring_parse.parse_plan_document(text)
     if parsed.registry is not None:
         return RegistrationResult(
             status="already-registered",
@@ -436,12 +441,12 @@ def register_repositories(
             staged.append((session.filename, migrated))
             sessions_changed.append(session.id)
 
-    transaction = authoring.PlanTransaction(canonical_dir)
+    transaction = authoring_transaction.PlanTransaction(canonical_dir)
     for relative_path, text in staged:
         transaction.stage(relative_path, text)
     files = transaction.commit()
 
-    readiness = authoring.refresh_readiness_metadata(
+    readiness = authoring_transaction.refresh_readiness_metadata(
         canonical_dir,
         state="draft" if previous_readiness is None else previous_readiness.state,
         now=now,
@@ -488,7 +493,7 @@ def _insert_registry_table(text: str, registry: RepositoryRegistry) -> str:
     return _render_lines(
         _registry_lines(
             lines,
-            authoring.render_repository_registry_table(registry)
+            authoring_manifest.render_repository_registry_table(registry)
             .rstrip("\n")
             .splitlines(),
             index,
@@ -526,7 +531,7 @@ def _registry_lines(lines: list[str], table: list[str], index: int) -> list[str]
 
 
 def _migrate_source_plan(
-    text: str, parsed: authoring.ParsedPlan, plan: RegistrationPlan
+    text: str, parsed: authoring_source_models.ParsedPlan, plan: RegistrationPlan
 ) -> tuple[str, tuple[str, ...]]:
     """Rewrite a source plan's sessions and give it a registry."""
     lines = text.splitlines()
@@ -557,11 +562,11 @@ def _migrate_source_plan(
 
 
 def _source_session_bounds(
-    lines: list[str], parsed: authoring.ParsedPlan
+    lines: list[str], parsed: authoring_source_models.ParsedPlan
 ) -> list[tuple[str, int, int]]:
     """Locate each session as ``(id, heading index, end)`` in the source lines.
 
-    :func:`authoring.parse_plan_document` partitions a document into a leading
+    :func:`authoring_parse.parse_plan_document` partitions a document into a leading
     context region and one heading-plus-body chunk per session, so the chunks
     end at the last line and the first heading sits at the only offset that
     makes that true.
@@ -648,7 +653,9 @@ def _splice_contract(
         return lines
     stop = _contracts._section_end(lines, start, max_level=2, end=end)
     rendered = (
-        authoring.render_completion_contract(contract, repository_registry=registry)
+        authoring_render.render_completion_contract(
+            contract, repository_registry=registry
+        )
         .rstrip("\n")
         .splitlines()
     )
@@ -994,7 +1001,7 @@ def _register_source_plan_from_args(args: Any) -> int:
     if args.inline_stdin:
         source_path = "<stdin>"
         try:
-            text = authoring.extract_inline_plan(sys.stdin.read())
+            text = authoring_paths.extract_inline_plan(sys.stdin.read())
         except ValueError as error:
             return _emit_error(REGISTER_REASON_INPUT_ERROR, str(error))
     else:

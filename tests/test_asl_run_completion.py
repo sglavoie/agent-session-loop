@@ -40,7 +40,7 @@ from agent_session_loop import (
     plans_snapshot,
     run_completion,
     run_control,
-    run_coordination,
+    run_coordination_control_drain,
     run_termination,
 )
 from agent_session_loop.run_errors import RunError
@@ -488,7 +488,7 @@ class StopBeforeReviewTests(CompletionTestCase):
         snapshot = self.snapshot(("complete",))
 
         with mock.patch.object(
-            run_completion.run_coordination,
+            run_completion.run_coordination_control_drain,
             "drain_external_control_queue",
             side_effect=self.drain_that_queues_a_stop,
         ):
@@ -515,7 +515,8 @@ class StopBeforeReviewTests(CompletionTestCase):
 
         with (
             mock.patch.object(
-                run_completion.run_coordination, "drain_external_control_queue"
+                run_completion.run_coordination_control_drain,
+                "drain_external_control_queue",
             ),
             mock.patch.object(
                 run_completion.review_delta,
@@ -555,12 +556,15 @@ class SeamOwnershipTests(unittest.TestCase):
             if isinstance(node, ast.ImportFrom) and node.module is None
             for alias in node.names
         }
-        self.assertIn("run_coordination", imported)
+        self.assertIn("run_coordination_control_drain", imported)
         self.assertIn("run_termination", imported)
         self.assertNotIn("runner", imported)
         # The three names the tests above patch through the module must be the
         # module's own bindings, not copies, or a patch would be a no-op.
-        self.assertIs(run_coordination, run_completion.run_coordination)
+        self.assertIs(
+            run_coordination_control_drain,
+            run_completion.run_coordination_control_drain,
+        )
         self.assertIs(run_termination, run_completion.run_termination)
 
 

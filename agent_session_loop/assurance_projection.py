@@ -78,39 +78,43 @@ from .assurance_ledger import (
     RejectedLedgerRecord,
     follow_merge_chain,
 )
-from .assurance_models import (
-    AUDIT_INPUT_FILENAME,
-    AUDIT_REPORT_FILENAME,
-    ISSUE_ID_PREFIX,
-    MAX_REFERENCES_PER_ITEM,
-    AssuranceError,
-    AssuranceSummary,
-    AuditAttempt,
-    AuditRole,
-    AuditState,
-    Closeout,
-    CloseoutOutcome,
-    Disposition,
-    DispositionKind,
+from .assurance_models_findings import (
     EvidenceRef,
     Finding,
+    normalize_invariant_tokens,
+    normalize_localization,
+    normalize_summary_tokens,
+)
+from .assurance_models_inbox import (
+    Closeout,
+    Disposition,
     ImprovementPlanDraft,
     IssueIdentityBinding,
     IssueKeptDistinct,
     IssueMerge,
     IssueObservation,
-    IssueState,
-    RubricLane,
-    Severity,
+)
+from .assurance_models_primitives import (
+    ISSUE_ID_PREFIX,
+    AssuranceError,
     canonical_json_bytes,
     identity_key_for_issue,
     issue_id_for_identity_key,
     issue_id_number,
-    normalize_invariant_tokens,
-    normalize_localization,
-    normalize_summary_tokens,
     parse_identity_key,
     parse_issue_id,
+)
+from .assurance_models_summary import AssuranceSummary, AuditAttempt, AuditRole
+from .assurance_models_vocab import (
+    AUDIT_INPUT_FILENAME,
+    AUDIT_REPORT_FILENAME,
+    MAX_REFERENCES_PER_ITEM,
+    AuditState,
+    CloseoutOutcome,
+    DispositionKind,
+    IssueState,
+    RubricLane,
+    Severity,
 )
 
 #: The record kind each audit state is stored under. Kind and state are two

@@ -21,9 +21,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from agent_session_loop import assurance_ledger as ledger
-from agent_session_loop import assurance_models as models
+from agent_session_loop import (
+    assurance_models_findings,
+    plans_files,
+    retention,
+    state,
+    state_locks,
+)
 from agent_session_loop import assurance_projection as projection
-from agent_session_loop import plans_files, retention, state, state_locks
 
 NOW = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
 DEAD_PID = 4_242_424
@@ -419,7 +424,7 @@ class AssurancePinningTests(RetentionTestBase):
         self.ledger_path = ledger.ledger_path(self.state_root)
 
     def _publish(self, run_id: str, *, invariant_key: str = "retry.budget") -> None:
-        finding = models.Finding(
+        finding = assurance_models_findings.Finding(
             category="lifecycle",
             component="agent_session_loop/runner.py",
             invariant_key=invariant_key,

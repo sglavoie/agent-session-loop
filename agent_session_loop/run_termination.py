@@ -88,7 +88,10 @@ from . import (
     preflight_auto_repair,
     preflight_runtime_hints,
     run_control,
-    run_coordination,
+    run_coordination_control,
+    run_coordination_control_drain,
+    run_coordination_mailbox_poll,
+    run_coordination_terminal,
     run_persistence,
     run_reporting,
     verification,
@@ -214,7 +217,7 @@ def _terminal_outcome(payload: Mapping[str, Any]) -> str:
 
 def _attach_terminal_assurance(
     payload: dict[str, Any],
-    context: run_coordination.TerminalAuditContext,
+    context: run_coordination_terminal.TerminalAuditContext,
     persistence: run_persistence._RunPersistence,
     abort: harnesses.AbortSignal | None = None,
 ) -> bool:
@@ -224,7 +227,7 @@ def _attach_terminal_assurance(
     to compact this run's payload instead of importing the projection, and the
     runner is the only place that knows.
     """
-    return run_coordination.attach_terminal_assurance(
+    return run_coordination_terminal.attach_terminal_assurance(
         payload,
         context,
         persistence,
@@ -323,7 +326,7 @@ def _terminalize_run(
     write_readiness_state: ReadinessStateWriter,
     progress: run_reporting._ProgressReporter | None = None,
     persistence: run_persistence._RunPersistence | None = None,
-    audit_context: run_coordination.TerminalAuditContext | None = None,
+    audit_context: run_coordination_terminal.TerminalAuditContext | None = None,
     cancel: harnesses.AbortSignal | None = None,
     poll: Callable[[], None] | None = None,
 ) -> int:
@@ -366,7 +369,7 @@ def _terminalize_run(
         # The coordinator owns the one invariant this block existed for: the
         # published finalization phase is closed exactly once, cancelled or
         # not, however the advisory audit inside it ends.
-        run_coordination.TerminalAssuranceCoordinator(
+        run_coordination_terminal.TerminalAssuranceCoordinator(
             payload=payload,
             context=audit_context,
             persistence=resolved_persistence,
@@ -382,7 +385,7 @@ def _terminalize_run(
             state_snapshot=run_persistence._compact_state_payload,
             abort=cancel,
         ).run()
-    run_coordination.record_degraded_assurance(
+    run_coordination_terminal.record_degraded_assurance(
         payload, persistence=resolved_persistence
     )
     commit_settlement._finish_run(
@@ -617,7 +620,7 @@ def _supersede_live_action_signal(
     than the harness's generic ask, and the run stops on them, so the generic
     ask can no longer be answered in this run.
 
-    Nothing else retires it. ``turn_execution.clear_live_action_required``
+    Nothing else retires it. ``turn_execution_signals.clear_live_action_required``
     fires only when another turn starts or the run finishes unpaused, and a
     paused run reaches neither, so the stale signal outlived every pause that
     superseded it and reached the audit as a run still asking for something it
@@ -750,7 +753,7 @@ def _pause_run(
     run_persistence._notify_agent_mux_loop_paused(payload, persistence)
 
 
-def _detach_turn_controls(poll: run_coordination.MailboxPoll) -> None:
+def _detach_turn_controls(poll: run_coordination_mailbox_poll.MailboxPoll) -> None:
     """Take the finished turn's mid-turn inputs away from the poller.
 
     Called from ``after_stop``, which runs once the poll thread is joined and
@@ -775,7 +778,7 @@ def _record_abort_satisfied_by_worker(
     action = listener.consume_abort_turn()
     if action is None:
         return
-    run_coordination.record_run_control_action(
+    run_coordination_control.record_run_control_action(
         event_path=event_path,
         payload=payload,
         control_payload=control_payload,
@@ -803,7 +806,7 @@ def _record_aborted_turn_exit(
     """
     action = listener.consume_abort_turn()
     if action is not None:
-        run_coordination.record_run_control_action(
+        run_coordination_control.record_run_control_action(
             event_path=event_path,
             payload=payload,
             control_payload=control_payload,
@@ -840,10 +843,13 @@ def _honor_abort_turn(
     """
     persistence = run_persistence._run_persistence(persistence)
     action = listener.consume_abort_turn()
-    reason = run_coordination.ABORT_TURN_DEFAULT_REASON
+    reason = run_coordination_control_drain.ABORT_TURN_DEFAULT_REASON
     if action is not None:
-        reason = action.abort_reason or run_coordination.ABORT_TURN_DEFAULT_REASON
-        run_coordination.record_run_control_action(
+        reason = (
+            action.abort_reason
+            or run_coordination_control_drain.ABORT_TURN_DEFAULT_REASON
+        )
+        run_coordination_control.record_run_control_action(
             event_path=event_path,
             payload=payload,
             control_payload=control_payload,
@@ -890,7 +896,7 @@ def _honor_stop_after_current(
     with persistence.lock:
         action = listener.consume_stop_after_current()
         if action is not None:
-            run_coordination.record_run_control_action(
+            run_coordination_control.record_run_control_action(
                 event_path=event_path,
                 payload=payload,
                 control_payload=control_payload,

@@ -16,7 +16,7 @@ a dashboard that is honest and one that invents endings:
   evidence only when the observation that omitted the run claimed to be whole,
   and was recent enough to be describing the present. That is
   :attr:`Freshness.absence_proves_removal`, and
-  :mod:`asl_workbench.store` is the caller that acts on it.
+  :mod:`asl_workbench.store_workbench` is the caller that acts on it.
 
 * **Truncation does not block a reply.** The rows that did arrive are as
   current as any other row. It is the rows that did *not* arrive that are

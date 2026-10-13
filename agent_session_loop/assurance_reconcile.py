@@ -44,21 +44,21 @@ from .assurance_ledger import (
     PendingRecord,
     follow_merge_chain,
 )
-from .assurance_models import (
+from .assurance_models_inbox import IssueIdentityBinding, IssueKeptDistinct, IssueMerge
+from .assurance_models_primitives import (
+    identity_key_for_issue,
+    issue_id_for_identity_key,
+    issue_id_number,
+)
+from .assurance_models_reconcile import (
     DECISION_KEEP_DISTINCT,
     DECISION_MERGE,
     DECISION_REVIEW,
     BindDecision,
-    IssueIdentityBinding,
-    IssueKeptDistinct,
-    IssueMerge,
     KeepDistinctDecision,
     MergeDecision,
     ReconciliationManifest,
     ReviewDecision,
-    identity_key_for_issue,
-    issue_id_for_identity_key,
-    issue_id_number,
 )
 from .assurance_projection import (
     UNKNOWN_ISSUE,

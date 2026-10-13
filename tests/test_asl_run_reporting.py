@@ -46,7 +46,7 @@ from agent_session_loop import (
     run_loop,
     run_reporting,
     runner,
-    turn_execution,
+    turn_execution_protocols,
 )
 from tests import support_asl_run_loop_view as run_loop_view
 from tests.support import assert_no_runner_import
@@ -115,8 +115,8 @@ class RunReportingBoundaryTests(unittest.TestCase):
     def test_the_reporter_satisfies_the_turn_boundary_protocol(self) -> None:
         # Structural, not nominal: the turn boundary reports through this
         # object without either module importing the other.
-        progress: turn_execution.TurnProgress = run_reporting._ProgressReporter(
-            enabled=False
+        progress: turn_execution_protocols.TurnProgress = (
+            run_reporting._ProgressReporter(enabled=False)
         )
         self.assertIsNotNone(progress)
 

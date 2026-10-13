@@ -22,10 +22,10 @@ from agent_session_loop import (
     mailbox_vocabulary,
     plans_readiness,
     qna,
-    run_coordination,
     run_prompts,
     state,
 )
+from agent_session_loop import run_coordination_constants as wait_budgets
 from tests.reply_flow_support import (
     HELPER_THREAD_JOIN_TIMEOUT_SECONDS,
     LOOP_RUN_TIMEOUT_SECONDS,
@@ -57,10 +57,10 @@ class EndToEndReplyResumeTests(rfs.EndToEndReplyResumeCase):
         env = self._base_env("reply-aware")
         env.update(
             {
-                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "3",
-                run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "5",
-                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.02",
-                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.1",
+                wait_budgets.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "3",
+                wait_budgets.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "5",
+                wait_budgets.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.02",
+                wait_budgets.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.1",
             }
         )
         argv = [

@@ -5,7 +5,7 @@ import unittest
 from unittest import mock
 
 from agent_session_loop import (
-    authoring,
+    authoring_transaction,
     events,
     pause_policy,
     plans_content_hash,
@@ -432,7 +432,9 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
     def test_a_withdrawn_cycle_resumes_once_the_plan_is_loop_ready(self) -> None:
         """Clearing the blockers is what the operator was told to do."""
         self._write_plan([self._finding("F1", "runner")])
-        authoring.refresh_readiness_metadata(self.plan_dir, state="loop-ready")
+        authoring_transaction.refresh_readiness_metadata(
+            self.plan_dir, state="loop-ready"
+        )
 
         projected = review_continuation.evaluate_review_continuation(
             plans_snapshot.inspect_plan(self.plan_dir), self._withdrawn_cycle_events()
@@ -445,7 +447,9 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
     def test_a_cycle_that_did_materialize_still_fails_closed(self) -> None:
         """A child set deleted from a real materialization is still missing."""
         self._write_plan([self._finding("F1", "runner")])
-        authoring.refresh_readiness_metadata(self.plan_dir, state="loop-ready")
+        authoring_transaction.refresh_readiness_metadata(
+            self.plan_dir, state="loop-ready"
+        )
         event_path = self._write_review_events(
             {
                 "cycle": 1,

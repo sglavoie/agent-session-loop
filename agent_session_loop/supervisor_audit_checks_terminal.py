@@ -6,7 +6,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from . import events, state, verification
-from . import supervisor_audit_evidence as audit_evidence
+from . import supervisor_audit_evidence_constants as audit_evidence_constants
+from . import supervisor_audit_evidence_helpers as audit_evidence_helpers
+from . import supervisor_audit_evidence_turns as audit_evidence_turns
 from .supervisor_audit_checks_paused_work import (
     _paused_work_settlement_group_ids,
     _settles_paused_work,
@@ -24,7 +26,7 @@ def _check_state_event_agreement(context: _CheckContext) -> _Verdict:
     terminal = [
         record
         for record in context.records
-        if record.get("name") in audit_evidence._TERMINAL_EVENT_NAMES
+        if record.get("name") in audit_evidence_constants._TERMINAL_EVENT_NAMES
     ]
     if "ok" not in status and "paused" not in status and not terminal:
         return _Verdict(
@@ -61,7 +63,7 @@ def _check_state_event_agreement(context: _CheckContext) -> _Verdict:
         )
     if (
         any(
-            audit_evidence._mapping(record.get("payload")).get("ok") is False
+            audit_evidence_helpers._mapping(record.get("payload")).get("ok") is False
             for record in finished_records
         )
         and status.get("ok") is True
@@ -72,7 +74,7 @@ def _check_state_event_agreement(context: _CheckContext) -> _Verdict:
         )
     reason = status.get("pause_reason")
     for record in paused_records:
-        recorded = audit_evidence._mapping(record.get("payload")).get("reason")
+        recorded = audit_evidence_helpers._mapping(record.get("payload")).get("reason")
         if reason and recorded and recorded != reason:
             contradictions.append(
                 f"state names {reason} as the pause reason while the run_paused "
@@ -104,7 +106,7 @@ def _check_terminal_artifacts(context: _CheckContext) -> _Verdict:
     blind: list[str] = []
     references: list[str] = []
     for turn in context.turns:
-        result = audit_evidence._mapping(turn.get("result"))
+        result = audit_evidence_helpers._mapping(turn.get("result"))
         if isinstance(turn.get("directory"), str):
             references.append(turn["directory"])
         if result.get("available") is False:
@@ -123,19 +125,19 @@ def _check_terminal_artifacts(context: _CheckContext) -> _Verdict:
             evidence,
         )
 
-    if audit_evidence._RUN_STARTED_EVENT not in names:
+    if audit_evidence_constants._RUN_STARTED_EVENT not in names:
         (blind if context.events_shed else problems).append(
             "the run recorded no run_started event"
         )
-    elif names[0] != audit_evidence._RUN_STARTED_EVENT:
+    elif names[0] != audit_evidence_constants._RUN_STARTED_EVENT:
         problems.append(
             f"the run's first record is {names[0]} rather than "
-            f"{audit_evidence._RUN_STARTED_EVENT}"
+            f"{audit_evidence_constants._RUN_STARTED_EVENT}"
         )
     terminal_at = [
         index
         for index, name in enumerate(names)
-        if name in audit_evidence._TERMINAL_EVENT_NAMES
+        if name in audit_evidence_constants._TERMINAL_EVENT_NAMES
     ]
     if not terminal_at:
         if not context.terminal_pending:
@@ -187,7 +189,7 @@ def _check_terminal_artifacts(context: _CheckContext) -> _Verdict:
     )
     return _Verdict(
         "pass",
-        f"the run opens on {audit_evidence._RUN_STARTED_EVENT}, "
+        f"the run opens on {audit_evidence_constants._RUN_STARTED_EVENT}, "
         f"{closing}{epilogue}, and every "
         f"turn wrote a readable {state.RESULT_FILE_NAME}",
         evidence,
@@ -207,7 +209,7 @@ def _is_expected_conditional_skip(entry: Any) -> bool:
         return False
     return bool(
         entry.get("reason") == verification.SKIP_REASON_CONDITION_NOT_MET
-        and audit_evidence._sequence(entry.get("on_failure_of"))
+        and audit_evidence_helpers._sequence(entry.get("on_failure_of"))
     )
 
 
@@ -219,12 +221,12 @@ def _verification_covered_the_turn(session_verification: Mapping[str, Any]) -> b
     turn's mutation uncovered no matter how well-formed its skips were.
     """
 
-    gate_count = audit_evidence._mapping(session_verification.get("recipe")).get(
-        "gate_count"
-    )
+    gate_count = audit_evidence_helpers._mapping(
+        session_verification.get("recipe")
+    ).get("gate_count")
     if isinstance(gate_count, int) and gate_count <= 0:
         return False
-    return bool(audit_evidence._sequence(session_verification.get("checks")))
+    return bool(audit_evidence_helpers._sequence(session_verification.get("checks")))
 
 
 def _superseded_turn_names(turns: Sequence[Mapping[str, Any]]) -> frozenset[str]:
@@ -241,6 +243,6 @@ def _superseded_turn_names(turns: Sequence[Mapping[str, Any]]) -> frozenset[str]
         turn["name"]
         for turn in turns
         if isinstance(turn.get("name"), str)
-        and isinstance(turn.get(audit_evidence.TURN_SUPERSEDED_BY_KEY), str)
+        and isinstance(turn.get(audit_evidence_turns.TURN_SUPERSEDED_BY_KEY), str)
     }
-    return frozenset(audit_evidence._supersessions(turns)) | stamped
+    return frozenset(audit_evidence_turns._supersessions(turns)) | stamped

@@ -1,7 +1,7 @@
 """End-to-end ``asl prepare`` orchestration.
 
 :func:`prepare_plan` drives the autonomous pipeline: deterministic authoring
-(:mod:`agent_session_loop.authoring`), validation through the validator
+(:mod:`agent_session_loop.authoring_split`), validation through the validator
 packets and fail-closed ingest, exact factual correction, baseline execution
 (:mod:`agent_session_loop.baseline`), and a final ``--mark-loop-ready``
 preflight through :mod:`agent_session_loop.preflight`.
@@ -31,7 +31,8 @@ from pathlib import Path
 from typing import Any
 
 from . import (
-    authoring,
+    authoring_parse,
+    authoring_source_models,
     contracts,
     harnesses,
     plans_registry,
@@ -202,9 +203,9 @@ def prepare_plan(
                 f"cannot read source plan {source_path}: {error}"
             ) from error
 
-        parsed: authoring.ParsedPlan | None
+        parsed: authoring_source_models.ParsedPlan | None
         try:
-            parsed = authoring.parse_plan_document(text)
+            parsed = authoring_parse.parse_plan_document(text)
             structure_blockers, contracts_by_id = _structure_blockers(parsed)
         except PlanError as error:
             parsed = None

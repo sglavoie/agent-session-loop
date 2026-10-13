@@ -54,8 +54,9 @@ from agent_session_loop import (
     plans_files,
     state,
     state_locks,
-    workbench,
+    workbench_launch,
     workbench_operations,
+    workbench_registry_models,
 )
 from asl_workbench import operations
 from tests.support import (
@@ -955,11 +956,11 @@ class LaunchRouteTests(WorkbenchAPIFixture, unittest.TestCase):
         )
 
     def _sentinel(self, *, pid: int = 4242, reply: bool = False) -> Any:
-        return workbench.LaunchResult(
+        return workbench_launch.LaunchResult(
             pid=pid,
             argv=("python3", "-m", "agent_session_loop", "run"),
             plan_dir=self.canonical,
-            profile_payload=workbench.LaunchProfile().to_payload(),
+            profile_payload=workbench_registry_models.LaunchProfile().to_payload(),
             reply_provided=reply,
             reply_length=5 if reply else None,
             reply_origin="stdin" if reply else None,
@@ -1003,7 +1004,9 @@ class LaunchRouteTests(WorkbenchAPIFixture, unittest.TestCase):
         )
 
     def test_a_launch_is_recorded_and_accounted_for(self) -> None:
-        with mock.patch.object(workbench, "launch_plan", return_value=self._sentinel()):
+        with mock.patch.object(
+            workbench_launch, "launch_plan", return_value=self._sentinel()
+        ):
             status, body = self._post(
                 "/api/launch",
                 {"plan_dir": str(self.canonical), "launch_id": "launch-1"},
@@ -1017,7 +1020,9 @@ class LaunchRouteTests(WorkbenchAPIFixture, unittest.TestCase):
         self.assertIsNotNone(rows[0]["dispatched_at"])
 
     def test_a_launch_without_an_id_is_still_accounted_for(self) -> None:
-        with mock.patch.object(workbench, "launch_plan", return_value=self._sentinel()):
+        with mock.patch.object(
+            workbench_launch, "launch_plan", return_value=self._sentinel()
+        ):
             status, _ = self._post("/api/launch", {"plan_dir": str(self.canonical)})
         self.assertEqual(200, status)
         rows = self._rows()
@@ -1026,7 +1031,7 @@ class LaunchRouteTests(WorkbenchAPIFixture, unittest.TestCase):
 
     def test_a_resent_launch_id_does_not_spawn_twice(self) -> None:
         with mock.patch.object(
-            workbench, "launch_plan", return_value=self._sentinel()
+            workbench_launch, "launch_plan", return_value=self._sentinel()
         ) as patched:
             first_status, first = self._post(
                 "/api/launch",
@@ -1044,13 +1049,17 @@ class LaunchRouteTests(WorkbenchAPIFixture, unittest.TestCase):
         self.assertEqual(1, len(self._rows()))
 
     def test_a_launch_id_reused_for_a_reply_is_refused(self) -> None:
-        with mock.patch.object(workbench, "launch_plan", return_value=self._sentinel()):
+        with mock.patch.object(
+            workbench_launch, "launch_plan", return_value=self._sentinel()
+        ):
             self._post(
                 "/api/launch",
                 {"plan_dir": str(self.canonical), "launch_id": "shared-id"},
             )
         with mock.patch.object(
-            workbench, "resume_plan_with_reply", return_value=self._sentinel(reply=True)
+            workbench_launch,
+            "resume_plan_with_reply",
+            return_value=self._sentinel(reply=True),
         ) as patched:
             status, body = self._post(
                 "/api/reply",
@@ -1066,10 +1075,10 @@ class LaunchRouteTests(WorkbenchAPIFixture, unittest.TestCase):
         patched.assert_not_called()
 
     def test_a_refused_launch_is_closed_out_rather_than_left_open(self) -> None:
-        error = workbench.LaunchError(
-            workbench.LAUNCH_REASON_INVALID_PLAN, "no such plan"
+        error = workbench_launch.LaunchError(
+            workbench_launch.LAUNCH_REASON_INVALID_PLAN, "no such plan"
         )
-        with mock.patch.object(workbench, "launch_plan", side_effect=error):
+        with mock.patch.object(workbench_launch, "launch_plan", side_effect=error):
             status, _ = self._post(
                 "/api/launch",
                 {"plan_dir": str(self.canonical), "launch_id": "launch-1"},
@@ -1090,7 +1099,9 @@ class LaunchRouteTests(WorkbenchAPIFixture, unittest.TestCase):
     def test_the_reply_text_never_reaches_the_journal(self) -> None:
         secret = "the-operator-typed-this"
         with mock.patch.object(
-            workbench, "resume_plan_with_reply", return_value=self._sentinel(reply=True)
+            workbench_launch,
+            "resume_plan_with_reply",
+            return_value=self._sentinel(reply=True),
         ):
             status, _ = self._post(
                 "/api/reply",
@@ -1114,7 +1125,7 @@ class LaunchRouteTests(WorkbenchAPIFixture, unittest.TestCase):
         # operators already know.
         self._hold_the_plan()
         with mock.patch.object(
-            workbench, "launch_plan", return_value=self._sentinel()
+            workbench_launch, "launch_plan", return_value=self._sentinel()
         ) as patched:
             status, body = self._post(
                 "/api/launch",

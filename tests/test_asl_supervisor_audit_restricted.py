@@ -15,16 +15,14 @@ from unittest import mock
 
 from agent_session_loop import (
     assurance_ledger,
-    assurance_models,
+    assurance_models_artifacts,
     harness_claude,
     harness_failures,
     harnesses,
     supervisor_audit,
     supervisor_audit_vocabulary,
 )
-from agent_session_loop.assurance_models import (
-    AuditRole,
-)
+from agent_session_loop.assurance_models_summary import AuditRole
 from tests.support import git_stdout, init_git_repo
 from tests.support_supervisor_audit import RUN_ID
 
@@ -456,7 +454,9 @@ class RestrictedAuditTests(unittest.TestCase):
             workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
             fake = _RecordingHarness(writes=workspace / "app" / "escaped.txt")
             with mock.patch.object(
-                assurance_models, "write_audit_json", side_effect=OSError("disk-full")
+                assurance_models_artifacts,
+                "write_audit_json",
+                side_effect=OSError("disk-full"),
             ):
                 result = self._run(
                     "codex", Path(tmp), fake, workspace, plan_dir, state_dir, run_dir

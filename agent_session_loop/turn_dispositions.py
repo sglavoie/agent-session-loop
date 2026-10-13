@@ -50,10 +50,12 @@ Nothing here imports the runner, and since Session 37 it does not import
 ``run_loop``, which owns ``RunContext``, either: the context enters as the
 structural :class:`RunContext` Protocol below, naming only the members these
 branches reach. The three mailbox wait
-functions enter as callbacks rather than being called on ``run_coordination``
+functions enter as callbacks rather than being called on
+``run_coordination_mailbox_wait``
 directly, for the reason ``MailboxWaitCoordinator`` already states: callers
 patch them to assert a wait was or was not entered. Session 37 repointed those
-patches from the runner's retired aliases to ``run_coordination`` itself, which
+patches from the runner's retired aliases to
+``run_coordination_mailbox_wait`` itself, which
 is where the loop now resolves them; a branch that imported them here instead
 would bind them once and silently ignore the patch.
 
@@ -110,14 +112,19 @@ from . import (
     redirect_continuation,
     redirect_control,
     run_control,
-    run_coordination,
+    run_coordination_mailbox_poll,
+    run_coordination_mailbox_question,
+    run_coordination_mailbox_wait,
+    run_coordination_wait_models,
+    run_coordination_wait_state,
     run_persistence,
     run_prompts,
     run_selection,
     run_termination,
     session_verification,
     state,
-    turn_execution,
+    turn_execution_commit,
+    turn_execution_signals,
     workspaces,
 )
 
@@ -375,7 +382,7 @@ def settle_malformed_plan(
     ctx.record_final_snapshot(
         before if reopened_snapshot is None else reopened_snapshot
     )
-    turn_execution.record_turn_rejected(
+    turn_execution_commit.record_turn_rejected(
         event_path=ctx.event_path,
         payload=ctx.payload,
         persistence=ctx.persistence,
@@ -662,14 +669,14 @@ def _mailbox_pause_resolution_details(
 
 def _enter_mailbox_reply_wait(
     ctx: RunContext,
-    prepared: run_coordination.PreparedMailboxWait,
+    prepared: run_coordination_wait_models.PreparedMailboxWait,
     *,
     plan_dir: Path,
     state_dir_arg: str | None,
-    mailbox_poll: run_coordination.MailboxPoll,
-    wait_for_reply: Callable[..., run_coordination.MailboxWaitResult],
-    finish_lifecycle: Callable[..., run_coordination.MailboxWaitResult],
-) -> run_coordination.MailboxWaitResult:
+    mailbox_poll: run_coordination_mailbox_poll.MailboxPoll,
+    wait_for_reply: Callable[..., run_coordination_wait_models.MailboxWaitResult],
+    finish_lifecycle: Callable[..., run_coordination_wait_models.MailboxWaitResult],
+) -> run_coordination_wait_models.MailboxWaitResult:
     """Block on the question this pause asked, with the idle clock stopped.
 
     The wait that follows is genuine idle time: the runner has no work left for
@@ -679,12 +686,12 @@ def _enter_mailbox_reply_wait(
     """
     ctx.runner_work_finished_at = clock.utc_now()
     ctx.idle_baseline_pinned = True
-    return run_coordination.MailboxWaitCoordinator(
+    return run_coordination_mailbox_wait.MailboxWaitCoordinator(
         plan_dir=plan_dir,
         state_dir_arg=state_dir_arg,
         prepared=prepared,
         run_id=ctx.run_id,
-        store=run_coordination.WaitStateStore(
+        store=run_coordination_wait_state.WaitStateStore(
             event_path=ctx.event_path,
             payload=ctx.payload,
             persistence=ctx.persistence,
@@ -711,13 +718,13 @@ def settle_runner_pause(
     session_details: dict[str, Any],
     paused_status_repair: dict[str, Any] | None,
     mailbox_enabled: bool,
-    mailbox_poll: run_coordination.MailboxPoll,
+    mailbox_poll: run_coordination_mailbox_poll.MailboxPoll,
     plan_state: Path,
     state_path: Path,
     state_dir_arg: str | None,
-    prepare_wait: Callable[..., run_coordination.PreparedMailboxWait],
-    wait_for_reply: Callable[..., run_coordination.MailboxWaitResult],
-    finish_lifecycle: Callable[..., run_coordination.MailboxWaitResult],
+    prepare_wait: Callable[..., run_coordination_wait_models.PreparedMailboxWait],
+    wait_for_reply: Callable[..., run_coordination_wait_models.MailboxWaitResult],
+    finish_lifecycle: Callable[..., run_coordination_wait_models.MailboxWaitResult],
 ) -> MailboxContinuation | None:
     """Honour a worker's own pause, waiting for an answer where one can arrive.
 
@@ -727,7 +734,7 @@ def settle_runner_pause(
     pause the worker could still be answered out of enters the live wait.
     """
     runner_pause = turn_payload.get("runner_pause")
-    pause_reason = turn_execution.runner_pause_reason(str(runner_pause))
+    pause_reason = turn_execution_signals.runner_pause_reason(str(runner_pause))
     ctx.record_final_snapshot(after)
     pause_details: dict[str, Any] = {
         **session_details,
@@ -736,7 +743,7 @@ def settle_runner_pause(
     if paused_status_repair is not None:
         pause_details["handoff_status_repair"] = paused_status_repair
     worker_pause_resolution = (
-        run_coordination.worker_pause_resolution_for_turn(
+        run_coordination_mailbox_question.worker_pause_resolution_for_turn(
             plan_dir=after.plan_dir,
             state_dir_arg=state_dir_arg,
             run_id=ctx.run_id,
@@ -759,7 +766,7 @@ def settle_runner_pause(
             details=pause_details,
         )
         return None
-    if run_coordination.runner_pause_can_wait_for_mailbox_reply(
+    if run_coordination_mailbox_question.runner_pause_can_wait_for_mailbox_reply(
         mailbox_enabled=mailbox_enabled,
         pause_reason=pause_reason,
         result=result,
@@ -775,8 +782,8 @@ def settle_runner_pause(
                 session_id=session_id,
                 turn_index=turn_index,
             )
-        except run_coordination.MailboxWaitUnavailable as error:
-            run_coordination.record_mailbox_reply_wait_preparation_failed(
+        except run_coordination_wait_models.MailboxWaitUnavailable as error:
+            run_coordination_wait_state.record_mailbox_reply_wait_preparation_failed(
                 ctx.event_path,
                 ctx.payload,
                 session_id=session_id,
@@ -973,7 +980,7 @@ def _reconcile_unsettled_completion(
                     "to_status": "pending",
                     "guard": "turn-completion-reconciliation",
                     "reason": reason,
-                    **turn_execution.reopened_snapshot_identity(
+                    **turn_execution_commit.reopened_snapshot_identity(
                         plans_payloads.snapshot_payload(snapshot_after)
                     ),
                 },

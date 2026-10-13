@@ -16,7 +16,8 @@ from agent_session_loop import (
     plans_session_scope,
     state,
     supervisor_audit,
-    supervisor_audit_evidence,
+    supervisor_audit_evidence_input,
+    supervisor_audit_evidence_models,
     verification_transitions,
 )
 from tests.support import init_git_repo
@@ -211,9 +212,9 @@ class RunHistoryFixture:
         history: tuple[Path, Path, Path, Path],
         *,
         workspace_root: Path | None = None,
-    ) -> supervisor_audit_evidence.AuditInput:
+    ) -> supervisor_audit_evidence_models.AuditInput:
         workspace, plan_dir, state_dir, run_dir = history
-        return supervisor_audit_evidence.collect_audit_input(
+        return supervisor_audit_evidence_input.collect_audit_input(
             run_id=RUN_ID,
             run_dir=run_dir,
             state_dir=state_dir,

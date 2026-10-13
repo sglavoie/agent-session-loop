@@ -16,7 +16,7 @@ from agent_session_loop import (
     mailbox_vocabulary,
     mailbox_waits,
     state,
-    turn_execution,
+    turn_execution_executor,
 )
 from tests.asl_control_mailbox_support import MailboxTestsBase
 
@@ -111,7 +111,7 @@ class MailboxTests(MailboxTestsBase):
             initial.active_worker_wait(run_id="run-A", session_id="1", turn_index=2),
         )
         self.assertTrue(
-            turn_execution.worker_input_wait_probe(
+            turn_execution_executor.worker_input_wait_probe(
                 plan_dir=self.plan_dir,
                 state_dir=self.state_dir,
                 run_id="run-A",

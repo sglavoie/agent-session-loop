@@ -15,7 +15,7 @@ from contextlib import redirect_stderr, redirect_stdout, suppress
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import plans_files, state, workbench, workbench_server
+from agent_session_loop import plans_files, state, workbench_registry, workbench_server
 from tests import support_asl_workbench_static as support_static
 from tests.support import (
     _http_request,
@@ -203,7 +203,7 @@ class WorkbenchHardeningTests(support_static.WorkbenchHardeningCase):
             self.assertFalse(thread.is_alive())
         self.assertEqual([], errors)
 
-        registry = workbench.load_registry(self.registry_path)
+        registry = workbench_registry.load_registry(self.registry_path)
         persisted_plan_dirs = {pin.plan_dir for pin in registry.pins}
         for target in plan_dirs:
             self.assertIn(str(target), persisted_plan_dirs)

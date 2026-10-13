@@ -5,7 +5,8 @@ This helper performs the filesystem-safe parts of the session-resplit skill:
 plan inspection, target validation, lock acquisition, archival, child file
 creation, and derived ledger updates. Deterministic rendering, table mutation,
 archive-path, readiness, and atomic multi-file writes are delegated to
-``agent_session_loop.authoring`` so split and resplit share one implementation.
+the ``agent_session_loop.authoring_*`` modules so split and resplit share one
+implementation.
 
 Child completion contracts are never placeholders. Explicit child specs must
 allocate the parent's verification checks by name (``inherit_checks``) or
@@ -39,7 +40,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from agent_session_loop import (  # noqa: E402 - import needs the sys.path insertion above
-    authoring,
+    authoring_manifest,
+    authoring_render,
+    authoring_transaction,
     contracts,
     harnesses,
     plans_errors,
@@ -60,7 +63,7 @@ from agent_session_loop.workspaces import (  # noqa: E402 - needs the sys.path i
 MIN_PARTS = 2
 MAX_PARTS = 20
 HANDOFF_HEADING = "## Handoff"
-ARCHIVE_ROOT_NAME = authoring.ARCHIVE_ROOT_NAME
+ARCHIVE_ROOT_NAME = authoring_transaction.ARCHIVE_ROOT_NAME
 CHILD_SPEC_KEYS = frozenset(
     {"title", "instructions", "done_when", "checks", "inherit_checks"}
 )
@@ -690,7 +693,7 @@ def _allocate_explicit_contract(
                 f"child spec {index} inherits unknown parent check {name!r}",
             )
         check_payloads.append(
-            authoring._check_to_json(
+            authoring_render._check_to_json(
                 parent_check,
                 repository_registry=repository_registry,
                 session_id=child_session_id,
@@ -700,7 +703,7 @@ def _allocate_explicit_contract(
     check_payloads.extend(spec["checks"])
 
     try:
-        return authoring.contract_from_payload(
+        return authoring_render.contract_from_payload(
             child_session_id,
             spec["done_when"],
             {"session": child_session_id.value, "checks": check_payloads},
@@ -941,7 +944,7 @@ def _render_child_session(
     parent_details: ParentDetails,
     skill_prefix: str,
 ) -> str:
-    return authoring.render_session_file(
+    return authoring_render.render_session_file(
         session_id=child.session_id,
         title=child.title,
         instruction_lines=_child_body_lines(
@@ -1004,9 +1007,9 @@ def _append_resplit_notes(
 
 def _manifest_replacements(
     children: list[ChildSpec],
-) -> tuple[authoring.ManifestSession, ...]:
+) -> tuple[authoring_manifest.ManifestSession, ...]:
     return tuple(
-        authoring.ManifestSession(
+        authoring_manifest.ManifestSession(
             session_id=child.session_id, title=child.title, status="pending"
         )
         for child in children
@@ -1021,8 +1024,8 @@ def _updated_manifest_text(
     archive_relative_path: str,
 ) -> tuple[str, bool]:
     text = _read_text(manifest_path)
-    updated = authoring.replace_manifest_sessions_count(text, total_sessions)
-    updated, tables_changed = authoring.replace_session_status_rows(
+    updated = authoring_manifest.replace_manifest_sessions_count(text, total_sessions)
+    updated, tables_changed = authoring_manifest.replace_session_status_rows(
         updated, parent_id, _manifest_replacements(children)
     )
     updated = _append_resplit_notes(updated, parent_id, children, archive_relative_path)
@@ -1035,7 +1038,7 @@ def _updated_context_text(
     children: list[ChildSpec],
 ) -> tuple[str, bool]:
     text = _read_text(context_path)
-    return authoring.replace_session_status_rows(
+    return authoring_manifest.replace_session_status_rows(
         text, parent_id, _manifest_replacements(children)
     )
 
@@ -1124,7 +1127,7 @@ def resplit_session(
             first_previous_session_file,
         )
 
-        archive_dir = authoring.create_archive_dir(
+        archive_dir = authoring_transaction.create_archive_dir(
             locked_snapshot.plan_dir, parent_id, timestamp
         )
         archive_relative_path = archive_dir.relative_to(
@@ -1132,7 +1135,7 @@ def resplit_session(
         ).as_posix()
 
         # Build every staged write before mutating anything on disk.
-        transaction = authoring.PlanTransaction(locked_snapshot.plan_dir)
+        transaction = authoring_transaction.PlanTransaction(locked_snapshot.plan_dir)
         for child in children:
             transaction.stage(
                 child.filename,
@@ -1148,10 +1151,12 @@ def resplit_session(
         reference_updates: list[str] = []
         next_session = _next_session_after(locked_snapshot, parent_id)
         if next_session is not None:
-            next_text, next_changed = authoring.replace_previous_session_reference(
-                _read_text(next_session.path),
-                parent_id,
-                children[-1].session_id,
+            next_text, next_changed = (
+                authoring_manifest.replace_previous_session_reference(
+                    _read_text(next_session.path),
+                    parent_id,
+                    children[-1].session_id,
+                )
             )
             if next_changed:
                 transaction.stage(next_session.session.filename, next_text)
@@ -1190,7 +1195,7 @@ def resplit_session(
             _rollback_archive(archive_moves, archive_dir)
             raise
 
-        readiness = authoring.refresh_readiness_metadata(
+        readiness = authoring_transaction.refresh_readiness_metadata(
             locked_snapshot.plan_dir, state="draft", now=timestamp
         )
 

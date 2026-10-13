@@ -24,8 +24,9 @@ Four rules, and each one exists because of a way a supervised service fails:
   validation and exits, so the installer can ask "can this release read this
   state?" of a *copy*, before the upgrade touches the real one, and can ask the
   outgoing release the same question about the same copy. A schema the previous
-  release cannot read is refused by :func:`asl_workbench.store.migrate` rather
-  than discovered after the rollback path has been closed.
+  release cannot read is refused by
+  :func:`asl_workbench.store_migrations.migrate` rather than discovered after
+  the rollback path has been closed.
 * **SIGTERM is an answer.** Both native managers stop a service by sending it
   and escalate to SIGKILL if nothing happens. The handler shuts the server down
   and the process exits zero, so a stop is a stop rather than a kill.
@@ -81,7 +82,8 @@ from .integrations import PI_SITE, IntegrationSite, service_endpoint, service_se
 from .observation import ObservationPolicy
 from .server import ApplicationServer, install_shutdown_handlers
 from .service import RemoteProvider
-from .store import StoreError, WorkbenchStore
+from .store_types import StoreError
+from .store_workbench import WorkbenchStore
 from .uplink import Uplink
 
 #: The runtime log. Event words only -- ``runtime-started``, ``runtime-stopped``
@@ -165,9 +167,10 @@ def check_state(state: Path, policy: ObservationPolicy) -> None:
     Run by each release against a copy during an upgrade, in both directions,
     which is what makes an incompatible schema a refusal before the switch
     rather than a rollback that cannot read what the new release wrote.
-    Opening the store migrates it; :func:`asl_workbench.store.migrate` refuses
-    a database newer than the code, so the outgoing release fails here exactly
-    when a downgrade would have been unsafe.
+    Opening the store migrates it;
+    :func:`asl_workbench.store_migrations.migrate` refuses a database newer
+    than the code, so the outgoing release fails here exactly when a downgrade
+    would have been unsafe.
     """
     private(state, directory=True)
     database = state / DATABASE_FILE

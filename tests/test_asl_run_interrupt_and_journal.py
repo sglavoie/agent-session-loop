@@ -24,7 +24,7 @@ from agent_session_loop import (
     run_loop,
     state,
     state_locks,
-    turn_execution,
+    turn_execution_constants,
     verification,
 )
 from tests.support import (
@@ -130,7 +130,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
         ):
             exit_code, payload = self._invoke_run_locked()
 
-        self.assertEqual(turn_execution.INTERRUPTED_EXIT, exit_code)
+        self.assertEqual(turn_execution_constants.INTERRUPTED_EXIT, exit_code)
         self.assertTrue(payload["paused"])
         self.assertEqual("interrupted", payload["pause_reason"])
         self.assertIn("verification", payload["pause_message"])
@@ -195,7 +195,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
         ):
             exit_code, payload = self._invoke_run_locked()
 
-        self.assertEqual(turn_execution.INTERRUPTED_EXIT, exit_code)
+        self.assertEqual(turn_execution_constants.INTERRUPTED_EXIT, exit_code)
         self.assertTrue(payload["paused"])
         self.assertEqual("interrupted", payload["pause_reason"])
         self.assertEqual("run interrupted by user", payload["pause_message"])

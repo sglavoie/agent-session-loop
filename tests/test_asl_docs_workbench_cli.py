@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from agent_session_loop import (
-    workbench_recovery,
+    workbench_recovery_models,
     workbench_workspace,
 )
 from tests.asl_docs_support import ASL_GUIDE, read_repo_text
@@ -56,7 +56,7 @@ class WorkbenchCliDocsTests(unittest.TestCase):
             "repositories": [{"alias": "API", "path": "api"}],
             "repository_count": 1,
         }
-        recovery_payload = workbench_recovery.WorkbenchRecovery(
+        recovery_payload = workbench_recovery_models.WorkbenchRecovery(
             plan_dir=Path("/plan"),
             kind="none",
             title="No recovery needed",
@@ -240,7 +240,7 @@ class WorkbenchCliDocsTests(unittest.TestCase):
             "`warning_count`",
         ):
             self.assertIn(field, docs, msg=f"missing compact recovery field: {field}")
-        # Urgency groups vocabulary (mirrors workbench.URGENCY_GROUPS).
+        # Urgency groups vocabulary (mirrors workbench_summary_model.URGENCY_GROUPS).
         for group in (
             "`needs-action`",
             "`in-progress`",
@@ -249,7 +249,7 @@ class WorkbenchCliDocsTests(unittest.TestCase):
         ):
             self.assertIn(group, docs, msg=f"missing urgency group: {group}")
         # Last-activity source vocabulary (mirrors
-        # workbench.LAST_ACTIVITY_SOURCES).
+        # workbench_summary_model.LAST_ACTIVITY_SOURCES).
         for source in (
             "`active-verification`",
             "`active-turn`",
@@ -279,13 +279,13 @@ class WorkbenchCliDocsTests(unittest.TestCase):
             self.assertIn(rank, docs, msg=f"missing urgency rank: {rank}")
         # Exported Python constants are the source of truth — the docs
         # must reference them so downstream callers can grep their way
-        # back to workbench.py.
+        # back to workbench_summary_model.py.
         for constant in (
-            "`workbench.URGENCY_GROUPS`",
-            "`workbench.LAST_ACTIVITY_SOURCES`",
-            "`workbench.URGENCY_RANK_BY_STATE`",
-            "`workbench.URGENCY_GROUP_BY_STATE`",
-            "`workbench.ACTIVITY_LABEL_BY_STATE`",
+            "`workbench_summary_model.URGENCY_GROUPS`",
+            "`workbench_summary_model.LAST_ACTIVITY_SOURCES`",
+            "`workbench_summary_model.URGENCY_RANK_BY_STATE`",
+            "`workbench_summary_model.URGENCY_GROUP_BY_STATE`",
+            "`workbench_summary_model.ACTIVITY_LABEL_BY_STATE`",
         ):
             self.assertIn(constant, docs, msg=f"missing exported constant: {constant}")
 

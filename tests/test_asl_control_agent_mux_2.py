@@ -18,7 +18,7 @@ from agent_session_loop import (
     readiness_gate,
     run_persistence,
     run_termination,
-    turn_execution,
+    turn_execution_protocols,
 )
 from tests.asl_control_agent_mux_support import AgentMuxNotificationIntegrationTestsBase
 from tests.support import (
@@ -66,9 +66,15 @@ class AgentMuxNotificationIntegrationTestsPart2(
                 ) as run,
             ):
                 run_persistence._notify_agent_mux_loop_started(payload, persistence)
-                turn_execution.notify_turn_started(payload, active_turn, persistence)
-                turn_execution.notify_turn_heartbeat(payload, active_turn, persistence)
-                turn_execution.notify_turn_finished(payload, active_turn, persistence)
+                turn_execution_protocols.notify_turn_started(
+                    payload, active_turn, persistence
+                )
+                turn_execution_protocols.notify_turn_heartbeat(
+                    payload, active_turn, persistence
+                )
+                turn_execution_protocols.notify_turn_finished(
+                    payload, active_turn, persistence
+                )
                 run_persistence._notify_agent_mux_loop_paused(payload, persistence)
                 run_persistence._notify_agent_mux_loop_finished(payload, persistence)
 

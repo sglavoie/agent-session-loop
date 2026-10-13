@@ -4,7 +4,7 @@ Two claims carry this boundary, and neither is provable by reading the module.
 
 The first is *reach*: the overseer watches a fleet, so the inventory has to
 enumerate every run in the corpus. The bridge caps its projection at
-``bridge.MAX_ROWS`` because it serializes a queue view onto a wire, and a run
+``bridge_protocol.MAX_ROWS`` because it serializes a queue view onto a wire, and a run
 dropped past that cap is indistinguishable from a run that does not exist.
 ``BeyondTheBridgeLimitTests`` builds a corpus larger than the cap and asserts the
 whole of it comes back.
@@ -41,7 +41,7 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
-    bridge,
+    bridge_protocol,
     events,
     overseer_discovery,
     plans_files,
@@ -165,13 +165,13 @@ class BeyondTheBridgeLimitTests(unittest.TestCase):
 
     def test_every_run_past_the_bridge_row_cap_is_enumerated(self) -> None:
         corpus = _Corpus(self)
-        expected = bridge.MAX_ROWS + 25
+        expected = bridge_protocol.MAX_ROWS + 25
         for index in range(expected):
             corpus.write_run(f"plan-{index:04d}", run_id=f"20260619T130000Z-{index}")
 
         inventory = corpus.inventory()
 
-        self.assertGreater(expected, bridge.MAX_ROWS)
+        self.assertGreater(expected, bridge_protocol.MAX_ROWS)
         self.assertEqual(expected, len(inventory.candidates))
         self.assertEqual(expected, len(inventory.eligible()))
         self.assertTrue(inventory.complete)
@@ -197,7 +197,7 @@ class BeyondTheBridgeLimitTests(unittest.TestCase):
     def test_the_inventory_is_not_built_on_the_bridge_or_the_workbench(self) -> None:
         """Full summaries are the read this boundary exists to avoid.
 
-        `workbench.build_workbench_summary` opens turn records, last-message
+        `workbench_summary.build_workbench_summary` opens turn records, last-message
         files and review artifacts, and `bridge` is the module that bounds them
         for display. Importing either would put both back within reach of a
         boundary that runs before authorization.
@@ -212,7 +212,18 @@ class BeyondTheBridgeLimitTests(unittest.TestCase):
                 if node.module:
                     imported.add(node.module.split(".")[-1])
 
-        self.assertEqual(set(), imported & {"bridge", "workbench", "runner"})
+        self.assertEqual(
+            set(),
+            imported
+            & {
+                "bridge_projection",
+                "bridge_protocol",
+                "bridge_server",
+                "bridge_session",
+                "workbench",
+                "runner",
+            },
+        )
 
 
 class MetadataOnlyAccessTests(unittest.TestCase):

@@ -21,7 +21,8 @@ from agent_session_loop import (
     events,
     harnesses,
     run_control,
-    run_coordination,
+    run_coordination_control,
+    run_coordination_control_drain,
     run_persistence,
     state,
 )
@@ -152,7 +153,7 @@ class ControlCliWaitTests(unittest.TestCase):
     ):
         """Drain the queue from another thread, like a live runner's poll.
 
-        The real ``run_coordination.drain_external_control_queue`` is used so
+        The real ``run_coordination_control_drain`` drain is used so
         the receipt the CLI tails is the one production writes.
         """
         stop = threading.Event()
@@ -164,7 +165,7 @@ class ControlCliWaitTests(unittest.TestCase):
         )
         payload: dict[str, object] = {
             "run_id": "20260724T100000Z-1",
-            "control": run_coordination.initial_control_payload(),
+            "control": run_coordination_control.initial_control_payload(),
             "harness": "codex",
         }
         control_payload = dict(payload["control"])  # type: ignore[arg-type]
@@ -173,20 +174,24 @@ class ControlCliWaitTests(unittest.TestCase):
         def poll() -> None:
             try:
                 while not stop.is_set():
-                    result = run_coordination.drain_external_control_queue(
-                        plan_dir=self.plan_dir,
-                        state_dir_arg=str(self.state_dir),
-                        control_state=rc_state,
-                        seen_ids=seen_ids,
-                        payload=payload,
-                        event_path=self.event_path,
-                        control_payload=control_payload,
-                        context=None,
-                        persistence=run_persistence._RunPersistence(write_state=False),
-                        run_control_lock=threading.Lock(),
-                        wakeup=None,
-                        abort=abort,
-                        mailbox_enabled=False,
+                    result = (
+                        run_coordination_control_drain.drain_external_control_queue(
+                            plan_dir=self.plan_dir,
+                            state_dir_arg=str(self.state_dir),
+                            control_state=rc_state,
+                            seen_ids=seen_ids,
+                            payload=payload,
+                            event_path=self.event_path,
+                            control_payload=control_payload,
+                            context=None,
+                            persistence=run_persistence._RunPersistence(
+                                write_state=False
+                            ),
+                            run_control_lock=threading.Lock(),
+                            wakeup=None,
+                            abort=abort,
+                            mailbox_enabled=False,
+                        )
                     )
                     if result.accepted and after_drain is not None:
                         after_drain()

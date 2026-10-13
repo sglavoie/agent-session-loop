@@ -6,7 +6,8 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from . import events, pause_policy, review_continuation
-from . import supervisor_audit_evidence as audit_evidence
+from . import supervisor_audit_evidence_failures as audit_evidence_failures
+from . import supervisor_audit_evidence_helpers as audit_evidence_helpers
 from .supervisor_audit_checks_failures import _aborted_turns
 from .supervisor_audit_checks_terminal import (
     _is_expected_conditional_skip,
@@ -23,11 +24,13 @@ _DeferralResolution = Literal["resolved", "pending", "unresolved"]
 
 def _recorded_review_cycles(context: _CheckContext) -> tuple[Mapping[str, Any], ...]:
     """Return ordered cycle evidence, preferring the durable state projection."""
-    projected = audit_evidence._sequence(context.section("review").get("review_cycles"))
+    projected = audit_evidence_helpers._sequence(
+        context.section("review").get("review_cycles")
+    )
     if projected:
-        return tuple(audit_evidence._mapping(item) for item in projected)
+        return tuple(audit_evidence_helpers._mapping(item) for item in projected)
     return tuple(
-        audit_evidence._mapping(record.get("payload"))
+        audit_evidence_helpers._mapping(record.get("payload"))
         for record in context.records
         if record.get("name") == events.REVIEW_CYCLE_EVENT
     )
@@ -84,22 +87,25 @@ def _accepted_verification_is_accounted_for(
     Identity and name validation stay a hard ``unresolved``: a malformed
     acceptance is a defect whether or not the run ever finished.
     """
-    acceptance = audit_evidence._deferred_review_acceptance(verification_payload)
+    acceptance = audit_evidence_failures._deferred_review_acceptance(
+        verification_payload
+    )
     if acceptance is None:
         return "unresolved"
     deferred = verification_payload.get("deferred_failures")
     if deferred is not None:
         failures = [
-            audit_evidence._mapping(item) for item in audit_evidence._sequence(deferred)
+            audit_evidence_helpers._mapping(item)
+            for item in audit_evidence_helpers._sequence(deferred)
         ]
         names = [failure.get("name") for failure in failures]
         if names != list(
-            audit_evidence._sequence(acceptance.get("deferred_failure_names"))
+            audit_evidence_helpers._sequence(acceptance.get("deferred_failure_names"))
         ):
             return "unresolved"
         if any(
             not isinstance(name, str)
-            or not name.startswith(audit_evidence._BROAD_REVIEW_CHECK_PREFIX)
+            or not name.startswith(audit_evidence_failures._BROAD_REVIEW_CHECK_PREFIX)
             for name in names
         ):
             return "unresolved"
@@ -120,7 +126,7 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
         if record.get("name") == events.RUN_FINISHED_EVENT
     ]
     claimed = status.get("ok") is True or any(
-        audit_evidence._mapping(record.get("payload")).get("ok") is True
+        audit_evidence_helpers._mapping(record.get("payload")).get("ok") is True
         for record in finished
     )
 
@@ -134,8 +140,8 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
         _aborted_turns(context) if status.get("reason") == "stopped" else set()
     )
     for turn in context.turns:
-        result = audit_evidence._mapping(turn.get("result"))
-        guard = audit_evidence._mapping(result.get("workspace_write_guard"))
+        result = audit_evidence_helpers._mapping(turn.get("result"))
+        guard = audit_evidence_helpers._mapping(result.get("workspace_write_guard"))
         # A retry replaces the attempt, never the breach: a turn that wrote
         # outside its declared scope stays counter-evidence however cleanly the
         # session finished afterwards.
@@ -144,8 +150,10 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
             and result.get("status_result") in {"nonzero-exit", "runner-pause"}
             and turn.get("rejected") is not True
             and not result.get("plan_error")
-            and not audit_evidence._guard_shows_failure(guard)
-            and audit_evidence._mapping(result.get("verification")).get("passed")
+            and not audit_evidence_failures._guard_shows_failure(guard)
+            and audit_evidence_helpers._mapping(result.get("verification")).get(
+                "passed"
+            )
             is not False
         )
         anomalous = (
@@ -154,23 +162,23 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
             and not stopped
         )
         contradicts = anomalous or bool(
-            audit_evidence._sequence(guard.get("violations"))
+            audit_evidence_helpers._sequence(guard.get("violations"))
         )
         if anomalous:
             counter.append(f"{turn.get('name')} recorded an anomalous result")
-        if audit_evidence._sequence(guard.get("violations")):
+        if audit_evidence_helpers._sequence(guard.get("violations")):
             counter.append(f"{turn.get('name')} exceeded its declared write scope")
         if contradicts and isinstance(turn.get("directory"), str):
             references.append(turn["directory"])
-    for session in audit_evidence._sequence(
+    for session in audit_evidence_helpers._sequence(
         context.section("verification").get("sessions")
     ):
-        session_verification = audit_evidence._mapping(
-            audit_evidence._mapping(session).get("verification")
+        session_verification = audit_evidence_helpers._mapping(
+            audit_evidence_helpers._mapping(session).get("verification")
         )
         # The whole entry, not just its failure: a coverage gap in a superseded
         # turn's recipe reappears on the turn that replaced it.
-        if audit_evidence._mapping(session).get("turn") in superseded:
+        if audit_evidence_helpers._mapping(session).get("turn") in superseded:
             continue
         if (
             session_verification.get("passed") is False
@@ -179,34 +187,36 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
             and _accepted_verification_is_accounted_for(
                 context,
                 session_verification,
-                session_id=audit_evidence._mapping(session).get("session_id")
+                session_id=audit_evidence_helpers._mapping(session).get("session_id")
                 or session_verification.get("session"),
             )
             == "unresolved"
         ):
             counter.append(
                 "verification failed for "
-                f"{audit_evidence._mapping(session).get('turn')}"
+                f"{audit_evidence_helpers._mapping(session).get('turn')}"
             )
-        skipped = audit_evidence._sequence(session_verification.get("skipped_checks"))
+        skipped = audit_evidence_helpers._sequence(
+            session_verification.get("skipped_checks")
+        )
         unexplained = [
             entry for entry in skipped if not _is_expected_conditional_skip(entry)
         ]
         if unexplained:
             counter.append(
                 f"{len(unexplained)} verification check(s) were skipped for "
-                f"{audit_evidence._mapping(session).get('turn')} "
+                f"{audit_evidence_helpers._mapping(session).get('turn')} "
                 "without a condition that "
                 "explains the skip"
             )
         elif skipped and not _verification_covered_the_turn(session_verification):
             counter.append(
                 "every verification check for "
-                f"{audit_evidence._mapping(session).get('turn')} was "
+                f"{audit_evidence_helpers._mapping(session).get('turn')} was "
                 "skipped, so nothing gated the changes it made"
             )
     skipped_records = [
-        audit_evidence._mapping(record.get("payload"))
+        audit_evidence_helpers._mapping(record.get("payload"))
         for record in context.records
         if record.get("name") == events.VERIFICATION_CHECK_SKIPPED_EVENT
     ]
@@ -227,7 +237,7 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
         # half of the pair that reads as a coverage gap and drops the half that
         # would refute it (ASI-23).
         executed_turns = {
-            audit_evidence._mapping(record.get("payload")).get("turn_index")
+            audit_evidence_helpers._mapping(record.get("payload")).get("turn_index")
             for record in context.records
             if record.get("name") == events.VERIFICATION_CHECK_FINISHED_EVENT
         }
@@ -248,7 +258,9 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
         counter.append("the state projection records the run as paused")
     if any(record.get("name") == events.RUN_PAUSED_EVENT for record in context.records):
         counter.append("the event log records the run as paused")
-    verdict = audit_evidence._mapping(context.section("review").get("review_verdict"))
+    verdict = audit_evidence_helpers._mapping(
+        context.section("review").get("review_verdict")
+    )
     # The verdict is rewritten per cycle, so this is what the last review
     # *found*, not what it left open. Only the cycle log says whether a later
     # all-clear closed them.
@@ -297,7 +309,7 @@ def _check_retry_resume(context: _CheckContext) -> _Verdict:
     paused = status.get("paused") is True or any(
         record.get("name") == events.RUN_PAUSED_EVENT for record in context.records
     )
-    recorded = audit_evidence._mapping(status.get("pause_policy"))
+    recorded = audit_evidence_helpers._mapping(status.get("pause_policy"))
     if paused and reason and not recorded:
         return _Verdict(
             "unavailable",
@@ -324,7 +336,7 @@ def _check_retry_resume(context: _CheckContext) -> _Verdict:
     for record in context.records:
         if record.get("name") != events.REVIEW_VERDICT_RETRY_EVENT:
             continue
-        payload = audit_evidence._mapping(record.get("payload"))
+        payload = audit_evidence_helpers._mapping(record.get("payload"))
         retries.setdefault(str(payload.get("session")), []).append(payload)
     for session, attempts in sorted(retries.items()):
         budgets = [

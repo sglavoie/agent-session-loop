@@ -35,7 +35,7 @@ READINESS_CHECKED_PREFIX = "**Readiness checked at**:"
 #: Manifest metadata naming the document a plan was split from. Read by the
 #: repository-intent gate to exempt that document — and the directory holding
 #: it — wherever the plan happens to mention it. Interpolated by
-#: :func:`authoring.render_manifest` so writer and reader cannot drift.
+#: :func:`authoring_manifest.render_manifest` so writer and reader cannot drift.
 SPLIT_FROM_PREFIX = "**Split from**:"
 
 

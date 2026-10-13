@@ -4,7 +4,7 @@ Everything else in this package runs *inside* a run. This boundary owns the
 outside of it — the stretch between the CLI handing over a parsed namespace and
 the loop taking the plan's lock, plus the single line that returns its exit
 code. It is the package's public entry: ``cli.py`` reaches it by the string
-``handler_ref="runner:run_from_args"``, and ``workbench.py``,
+``handler_ref="runner:run_from_args"``, and ``workbench_launch.py``,
 ``maintenance.py`` and ``skills/asl/scripts/asl_autopilot.py`` call the runner's
 delegating shim by name, so the name and the signature are a contract, not an
 implementation detail.
@@ -48,7 +48,7 @@ other collaborator
 is read at its true owner: admission at ``run_inputs``, the review-guard
 allowlist at ``review_guard``, the reply at ``run_prompts``, the final emission
 and the error payload at ``run_outcome``, the flag spec at ``run_flags``, the
-run id at ``clock``, the interrupted exit code at ``turn_execution``, and the
+run id at ``clock``, the interrupted exit code at ``turn_execution_constants``, and the
 lock, endpoint and contention checks at ``state``, ``control_signal`` and
 ``run_contention``.
 
@@ -109,7 +109,7 @@ from . import (
     state,
     state_locks,
     supervisor_audit,
-    turn_execution,
+    turn_execution_constants,
     verification,
 )
 from .run_errors import RunError
@@ -665,7 +665,7 @@ def run_from_args(
                 snapshot=initial_snapshot,
             )
             run_outcome._emit_run_payload(args, payload)
-            return turn_execution.INTERRUPTED_EXIT
+            return turn_execution_constants.INTERRUPTED_EXIT
         except (
             config.ConfigError,
             harnesses.HarnessError,

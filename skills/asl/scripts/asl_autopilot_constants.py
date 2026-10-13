@@ -191,8 +191,8 @@ QUOTA_WAIT_SLICE_SECONDS = 30.0
 
 # Escalation classes carried in the `worker_hung` result's `hang.class`. The
 # first two mirror the run's `hang_suspected.reason` values
-# (`agent_session_loop.turn_execution.HANG_REASON_RESULT_RECEIVED` /
-# `agent_session_loop.turn_execution.HANG_REASON_ZERO_CPU`); the ceiling class
+# (`agent_session_loop.turn_execution_constants.HANG_REASON_RESULT_RECEIVED` /
+# `agent_session_loop.turn_execution_constants.HANG_REASON_ZERO_CPU`); the ceiling class
 # marks an idle overrun with no (or a different) runner block.
 HANG_CLASS_RESULT_RECEIVED = "result_received_process_alive"
 HANG_CLASS_ZERO_CPU = "zero_cpu_idle"

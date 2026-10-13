@@ -51,9 +51,10 @@ from agent_session_loop import (
     mailbox_vocabulary,
     plans_files,
     state,
-    workbench,
     workbench_actions,
+    workbench_launch,
     workbench_operations,
+    workbench_registry_models,
 )
 from asl_workbench import actions, operations
 from tests.support import (
@@ -254,7 +255,7 @@ class PortableInterpretationTests(unittest.TestCase):
     def test_the_profile_field_list_matches_the_launcher(self) -> None:
         """The portable half names the profile ASL actually launches under."""
         self.assertEqual(
-            sorted(workbench.LaunchProfile().to_payload()),
+            sorted(workbench_registry_models.LaunchProfile().to_payload()),
             sorted(actions.LAUNCH_PROFILE_FIELDS),
         )
         self.assertIn(
@@ -436,12 +437,12 @@ class _PlanFixture(unittest.TestCase):
         assert record is not None
         return record
 
-    def launch_result(self, *, reply: bool = False) -> workbench.LaunchResult:
-        return workbench.LaunchResult(
+    def launch_result(self, *, reply: bool = False) -> workbench_launch.LaunchResult:
+        return workbench_launch.LaunchResult(
             pid=4242,
             argv=("python3", "-m", "agent_session_loop", "run"),
             plan_dir=self.canonical,
-            profile_payload=workbench.LaunchProfile().to_payload(),
+            profile_payload=workbench_registry_models.LaunchProfile().to_payload(),
             reply_provided=reply,
             reply_length=len(REPLY_TEXT) if reply else None,
             reply_origin="stdin" if reply else None,
@@ -519,7 +520,7 @@ class SharedActionTests(_PlanFixture):
 
     def test_a_launch_is_finished_by_the_process_it_promised(self) -> None:
         with mock.patch.object(
-            workbench, "launch_plan", return_value=self.launch_result()
+            workbench_launch, "launch_plan", return_value=self.launch_result()
         ) as patched:
             outcome = workbench_actions.launch_run(
                 self.canonical, operation_id="op-launch", state_dir=self.state_dir
@@ -532,7 +533,7 @@ class SharedActionTests(_PlanFixture):
         """Accepted, not consumed: a ``Popen`` is not a reader."""
         self.make_paused()
         with mock.patch.object(
-            workbench,
+            workbench_launch,
             "resume_plan_with_reply",
             return_value=self.launch_result(reply=True),
         ):
@@ -625,7 +626,7 @@ class SharedActionTests(_PlanFixture):
     def test_a_resent_id_replays_instead_of_spawning_again(self) -> None:
         self.make_paused()
         with mock.patch.object(
-            workbench,
+            workbench_launch,
             "resume_plan_with_reply",
             return_value=self.launch_result(reply=True),
         ) as patched:
@@ -655,7 +656,7 @@ class SharedActionTests(_PlanFixture):
         """
         self.make_paused()
         with (
-            mock.patch.object(workbench, "resume_plan_with_reply") as patched,
+            mock.patch.object(workbench_launch, "resume_plan_with_reply") as patched,
             self.assertRaises(intervention.InterventionError) as caught,
         ):
             workbench_actions.resume_with_reply(
@@ -702,7 +703,7 @@ class SharedActionTests(_PlanFixture):
         open forever.
         """
         with (
-            mock.patch.object(workbench, "launch_plan") as patched,
+            mock.patch.object(workbench_launch, "launch_plan") as patched,
             self.assertRaises(workbench_actions.ActionRefused) as caught,
         ):
             workbench_actions.launch_run(
@@ -725,7 +726,7 @@ class SharedActionTests(_PlanFixture):
         # And the plan is free: a new submission is admitted rather than
         # refused by the withdrawn one.
         with mock.patch.object(
-            workbench, "launch_plan", return_value=self.launch_result()
+            workbench_launch, "launch_plan", return_value=self.launch_result()
         ):
             again = workbench_actions.launch_run(
                 self.canonical, operation_id="op-launch-2", state_dir=self.state_dir
@@ -733,12 +734,12 @@ class SharedActionTests(_PlanFixture):
         self.assertEqual(operations.OPERATION_CONSUMED, again.status)
 
     def test_a_launch_refused_before_the_spawn_is_closed_as_rejected(self) -> None:
-        error = workbench.LaunchError(
-            workbench.LAUNCH_REASON_INVALID_PROFILE, "no such harness"
+        error = workbench_launch.LaunchError(
+            workbench_launch.LAUNCH_REASON_INVALID_PROFILE, "no such harness"
         )
         with (
-            mock.patch.object(workbench, "launch_plan", side_effect=error),
-            self.assertRaises(workbench.LaunchError),
+            mock.patch.object(workbench_launch, "launch_plan", side_effect=error),
+            self.assertRaises(workbench_launch.LaunchError),
         ):
             workbench_actions.launch_run(
                 self.canonical,
@@ -751,15 +752,17 @@ class SharedActionTests(_PlanFixture):
 
     def test_a_child_killed_after_the_spawn_is_left_uncertain(self) -> None:
         """The one failure that must not be recorded as "did not run"."""
-        error = workbench.LaunchError(
-            workbench.LAUNCH_REASON_PROCESS_FAILED,
+        error = workbench_launch.LaunchError(
+            workbench_launch.LAUNCH_REASON_PROCESS_FAILED,
             "failed to stream reply text to child stdin",
             spawned=True,
         )
         self.make_paused()
         with (
-            mock.patch.object(workbench, "resume_plan_with_reply", side_effect=error),
-            self.assertRaises(workbench.LaunchError),
+            mock.patch.object(
+                workbench_launch, "resume_plan_with_reply", side_effect=error
+            ),
+            self.assertRaises(workbench_launch.LaunchError),
         ):
             workbench_actions.resume_with_reply(
                 self.canonical,
@@ -806,7 +809,7 @@ class LaunchIsolationTests(_PlanFixture):
             spawned.append(process)
             return process
 
-        workbench.launch_plan(
+        workbench_launch.launch_plan(
             self.canonical, state_dir=self.state_dir, popen_factory=factory
         )
         self.assertEqual(1, len(spawned))
@@ -821,7 +824,7 @@ class LaunchIsolationTests(_PlanFixture):
             spawned.append(process)
             return process
 
-        workbench.resume_plan_with_reply(
+        workbench_launch.resume_plan_with_reply(
             self.canonical,
             reply_text=REPLY_TEXT,
             state_dir=self.state_dir,
@@ -853,12 +856,12 @@ class SurfaceParityTests(WorkbenchAPIFixture, unittest.TestCase):
         )
         return status, payload
 
-    def _result(self) -> workbench.LaunchResult:
-        return workbench.LaunchResult(
+    def _result(self) -> workbench_launch.LaunchResult:
+        return workbench_launch.LaunchResult(
             pid=os.getpid(),
             argv=("python3", "-m", "agent_session_loop", "run"),
             plan_dir=self.canonical,
-            profile_payload=workbench.LaunchProfile().to_payload(),
+            profile_payload=workbench_registry_models.LaunchProfile().to_payload(),
             reply_provided=False,
             reply_length=None,
             reply_origin=None,
@@ -876,7 +879,7 @@ class SurfaceParityTests(WorkbenchAPIFixture, unittest.TestCase):
         the same file.
         """
         with mock.patch.object(
-            workbench, "launch_plan", return_value=self._result()
+            workbench_launch, "launch_plan", return_value=self._result()
         ) as patched:
             first = workbench_actions.launch_run(
                 self.canonical, operation_id="shared-1", state_dir=self.state_dir
@@ -895,7 +898,9 @@ class SurfaceParityTests(WorkbenchAPIFixture, unittest.TestCase):
         self.assertEqual("shared-1", body["operation"]["operation_id"])
 
     def test_a_route_launch_records_the_same_row_the_action_would(self) -> None:
-        with mock.patch.object(workbench, "launch_plan", return_value=self._result()):
+        with mock.patch.object(
+            workbench_launch, "launch_plan", return_value=self._result()
+        ):
             status, body = self._post(
                 "/api/launch",
                 {"plan_dir": str(self.canonical), "launch_id": "route-1"},
@@ -928,7 +933,7 @@ class SurfaceParityTests(WorkbenchAPIFixture, unittest.TestCase):
             pid=os.getpid(),
             hostname=socket.gethostname(),
         )
-        with mock.patch.object(workbench, "launch_plan") as patched:
+        with mock.patch.object(workbench_launch, "launch_plan") as patched:
             status, body = self._post(
                 "/api/launch",
                 {"plan_dir": str(self.canonical), "launch_id": "route-1"},

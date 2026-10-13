@@ -34,7 +34,7 @@ empty mappings, and roughly two dozen scalars — `active_turn`,
 `active_verification`, `action_required`, `pause_reason`, `review_verdict`,
 `review_resume`, `review_reopen`, `readiness_gate`, `run_finished_at`,
 `duration_seconds` — to ``None`` rather than leaving them out. A writer may
-therefore say ``payload["turns"].append(...)`` (``turn_execution``),
+therefore say ``payload["turns"].append(...)`` (``turn_execution_commit``),
 ``payload["commits"].append(...)`` (``commit_settlement``) or
 ``payload["completed_sessions"].append(...)`` without a presence check, and a
 reader may say ``if payload["turns"]:`` without a ``.get``. The four keys that
@@ -69,8 +69,8 @@ run id, the commit mode, the mailbox activation and the verification context all
 enter as parameters, and every collaborator is read at its true owner: the flag
 readers at ``run_inputs``/``run_selection``/``readiness_gate``/``review_guard``,
 the clock at ``clock``, the snapshot and session-kind values at ``plans_payloads``, the
-turn paths and observed-model block at ``turn_execution``, the seeded control
-block at ``run_coordination``, and the review-verdict repair references at
+turn paths and observed-model block at ``turn_execution_artifacts``, the seeded control
+block at ``run_coordination_control``, and the review-verdict repair references at
 ``review_transitions``.
 
 Invariants that survive the move:
@@ -113,14 +113,14 @@ from . import (
     review_session_contract,
     review_transitions,
     run_commit,
-    run_coordination,
+    run_coordination_control,
     run_inputs,
     run_prompts,
     run_selection,
     state,
     supervisor_audit,
     task_packet,
-    turn_execution,
+    turn_execution_artifacts,
     verification,
 )
 from .run_errors import RunError
@@ -272,7 +272,7 @@ def _initial_payload(
         harness=args.harness,
         spark=spark,
         **model_effort,
-        **turn_execution.observed_model_payload(None),
+        **turn_execution_artifacts.observed_model_payload(None),
         model_projection=[],
         state_dir=str(state_dir),
         run_dir=str(run_dir),
@@ -286,7 +286,7 @@ def _initial_payload(
         commits=[],
         commit_groups=[],
         turns=[],
-        control=run_coordination.initial_control_payload(),
+        control=run_coordination_control.initial_control_payload(),
         initial_snapshot=plans_payloads.snapshot_payload(snapshot),
         final_snapshot=plans_payloads.snapshot_payload(snapshot),
         allow_not_loop_ready=readiness_gate._allow_not_loop_ready(args),
@@ -380,7 +380,9 @@ def _dry_run_payload(
         run_suppression=None,
     )
     spark["active_route"] = spark_route
-    paths = turn_execution.turn_paths(run_dir, turn_index=1, session_id=next_pending.id)
+    paths = turn_execution_artifacts.turn_paths(
+        run_dir, turn_index=1, session_id=next_pending.id
+    )
     workspace = context.workspace
     session_scope = (
         run_prompts._session_scope(next_pending, workspace)

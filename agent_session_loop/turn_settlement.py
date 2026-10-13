@@ -107,14 +107,15 @@ from . import (
     review_cycle,
     run_commit,
     run_control,
-    run_coordination,
+    run_coordination_control_drain,
     run_inputs,
     run_persistence,
     run_reporting,
     run_selection,
     session_verification,
     state,
-    turn_execution,
+    turn_execution_commit,
+    turn_execution_executor,
     verification,
 )
 from .run_errors import RunError
@@ -274,7 +275,7 @@ def settle_turn(
     commit_mode: str | None,
     max_review_fix_cycles: int,
     review_requested: bool,
-    turn_executor: turn_execution.TurnExecutor,
+    turn_executor: turn_execution_executor.TurnExecutor,
     live_turn_payload: dict[str, Any],
     run_controls: run_control.RunControlListener,
     run_control_lock: AbstractContextManager[Any],
@@ -321,7 +322,7 @@ def settle_turn(
             ctx.payload["expected_status_changes"] = list(expected_change)
             ctx.payload["observed_status_changes"] = []
             ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(after)
-        turn_execution.record_turn_rejected(
+        turn_execution_commit.record_turn_rejected(
             event_path=ctx.event_path,
             payload=ctx.payload,
             persistence=ctx.persistence,
@@ -350,7 +351,7 @@ def settle_turn(
             ctx.payload["expected_status_changes"] = list(expected_change)
             ctx.payload["observed_status_changes"] = list(status_changes)
             ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(after)
-        turn_execution.record_turn_rejected(
+        turn_execution_commit.record_turn_rejected(
             event_path=ctx.event_path,
             payload=ctx.payload,
             persistence=ctx.persistence,
@@ -379,7 +380,7 @@ def settle_turn(
             ctx.payload["expected_status_changes"] = list(expected_change)
             ctx.payload["observed_status_changes"] = list(status_changes)
             ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(after)
-        turn_execution.record_turn_rejected(
+        turn_execution_commit.record_turn_rejected(
             event_path=ctx.event_path,
             payload=ctx.payload,
             persistence=ctx.persistence,
@@ -466,7 +467,7 @@ def settle_turn(
         # read below is non-consuming, like every other checkpoint —
         # only `run_termination._honor_stop_after_current` consumes,
         # at the moment the loop actually stops.
-        run_coordination.drain_external_control_queue(
+        run_coordination_control_drain.drain_external_control_queue(
             plan_dir=before.plan_dir,
             state_dir_arg=args.state_dir,
             control_state=run_controls.state,
@@ -537,7 +538,7 @@ def settle_turn(
         ledger_updates = plans_status_tables.sync_derived_status_ledgers(after)
     except plans_errors.PlanError as error:
         ctx.record_final_snapshot(after)
-        turn_execution.record_turn_rejected(
+        turn_execution_commit.record_turn_rejected(
             event_path=ctx.event_path,
             payload=ctx.payload,
             persistence=ctx.persistence,
@@ -561,7 +562,7 @@ def settle_turn(
             after = ctx.plan_cache.get_fresh(before.plan_dir)
         except plans_errors.PlanError as error:
             ctx.record_final_snapshot(after)
-            turn_execution.record_turn_rejected(
+            turn_execution_commit.record_turn_rejected(
                 event_path=ctx.event_path,
                 payload=ctx.payload,
                 persistence=ctx.persistence,
@@ -684,9 +685,9 @@ def settle_turn(
             live_turn=live_turn_payload,
             accepted=after,
         )
-    except turn_execution.TurnCommitRejected as rejection:
+    except turn_execution_commit.TurnCommitRejected as rejection:
         ctx.record_final_snapshot(after)
-        turn_execution.record_turn_rejected(
+        turn_execution_commit.record_turn_rejected(
             event_path=ctx.event_path,
             payload=ctx.payload,
             persistence=ctx.persistence,

@@ -78,7 +78,7 @@ from . import (
     plans_payloads,
     run_persistence,
     run_reporting,
-    turn_execution,
+    turn_execution_constants,
 )
 
 #: How often a running `Verify` recipe stamps liveness onto ``state.json`` and
@@ -598,7 +598,9 @@ class _LiveFinalization:
         cancellable: bool,
         poll: Callable[[], None] | None = None,
         heartbeat_interval: float = FINALIZATION_HEARTBEAT_INTERVAL_SECONDS,
-        poll_interval: float = turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+        poll_interval: float = (
+            turn_execution_constants.LIVE_CONTROL_POLL_INTERVAL_SECONDS
+        ),
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._event_path = event_path

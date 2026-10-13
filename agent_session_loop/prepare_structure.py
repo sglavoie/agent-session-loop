@@ -6,8 +6,15 @@ import contextlib
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import authoring, contracts
-from .authoring import PlanTransaction
+from . import (
+    authoring_manifest,
+    authoring_paths,
+    authoring_render,
+    authoring_source_models,
+    authoring_transaction,
+    contracts,
+)
+from .authoring_transaction import PlanTransaction
 from .contracts import COMPLETION_CONTRACT_HEADING
 from .plans_errors import PlanError
 from .plans_models import ReadinessMetadata
@@ -26,7 +33,7 @@ def _strip_contract_lines(lines: list[str]) -> list[str]:
 
 
 def _structure_blockers(
-    parsed: authoring.ParsedPlan,
+    parsed: authoring_source_models.ParsedPlan,
 ) -> tuple[list[PrepareBlocker], dict[str, contracts.CompletionContract]]:
     """Gate the source plan: >= 2 sessions, each with a parseable contract."""
     blockers: list[PrepareBlocker] = []
@@ -74,29 +81,33 @@ def _structure_blockers(
 def _author_plan_directory(
     source_path: str,
     text: str,
-    parsed: authoring.ParsedPlan,
+    parsed: authoring_source_models.ParsedPlan,
     contracts_by_id: dict[str, contracts.CompletionContract],
     *,
     base_dir: str | Path | None,
     force_new: bool = False,
 ) -> Path:
     """Author the split plan directory deterministically, in one transaction."""
-    resolver = authoring.resolve_plan_output(source_path, base_dir, force_new=force_new)
+    resolver = authoring_paths.resolve_plan_output(
+        source_path, base_dir, force_new=force_new
+    )
     output_dir = Path(str(resolver["output_dir"]))
 
     transaction = PlanTransaction(output_dir)
     transaction.stage(
         "context.md",
-        authoring.render_context(parsed.context_lines, str(resolver["source_path"])),
+        authoring_render.render_context(
+            parsed.context_lines, str(resolver["source_path"])
+        ),
     )
-    transaction.stage("progress.md", authoring.render_progress_skeleton())
+    transaction.stage("progress.md", authoring_render.render_progress_skeleton())
 
-    manifest_sessions: list[authoring.ManifestSession] = []
+    manifest_sessions: list[authoring_manifest.ManifestSession] = []
     for index, session in enumerate(parsed.sessions):
         contract = contracts_by_id[session.session_id.value]
         transaction.stage(
             session.session_id.filename,
-            authoring.render_session_file(
+            authoring_render.render_session_file(
                 session_id=session.session_id,
                 title=session.title,
                 instruction_lines=_strip_contract_lines(list(session.lines)),
@@ -110,7 +121,7 @@ def _author_plan_directory(
             ),
         )
         manifest_sessions.append(
-            authoring.ManifestSession(
+            authoring_manifest.ManifestSession(
                 session_id=session.session_id,
                 title=session.title or f"Session {session.session_id.value}",
             )
@@ -118,9 +129,9 @@ def _author_plan_directory(
 
     transaction.stage(
         "manifest.md",
-        authoring.render_manifest(
-            authoring.ManifestSpec(
-                plan_title=authoring.title_from_plan(text),
+        authoring_manifest.render_manifest(
+            authoring_manifest.ManifestSpec(
+                plan_title=authoring_paths.title_from_plan(text),
                 source_path=str(resolver["source_path"]),
                 output_dir=str(output_dir),
                 plan_id=str(resolver["plan_id"]),
@@ -138,11 +149,11 @@ def _author_plan_directory(
         ),
     )
     transaction.commit()
-    authoring.refresh_readiness_metadata(output_dir, state="draft")
+    authoring_transaction.refresh_readiness_metadata(output_dir, state="draft")
     return output_dir
 
 
 def _refresh_draft_readiness(plan_dir: Path) -> None:
     """Best-effort readiness resync so a preserved directory stays consistent."""
     with contextlib.suppress(PlanError):
-        authoring.refresh_readiness_metadata(plan_dir, state="draft")
+        authoring_transaction.refresh_readiness_metadata(plan_dir, state="draft")

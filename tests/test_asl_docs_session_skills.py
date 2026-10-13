@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent_session_loop import authoring, preflight_models
+from agent_session_loop import authoring_source_models, preflight_models
 from tests.asl_docs_support import read_asl_reference
 from tests.support import (
     REPO_ROOT,
@@ -37,7 +37,7 @@ class SessionSkillDocsTests(unittest.TestCase):
         # The full source-heading grammar restatement is gone; the parser is
         # authoritative and malformed headings surface as PlanError verbatim.
         self.assertIn(
-            "agent_session_loop.authoring.parse_plan_document",
+            "agent_session_loop.authoring_parse.parse_plan_document",
             text,
         )
         self.assertIn("without asking for normalization approval", text)
@@ -98,7 +98,7 @@ class SessionSkillDocsTests(unittest.TestCase):
 
         categories = [
             value
-            for name, value in vars(authoring).items()
+            for name, value in vars(authoring_source_models).items()
             if name.startswith("LINT_") and isinstance(value, str)
         ]
         self.assertGreaterEqual(len(categories), 12)

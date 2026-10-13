@@ -275,4 +275,4 @@ def _add_progress_commands(
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    plans_parser.set_defaults(handler_ref="workbench:plans_from_args")
+    plans_parser.set_defaults(handler_ref="workbench_cli:plans_from_args")

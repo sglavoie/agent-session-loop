@@ -12,7 +12,7 @@ from . import (
     plans_models,
     plans_session_scope,
     readiness_gate,
-    run_coordination,
+    run_coordination_control,
     run_prompts,
     run_termination,
 )
@@ -98,7 +98,7 @@ def _terminalize(
 
 def _expire_run_guards(ctx: RunContext) -> None:
     """Disable this run's command gate on every exit path."""
-    run_coordination.expire_run_guards(
+    run_coordination_control.expire_run_guards(
         controller=ctx.guard_controller,
         event_path=ctx.event_path,
         payload=ctx.payload,

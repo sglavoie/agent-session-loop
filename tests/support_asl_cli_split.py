@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from unittest import mock
 
 from agent_session_loop import (
-    authoring,
+    authoring_split_cli,
 )
 
 if TYPE_CHECKING:
@@ -88,9 +88,9 @@ class SplitCliHelpers(_Base):
         with redirect_stdout(stdout), redirect_stderr(stderr):
             if stdin is not None:
                 with mock.patch("sys.stdin", io.StringIO(stdin)):
-                    code = authoring.split_from_args(args)
+                    code = authoring_split_cli.split_from_args(args)
             else:
-                code = authoring.split_from_args(args)
+                code = authoring_split_cli.split_from_args(args)
         return code, stdout.getvalue(), stderr.getvalue()
 
     # -- `asl split --check` -------------------------------------------------

@@ -10,13 +10,14 @@ from . import (
     handoff_correction,
     handoff_guards,
     redirect_continuation,
-    run_coordination,
+    run_coordination_control_drain,
+    run_coordination_mailbox_wait,
     run_inputs,
     run_termination,
     session_verification,
     state,
     turn_dispositions,
-    turn_execution,
+    turn_execution_commit,
     turn_settlement,
 )
 from .run_loop_commit_settlement import _soft_fail_commit
@@ -193,7 +194,7 @@ def _settle_turn_outcome(frame: RunFrame) -> RunResult | LoopSignal | None:
     if frame.invalid_pause is not None:
         frame.reason, frame.message, frame.details = frame.invalid_pause
         frame.ctx.record_final_snapshot(frame.after)
-        turn_execution.record_turn_rejected(
+        turn_execution_commit.record_turn_rejected(
             event_path=frame.ctx.event_path,
             payload=frame.ctx.payload,
             persistence=frame.ctx.persistence,
@@ -255,9 +256,9 @@ def _settle_turn_outcome(frame: RunFrame) -> RunResult | LoopSignal | None:
             # Resolved here rather than inside the boundary so this
             # module keeps owning all three names: callers patch them
             # on the runner to assert a wait was or was not entered.
-            prepare_wait=run_coordination.prepare_mailbox_reply_wait,
-            wait_for_reply=run_coordination.wait_for_mailbox_reply,
-            finish_lifecycle=run_coordination.finish_mailbox_reply_wait_lifecycle,
+            prepare_wait=run_coordination_mailbox_wait.prepare_mailbox_reply_wait,
+            wait_for_reply=run_coordination_mailbox_wait.wait_for_mailbox_reply,
+            finish_lifecycle=run_coordination_mailbox_wait.finish_mailbox_reply_wait_lifecycle,
         )
         if frame.continuation is not None:
             frame.snapshot = frame.continuation.snapshot
@@ -324,7 +325,7 @@ def _settle_turn_outcome(frame: RunFrame) -> RunResult | LoopSignal | None:
     if settlement.action == turn_settlement.ACTION_RETRY:
         return LoopSignal.CONTINUE
 
-    run_coordination.drain_external_control_queue(
+    run_coordination_control_drain.drain_external_control_queue(
         plan_dir=frame.snapshot.plan_dir,
         state_dir_arg=frame.args.state_dir,
         control_state=frame.ctx.run_controls.state,

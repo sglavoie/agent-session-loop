@@ -5,7 +5,7 @@ plan files, runner state, lock state, commit artifacts, verification
 payloads, and preflight repair hints on every refresh; no harness/model
 is called to summarize failures, and no recovery state is persisted.
 
-`workbench_recovery.RECOVERY_KINDS` is the source-of-truth vocabulary:
+`workbench_recovery_models.RECOVERY_KINDS` is the source-of-truth vocabulary:
 `none`, `review-continuation`, `reply-needed`, `not-loop-ready`, `verify-failed`,
 `no-contract`, `malformed-contract`, `stale-lock`, `stale-state`,
 `commit-preflight`, `commit-failed`, `conversation-recovery`, and

@@ -25,8 +25,11 @@ from agent_session_loop import (
     review_repair,
     state,
     state_status,
-    workbench,
-    workbench_recovery,
+    workbench_recovery_build,
+    workbench_registry_models,
+    workbench_summary,
+    workbench_summary_helpers,
+    workbench_summary_model,
 )
 from tests.support import (
     _WORKBENCH_DEAD_PID,
@@ -67,7 +70,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             legacy["workspace_inventory_excludes"] = ["Library/Protected.dv"]
             metadata_path.write_text(json.dumps(legacy), encoding="utf-8")
 
-            payload = workbench.build_workbench_summary(
+            payload = workbench_summary.build_workbench_summary(
                 _discovered(plan_dir), state_dir=tmp_path / "state"
             ).to_payload()
 
@@ -101,7 +104,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 },
             )
 
-            payload = workbench.build_workbench_summary(
+            payload = workbench_summary.build_workbench_summary(
                 _discovered(plan_dir), state_dir=tmp_path / "state"
             ).to_payload()
 
@@ -114,7 +117,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             missing = tmp_path / "ghost"
             discovered = _discovered(missing, exists=False)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=tmp_path / "state"
             )
 
@@ -132,7 +135,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             (plan_dir / "context.md").write_text("# C\n", encoding="utf-8")
             discovered = _discovered(plans_files.canonicalize_path(plan_dir))
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=tmp_path / "state"
             )
 
@@ -149,7 +152,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             plan_dir = _make_workbench_plan(tmp_path)
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=tmp_path / "state"
             )
 
@@ -169,7 +172,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             canonical = plans_files.canonicalize_path(plan_dir)
             discovered = _discovered(canonical)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=tmp_path / "state"
             )
 
@@ -209,7 +212,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 if path.is_file()
             }
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 _discovered(plan_dir), state_dir=state_root
             )
             status_payload = state_status.status_payload(
@@ -248,10 +251,10 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
             state_root = tmp_path / "state"
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 _discovered(plan_dir), state_dir=state_root
             )
-            recovery = workbench_recovery.build_workbench_recovery(
+            recovery = workbench_recovery_build.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -291,10 +294,10 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 },
             )
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 _discovered(plan_dir), state_dir=state_root
             )
-            recovery = workbench_recovery.build_workbench_recovery(
+            recovery = workbench_recovery_build.build_workbench_recovery(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -335,7 +338,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 },
             )
 
-            blocked = workbench.build_workbench_summary(
+            blocked = workbench_summary.build_workbench_summary(
                 _discovered(plan_dir), state_dir=state_root
             )
             self.assertEqual("complete", blocked.primary_state)
@@ -347,7 +350,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 json.dumps({"version": 2, "outcome": "findings", "findings": findings}),
                 encoding="utf-8",
             )
-            ready = workbench.build_workbench_summary(
+            ready = workbench_summary.build_workbench_summary(
                 _discovered(plan_dir), state_dir=state_root
             )
             self.assertEqual("recent", ready.primary_state)
@@ -400,10 +403,10 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
-            recovery = workbench_recovery.build_workbench_recovery(
+            recovery = workbench_recovery_build.build_workbench_recovery(
                 discovered, state_dir=state_root
             )
 
@@ -427,17 +430,17 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            resumed = workbench.build_workbench_summary(
+            resumed = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
-            ready_recovery = workbench_recovery.build_workbench_recovery(
+            ready_recovery = workbench_recovery_build.build_workbench_recovery(
                 discovered, state_dir=state_root
             )
 
             self.assertEqual("recent", resumed.primary_state)
             self.assertEqual("run", resumed.recommended_action)
             self.assertEqual(
-                workbench.REVIEW_CONTINUATION_ACTIVITY_LABEL,
+                workbench_summary_model.REVIEW_CONTINUATION_ACTIVITY_LABEL,
                 resumed.activity_label,
             )
             self.assertNotIn("sessions remain", resumed.activity_label)
@@ -475,7 +478,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -483,7 +486,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual("rereview", summary.review_resume["action"])
             self.assertEqual(0, summary.counts["pending"])
             self.assertEqual(
-                workbench.REVIEW_CONTINUATION_ACTIVITY_LABEL,
+                workbench_summary_model.REVIEW_CONTINUATION_ACTIVITY_LABEL,
                 summary.activity_label,
             )
             self.assertNotIn("sessions remain", summary.activity_label)
@@ -504,7 +507,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
             discovered = _discovered(canonical)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=tmp_path / "state"
             )
 
@@ -554,7 +557,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 },
             )
 
-            payload = workbench.build_workbench_summary(
+            payload = workbench_summary.build_workbench_summary(
                 _discovered(canonical), state_dir=state_root
             ).to_payload()
 
@@ -586,7 +589,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 },
             )
 
-            payload = workbench.build_workbench_summary(
+            payload = workbench_summary.build_workbench_summary(
                 _discovered(canonical), state_dir=state_root
             ).to_payload()
 
@@ -618,7 +621,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 },
             )
 
-            payload = workbench.build_workbench_summary(
+            payload = workbench_summary.build_workbench_summary(
                 _discovered(canonical), state_dir=state_root
             ).to_payload()
 
@@ -632,7 +635,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             tmp_path = Path(tmp)
             plan_dir = _make_workbench_plan(tmp_path)
 
-            payload = workbench.build_workbench_summary(
+            payload = workbench_summary.build_workbench_summary(
                 _discovered(plan_dir), state_dir=tmp_path / "state"
             ).to_payload()
 
@@ -661,7 +664,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
             discovered = _discovered(canonical)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
 
@@ -677,7 +680,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             canonical = plans_files.canonicalize_path(plan_dir)
             discovered = _discovered(canonical)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=tmp_path / "state"
             )
 
@@ -691,7 +694,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             plan_dir = _make_workbench_plan(tmp_path)
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=tmp_path / "state"
             )
 
@@ -733,7 +736,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             _write_lock_file(plan_dir, state_root, pid=os.getpid())
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
 
@@ -774,7 +777,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             _write_lock_file(plan_dir, state_root, pid=os.getpid())
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
 
@@ -809,7 +812,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
             _write_lock_file(plan_dir, state_root, pid=os.getpid())
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -852,7 +855,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
 
@@ -890,7 +893,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
 
@@ -924,7 +927,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 },
             )
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -983,7 +986,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 plan_dir,
                 state_dir=state_root,
             )
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 _discovered(plan_dir),
                 state_dir=state_root,
             )
@@ -1024,7 +1027,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 },
             )
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 _discovered(plan_dir), state_dir=state_root
             )
 
@@ -1056,7 +1059,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
 
@@ -1085,7 +1088,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
 
@@ -1106,7 +1109,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 "is_pid_running",
                 side_effect=lambda pid: pid == os.getpid(),
             ):
-                summary = workbench.build_workbench_summary(
+                summary = workbench_summary.build_workbench_summary(
                     discovered, state_dir=state_root
                 )
 
@@ -1134,7 +1137,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
 
@@ -1142,7 +1145,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual("run", summary.recommended_action)
             self.assertEqual("1", summary.next_pending_session_id)
             self.assertEqual(
-                workbench.ACTIVITY_LABEL_BY_STATE["recent"],
+                workbench_summary_model.ACTIVITY_LABEL_BY_STATE["recent"],
                 summary.activity_label,
             )
             self.assertIn("2026-06-19T12:30:00+00:00", summary.detail or "")
@@ -1152,7 +1155,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             tmp_path = Path(tmp)
             plan_dir = _make_workbench_plan(tmp_path)
             state_root = tmp_path / "state"
-            (plan_dir / workbench.FINAL_REVIEW_FILE_NAME).write_text(
+            (plan_dir / workbench_summary_helpers.FINAL_REVIEW_FILE_NAME).write_text(
                 "# Final review\n", encoding="utf-8"
             )
             plans_progress.append_progress_entry(
@@ -1163,15 +1166,17 @@ class WorkbenchSummaryTests(unittest.TestCase):
                     completed_at="2026-06-19T14:22:00Z",
                 ),
             )
-            discovered = workbench.DiscoveredPlan(
+            discovered = workbench_registry_models.DiscoveredPlan(
                 plan_dir=plan_dir,
                 sources=("state", "registry"),
                 label="Alpha",
-                profile=workbench.LaunchProfile(harness="claude", timeout=900),
+                profile=workbench_registry_models.LaunchProfile(
+                    harness="claude", timeout=900
+                ),
                 exists=True,
             )
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
 
@@ -1193,7 +1198,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual(str(plan_dir), payload["plan_dir"])
             self.assertEqual(str(summary.progress_path), payload["progress_path"])
             self.assertEqual(
-                str(plan_dir / workbench.FINAL_REVIEW_FILE_NAME),
+                str(plan_dir / workbench_summary_helpers.FINAL_REVIEW_FILE_NAME),
                 payload["final_review_path"],
             )
 
@@ -1204,7 +1209,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             plan_b = _make_workbench_plan(tmp_path, "beta")
             discovered = [_discovered(plan_a), _discovered(plan_b)]
 
-            summaries = workbench.build_workbench_summaries(
+            summaries = workbench_summary.build_workbench_summaries(
                 discovered, state_dir=tmp_path / "state"
             )
 
@@ -1224,7 +1229,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 "{not-json", encoding="utf-8"
             )
 
-            summaries = workbench.build_workbench_summaries(
+            summaries = workbench_summary.build_workbench_summaries(
                 [_discovered(healthy), _discovered(broken)],
                 state_dir=tmp_path / "state",
             )
@@ -1244,17 +1249,19 @@ class WorkbenchSummaryTests(unittest.TestCase):
             plan_dir = _make_workbench_plan(tmp_path)
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=tmp_path / "state"
             )
 
             self.assertEqual("ready", summary.primary_state)
             self.assertEqual(
-                workbench.URGENCY_RANK_BY_STATE["ready"], summary.urgency_rank
+                workbench_summary_model.URGENCY_RANK_BY_STATE["ready"],
+                summary.urgency_rank,
             )
             self.assertEqual("ready", summary.urgency_group)
             self.assertEqual(
-                workbench.ACTIVITY_LABEL_BY_STATE["ready"], summary.activity_label
+                workbench_summary_model.ACTIVITY_LABEL_BY_STATE["ready"],
+                summary.activity_label,
             )
             self.assertIn("session 1", summary.concise_reason)
             self.assertIsNone(summary.last_activity_at)
@@ -1269,17 +1276,18 @@ class WorkbenchSummaryTests(unittest.TestCase):
             missing = tmp_path / "ghost"
             discovered = _discovered(missing, exists=False)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=tmp_path / "state"
             )
 
             self.assertEqual("invalid", summary.primary_state)
             self.assertEqual("needs-action", summary.urgency_group)
             self.assertEqual(
-                workbench.URGENCY_RANK_BY_STATE["invalid"], summary.urgency_rank
+                workbench_summary_model.URGENCY_RANK_BY_STATE["invalid"],
+                summary.urgency_rank,
             )
             self.assertEqual(
-                workbench.ACTIVITY_LABEL_BY_STATE["invalid"],
+                workbench_summary_model.ACTIVITY_LABEL_BY_STATE["invalid"],
                 summary.activity_label,
             )
             self.assertIn(str(missing), summary.concise_reason)
@@ -1315,14 +1323,15 @@ class WorkbenchSummaryTests(unittest.TestCase):
             _write_lock_file(plan_dir, state_root, pid=os.getpid())
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
 
             self.assertEqual("running", summary.primary_state)
             self.assertEqual("in-progress", summary.urgency_group)
             self.assertEqual(
-                workbench.URGENCY_RANK_BY_STATE["running"], summary.urgency_rank
+                workbench_summary_model.URGENCY_RANK_BY_STATE["running"],
+                summary.urgency_rank,
             )
             self.assertEqual("2026-06-19T12:01:30+00:00", summary.last_activity_at)
             self.assertEqual("active-turn", summary.last_activity_source)
@@ -1361,7 +1370,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             _write_lock_file(plan_dir, state_root, pid=os.getpid())
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
 
@@ -1410,14 +1419,14 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
 
             self.assertEqual("paused-for-reply", summary.primary_state)
             self.assertEqual("needs-action", summary.urgency_group)
             self.assertEqual(
-                workbench.URGENCY_RANK_BY_STATE["paused-for-reply"],
+                workbench_summary_model.URGENCY_RANK_BY_STATE["paused-for-reply"],
                 summary.urgency_rank,
             )
             self.assertEqual("2026-06-19T14:00:00+00:00", summary.last_activity_at)
@@ -1452,7 +1461,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
 
@@ -1483,7 +1492,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
 
@@ -1507,7 +1516,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 "is_pid_running",
                 side_effect=lambda pid: pid == os.getpid(),
             ):
-                summary = workbench.build_workbench_summary(
+                summary = workbench_summary.build_workbench_summary(
                     discovered, state_dir=state_root
                 )
 
@@ -1537,7 +1546,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=state_root
             )
 
@@ -1571,7 +1580,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
             discovered = _discovered(canonical)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=tmp_path / "state"
             )
 
@@ -1580,14 +1589,15 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual("2026-06-19T15:10:00+00:00", summary.last_activity_at)
             self.assertEqual("progress-journal", summary.last_activity_source)
             self.assertEqual(
-                workbench.URGENCY_RANK_BY_STATE["complete"], summary.urgency_rank
+                workbench_summary_model.URGENCY_RANK_BY_STATE["complete"],
+                summary.urgency_rank,
             )
 
     def test_searchable_text_lowercases_and_includes_label(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             plan_dir = _make_workbench_plan(tmp_path)
-            discovered = workbench.DiscoveredPlan(
+            discovered = workbench_registry_models.DiscoveredPlan(
                 plan_dir=plan_dir,
                 sources=("state",),
                 label="Workbench Alpha",
@@ -1595,7 +1605,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 exists=True,
             )
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=tmp_path / "state"
             )
 
@@ -1609,7 +1619,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             plan_dir = _make_workbench_plan(tmp_path)
             discovered = _discovered(plan_dir)
 
-            summary = workbench.build_workbench_summary(
+            summary = workbench_summary.build_workbench_summary(
                 discovered, state_dir=tmp_path / "state"
             )
 
