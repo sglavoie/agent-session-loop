@@ -20,7 +20,10 @@ from agent_session_loop import (
     copilot_acp,
     harnesses,
     mailbox,
+    mailbox_appenders,
+    mailbox_models,
     mailbox_rendering,
+    mailbox_vocabulary,
     plans,
     qna,
     redirect_ack,
@@ -352,7 +355,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             "codex",
             self.PLAN_DIR,
             session_id="9",
-            resolution_action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            resolution_action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             resolution_note="Proceed without choosing a variant.",
             resolution_context=self._make_reply_context(),
         )
@@ -369,14 +372,14 @@ class TaskPacketBuilderTests(unittest.TestCase):
             "codex",
             self.PLAN_DIR,
             session_id="9",
-            resolution_action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            resolution_action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             resolution_note="keep scope",
             resolution_context=context,
         )
         resolution_prompt = run_prompts.build_resolution_prompt(
             "codex",
             self.PLAN_DIR,
-            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             note="keep scope",
             context=context,
         )
@@ -397,7 +400,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
                 session_id="9",
                 reply="1a",
                 reply_context=context,
-                resolution_action=mailbox.RESOLUTION_ACTION_CONTINUE,
+                resolution_action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
                 resolution_context=context,
             )
 
@@ -409,7 +412,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
                 "codex",
                 self.PLAN_DIR,
                 session_id="9",
-                resolution_action=mailbox.RESOLUTION_ACTION_CONTINUE,
+                resolution_action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             )
         with self.assertRaises(ValueError):
             task_packet.build_task_packet(
@@ -527,10 +530,10 @@ class TaskPacketBuilderTests(unittest.TestCase):
     def test_pending_multiline_guidance_is_json_escaped_and_delimited(
         self,
     ) -> None:
-        guidance = mailbox.MailboxMessage(
+        guidance = mailbox_models.MailboxMessage(
             seq=4,
             id="11111111-1111-4111-8111-111111111111",
-            kind=mailbox.KIND_GUIDANCE,
+            kind=mailbox_vocabulary.KIND_GUIDANCE,
             created_at="2026-07-24T00:00:00+00:00",
             text=(
                 "Prefer the small adapter.\n"
@@ -565,7 +568,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             plan_dir.mkdir()
             pending_count = mailbox_rendering.MAX_RENDERED_GUIDANCE + 3
             appended = [
-                mailbox.append_guidance(
+                mailbox_appenders.append_guidance(
                     plan_dir,
                     f"guidance-{index}",
                     state_dir=state_dir,
@@ -636,7 +639,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             plan_dir.mkdir()
-            oversized = mailbox.append_guidance(
+            oversized = mailbox_appenders.append_guidance(
                 plan_dir,
                 "x" * (mailbox_rendering.MAX_RENDERED_GUIDANCE_BYTES + 1024),
                 state_dir=state_dir,
@@ -717,14 +720,14 @@ class TaskPacketBuilderTests(unittest.TestCase):
             state_dir = Path(tmp) / "state"
             plan_dir.mkdir()
             small_records = [
-                mailbox.append_guidance(
+                mailbox_appenders.append_guidance(
                     plan_dir,
                     f"small-guidance-{index}",
                     state_dir=state_dir,
                 )
                 for index in range(2)
             ]
-            oversized = mailbox.append_guidance(
+            oversized = mailbox_appenders.append_guidance(
                 plan_dir,
                 "x" * (mailbox_rendering.MAX_RENDERED_GUIDANCE_BYTES + 1024),
                 state_dir=state_dir,
@@ -771,7 +774,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             state_dir = Path(tmp) / "state"
             plan_dir.mkdir()
             appended = [
-                mailbox.append_guidance(
+                mailbox_appenders.append_guidance(
                     plan_dir,
                     f"{index:02d}-" + ("x" * 4096),
                     state_dir=state_dir,
@@ -827,10 +830,10 @@ class TaskPacketBuilderTests(unittest.TestCase):
                 )
 
     def test_pending_guidance_requires_active_mailbox(self) -> None:
-        guidance = mailbox.MailboxMessage(
+        guidance = mailbox_models.MailboxMessage(
             seq=1,
             id="11111111-1111-4111-8111-111111111111",
-            kind=mailbox.KIND_GUIDANCE,
+            kind=mailbox_vocabulary.KIND_GUIDANCE,
             created_at="2026-07-24T00:00:00+00:00",
             text="Use the adapter.",
         )
@@ -1189,7 +1192,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
                 prompt = run_prompts.build_resolution_prompt(
                     harness,
                     "/tmp/plan",
-                    action=mailbox.RESOLUTION_ACTION_CONTINUE,
+                    action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
                     note=None,
                     context=self._make_context(),
                 )
@@ -1200,7 +1203,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
         prompt = run_prompts.build_resolution_prompt(
             "codex",
             "/tmp/plan",
-            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             note="Keep the current scope.",
             context=self._make_context(),
         )
@@ -1232,14 +1235,14 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
         omitted = run_prompts.build_resolution_prompt(
             "codex",
             "/tmp/plan",
-            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             note=None,
             context=context,
         )
         empty = run_prompts.build_resolution_prompt(
             "codex",
             "/tmp/plan",
-            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             note="",
             context=context,
         )
@@ -1264,7 +1267,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
         prompt = run_prompts.build_resolution_prompt(
             "codex",
             "/tmp/plan",
-            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             note=hostile,
             context=self._make_context(),
         )
@@ -1292,7 +1295,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
         prompt = run_prompts.build_resolution_prompt(
             "codex",
             "/tmp/plan",
-            action=mailbox.RESOLUTION_ACTION_PAUSE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
             note="",
             context=self._make_context(),
         )
@@ -1312,7 +1315,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
     def test_pending_resolution_source_metadata_is_body_free(self) -> None:
         hostile_note = "do not persist this resolution body"
         pending = run_prompts._PendingResolution(
-            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             note=hostile_note,
             context=self._make_context(),
             question_id="question-1",
@@ -1335,7 +1338,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
         prompt = run_prompts.build_resolution_prompt(
             "codex",
             "/tmp/plan",
-            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             note=note,
             context=self._make_context(),
         )
@@ -1343,7 +1346,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
         sanitized = turn_execution.sanitize_resolution_argv(
             ["codex", "exec", prompt],
             full_prompt=prompt,
-            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             note_length=len(note),
         )
 
@@ -1358,7 +1361,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
         prompt = run_prompts.build_resolution_prompt(
             "codex",
             "/tmp/plan",
-            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             note=note,
             context=self._make_context(),
         )
@@ -1366,7 +1369,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
             None,
             {},
             {
-                "action": mailbox.RESOLUTION_ACTION_CONTINUE,
+                "action": mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
                 "note_length": True,
             },
         )

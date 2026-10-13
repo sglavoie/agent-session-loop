@@ -1219,11 +1219,15 @@ def _guidance_delivery_projection(view: Any) -> list[dict[str, Any]]:
     run, while guidance is addressed to its worker; the record's id and seq are
     enough to look it up through ``asl inbox``.
     """
-    from . import mailbox
+    from . import (
+        mailbox_vocabulary,
+    )
 
     entries: list[dict[str, Any]] = []
     guidance = [
-        message for message in view.messages if message.kind == mailbox.KIND_GUIDANCE
+        message
+        for message in view.messages
+        if message.kind == mailbox_vocabulary.KIND_GUIDANCE
     ]
     for message in guidance[-MAILBOX_STATUS_GUIDANCE_CAP:]:
         latest = view.latest_guidance_delivery(message.id)
@@ -1256,11 +1260,13 @@ def _guidance_delivery_projection(view: Any) -> list[dict[str, Any]]:
 
 def _guidance_state_summary(entry: Mapping[str, Any]) -> str:
     """Render one projection entry the way the mailbox vocabulary defines it."""
-    from . import mailbox
+    from . import (
+        mailbox_vocabulary,
+    )
 
     attempt = entry.get("latest_attempt")
     attempt = attempt if isinstance(attempt, dict) else {}
-    return mailbox.describe_guidance_delivery(
+    return mailbox_vocabulary.describe_guidance_delivery(
         str(entry.get("state")),
         delivery_reason=attempt.get("reason"),
         harness=attempt.get("harness"),
@@ -1275,10 +1281,16 @@ def _mailbox_status_payload(
     """Project the append-only mailbox and lease without mutating either file."""
     # Local import avoids a module cycle: mailbox path resolution depends on
     # this module's state-root helpers, while status only needs read-only views.
-    from . import mailbox
+    from . import (
+        mailbox,
+        mailbox_constants,
+        mailbox_cursors,
+        mailbox_leases,
+        mailbox_models,
+    )
 
-    mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
-    lease_path = mailbox.lease_path_for_plan(plan_dir, state_dir)
+    mailbox_path = mailbox_cursors.mailbox_path_for_plan(plan_dir, state_dir)
+    lease_path = mailbox_cursors.lease_path_for_plan(plan_dir, state_dir)
     mailbox_present = mailbox_path.exists()
     lease_present = lease_path.exists()
     payload: dict[str, Any] = {
@@ -1288,7 +1300,7 @@ def _mailbox_status_payload(
         "lease_present": lease_present,
         "lease_path": str(lease_path),
         "size_bytes": 0,
-        "max_bytes": mailbox.MAILBOX_MAX_BYTES,
+        "max_bytes": mailbox_constants.MAILBOX_MAX_BYTES,
         "full": False,
         "accepts_questions": True,
         "accepts_replies": True,
@@ -1311,7 +1323,7 @@ def _mailbox_status_payload(
 
     try:
         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
-    except mailbox.MailboxError as error:
+    except mailbox_models.MailboxError as error:
         # read_mailbox only returns an absent view for FileNotFoundError, so an
         # exception means something exists at the path but could not be read.
         payload["present"] = True
@@ -1362,23 +1374,23 @@ def _mailbox_status_payload(
             )
 
     try:
-        lease = mailbox.read_lease(plan_dir, state_dir=state_dir)
-    except mailbox.MailboxError as error:
+        lease = mailbox_leases.read_lease(plan_dir, state_dir=state_dir)
+    except mailbox_models.MailboxError as error:
         payload["lease_present"] = True
         payload["lease_reason"] = error.reason
         payload["lease_error"] = str(error)
     else:
-        lease_present = lease.reason != mailbox.LEASE_MISSING
+        lease_present = lease.reason != mailbox_constants.LEASE_MISSING
         payload["lease_present"] = lease_present
         payload["lease_updated_at"] = lease.updated_at
         payload["lease_fresh"] = lease.fresh
         payload["lease_reason"] = (
-            None if lease.reason == mailbox.LEASE_MISSING else lease.reason
+            None if lease.reason == mailbox_constants.LEASE_MISSING else lease.reason
         )
         if lease.reason not in (
             None,
-            mailbox.LEASE_MISSING,
-            mailbox.LEASE_EXPIRED,
+            mailbox_constants.LEASE_MISSING,
+            mailbox_constants.LEASE_EXPIRED,
         ):
             payload["lease_error"] = lease.reason
 

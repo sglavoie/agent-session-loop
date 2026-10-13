@@ -14,8 +14,13 @@ from unittest import mock
 
 from agent_session_loop import (
     mailbox,
+    mailbox_appenders,
     mailbox_cli,
+    mailbox_constants,
+    mailbox_cursors,
     mailbox_rendering,
+    mailbox_snapshot,
+    mailbox_vocabulary,
 )
 from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
 from tests.support import (
@@ -29,7 +34,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
         self,
     ) -> None:
         appended = [
-            mailbox.append_guidance(
+            mailbox_appenders.append_guidance(
                 self.plan_dir,
                 f"{index:02d}:" + ("G" * 40000),
                 state_dir=self.state_dir,
@@ -78,7 +83,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
         self,
     ) -> None:
         appended = [
-            mailbox.append_guidance(
+            mailbox_appenders.append_guidance(
                 self.plan_dir,
                 f"guidance-{index}",
                 state_dir=self.state_dir,
@@ -119,7 +124,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
         self.assertEqual((), view.pending_guidance)
 
     def test_inbox_text_omits_one_individually_oversized_record(self) -> None:
-        oversized = mailbox.append_guidance(
+        oversized = mailbox_appenders.append_guidance(
             self.plan_dir,
             "x" * (mailbox_rendering.MAX_RENDERED_GUIDANCE_BYTES + 1024),
             state_dir=self.state_dir,
@@ -194,7 +199,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
         self.assertEqual("run-live", exact.run_id)
         self.assertEqual("1", exact.session_id)
         self.assertEqual(4, exact.turn_index)
-        self.assertEqual(mailbox.WAITER_ORIGIN_WORKER, exact.waiter_origin)
+        self.assertEqual(mailbox_vocabulary.WAITER_ORIGIN_WORKER, exact.waiter_origin)
         self.assertEqual(
             (by_id[attributed["question_id"]], exact),
             view.open_questions("run-live"),
@@ -223,12 +228,12 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
         self.assertEqual(1, view.counts.questions)
 
     def test_ask_resume_returns_an_existing_reply_without_appending(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Need a decision",
             state_dir=self.state_dir,
         )
-        reply = mailbox.append_reply(
+        reply = mailbox_appenders.append_reply(
             self.plan_dir,
             question.id,
             "Proceed.",
@@ -259,13 +264,13 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
         )
 
     def test_ask_resume_returns_existing_continue_resolution(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Need a decision",
             state_dir=self.state_dir,
             run_id="run-live",
         )
-        resolution = mailbox.append_resolution(
+        resolution = mailbox_appenders.append_resolution(
             self.plan_dir,
             question.id,
             "continue",
@@ -288,13 +293,13 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
         self.assertEqual(resolution.id, payload["resolution"]["id"])
 
     def test_ask_pause_resolution_text_is_framed_and_requires_stop(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Need a decision",
             state_dir=self.state_dir,
             run_id="run-live",
         )
-        mailbox.append_resolution(
+        mailbox_appenders.append_resolution(
             self.plan_dir,
             question.id,
             "pause",
@@ -323,7 +328,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
         self.assertIn("RUNNER_PAUSE: blocked", rendered)
 
     def test_ask_wait_observes_resolution_on_the_next_poll(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Need a decision",
             state_dir=self.state_dir,
@@ -333,7 +338,7 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
             self.plan_dir,
             state_dir=self.state_dir,
         )
-        resolution = mailbox.append_resolution(
+        resolution = mailbox_appenders.append_resolution(
             self.plan_dir,
             question.id,
             "continue",
@@ -401,10 +406,12 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
     def test_ask_wait_skips_full_reads_while_large_mailbox_is_unchanged(
         self,
     ) -> None:
-        mailbox_path = mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
-        large_view = mailbox.MailboxView(
+        mailbox_path = mailbox_cursors.mailbox_path_for_plan(
+            self.plan_dir, self.state_dir
+        )
+        large_view = mailbox_snapshot.MailboxView(
             mailbox_path=mailbox_path,
-            size_bytes=mailbox.MAILBOX_MAX_BYTES - 1,
+            size_bytes=mailbox_constants.MAILBOX_MAX_BYTES - 1,
         )
         unchanged_token = (1, 2, large_view.size_bytes, 3)
         with (

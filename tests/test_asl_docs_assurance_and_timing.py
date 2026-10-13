@@ -9,7 +9,7 @@ from agent_session_loop import (
     assurance_ledger,
     assurance_models,
     cli,
-    mailbox,
+    mailbox_constants,
     state,
     supervisor_audit_agent,
 )
@@ -127,7 +127,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
         """
         for text in (self.guide, self.docs, self.package_readme):
             self.assertIn(assurance_ledger.LEDGER_FILE_NAME, text)
-            self.assertIn(mailbox.MAILBOX_FILE_NAME, text)
+            self.assertIn(mailbox_constants.MAILBOX_FILE_NAME, text)
             self.assertIn("separate system", text)
 
     def test_lifecycle_ordering_puts_the_audit_before_the_terminal_record(

@@ -1047,7 +1047,7 @@ def _add_plan_authoring_commands(
         action="store_true",
         help="When checks pass, mark the plan readiness state as loop-ready",
     )
-    preflight_parser.set_defaults(handler_ref="preflight:preflight_from_args")
+    preflight_parser.set_defaults(handler_ref="preflight_cli:preflight_from_args")
 
 
 def _add_storage_commands(

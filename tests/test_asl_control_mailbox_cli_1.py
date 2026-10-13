@@ -14,7 +14,12 @@ from unittest import mock
 from agent_session_loop import (
     agent_mux_delivery,
     mailbox,
+    mailbox_appenders,
     mailbox_cli,
+    mailbox_leases,
+    mailbox_models,
+    mailbox_vocabulary,
+    mailbox_waits,
 )
 from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
 from tests.support import (
@@ -26,14 +31,14 @@ from tests.support import (
 class MailboxCliTests(MailboxCliTestsBase):
     def test_reply_consumption_timeout_keeps_successful_append_truthful(self) -> None:
         self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
-        question, _wait_start = mailbox.append_wait_question(
+        question, _wait_start = mailbox_waits.append_wait_question(
             self.plan_dir,
             "Need answer",
             state_dir=self.state_dir,
             run_id="run-live",
             session_id="5",
             turn_index=2,
-            waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+            waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_WORKER,
         )
         with mock.patch.object(mailbox_cli, "_wait_for_receipt", return_value=None):
             code, payload = self.payload_from(
@@ -53,19 +58,19 @@ class MailboxCliTests(MailboxCliTestsBase):
 
     def test_reply_json_exposes_consumption_receipt(self) -> None:
         self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
-        question, wait_start = mailbox.append_wait_question(
+        question, wait_start = mailbox_waits.append_wait_question(
             self.plan_dir,
             "Need answer",
             state_dir=self.state_dir,
             run_id="run-live",
             session_id="5",
             turn_index=2,
-            waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+            waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_WORKER,
         )
-        receipt = mailbox.MailboxMessage(
+        receipt = mailbox_models.MailboxMessage(
             seq=4,
             id=str(uuid.uuid4()),
-            kind=mailbox.KIND_RECEIPT,
+            kind=mailbox_vocabulary.KIND_RECEIPT,
             created_at="2026-08-01T00:00:00+00:00",
             to=question.id,
             wait_id=wait_start.id,
@@ -95,14 +100,14 @@ class MailboxCliTests(MailboxCliTestsBase):
         self.assertEqual("inbox-guidance", guidance_payload["command"])
         self.assertEqual("guidance", guidance_payload["message"]["kind"])
         self.assertEqual("Keep the parser lazy.", guidance_payload["message"]["text"])
-        first_lease = mailbox.read_lease(
+        first_lease = mailbox_leases.read_lease(
             self.plan_dir,
             state_dir=self.state_dir,
         )
         self.assertTrue(first_lease.fresh)
         self.assertEqual(guidance_payload["supervisor_id"], first_lease.supervisor_id)
 
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,
@@ -122,7 +127,7 @@ class MailboxCliTests(MailboxCliTestsBase):
                 state_dir=self.state_dir,
             ).text,
         )
-        second_lease = mailbox.read_lease(
+        second_lease = mailbox_leases.read_lease(
             self.plan_dir,
             state_dir=self.state_dir,
         )
@@ -155,7 +160,9 @@ class MailboxCliTests(MailboxCliTestsBase):
         self.assertTrue(payload["appended"])
         self.assertFalse(payload["waited"])
         self.assertFalse(payload["delivered"])
-        self.assertEqual(mailbox.GUIDANCE_STATE_QUEUED, payload["delivery_state"])
+        self.assertEqual(
+            mailbox_vocabulary.GUIDANCE_STATE_QUEUED, payload["delivery_state"]
+        )
         self.assertIsNone(payload["delivery"])
 
     def test_guidance_wait_reports_the_delivery_that_ended_it(self) -> None:
@@ -173,9 +180,11 @@ class MailboxCliTests(MailboxCliTestsBase):
         self.assertTrue(payload["waited"])
         self.assertTrue(payload["delivered"])
         self.assertEqual(
-            mailbox.GUIDANCE_STATE_DELIVERED_LIVE, payload["delivery_state"]
+            mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_LIVE, payload["delivery_state"]
         )
-        self.assertEqual(mailbox.GUIDANCE_REASON_DELIVERED, payload["delivery_reason"])
+        self.assertEqual(
+            mailbox_vocabulary.GUIDANCE_REASON_DELIVERED, payload["delivery_reason"]
+        )
         self.assertEqual(
             payload["message"]["id"],
             payload["delivery"]["to"],
@@ -184,8 +193,8 @@ class MailboxCliTests(MailboxCliTestsBase):
     def test_guidance_wait_reports_a_deferral_for_the_active_turn(self) -> None:
         self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
         with self._deliver_on_first_poll(
-            delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
-            delivery_reason=mailbox.GUIDANCE_REASON_HARNESS_UNSUPPORTED,
+            delivery_state=mailbox_vocabulary.GUIDANCE_STATE_DEFERRED,
+            delivery_reason=mailbox_vocabulary.GUIDANCE_REASON_HARNESS_UNSUPPORTED,
             run_id="run-live",
             session_id="5",
             turn_index=2,
@@ -200,17 +209,19 @@ class MailboxCliTests(MailboxCliTestsBase):
         self.assertEqual(0, code)
         self.assertTrue(payload["appended"])
         self.assertFalse(payload["delivered"])
-        self.assertEqual(mailbox.GUIDANCE_STATE_DEFERRED, payload["delivery_state"])
         self.assertEqual(
-            mailbox.GUIDANCE_REASON_HARNESS_UNSUPPORTED,
+            mailbox_vocabulary.GUIDANCE_STATE_DEFERRED, payload["delivery_state"]
+        )
+        self.assertEqual(
+            mailbox_vocabulary.GUIDANCE_REASON_HARNESS_UNSUPPORTED,
             payload["delivery_reason"],
         )
 
     def test_guidance_wait_ignores_a_deferral_from_another_turn(self) -> None:
         self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
         with self._deliver_on_first_poll(
-            delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
-            delivery_reason=mailbox.GUIDANCE_REASON_STALE_TURN,
+            delivery_state=mailbox_vocabulary.GUIDANCE_STATE_DEFERRED,
+            delivery_reason=mailbox_vocabulary.GUIDANCE_REASON_STALE_TURN,
             run_id="run-live",
             session_id="5",
             turn_index=1,
@@ -222,7 +233,9 @@ class MailboxCliTests(MailboxCliTestsBase):
 
         self.assertEqual(0, code)
         self.assertFalse(payload["delivered"])
-        self.assertEqual(mailbox.GUIDANCE_STATE_QUEUED, payload["delivery_state"])
+        self.assertEqual(
+            mailbox_vocabulary.GUIDANCE_STATE_QUEUED, payload["delivery_state"]
+        )
         self.assertIsNone(payload["delivery"])
 
     def test_guidance_wait_ignores_an_unconfirmed_attempt(self) -> None:
@@ -234,8 +247,8 @@ class MailboxCliTests(MailboxCliTestsBase):
         """
         self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
         with self._deliver_on_first_poll(
-            delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
-            delivery_reason=mailbox.GUIDANCE_REASON_AWAITING_CONFIRMATION,
+            delivery_state=mailbox_vocabulary.GUIDANCE_STATE_DEFERRED,
+            delivery_reason=mailbox_vocabulary.GUIDANCE_REASON_AWAITING_CONFIRMATION,
             run_id="run-live",
             session_id="5",
             turn_index=2,
@@ -249,7 +262,9 @@ class MailboxCliTests(MailboxCliTestsBase):
         self.assertEqual(0, code)
         self.assertTrue(payload["appended"])
         self.assertFalse(payload["delivered"])
-        self.assertEqual(mailbox.GUIDANCE_STATE_QUEUED, payload["delivery_state"])
+        self.assertEqual(
+            mailbox_vocabulary.GUIDANCE_STATE_QUEUED, payload["delivery_state"]
+        )
         self.assertIsNone(payload["delivery"])
 
     def test_guidance_wait_text_says_delivered_live_and_to_whom(self) -> None:
@@ -280,8 +295,8 @@ class MailboxCliTests(MailboxCliTestsBase):
         stdout = io.StringIO()
         with (
             self._deliver_on_first_poll(
-                delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
-                delivery_reason=mailbox.GUIDANCE_REASON_UNSUPPORTED_ACTIVE_STEER,
+                delivery_state=mailbox_vocabulary.GUIDANCE_STATE_DEFERRED,
+                delivery_reason=mailbox_vocabulary.GUIDANCE_REASON_UNSUPPORTED_ACTIVE_STEER,
                 run_id="run-live",
                 session_id="5",
                 turn_index=2,
@@ -314,7 +329,9 @@ class MailboxCliTests(MailboxCliTestsBase):
         self.assertTrue(payload["appended"])
         self.assertTrue(payload["waited"])
         self.assertFalse(payload["delivered"])
-        self.assertEqual(mailbox.GUIDANCE_STATE_QUEUED, payload["delivery_state"])
+        self.assertEqual(
+            mailbox_vocabulary.GUIDANCE_STATE_QUEUED, payload["delivery_state"]
+        )
         self.assertIsNone(payload["delivery_reason"])
         # The guidance is durable regardless of what the wait observed.
         view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
@@ -371,7 +388,7 @@ class MailboxCliTests(MailboxCliTestsBase):
                 self.assertEqual("invalid-timeout", payload["reason"])
 
     def test_inbox_guidance_heartbeats_fresh_projected_lease(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,
@@ -392,7 +409,7 @@ class MailboxCliTests(MailboxCliTestsBase):
         self.assertEqual(supervisor_id, payload["supervisor_id"])
 
     def test_inbox_reply_heartbeats_fresh_projected_lease(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,
@@ -424,7 +441,7 @@ class MailboxCliTests(MailboxCliTestsBase):
             {"run_id": "run-live", "ok": True, "paused": False},
         )
         _write_lock_file(self.plan_dir, self.state_dir, pid=os.getpid())
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Proceed without an answer?",
             state_dir=self.state_dir,

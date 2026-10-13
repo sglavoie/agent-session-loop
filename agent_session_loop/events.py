@@ -178,7 +178,7 @@ MAILBOX_ACTION_WAIT_CLEARED = "wait-cleared"
 # Guidance-delivery ledger actions. The vocabulary lands with the durable
 # record so status and audit surfaces can be written against a fixed set; the
 # runner does not emit any of them until live delivery exists. Their payloads
-# are built by ``mailbox.guidance_delivery_event_payload`` and carry no
+# are built by ``mailbox_appenders.guidance_delivery_event_payload`` and carry no
 # guidance body — not the text, not its length, not a digest.
 MAILBOX_ACTION_GUIDANCE_DELIVERED = "guidance-delivered"
 MAILBOX_ACTION_GUIDANCE_DELIVERY_DEFERRED = "guidance-delivery-deferred"

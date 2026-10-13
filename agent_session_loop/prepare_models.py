@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import preflight
+from . import preflight_footprint
 from .plans import PlanError, SessionId, parse_session_id
 
 LEGACY_PREPARE_VALIDATION_VERSION = 1
@@ -419,7 +419,7 @@ def _require_legacy_repository_footprint(
     plan_dir: str | Path, root: str | Path
 ) -> None:
     """Refuse a legacy plan whose reach exceeds one repository under ``root``."""
-    _, payload = preflight.plan_repository_footprint(plan_dir, root)
+    _, payload = preflight_footprint.plan_repository_footprint(plan_dir, root)
     if payload is None:
         return
     raise RepositoryFootprintError(
@@ -446,7 +446,7 @@ class RepositoryRegistryRequiredError(PlanError):
 
 def _require_legacy_repository_intent(plan_dir: str | Path, root: str | Path) -> None:
     """Refuse a legacy plan that intends to reach several repositories."""
-    _, payload = preflight.plan_repository_intent(plan_dir, root)
+    _, payload = preflight_footprint.plan_repository_intent(plan_dir, root)
     if payload is None:
         return
     git_roots = ", ".join(payload.get("git_roots", ()))

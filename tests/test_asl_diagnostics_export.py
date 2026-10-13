@@ -26,7 +26,7 @@ from agent_session_loop import (
     cli,
     diagnostics_export,
     events,
-    mailbox,
+    mailbox_constants,
     plans,
 )
 
@@ -253,7 +253,9 @@ class ExportTestBase(unittest.TestCase):
                 }
             )
         text = "".join(json.dumps(line) + "\n" for line in lines)
-        (target / mailbox.MAILBOX_FILE_NAME).write_text(text, encoding="utf-8")
+        (target / mailbox_constants.MAILBOX_FILE_NAME).write_text(
+            text, encoding="utf-8"
+        )
 
     def seed_full_plan(self, name: str = "plan-a", **kwargs: Any) -> Path:
         plan_dir = self.tmp_path / name
@@ -711,7 +713,9 @@ class ExportBoundsTests(ExportTestBase):
         # reaching either section's own record cap. That keeps each bounded
         # omission attributable to the scan alone.
         filler = json.dumps({"seq": 0, "kind": "receipt", "run_id": "run-other-0002"})
-        with (target / mailbox.MAILBOX_FILE_NAME).open("w", encoding="utf-8") as handle:
+        with (target / mailbox_constants.MAILBOX_FILE_NAME).open(
+            "w", encoding="utf-8"
+        ) as handle:
             handle.write(receipt(1, "msg-oldest") + "\n")
             for _ in range(diagnostics_export.MAX_LOG_LINES):
                 handle.write(filler + "\n")

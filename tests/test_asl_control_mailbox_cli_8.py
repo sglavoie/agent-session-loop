@@ -15,8 +15,14 @@ from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 from agent_session_loop import (
-    mailbox,
+    mailbox_appenders,
     mailbox_cli,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_models,
+    mailbox_snapshot,
+    mailbox_validation,
+    mailbox_vocabulary,
     state,
     supervision_liveness,
 )
@@ -28,10 +34,10 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         self,
     ) -> None:
         # A record from a helper predating launch correlation carries no id.
-        record = mailbox.append_supervision_end(
+        record = mailbox_appenders.append_supervision_end(
             self.plan_dir,
             "helper exited: complete",
-            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
             state_dir=self.state_dir,
         )
 
@@ -40,7 +46,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
             self.args(
                 timeout=0,
                 include=mailbox_cli.OUTBOX_INCLUDE_ALL,
-                supervision_id=mailbox.new_supervision_id(),
+                supervision_id=mailbox_validation.new_supervision_id(),
             ),
         )
 
@@ -52,12 +58,12 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
     def test_uncorrelated_wait_keeps_treating_any_record_as_terminal(
         self,
     ) -> None:
-        record = mailbox.append_supervision_end(
+        record = mailbox_appenders.append_supervision_end(
             self.plan_dir,
             "helper exited: complete",
-            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
             state_dir=self.state_dir,
-            supervision_id=mailbox.new_supervision_id(),
+            supervision_id=mailbox_validation.new_supervision_id(),
         )
 
         code, payload = self.payload_from(
@@ -87,14 +93,14 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
     def test_outbox_wait_text_reports_an_uncorrelated_supervision_end(
         self,
     ) -> None:
-        record = mailbox.append_supervision_end(
+        record = mailbox_appenders.append_supervision_end(
             self.plan_dir,
             "helper exited: complete",
-            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
             state_dir=self.state_dir,
-            supervision_id=mailbox.new_supervision_id(),
+            supervision_id=mailbox_validation.new_supervision_id(),
         )
-        launch = mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
 
         stdout = io.StringIO()
         with redirect_stdout(stdout):
@@ -124,7 +130,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         self,
     ) -> None:
         self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
-        notice = mailbox.append_notice(
+        notice = mailbox_appenders.append_notice(
             self.plan_dir,
             "checkpoint reached",
             state_dir=self.state_dir,
@@ -132,7 +138,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
             session_id="5",
             turn_index=2,
         )
-        launch = mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
 
         code, lines = self.supervise_lines(supervision_id=launch)
 
@@ -141,13 +147,13 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         self.assertGreaterEqual(self.cursor_on_disk(launch), notice.seq)
 
     def test_outbox_supervise_resumes_its_persisted_cursor(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,
             run_id="run-live",
         )
-        launch = mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
 
         code, first = self.supervise_lines(supervision_id=launch)
         self.assertEqual(0, code)
@@ -163,19 +169,21 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         self.assertEqual(["IDLE"], second)
 
         # A different launch keeps its own cursor and still sees the question.
-        code, other = self.supervise_lines(supervision_id=mailbox.new_supervision_id())
+        code, other = self.supervise_lines(
+            supervision_id=mailbox_validation.new_supervision_id()
+        )
         self.assertEqual(0, code)
         self.assertEqual("ACTION questions=1", other[0])
 
     def test_outbox_supervise_absorbs_a_foreign_supervision_end(self) -> None:
-        foreign = mailbox.append_supervision_end(
+        foreign = mailbox_appenders.append_supervision_end(
             self.plan_dir,
             "helper exited: complete",
-            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
             state_dir=self.state_dir,
-            supervision_id=mailbox.new_supervision_id(),
+            supervision_id=mailbox_validation.new_supervision_id(),
         )
-        launch = mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
 
         code, lines = self.supervise_lines(supervision_id=launch)
 
@@ -184,19 +192,19 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         self.assertEqual(foreign.seq, self.cursor_on_disk(launch))
 
     def test_outbox_supervise_absorbs_an_already_closed_question(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,
             run_id="run-live",
         )
-        mailbox.append_reply(
+        mailbox_appenders.append_reply(
             self.plan_dir,
             question.id,
             "answered",
             state_dir=self.state_dir,
         )
-        launch = mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
 
         code, lines = self.supervise_lines(supervision_id=launch)
 
@@ -204,18 +212,18 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         self.assertEqual(["IDLE"], lines)
 
     def test_outbox_supervise_reports_its_own_terminal_record(self) -> None:
-        launch = mailbox.new_supervision_id()
-        mailbox.append_supervision_end(
+        launch = mailbox_validation.new_supervision_id()
+        mailbox_appenders.append_supervision_end(
             self.plan_dir,
             "helper exited: stopped",
-            outcome=mailbox.SUPERVISION_OUTCOME_STOPPED,
+            outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_STOPPED,
             state_dir=self.state_dir,
-            supervision_id=mailbox.new_supervision_id(),
+            supervision_id=mailbox_validation.new_supervision_id(),
         )
-        own = mailbox.append_supervision_end(
+        own = mailbox_appenders.append_supervision_end(
             self.plan_dir,
             "helper exited: complete",
-            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
             state_dir=self.state_dir,
             supervision_id=launch,
         )
@@ -224,7 +232,10 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
 
         self.assertEqual(0, code)
         self.assertEqual(
-            f"DONE outcome={mailbox.SUPERVISION_OUTCOME_COMPLETE} seq={own.seq}",
+            (
+                f"DONE outcome={mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE} "
+                f"seq={own.seq}"
+            ),
             lines[0],
         )
         self.assertIn(f"Supervision end {own.id} (seq {own.seq}):", lines)
@@ -244,14 +255,14 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         self.assertEqual(own.seq, payload["since"])
 
     def test_outbox_supervise_self_heals_an_unusable_cursor(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,
             run_id="run-live",
         )
-        launch = mailbox.new_supervision_id()
-        cursor_path = mailbox.supervision_cursor_path_for_plan(
+        launch = mailbox_validation.new_supervision_id()
+        cursor_path = mailbox_cursors.supervision_cursor_path_for_plan(
             self.plan_dir,
             launch,
             self.state_dir,
@@ -263,8 +274,8 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
             json.dumps({"version": 99, "next_since": 5}),
             json.dumps(
                 {
-                    "version": mailbox.MAILBOX_SUPERVISION_CURSOR_VERSION,
-                    "supervision_id": mailbox.new_supervision_id(),
+                    "version": mailbox_constants.MAILBOX_SUPERVISION_CURSOR_VERSION,
+                    "supervision_id": mailbox_validation.new_supervision_id(),
                     "next_since": 5,
                 }
             ),
@@ -278,8 +289,8 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
                 self.assertEqual(question.seq, self.cursor_on_disk(launch))
 
     def test_outbox_supervise_keeps_one_cursor_file_per_launch(self) -> None:
-        first = mailbox.new_supervision_id()
-        second = mailbox.new_supervision_id()
+        first = mailbox_validation.new_supervision_id()
+        second = mailbox_validation.new_supervision_id()
 
         for launch in (first, second):
             code, _lines = self.supervise_lines(supervision_id=launch)
@@ -288,7 +299,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         state_dir = state.plan_state_dir(self.plan_dir, self.state_dir)
         self.assertEqual(
             sorted(
-                mailbox.supervision_cursor_path_for_plan(
+                mailbox_cursors.supervision_cursor_path_for_plan(
                     self.plan_dir,
                     launch,
                     self.state_dir,
@@ -297,27 +308,33 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
             ),
             sorted(
                 path.name
-                for path in state_dir.glob(mailbox.MAILBOX_SUPERVISION_CURSOR_GLOB)
+                for path in state_dir.glob(
+                    mailbox_constants.MAILBOX_SUPERVISION_CURSOR_GLOB
+                )
             ),
         )
 
     def test_outbox_supervise_prunes_cursors_abandoned_long_ago(self) -> None:
-        abandoned = mailbox.new_supervision_id()
-        mailbox.write_supervision_cursor(
+        abandoned = mailbox_validation.new_supervision_id()
+        mailbox_cursors.write_supervision_cursor(
             self.plan_dir,
             abandoned,
             3,
             state_dir=self.state_dir,
         )
-        abandoned_path = mailbox.supervision_cursor_path_for_plan(
+        abandoned_path = mailbox_cursors.supervision_cursor_path_for_plan(
             self.plan_dir,
             abandoned,
             self.state_dir,
         )
-        stale = time.time() - (mailbox.MAILBOX_SUPERVISION_CURSOR_MAX_AGE_SECONDS + 60)
+        stale = time.time() - (
+            mailbox_constants.MAILBOX_SUPERVISION_CURSOR_MAX_AGE_SECONDS + 60
+        )
         os.utime(abandoned_path, (stale, stale))
 
-        code, _lines = self.supervise_lines(supervision_id=mailbox.new_supervision_id())
+        code, _lines = self.supervise_lines(
+            supervision_id=mailbox_validation.new_supervision_id()
+        )
 
         self.assertEqual(0, code)
         self.assertFalse(abandoned_path.exists())
@@ -325,46 +342,48 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
     def test_outbox_supervise_reenters_the_wait_on_the_remaining_budget(
         self,
     ) -> None:
-        mailbox_path = mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
-        foreign_end = mailbox.MailboxMessage(
+        mailbox_path = mailbox_cursors.mailbox_path_for_plan(
+            self.plan_dir, self.state_dir
+        )
+        foreign_end = mailbox_models.MailboxMessage(
             seq=1,
             id=str(uuid.uuid4()),
-            kind=mailbox.KIND_SUPERVISION_END,
+            kind=mailbox_vocabulary.KIND_SUPERVISION_END,
             created_at="2026-08-10T12:00:00+00:00",
             text="helper exited: complete",
-            supervision_outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
-            supervision_id=mailbox.new_supervision_id(),
+            supervision_outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
+            supervision_id=mailbox_validation.new_supervision_id(),
         )
-        question = mailbox.MailboxMessage(
+        question = mailbox_models.MailboxMessage(
             seq=2,
             id=str(uuid.uuid4()),
-            kind=mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-08-10T12:00:05+00:00",
             text="Which shape?",
             run_id="run-live",
         )
 
         def woke(
-            messages: tuple[mailbox.MailboxMessage, ...],
+            messages: tuple[mailbox_models.MailboxMessage, ...],
         ) -> mailbox_cli._OutboxWaitResult:
             return mailbox_cli._OutboxWaitResult(
                 questions=tuple(
                     message
                     for message in messages
-                    if message.kind == mailbox.KIND_QUESTION
+                    if message.kind == mailbox_vocabulary.KIND_QUESTION
                 ),
                 notices=(),
                 supervision_ends=tuple(
                     message
                     for message in messages
-                    if message.kind == mailbox.KIND_SUPERVISION_END
+                    if message.kind == mailbox_vocabulary.KIND_SUPERVISION_END
                 ),
                 include=mailbox_cli.OUTBOX_INCLUDE_SUPERVISION,
                 supervisor_id=str(uuid.uuid4()),
                 next_since=messages[-1].seq,
                 timed_out=False,
                 lease_supervision=mailbox_cli._LeaseSupervision(),
-                mailbox_view=mailbox.MailboxView(
+                mailbox_view=mailbox_snapshot.MailboxView(
                     mailbox_path=mailbox_path,
                     messages=messages,
                     last_seq=messages[-1].seq,
@@ -381,7 +400,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         ) as wait:
             code, lines = self.supervise_lines(
                 timeout=60,
-                supervision_id=mailbox.new_supervision_id(),
+                supervision_id=mailbox_validation.new_supervision_id(),
             )
 
         self.assertEqual(0, code)
@@ -406,9 +425,9 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         self.assertEqual("invalid-supervision-id", payload["reason"])
 
     def test_supervision_cursor_preserves_its_first_seen_anchor(self) -> None:
-        launch = mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
         anchor = datetime.now(UTC) - timedelta(seconds=300)
-        mailbox.write_supervision_cursor(
+        mailbox_cursors.write_supervision_cursor(
             self.plan_dir,
             launch,
             1,
@@ -416,7 +435,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
             first_seen_at=anchor,
         )
 
-        mailbox.write_supervision_cursor(
+        mailbox_cursors.write_supervision_cursor(
             self.plan_dir,
             launch,
             2,
@@ -425,7 +444,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
 
         self.assertEqual(
             anchor,
-            mailbox.read_supervision_first_seen_at(
+            mailbox_cursors.read_supervision_first_seen_at(
                 self.plan_dir,
                 launch,
                 state_dir=self.state_dir,
@@ -434,7 +453,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         self.assertEqual(2, self.cursor_on_disk(launch))
 
     def test_outbox_supervise_reports_a_dead_helper_as_lost(self) -> None:
-        launch = mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
         self.write_liveness_record(launch)
 
         with mock.patch.object(

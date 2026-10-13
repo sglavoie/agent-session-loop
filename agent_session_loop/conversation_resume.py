@@ -361,8 +361,9 @@ def recovery_message(continuation: TurnContinuation) -> str:
     """The operator-facing sentence a recovery pause carries.
 
     Says what was refused and what the two ways forward are, in that order. The
-    repair hint registered at ``preflight.RUNTIME_REPAIR_HINTS`` carries the
-    long form; this is the one line that reaches a pause message.
+    repair hint registered at
+    ``preflight_runtime_hints.RUNTIME_REPAIR_HINTS`` carries the long form;
+    this is the one line that reaches a pause message.
     """
     detail = continuation.detail or "the saved conversation cannot be continued"
     return (

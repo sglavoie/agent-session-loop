@@ -16,7 +16,7 @@ import json
 import unittest
 
 from agent_session_loop import assurance_models as models
-from agent_session_loop import contracts, plans, preflight
+from agent_session_loop import contracts, plans, preflight_cli
 from agent_session_loop.assurance_models import AssuranceError
 from agent_session_loop.literals import as_literal, as_optional_literal
 from agent_session_loop.plans import PlanError, parse_session_id
@@ -253,7 +253,7 @@ class ParseBoundaryTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "--commit-per-session"):
-            preflight.preflight_from_args(namespace)
+            preflight_cli.preflight_from_args(namespace)
 
 
 if __name__ == "__main__":

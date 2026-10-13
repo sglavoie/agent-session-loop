@@ -15,6 +15,11 @@ from agent_session_loop import (
     control_queue,
     events,
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_leases,
+    mailbox_models,
+    mailbox_vocabulary,
     plans,
     qna,
     run_coordination,
@@ -39,12 +44,12 @@ class EndToEndReplyResumeTests(rfs.EndToEndReplyResumeCase):
         self,
     ) -> None:
         self._write_plan(statuses=("pending", "pending"))
-        mailbox.append_guidance(
+        mailbox_appenders.append_guidance(
             self.plan_dir,
             "Keep the current session scoped.",
             state_dir=self.state_dir,
         )
-        mailbox.write_lease(
+        mailbox_leases.write_lease(
             self.plan_dir,
             "00000000-0000-0000-0000-000000000001",
             state_dir=self.state_dir,
@@ -109,20 +114,20 @@ class EndToEndReplyResumeTests(rfs.EndToEndReplyResumeCase):
             state_dir=self.state_dir,
         )
         race_barrier = threading.Barrier(2)
-        reply_successes: list[mailbox.MailboxMessage] = []
+        reply_successes: list[mailbox_models.MailboxMessage] = []
         reply_failures: list[str] = []
         result_lock = threading.Lock()
 
         def race_reply() -> None:
             race_barrier.wait(timeout=HELPER_THREAD_JOIN_TIMEOUT_SECONDS)
             try:
-                reply = mailbox.append_reply(
+                reply = mailbox_appenders.append_reply(
                     self.plan_dir,
                     question_id,
                     self.REPLY_TEXT,
                     state_dir=self.state_dir,
                 )
-            except mailbox.MailboxError as error:
+            except mailbox_models.MailboxError as error:
                 with result_lock:
                     reply_failures.append(error.reason)
             else:
@@ -140,7 +145,7 @@ class EndToEndReplyResumeTests(rfs.EndToEndReplyResumeCase):
             self.assertFalse(thread.is_alive())
         self.assertEqual(1, len(reply_successes))
         self.assertEqual(
-            [mailbox.REJECT_QUESTION_ALREADY_ANSWERED],
+            [mailbox_constants.REJECT_QUESTION_ALREADY_ANSWERED],
             reply_failures,
         )
         stdout, stderr = process.communicate(timeout=LOOP_RUN_TIMEOUT_SECONDS)
@@ -164,14 +169,14 @@ class EndToEndReplyResumeTests(rfs.EndToEndReplyResumeCase):
         questions = [
             message
             for message in mailbox_view.messages
-            if message.kind == mailbox.KIND_QUESTION
+            if message.kind == mailbox_vocabulary.KIND_QUESTION
         ]
         self.assertEqual(1, len(questions))
         self.assertEqual(question_id, questions[0].id)
         replies = [
             message
             for message in mailbox_view.messages
-            if message.kind == mailbox.KIND_REPLY
+            if message.kind == mailbox_vocabulary.KIND_REPLY
         ]
         self.assertEqual(reply_successes, replies)
 

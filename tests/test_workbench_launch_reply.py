@@ -47,6 +47,8 @@ from agent_session_loop import (
     events,
     intervention,
     mailbox,
+    mailbox_appenders,
+    mailbox_vocabulary,
     plans,
     state,
     workbench,
@@ -481,7 +483,7 @@ class _PlanFixture(unittest.TestCase):
             pid=os.getpid(),
             hostname=socket.gethostname(),
         )
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.canonical,
             QUESTION_BODY,
             state_dir=self.state_dir,
@@ -557,7 +559,9 @@ class SharedActionTests(_PlanFixture):
         self.assertIsNotNone(outcome.closure_id)
         view = mailbox.read_mailbox(self.canonical, state_dir=self.state_dir)
         replies = [
-            message for message in view.messages if message.kind == mailbox.KIND_REPLY
+            message
+            for message in view.messages
+            if message.kind == mailbox_vocabulary.KIND_REPLY
         ]
         self.assertEqual(1, len(replies))
 
@@ -590,7 +594,7 @@ class SharedActionTests(_PlanFixture):
             question_id=question_id,
         )
         assert outcome.closure_id is not None
-        mailbox.append_receipt(
+        mailbox_appenders.append_receipt(
             self.canonical,
             question_id,
             outcome.closure_id,

@@ -9,7 +9,8 @@ from typing import Any
 
 from agent_session_loop import (
     events,
-    mailbox,
+    mailbox_constants,
+    mailbox_vocabulary,
     plans,
     state,
     supervisor_audit_evidence,
@@ -57,10 +58,10 @@ class EvidenceBundleFixture(unittest.TestCase):
             {
                 "created_at": "2026-08-10T10:11:12Z",
                 "id": self.QUESTION_ID,
-                "kind": mailbox.KIND_QUESTION,
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "kind": mailbox_vocabulary.KIND_QUESTION,
+                "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
                 "text": self.QUESTION_TEXT,
-                "delivery_mode": mailbox.DELIVERY_MODE_WAIT,
+                "delivery_mode": mailbox_vocabulary.DELIVERY_MODE_WAIT,
                 "run_id": RUN_ID,
                 "session_id": "01",
                 "turn_index": 1,
@@ -68,17 +69,17 @@ class EvidenceBundleFixture(unittest.TestCase):
             {
                 "created_at": "2026-08-10T10:11:13Z",
                 "id": self.WAIT_ID,
-                "kind": mailbox.KIND_WAIT_START,
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "kind": mailbox_vocabulary.KIND_WAIT_START,
+                "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
                 "to": self.QUESTION_ID,
             },
             {
                 "created_at": "2026-08-10T10:11:14Z",
                 "id": self.FOREIGN_QUESTION_ID,
-                "kind": mailbox.KIND_QUESTION,
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "kind": mailbox_vocabulary.KIND_QUESTION,
+                "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
                 "text": "Another run asks something else.",
-                "delivery_mode": mailbox.DELIVERY_MODE_ASYNC,
+                "delivery_mode": mailbox_vocabulary.DELIVERY_MODE_ASYNC,
                 "run_id": self.FOREIGN_RUN_ID,
                 "session_id": "01",
                 "turn_index": 1,
@@ -86,24 +87,24 @@ class EvidenceBundleFixture(unittest.TestCase):
             {
                 "created_at": "2026-08-10T10:11:15Z",
                 "id": self.REPLY_ID,
-                "kind": mailbox.KIND_REPLY,
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "kind": mailbox_vocabulary.KIND_REPLY,
+                "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
                 "text": self.REPLY_TEXT,
                 "to": self.QUESTION_ID,
             },
             {
                 "created_at": "2026-08-10T10:11:16Z",
                 "id": self.FOREIGN_REPLY_ID,
-                "kind": mailbox.KIND_REPLY,
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "kind": mailbox_vocabulary.KIND_REPLY,
+                "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
                 "text": "Answering the other run.",
                 "to": self.FOREIGN_QUESTION_ID,
             },
             {
                 "created_at": "2026-08-10T10:11:17Z",
                 "id": self.RECEIPT_ID,
-                "kind": mailbox.KIND_RECEIPT,
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "kind": mailbox_vocabulary.KIND_RECEIPT,
+                "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
                 "to": self.QUESTION_ID,
                 "closure_id": self.REPLY_ID,
                 "wait_id": self.WAIT_ID,
@@ -111,18 +112,18 @@ class EvidenceBundleFixture(unittest.TestCase):
             {
                 "created_at": "2026-08-10T10:11:18Z",
                 "id": self.WAIT_END_ID,
-                "kind": mailbox.KIND_WAIT_END,
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "kind": mailbox_vocabulary.KIND_WAIT_END,
+                "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
                 "to": self.QUESTION_ID,
                 "wait_id": self.WAIT_ID,
-                "reason": mailbox.WAIT_END_REASON_CLOSURE,
+                "reason": mailbox_vocabulary.WAIT_END_REASON_CLOSURE,
                 "closure_id": self.REPLY_ID,
             },
             {
                 "created_at": "2026-08-10T10:11:19Z",
                 "id": self.NOTICE_ID,
-                "kind": mailbox.KIND_NOTICE,
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "kind": mailbox_vocabulary.KIND_NOTICE,
+                "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
                 "text": "Session 01 resumed with the narrowed contract.",
                 "run_id": RUN_ID,
                 "session_id": "01",
@@ -242,7 +243,7 @@ class EvidenceBundleFixture(unittest.TestCase):
                 )
                 + "\n"
             )
-        (state_dir / mailbox.MAILBOX_FILE_NAME).write_text(
+        (state_dir / mailbox_constants.MAILBOX_FILE_NAME).write_text(
             "".join(json.dumps(record) + "\n" for record in self._mailbox_records()),
             encoding="utf-8",
         )

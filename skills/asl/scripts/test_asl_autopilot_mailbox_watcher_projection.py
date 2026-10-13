@@ -18,6 +18,8 @@ from asl_autopilot_test_support import (  # noqa: F401
     tearDownModule,
 )
 
+from agent_session_loop import mailbox_vocabulary
+
 
 class MailboxWatcherProjectionTest(MailboxWatcherBase):
     def test_projects_only_observed_unanswered_questions_for_exact_run(
@@ -30,7 +32,7 @@ class MailboxWatcherProjectionTest(MailboxWatcherBase):
         reply = autopilot._mailbox.MailboxMessage(
             seq=3,
             id="00000000-0000-0000-0000-000000000012",
-            kind=autopilot._mailbox.KIND_REPLY,
+            kind=mailbox_vocabulary.KIND_REPLY,
             created_at="2026-07-24T19:00:02+00:00",
             text="handled",
             to=question.id,
@@ -38,7 +40,7 @@ class MailboxWatcherProjectionTest(MailboxWatcherBase):
         guidance = autopilot._mailbox.MailboxMessage(
             seq=2,
             id="00000000-0000-0000-0000-000000000013",
-            kind=autopilot._mailbox.KIND_GUIDANCE,
+            kind=mailbox_vocabulary.KIND_GUIDANCE,
             created_at="2026-07-24T19:00:01+00:00",
             text="unrelated guidance",
         )
@@ -120,7 +122,7 @@ class MailboxWatcherProjectionTest(MailboxWatcherBase):
         current_question = autopilot._mailbox.MailboxMessage(
             seq=2,
             id="00000000-0000-0000-0000-000000000022",
-            kind=autopilot._mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T19:01:00+00:00",
             text="current run question",
             run_id="run-current",

@@ -54,7 +54,16 @@ from asl_workbench import actions as portable_actions
 from asl_workbench import catalog as portable_catalog
 from asl_workbench import operations
 
-from . import clock, durability, events, intervention, mailbox, plans, state
+from . import (
+    clock,
+    durability,
+    events,
+    intervention,
+    mailbox,
+    mailbox_models,
+    plans,
+    state,
+)
 
 # ---------------------------------------------------------------------------
 # Layout
@@ -524,7 +533,7 @@ def _reply_evidence(
     if origin == portable_actions.REPLY_ORIGIN_MAILBOX and question_id is not None:
         try:
             view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
-        except OSError, ValueError, mailbox.MailboxError:
+        except OSError, ValueError, mailbox_models.MailboxError:
             view = None
         if view is not None:
             closure = view.reply_for(question_id)

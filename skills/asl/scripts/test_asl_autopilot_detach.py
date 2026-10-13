@@ -20,6 +20,8 @@ from asl_autopilot_test_support import (  # noqa: F401
     tearDownModule,
 )
 
+from agent_session_loop import mailbox_vocabulary
+
 
 class DetachLaunchTest(unittest.TestCase):
     """`--detach` hands supervision to a new session and returns a handshake."""
@@ -311,7 +313,7 @@ class DetachRealForkTest(unittest.TestCase):
         return [
             message.supervision_id
             for message in view.messages
-            if message.kind == autopilot._mailbox.KIND_SUPERVISION_END
+            if message.kind == mailbox_vocabulary.KIND_SUPERVISION_END
         ]
 
 

@@ -10,7 +10,7 @@ Every race the module claims to survive is covered as a *deterministic*
 property rather than by hoping a sleep lands in the right window:
 
 * a reply committed in the instant a wait times out is honoured, because
-  ``mailbox.finish_wait`` re-checks under the mailbox lock;
+  ``mailbox_waits.finish_wait`` re-checks under the mailbox lock;
 * a lease probe or deadline rebase whose wait has already been cleared is
   dropped instead of resurrecting the wait;
 * a supervisor lost, recovered, and lost again across a suspend moves the
@@ -37,6 +37,11 @@ from agent_session_loop import (
     events,
     harnesses,
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_models,
+    mailbox_vocabulary,
+    mailbox_waits,
     qna,
     run_control,
     run_coordination,
@@ -143,11 +148,11 @@ def lease_view(
     """Build the lease view a probe would return, without writing a lease file."""
     lease = None
     if updated_at is not None:
-        lease = mailbox.MailboxLease(
+        lease = mailbox_models.MailboxLease(
             supervisor_id="11111111-2222-3333-4444-555555555555",
             updated_at=updated_at,
         )
-    return mailbox.MailboxLeaseView(
+    return mailbox_models.MailboxLeaseView(
         lease_path=Path("lease.json"),
         lease=lease,
         fresh=fresh,
@@ -235,16 +240,16 @@ class CoordinationTestCase(unittest.TestCase):
 
     def open_wait(
         self, text: str = "what next?", *, turn_index: int = 1
-    ) -> tuple[mailbox.MailboxMessage, mailbox.MailboxMessage]:
+    ) -> tuple[mailbox_models.MailboxMessage, mailbox_models.MailboxMessage]:
         """Append a wait-delivered runner question and return it with its wait."""
-        return mailbox.append_wait_question(
+        return mailbox_waits.append_wait_question(
             self.plan_dir,
             text,
             state_dir=self.state_dir_arg,
             run_id=RUN_ID,
             session_id=SESSION_ID,
             turn_index=turn_index,
-            waiter_origin=mailbox.WAITER_ORIGIN_RUNNER,
+            waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_RUNNER,
         )
 
 
@@ -356,12 +361,12 @@ class WaitStateStoreTests(CoordinationTestCase):
     def test_clearing_on_a_resolution_publishes_its_closure_metadata(self) -> None:
         store = self.store()
         store.begin(waiting_payload("question-1"), pending_outbox=1)
-        resolution = mailbox.MailboxMessage(
+        resolution = mailbox_models.MailboxMessage(
             id="22222222-3333-4444-5555-666666666666",
             seq=7,
-            kind=mailbox.KIND_RESOLUTION,
+            kind=mailbox_vocabulary.KIND_RESOLUTION,
             created_at=clock.isoformat(clock.utc_now()),
-            action=mailbox.RESOLUTION_ACTION_PAUSE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
         )
 
         reason = store.clear(
@@ -374,7 +379,9 @@ class WaitStateStoreTests(CoordinationTestCase):
 
         self.assertEqual(reason, run_coordination.WAIT_REASON_RESOLUTION)
         cleared = self.persistence.payloads(events.MAILBOX_EVENT)[-1]
-        self.assertEqual(cleared["resolution_action"], mailbox.RESOLUTION_ACTION_PAUSE)
+        self.assertEqual(
+            cleared["resolution_action"], mailbox_vocabulary.RESOLUTION_ACTION_PAUSE
+        )
         self.assertEqual(cleared["resolution_message_id"], resolution.id)
         self.assertEqual(cleared["resolution_seq"], 7)
 
@@ -385,7 +392,7 @@ class WaitStateStoreTests(CoordinationTestCase):
                 self.payload,
                 reason=run_coordination.WAIT_REASON_RESOLUTION,
                 pending_outbox=0,
-                resolution_action=mailbox.RESOLUTION_ACTION_PAUSE,
+                resolution_action=mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
                 persistence=self.persistence,
             )
 
@@ -393,12 +400,12 @@ class WaitStateStoreTests(CoordinationTestCase):
         store = self.store()
 
         store.record_preparation_failed(
-            session_id=SESSION_ID, turn_index=1, reason=mailbox.LEASE_MISSING
+            session_id=SESSION_ID, turn_index=1, reason=mailbox_constants.LEASE_MISSING
         )
 
         (event,) = self.persistence.payloads(events.MAILBOX_EVENT)
         self.assertEqual(event["action"], events.MAILBOX_ACTION_WAIT_PREPARATION_FAILED)
-        self.assertEqual(event["reason"], mailbox.LEASE_MISSING)
+        self.assertEqual(event["reason"], mailbox_constants.LEASE_MISSING)
         self.assertEqual(self.persistence.states, [])
         self.assertNotIn("waiting_for_reply", self.payload)
 
@@ -470,8 +477,8 @@ class ReplyRaceTests(CoordinationTestCase):
 
     def finish(
         self,
-        question: mailbox.MailboxMessage,
-        wait_start: mailbox.MailboxMessage,
+        question: mailbox_models.MailboxMessage,
+        wait_start: mailbox_models.MailboxMessage,
         result: run_coordination.MailboxWaitResult,
     ) -> run_coordination.MailboxWaitResult:
         return run_coordination.finish_mailbox_reply_wait_lifecycle(
@@ -486,7 +493,7 @@ class ReplyRaceTests(CoordinationTestCase):
         question, wait_start = self.open_wait()
         # The poll loop already decided it had timed out; the reply commits
         # before ``finish_wait`` takes the mailbox lock.
-        reply = mailbox.append_reply(
+        reply = mailbox_appenders.append_reply(
             self.plan_dir, question.id, "here you go", state_dir=self.state_dir_arg
         )
 
@@ -499,7 +506,7 @@ class ReplyRaceTests(CoordinationTestCase):
 
     def test_the_overridden_timeout_keeps_the_evidence_the_loop_gathered(self) -> None:
         question, wait_start = self.open_wait()
-        mailbox.append_reply(
+        mailbox_appenders.append_reply(
             self.plan_dir, question.id, "here you go", state_dir=self.state_dir_arg
         )
         timed_out = self.timed_out()
@@ -512,10 +519,10 @@ class ReplyRaceTests(CoordinationTestCase):
 
     def test_a_resolution_landing_at_the_timeout_overrides_the_timeout(self) -> None:
         question, wait_start = self.open_wait()
-        resolution = mailbox.append_resolution(
+        resolution = mailbox_appenders.append_resolution(
             self.plan_dir,
             question.id,
-            mailbox.RESOLUTION_ACTION_PAUSE,
+            mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
             expected_run_id=RUN_ID,
             state_dir=self.state_dir_arg,
         )
@@ -528,17 +535,17 @@ class ReplyRaceTests(CoordinationTestCase):
 
     def test_a_closure_replacing_a_reply_result_clears_the_other_field(self) -> None:
         question, wait_start = self.open_wait()
-        resolution = mailbox.append_resolution(
+        resolution = mailbox_appenders.append_resolution(
             self.plan_dir,
             question.id,
-            mailbox.RESOLUTION_ACTION_CONTINUE,
+            mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             expected_run_id=RUN_ID,
             state_dir=self.state_dir_arg,
         )
-        stale_reply = mailbox.MailboxMessage(
+        stale_reply = mailbox_models.MailboxMessage(
             id="33333333-4444-5555-6666-777777777777",
             seq=1,
-            kind=mailbox.KIND_REPLY,
+            kind=mailbox_vocabulary.KIND_REPLY,
             created_at=clock.isoformat(clock.utc_now()),
         )
         arrived = run_coordination.MailboxWaitResult(
@@ -562,24 +569,26 @@ class ReplyRaceTests(CoordinationTestCase):
 
     def test_the_same_wait_cannot_be_finished_twice(self) -> None:
         question, wait_start = self.open_wait()
-        mailbox.append_reply(
+        mailbox_appenders.append_reply(
             self.plan_dir, question.id, "here you go", state_dir=self.state_dir_arg
         )
         self.finish(question, wait_start, self.timed_out())
 
-        with self.assertRaises(mailbox.MailboxError):
+        with self.assertRaises(mailbox_models.MailboxError):
             self.finish(question, wait_start, self.timed_out())
 
     def test_a_reply_after_a_clean_timeout_is_rejected(self) -> None:
         question, wait_start = self.open_wait()
         self.finish(question, wait_start, self.timed_out())
 
-        with self.assertRaises(mailbox.MailboxError) as caught:
-            mailbox.append_reply(
+        with self.assertRaises(mailbox_models.MailboxError) as caught:
+            mailbox_appenders.append_reply(
                 self.plan_dir, question.id, "too late", state_dir=self.state_dir_arg
             )
 
-        self.assertEqual(caught.exception.reason, mailbox.REJECT_QUESTION_NOT_WAITING)
+        self.assertEqual(
+            caught.exception.reason, mailbox_constants.REJECT_QUESTION_NOT_WAITING
+        )
 
 
 class MailboxWaitCoordinatorTests(CoordinationTestCase):
@@ -587,8 +596,8 @@ class MailboxWaitCoordinatorTests(CoordinationTestCase):
 
     def prepared(
         self,
-        question: mailbox.MailboxMessage,
-        wait_start: mailbox.MailboxMessage,
+        question: mailbox_models.MailboxMessage,
+        wait_start: mailbox_models.MailboxMessage,
     ) -> run_coordination.PreparedMailboxWait:
         return run_coordination.PreparedMailboxWait(
             context=qna_context(
@@ -628,7 +637,7 @@ class MailboxWaitCoordinatorTests(CoordinationTestCase):
         def poll(**_kwargs: Any) -> run_coordination.MailboxWaitResult:
             # The supervisor answers in the window between the loop's last
             # unlocked read and the locked commit below.
-            mailbox.append_reply(
+            mailbox_appenders.append_reply(
                 self.plan_dir, question.id, "answered", state_dir=self.state_dir_arg
             )
             return run_coordination.MailboxWaitResult(
@@ -834,7 +843,8 @@ class SupervisionCursorTests(unittest.TestCase):
         clocks.advance(300.0)
 
         verdict = cursor.observe_lease(
-            lease_view(fresh=False, reason=mailbox.LEASE_EXPIRED), clocks.monotonic()
+            lease_view(fresh=False, reason=mailbox_constants.LEASE_EXPIRED),
+            clocks.monotonic(),
         )
 
         self.assertEqual(verdict, "lost")
@@ -1208,7 +1218,7 @@ class AbortCancellationTests(ControlDrainTestCase):
         guidance = [
             message
             for message in view.messages
-            if message.kind == mailbox.KIND_GUIDANCE
+            if message.kind == mailbox_vocabulary.KIND_GUIDANCE
         ]
         self.assertEqual(len(guidance), 1)
         self.assertIn("rethinking the plan", guidance[0].text or "")
@@ -1265,7 +1275,7 @@ class AbortCancellationTests(ControlDrainTestCase):
             [
                 message
                 for message in view.messages
-                if message.kind == mailbox.KIND_GUIDANCE
+                if message.kind == mailbox_vocabulary.KIND_GUIDANCE
             ],
             [],
         )
@@ -1290,7 +1300,7 @@ class AbortCancellationTests(ControlDrainTestCase):
         action = run_control.RunControlState().request_abort_turn(reason="stop")
 
         with mock.patch.object(
-            run_coordination.mailbox,
+            run_coordination.mailbox_appenders,
             "append_guidance",
             side_effect=OSError("mailbox gone"),
         ):

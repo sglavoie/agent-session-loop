@@ -33,7 +33,7 @@ from agent_session_loop import (
     harnesses,
     pause_policy,
     plans,
-    preflight,
+    preflight_runtime_hints,
     run_entry,
     run_flags,
     turn_execution,
@@ -589,7 +589,7 @@ class RecoveryPauseRegistrationTests(unittest.TestCase):
         self.assertNotIn(self.reason, workbench_recovery.GENERIC_RECOVERY_PAUSE_REASONS)
 
     def test_a_repair_hint_explains_the_two_ways_forward(self) -> None:
-        hint = preflight.RUNTIME_REPAIR_HINTS[self.reason]
+        hint = preflight_runtime_hints.RUNTIME_REPAIR_HINTS[self.reason]
         self.assertEqual(hint.check_id, f"runtime.{self.reason}")
         self.assertIn("--fresh-conversation", hint.message)
 

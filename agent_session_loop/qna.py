@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import events, mailbox, pause_policy, plans, responses, state
+from . import events, mailbox_vocabulary, pause_policy, plans, responses, state
 
 REASON_NO_PAUSED_RUN = "no-paused-run"
 REASON_MISSING_QUESTION_CONTEXT = "missing-question-context"
@@ -1069,7 +1069,7 @@ def mailbox_reply_stdin_command_text(context: QnAContext) -> str:
 
 def _mailbox_resolution_command_base(
     context: QnAContext,
-    action: mailbox.ResolutionAction,
+    action: mailbox_vocabulary.ResolutionAction,
 ) -> list[str]:
     if context.question_id is None:
         raise ValueError("live Q&A context does not record a question id")
@@ -1094,7 +1094,7 @@ def mailbox_continue_command_text(context: QnAContext) -> str:
     return shlex.join(
         _mailbox_resolution_command_base(
             context,
-            mailbox.RESOLUTION_ACTION_CONTINUE,
+            mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
         )
     )
 
@@ -1104,7 +1104,7 @@ def mailbox_pause_command_text(context: QnAContext) -> str:
     return shlex.join(
         _mailbox_resolution_command_base(
             context,
-            mailbox.RESOLUTION_ACTION_PAUSE,
+            mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
         )
     )
 

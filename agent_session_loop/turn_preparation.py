@@ -90,9 +90,9 @@ from . import (
     conversation_resume,
     events,
     handoff_guards,
-    mailbox,
+    mailbox_models,
     plans,
-    preflight,
+    preflight_footprint,
     readiness_gate,
     redirect_ack,
     repository_evidence,
@@ -600,7 +600,7 @@ class PacketInputs:
     has_expansion: bool
     has_progress: bool
     repair_references: tuple[str, ...]
-    pending_guidance: tuple[mailbox.MailboxMessage, ...]
+    pending_guidance: tuple[mailbox_models.MailboxMessage, ...]
 
 
 def collect_packet_inputs(
@@ -841,7 +841,9 @@ def prepare_turn_prompt(
             exempt_roots=run_inputs._runner_owned_roots(
                 snapshot.plan_dir, args.state_dir, run_dir=ctx.run_dir
             ),
-            provenance_roots=preflight.plan_provenance_exempt_roots(snapshot.plan_dir),
+            provenance_roots=preflight_footprint.plan_provenance_exempt_roots(
+                snapshot.plan_dir
+            ),
         )
     )
     if packet_intent_report is not None:

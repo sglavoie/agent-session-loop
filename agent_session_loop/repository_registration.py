@@ -52,7 +52,7 @@ from typing import Any, Literal
 from . import (
     authoring,
     plans,
-    preflight,
+    preflight_footprint,
     repository_intent,
     repository_scope,
     responses,
@@ -154,15 +154,18 @@ def derive_registration(
 ) -> RegistrationPlan | RegistrationResult:
     """Compute the registry migration for ``plan_dir`` bound to ``cwd``.
 
-    Detection goes through :func:`preflight.plan_repository_intent` rather than
-    the footprint scan: intent resolves a contract target no session has
+    Detection goes through
+    :func:`preflight_footprint.plan_repository_intent` rather than the
+    footprint scan: intent resolves a contract target no session has
     created yet, and it is the gate the runner actually enforces, so this
     derivation fires exactly when that gate would refuse.
     """
     canonical_dir = canonicalize_path(plan_dir)
     bound_root = canonicalize_filesystem_path(cwd)
 
-    intent, report = preflight.plan_repository_intent(canonical_dir, bound_root)
+    intent, report = preflight_footprint.plan_repository_intent(
+        canonical_dir, bound_root
+    )
     if intent is None:
         return RegistrationResult(
             status="already-registered",
@@ -285,7 +288,7 @@ def _source_candidates(
 ) -> list[repository_intent.IntentCandidate]:
     """Every location a source plan declares it will reach.
 
-    Mirrors :func:`preflight._repository_intent_candidates` minus the
+    Mirrors :func:`preflight_footprint._repository_intent_candidates` minus the
     plan-directory files a source plan does not have: contract locations
     first, then the plan's own prose, then the root a run would launch from.
     """

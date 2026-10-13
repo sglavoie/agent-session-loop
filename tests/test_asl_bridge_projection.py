@@ -22,6 +22,9 @@ from agent_session_loop import (
     cli,
     intervention,
     mailbox,
+    mailbox_appenders,
+    mailbox_vocabulary,
+    mailbox_waits,
     plans,
     state,
     workbench,
@@ -160,7 +163,7 @@ class _Corpus:
             pid=os.getpid(),
             hostname=socket.gethostname(),
         )
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             plan_dir,
             QUESTION_BODY,
             run_id="20260619T160000Z-1",
@@ -281,7 +284,7 @@ class RunsProjectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))
             plan_dir = corpus.paused_plan()
-            mailbox.append_question(
+            mailbox_appenders.append_question(
                 plan_dir,
                 QUESTION_BODY,
                 state_dir=corpus.state_root,
@@ -307,7 +310,7 @@ class RunsProjectionTests(unittest.TestCase):
             corpus = _Corpus(Path(tmp))
             plan_dir = corpus.paused_plan()
             for owner in ("previous-run", None):
-                mailbox.append_question(
+                mailbox_appenders.append_question(
                     plan_dir,
                     "Historical question",
                     run_id=owner,
@@ -438,7 +441,7 @@ class RunsProjectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))
             plan_dir = corpus.running_plan()
-            question = mailbox.append_question(
+            question = mailbox_appenders.append_question(
                 plan_dir,
                 QUESTION_BODY,
                 state_dir=corpus.state_root,
@@ -470,14 +473,14 @@ class RunsProjectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))
             plan_dir = corpus.running_plan()
-            question, _ = mailbox.append_wait_question(
+            question, _ = mailbox_waits.append_wait_question(
                 plan_dir,
                 QUESTION_BODY,
                 state_dir=corpus.state_root,
                 run_id="20260619T150000Z-1",
                 session_id="2",
                 turn_index=3,
-                waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+                waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_WORKER,
             )
 
             (row,) = corpus.snapshot()["rows"]
@@ -499,14 +502,14 @@ class RunsProjectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))
             plan_dir = corpus.running_plan()
-            mailbox.append_wait_question(
+            mailbox_waits.append_wait_question(
                 plan_dir,
                 QUESTION_BODY,
                 state_dir=corpus.state_root,
                 run_id="20260619T150000Z-1",
                 session_id="2",
                 turn_index=2,
-                waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+                waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_WORKER,
             )
 
             (row,) = corpus.snapshot()["rows"]

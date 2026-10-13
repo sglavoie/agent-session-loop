@@ -14,7 +14,11 @@ from unittest import mock
 from agent_session_loop import (
     agent_mux_delivery,
     mailbox,
+    mailbox_appenders,
     mailbox_cli,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_leases,
 )
 from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
 from tests.support import (
@@ -26,7 +30,7 @@ from tests.support import (
 
 class MailboxCliTestsPart2(MailboxCliTestsBase):
     def test_inbox_resolve_requires_a_live_owned_question(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Historical question",
             state_dir=self.state_dir,
@@ -54,13 +58,13 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
                 "historical-question",
                 {"run_id": "run-live", "ok": True, "paused": False},
                 question.id,
-                mailbox.REJECT_QUESTION_NOT_OPEN,
+                mailbox_constants.REJECT_QUESTION_NOT_OPEN,
             ),
             (
                 "missing-question",
                 {"run_id": "run-live", "ok": True, "paused": False},
                 str(uuid.uuid4()),
-                mailbox.REJECT_QUESTION_NOT_FOUND,
+                mailbox_constants.REJECT_QUESTION_NOT_FOUND,
             ),
         )
         for label, runner_state, target, expected_reason in cases:
@@ -86,7 +90,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
     def test_inbox_resolve_rejects_stale_lock_and_unreadable_state(
         self,
     ) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Still active?",
             state_dir=self.state_dir,
@@ -134,25 +138,25 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
             {"run_id": "run-live", "ok": True, "paused": False},
         )
         _write_lock_file(self.plan_dir, self.state_dir, pid=os.getpid())
-        answered = mailbox.append_question(
+        answered = mailbox_appenders.append_question(
             self.plan_dir,
             "Answered?",
             state_dir=self.state_dir,
             run_id="run-live",
         )
-        mailbox.append_reply(
+        mailbox_appenders.append_reply(
             self.plan_dir,
             answered.id,
             "Yes.",
             state_dir=self.state_dir,
         )
-        resolved = mailbox.append_question(
+        resolved = mailbox_appenders.append_question(
             self.plan_dir,
             "Resolved?",
             state_dir=self.state_dir,
             run_id="run-live",
         )
-        mailbox.append_resolution(
+        mailbox_appenders.append_resolution(
             self.plan_dir,
             resolved.id,
             "pause",
@@ -161,8 +165,8 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
         )
 
         for target, expected_reason in (
-            (answered.id, mailbox.REJECT_QUESTION_ALREADY_ANSWERED),
-            (resolved.id, mailbox.REJECT_QUESTION_ALREADY_RESOLVED),
+            (answered.id, mailbox_constants.REJECT_QUESTION_ALREADY_ANSWERED),
+            (resolved.id, mailbox_constants.REJECT_QUESTION_ALREADY_RESOLVED),
         ):
             with self.subTest(reason=expected_reason):
                 code, payload = self.payload_from(
@@ -176,7 +180,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
         invalid_cases = (
             (
                 self.args(action=None, to=str(uuid.uuid4())),
-                mailbox.REJECT_INVALID_ACTION,
+                mailbox_constants.REJECT_INVALID_ACTION,
             ),
             (
                 self.args(
@@ -192,7 +196,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
                     action="other",
                     to=str(uuid.uuid4()),
                 ),
-                mailbox.REJECT_INVALID_ACTION,
+                mailbox_constants.REJECT_INVALID_ACTION,
             ),
         )
         for args, expected_reason in invalid_cases:
@@ -204,7 +208,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
                 self.assertEqual(1, code)
                 self.assertEqual(expected_reason, payload["reason"])
         self.assertFalse(
-            mailbox.mailbox_path_for_plan(
+            mailbox_cursors.mailbox_path_for_plan(
                 self.plan_dir,
                 self.state_dir,
             ).exists()
@@ -217,7 +221,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
             {"run_id": "run-live", "ok": True, "paused": False},
         )
         _write_lock_file(self.plan_dir, self.state_dir, pid=os.getpid())
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Continue?",
             state_dir=self.state_dir,
@@ -241,13 +245,13 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
         self,
     ) -> None:
         self.write_active_turn()
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "May I continue?",
             state_dir=self.state_dir,
             run_id="run-live",
         )
-        mailbox.write_lease(
+        mailbox_leases.write_lease(
             self.plan_dir,
             "00000000-0000-0000-0000-000000000099",
             state_dir=self.state_dir,
@@ -312,19 +316,19 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
         self,
     ) -> None:
         self.write_active_turn()
-        first = mailbox.append_question(
+        first = mailbox_appenders.append_question(
             self.plan_dir,
             "First?",
             state_dir=self.state_dir,
             run_id="run-live",
         )
-        second = mailbox.append_question(
+        second = mailbox_appenders.append_question(
             self.plan_dir,
             "Second?",
             state_dir=self.state_dir,
             run_id="run-live",
         )
-        mailbox.write_lease(
+        mailbox_leases.write_lease(
             self.plan_dir,
             "00000000-0000-0000-0000-000000000099",
             state_dir=self.state_dir,
@@ -352,13 +356,13 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
 
     def test_resolution_succeeds_when_agent_mux_delivery_fails(self) -> None:
         self.write_active_turn()
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Proceed?",
             state_dir=self.state_dir,
             run_id="run-live",
         )
-        mailbox.write_lease(
+        mailbox_leases.write_lease(
             self.plan_dir,
             "00000000-0000-0000-0000-000000000099",
             state_dir=self.state_dir,
@@ -384,7 +388,7 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
         self.assertEqual("resolution", payload["message"]["kind"])
 
     def test_outbox_wait_heartbeats_fresh_projected_lease(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,
@@ -411,13 +415,13 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
         self,
     ) -> None:
         self.write_active_turn(run_id="run-live")
-        first = mailbox.append_question(
+        first = mailbox_appenders.append_question(
             self.plan_dir,
             "First private question",
             state_dir=self.state_dir,
             run_id="run-live",
         )
-        second = mailbox.append_question(
+        second = mailbox_appenders.append_question(
             self.plan_dir,
             "Second private question",
             state_dir=self.state_dir,

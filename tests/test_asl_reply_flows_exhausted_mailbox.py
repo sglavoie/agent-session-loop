@@ -14,6 +14,12 @@ import tests.reply_flow_support as rfs
 from agent_session_loop import (
     events,
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_leases,
+    mailbox_models,
+    mailbox_snapshot,
+    mailbox_vocabulary,
     qna,
     run_coordination,
     run_persistence,
@@ -31,14 +37,14 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
         self,
     ) -> None:
         question_id = "00000000-0000-0000-0000-000000000043"
-        question = mailbox.MailboxMessage(
+        question = mailbox_models.MailboxMessage(
             seq=1,
             id=question_id,
-            kind=mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T12:00:00+00:00",
             text="Which option?",
         )
-        view = mailbox.MailboxView(
+        view = mailbox_snapshot.MailboxView(
             mailbox_path=Path("/tmp/mailbox.jsonl"),
             messages=(question,),
             last_seq=1,
@@ -158,35 +164,35 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
 
     def test_mailbox_reply_wait_reparses_only_after_change_token(self) -> None:
         question_id = "00000000-0000-0000-0000-000000000016"
-        question = mailbox.MailboxMessage(
+        question = mailbox_models.MailboxMessage(
             seq=1,
             id=question_id,
-            kind=mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T12:00:00+00:00",
             text="Which option?",
         )
-        reply = mailbox.MailboxMessage(
+        reply = mailbox_models.MailboxMessage(
             seq=2,
             id="00000000-0000-0000-0000-000000000017",
-            kind=mailbox.KIND_REPLY,
+            kind=mailbox_vocabulary.KIND_REPLY,
             created_at="2026-07-24T12:00:01+00:00",
             text="Option A",
             to=question_id,
         )
         mailbox_path = Path("/tmp/mailbox.jsonl")
-        waiting_view = mailbox.MailboxView(
+        waiting_view = mailbox_snapshot.MailboxView(
             mailbox_path=mailbox_path,
             messages=(question,),
             last_seq=1,
         )
-        replied_view = mailbox.MailboxView(
+        replied_view = mailbox_snapshot.MailboxView(
             mailbox_path=mailbox_path,
             messages=(question, reply),
             last_seq=2,
         )
-        lease = mailbox.MailboxLeaseView(
+        lease = mailbox_models.MailboxLeaseView(
             lease_path=Path("/tmp/mailbox-lease.json"),
-            lease=mailbox.MailboxLease(
+            lease=mailbox_models.MailboxLease(
                 supervisor_id="00000000-0000-0000-0000-000000000018",
                 updated_at="2026-07-24T12:00:00+00:00",
             ),
@@ -227,7 +233,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
                 side_effect=[waiting_view, replied_view],
             ) as read,
             mock.patch.object(
-                mailbox,
+                mailbox_leases,
                 "read_lease",
                 return_value=lease,
             ),
@@ -256,20 +262,22 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
 
     def test_exhausted_mailbox_ends_reply_wait_before_polling(self) -> None:
         question_id = "00000000-0000-4000-8000-000000000021"
-        question = mailbox.MailboxMessage(
+        question = mailbox_models.MailboxMessage(
             seq=1,
             id=question_id,
-            kind=mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T12:00:00+00:00",
             text="Which option?",
             run_id="RUN-TEST",
         )
-        exhausted_view = mailbox.MailboxView(
+        exhausted_view = mailbox_snapshot.MailboxView(
             mailbox_path=Path("/tmp/mailbox.jsonl"),
             messages=(question,),
             last_seq=1,
             size_bytes=(
-                mailbox.MAILBOX_MAX_BYTES - mailbox.MAILBOX_MIN_APPEND_BYTES + 1
+                mailbox_constants.MAILBOX_MAX_BYTES
+                - mailbox_constants.MAILBOX_MIN_APPEND_BYTES
+                + 1
             ),
         )
         settings = run_coordination.MailboxWaitSettings(
@@ -292,7 +300,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
                 return_value=exhausted_view,
             ) as read,
             mock.patch.object(
-                mailbox,
+                mailbox_leases,
                 "read_lease",
             ) as read_lease,
         ):
@@ -313,7 +321,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
             )
 
         self.assertIsNone(result.reply)
-        self.assertEqual(mailbox.ERROR_MAILBOX_FULL, result.reason)
+        self.assertEqual(mailbox_constants.ERROR_MAILBOX_FULL, result.reason)
         self.assertEqual(1, result.pending_outbox)
         read.assert_called_once()
         read_lease.assert_not_called()
@@ -326,7 +334,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
             created_at = "0001-01-01T00:00:00+00:00"
             question_id = "00000000-0000-4000-8000-000000000022"
             reply_id = "00000000-0000-4000-8000-000000000023"
-            mailbox.append_question(
+            mailbox_appenders.append_question(
                 plan_dir,
                 "Which option?",
                 state_dir=state_dir,
@@ -336,10 +344,10 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
             reply_record = {
                 "created_at": created_at,
                 "id": reply_id,
-                "kind": mailbox.KIND_REPLY,
+                "kind": mailbox_vocabulary.KIND_REPLY,
                 "text": "",
                 "to": question_id,
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
             }
             reply_overhead = len(
                 json.dumps(
@@ -353,14 +361,14 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
                 plan_dir,
                 state_dir=state_dir,
             ).size_bytes
-            final_headroom = mailbox.MAILBOX_MIN_APPEND_BYTES - 1
+            final_headroom = mailbox_constants.MAILBOX_MIN_APPEND_BYTES - 1
             reply_text = "x" * (
-                mailbox.MAILBOX_MAX_BYTES
+                mailbox_constants.MAILBOX_MAX_BYTES
                 - final_headroom
                 - current_size
                 - reply_overhead
             )
-            appended_reply = mailbox.append_reply(
+            appended_reply = mailbox_appenders.append_reply(
                 plan_dir,
                 question_id,
                 reply_text,
@@ -386,7 +394,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
             )
 
             with mock.patch.object(
-                mailbox,
+                mailbox_leases,
                 "read_lease",
             ) as read_lease:
                 result = run_coordination.wait_for_mailbox_reply(
@@ -426,7 +434,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
                 turn_index=2,
             )
             reply_id = "00000000-0000-4000-8000-000000000025"
-            published_question = mailbox.append_question(
+            published_question = mailbox_appenders.append_question(
                 plan_dir,
                 question_text,
                 state_dir=state_dir,
@@ -435,15 +443,15 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
                 run_id="run-retry",
                 session_id="1",
                 turn_index=2,
-                waiter_origin=mailbox.WAITER_ORIGIN_RUNNER,
+                waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_RUNNER,
             )
             reply_record = {
                 "created_at": created_at,
                 "id": reply_id,
-                "kind": mailbox.KIND_REPLY,
+                "kind": mailbox_vocabulary.KIND_REPLY,
                 "text": "",
                 "to": question_id,
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
             }
             reply_overhead = len(
                 json.dumps(
@@ -458,12 +466,12 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
                 state_dir=state_dir,
             ).size_bytes
             reply_text = "x" * (
-                mailbox.MAILBOX_MAX_BYTES
-                - (mailbox.MAILBOX_MIN_APPEND_BYTES - 1)
+                mailbox_constants.MAILBOX_MAX_BYTES
+                - (mailbox_constants.MAILBOX_MIN_APPEND_BYTES - 1)
                 - current_size
                 - reply_overhead
             )
-            mailbox.append_reply(
+            mailbox_appenders.append_reply(
                 plan_dir,
                 question_id,
                 reply_text,
@@ -479,7 +487,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
             self.assertIsNotNone(exhausted_view.reply_for(question_id))
 
             with mock.patch.object(
-                mailbox,
+                mailbox_appenders,
                 "append_question",
                 side_effect=AssertionError(
                     "reusing a published question must not append"
@@ -502,24 +510,24 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
         self,
     ) -> None:
         question_id = "00000000-0000-4000-8000-000000000027"
-        mismatched_kind = mailbox.MailboxMessage(
+        mismatched_kind = mailbox_models.MailboxMessage(
             seq=1,
             id=question_id,
-            kind=mailbox.KIND_GUIDANCE,
+            kind=mailbox_vocabulary.KIND_GUIDANCE,
             created_at="2026-07-24T12:00:00+00:00",
             text="Which option?",
             run_id="RUN-TEST",
             session_id="1",
             turn_index=1,
-            waiter_origin=mailbox.WAITER_ORIGIN_RUNNER,
+            waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_RUNNER,
         )
         mismatched_text = dataclasses.replace(
             mismatched_kind,
-            kind=mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             text="A different question?",
         )
         cases = (
-            ("append-required", (), mailbox.ERROR_MAILBOX_FULL),
+            ("append-required", (), mailbox_constants.ERROR_MAILBOX_FULL),
             (
                 "mismatched-kind",
                 (mismatched_kind,),
@@ -534,11 +542,11 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
 
         for name, messages, expected_reason in cases:
             with self.subTest(name=name):
-                exhausted_view = mailbox.MailboxView(
+                exhausted_view = mailbox_snapshot.MailboxView(
                     mailbox_path=Path("/tmp/mailbox.jsonl"),
                     messages=messages,
                     last_seq=len(messages),
-                    size_bytes=mailbox.MAILBOX_MAX_BYTES,
+                    size_bytes=mailbox_constants.MAILBOX_MAX_BYTES,
                 )
                 with (
                     mock.patch.object(
@@ -547,7 +555,7 @@ class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
                         return_value=exhausted_view,
                     ),
                     mock.patch.object(
-                        mailbox,
+                        mailbox_appenders,
                         "append_question",
                     ) as append_question,
                     self.assertRaises(

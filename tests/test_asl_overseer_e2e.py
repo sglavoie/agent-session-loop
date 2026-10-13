@@ -91,6 +91,9 @@ from agent_session_loop import (
     events,
     intervention,
     mailbox,
+    mailbox_appenders,
+    mailbox_models,
+    mailbox_vocabulary,
     overseer_cli,
     overseer_decisions,
     overseer_discovery,
@@ -604,14 +607,14 @@ class _World:
         return path
 
     def ask_question(self, plan_dir: Path, text: str) -> str:
-        return mailbox.append_question(
+        return mailbox_appenders.append_question(
             plan_dir,
             text,
             state_dir=self.state_root,
             run_id=f"{plan_dir.name}-run-1",
         ).id
 
-    def messages(self, plan_dir: Path) -> tuple[mailbox.MailboxMessage, ...]:
+    def messages(self, plan_dir: Path) -> tuple[mailbox_models.MailboxMessage, ...]:
         return mailbox.read_mailbox(plan_dir, state_dir=self.state_root).messages
 
     # -- turn artifacts ----------------------------------------------------
@@ -1146,7 +1149,7 @@ class HistoricalReplayTests(_WorldCase):
         self.assertEqual(overseer_cli.EXIT_OK, status, payload)
         self.assertTrue(payload["dispatch"]["performed"], payload["dispatch"]["detail"])
         self.assertIn(
-            mailbox.KIND_GUIDANCE,
+            mailbox_vocabulary.KIND_GUIDANCE,
             [message.kind for message in self.world.messages(self.plan)],
         )
 
@@ -1205,10 +1208,10 @@ class HistoricalReplayTests(_WorldCase):
         )
         self.world.release_lock(self.plan)
         question = self.world.ask_question(self.plan, "which lint profile?")
-        mailbox.append_resolution(
+        mailbox_appenders.append_resolution(
             self.plan,
             question,
-            mailbox.RESOLUTION_ACTION_CONTINUE,
+            mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             expected_run_id=f"{self.plan.name}-run-1",
             note="the question was superseded before anyone answered it",
             state_dir=self.world.state_root,
@@ -1389,7 +1392,7 @@ class FaultQualificationTests(_WorldCase):
             [
                 message
                 for message in self.world.messages(self.plan)
-                if message.kind == mailbox.KIND_GUIDANCE
+                if message.kind == mailbox_vocabulary.KIND_GUIDANCE
             ],
         )
 
@@ -1566,7 +1569,7 @@ class FaultQualificationTests(_WorldCase):
             [
                 message
                 for message in self.world.messages(self.plan)
-                if message.kind == mailbox.KIND_GUIDANCE
+                if message.kind == mailbox_vocabulary.KIND_GUIDANCE
             ],
         )
 

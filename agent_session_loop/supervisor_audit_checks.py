@@ -32,7 +32,7 @@ from . import (
     events,
     pause_policy,
     plans,
-    preflight,
+    preflight_footprint,
     review_continuation,
     state,
     verification,
@@ -411,7 +411,7 @@ def _check_repository_intent(context: _CheckContext) -> _Verdict:
         if context.roots.get(name)
     ]
     try:
-        intent, report = preflight.plan_repository_intent(
+        intent, report = preflight_footprint.plan_repository_intent(
             plan_root, workspace_root, extra_exempt_roots=exempt
         )
     except (OSError, ValueError, plans.PlanError) as error:

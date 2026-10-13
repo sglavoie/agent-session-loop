@@ -97,7 +97,7 @@ from . import (
     events,
     harnesses,
     plans,
-    preflight,
+    preflight_auto_repair,
     repository_registration,
     review_guard,
     run_contention,
@@ -540,7 +540,7 @@ def run_from_args(
             if registration.status == "applied":
                 details["auto_repairs"] = [
                     asdict(
-                        preflight.AutoRepair(
+                        preflight_auto_repair.AutoRepair(
                             action="repository-registry",
                             category="repository-registry-required",
                             path=str(initial_snapshot.plan_dir),

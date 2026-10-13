@@ -57,6 +57,7 @@ from . import (
     clock,
     intervention,
     mailbox,
+    mailbox_snapshot,
     overseer_checkpoint_groups,
     overseer_context,
     overseer_decisions,
@@ -97,7 +98,7 @@ type OpenLedger = Callable[..., overseer_store.Ledger]
 type BuildInventory = Callable[..., overseer_discovery.Inventory]
 type Authorize = Callable[..., overseer_policy_client.Decision]
 type InspectRun = Callable[..., intervention.RunFacts]
-type ReadMailbox = Callable[..., mailbox.MailboxView]
+type ReadMailbox = Callable[..., mailbox_snapshot.MailboxView]
 type ReadHistory = Callable[..., overseer_history.History]
 type UtcNow = Callable[[], datetime]
 type UtcIsoNow = Callable[[], str]

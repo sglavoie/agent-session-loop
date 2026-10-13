@@ -23,6 +23,9 @@ from asl_autopilot_records import (
 )
 
 from agent_session_loop import mailbox as _mailbox
+from agent_session_loop import mailbox_leases as _mailbox_leases
+from agent_session_loop import mailbox_models as _mailbox_models
+from agent_session_loop import mailbox_vocabulary as _mailbox_vocabulary
 
 
 class _MailboxWatcher:
@@ -49,7 +52,7 @@ class _MailboxWatcher:
         since: int,
         clock=time.monotonic,
         read_mailbox=_mailbox.read_mailbox,
-        write_lease=_mailbox.write_lease,
+        write_lease=_mailbox_leases.write_lease,
         supervisor_id: str | None = None,
         poll_interval: float = MAILBOX_POLL_INTERVAL,
         lease_interval: float = MAILBOX_LEASE_RENEW_INTERVAL,
@@ -75,7 +78,7 @@ class _MailboxWatcher:
         self._notices: list[dict[str, Any]] = []
         self._observed_question_ids: set[str] = set()
         self._observed_notice_ids: set[str] = set()
-        self._pending_questions: tuple[_mailbox.MailboxMessage, ...] = ()
+        self._pending_questions: tuple[_mailbox_models.MailboxMessage, ...] = ()
         self._projection_seq = since
         self.run_id: str | None = None
         self._requires_lock_correlation = False
@@ -88,7 +91,7 @@ class _MailboxWatcher:
     def _open_questions(
         self,
         view,
-    ) -> tuple[_mailbox.MailboxMessage, ...]:
+    ) -> tuple[_mailbox_models.MailboxMessage, ...]:
         """Return unanswered questions the bound run can still consume."""
         if self.run_id is None:
             return ()
@@ -280,7 +283,7 @@ class _MailboxWatcher:
                 state_dir=self.state_root,
                 **projection,
             )
-        except OSError, _mailbox.MailboxError:
+        except OSError, _mailbox_models.MailboxError:
             self._lease_renewal_failures += 1
             if not self._lease_degraded:
                 self._progress_records.append(
@@ -324,7 +327,7 @@ class _MailboxWatcher:
         *,
         now: float | None = None,
         force_read: bool = False,
-    ) -> tuple[_mailbox.MailboxMessage, ...]:
+    ) -> tuple[_mailbox_models.MailboxMessage, ...]:
         """Renew when due and return each newly observed question once.
 
         Attach-mode watchers use one initial immutable unanswered-question view
@@ -342,7 +345,7 @@ class _MailboxWatcher:
         assert self._next_poll_at is not None
         assert self._next_lease_at is not None
 
-        questions: tuple[_mailbox.MailboxMessage, ...] = ()
+        questions: tuple[_mailbox_models.MailboxMessage, ...] = ()
         read_succeeded = False
         if force_read or resolved_now >= self._next_poll_at:
             self._next_poll_at = resolved_now + self._poll_interval
@@ -351,7 +354,7 @@ class _MailboxWatcher:
                     self.plan_dir,
                     state_dir=self.state_root,
                 )
-            except OSError, _mailbox.MailboxError:
+            except OSError, _mailbox_models.MailboxError:
                 pass
             else:
                 read_succeeded = True
@@ -364,12 +367,12 @@ class _MailboxWatcher:
                 else:
                     questions = view.messages_since(
                         self.last_seq,
-                        kinds=(_mailbox.KIND_QUESTION,),
+                        kinds=(_mailbox_vocabulary.KIND_QUESTION,),
                     )
                 notices = tuple(
                     message
                     for message in view.messages
-                    if message.kind == _mailbox.KIND_NOTICE
+                    if message.kind == _mailbox_vocabulary.KIND_NOTICE
                     and message.run_id == self.run_id
                     and message.id not in self._observed_notice_ids
                 )
@@ -377,7 +380,11 @@ class _MailboxWatcher:
                     message
                     for message in view.messages
                     if message.seq > prior_seq
-                    and message.kind in (_mailbox.KIND_WAIT_END, _mailbox.KIND_RECEIPT)
+                    and message.kind
+                    in (
+                        _mailbox_vocabulary.KIND_WAIT_END,
+                        _mailbox_vocabulary.KIND_RECEIPT,
+                    )
                 )
                 self.last_seq = max(self.last_seq, view.last_seq)
                 self._observed_question_ids.update(
@@ -407,7 +414,7 @@ class _MailboxWatcher:
                 )
                 self._progress_records.extend(
                     _wait_end_progress_record(message)
-                    if message.kind == _mailbox.KIND_WAIT_END
+                    if message.kind == _mailbox_vocabulary.KIND_WAIT_END
                     else _receipt_progress_record(message)
                     for message in lifecycle
                 )
@@ -451,7 +458,7 @@ def _poll_mailbox_watcher(
     now: float,
     heartbeat,
     force_read: bool = False,
-) -> tuple[_mailbox.MailboxMessage, ...]:
+) -> tuple[_mailbox_models.MailboxMessage, ...]:
     """Poll one watcher and emit health plus bounded message previews."""
     if force_read:
         questions = watcher.poll(now=now, force_read=True)

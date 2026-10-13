@@ -21,6 +21,12 @@ from agent_session_loop import (
     config,
     events,
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_leases,
+    mailbox_models,
+    mailbox_snapshot,
+    mailbox_vocabulary,
     qna,
     run_coordination,
     run_persistence,
@@ -171,47 +177,47 @@ class ReplyResumeFlowCase(unittest.TestCase):
         run that turns the lease fresh must also say when supervision stops.
         """
         question_id = "00000000-0000-0000-0000-000000000044"
-        question = mailbox.MailboxMessage(
+        question = mailbox_models.MailboxMessage(
             seq=1,
             id=question_id,
-            kind=mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T12:00:00+00:00",
             text="Which option?",
         )
-        reply = mailbox.MailboxMessage(
+        reply = mailbox_models.MailboxMessage(
             seq=2,
             id="00000000-0000-0000-0000-000000000045",
-            kind=mailbox.KIND_REPLY,
+            kind=mailbox_vocabulary.KIND_REPLY,
             created_at="2026-07-24T12:00:01+00:00",
             text="Option A",
             to=question_id,
         )
         mailbox_path = Path("/tmp/mailbox.jsonl")
-        waiting_view = mailbox.MailboxView(
+        waiting_view = mailbox_snapshot.MailboxView(
             mailbox_path=mailbox_path,
             messages=(question,),
             last_seq=1,
         )
-        replied_view = mailbox.MailboxView(
+        replied_view = mailbox_snapshot.MailboxView(
             mailbox_path=mailbox_path,
             messages=(question, reply),
             last_seq=2,
         )
-        lease_record = mailbox.MailboxLease(
+        lease_record = mailbox_models.MailboxLease(
             supervisor_id="00000000-0000-0000-0000-000000000046",
             updated_at="2026-07-24T12:00:00+00:00",
         )
         lease_path = Path("/tmp/mailbox-lease.json")
-        fresh_lease = mailbox.MailboxLeaseView(
+        fresh_lease = mailbox_models.MailboxLeaseView(
             lease_path=lease_path,
             lease=lease_record,
             fresh=True,
         )
-        stale_lease = mailbox.MailboxLeaseView(
+        stale_lease = mailbox_models.MailboxLeaseView(
             lease_path=lease_path,
             lease=lease_record,
             fresh=False,
-            reason=mailbox.LEASE_EXPIRED,
+            reason=mailbox_constants.LEASE_EXPIRED,
         )
         epoch = datetime(2026, 7, 24, 12, 0, 0, tzinfo=UTC)
         now = [0.0]
@@ -256,7 +262,7 @@ class ReplyResumeFlowCase(unittest.TestCase):
                 side_effect=read_mailbox,
             ),
             mock.patch.object(
-                mailbox,
+                mailbox_leases,
                 "read_lease",
                 side_effect=read_lease,
             ),
@@ -437,12 +443,12 @@ class EndToEndReplyResumeCase(unittest.TestCase):
         return completed, completed.stdout
 
     def _start_live_mailbox_run(self) -> subprocess.Popen[str]:
-        mailbox.append_guidance(
+        mailbox_appenders.append_guidance(
             self.plan_dir,
             "Keep this run supervised.",
             state_dir=self.state_dir,
         )
-        mailbox.write_lease(
+        mailbox_leases.write_lease(
             self.plan_dir,
             "00000000-0000-0000-0000-000000000081",
             state_dir=self.state_dir,

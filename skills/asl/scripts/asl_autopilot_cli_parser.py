@@ -6,11 +6,11 @@ import argparse
 
 from asl_autopilot_constants import HELPER_DESCRIPTION, HELPER_NAME
 
-from agent_session_loop import mailbox as _mailbox
+from agent_session_loop import mailbox_validation as _mailbox_validation
 
 
 def _supervision_id_argument(value: str) -> str:
-    if not _mailbox.is_supervision_id(value):
+    if not _mailbox_validation.is_supervision_id(value):
         raise argparse.ArgumentTypeError("--supervision-id must be a UUID")
     return value
 

@@ -532,14 +532,21 @@ class ExternalRecoveryTests(unittest.TestCase):
         )
 
     def test_written_tree_cleanliness_and_legacy_end_behavior(self):
-        from agent_session_loop import preflight, review_guard, verification
+        from agent_session_loop import (
+            preflight_environment,
+            review_guard,
+            verification,
+        )
 
         git_stdout(self.repos["notes"], "add", "README.md")
         git_stdout(self.repos["notes"], "commit", "-m", "manual checkpoint")
         context = verification.VerificationContext.resolved_workspace(self.resolved)
         snapshot = plans.inspect_plan(self.plan)
         self.assertEqual(
-            (), preflight._check_registered_env_git(context, "per-session", snapshot)
+            (),
+            preflight_environment._check_registered_env_git(
+                context, "per-session", snapshot
+            ),
         )
         needed = plans.needed_repository_aliases(snapshot, self.resolved.registry)
         review_guard._validate_commit_preflight(
@@ -548,7 +555,9 @@ class ExternalRecoveryTests(unittest.TestCase):
         linked_dirt = self.linked / "unowned.txt"
         linked_dirt.write_text("linked dirt\n")
         self.assertTrue(
-            preflight._check_registered_env_git(context, "per-session", snapshot)
+            preflight_environment._check_registered_env_git(
+                context, "per-session", snapshot
+            )
         )
         with self.assertRaises(review_guard.RunError):
             review_guard._validate_commit_preflight(
@@ -557,7 +566,9 @@ class ExternalRecoveryTests(unittest.TestCase):
                 needed_aliases=needed,
             )
         linked_dirt.unlink()
-        self.assertTrue(preflight._check_registered_env_git(context, "end", snapshot))
+        self.assertTrue(
+            preflight_environment._check_registered_env_git(context, "end", snapshot)
+        )
         self.session.write_text(
             self.session.read_text().replace(
                 "**Reads repositories**: notes", "**Reads repositories**: notes, pi"
@@ -566,7 +577,9 @@ class ExternalRecoveryTests(unittest.TestCase):
         snapshot = plans.inspect_plan(self.plan)
         # A dirty tree the session only reads is inspected, reported green, and
         # never refused: its commit stages write aliases only.
-        findings = preflight._check_registered_env_git(context, "per-session", snapshot)
+        findings = preflight_environment._check_registered_env_git(
+            context, "per-session", snapshot
+        )
         self.assertEqual(["green"], [finding.severity for finding in findings])
         self.assertIn("read-only", findings[0].message)
         result = review_guard._validate_commit_preflight(
@@ -594,7 +607,7 @@ class ExternalRecoveryTests(unittest.TestCase):
             ["yellow"],
             [
                 finding.severity
-                for finding in preflight._check_registered_env_git(
+                for finding in preflight_environment._check_registered_env_git(
                     context, "per-session", snapshot
                 )
             ],

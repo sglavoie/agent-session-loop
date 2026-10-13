@@ -48,7 +48,8 @@ from pathlib import Path
 from typing import Any
 
 from agent_session_loop import (
-    mailbox,
+    mailbox_appenders,
+    mailbox_vocabulary,
     overseer_cli,
     overseer_decisions,
     overseer_history,
@@ -416,10 +417,10 @@ class InstalledLoopTests(_InstalledCase):
         )
         self.world.release_lock(self.plan)
         question = self.world.ask_question(self.plan, "which lint profile?")
-        mailbox.append_resolution(
+        mailbox_appenders.append_resolution(
             self.plan,
             question,
-            mailbox.RESOLUTION_ACTION_CONTINUE,
+            mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             expected_run_id=f"{self.plan.name}-run-1",
             note="the question was superseded before anyone answered it",
             state_dir=self.world.state_root,

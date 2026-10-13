@@ -61,6 +61,8 @@ from . import (
     events,
     intervention,
     mailbox,
+    mailbox_models,
+    mailbox_snapshot,
     plans,
     redirect_admission,
     redirect_cli,
@@ -438,8 +440,8 @@ def _question_projection(
     waiting = runner_state.get("waiting_for_reply")
     waiting = waiting if isinstance(waiting, Mapping) else None
 
-    unanswered: tuple[mailbox.MailboxMessage, ...] = ()
-    mailbox_view: mailbox.MailboxView | None = None
+    unanswered: tuple[mailbox_models.MailboxMessage, ...] = ()
+    mailbox_view: mailbox_snapshot.MailboxView | None = None
     try:
         mailbox_view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
         run_id = runner_state.get("run_id")
@@ -448,7 +450,7 @@ def _question_projection(
             for message in mailbox_view.unanswered_questions
             if isinstance(run_id, str) and run_id and message.run_id == run_id
         )
-    except OSError, ValueError, mailbox.MailboxError:
+    except OSError, ValueError, mailbox_models.MailboxError:
         unanswered = ()
     open_ids = tuple(
         message.id
@@ -1799,7 +1801,7 @@ class BridgeSession:
                 error.message,
                 details={"reason": error.reason},
             ) from error
-        except (OSError, ValueError, mailbox.MailboxError) as error:
+        except (OSError, ValueError, mailbox_models.MailboxError) as error:
             raise BridgeError(
                 ERROR_MUTATION_FAILED,
                 f"{action} could not be completed: {error}",
@@ -1916,7 +1918,7 @@ class BridgeSession:
             )
         except intervention.InterventionError as error:
             raise _bridge_error(error) from error
-        except (OSError, ValueError, mailbox.MailboxError) as error:
+        except (OSError, ValueError, mailbox_models.MailboxError) as error:
             raise BridgeError(
                 ERROR_MUTATION_FAILED,
                 f"resolution could not be appended: {error}",

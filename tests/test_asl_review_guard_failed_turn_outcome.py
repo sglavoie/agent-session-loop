@@ -19,7 +19,7 @@ from agent_session_loop import (
     cli,
     config,
     harnesses,
-    mailbox,
+    mailbox_leases,
     pause_policy,
     plans,
     review_session_body,
@@ -166,7 +166,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
                 )
             )
             if forbid_mailbox_wait:
-                mailbox.write_lease(
+                mailbox_leases.write_lease(
                     self.plan_dir,
                     str(uuid.uuid4()),
                     state_dir=str(self.state_dir),

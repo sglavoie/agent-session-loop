@@ -58,10 +58,10 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests.test_asl_authoring:"
             "SplitRepositoryFootprintTests."
             "test_write_path_refuses_contracts_that_span_repositories",
-            "tests.test_asl_preflight:"
-            "RepositoryIntentPreflightTests."
+            "tests.test_asl_preflight_repository_registry:"
+            "RepositoryIntentRegistryRepairTests."
             "test_payload_reports_the_repositories_the_plan_intends_to_reach",
-            "tests.test_asl_prepare:"
+            "tests.test_asl_prepare_legacy_repository_scope:"
             "LegacyRepositoryIntentPrepareTests."
             "test_build_validation_packet_refuses_a_multi_repo_intent",
             "tests.test_asl_run_readiness_hard_gate:"

@@ -237,7 +237,7 @@ stdlib `unittest` only) sharing fixtures through `tests/support.py`.
 everything — including the helper-script suites under `skills/` — as isolated
 parallel shards via `tests/run_suite.py`, which also fails if a test module is
 missing from its shard lists. Individual modules run directly, for example
-`python3 -m unittest tests.test_asl_verification -q`.
+`python3 -m unittest tests.test_asl_verification_run_and_observers -q`.
 
 `just test-portable` is a third lane cut for CI rather than for a developer. It
 runs `PORTABLE_MODULES`, the subset of `FAST_MODULES` that spawns no external

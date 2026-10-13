@@ -16,6 +16,12 @@ from unittest import mock
 
 from agent_session_loop import (
     mailbox,
+    mailbox_append_record,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_validation,
+    mailbox_vocabulary,
     plans,
     state,
 )
@@ -33,30 +39,30 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
-            deferred_guidance = mailbox.append_guidance(
+            deferred_guidance = mailbox_appenders.append_guidance(
                 plan_dir, "steer me", state_dir=state_dir
             )
-            delivered_guidance = mailbox.append_guidance(
+            delivered_guidance = mailbox_appenders.append_guidance(
                 plan_dir, "and me", state_dir=state_dir
             )
-            mailbox.append_guidance_delivery(
+            mailbox_appenders.append_guidance_delivery(
                 plan_dir,
                 deferred_guidance.id,
-                delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
-                delivery_reason=mailbox.GUIDANCE_REASON_UNSUPPORTED_ACTIVE_STEER,
-                channel=mailbox.GUIDANCE_CHANNEL_LIVE,
+                delivery_state=mailbox_vocabulary.GUIDANCE_STATE_DEFERRED,
+                delivery_reason=mailbox_vocabulary.GUIDANCE_REASON_UNSUPPORTED_ACTIVE_STEER,
+                channel=mailbox_vocabulary.GUIDANCE_CHANNEL_LIVE,
                 run_id="run-1",
                 session_id="5",
                 turn_index=2,
                 harness="copilot",
                 state_dir=state_dir,
             )
-            delivery = mailbox.append_guidance_delivery(
+            delivery = mailbox_appenders.append_guidance_delivery(
                 plan_dir,
                 delivered_guidance.id,
-                delivery_state=mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
-                delivery_reason=mailbox.GUIDANCE_REASON_DELIVERED,
-                channel=mailbox.GUIDANCE_CHANNEL_LIVE,
+                delivery_state=mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_LIVE,
+                delivery_reason=mailbox_vocabulary.GUIDANCE_REASON_DELIVERED,
+                channel=mailbox_vocabulary.GUIDANCE_CHANNEL_LIVE,
                 run_id="run-1",
                 session_id="5",
                 turn_index=3,
@@ -67,12 +73,14 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
 
             first, second = payload["mailbox"]["guidance"]
-            self.assertEqual(mailbox.GUIDANCE_STATE_DEFERRED, first["state"])
+            self.assertEqual(mailbox_vocabulary.GUIDANCE_STATE_DEFERRED, first["state"])
             self.assertEqual(
                 {
-                    "delivery_state": mailbox.GUIDANCE_STATE_DEFERRED,
-                    "reason": mailbox.GUIDANCE_REASON_UNSUPPORTED_ACTIVE_STEER,
-                    "channel": mailbox.GUIDANCE_CHANNEL_LIVE,
+                    "delivery_state": mailbox_vocabulary.GUIDANCE_STATE_DEFERRED,
+                    "reason": (
+                        mailbox_vocabulary.GUIDANCE_REASON_UNSUPPORTED_ACTIVE_STEER
+                    ),
+                    "channel": mailbox_vocabulary.GUIDANCE_CHANNEL_LIVE,
                     "harness": "copilot",
                     "run_id": "run-1",
                     "session_id": "5",
@@ -91,7 +99,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                     )
                 },
             )
-            self.assertEqual(mailbox.GUIDANCE_STATE_DELIVERED_LIVE, second["state"])
+            self.assertEqual(
+                mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_LIVE, second["state"]
+            )
             self.assertEqual(delivery.id, second["latest_attempt"]["delivery_id"])
             self.assertEqual(
                 delivery.created_at, second["latest_attempt"]["recorded_at"]
@@ -106,7 +116,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
-            mailbox.append_guidance(
+            mailbox_appenders.append_guidance(
                 plan_dir, "a body nobody else may read", state_dir=state_dir
             )
 
@@ -122,7 +132,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
             appended = [
-                mailbox.append_guidance(plan_dir, f"note {index}", state_dir=state_dir)
+                mailbox_appenders.append_guidance(
+                    plan_dir, f"note {index}", state_dir=state_dir
+                )
                 for index in range(state.MAILBOX_STATUS_GUIDANCE_CAP + 4)
             ]
 
@@ -140,37 +152,37 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
-            mailbox.append_question(
+            mailbox_appenders.append_question(
                 plan_dir,
                 "from a run that already ended",
                 state_dir=state_dir,
                 run_id="RUN-OLD",
             )
-            mailbox.append_question(
+            mailbox_appenders.append_question(
                 plan_dir,
                 "predates run attribution",
                 state_dir=state_dir,
             )
-            mailbox.append_question(
+            mailbox_appenders.append_question(
                 plan_dir,
                 "the live run is blocked on this",
                 state_dir=state_dir,
                 run_id="RUN-LIVE",
             )
-            resolved = mailbox.append_question(
+            resolved = mailbox_appenders.append_question(
                 plan_dir,
                 "the live run already closed this",
                 state_dir=state_dir,
                 run_id="RUN-LIVE",
             )
-            mailbox.append_resolution(
+            mailbox_appenders.append_resolution(
                 plan_dir,
                 resolved.id,
-                mailbox.RESOLUTION_ACTION_CONTINUE,
+                mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
                 expected_run_id="RUN-LIVE",
                 state_dir=state_dir,
             )
-            mailbox.append_notice(
+            mailbox_appenders.append_notice(
                 plan_dir,
                 "checkpoint",
                 run_id="RUN-LIVE",
@@ -204,10 +216,10 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
-            mailbox.append_supervision_end(
+            mailbox_appenders.append_supervision_end(
                 plan_dir,
                 "reason=complete",
-                outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
                 run_id="RUN-LIVE",
                 state_dir=state_dir,
             )
@@ -243,7 +255,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 plan_dir = Path(tmp) / "plan"
                 state_dir = Path(tmp) / "state"
                 write_plan(plan_dir, ("pending",))
-                mailbox.append_question(
+                mailbox_appenders.append_question(
                     plan_dir,
                     "abandoned when the wait timed out",
                     state_dir=state_dir,
@@ -297,20 +309,22 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             created_at = "2026-07-25T12:00:00.000000+00:00"
 
             with (
-                mock.patch.object(mailbox, "_new_id", return_value=message_id),
-                mock.patch.object(mailbox, "_utc_now", return_value=now),
+                mock.patch.object(
+                    mailbox_append_record, "_new_id", return_value=message_id
+                ),
+                mock.patch.object(mailbox_validation, "_utc_now", return_value=now),
             ):
-                appended = mailbox.append_acknowledgement(
+                appended = mailbox_appenders.append_acknowledgement(
                     plan_dir,
                     0,
                     state_dir=state_dir,
                 )
 
-            mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+            mailbox_path = mailbox_cursors.mailbox_path_for_plan(plan_dir, state_dir)
             self.assertEqual(message_id, appended.id)
             self.assertEqual(created_at, appended.created_at)
             self.assertEqual(
-                mailbox.MAILBOX_MIN_APPEND_BYTES,
+                mailbox_constants.MAILBOX_MIN_APPEND_BYTES,
                 len(mailbox_path.read_bytes()),
             )
 
@@ -322,21 +336,23 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             question_id = "00000000-0000-4000-8000-000000000001"
             reply_id = "00000000-0000-4000-8000-000000000002"
             now = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
-            question = mailbox.append_question(
+            question = mailbox_appenders.append_question(
                 plan_dir,
                 "x",
                 state_dir=state_dir,
                 message_id=question_id,
                 created_at="2026-07-25T12:00:00.000000+00:00",
             )
-            mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+            mailbox_path = mailbox_cursors.mailbox_path_for_plan(plan_dir, state_dir)
             size_before = mailbox_path.stat().st_size
 
             with (
-                mock.patch.object(mailbox, "_new_id", return_value=reply_id),
-                mock.patch.object(mailbox, "_utc_now", return_value=now),
+                mock.patch.object(
+                    mailbox_append_record, "_new_id", return_value=reply_id
+                ),
+                mock.patch.object(mailbox_validation, "_utc_now", return_value=now),
             ):
-                appended = mailbox.append_reply(
+                appended = mailbox_appenders.append_reply(
                     plan_dir,
                     question.id,
                     "x",
@@ -345,7 +361,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
 
             self.assertEqual(reply_id, appended.id)
             self.assertEqual(
-                mailbox.MAILBOX_MIN_REPLY_BYTES,
+                mailbox_constants.MAILBOX_MIN_REPLY_BYTES,
                 mailbox_path.stat().st_size - size_before,
             )
 
@@ -359,7 +375,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             question_id = "00000000-0000-4000-8000-000000000001"
             resolution_id = "00000000-0000-4000-8000-000000000002"
             now = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
-            question = mailbox.append_question(
+            question = mailbox_appenders.append_question(
                 plan_dir,
                 "x",
                 state_dir=state_dir,
@@ -367,24 +383,26 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 created_at="2026-07-25T12:00:00.000000+00:00",
                 run_id="x",
             )
-            mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+            mailbox_path = mailbox_cursors.mailbox_path_for_plan(plan_dir, state_dir)
             size_before = mailbox_path.stat().st_size
 
             with (
-                mock.patch.object(mailbox, "_new_id", return_value=resolution_id),
-                mock.patch.object(mailbox, "_utc_now", return_value=now),
+                mock.patch.object(
+                    mailbox_append_record, "_new_id", return_value=resolution_id
+                ),
+                mock.patch.object(mailbox_validation, "_utc_now", return_value=now),
             ):
-                appended = mailbox.append_resolution(
+                appended = mailbox_appenders.append_resolution(
                     plan_dir,
                     question.id,
-                    mailbox.RESOLUTION_ACTION_PAUSE,
+                    mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
                     expected_run_id="x",
                     state_dir=state_dir,
                 )
 
             self.assertEqual(resolution_id, appended.id)
             self.assertEqual(
-                mailbox.MAILBOX_MIN_RESOLUTION_BYTES,
+                mailbox_constants.MAILBOX_MIN_RESOLUTION_BYTES,
                 mailbox_path.stat().st_size - size_before,
             )
 
@@ -393,30 +411,30 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
-            empty_note_question = mailbox.append_question(
+            empty_note_question = mailbox_appenders.append_question(
                 plan_dir,
                 "Continue with an empty note?",
                 state_dir=state_dir,
                 run_id="RUN-LIVE",
             )
-            omitted_note_question = mailbox.append_question(
+            omitted_note_question = mailbox_appenders.append_question(
                 plan_dir,
                 "Pause without a note?",
                 state_dir=state_dir,
                 run_id="RUN-LIVE",
             )
-            mailbox.append_resolution(
+            mailbox_appenders.append_resolution(
                 plan_dir,
                 empty_note_question.id,
-                mailbox.RESOLUTION_ACTION_CONTINUE,
+                mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
                 expected_run_id="RUN-LIVE",
                 note="",
                 state_dir=state_dir,
             )
-            mailbox.append_resolution(
+            mailbox_appenders.append_resolution(
                 plan_dir,
                 omitted_note_question.id,
-                mailbox.RESOLUTION_ACTION_PAUSE,
+                mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
                 expected_run_id="RUN-LIVE",
                 state_dir=state_dir,
             )

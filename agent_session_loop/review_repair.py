@@ -83,6 +83,9 @@ from . import (
     durability,
     plans,
     preflight,
+    preflight_cli,
+    preflight_footprint,
+    preflight_models,
     progress_repair,
     repository_scope,
     review,
@@ -1020,9 +1023,9 @@ def _run_targeted_baselines(
 
 
 def _strip_self_lock_findings(
-    report: preflight.PreflightReport,
+    report: preflight_models.PreflightReport,
     lock_info: state.LockInfo | None,
-) -> preflight.PreflightReport:
+) -> preflight_models.PreflightReport:
     """Drop the env-lock finding that points at this process's own lock.
 
     Materialization runs the preflight gate while holding the plan lock, so the
@@ -1034,7 +1037,7 @@ def _strip_self_lock_findings(
     own_pid = os.getpid()
     own_lock_path = str(lock_info.path)
 
-    def is_self_lock(finding: preflight.PreflightFinding) -> bool:
+    def is_self_lock(finding: preflight_models.PreflightFinding) -> bool:
         if finding.category != "env-lock":
             return False
         if finding.path != own_lock_path:
@@ -1046,7 +1049,7 @@ def _strip_self_lock_findings(
     )
     if len(filtered) == len(report.findings):
         return report
-    return preflight.PreflightReport(
+    return preflight_models.PreflightReport(
         plan_dir=report.plan_dir,
         findings=filtered,
         snapshot=report.snapshot,
@@ -1086,7 +1089,7 @@ def _validate_children_footprint(
     }
     if plans.read_repository_registry(plan_dir) is not None:
         return clean
-    provenance_roots = preflight.plan_provenance_exempt_roots(plan_dir)
+    provenance_roots = preflight_footprint.plan_provenance_exempt_roots(plan_dir)
     blockers: list[str] = []
     for group_plan in group_plans:
         child = group_plan.proposed_child_id.value
@@ -1220,7 +1223,7 @@ def _make_children_executable(
 
     report = preflight.run_preflight(plan_dir, cwd=canonical_cwd, state_dir=state_dir)
     report = _strip_self_lock_findings(report, lock_info)
-    mark_blockers = preflight._mark_loop_ready_blockers(report)
+    mark_blockers = preflight_cli._mark_loop_ready_blockers(report)
     if mark_blockers and all(
         blocker.category == "progress-journal-missing" for blocker in mark_blockers
     ):
@@ -1238,7 +1241,7 @@ def _make_children_executable(
                 ),
                 lock_info,
             )
-            mark_blockers = preflight._mark_loop_ready_blockers(report)
+            mark_blockers = preflight_cli._mark_loop_ready_blockers(report)
     if mark_blockers:
         blockers = [
             f"{finding.category}: {finding.message}" for finding in mark_blockers
@@ -1250,12 +1253,13 @@ def _make_children_executable(
                 {
                     finding.category
                     for finding in mark_blockers
-                    if finding.category in preflight.NON_BYPASSABLE_PREFLIGHT_CATEGORIES
+                    if finding.category
+                    in preflight_models.NON_BYPASSABLE_PREFLIGHT_CATEGORIES
                 }
             ),
             "baseline_summary": baseline_summary,
         }
-    marked, mark_error = preflight._mark_loop_ready(report)
+    marked, mark_error = preflight_cli._mark_loop_ready(report)
     if not marked:
         return {
             "loop_ready": False,

@@ -28,7 +28,14 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from agent_session_loop import config, events, mailbox, run_selection
+from agent_session_loop import (
+    config,
+    events,
+    mailbox_appenders,
+    mailbox_models,
+    mailbox_vocabulary,
+    run_selection,
+)
 from agent_session_loop.run_errors import RunError
 from tests.support import assert_no_runner_import, patched_env
 
@@ -70,7 +77,7 @@ class RunSelectionBoundaryTests(unittest.TestCase):
         # The receipt's ledger append is the module's own durable write; the
         # matching event append is the run's, and it arrives as a callable so
         # this module never sees the persistence type the run loop owns.
-        self.assertEqual(1, source.count("mailbox.append_guidance_delivery("))
+        self.assertEqual(1, source.count("mailbox_appenders.append_guidance_delivery("))
         self.assertIn(
             "GuidanceEventAppender = Callable[[Path, str, dict[str, Any]], None]",
             source,
@@ -84,7 +91,7 @@ class RunSelectionBoundaryTests(unittest.TestCase):
         appended: list[tuple[Path, str, dict[str, Any]]] = []
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            message = mailbox.append_guidance(
+            message = mailbox_appenders.append_guidance(
                 root / "plan", "keep going", state_dir=root / "state"
             )
             run_selection._record_next_turn_guidance_delivery(
@@ -112,10 +119,10 @@ class RunSelectionBoundaryTests(unittest.TestCase):
 
     def test_an_unwritable_ledger_leaves_the_guidance_deliverable(self) -> None:
         appended: list[tuple[Path, str, dict[str, Any]]] = []
-        message = mailbox.MailboxMessage(
+        message = mailbox_models.MailboxMessage(
             seq=1,
             id="g-1",
-            kind=mailbox.KIND_GUIDANCE,
+            kind=mailbox_vocabulary.KIND_GUIDANCE,
             created_at="2026-01-01T00:00:00Z",
             text="keep going",
         )

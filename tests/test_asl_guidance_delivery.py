@@ -22,6 +22,12 @@ from agent_session_loop import (
     guidance_delivery,
     harnesses,
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_models,
+    mailbox_snapshot,
+    mailbox_vocabulary,
     run_control,
     run_coordination,
     run_persistence,
@@ -84,25 +90,25 @@ class DeliveryVocabularyTests(unittest.TestCase):
 
     def test_states_and_channel_match_the_ledger(self) -> None:
         self.assertEqual(
-            mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
+            mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_LIVE,
             guidance_delivery.STATE_DELIVERED_LIVE,
         )
         self.assertEqual(
-            mailbox.GUIDANCE_STATE_DEFERRED,
+            mailbox_vocabulary.GUIDANCE_STATE_DEFERRED,
             guidance_delivery.STATE_DEFERRED,
         )
         self.assertEqual(
-            mailbox.GUIDANCE_CHANNEL_LIVE,
+            mailbox_vocabulary.GUIDANCE_CHANNEL_LIVE,
             guidance_delivery.CHANNEL_LIVE,
         )
 
     def test_reasons_match_the_ledger(self) -> None:
         self.assertEqual(
-            mailbox.GUIDANCE_REASON_DELIVERED,
+            mailbox_vocabulary.GUIDANCE_REASON_DELIVERED,
             guidance_delivery.REASON_DELIVERED,
         )
         self.assertEqual(
-            set(mailbox.GUIDANCE_DEFERRAL_REASONS),
+            set(mailbox_vocabulary.GUIDANCE_DEFERRAL_REASONS),
             set(guidance_delivery.DEFERRAL_REASONS),
         )
 
@@ -119,10 +125,14 @@ class DeliveryVocabularyTests(unittest.TestCase):
             with self.subTest(reason=outcome.reason):
                 self.assertIn(
                     outcome.delivery_state,
-                    mailbox.GUIDANCE_DELIVERY_STATES,
+                    mailbox_vocabulary.GUIDANCE_DELIVERY_STATES,
                 )
-                self.assertIn(outcome.channel, mailbox.GUIDANCE_DELIVERY_CHANNELS)
-                self.assertIn(outcome.reason, mailbox.GUIDANCE_DELIVERY_REASONS)
+                self.assertIn(
+                    outcome.channel, mailbox_vocabulary.GUIDANCE_DELIVERY_CHANNELS
+                )
+                self.assertIn(
+                    outcome.reason, mailbox_vocabulary.GUIDANCE_DELIVERY_REASONS
+                )
 
 
 class GuidanceOutcomeTests(unittest.TestCase):
@@ -653,17 +663,19 @@ class MailboxPollDeliveryTests(unittest.TestCase):
 
     def add_guidance(
         self, text: str = "use the smaller diff"
-    ) -> mailbox.MailboxMessage:
-        return mailbox.append_guidance(self.plan_dir, text, state_dir=self.state_dir)
+    ) -> mailbox_models.MailboxMessage:
+        return mailbox_appenders.append_guidance(
+            self.plan_dir, text, state_dir=self.state_dir
+        )
 
-    def view(self) -> mailbox.MailboxView:
+    def view(self) -> mailbox_snapshot.MailboxView:
         return mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
 
-    def deliveries(self) -> list[mailbox.MailboxMessage]:
+    def deliveries(self) -> list[mailbox_models.MailboxMessage]:
         return [
             message
             for message in self.view().messages
-            if message.kind == mailbox.KIND_GUIDANCE_DELIVERY
+            if message.kind == mailbox_vocabulary.KIND_GUIDANCE_DELIVERY
         ]
 
     def mailbox_events(self, action: str) -> list[dict[str, Any]]:
@@ -685,15 +697,19 @@ class MailboxPollDeliveryTests(unittest.TestCase):
         self.assertEqual(["rebase before you push"], self.received)
         [record] = self.deliveries()
         self.assertEqual(guidance.id, record.to)
-        self.assertEqual(mailbox.GUIDANCE_STATE_DELIVERED_LIVE, record.delivery_state)
-        self.assertEqual(mailbox.GUIDANCE_REASON_DELIVERED, record.delivery_reason)
-        self.assertEqual(mailbox.GUIDANCE_CHANNEL_LIVE, record.channel)
+        self.assertEqual(
+            mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_LIVE, record.delivery_state
+        )
+        self.assertEqual(
+            mailbox_vocabulary.GUIDANCE_REASON_DELIVERED, record.delivery_reason
+        )
+        self.assertEqual(mailbox_vocabulary.GUIDANCE_CHANNEL_LIVE, record.channel)
         self.assertEqual("run-1", record.run_id)
         self.assertEqual("7", record.session_id)
         self.assertEqual(2, record.turn_index)
         self.assertEqual("codex", record.harness)
         self.assertEqual(
-            mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
+            mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_LIVE,
             self.view().guidance_delivery_state(guidance.id),
         )
         [event_payload] = self.mailbox_events(events.MAILBOX_ACTION_GUIDANCE_DELIVERED)
@@ -714,7 +730,7 @@ class MailboxPollDeliveryTests(unittest.TestCase):
         self.assertNotIn("length", event_payload)
         [record] = self.deliveries()
         self.assertIsNone(record.text)
-        mailbox_text = mailbox.mailbox_path_for_plan(
+        mailbox_text = mailbox_cursors.mailbox_path_for_plan(
             self.plan_dir, str(self.state_dir)
         ).read_text(encoding="utf-8")
         # The guidance record itself holds the body once; the delivery record
@@ -774,7 +790,7 @@ class MailboxPollDeliveryTests(unittest.TestCase):
 
         self.poll()
         self.assertEqual(
-            mailbox.GUIDANCE_STATE_DEFERRED,
+            mailbox_vocabulary.GUIDANCE_STATE_DEFERRED,
             self.view().guidance_delivery_state(guidance.id),
         )
         self.poll()
@@ -782,7 +798,7 @@ class MailboxPollDeliveryTests(unittest.TestCase):
 
         self.assertEqual(3, len(attempts))
         self.assertEqual(
-            mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
+            mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_LIVE,
             self.view().guidance_delivery_state(guidance.id),
         )
 
@@ -826,12 +842,12 @@ class MailboxPollDeliveryTests(unittest.TestCase):
         self.assertEqual(
             [
                 (
-                    mailbox.GUIDANCE_STATE_DEFERRED,
-                    mailbox.GUIDANCE_REASON_AWAITING_CONFIRMATION,
+                    mailbox_vocabulary.GUIDANCE_STATE_DEFERRED,
+                    mailbox_vocabulary.GUIDANCE_REASON_AWAITING_CONFIRMATION,
                 ),
                 (
-                    mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
-                    mailbox.GUIDANCE_REASON_DELIVERED,
+                    mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_LIVE,
+                    mailbox_vocabulary.GUIDANCE_REASON_DELIVERED,
                 ),
             ],
             [(record.delivery_state, record.delivery_reason) for record in records],
@@ -851,8 +867,8 @@ class MailboxPollDeliveryTests(unittest.TestCase):
 
         self.assertEqual(
             [
-                mailbox.GUIDANCE_REASON_AWAITING_CONFIRMATION,
-                mailbox.GUIDANCE_REASON_STALE_TURN,
+                mailbox_vocabulary.GUIDANCE_REASON_AWAITING_CONFIRMATION,
+                mailbox_vocabulary.GUIDANCE_REASON_STALE_TURN,
             ],
             [record.delivery_reason for record in self.deliveries()],
         )
@@ -871,9 +887,11 @@ class MailboxPollDeliveryTests(unittest.TestCase):
         self.poll()
 
         [deferral] = self.deliveries()
-        self.assertEqual(mailbox.GUIDANCE_STATE_DEFERRED, deferral.delivery_state)
         self.assertEqual(
-            mailbox.GUIDANCE_REASON_HARNESS_UNSUPPORTED,
+            mailbox_vocabulary.GUIDANCE_STATE_DEFERRED, deferral.delivery_state
+        )
+        self.assertEqual(
+            mailbox_vocabulary.GUIDANCE_REASON_HARNESS_UNSUPPORTED,
             deferral.delivery_reason,
         )
         self.assertEqual(
@@ -892,7 +910,7 @@ class MailboxPollDeliveryTests(unittest.TestCase):
 
         self.assertEqual(["read the handoff first"], self.received)
         self.assertEqual(
-            mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
+            mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_LIVE,
             self.view().guidance_delivery_state(guidance.id),
         )
 
@@ -934,8 +952,12 @@ class MailboxPollDeliveryTests(unittest.TestCase):
         self.poll()
 
         [record] = self.deliveries()
-        self.assertEqual(mailbox.GUIDANCE_STATE_DEFERRED, record.delivery_state)
-        self.assertEqual(mailbox.GUIDANCE_REASON_STALE_TURN, record.delivery_reason)
+        self.assertEqual(
+            mailbox_vocabulary.GUIDANCE_STATE_DEFERRED, record.delivery_state
+        )
+        self.assertEqual(
+            mailbox_vocabulary.GUIDANCE_REASON_STALE_TURN, record.delivery_reason
+        )
         self.assertEqual([], self.received)
 
     def test_no_endpoint_means_no_delivery_history_at_all(self) -> None:
@@ -968,20 +990,22 @@ class MailboxPollDeliveryTests(unittest.TestCase):
 
         for error in (
             OSError("read-only mailbox"),
-            mailbox.MailboxError(mailbox.ERROR_MAILBOX_FULL, "no room"),
+            mailbox_models.MailboxError(
+                mailbox_constants.ERROR_MAILBOX_FULL, "no room"
+            ),
         ):
             with self.subTest(error=type(error).__name__):
                 self.received.clear()
                 self.poll.set_live_delivery(self.endpoint())
                 with mock.patch.object(
-                    mailbox, "append_guidance_delivery", side_effect=error
+                    mailbox_appenders, "append_guidance_delivery", side_effect=error
                 ):
                     self.poll()
 
                 self.assertEqual(["prefer at-least-once"], self.received)
                 self.assertEqual([], self.deliveries())
                 self.assertEqual(
-                    mailbox.GUIDANCE_STATE_QUEUED,
+                    mailbox_vocabulary.GUIDANCE_STATE_QUEUED,
                     self.view().guidance_delivery_state(guidance.id),
                 )
                 self.assertEqual(
@@ -999,7 +1023,9 @@ class MailboxPollDeliveryTests(unittest.TestCase):
         with mock.patch.object(
             mailbox,
             "read_mailbox",
-            side_effect=mailbox.MailboxError(mailbox.ERROR_MAILBOX_READ, "unreadable"),
+            side_effect=mailbox_models.MailboxError(
+                mailbox_constants.ERROR_MAILBOX_READ, "unreadable"
+            ),
         ):
             self.poll()
 
@@ -1019,15 +1045,17 @@ class MailboxPollDeliveryTests(unittest.TestCase):
         self.poll()
 
         [record] = self.deliveries()
-        self.assertEqual(mailbox.GUIDANCE_STATE_DEFERRED, record.delivery_state)
         self.assertEqual(
-            mailbox.GUIDANCE_REASON_TRANSPORT_UNAVAILABLE,
+            mailbox_vocabulary.GUIDANCE_STATE_DEFERRED, record.delivery_state
+        )
+        self.assertEqual(
+            mailbox_vocabulary.GUIDANCE_REASON_TRANSPORT_UNAVAILABLE,
             record.delivery_reason,
         )
 
     def test_guidance_read_by_the_worker_is_never_delivered_again(self) -> None:
         guidance = self.add_guidance()
-        mailbox.append_acknowledgement(
+        mailbox_appenders.append_acknowledgement(
             self.plan_dir, guidance.seq, state_dir=self.state_dir
         )
         self.poll.set_live_delivery(self.endpoint())

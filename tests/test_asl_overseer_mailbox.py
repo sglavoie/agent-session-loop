@@ -49,6 +49,12 @@ from unittest import mock
 from agent_session_loop import (
     intervention,
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_models,
+    mailbox_snapshot,
+    mailbox_vocabulary,
     overseer_decisions,
     overseer_dispatch,
     overseer_mailbox,
@@ -123,7 +129,7 @@ class _MailboxCase(unittest.TestCase):
             kind="question_pending",
             summary="waiting on a reply",
         ).incident_id
-        self.question = mailbox.append_question(
+        self.question = mailbox_appenders.append_question(
             self.plan,
             "may I proceed?",
             state_dir=self.root,
@@ -150,13 +156,13 @@ class _MailboxCase(unittest.TestCase):
 
     def break_mailbox(self, plan_dir: str) -> None:
         """Leave a directory where the mailbox log belongs: unreadable, durably."""
-        path = mailbox.mailbox_path_for_plan(plan_dir, self.root)
+        path = mailbox_cursors.mailbox_path_for_plan(plan_dir, self.root)
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
             path.unlink()
         path.mkdir()
 
-    def view(self, plan_dir: str | None = None) -> mailbox.MailboxView:
+    def view(self, plan_dir: str | None = None) -> mailbox_snapshot.MailboxView:
         return mailbox.read_mailbox(plan_dir or self.plan, state_dir=self.root)
 
     def kinds(self, plan_dir: str | None = None) -> list[str]:
@@ -292,7 +298,7 @@ class Duplicates(_MailboxCase):
         self.assertEqual(first.message_id, second.message_id)
         self.assertEqual(first.seq, second.seq)
         self.assertEqual(second.state, "accepted")
-        self.assertEqual(self.kinds().count(mailbox.KIND_REPLY), 1)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_REPLY), 1)
 
     def test_posting_the_same_guidance_twice_appends_once(self) -> None:
         first = self.post_guidance()
@@ -300,14 +306,14 @@ class Duplicates(_MailboxCase):
 
         self.assertEqual(first.message_id, second.message_id)
         self.assertEqual(second.state, "queued")
-        self.assertEqual(self.kinds().count(mailbox.KIND_GUIDANCE), 1)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_GUIDANCE), 1)
 
     def test_different_guidance_text_is_a_different_posting(self) -> None:
         first = self.post_guidance()
         second = self.post_guidance(text="prefer the smaller change, please")
 
         self.assertNotEqual(first.message_id, second.message_id)
-        self.assertEqual(self.kinds().count(mailbox.KIND_GUIDANCE), 2)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_GUIDANCE), 2)
 
     def test_a_retry_that_only_learns_of_the_first_at_the_append(self) -> None:
         """The crash-and-retry case: the pre-read misses what the append hits."""
@@ -318,7 +324,7 @@ class Duplicates(_MailboxCase):
             operation="reply",
             target=self.question,
         )
-        landed = mailbox.append_reply(
+        landed = mailbox_appenders.append_reply(
             self.plan,
             self.question,
             "carry on",
@@ -332,14 +338,14 @@ class Duplicates(_MailboxCase):
         self.assertEqual(posting.state, "accepted")
         self.assertEqual(posting.message_id, identity)
         self.assertEqual(posting.seq, landed.seq)
-        self.assertEqual(self.kinds().count(mailbox.KIND_REPLY), 1)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_REPLY), 1)
 
 
 class ConcurrentClosure(_MailboxCase):
     """Another supervisor, or the user, getting there first."""
 
     def test_a_foreign_reply_seen_before_the_append_refuses(self) -> None:
-        mailbox.append_reply(
+        mailbox_appenders.append_reply(
             self.plan,
             self.question,
             "somebody else answered",
@@ -350,10 +356,10 @@ class ConcurrentClosure(_MailboxCase):
 
         self.assertEqual(posting.state, "rejected")
         self.assertEqual(posting.refusal, "question_closed")
-        self.assertEqual(self.kinds().count(mailbox.KIND_REPLY), 1)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_REPLY), 1)
 
     def test_a_foreign_resolution_seen_before_the_append_refuses(self) -> None:
-        mailbox.append_resolution(
+        mailbox_appenders.append_resolution(
             self.plan,
             self.question,
             "continue",
@@ -365,12 +371,12 @@ class ConcurrentClosure(_MailboxCase):
         posting = self.post_reply()
 
         self.assertEqual(posting.refusal, "question_closed")
-        self.assertEqual(self.kinds().count(mailbox.KIND_REPLY), 0)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_REPLY), 0)
 
     def test_losing_the_race_after_the_read_refuses_the_same_way(self) -> None:
         """A closure that lands between the read and the append reads alike."""
         stale = self.view()
-        mailbox.append_reply(
+        mailbox_appenders.append_reply(
             self.plan,
             self.question,
             "somebody else answered",
@@ -382,7 +388,7 @@ class ConcurrentClosure(_MailboxCase):
 
         self.assertEqual(posting.state, "rejected")
         self.assertEqual(posting.refusal, "question_closed")
-        self.assertEqual(self.kinds().count(mailbox.KIND_REPLY), 1)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_REPLY), 1)
 
 
 class StaleQuestions(_MailboxCase):
@@ -392,10 +398,10 @@ class StaleQuestions(_MailboxCase):
         posting = self.post_reply(question_id="q-nobody-asked")
 
         self.assertEqual(posting.refusal, "question_unknown")
-        self.assertEqual(self.kinds().count(mailbox.KIND_REPLY), 0)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_REPLY), 0)
 
     def test_a_question_from_a_finished_run_is_stale_not_unknown(self) -> None:
-        older = mailbox.append_question(
+        older = mailbox_appenders.append_question(
             self.plan,
             "asked by a run that has since ended",
             state_dir=self.root,
@@ -405,7 +411,7 @@ class StaleQuestions(_MailboxCase):
         posting = self.post_reply(question_id=older)
 
         self.assertEqual(posting.refusal, "question_stale")
-        self.assertEqual(self.kinds().count(mailbox.KIND_REPLY), 0)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_REPLY), 0)
 
     def test_a_mailbox_that_cannot_be_read_is_not_a_stale_question(self) -> None:
         with mock.patch.object(
@@ -429,8 +435,8 @@ class CurrentAuthority(_MailboxCase):
         self.assertEqual(posting.state, "rejected")
         self.assertEqual(posting.refusal, refusal)
         self.assertIn(posting.refusal, overseer_mailbox.REFUSALS)
-        self.assertEqual(self.kinds().count(mailbox.KIND_REPLY), 0)
-        self.assertEqual(self.kinds().count(mailbox.KIND_GUIDANCE), 0)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_REPLY), 0)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_GUIDANCE), 0)
 
     def test_no_ruling_refuses_before_the_mailbox_is_touched(self) -> None:
         with mock.patch.object(
@@ -516,7 +522,7 @@ class RevokedAuthority(_MailboxCase):
         posting = self.post_reply(authority=lambda: None)
 
         self.assertEqual(posting.refusal, "authority_absent")
-        self.assertEqual(self.kinds().count(mailbox.KIND_REPLY), 0)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_REPLY), 0)
 
     def test_a_replaced_decision_is_superseded_not_honored(self) -> None:
         posting = self.post_reply(
@@ -526,7 +532,7 @@ class RevokedAuthority(_MailboxCase):
         self.assertEqual(posting.refusal, "authority_superseded")
         self.assertIn("d-1", posting.detail)
         self.assertIn("d-2", posting.detail)
-        self.assertEqual(self.kinds().count(mailbox.KIND_REPLY), 0)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_REPLY), 0)
 
     def test_a_decision_that_kept_its_id_and_changed_its_stance(self) -> None:
         posting = self.post_reply(
@@ -534,7 +540,7 @@ class RevokedAuthority(_MailboxCase):
         )
 
         self.assertEqual(posting.refusal, "authority_held")
-        self.assertEqual(self.kinds().count(mailbox.KIND_REPLY), 0)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_REPLY), 0)
 
     def test_a_decision_re_read_at_a_different_moment_is_superseded(self) -> None:
         posting = self.post_reply(
@@ -547,14 +553,14 @@ class RevokedAuthority(_MailboxCase):
         posting = self.post_guidance(authority=lambda: None)
 
         self.assertEqual(posting.refusal, "authority_absent")
-        self.assertEqual(self.kinds().count(mailbox.KIND_GUIDANCE), 0)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_GUIDANCE), 0)
 
     def test_unchanged_authority_posts(self) -> None:
         ruling = self.ruling()
         posting = self.post_reply(ruling=ruling, authority=lambda: ruling)
 
         self.assertEqual(posting.state, "accepted")
-        self.assertEqual(self.kinds().count(mailbox.KIND_REPLY), 1)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_REPLY), 1)
 
 
 class States(_MailboxCase):
@@ -584,7 +590,7 @@ class States(_MailboxCase):
         self.assertTrue(posting.outstanding)
         self.assertFalse(posting.arrived)
 
-        mailbox.append_receipt(
+        mailbox_appenders.append_receipt(
             self.plan,
             self.question,
             posting.message_id,
@@ -601,32 +607,36 @@ class States(_MailboxCase):
     def test_deferred_guidance_is_queued_and_says_so(self) -> None:
         posting = self.post_guidance()
         self.assertEqual(posting.state, "queued")
-        self.assertEqual(posting.mailbox_state, mailbox.GUIDANCE_STATE_QUEUED)
+        self.assertEqual(
+            posting.mailbox_state, mailbox_vocabulary.GUIDANCE_STATE_QUEUED
+        )
 
-        mailbox.append_guidance_delivery(
+        mailbox_appenders.append_guidance_delivery(
             self.plan,
             posting.message_id,
-            delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
-            delivery_reason=mailbox.GUIDANCE_REASON_NO_ACTIVE_TURN,
-            channel=mailbox.GUIDANCE_CHANNEL_LIVE,
+            delivery_state=mailbox_vocabulary.GUIDANCE_STATE_DEFERRED,
+            delivery_reason=mailbox_vocabulary.GUIDANCE_REASON_NO_ACTIVE_TURN,
+            channel=mailbox_vocabulary.GUIDANCE_CHANNEL_LIVE,
             state_dir=self.root,
         )
 
         deferred = self.inspect(operation="guidance", target=posting.target)
         assert deferred is not None
         self.assertEqual(deferred.state, "queued")
-        self.assertEqual(deferred.mailbox_state, mailbox.GUIDANCE_STATE_DEFERRED)
+        self.assertEqual(
+            deferred.mailbox_state, mailbox_vocabulary.GUIDANCE_STATE_DEFERRED
+        )
         self.assertTrue(deferred.outstanding)
         self.assertFalse(deferred.arrived)
 
     def test_delivered_guidance_is_delivered(self) -> None:
         posting = self.post_guidance()
-        mailbox.append_guidance_delivery(
+        mailbox_appenders.append_guidance_delivery(
             self.plan,
             posting.message_id,
-            delivery_state=mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
-            delivery_reason=mailbox.GUIDANCE_REASON_DELIVERED,
-            channel=mailbox.GUIDANCE_CHANNEL_LIVE,
+            delivery_state=mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_LIVE,
+            delivery_reason=mailbox_vocabulary.GUIDANCE_REASON_DELIVERED,
+            channel=mailbox_vocabulary.GUIDANCE_CHANNEL_LIVE,
             run_id=RUN,
             session_id="1",
             turn_index=2,
@@ -639,22 +649,22 @@ class States(_MailboxCase):
         self.assertEqual(delivered.state, "delivered")
         self.assertEqual(
             delivered.mailbox_state,
-            mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
+            mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_LIVE,
         )
         self.assertTrue(delivered.arrived)
 
     def test_every_state_is_reachable_and_the_vocabulary_is_closed(self) -> None:
         reply = self.post_reply()
         guidance = self.post_guidance()
-        mailbox.append_receipt(
+        mailbox_appenders.append_receipt(
             self.plan, self.question, reply.message_id, state_dir=self.root
         )
-        mailbox.append_guidance_delivery(
+        mailbox_appenders.append_guidance_delivery(
             self.plan,
             guidance.message_id,
-            delivery_state=mailbox.GUIDANCE_STATE_DELIVERED_BY_READ,
-            delivery_reason=mailbox.GUIDANCE_REASON_DELIVERED,
-            channel=mailbox.GUIDANCE_CHANNEL_READ,
+            delivery_state=mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_BY_READ,
+            delivery_reason=mailbox_vocabulary.GUIDANCE_REASON_DELIVERED,
+            channel=mailbox_vocabulary.GUIDANCE_CHANNEL_READ,
             state_dir=self.root,
         )
         rejected = self.post_reply(question_id="q-nobody-asked")
@@ -746,10 +756,10 @@ class Adapters(_MailboxCase):
 
         self.assertEqual(first.locator, second.locator)
         self.assertEqual(second.outcome, "executed")
-        self.assertEqual(self.kinds().count(mailbox.KIND_REPLY), 1)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_REPLY), 1)
 
     def test_a_refused_posting_is_a_failure_not_a_dispatch_refusal(self) -> None:
-        mailbox.append_resolution(
+        mailbox_appenders.append_resolution(
             self.plan,
             self.question,
             "continue",
@@ -777,7 +787,7 @@ class Adapters(_MailboxCase):
 
         self.assertFalse(guidance.prepare(wrong).ready)
         self.assertEqual(guidance.execute(wrong).outcome, "failed")
-        self.assertEqual(self.kinds().count(mailbox.KIND_GUIDANCE), 0)
+        self.assertEqual(self.kinds().count(mailbox_vocabulary.KIND_GUIDANCE), 0)
 
     def test_executing_guidance_queues_it_and_never_claims_delivery(self) -> None:
         adapter = overseer_mailbox.GuidanceAdapter(
@@ -797,7 +807,7 @@ class Adapters(_MailboxCase):
         reads = {"count": 0}
         real_read = mailbox.read_mailbox
 
-        def flaky(*args: Any, **kwargs: Any) -> mailbox.MailboxView:
+        def flaky(*args: Any, **kwargs: Any) -> mailbox_snapshot.MailboxView:
             reads["count"] += 1
             if reads["count"] == 1:
                 return real_read(*args, **kwargs)
@@ -809,10 +819,10 @@ class Adapters(_MailboxCase):
         with (
             mock.patch.object(mailbox, "read_mailbox", side_effect=flaky),
             mock.patch.object(
-                mailbox,
+                mailbox_appenders,
                 "append_reply",
-                side_effect=mailbox.MailboxError(
-                    mailbox.ERROR_MAILBOX_WRITE, "short write"
+                side_effect=mailbox_models.MailboxError(
+                    mailbox_constants.ERROR_MAILBOX_WRITE, "short write"
                 ),
             ),
         ):
@@ -825,9 +835,11 @@ class Adapters(_MailboxCase):
             overseer_dispatch.Reply(question_id=self.question, text="carry on")
         )
         with mock.patch.object(
-            mailbox,
+            mailbox_appenders,
             "append_reply",
-            side_effect=mailbox.MailboxError(mailbox.ERROR_MAILBOX_FULL, "no room"),
+            side_effect=mailbox_models.MailboxError(
+                mailbox_constants.ERROR_MAILBOX_FULL, "no room"
+            ),
         ):
             receipt = self.reply_adapter().execute(action)
 
@@ -860,7 +872,7 @@ class DelayedOutcomes(_MailboxCase):
             operation="reply",
             target=self.question,
         )
-        mailbox.append_reply(
+        mailbox_appenders.append_reply(
             self.plan,
             self.question,
             "carry on",
@@ -882,7 +894,7 @@ class DelayedOutcomes(_MailboxCase):
     def test_reconciling_names_a_foreign_closure_rather_than_claiming_it(
         self,
     ) -> None:
-        mailbox.append_reply(
+        mailbox_appenders.append_reply(
             self.plan,
             self.question,
             "somebody else answered",
@@ -961,7 +973,7 @@ class FleetPolling(_MailboxCase):
     def test_a_receipt_that_has_arrived_settles_the_posting(self) -> None:
         posting = self.post_reply()
         self.enrol(self.plan, operation="reply", target=self.question)
-        mailbox.append_receipt(
+        mailbox_appenders.append_receipt(
             self.plan, self.question, posting.message_id, state_dir=self.root
         )
 
@@ -1150,7 +1162,7 @@ def _state(posting: overseer_mailbox.Posting | None) -> str:
 
 def _stale_first_read(
     case: _MailboxCase,
-    stale: mailbox.MailboxView,
+    stale: mailbox_snapshot.MailboxView,
 ) -> Any:
     """Serve one stale snapshot, then the mailbox as it actually stands.
 
@@ -1160,7 +1172,7 @@ def _stale_first_read(
     real_read = mailbox.read_mailbox
     served = {"count": 0}
 
-    def reader(*args: Any, **kwargs: Any) -> mailbox.MailboxView:
+    def reader(*args: Any, **kwargs: Any) -> mailbox_snapshot.MailboxView:
         served["count"] += 1
         if served["count"] == 1:
             return stale

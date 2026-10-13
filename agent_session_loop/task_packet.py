@@ -52,7 +52,8 @@ from typing import Any
 
 from . import (
     harnesses,
-    mailbox,
+    mailbox_models,
+    mailbox_vocabulary,
     plans,
     qna,
     redirect_ack,
@@ -119,7 +120,7 @@ class SessionTaskPacket:
     mailbox_notify_command: str | None = None
     mailbox_ask_command: str | None = None
     mailbox_resume_ask_command: str | None = None
-    pending_guidance: tuple[mailbox.MailboxMessage, ...] = ()
+    pending_guidance: tuple[mailbox_models.MailboxMessage, ...] = ()
     correction_block: tuple[str, ...] = field(default_factory=tuple)
     reply_block: tuple[str, ...] = field(default_factory=tuple)
     resolution_block: tuple[str, ...] = field(default_factory=tuple)
@@ -401,13 +402,13 @@ def build_task_packet(
     has_progress: bool = True,
     reply: str | None = None,
     reply_context: qna.QnAContext | None = None,
-    resolution_action: mailbox.ResolutionAction | str | None = None,
+    resolution_action: mailbox_vocabulary.ResolutionAction | str | None = None,
     resolution_note: str | None = None,
     resolution_context: qna.QnAContext | None = None,
     repair_references: Sequence[str] = (),
     mailbox_enabled: bool = False,
     state_dir: str | Path | None = None,
-    pending_guidance: Sequence[mailbox.MailboxMessage] = (),
+    pending_guidance: Sequence[mailbox_models.MailboxMessage] = (),
     workspace: workspaces.ResolvedWorkspace | None = None,
     session_scope: plans.SessionScope | None = None,
     session_kind: str = plans.SESSION_KIND_IMPLEMENTATION,
@@ -594,7 +595,7 @@ def _resolution_source_metadata(
     pending: run_prompts._PendingResolution,
 ) -> dict[str, Any]:
     """Return fixed-shape, body-free identity for a pending resolution."""
-    if pending.action not in mailbox.RESOLUTION_ACTIONS:
+    if pending.action not in mailbox_vocabulary.RESOLUTION_ACTIONS:
         raise ValueError("pending resolution has an invalid action")
     if pending.note is not None and not isinstance(pending.note, str):
         raise ValueError("pending resolution note must be a string or None")

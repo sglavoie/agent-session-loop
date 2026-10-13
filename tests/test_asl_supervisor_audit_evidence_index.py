@@ -13,7 +13,7 @@ from agent_session_loop import (
     artifacts,
     assurance_models,
     events,
-    mailbox,
+    mailbox_constants,
     plans,
     repository_evidence,
     review,
@@ -47,7 +47,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             bundle = self._collect(*self._history(Path(tmp)))
 
             self.assertIn(
-                f"state/{mailbox.MAILBOX_FILE_NAME}",
+                f"state/{mailbox_constants.MAILBOX_FILE_NAME}",
                 {reference.locator for reference in bundle.evidence},
             )
 

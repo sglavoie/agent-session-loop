@@ -16,6 +16,7 @@ from agent_session_loop import (
     events,
     harnesses,
     mailbox,
+    mailbox_appenders,
     run_control,
     run_coordination,
     run_persistence,
@@ -493,7 +494,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         self.queue_abort(grace_seconds=5)
         abort = harnesses.AbortSignal()
         with mock.patch.object(
-            mailbox,
+            mailbox_appenders,
             "append_guidance",
             side_effect=OSError("read-only mailbox"),
         ):

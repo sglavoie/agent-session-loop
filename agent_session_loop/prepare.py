@@ -30,7 +30,15 @@ import os
 from pathlib import Path
 from typing import Any
 
-from . import authoring, contracts, harnesses, plans, preflight, repository_intent
+from . import (
+    authoring,
+    contracts,
+    harnesses,
+    plans,
+    preflight,
+    preflight_cli,
+    repository_intent,
+)
 from .plans import PlanError, canonicalize_path, inspect_plan
 from .prepare_baseline import _run_baseline_stage
 from .prepare_commands import _format_resume_command, _format_run_command
@@ -473,7 +481,7 @@ def prepare_plan(
     steps.append(PrepareStep(PREPARE_STAGE_BASELINE, PREPARE_STEP_OK, baseline_detail))
 
     report = preflight.run_preflight(plan_dir, cwd=canonical_cwd, state_dir=state_dir)
-    mark_blockers = preflight._mark_loop_ready_blockers(report)
+    mark_blockers = preflight_cli._mark_loop_ready_blockers(report)
     if mark_blockers:
         for finding in mark_blockers:
             blockers.append(
@@ -488,7 +496,7 @@ def prepare_plan(
             PrepareStep(
                 PREPARE_STAGE_PREFLIGHT,
                 PREPARE_STEP_FAILED,
-                preflight._mark_loop_ready_refusal_message(mark_blockers),
+                preflight_cli._mark_loop_ready_refusal_message(mark_blockers),
             )
         )
         return _failed(
@@ -496,7 +504,7 @@ def prepare_plan(
             corrections=corrections,
             baseline_summary=baseline_summary,
         )
-    marked, mark_error = preflight._mark_loop_ready(report)
+    marked, mark_error = preflight_cli._mark_loop_ready(report)
     if not marked:
         blockers.append(
             PrepareBlocker(

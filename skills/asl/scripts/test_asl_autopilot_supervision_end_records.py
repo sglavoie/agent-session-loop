@@ -19,10 +19,12 @@ from asl_autopilot_test_support import (  # noqa: F401
     tearDownModule,
 )
 
+from agent_session_loop import mailbox_appenders, mailbox_validation, mailbox_vocabulary
+
 
 class SupervisionEndRecordTest(SupervisionEndBase):
     def test_each_terminal_reason_appends_one_mapped_record(self) -> None:
-        outcomes = autopilot._mailbox
+        outcomes = mailbox_vocabulary
         cases = (
             ("complete", True, outcomes.SUPERVISION_OUTCOME_COMPLETE),
             ("review_findings", False, outcomes.SUPERVISION_OUTCOME_COMPLETE),
@@ -81,7 +83,7 @@ class SupervisionEndRecordTest(SupervisionEndBase):
         records = self._supervision_ends(self.plan_dir, self.state_dir)
         self.assertEqual(1, len(records))
         self.assertEqual(
-            autopilot._mailbox.SUPERVISION_OUTCOME_PAUSED,
+            mailbox_vocabulary.SUPERVISION_OUTCOME_PAUSED,
             records[0].supervision_outcome,
         )
         self.assertEqual("supervision ended: needs_agent_reply", records[0].text)
@@ -113,13 +115,13 @@ class SupervisionEndRecordTest(SupervisionEndBase):
         records = self._supervision_ends(self.plan_dir, self.state_dir)
         self.assertEqual(1, len(records))
         self.assertEqual(
-            autopilot._mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
             records[0].supervision_outcome,
         )
         self.assertEqual("supervision ended: review_findings", records[0].text)
 
     def test_supplied_supervision_id_lands_on_the_terminal_record(self) -> None:
-        launch = autopilot._mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
         result = {
             "ok": True,
             "stage": autopilot.RUN_STAGE,
@@ -151,14 +153,14 @@ class SupervisionEndRecordTest(SupervisionEndBase):
 
         self.assertEqual(0, exit_code)
         minted = json.loads(stdout)["supervision_id"]
-        self.assertTrue(autopilot._mailbox.is_supervision_id(minted))
+        self.assertTrue(mailbox_validation.is_supervision_id(minted))
         records = self._supervision_ends(self.plan_dir, self.state_dir)
         self.assertEqual([minted], [record.supervision_id for record in records])
 
     def test_overlapping_launches_leave_distinguishable_records(self) -> None:
         # Two helpers on one plan: sequence cannot tell their records apart,
         # the launch identity can.
-        launches = [autopilot._mailbox.new_supervision_id() for _ in range(2)]
+        launches = [mailbox_validation.new_supervision_id() for _ in range(2)]
         for launch in launches:
             result = {
                 "ok": True,
@@ -178,7 +180,7 @@ class SupervisionEndRecordTest(SupervisionEndBase):
         self.assertEqual(launches, [record.supervision_id for record in records])
 
     def test_error_path_record_carries_the_launch_identity(self) -> None:
-        launch = autopilot._mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
 
         def supervision(args):
             raise RuntimeError("supervisor exploded")
@@ -198,7 +200,7 @@ class SupervisionEndRecordTest(SupervisionEndBase):
         records = self._supervision_ends(self.plan_dir, self.state_dir)
         self.assertEqual([launch], [record.supervision_id for record in records])
         self.assertEqual(
-            autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+            mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
             records[0].supervision_outcome,
         )
 
@@ -227,7 +229,7 @@ class SupervisionEndRecordTest(SupervisionEndBase):
     def test_emitter_refuses_a_second_record_for_the_same_process(self) -> None:
         appended = []
         emitter = autopilot._SupervisionEndEmitter(
-            supervision_id=autopilot._mailbox.new_supervision_id(),
+            supervision_id=mailbox_validation.new_supervision_id(),
             append=lambda *args, **kwargs: appended.append((args, kwargs)),
         )
         parsed = autopilot.parse_command(self.command)
@@ -235,14 +237,14 @@ class SupervisionEndRecordTest(SupervisionEndBase):
         self.assertTrue(
             emitter.emit(
                 parsed,
-                outcome=autopilot._mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
                 text="supervision ended: complete",
             )
         )
         self.assertFalse(
             emitter.emit(
                 parsed,
-                outcome=autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+                outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
                 text="supervision ended: error - RuntimeError",
             )
         )
@@ -292,7 +294,7 @@ class SupervisionEndRecordTest(SupervisionEndBase):
         records = self._supervision_ends(self.plan_dir, self.state_dir)
         self.assertEqual(1, len(records))
         self.assertEqual(
-            autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+            mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
             records[0].supervision_outcome,
         )
         self.assertEqual("supervision ended: error - RuntimeError", records[0].text)
@@ -301,7 +303,7 @@ class SupervisionEndRecordTest(SupervisionEndBase):
         def boom(*args, **kwargs):
             raise OSError("mailbox is unwritable")
 
-        self._patch(autopilot._mailbox, "append_supervision_end", boom)
+        self._patch(mailbox_appenders, "append_supervision_end", boom)
         result = {
             "ok": True,
             "stage": autopilot.RUN_STAGE,
@@ -342,7 +344,7 @@ class SupervisionEndRecordTest(SupervisionEndBase):
         records = self._supervision_ends(self.plan_dir, self.state_dir)
         self.assertEqual(1, len(records))
         self.assertEqual(
-            autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+            mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
             records[0].supervision_outcome,
         )
         self.assertEqual("supervision ended: error - SIGTERM", records[0].text)
@@ -350,13 +352,13 @@ class SupervisionEndRecordTest(SupervisionEndBase):
     def test_record_is_appended_after_the_result_is_flushed(self) -> None:
         events: list = []
         stdout = _OrderRecordingStdout(events)
-        real_append = autopilot._mailbox.append_supervision_end
+        real_append = mailbox_appenders.append_supervision_end
 
         def recording_append(*args, **kwargs):
             events.append(("append", stdout.getvalue()))
             return real_append(*args, **kwargs)
 
-        self._patch(autopilot._mailbox, "append_supervision_end", recording_append)
+        self._patch(mailbox_appenders, "append_supervision_end", recording_append)
         result = {
             "ok": True,
             "stage": autopilot.RUN_STAGE,

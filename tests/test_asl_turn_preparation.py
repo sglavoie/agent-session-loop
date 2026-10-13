@@ -39,7 +39,7 @@ from unittest import mock
 
 from agent_session_loop import (
     events,
-    mailbox,
+    mailbox_vocabulary,
     plans,
     qna,
     review_guard,
@@ -708,7 +708,7 @@ class TurnPromptTests(PreparationTestCase):
 
     def resolution(self) -> run_prompts._PendingResolution:
         return run_prompts._PendingResolution(
-            action=mailbox.RESOLUTION_ACTIONS[0],
+            action=mailbox_vocabulary.RESOLUTION_ACTIONS[0],
             note="a note",
             context=self.qna_context(),
             question_id="q1",

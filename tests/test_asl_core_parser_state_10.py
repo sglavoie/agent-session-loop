@@ -13,7 +13,14 @@ from unittest import mock
 
 from agent_session_loop import (
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_leases,
+    mailbox_models,
     mailbox_rendering,
+    mailbox_validation,
+    mailbox_vocabulary,
     plans,
     state,
 )
@@ -30,20 +37,21 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
 
-            appended = mailbox.append_supervision_end(
+            appended = mailbox_appenders.append_supervision_end(
                 plan_dir,
                 "supervision ended: complete",
-                outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
-                supervision_id=mailbox.new_supervision_id(),
+                outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
+                supervision_id=mailbox_validation.new_supervision_id(),
                 state_dir=state_dir,
                 resolve_at_commit=lambda: (
-                    mailbox.SUPERVISION_OUTCOME_ERROR,
+                    mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
                     "supervision ended: error - SIGTERM",
                 ),
             )
 
             self.assertEqual(
-                mailbox.SUPERVISION_OUTCOME_ERROR, appended.supervision_outcome
+                mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
+                appended.supervision_outcome,
             )
             self.assertEqual("supervision ended: error - SIGTERM", appended.text)
             view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
@@ -58,15 +66,15 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             message_id = "00000000-0000-4000-8000-00000000000a"
             created_at = "0001-01-01T00:00:00+00:00"
 
-            appended = mailbox.append_supervision_end(
+            appended = mailbox_appenders.append_supervision_end(
                 plan_dir,
                 "supervision ended: complete",
-                outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
                 state_dir=state_dir,
                 message_id=message_id,
                 created_at=created_at,
                 resolve_at_commit=lambda: (
-                    mailbox.SUPERVISION_OUTCOME_ERROR,
+                    mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
                     "supervision ended: error - SIGINT",
                 ),
             )
@@ -80,17 +88,17 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
 
-            with self.assertRaises(mailbox.MailboxError) as raised:
-                mailbox.append_supervision_end(
+            with self.assertRaises(mailbox_models.MailboxError) as raised:
+                mailbox_appenders.append_supervision_end(
                     plan_dir,
                     "supervision ended: complete",
-                    outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                    outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
                     state_dir=state_dir,
                     resolve_at_commit=lambda: ("not-an-outcome", "late text"),
                 )
 
             self.assertEqual(
-                mailbox.REJECT_INVALID_SUPERVISION_OUTCOME,
+                mailbox_constants.REJECT_INVALID_SUPERVISION_OUTCOME,
                 raised.exception.reason,
             )
             self.assertEqual(
@@ -116,26 +124,27 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             def resolve() -> tuple:
                 if written:
                     return (
-                        mailbox.SUPERVISION_OUTCOME_ERROR,
+                        mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
                         "supervision ended: error - SIGTERM",
                     )
                 return (
-                    mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                    mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
                     "supervision ended: complete",
                 )
 
             with mock.patch.object(mailbox.os, "write", writing):
-                appended = mailbox.append_supervision_end(
+                appended = mailbox_appenders.append_supervision_end(
                     plan_dir,
                     "supervision ended: complete",
-                    outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
-                    supervision_id=mailbox.new_supervision_id(),
+                    outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
+                    supervision_id=mailbox_validation.new_supervision_id(),
                     state_dir=state_dir,
                     resolve_at_commit=resolve,
                 )
 
             self.assertEqual(
-                mailbox.SUPERVISION_OUTCOME_ERROR, appended.supervision_outcome
+                mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
+                appended.supervision_outcome,
             )
             self.assertEqual("supervision ended: error - SIGTERM", appended.text)
             view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
@@ -160,26 +169,27 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             def resolve() -> tuple:
                 if synced:
                     return (
-                        mailbox.SUPERVISION_OUTCOME_ERROR,
+                        mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
                         "supervision ended: error - SIGTERM",
                     )
                 return (
-                    mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                    mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
                     "supervision ended: complete",
                 )
 
             with mock.patch.object(mailbox.durability, "fullsync", fullsync):
-                appended = mailbox.append_supervision_end(
+                appended = mailbox_appenders.append_supervision_end(
                     plan_dir,
                     "supervision ended: complete",
-                    outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
-                    supervision_id=mailbox.new_supervision_id(),
+                    outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
+                    supervision_id=mailbox_validation.new_supervision_id(),
                     state_dir=state_dir,
                     resolve_at_commit=resolve,
                 )
 
             self.assertEqual(
-                mailbox.SUPERVISION_OUTCOME_ERROR, appended.supervision_outcome
+                mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
+                appended.supervision_outcome,
             )
             self.assertEqual("supervision ended: error - SIGTERM", appended.text)
             view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
@@ -199,14 +209,14 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             def resolve() -> tuple:
                 calls.append(len(calls))
                 return (
-                    mailbox.SUPERVISION_OUTCOME_ERROR,
+                    mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
                     f"supervision ended: error - {len(calls)}",
                 )
 
-            appended = mailbox.append_supervision_end(
+            appended = mailbox_appenders.append_supervision_end(
                 plan_dir,
                 "supervision ended: complete",
-                outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
                 state_dir=state_dir,
                 resolve_at_commit=resolve,
             )
@@ -222,10 +232,10 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
-            message = mailbox.append_supervision_end(
+            message = mailbox_appenders.append_supervision_end(
                 plan_dir,
                 "reason=terminé",
-                outcome=mailbox.SUPERVISION_OUTCOME_PAUSED,
+                outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_PAUSED,
                 state_dir=state_dir,
             )
 
@@ -238,7 +248,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                     "id": message.id,
                     "seq": message.seq,
                     "text": "reason=terminé",
-                    "outcome": mailbox.SUPERVISION_OUTCOME_PAUSED,
+                    "outcome": mailbox_vocabulary.SUPERVISION_OUTCOME_PAUSED,
                 },
                 json.loads(rendered),
             )
@@ -250,14 +260,14 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
-            question = mailbox.append_question(
+            question = mailbox_appenders.append_question(
                 plan_dir,
                 "Which mode?",
                 state_dir=state_dir,
                 message_id="00000000-0000-4000-8000-000000000001",
                 created_at="0001-01-01T00:00:00+00:00",
             )
-            resolution_question = mailbox.append_question(
+            resolution_question = mailbox_appenders.append_question(
                 plan_dir,
                 "Continue?",
                 state_dir=state_dir,
@@ -270,9 +280,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             empty_text_record = {
                 "created_at": created_at,
                 "id": message_id,
-                "kind": mailbox.KIND_GUIDANCE,
+                "kind": mailbox_vocabulary.KIND_GUIDANCE,
                 "text": "",
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
             }
             record_overhead = len(
                 json.dumps(
@@ -286,14 +296,14 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             # guidance-delivery reserve and then the closure/reply reserve, so
             # ordinary records stop short of both.
             ordinary_cap = (
-                mailbox.MAILBOX_MAX_BYTES
-                - mailbox.MAILBOX_REPLY_RESERVE_BYTES
-                - mailbox.MAILBOX_GUIDANCE_DELIVERY_RESERVE_BYTES
+                mailbox_constants.MAILBOX_MAX_BYTES
+                - mailbox_constants.MAILBOX_REPLY_RESERVE_BYTES
+                - mailbox_constants.MAILBOX_GUIDANCE_DELIVERY_RESERVE_BYTES
             )
             current_size = mailbox.read_mailbox(
                 plan_dir, state_dir=state_dir
             ).size_bytes
-            mailbox.append_guidance(
+            mailbox_appenders.append_guidance(
                 plan_dir,
                 "x" * (ordinary_cap - current_size - record_overhead),
                 state_dir=state_dir,
@@ -315,21 +325,28 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertTrue(view_payload["accepts_resolutions"])
             self.assertTrue(view_payload["accepts_guidance_deliveries"])
             self.assertEqual(
-                mailbox.MAILBOX_CLOSURE_RESERVE_BYTES,
-                mailbox.MAILBOX_REPLY_RESERVE_BYTES,
+                mailbox_constants.MAILBOX_CLOSURE_RESERVE_BYTES,
+                mailbox_constants.MAILBOX_REPLY_RESERVE_BYTES,
             )
 
-            for append in (mailbox.append_guidance, mailbox.append_question):
-                with self.assertRaises(mailbox.MailboxError) as raised:
+            for append in (
+                mailbox_appenders.append_guidance,
+                mailbox_appenders.append_question,
+            ):
+                with self.assertRaises(mailbox_models.MailboxError) as raised:
                     append(plan_dir, "one more?", state_dir=state_dir)
-                self.assertEqual(mailbox.ERROR_MAILBOX_FULL, raised.exception.reason)
-            with self.assertRaises(mailbox.MailboxError) as raised:
-                mailbox.append_acknowledgement(
+                self.assertEqual(
+                    mailbox_constants.ERROR_MAILBOX_FULL, raised.exception.reason
+                )
+            with self.assertRaises(mailbox_models.MailboxError) as raised:
+                mailbox_appenders.append_acknowledgement(
                     plan_dir, view.last_seq, state_dir=state_dir
                 )
-            self.assertEqual(mailbox.ERROR_MAILBOX_FULL, raised.exception.reason)
-            with self.assertRaises(mailbox.MailboxError) as raised:
-                mailbox.append_notice(
+            self.assertEqual(
+                mailbox_constants.ERROR_MAILBOX_FULL, raised.exception.reason
+            )
+            with self.assertRaises(mailbox_models.MailboxError) as raised:
+                mailbox_appenders.append_notice(
                     plan_dir,
                     "one more notice",
                     run_id="run-A",
@@ -337,28 +354,30 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                     turn_index=1,
                     state_dir=state_dir,
                 )
-            self.assertEqual(mailbox.ERROR_MAILBOX_FULL, raised.exception.reason)
+            self.assertEqual(
+                mailbox_constants.ERROR_MAILBOX_FULL, raised.exception.reason
+            )
 
             # Guidance still owes an honest delivery outcome, so its reserve
             # survives the ordinary-write refusals above.
-            delivery = mailbox.append_guidance_delivery(
+            delivery = mailbox_appenders.append_guidance_delivery(
                 plan_dir,
                 message_id,
-                delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
-                delivery_reason=mailbox.GUIDANCE_REASON_STALE_TURN,
-                channel=mailbox.GUIDANCE_CHANNEL_LIVE,
+                delivery_state=mailbox_vocabulary.GUIDANCE_STATE_DEFERRED,
+                delivery_reason=mailbox_vocabulary.GUIDANCE_REASON_STALE_TURN,
+                channel=mailbox_vocabulary.GUIDANCE_CHANNEL_LIVE,
                 state_dir=state_dir,
             )
             self.assertEqual(message_id, delivery.to)
 
-            reply = mailbox.append_reply(
+            reply = mailbox_appenders.append_reply(
                 plan_dir, question.id, "x", state_dir=state_dir
             )
             self.assertEqual(question.id, reply.to)
-            resolution = mailbox.append_resolution(
+            resolution = mailbox_appenders.append_resolution(
                 plan_dir,
                 resolution_question.id,
-                mailbox.RESOLUTION_ACTION_CONTINUE,
+                mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
                 expected_run_id="run-A",
                 state_dir=state_dir,
             )
@@ -388,14 +407,14 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
             created_at = "0001-01-01T00:00:00+00:00"
-            first_question = mailbox.append_question(
+            first_question = mailbox_appenders.append_question(
                 plan_dir,
                 "first?",
                 state_dir=state_dir,
                 message_id="00000000-0000-4000-8000-000000000001",
                 created_at=created_at,
             )
-            second_question = mailbox.append_question(
+            second_question = mailbox_appenders.append_question(
                 plan_dir,
                 "second?",
                 state_dir=state_dir,
@@ -406,10 +425,10 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             empty_reply_record = {
                 "created_at": created_at,
                 "id": reply_id,
-                "kind": mailbox.KIND_REPLY,
+                "kind": mailbox_vocabulary.KIND_REPLY,
                 "text": "",
                 "to": first_question.id,
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
             }
             reply_overhead = len(
                 json.dumps(
@@ -420,12 +439,14 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 + b"\n"
             )
             target_size = (
-                mailbox.MAILBOX_MAX_BYTES - mailbox.MAILBOX_MIN_REPLY_BYTES + 1
+                mailbox_constants.MAILBOX_MAX_BYTES
+                - mailbox_constants.MAILBOX_MIN_REPLY_BYTES
+                + 1
             )
             current_size = mailbox.read_mailbox(
                 plan_dir, state_dir=state_dir
             ).size_bytes
-            mailbox.append_reply(
+            mailbox_appenders.append_reply(
                 plan_dir,
                 first_question.id,
                 "x" * (target_size - current_size - reply_overhead),
@@ -438,11 +459,13 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertEqual(target_size, view.size_bytes)
             self.assertFalse(view.full)
             self.assertFalse(view.accepts_replies)
-            with self.assertRaises(mailbox.MailboxError) as raised:
-                mailbox.append_reply(
+            with self.assertRaises(mailbox_models.MailboxError) as raised:
+                mailbox_appenders.append_reply(
                     plan_dir, second_question.id, "x", state_dir=state_dir
                 )
-            self.assertEqual(mailbox.ERROR_MAILBOX_FULL, raised.exception.reason)
+            self.assertEqual(
+                mailbox_constants.ERROR_MAILBOX_FULL, raised.exception.reason
+            )
 
             payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
             status = payload["mailbox"]
@@ -463,18 +486,18 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
-            mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+            mailbox_path = mailbox_cursors.mailbox_path_for_plan(plan_dir, state_dir)
             mailbox_path.parent.mkdir(parents=True)
             mailbox_path.touch()
-            mailbox.write_lease(
+            mailbox_leases.write_lease(
                 plan_dir,
                 "00000000-0000-4000-8000-000000000001",
                 state_dir=state_dir,
                 updated_at="2020-01-01T00:00:00+00:00",
             )
 
-            read_error = mailbox.MailboxError(
-                mailbox.ERROR_MAILBOX_READ,
+            read_error = mailbox_models.MailboxError(
+                mailbox_constants.ERROR_MAILBOX_READ,
                 "permission denied",
                 path=mailbox_path,
             )
@@ -490,9 +513,9 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertIsNone(status["accepts_resolutions"])
             self.assertIsNone(status["resolutions"])
             self.assertIsNone(status["notices"])
-            self.assertIn(mailbox.ERROR_MAILBOX_READ, status["error"])
+            self.assertIn(mailbox_constants.ERROR_MAILBOX_READ, status["error"])
             self.assertTrue(status["lease_present"])
             self.assertFalse(status["lease_fresh"])
             self.assertEqual("2020-01-01T00:00:00+00:00", status["lease_updated_at"])
-            self.assertEqual(mailbox.LEASE_EXPIRED, status["lease_reason"])
+            self.assertEqual(mailbox_constants.LEASE_EXPIRED, status["lease_reason"])
             self.assertIsNone(status["lease_error"])

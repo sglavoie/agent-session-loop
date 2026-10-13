@@ -88,6 +88,10 @@ from . import (
     events,
     harnesses,
     mailbox,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_models,
+    mailbox_vocabulary,
     plans,
     redirect_continuation,
     repository_evidence,
@@ -299,25 +303,27 @@ def _mailbox_completion_guard_evidence(
     """Return body-free evidence when a blocking worker question was ignored."""
     try:
         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir_arg)
-    except (OSError, mailbox.MailboxError) as error:
+    except (OSError, mailbox_models.MailboxError) as error:
         return {
-            "mailbox_path": str(mailbox.mailbox_path_for_plan(plan_dir, state_dir_arg)),
-            "mailbox_schema_version": mailbox.MAILBOX_SCHEMA_VERSION,
+            "mailbox_path": str(
+                mailbox_cursors.mailbox_path_for_plan(plan_dir, state_dir_arg)
+            ),
+            "mailbox_schema_version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
             "projection_seq": None,
             "read_error": (
                 error.reason
-                if isinstance(error, mailbox.MailboxError)
-                else mailbox.ERROR_MAILBOX_READ
+                if isinstance(error, mailbox_models.MailboxError)
+                else mailbox_constants.ERROR_MAILBOX_READ
             ),
             "questions": [],
         }
     violations: list[dict[str, Any]] = []
     for question in view.messages:
         if (
-            question.kind != mailbox.KIND_QUESTION
-            or question.version < mailbox.MAILBOX_WAIT_SCHEMA_VERSION
-            or question.delivery_mode != mailbox.DELIVERY_MODE_WAIT
-            or question.waiter_origin != mailbox.WAITER_ORIGIN_WORKER
+            question.kind != mailbox_vocabulary.KIND_QUESTION
+            or question.version < mailbox_constants.MAILBOX_WAIT_SCHEMA_VERSION
+            or question.delivery_mode != mailbox_vocabulary.DELIVERY_MODE_WAIT
+            or question.waiter_origin != mailbox_vocabulary.WAITER_ORIGIN_WORKER
             or question.run_id != run_id
             or question.session_id != session_id
             or question.turn_index != turn_index
@@ -330,8 +336,8 @@ def _mailbox_completion_guard_evidence(
         elif receipt is None:
             violation = "unconsumed"
         elif (
-            closure.kind == mailbox.KIND_RESOLUTION
-            and closure.action == mailbox.RESOLUTION_ACTION_PAUSE
+            closure.kind == mailbox_vocabulary.KIND_RESOLUTION
+            and closure.action == mailbox_vocabulary.RESOLUTION_ACTION_PAUSE
         ):
             violation = "pause-resolved"
         else:
@@ -357,7 +363,7 @@ def _mailbox_completion_guard_evidence(
         return None
     return {
         "mailbox_path": str(view.mailbox_path),
-        "mailbox_schema_version": mailbox.MAILBOX_SCHEMA_VERSION,
+        "mailbox_schema_version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
         "projection_seq": view.last_seq,
         "questions": violations,
     }

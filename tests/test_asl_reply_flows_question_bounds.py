@@ -14,6 +14,10 @@ from agent_session_loop import (
     events,
     harnesses,
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_snapshot,
     plans,
     run_coordination,
     state,
@@ -78,7 +82,7 @@ class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
             self.assertEqual(first_text, published.text)
 
             with mock.patch.object(
-                mailbox,
+                mailbox_appenders,
                 "append_question",
                 side_effect=AssertionError(
                     "a retried preparation must reuse the bounded question"
@@ -119,12 +123,13 @@ class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
     def test_question_cap_degrades_to_mailbox_full_without_appending(
         self,
     ) -> None:
-        past_question_cap = mailbox.MailboxView(
+        past_question_cap = mailbox_snapshot.MailboxView(
             mailbox_path=Path("/tmp/mailbox.jsonl"),
             messages=(),
             last_seq=0,
             size_bytes=(
-                mailbox.MAILBOX_MAX_BYTES - mailbox.MAILBOX_QUESTION_RESERVE_BYTES
+                mailbox_constants.MAILBOX_MAX_BYTES
+                - mailbox_constants.MAILBOX_QUESTION_RESERVE_BYTES
             ),
         )
         # The guard must fire on the reduced question cap even though the
@@ -139,7 +144,7 @@ class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
                 return_value=past_question_cap,
             ),
             mock.patch.object(
-                mailbox,
+                mailbox_appenders,
                 "append_question",
             ) as append_question,
             self.assertRaises(run_coordination.MailboxWaitUnavailable) as raised,
@@ -154,7 +159,7 @@ class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
                 turn_index=1,
             )
 
-        self.assertEqual(mailbox.ERROR_MAILBOX_FULL, raised.exception.reason)
+        self.assertEqual(mailbox_constants.ERROR_MAILBOX_FULL, raised.exception.reason)
         append_question.assert_not_called()
 
     def test_abandoned_escalation_stops_counting_once_the_run_pauses(
@@ -221,9 +226,9 @@ class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
-            mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+            mailbox_path = mailbox_cursors.mailbox_path_for_plan(plan_dir, state_dir)
             mailbox_path.parent.mkdir(parents=True, exist_ok=True)
-            mailbox_path.write_bytes(b"{" * mailbox.MAILBOX_MAX_BYTES)
+            mailbox_path.write_bytes(b"{" * mailbox_constants.MAILBOX_MAX_BYTES)
             pause_message = "blocked - mailbox capacity fallback"
 
             def fake_run_harness(name, **_kwargs):
@@ -278,7 +283,7 @@ class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
                 ),
             )
             self.assertEqual(
-                mailbox.MAILBOX_MAX_BYTES,
+                mailbox_constants.MAILBOX_MAX_BYTES,
                 mailbox_path.stat().st_size,
             )
 

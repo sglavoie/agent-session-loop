@@ -20,6 +20,8 @@ from asl_autopilot_test_support import (  # noqa: F401
     tearDownModule,
 )
 
+from agent_session_loop import mailbox_constants, mailbox_cursors, mailbox_leases
+
 
 class SuperviseRunMailboxLeaseTest(SuperviseRunInjectedBase):
     def test_default_run_invoker_forwards_status_probe_and_stall_threshold(
@@ -77,7 +79,7 @@ class SuperviseRunMailboxLeaseTest(SuperviseRunInjectedBase):
         state_root = os.path.join(tmp, "state")
         os.makedirs(plan_dir)
         mailbox_path = autopilot._mailbox.mailbox_path_for_plan(plan_dir, state_root)
-        lease_path = autopilot._mailbox.lease_path_for_plan(plan_dir, state_root)
+        lease_path = mailbox_cursors.lease_path_for_plan(plan_dir, state_root)
 
         initial = _status_payload(1)
         initial.update(
@@ -139,7 +141,7 @@ class SuperviseRunMailboxLeaseTest(SuperviseRunInjectedBase):
         state_root = os.path.join(tmp, "state")
         os.makedirs(plan_dir)
         mailbox_path = autopilot._mailbox.mailbox_path_for_plan(plan_dir, state_root)
-        lease_path = autopilot._mailbox.lease_path_for_plan(plan_dir, state_root)
+        lease_path = mailbox_cursors.lease_path_for_plan(plan_dir, state_root)
         clock = _ManualClock()
         wall_start = datetime(2026, 7, 24, tzinfo=UTC)
         lease_writes = []
@@ -166,7 +168,7 @@ class SuperviseRunMailboxLeaseTest(SuperviseRunInjectedBase):
         def write_lease(plan, supervisor_id, *, state_dir=None):
             lease_writes.append(clock())
             updated_at = wall_start + timedelta(seconds=clock())
-            return autopilot._mailbox.write_lease(
+            return mailbox_leases.write_lease(
                 plan,
                 supervisor_id,
                 state_dir=state_dir,
@@ -185,14 +187,14 @@ class SuperviseRunMailboxLeaseTest(SuperviseRunInjectedBase):
             launch_times.append(clock())
             now = wall_start + timedelta(seconds=clock())
             activation_at_launch.append(
-                autopilot._mailbox.read_lease(
+                mailbox_leases.read_lease(
                     plan_dir,
                     state_dir=state_root,
                     now=now,
                 ).fresh
             )
             if chunk_index == 1:
-                clock.advance(autopilot._mailbox.MAILBOX_LEASE_FRESH_SECONDS + 1.0)
+                clock.advance(mailbox_constants.MAILBOX_LEASE_FRESH_SECONDS + 1.0)
                 return {
                     "ok": False,
                     "paused": True,
@@ -229,7 +231,7 @@ class SuperviseRunMailboxLeaseTest(SuperviseRunInjectedBase):
         self.assertEqual(lease_writes, launch_times)
         self.assertGreater(
             launch_times[1] - launch_times[0],
-            autopilot._mailbox.MAILBOX_LEASE_FRESH_SECONDS,
+            mailbox_constants.MAILBOX_LEASE_FRESH_SECONDS,
         )
 
     def test_no_mailbox_skips_watcher_and_lease_write(self) -> None:
@@ -239,7 +241,7 @@ class SuperviseRunMailboxLeaseTest(SuperviseRunInjectedBase):
         state_root = os.path.join(tmp, "state")
         os.makedirs(plan_dir)
         mailbox_path = autopilot._mailbox.mailbox_path_for_plan(plan_dir, state_root)
-        lease_path = autopilot._mailbox.lease_path_for_plan(plan_dir, state_root)
+        lease_path = mailbox_cursors.lease_path_for_plan(plan_dir, state_root)
         initial = _status_payload(1)
         initial.update(
             {

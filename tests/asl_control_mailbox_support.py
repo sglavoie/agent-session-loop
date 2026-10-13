@@ -9,7 +9,10 @@ import uuid
 from pathlib import Path
 
 from agent_session_loop import (
-    mailbox,
+    mailbox_appenders,
+    mailbox_cursors,
+    mailbox_models,
+    mailbox_vocabulary,
 )
 
 
@@ -25,10 +28,10 @@ class MailboxTestsBase(unittest.TestCase):
         (self.plan_dir / "context.md").write_text("# c\n", encoding="utf-8")
 
     def mailbox_path(self) -> Path:
-        return mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
+        return mailbox_cursors.mailbox_path_for_plan(self.plan_dir, self.state_dir)
 
     def lease_path(self) -> Path:
-        return mailbox.lease_path_for_plan(self.plan_dir, self.state_dir)
+        return mailbox_cursors.lease_path_for_plan(self.plan_dir, self.state_dir)
 
     def append_raw(self, payload: object) -> None:
         path = self.mailbox_path()
@@ -51,17 +54,19 @@ class MailboxTestsBase(unittest.TestCase):
 
     def guidance(
         self, text: str = "Prefer the existing parser."
-    ) -> mailbox.MailboxMessage:
-        return mailbox.append_guidance(self.plan_dir, text, state_dir=self.state_dir)
+    ) -> mailbox_models.MailboxMessage:
+        return mailbox_appenders.append_guidance(
+            self.plan_dir, text, state_dir=self.state_dir
+        )
 
-    def deliver(self, guidance_id: str, **overrides) -> mailbox.MailboxMessage:
+    def deliver(self, guidance_id: str, **overrides) -> mailbox_models.MailboxMessage:
         values = {
-            "delivery_state": mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
-            "delivery_reason": mailbox.GUIDANCE_REASON_DELIVERED,
-            "channel": mailbox.GUIDANCE_CHANNEL_LIVE,
+            "delivery_state": mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_LIVE,
+            "delivery_reason": mailbox_vocabulary.GUIDANCE_REASON_DELIVERED,
+            "channel": mailbox_vocabulary.GUIDANCE_CHANNEL_LIVE,
         }
         values.update(overrides)
-        return mailbox.append_guidance_delivery(
+        return mailbox_appenders.append_guidance_delivery(
             self.plan_dir,
             guidance_id,
             state_dir=self.state_dir,

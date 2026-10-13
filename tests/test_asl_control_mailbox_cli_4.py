@@ -17,7 +17,12 @@ from agent_session_loop import (
     agent_mux_delivery,
     events,
     mailbox,
+    mailbox_appenders,
     mailbox_cli,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_leases,
+    mailbox_models,
     state,
 )
 from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
@@ -32,13 +37,13 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
     def test_predates_fast_clear_still_defers_to_post_append_open_question(
         self,
     ) -> None:
-        first = mailbox.append_question(
+        first = mailbox_appenders.append_question(
             self.plan_dir,
             "First?",
             state_dir=self.state_dir,
             run_id="run-live",
         )
-        second = mailbox.append_question(
+        second = mailbox_appenders.append_question(
             self.plan_dir,
             "Second?",
             state_dir=self.state_dir,
@@ -46,7 +51,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
         )
         # The lease predates `second`, so the projection is captured, but the
         # authoritative post-append re-read still sees `first` open.
-        mailbox.write_lease(
+        mailbox_leases.write_lease(
             self.plan_dir,
             "00000000-0000-0000-0000-000000000099",
             state_dir=self.state_dir,
@@ -76,12 +81,12 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
     def test_predates_fast_clear_rejects_lease_naming_a_different_run(
         self,
     ) -> None:
-        mailbox.append_guidance(
+        mailbox_appenders.append_guidance(
             self.plan_dir,
             "Prefer the flat layout.",
             state_dir=self.state_dir,
         )
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,
@@ -90,7 +95,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
         # Same predates shape as the firing case, but the lease attributes a
         # different run; without the run comparison the post-append re-read
         # would find no open questions for `run-other` and fire.
-        mailbox.write_lease(
+        mailbox_leases.write_lease(
             self.plan_dir,
             "00000000-0000-0000-0000-000000000099",
             state_dir=self.state_dir,
@@ -109,13 +114,13 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
         notify.assert_not_called()
 
     def test_reply_succeeds_when_agent_mux_delivery_fails(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Proceed?",
             state_dir=self.state_dir,
             run_id="run-1",
         )
-        mailbox.write_lease(
+        mailbox_leases.write_lease(
             self.plan_dir,
             "00000000-0000-0000-0000-000000000099",
             state_dir=self.state_dir,
@@ -186,7 +191,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
         self.assertEqual((), view.pending_guidance)
         self.assertEqual(0, view.max_acknowledged_seq)
         self.assertFalse(
-            mailbox.lease_path_for_plan(
+            mailbox_cursors.lease_path_for_plan(
                 self.plan_dir,
                 self.state_dir,
             ).exists()
@@ -289,7 +294,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
         self.assertEqual(1, code)
         self.assertEqual(mailbox_cli.ERROR_NO_ACTIVE_RUN, payload["reason"])
         self.assertFalse(
-            mailbox.mailbox_path_for_plan(
+            mailbox_cursors.mailbox_path_for_plan(
                 self.plan_dir,
                 self.state_dir,
             ).exists()
@@ -318,7 +323,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
 
         self.assertEqual(1, code)
         self.assertEqual(mailbox_cli.ERROR_NO_ACTIVE_RUN, payload["reason"])
-        mailbox_path = mailbox.mailbox_path_for_plan(
+        mailbox_path = mailbox_cursors.mailbox_path_for_plan(
             self.plan_dir,
             self.state_dir,
         )
@@ -338,19 +343,19 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
 
     def test_notify_append_failure_is_an_ordinary_command_error(self) -> None:
         self.write_active_turn()
-        mailbox_path = mailbox.mailbox_path_for_plan(
+        mailbox_path = mailbox_cursors.mailbox_path_for_plan(
             self.plan_dir,
             self.state_dir,
         )
-        failure = mailbox.MailboxError(
-            mailbox.ERROR_MAILBOX_WRITE,
+        failure = mailbox_models.MailboxError(
+            mailbox_constants.ERROR_MAILBOX_WRITE,
             "cannot append notice",
             path=mailbox_path,
         )
         stdout, stderr = io.StringIO(), io.StringIO()
         with (
             mock.patch.object(
-                mailbox,
+                mailbox_appenders,
                 "append_notice",
                 side_effect=failure,
             ),
@@ -361,7 +366,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
 
         self.assertEqual(1, code)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(mailbox.ERROR_MAILBOX_WRITE, payload["reason"])
+        self.assertEqual(mailbox_constants.ERROR_MAILBOX_WRITE, payload["reason"])
         self.assertEqual({"path": str(mailbox_path)}, payload["details"])
         self.assertNotIn("RUNNER_PAUSE:", stdout.getvalue())
         self.assertNotIn("RUNNER_PAUSE:", stderr.getvalue())
@@ -422,7 +427,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
             (
                 "guidance-missing-text",
                 ["inbox", "guidance", str(self.plan_dir)],
-                mailbox.REJECT_MISSING_TEXT,
+                mailbox_constants.REJECT_MISSING_TEXT,
             ),
             (
                 "guidance-conflicting-text",
@@ -445,7 +450,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
                     "--to",
                     question_id,
                 ],
-                mailbox.REJECT_MISSING_TEXT,
+                mailbox_constants.REJECT_MISSING_TEXT,
             ),
             (
                 "reply-conflicting-text",
@@ -464,7 +469,7 @@ class MailboxCliTestsPart4(MailboxCliTestsBase):
             (
                 "notify-missing-text",
                 ["notify", str(self.plan_dir)],
-                mailbox.REJECT_MISSING_TEXT,
+                mailbox_constants.REJECT_MISSING_TEXT,
             ),
             (
                 "notify-conflicting-text",

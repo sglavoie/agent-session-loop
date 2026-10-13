@@ -73,6 +73,12 @@ from . import (
     events,
     harnesses,
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_leases,
+    mailbox_models,
+    mailbox_vocabulary,
     model_availability,
     plans,
     prepare_validation_store,
@@ -472,8 +478,8 @@ def _mailbox_activation_payload(
 ) -> dict[str, Any]:
     """Resolve mailbox activation without making mailbox failures fatal."""
     state_dir_arg = getattr(args, "state_dir", None)
-    mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir_arg)
-    lease_path = mailbox.lease_path_for_plan(plan_dir, state_dir_arg)
+    mailbox_path = mailbox_cursors.mailbox_path_for_plan(plan_dir, state_dir_arg)
+    lease_path = mailbox_cursors.lease_path_for_plan(plan_dir, state_dir_arg)
     disabled = _no_mailbox(args)
     mailbox_present = False if disabled else mailbox_path.exists()
     lease_fresh = False
@@ -482,12 +488,12 @@ def _mailbox_activation_payload(
 
     if not disabled:
         try:
-            lease = mailbox.read_lease(plan_dir, state_dir=state_dir_arg)
-        except (OSError, mailbox.MailboxError) as exc:
+            lease = mailbox_leases.read_lease(plan_dir, state_dir=state_dir_arg)
+        except (OSError, mailbox_models.MailboxError) as exc:
             lease_reason = (
                 exc.reason
-                if isinstance(exc, mailbox.MailboxError)
-                else mailbox.ERROR_LEASE_READ
+                if isinstance(exc, mailbox_models.MailboxError)
+                else mailbox_constants.ERROR_LEASE_READ
             )
             error = str(exc)
         else:
@@ -525,13 +531,13 @@ def _pending_guidance_snapshot(
     enabled: bool,
     plan_dir: str | Path,
     state_dir_arg: str | Path | None,
-) -> tuple[mailbox.MailboxMessage, ...]:
+) -> tuple[mailbox_models.MailboxMessage, ...]:
     """Return pending guidance for one prompt, degrading to an empty snapshot."""
     if not enabled:
         return ()
     try:
         return mailbox.pending_guidance(plan_dir, state_dir=state_dir_arg)
-    except OSError, mailbox.MailboxError:
+    except OSError, mailbox_models.MailboxError:
         return ()
 
 
@@ -541,7 +547,7 @@ def _record_next_turn_guidance_delivery(
     state_dir_arg: str | Path | None,
     event_path: Path,
     append_event: GuidanceEventAppender,
-    pending_guidance: Sequence[mailbox.MailboxMessage],
+    pending_guidance: Sequence[mailbox_models.MailboxMessage],
     harness: str,
     run_id: str,
     session_id: str,
@@ -568,25 +574,25 @@ def _record_next_turn_guidance_delivery(
     """
     for message in pending_guidance:
         try:
-            record = mailbox.append_guidance_delivery(
+            record = mailbox_appenders.append_guidance_delivery(
                 plan_dir,
                 message.id,
-                delivery_state=mailbox.GUIDANCE_STATE_DELIVERED_NEXT_TURN,
-                delivery_reason=mailbox.GUIDANCE_REASON_DELIVERED,
-                channel=mailbox.GUIDANCE_CHANNEL_NEXT_TURN,
+                delivery_state=mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_NEXT_TURN,
+                delivery_reason=mailbox_vocabulary.GUIDANCE_REASON_DELIVERED,
+                channel=mailbox_vocabulary.GUIDANCE_CHANNEL_NEXT_TURN,
                 run_id=run_id,
                 session_id=session_id,
                 turn_index=turn_index,
                 harness=harness,
                 state_dir=state_dir_arg,
             )
-        except OSError, mailbox.MailboxError:
+        except OSError, mailbox_models.MailboxError:
             return
         append_event(
             event_path,
             events.MAILBOX_EVENT,
             {
                 "action": events.MAILBOX_ACTION_GUIDANCE_DELIVERED,
-                **mailbox.guidance_delivery_event_payload(record),
+                **mailbox_appenders.guidance_delivery_event_payload(record),
             },
         )

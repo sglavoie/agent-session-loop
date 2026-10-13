@@ -40,7 +40,7 @@ from typing import Any
 from agent_session_loop import (
     events,
     plans,
-    preflight,
+    preflight_runtime_hints,
     run_control,
     run_persistence,
     run_termination,
@@ -412,7 +412,8 @@ class PauseWriteTests(_TerminationCase):
             {"error": "durable commit-group evidence could not be reconstructed"}
         )
         self.assertEqual(
-            preflight.RUNTIME_REPAIR_HINTS["commit-failed"].message, message
+            preflight_runtime_hints.RUNTIME_REPAIR_HINTS["commit-failed"].message,
+            message,
         )
         self.assertIn("retries the outstanding commit group", message)
 

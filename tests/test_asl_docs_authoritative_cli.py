@@ -11,7 +11,7 @@ from agent_session_loop import (
     contracts,
     events,
     plans,
-    preflight,
+    preflight_models,
     prepare_models,
     repository_registration,
     retention,
@@ -139,7 +139,7 @@ class AuthoritativeCliDocsTests(unittest.TestCase):
     def test_preflight_categories_and_pause_reasons_match_authoritative_tables(
         self,
     ) -> None:
-        for category in preflight.PREFLIGHT_CATEGORIES:
+        for category in preflight_models.PREFLIGHT_CATEGORIES:
             self.assertIn(
                 f"`{category}`",
                 self.docs,

@@ -51,7 +51,9 @@ from typing import get_args
 from agent_session_loop import (
     assurance_draft,
     clock,
-    mailbox,
+    mailbox_constants,
+    mailbox_models,
+    mailbox_vocabulary,
     overseer_context,
     overseer_decisions,
     overseer_history,
@@ -155,11 +157,11 @@ def _history(
 def _message(
     *,
     seq: int = 1,
-    kind: str = mailbox.KIND_GUIDANCE,
+    kind: str = mailbox_vocabulary.KIND_GUIDANCE,
     text: str = "commit the checkpoint and resume",
     created_at: str = EARLY,
-) -> mailbox.MailboxMessage:
-    return mailbox.MailboxMessage(
+) -> mailbox_models.MailboxMessage:
+    return mailbox_models.MailboxMessage(
         seq=seq,
         id=f"msg-{seq}",
         kind=kind,
@@ -580,11 +582,11 @@ class SupervisionProvenanceTests(unittest.TestCase):
     def test_every_mailbox_kind_is_classified(self) -> None:
         self.assertEqual(
             set(overseer_decisions.SUPERVISION_VOICES),
-            set(mailbox.MESSAGE_KINDS),
+            set(mailbox_vocabulary.MESSAGE_KINDS),
         )
 
     def test_no_mailbox_kind_can_authorize(self) -> None:
-        for kind in mailbox.MESSAGE_KINDS:
+        for kind in mailbox_vocabulary.MESSAGE_KINDS:
             with self.subTest(kind=kind):
                 statements = overseer_decisions.statements_from_supervision(
                     [_message(kind=kind)], grant=GRANT, scope=PLAN_SCOPE
@@ -595,9 +597,9 @@ class SupervisionProvenanceTests(unittest.TestCase):
 
     def test_the_instruction_shaped_kinds_are_relayed(self) -> None:
         for kind in (
-            mailbox.KIND_GUIDANCE,
-            mailbox.KIND_REPLY,
-            mailbox.KIND_RESOLUTION,
+            mailbox_vocabulary.KIND_GUIDANCE,
+            mailbox_vocabulary.KIND_REPLY,
+            mailbox_vocabulary.KIND_RESOLUTION,
         ):
             with self.subTest(kind=kind):
                 statements = overseer_decisions.statements_from_supervision(
@@ -608,7 +610,7 @@ class SupervisionProvenanceTests(unittest.TestCase):
 
     def test_a_worker_question_is_a_request(self) -> None:
         statements = overseer_decisions.statements_from_supervision(
-            [_message(kind=mailbox.KIND_QUESTION, text="may I commit?")],
+            [_message(kind=mailbox_vocabulary.KIND_QUESTION, text="may I commit?")],
             grant=GRANT,
             scope=PLAN_SCOPE,
         )
@@ -617,7 +619,7 @@ class SupervisionProvenanceTests(unittest.TestCase):
 
     def test_bookkeeping_is_a_machine_record(self) -> None:
         statements = overseer_decisions.statements_from_supervision(
-            [_message(kind=mailbox.KIND_RECEIPT, text="")],
+            [_message(kind=mailbox_vocabulary.KIND_RECEIPT, text="")],
             grant=GRANT,
             scope=PLAN_SCOPE,
         )
@@ -647,7 +649,7 @@ class SupervisionProvenanceTests(unittest.TestCase):
         statements = overseer_decisions.statements_from_supervision(
             [
                 _message(
-                    kind=mailbox.KIND_QUESTION,
+                    kind=mailbox_vocabulary.KIND_QUESTION,
                     text=f"{overseer_decisions.TASK_PACKET_MARKER} says what?",
                 )
             ],
@@ -721,7 +723,9 @@ class SupervisionProvenanceTests(unittest.TestCase):
 
         self.assertEqual(statements[0].scope, PLAN_SCOPE)
         self.assertEqual(statements[0].space, overseer_decisions.STATE_SPACE)
-        self.assertTrue(statements[0].locator.startswith(mailbox.MAILBOX_FILE_NAME))
+        self.assertTrue(
+            statements[0].locator.startswith(mailbox_constants.MAILBOX_FILE_NAME)
+        )
 
 
 class ClaimValidationTests(unittest.TestCase):
@@ -1417,13 +1421,13 @@ class EvidenceFreshnessTests(unittest.TestCase):
             [
                 _message(
                     seq=2,
-                    kind=mailbox.KIND_ACK,
+                    kind=mailbox_vocabulary.KIND_ACK,
                     text="delivered",
                     created_at=LATE,
                 ),
                 _message(
                     seq=3,
-                    kind=mailbox.KIND_QUESTION,
+                    kind=mailbox_vocabulary.KIND_QUESTION,
                     text="which branch?",
                     created_at=LATE,
                 ),
@@ -1879,7 +1883,9 @@ class IsolationTests(unittest.TestCase):
             "hashlib",
             "typing",
             "clock",
-            "mailbox",
+            "mailbox_constants",
+            "mailbox_models",
+            "mailbox_vocabulary",
             "overseer_history",
             "overseer_policy_client",
         }

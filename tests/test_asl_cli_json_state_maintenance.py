@@ -15,7 +15,7 @@ from pathlib import Path
 
 from agent_session_loop import (
     cli,
-    mailbox,
+    mailbox_appenders,
     plans,
     retention,
     run_prompts,
@@ -37,7 +37,7 @@ class JsonStateMaintenanceCliTests(JsonCliHelpers, unittest.TestCase):
             plan_dir = tmp_dir / "plan with spaces"
             state_dir = tmp_dir / "state with spaces"
             write_plan(plan_dir, ("pending",))
-            mailbox.append_guidance(
+            mailbox_appenders.append_guidance(
                 plan_dir,
                 "Prefer the smaller implementation.",
                 state_dir=state_dir,

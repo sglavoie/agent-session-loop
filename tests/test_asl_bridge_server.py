@@ -28,6 +28,9 @@ from agent_session_loop import (
     events,
     intervention,
     mailbox,
+    mailbox_appenders,
+    mailbox_cursors,
+    mailbox_vocabulary,
     state,
     workbench,
     workbench_details,
@@ -83,7 +86,7 @@ class _Corpus:
             pid=os.getpid(),
             hostname=socket.gethostname(),
         )
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             plan_dir,
             QUESTION_BODY,
             state_dir=self.state_root,
@@ -122,7 +125,7 @@ class _Corpus:
         reachable solely as an explicitly selected id.
         """
         plan_dir, primary_id = self.waiting_plan(name)
-        second = mailbox.append_question(
+        second = mailbox_appenders.append_question(
             plan_dir,
             SECOND_QUESTION_BODY,
             state_dir=self.state_root,
@@ -162,7 +165,7 @@ class _Corpus:
     def input_wait_plan(self, name: str = "plan-input-wait") -> tuple[Path, str]:
         """A harness turn blocked in ``asl ask --wait``."""
         plan_dir = self.running_plan(name)
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             plan_dir,
             QUESTION_BODY,
             state_dir=self.state_root,
@@ -214,7 +217,7 @@ class _Corpus:
         raise AssertionError(f"no snapshot row for {plan_dir}")
 
     def mailbox_lines(self, plan_dir: Path) -> list[dict[str, Any]]:
-        path = mailbox.mailbox_path_for_plan(plan_dir, self.state_root)
+        path = mailbox_cursors.mailbox_path_for_plan(plan_dir, self.state_root)
         if not path.exists():
             return []
         return [
@@ -423,7 +426,7 @@ class BridgeRowActionTests(unittest.TestCase):
             first = mailbox.unanswered_questions(plan_dir, state_dir=corpus.state_root)[
                 0
             ]
-            mailbox.append_question(
+            mailbox_appenders.append_question(
                 plan_dir,
                 "Later question",
                 run_id=RUN_ID,
@@ -443,7 +446,7 @@ class BridgeRowActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))
             plan_dir, _ = corpus.waiting_plan()
-            bare = mailbox.append_question(
+            bare = mailbox_appenders.append_question(
                 plan_dir, "Bare question", run_id=RUN_ID, state_dir=corpus.state_root
             )
             path = (
@@ -464,7 +467,7 @@ class BridgeRowActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))
             plan_dir, primary = corpus.waiting_plan()
-            historical = mailbox.append_question(
+            historical = mailbox_appenders.append_question(
                 plan_dir,
                 "Historical question",
                 run_id="older-run",
@@ -550,7 +553,7 @@ class BridgeRowActionTests(unittest.TestCase):
             corpus = _Corpus(Path(tmp))
             plan_dir, _ = corpus.waiting_plan()
             for index in range(bridge.MAX_QUESTION_IDS + 4):
-                mailbox.append_question(
+                mailbox_appenders.append_question(
                     plan_dir,
                     f"extra question {index}",
                     state_dir=corpus.state_root,
@@ -622,7 +625,7 @@ class BridgeQuestionGetTests(unittest.TestCase):
                 hostname=socket.gethostname(),
             )
             body = "x" * (intervention.MAX_QUESTION_BODY_BYTES + 1)
-            question = mailbox.append_question(
+            question = mailbox_appenders.append_question(
                 plan_dir, body, state_dir=corpus.state_root, run_id=RUN_ID
             )
             corpus.write_state(
@@ -703,14 +706,16 @@ class BridgeReplyTests(unittest.TestCase):
             replies = [
                 line
                 for line in corpus.mailbox_lines(plan_dir)
-                if line["kind"] == mailbox.KIND_REPLY
+                if line["kind"] == mailbox_vocabulary.KIND_REPLY
             ]
             self.assertEqual(1, len(replies))
             self.assertEqual(REPLY_TEXT, replies[0]["text"])
             # The lease is the service's, not the CLI's: a bridge reply must
             # leave the same supervisor evidence the mailbox CLI leaves.
             self.assertTrue(
-                mailbox.lease_path_for_plan(plan_dir, corpus.state_root).exists()
+                mailbox_cursors.lease_path_for_plan(
+                    plan_dir, corpus.state_root
+                ).exists()
             )
 
     def test_reply_text_never_appears_in_the_response_or_the_event(self) -> None:
@@ -728,7 +733,7 @@ class BridgeReplyTests(unittest.TestCase):
                     "text": REPLY_TEXT,
                 }
             )
-            mailbox.append_receipt(
+            mailbox_appenders.append_receipt(
                 plan_dir,
                 row["question"]["question_id"],
                 result["closure_id"],
@@ -757,7 +762,7 @@ class BridgeReplyTests(unittest.TestCase):
             )
 
             self.assertEqual([], session.poll_operations())
-            mailbox.append_receipt(
+            mailbox_appenders.append_receipt(
                 plan_dir,
                 question_id,
                 result["closure_id"],
@@ -787,8 +792,8 @@ class BridgeReplyTests(unittest.TestCase):
 
             self.assertEqual(bridge.OPERATION_ACCEPTED, result["status"])
             kinds = [line["kind"] for line in corpus.mailbox_lines(plan_dir)]
-            self.assertIn(mailbox.KIND_RESOLUTION, kinds)
-            self.assertNotIn(mailbox.KIND_REPLY, kinds)
+            self.assertIn(mailbox_vocabulary.KIND_RESOLUTION, kinds)
+            self.assertNotIn(mailbox_vocabulary.KIND_REPLY, kinds)
 
     def test_empty_reply_is_refused_before_any_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -835,7 +840,7 @@ class BridgeMultipleQuestionMutationTests(unittest.TestCase):
             replies = [
                 line
                 for line in corpus.mailbox_lines(plan_dir)
-                if line["kind"] == mailbox.KIND_REPLY
+                if line["kind"] == mailbox_vocabulary.KIND_REPLY
             ]
             self.assertEqual([second_id], [line["to"] for line in replies])
             self.assertEqual(
@@ -933,10 +938,14 @@ class BridgeMultipleQuestionMutationTests(unittest.TestCase):
             closures = {
                 line["kind"]: line["to"]
                 for line in corpus.mailbox_lines(plan_dir)
-                if line["kind"] in (mailbox.KIND_REPLY, mailbox.KIND_RESOLUTION)
+                if line["kind"]
+                in (mailbox_vocabulary.KIND_REPLY, mailbox_vocabulary.KIND_RESOLUTION)
             }
             self.assertEqual(
-                {mailbox.KIND_REPLY: second_id, mailbox.KIND_RESOLUTION: primary_id},
+                {
+                    mailbox_vocabulary.KIND_REPLY: second_id,
+                    mailbox_vocabulary.KIND_RESOLUTION: primary_id,
+                },
                 closures,
             )
             self.assertEqual(
@@ -975,7 +984,7 @@ class BridgeStaleRequestTests(unittest.TestCase):
             corpus = _Corpus(Path(tmp))
             plan_dir, _ = corpus.waiting_plan()
             stale_token = corpus.row_for(plan_dir)["action_token"]
-            newer = mailbox.append_question(
+            newer = mailbox_appenders.append_question(
                 plan_dir, "a newer question", state_dir=corpus.state_root, run_id=RUN_ID
             )
             self.assertTrue(newer.id)
@@ -2296,7 +2305,7 @@ class BridgeDiagnosticsTests(unittest.TestCase):
             self.assertNotIn(REPLY_TEXT, writer.getvalue())
             self.assertIn('"ok":true', writer.getvalue())
             self.assertIn(
-                mailbox.KIND_REPLY,
+                mailbox_vocabulary.KIND_REPLY,
                 [line["kind"] for line in corpus.mailbox_lines(plan_dir)],
             )
 

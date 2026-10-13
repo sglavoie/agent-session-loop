@@ -101,7 +101,8 @@ from . import (
     handoff_guards,
     harness_failures,
     harnesses,
-    mailbox,
+    mailbox_models,
+    mailbox_vocabulary,
     model_availability,
     plans,
     redirect_continuation,
@@ -633,12 +634,14 @@ def settle_redirected_turn(
 
 
 def _mailbox_pause_resolution_details(
-    resolution: mailbox.MailboxMessage,
+    resolution: mailbox_models.MailboxMessage,
     *,
     run_id: str,
     session_id: str,
     turn_index: int,
-    waiter_origin: mailbox.WaiterOrigin = mailbox.WAITER_ORIGIN_WORKER,
+    waiter_origin: mailbox_vocabulary.WaiterOrigin = (
+        mailbox_vocabulary.WAITER_ORIGIN_WORKER
+    ),
     question_id: str | None = None,
 ) -> dict[str, Any]:
     """Describe the resolution that closed a worker or runner question."""
@@ -813,7 +816,10 @@ def settle_runner_pause(
             if wait_result.resolution is not None:
                 resolution_message = wait_result.resolution
                 assert resolution_message.action is not None
-                if resolution_message.action == mailbox.RESOLUTION_ACTION_CONTINUE:
+                if (
+                    resolution_message.action
+                    == mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE
+                ):
                     # The session remains pending; schedule its answerless
                     # continuation before honoring any stop-after-current
                     # request.
@@ -829,13 +835,16 @@ def settle_runner_pause(
                             resolution_seq=resolution_message.seq,
                         ),
                     )
-                assert resolution_message.action == mailbox.RESOLUTION_ACTION_PAUSE
+                assert (
+                    resolution_message.action
+                    == mailbox_vocabulary.RESOLUTION_ACTION_PAUSE
+                )
                 pause_details["mailbox_resolution"] = _mailbox_pause_resolution_details(
                     resolution_message,
                     run_id=ctx.run_id,
                     session_id=session_id,
                     turn_index=turn_index,
-                    waiter_origin=mailbox.WAITER_ORIGIN_RUNNER,
+                    waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_RUNNER,
                     question_id=prepared_wait.question.id,
                 )
     ctx.pause(

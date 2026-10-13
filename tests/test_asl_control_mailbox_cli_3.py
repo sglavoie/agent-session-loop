@@ -14,7 +14,12 @@ from agent_session_loop import (
     agent_mux_delivery,
     events,
     mailbox,
+    mailbox_appenders,
     mailbox_cli,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_leases,
+    mailbox_models,
     state,
 )
 from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
@@ -26,13 +31,13 @@ from tests.support import (
 class MailboxCliTestsPart3(MailboxCliTestsBase):
     def test_outbox_wait_does_not_notify_closed_question_history(self) -> None:
         self.write_active_turn(run_id="run-live")
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Already handled",
             state_dir=self.state_dir,
             run_id="run-live",
         )
-        mailbox.append_reply(
+        mailbox_appenders.append_reply(
             self.plan_dir,
             question.id,
             "done",
@@ -52,7 +57,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
 
     def test_outbox_wait_question_notification_is_fail_open(self) -> None:
         self.write_active_turn(run_id="run-live")
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Proceed?",
             state_dir=self.state_dir,
@@ -78,7 +83,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
     def test_stale_projected_lease_is_taken_over_without_projection(
         self,
     ) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,
@@ -88,7 +93,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
         self._write_projected_lease(
             stale_id,
             question,
-            age_seconds=mailbox.MAILBOX_LEASE_FRESH_SECONDS + 60.0,
+            age_seconds=mailbox_constants.MAILBOX_LEASE_FRESH_SECONDS + 60.0,
         )
 
         code, payload = self.payload_from(
@@ -104,7 +109,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
         self.assertEqual(after.supervisor_id, payload["supervisor_id"])
 
     def test_missing_v1_and_unprojected_leases_are_taken_over(self) -> None:
-        lease_path = mailbox.lease_path_for_plan(self.plan_dir, self.state_dir)
+        lease_path = mailbox_cursors.lease_path_for_plan(self.plan_dir, self.state_dir)
 
         with self.subTest(state="missing"):
             self.assertFalse(lease_path.exists())
@@ -128,7 +133,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
                 separators=(",", ":"),
             ).encode()
             lease_path.write_bytes(
-                (raw + b"\n").ljust(mailbox.MAILBOX_LEASE_BYTES, b" ")
+                (raw + b"\n").ljust(mailbox_constants.MAILBOX_LEASE_BYTES, b" ")
             )
             code, payload = self.payload_from(
                 mailbox_cli.inbox_guidance_from_args,
@@ -137,7 +142,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
             self.assertEqual(0, code)
             after = self._lease_on_disk()
             self.assertNotEqual(v1_id, after.supervisor_id)
-            self.assertEqual(mailbox.MAILBOX_LEASE_VERSION, after.version)
+            self.assertEqual(mailbox_constants.MAILBOX_LEASE_VERSION, after.version)
             self.assertIsNone(after.run_id)
             self.assertEqual(after.supervisor_id, payload["supervisor_id"])
 
@@ -154,7 +159,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
             self.assertEqual(after.supervisor_id, payload["supervisor_id"])
 
     def test_unreadable_lease_degrades_to_takeover(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,
@@ -162,14 +167,14 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
         )
         live_id = str(uuid.uuid4())
         self._write_projected_lease(live_id, question)
-        unreadable = mailbox.MailboxError(
-            mailbox.ERROR_LEASE_READ,
+        unreadable = mailbox_models.MailboxError(
+            mailbox_constants.ERROR_LEASE_READ,
             "temporarily unavailable",
-            path=mailbox.lease_path_for_plan(self.plan_dir, self.state_dir),
+            path=mailbox_cursors.lease_path_for_plan(self.plan_dir, self.state_dir),
         )
 
         with mock.patch.object(
-            mailbox_cli.mailbox,
+            mailbox_cli.mailbox_leases,
             "read_lease",
             side_effect=unreadable,
         ):
@@ -187,13 +192,13 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
     def test_reply_emits_text_free_agent_mux_clear_from_prewrite_projection(
         self,
     ) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,
             run_id="lease-run-not-current-state",
         )
-        mailbox.write_lease(
+        mailbox_leases.write_lease(
             self.plan_dir,
             "00000000-0000-0000-0000-000000000099",
             state_dir=self.state_dir,
@@ -254,19 +259,19 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
     def test_reply_fast_clear_ignores_a_question_abandoned_by_an_earlier_run(
         self,
     ) -> None:
-        mailbox.append_question(
+        mailbox_appenders.append_question(
             self.plan_dir,
             "Wrangler auth expired?",
             state_dir=self.state_dir,
             run_id="run-that-already-paused",
         )
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,
             run_id="run-2",
         )
-        mailbox.write_lease(
+        mailbox_leases.write_lease(
             self.plan_dir,
             "00000000-0000-0000-0000-000000000099",
             state_dir=self.state_dir,
@@ -307,19 +312,19 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
     def test_reply_fast_clear_requires_fresh_matching_sole_question(
         self,
     ) -> None:
-        first = mailbox.append_question(
+        first = mailbox_appenders.append_question(
             self.plan_dir,
             "First?",
             state_dir=self.state_dir,
             run_id="run-1",
         )
-        second = mailbox.append_question(
+        second = mailbox_appenders.append_question(
             self.plan_dir,
             "Second?",
             state_dir=self.state_dir,
             run_id="run-1",
         )
-        mailbox.write_lease(
+        mailbox_leases.write_lease(
             self.plan_dir,
             "00000000-0000-0000-0000-000000000099",
             state_dir=self.state_dir,
@@ -349,12 +354,12 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
     def test_reply_before_first_supervisor_poll_fires_predates_fast_clear(
         self,
     ) -> None:
-        guidance = mailbox.append_guidance(
+        guidance = mailbox_appenders.append_guidance(
             self.plan_dir,
             "Prefer the flat layout.",
             state_dir=self.state_dir,
         )
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,
@@ -362,7 +367,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
         )
         # The supervisor's last poll predates the question: the lease still
         # projects zero unanswered questions at the guidance sequence.
-        mailbox.write_lease(
+        mailbox_leases.write_lease(
             self.plan_dir,
             "00000000-0000-0000-0000-000000000099",
             state_dir=self.state_dir,
@@ -404,7 +409,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
         # The supervisor polled while the mailbox was still empty: its lease
         # validly projects zero unanswered questions at sequence 0, which
         # predates the mailbox's first-ever question.
-        mailbox.write_lease(
+        mailbox_leases.write_lease(
             self.plan_dir,
             "00000000-0000-0000-0000-000000000099",
             state_dir=self.state_dir,
@@ -412,7 +417,7 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
             projection_seq=0,
             unanswered_questions=0,
         )
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,

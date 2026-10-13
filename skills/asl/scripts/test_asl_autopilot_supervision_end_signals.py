@@ -16,6 +16,8 @@ from asl_autopilot_test_support import (  # noqa: F401
     tearDownModule,
 )
 
+from agent_session_loop import mailbox_appenders, mailbox_vocabulary
+
 
 class SupervisionEndSignalSeamTest(SupervisionEndBase):
     def test_signal_after_result_flush_still_emits_error_record(self) -> None:
@@ -58,7 +60,7 @@ class SupervisionEndSignalSeamTest(SupervisionEndBase):
                 records = self._supervision_ends(plan_dir, state_dir)
                 self.assertEqual(1, len(records))
                 self.assertEqual(
-                    autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+                    mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
                     records[0].supervision_outcome,
                 )
                 self.assertEqual(
@@ -108,7 +110,7 @@ class SupervisionEndSignalSeamTest(SupervisionEndBase):
         records = self._supervision_ends(self.plan_dir, self.state_dir)
         self.assertEqual(1, len(records))
         self.assertEqual(
-            autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+            mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
             records[0].supervision_outcome,
         )
         self.assertEqual("supervision ended: error - SIGTERM", records[0].text)
@@ -152,7 +154,7 @@ class SupervisionEndSignalSeamTest(SupervisionEndBase):
                     records = self._supervision_ends(plan_dir, state_dir)
                     self.assertEqual(1, len(records))
                     self.assertEqual(
-                        autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+                        mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
                         records[0].supervision_outcome,
                     )
                     self.assertEqual(
@@ -178,7 +180,7 @@ class SupervisionEndSignalSeamTest(SupervisionEndBase):
         records = self._supervision_ends(self.plan_dir, self.state_dir)
         self.assertEqual(1, len(records))
         self.assertEqual(
-            autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+            mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
             records[0].supervision_outcome,
         )
         self.assertEqual("supervision ended: error - RuntimeError", records[0].text)
@@ -223,12 +225,12 @@ class SupervisionEndSignalSeamTest(SupervisionEndBase):
         records = self._supervision_ends(self.plan_dir, self.state_dir)
         self.assertEqual(1, len(records))
         self.assertEqual(
-            autopilot._mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
             records[0].supervision_outcome,
         )
 
     def test_signal_during_the_terminal_write_records_the_termination(self) -> None:
-        real_append = autopilot._mailbox.append_supervision_end
+        real_append = mailbox_appenders.append_supervision_end
 
         def signalling_append(*args, **kwargs):
             # The append has begun and can still be waiting on the lock or
@@ -238,7 +240,7 @@ class SupervisionEndSignalSeamTest(SupervisionEndBase):
 
         result = self._complete_result(self.command)
         self._patch(autopilot, "run_autopilot", lambda args: result)
-        self._patch(autopilot._mailbox, "append_supervision_end", signalling_append)
+        self._patch(mailbox_appenders, "append_supervision_end", signalling_append)
 
         with (
             self.assertRaises(SystemExit) as caught,
@@ -252,7 +254,7 @@ class SupervisionEndSignalSeamTest(SupervisionEndBase):
         records = self._supervision_ends(self.plan_dir, self.state_dir)
         self.assertEqual(1, len(records))
         self.assertEqual(
-            autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+            mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
             records[0].supervision_outcome,
         )
         self.assertEqual("supervision ended: error - SIGINT", records[0].text)
@@ -302,7 +304,7 @@ class SupervisionEndSignalSeamTest(SupervisionEndBase):
                 records = self._supervision_ends(plan_dir, state_dir)
                 self.assertEqual(1, len(records))
                 self.assertEqual(
-                    autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+                    mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
                     records[0].supervision_outcome,
                 )
                 self.assertEqual(
@@ -360,7 +362,7 @@ class SupervisionEndSignalSeamTest(SupervisionEndBase):
                 records = self._supervision_ends(plan_dir, state_dir)
                 self.assertEqual(1, len(records))
                 self.assertEqual(
-                    autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+                    mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
                     records[0].supervision_outcome,
                 )
                 self.assertEqual(
@@ -411,7 +413,7 @@ class SupervisionEndSignalSeamTest(SupervisionEndBase):
         records = self._supervision_ends(self.plan_dir, self.state_dir)
         self.assertEqual(1, len(records))
         self.assertEqual(
-            autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+            mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
             records[0].supervision_outcome,
         )
         self.assertEqual("supervision ended: error - SIGTERM", records[0].text)

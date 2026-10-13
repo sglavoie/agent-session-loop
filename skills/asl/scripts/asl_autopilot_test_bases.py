@@ -14,6 +14,8 @@ from datetime import datetime
 
 from asl_autopilot_test_support import _counter_clock, autopilot
 
+from agent_session_loop import mailbox_vocabulary
+
 
 class SuperviseRunInjectedBase(unittest.TestCase):
     def _supervise(
@@ -105,7 +107,7 @@ class MailboxWatcherBase(unittest.TestCase):
         return autopilot._mailbox.MailboxMessage(
             seq=seq,
             id="00000000-0000-0000-0000-000000000011",
-            kind=autopilot._mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T19:00:00+00:00",
             text=text,
             run_id=run_id,
@@ -121,7 +123,7 @@ class MailboxWatcherBase(unittest.TestCase):
         return autopilot._mailbox.MailboxMessage(
             seq=seq,
             id=f"00000000-0000-0000-0000-{seq:012d}",
-            kind=autopilot._mailbox.KIND_NOTICE,
+            kind=mailbox_vocabulary.KIND_NOTICE,
             created_at="2026-07-24T19:00:00+00:00",
             text=text,
             run_id=run_id,
@@ -153,7 +155,7 @@ class SupervisionEndBase(unittest.TestCase):
         return [
             message
             for message in view.messages
-            if message.kind == autopilot._mailbox.KIND_SUPERVISION_END
+            if message.kind == mailbox_vocabulary.KIND_SUPERVISION_END
         ]
 
     def _run_main(self, command: str, supervision, *extra_argv: str) -> tuple:
@@ -210,8 +212,8 @@ class SupervisionEndBase(unittest.TestCase):
         """
         self.assertEqual(1, len(records))
         outcome = records[0].supervision_outcome
-        self.assertIn(outcome, autopilot._mailbox.SUPERVISION_OUTCOMES)
-        if outcome == autopilot._mailbox.SUPERVISION_OUTCOME_ERROR:
+        self.assertIn(outcome, mailbox_vocabulary.SUPERVISION_OUTCOMES)
+        if outcome == mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR:
             self.assertRegex(records[0].text, r"^supervision ended: error - \S+$")
             return
         self.assertTrue(stdout.endswith("\n"))

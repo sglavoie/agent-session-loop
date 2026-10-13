@@ -15,7 +15,13 @@ from unittest import mock
 
 from agent_session_loop import (
     mailbox,
+    mailbox_append_record,
+    mailbox_appenders,
     mailbox_cli,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_snapshot,
+    mailbox_vocabulary,
 )
 from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
 
@@ -65,7 +71,9 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
         self.assertEqual(str(self.plan_dir), payload["plan_reference"])
         self.assertNotIn("wait_timeout", payload)
         self.assertFalse(
-            mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir).exists()
+            mailbox_cursors.mailbox_path_for_plan(
+                self.plan_dir, self.state_dir
+            ).exists()
         )
 
     def test_blank_body_is_one_json_error_without_writes(self) -> None:
@@ -77,10 +85,12 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual("missing-text", payload["reason"])
         self.assertFalse(
-            mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir).exists()
+            mailbox_cursors.mailbox_path_for_plan(
+                self.plan_dir, self.state_dir
+            ).exists()
         )
         self.assertFalse(
-            mailbox.lease_path_for_plan(self.plan_dir, self.state_dir).exists()
+            mailbox_cursors.lease_path_for_plan(self.plan_dir, self.state_dir).exists()
         )
 
     def test_reply_rejects_missing_and_already_answered_questions(self) -> None:
@@ -92,12 +102,12 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
         self.assertEqual(1, code)
         self.assertEqual("question-not-found", missing["reason"])
 
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "question",
             state_dir=self.state_dir,
         )
-        mailbox.append_reply(
+        mailbox_appenders.append_reply(
             self.plan_dir,
             question.id,
             "first",
@@ -119,12 +129,12 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
         )
 
     def test_inbox_read_acknowledges_one_nonempty_snapshot_once(self) -> None:
-        first = mailbox.append_guidance(
+        first = mailbox_appenders.append_guidance(
             self.plan_dir,
             "one",
             state_dir=self.state_dir,
         )
-        second = mailbox.append_guidance(
+        second = mailbox_appenders.append_guidance(
             self.plan_dir,
             "two",
             state_dir=self.state_dir,
@@ -169,8 +179,12 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
         self.write_active_turn(
             run_id="run-live", session_id="5", turn_index=2, harness="copilot"
         )
-        first = mailbox.append_guidance(self.plan_dir, "one", state_dir=self.state_dir)
-        second = mailbox.append_guidance(self.plan_dir, "two", state_dir=self.state_dir)
+        first = mailbox_appenders.append_guidance(
+            self.plan_dir, "one", state_dir=self.state_dir
+        )
+        second = mailbox_appenders.append_guidance(
+            self.plan_dir, "two", state_dir=self.state_dir
+        )
 
         code, payload = self.payload_from(mailbox_cli.inbox_read_from_args, self.args())
 
@@ -184,9 +198,10 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
             record = view.successful_guidance_delivery(guidance.id)
             self.assertIsNotNone(record)
             self.assertEqual(
-                mailbox.GUIDANCE_STATE_DELIVERED_BY_READ, record.delivery_state
+                mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_BY_READ,
+                record.delivery_state,
             )
-            self.assertEqual(mailbox.GUIDANCE_CHANNEL_READ, record.channel)
+            self.assertEqual(mailbox_vocabulary.GUIDANCE_CHANNEL_READ, record.channel)
             self.assertEqual("run-live", record.run_id)
             self.assertEqual("5", record.session_id)
             self.assertEqual(2, record.turn_index)
@@ -199,7 +214,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
         ``delivered-by-read`` from it; what is withheld is a record naming a
         turn nothing can vouch for.
         """
-        guidance = mailbox.append_guidance(
+        guidance = mailbox_appenders.append_guidance(
             self.plan_dir, "one", state_dir=self.state_dir
         )
 
@@ -210,7 +225,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
         self.assertTrue(payload["acknowledged"])
         view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual(
-            mailbox.GUIDANCE_STATE_DELIVERED_BY_READ,
+            mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_BY_READ,
             view.guidance_delivery_state(guidance.id),
         )
 
@@ -218,7 +233,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
         self.write_active_turn(
             run_id="run-live", session_id="5", turn_index=2, harness="claude"
         )
-        guidance = mailbox.append_guidance(
+        guidance = mailbox_appenders.append_guidance(
             self.plan_dir, "one", state_dir=self.state_dir
         )
 
@@ -237,22 +252,22 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
     def test_inbox_read_returns_guidance_when_acknowledgement_cannot_fit(
         self,
     ) -> None:
-        guidance = mailbox.append_guidance(
+        guidance = mailbox_appenders.append_guidance(
             self.plan_dir,
             "deliver even when the acknowledgement cannot fit",
             state_dir=self.state_dir,
         )
-        mailbox_path = mailbox.mailbox_path_for_plan(
+        mailbox_path = mailbox_cursors.mailbox_path_for_plan(
             self.plan_dir,
             self.state_dir,
         )
         original_bytes = mailbox_path.read_bytes()
         # Leave one byte of headroom: the immutable read succeeds, but no
         # acknowledgement record can fit under the append cap.
-        with mock.patch.object(
-            mailbox,
-            "MAILBOX_MAX_BYTES",
-            len(original_bytes) + 1,
+        cap = len(original_bytes) + 1
+        with (
+            mock.patch.object(mailbox_append_record, "MAILBOX_MAX_BYTES", cap),
+            mock.patch.object(mailbox_snapshot, "MAILBOX_MAX_BYTES", cap),
         ):
             code, payload, stderr = self.cli_payload_from(
                 [
@@ -274,7 +289,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
         self.assertFalse(payload["acknowledged"])
         self.assertIsNone(payload["acknowledgement"])
         self.assertEqual(
-            mailbox.ERROR_MAILBOX_FULL,
+            mailbox_constants.ERROR_MAILBOX_FULL,
             payload["acknowledgement_error"]["reason"],
         )
         self.assertEqual("", stderr)
@@ -288,7 +303,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
         )
 
     def test_inbox_peek_never_appends_acknowledgement(self) -> None:
-        guidance = mailbox.append_guidance(
+        guidance = mailbox_appenders.append_guidance(
             self.plan_dir,
             "peek at me",
             state_dir=self.state_dir,
@@ -320,12 +335,12 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
             "Next cursor: 999",
         )
         body = "\n".join((*forged_lines, "caf\u00e9"))
-        guidance = mailbox.append_guidance(
+        guidance = mailbox_appenders.append_guidance(
             self.plan_dir,
             body,
             state_dir=self.state_dir,
         )
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             body,
             state_dir=self.state_dir,
@@ -383,7 +398,7 @@ class MailboxCliTestsPart5(MailboxCliTestsBase):
         )
         self.assertTrue(outbox_text.isascii())
 
-        reply = mailbox.append_reply(
+        reply = mailbox_appenders.append_reply(
             self.plan_dir,
             question.id,
             body,

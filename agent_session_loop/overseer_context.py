@@ -73,6 +73,10 @@ from . import (
     clock,
     events,
     mailbox,
+    mailbox_constants,
+    mailbox_models,
+    mailbox_snapshot,
+    mailbox_vocabulary,
     overseer_discovery,
     overseer_policy_client,
     overseer_store,
@@ -177,10 +181,10 @@ SOURCE_KINDS: tuple[SourceKind, ...] = (
 #: what a human sent and whether it landed; a resolution closes a question
 #: without answering it; a supervision-end says a supervising launch stopped.
 SUPERVISION_KINDS: tuple[str, ...] = (
-    mailbox.KIND_GUIDANCE,
-    mailbox.KIND_GUIDANCE_DELIVERY,
-    mailbox.KIND_RESOLUTION,
-    mailbox.KIND_SUPERVISION_END,
+    mailbox_vocabulary.KIND_GUIDANCE,
+    mailbox_vocabulary.KIND_GUIDANCE_DELIVERY,
+    mailbox_vocabulary.KIND_RESOLUTION,
+    mailbox_vocabulary.KIND_SUPERVISION_END,
 )
 
 GapReason = Literal["absent", "unreadable", "empty"]
@@ -246,7 +250,7 @@ REFUSALS: tuple[Refusal, ...] = (
 #: ``mailbox.read_mailbox`` and ``overseer_discovery.build_inventory``, as
 #: parameters. Injected for the same reason the watcher injects its seams: a
 #: test drives the whole boundary without a corpus this process installed.
-ReadMailbox = Callable[..., mailbox.MailboxView]
+ReadMailbox = Callable[..., mailbox_snapshot.MailboxView]
 BuildInventory = Callable[..., overseer_discovery.Inventory]
 
 #: Domain separation for :func:`scope_digest`. Length-prefixed fields under a
@@ -958,7 +962,7 @@ class _Reader:
         self.plan_state = state.plan_state_dir(plan_dir, state_dir)
         self._read_mailbox = read_mailbox
         self._records: dict[str, dict[str, Any] | None] = {}
-        self._view: mailbox.MailboxView | None = None
+        self._view: mailbox_snapshot.MailboxView | None = None
         self._view_read = False
 
     # -- locating ----------------------------------------------------------
@@ -969,8 +973,8 @@ class _Reader:
             path = self.plan_state / events.STATE_FILE_NAME
             return events.STATE_FILE_NAME if path.is_file() else None
         if kind in ("questions", "supervision"):
-            path = self.plan_state / mailbox.MAILBOX_FILE_NAME
-            return mailbox.MAILBOX_FILE_NAME if path.is_file() else None
+            path = self.plan_state / mailbox_constants.MAILBOX_FILE_NAME
+            return mailbox_constants.MAILBOX_FILE_NAME if path.is_file() else None
         if kind == "verification":
             return self._latest_turn(requiring="verification")
         return self._latest_commit() or self._latest_turn(requiring="status_changes")
@@ -1056,13 +1060,13 @@ class _Reader:
         self._records[locator] = parsed
         return parsed
 
-    def view(self) -> mailbox.MailboxView | None:
+    def view(self) -> mailbox_snapshot.MailboxView | None:
         """The plan's mailbox, read once under a shared lock and never written."""
         if not self._view_read:
             self._view_read = True
             try:
                 self._view = self._read_mailbox(self.plan_dir, state_dir=self.state_dir)
-            except mailbox.MailboxError:
+            except mailbox_models.MailboxError:
                 self._view = None
         return self._view
 
@@ -1221,7 +1225,7 @@ def _project_run_config(
 
 
 def _project_questions(
-    view: mailbox.MailboxView,
+    view: mailbox_snapshot.MailboxView,
     *,
     run_id: str,
     max_records: int,
@@ -1283,7 +1287,7 @@ def _project_questions(
 
 
 def _project_supervision(
-    view: mailbox.MailboxView, *, max_records: int, max_summary_chars: int
+    view: mailbox_snapshot.MailboxView, *, max_records: int, max_summary_chars: int
 ) -> _Projection:
     """What a human contributed to this plan, most recent last."""
     records = tuple(

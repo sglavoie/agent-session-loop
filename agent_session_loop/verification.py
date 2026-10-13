@@ -1787,15 +1787,17 @@ def _verify_remediation_fields(
     """Attach a ``repair_hint`` (and ``no-contract`` ``skill_remediation``).
 
     The hint mirrors ``workbench``'s runtime-recovery usage of
-    :func:`agent_session_loop.preflight.runtime_repair_hint`; the import is
-    deferred because ``preflight`` imports this module.
+    :func:`agent_session_loop.preflight_runtime_hints.runtime_repair_hint`; the
+    import is deferred because ``preflight`` imports this module.
     """
-    from . import preflight  # local import: preflight imports verification
+    from . import preflight_auto_repair, preflight_runtime_hints
 
     fields: dict[str, Any] = {}
-    hint = preflight.runtime_repair_hint(reason, failure_reason=failure_reason)
+    hint = preflight_runtime_hints.runtime_repair_hint(
+        reason, failure_reason=failure_reason
+    )
     if hint is not None:
-        fields["repair_hint"] = preflight.repair_hint_payload(
+        fields["repair_hint"] = preflight_auto_repair.repair_hint_payload(
             hint, plan_dir=plan_dir, cwd=cwd
         )
     if reason == VERIFY_EXIT_REASON_NO_CONTRACT:

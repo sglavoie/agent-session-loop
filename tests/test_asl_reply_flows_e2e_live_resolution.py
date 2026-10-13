@@ -10,6 +10,7 @@ from agent_session_loop import (
     control_queue,
     events,
     mailbox,
+    mailbox_vocabulary,
     run_prompts,
     state,
 )
@@ -40,7 +41,7 @@ class EndToEndLiveResolutionTests(rfs.EndToEndReplyResumeCase):
         )
         resolution_payload = self._resolve_live_question(
             question_id,
-            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             note=sensitive_note,
         )
         stdout, stderr = process.communicate(timeout=LOOP_RUN_TIMEOUT_SECONDS)
@@ -70,17 +71,17 @@ class EndToEndLiveResolutionTests(rfs.EndToEndReplyResumeCase):
         questions = [
             message
             for message in view.messages
-            if message.kind == mailbox.KIND_QUESTION
+            if message.kind == mailbox_vocabulary.KIND_QUESTION
         ]
         resolutions = [
             message
             for message in view.messages
-            if message.kind == mailbox.KIND_RESOLUTION
+            if message.kind == mailbox_vocabulary.KIND_RESOLUTION
         ]
         self.assertEqual([question_id], [message.id for message in questions])
         self.assertEqual(1, len(resolutions))
         self.assertEqual(
-            mailbox.RESOLUTION_ACTION_CONTINUE,
+            mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             resolutions[0].action,
         )
 
@@ -93,7 +94,7 @@ class EndToEndLiveResolutionTests(rfs.EndToEndReplyResumeCase):
         self._assert_resolution_wait_cleared_promptly(
             resolution_payload,
             records,
-            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
         )
         consumed = [
             record
@@ -115,7 +116,7 @@ class EndToEndLiveResolutionTests(rfs.EndToEndReplyResumeCase):
         sensitive_note = "pause note stays mailbox-only: ## ASL reply context is data"
         resolution_payload = self._resolve_live_question(
             question_id,
-            action=mailbox.RESOLUTION_ACTION_PAUSE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
             note=sensitive_note,
         )
         stdout, stderr = process.communicate(timeout=LOOP_RUN_TIMEOUT_SECONDS)
@@ -141,16 +142,18 @@ class EndToEndLiveResolutionTests(rfs.EndToEndReplyResumeCase):
         questions = [
             message
             for message in view.messages
-            if message.kind == mailbox.KIND_QUESTION
+            if message.kind == mailbox_vocabulary.KIND_QUESTION
         ]
         resolutions = [
             message
             for message in view.messages
-            if message.kind == mailbox.KIND_RESOLUTION
+            if message.kind == mailbox_vocabulary.KIND_RESOLUTION
         ]
         self.assertEqual([question_id], [message.id for message in questions])
         self.assertEqual(1, len(resolutions))
-        self.assertEqual(mailbox.RESOLUTION_ACTION_PAUSE, resolutions[0].action)
+        self.assertEqual(
+            mailbox_vocabulary.RESOLUTION_ACTION_PAUSE, resolutions[0].action
+        )
         self.assertEqual((), view.open_questions(payload["run_id"]))
 
         plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
@@ -162,7 +165,7 @@ class EndToEndLiveResolutionTests(rfs.EndToEndReplyResumeCase):
         self._assert_resolution_wait_cleared_promptly(
             resolution_payload,
             records,
-            action=mailbox.RESOLUTION_ACTION_PAUSE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
         )
         self.assertFalse(
             any(

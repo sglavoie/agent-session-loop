@@ -19,6 +19,9 @@ from agent_session_loop import (
     control_signal,
     events,
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_models,
     run_commit,
     run_control,
     run_coordination,
@@ -80,18 +83,18 @@ class MailboxPollTests(unittest.TestCase):
         ]
 
     def test_pending_guidance_emits_once_with_metadata_only(self) -> None:
-        historical = mailbox.append_guidance(
+        historical = mailbox_appenders.append_guidance(
             self.plan_dir,
             "already handled",
             state_dir=self.state_dir,
         )
-        mailbox.append_acknowledgement(
+        mailbox_appenders.append_acknowledgement(
             self.plan_dir,
             historical.seq,
             state_dir=self.state_dir,
         )
         sensitive_text = "Use the token s3cr3t-α without logging it."
-        pending = mailbox.append_guidance(
+        pending = mailbox_appenders.append_guidance(
             self.plan_dir,
             sensitive_text,
             state_dir=self.state_dir,
@@ -139,7 +142,7 @@ class MailboxPollTests(unittest.TestCase):
         ) as read:
             self.poll()
             self.poll()
-            pending = mailbox.append_guidance(
+            pending = mailbox_appenders.append_guidance(
                 self.plan_dir,
                 "new guidance",
                 state_dir=self.state_dir,
@@ -158,7 +161,7 @@ class MailboxPollTests(unittest.TestCase):
             mock.patch.object(
                 mailbox,
                 "mailbox_change_token",
-                return_value=mailbox.MAILBOX_CHANGE_TOKEN_UNAVAILABLE,
+                return_value=mailbox_constants.MAILBOX_CHANGE_TOKEN_UNAVAILABLE,
             ),
             mock.patch.object(
                 mailbox,
@@ -174,12 +177,12 @@ class MailboxPollTests(unittest.TestCase):
     def test_new_runner_does_not_event_acknowledged_historical_guidance(
         self,
     ) -> None:
-        guidance = mailbox.append_guidance(
+        guidance = mailbox_appenders.append_guidance(
             self.plan_dir,
             "historical",
             state_dir=self.state_dir,
         )
-        mailbox.append_acknowledgement(
+        mailbox_appenders.append_acknowledgement(
             self.plan_dir,
             guidance.seq,
             state_dir=self.state_dir,
@@ -211,7 +214,9 @@ class MailboxPollTests(unittest.TestCase):
 
         for error in (
             OSError("unreadable"),
-            mailbox.MailboxError(mailbox.ERROR_MAILBOX_READ, "unreadable"),
+            mailbox_models.MailboxError(
+                mailbox_constants.ERROR_MAILBOX_READ, "unreadable"
+            ),
         ):
             with (
                 self.subTest(error=type(error).__name__),

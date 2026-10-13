@@ -26,6 +26,8 @@ from asl_autopilot_test_support import (  # noqa: F401
     tearDownModule,
 )
 
+from agent_session_loop import mailbox_vocabulary
+
 
 class AttachedMailboxWatcherTest(unittest.TestCase):
     """Attach supervision shares the durable watcher without replaying history."""
@@ -67,7 +69,7 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
         answered = autopilot._mailbox.MailboxMessage(
             seq=1,
             id="00000000-0000-0000-0000-000000000010",
-            kind=autopilot._mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T18:59:00+00:00",
             text="answered before this supervisor attached",
             run_id=ATTACHED_RUN_ID,
@@ -75,7 +77,7 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
         reply = autopilot._mailbox.MailboxMessage(
             seq=2,
             id="00000000-0000-0000-0000-000000000011",
-            kind=autopilot._mailbox.KIND_REPLY,
+            kind=mailbox_vocabulary.KIND_REPLY,
             created_at="2026-07-24T18:59:01+00:00",
             text="already handled",
             to=answered.id,
@@ -83,7 +85,7 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
         unanswered = autopilot._mailbox.MailboxMessage(
             seq=3,
             id="00000000-0000-0000-0000-000000000012",
-            kind=autopilot._mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T19:00:00+00:00",
             text="unanswered before this supervisor attached",
             run_id=ATTACHED_RUN_ID,
@@ -152,7 +154,7 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
         orphan = autopilot._mailbox.MailboxMessage(
             seq=3,
             id="00000000-0000-0000-0000-000000000012",
-            kind=autopilot._mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T05:00:00+00:00",
             text="wrangler auth expired",
             run_id="run-that-paused-14-hours-ago",
@@ -221,7 +223,7 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
         notice = autopilot._mailbox.MailboxMessage(
             seq=2,
             id="00000000-0000-0000-0000-000000000011",
-            kind=autopilot._mailbox.KIND_NOTICE,
+            kind=mailbox_vocabulary.KIND_NOTICE,
             created_at="2026-07-24T18:59:00+00:00",
             text="notice emitted before this supervisor attached",
             run_id=ATTACHED_RUN_ID,
@@ -231,7 +233,7 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
         question = autopilot._mailbox.MailboxMessage(
             seq=3,
             id="00000000-0000-0000-0000-000000000012",
-            kind=autopilot._mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T19:00:00+00:00",
             text="unanswered before this supervisor attached",
             run_id=ATTACHED_RUN_ID,
@@ -296,7 +298,7 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
         live = autopilot._mailbox.MailboxMessage(
             seq=2,
             id="00000000-0000-0000-0000-000000000012",
-            kind=autopilot._mailbox.KIND_NOTICE,
+            kind=mailbox_vocabulary.KIND_NOTICE,
             created_at="2026-07-24T19:00:00+00:00",
             text="live run notice",
             run_id=ATTACHED_RUN_ID,
@@ -306,7 +308,7 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
         stale = autopilot._mailbox.MailboxMessage(
             seq=1,
             id="00000000-0000-0000-0000-000000000011",
-            kind=autopilot._mailbox.KIND_NOTICE,
+            kind=mailbox_vocabulary.KIND_NOTICE,
             created_at="2026-07-24T18:00:00+00:00",
             text="stale run notice",
             run_id="old-run",

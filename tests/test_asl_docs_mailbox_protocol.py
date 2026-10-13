@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent_session_loop import (
-    mailbox,
-    run_coordination,
-)
+from agent_session_loop import mailbox_constants, run_coordination
 from tests.asl_docs_support import ASL_GUIDE, read_repo_text
 
 #: The ASL operator guide moved out of the repository README; it carries the
@@ -189,19 +186,19 @@ class MailboxProtocolDocsTests(unittest.TestCase):
         normalized = " ".join(mailbox_docs.split())
 
         # Pin the documented reserve and minimum-closure sizes to their constants.
-        self.assertEqual(512 * 1024, mailbox.MAILBOX_CLOSURE_RESERVE_BYTES)
+        self.assertEqual(512 * 1024, mailbox_constants.MAILBOX_CLOSURE_RESERVE_BYTES)
         self.assertEqual(
-            mailbox.MAILBOX_CLOSURE_RESERVE_BYTES,
-            mailbox.MAILBOX_REPLY_RESERVE_BYTES,
+            mailbox_constants.MAILBOX_CLOSURE_RESERVE_BYTES,
+            mailbox_constants.MAILBOX_REPLY_RESERVE_BYTES,
         )
         self.assertEqual(
-            mailbox.MAILBOX_CLOSURE_RESERVE_BYTES,
-            mailbox.MAILBOX_QUESTION_RESERVE_BYTES,
+            mailbox_constants.MAILBOX_CLOSURE_RESERVE_BYTES,
+            mailbox_constants.MAILBOX_QUESTION_RESERVE_BYTES,
         )
-        self.assertEqual(176, mailbox.MAILBOX_MIN_REPLY_BYTES)
-        self.assertEqual(200, mailbox.MAILBOX_MIN_RESOLUTION_BYTES)
-        self.assertEqual(192 * 1024, mailbox.MAILBOX_WAIT_END_RESERVE_BYTES)
-        self.assertEqual(96 * 1024, mailbox.MAILBOX_RECEIPT_RESERVE_BYTES)
+        self.assertEqual(176, mailbox_constants.MAILBOX_MIN_REPLY_BYTES)
+        self.assertEqual(200, mailbox_constants.MAILBOX_MIN_RESOLUTION_BYTES)
+        self.assertEqual(192 * 1024, mailbox_constants.MAILBOX_WAIT_END_RESERVE_BYTES)
+        self.assertEqual(96 * 1024, mailbox_constants.MAILBOX_RECEIPT_RESERVE_BYTES)
         self.assertIn(
             "The final 512 KiB below the cap is a lifecycle reserve",
             normalized,

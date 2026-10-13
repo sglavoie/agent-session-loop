@@ -15,8 +15,15 @@ from unittest import mock
 from agent_session_loop import (
     agent_mux_delivery,
     mailbox,
+    mailbox_appenders,
     mailbox_cli,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_models,
     mailbox_rendering,
+    mailbox_snapshot,
+    mailbox_validation,
+    mailbox_vocabulary,
     supervision_liveness,
 )
 from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
@@ -24,7 +31,7 @@ from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
 
 class MailboxCliTestsPart9(MailboxCliTestsBase):
     def test_outbox_supervise_lost_payload_carries_run_evidence(self) -> None:
-        launch = mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
         self.write_liveness_record(launch)
         self.write_active_turn(run_id="run-live", session_id="1", turn_index=2)
 
@@ -55,7 +62,7 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         self.assertEqual(1, evidence["sessions_total"])
 
     def test_outbox_supervise_reports_a_helper_that_never_started(self) -> None:
-        launch = mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
         self.age_grace_anchor(
             launch,
             mailbox_cli.SUPERVISE_LIVENESS_GRACE_SECONDS + 60,
@@ -71,7 +78,7 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         self.assertIn("Active turn: none.", lines)
 
     def test_outbox_supervise_stays_idle_inside_the_liveness_grace(self) -> None:
-        launch = mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
 
         code, lines = self.supervise_lines(supervision_id=launch)
 
@@ -79,7 +86,7 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         self.assertEqual(["IDLE"], lines)
         # The first poll anchors the grace window so a later one can expire it.
         self.assertIsNotNone(
-            mailbox.read_supervision_first_seen_at(
+            mailbox_cursors.read_supervision_first_seen_at(
                 self.plan_dir,
                 launch,
                 state_dir=self.state_dir,
@@ -87,7 +94,7 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         )
 
     def test_outbox_supervise_stays_idle_when_a_live_run_holds_the_lock(self) -> None:
-        launch = mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
         self.write_active_turn(run_id="run-live", session_id="1", turn_index=2)
         self.age_grace_anchor(
             launch,
@@ -100,7 +107,7 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         self.assertEqual(["IDLE"], lines)
 
     def test_outbox_supervise_stays_idle_when_the_probe_is_unverified(self) -> None:
-        launch = mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
         self.write_liveness_record(launch)
         self.age_grace_anchor(
             launch,
@@ -120,12 +127,12 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
     def test_outbox_supervise_prefers_its_terminal_record_over_a_dead_probe(
         self,
     ) -> None:
-        launch = mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
         self.write_liveness_record(launch)
-        own = mailbox.append_supervision_end(
+        own = mailbox_appenders.append_supervision_end(
             self.plan_dir,
             "helper exited: complete",
-            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
             state_dir=self.state_dir,
             supervision_id=launch,
         )
@@ -139,14 +146,17 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
 
         self.assertEqual(0, code)
         self.assertEqual(
-            f"DONE outcome={mailbox.SUPERVISION_OUTCOME_COMPLETE} seq={own.seq}",
+            (
+                f"DONE outcome={mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE} "
+                f"seq={own.seq}"
+            ),
             lines[0],
         )
 
     def test_outbox_supervise_prefers_an_open_question_over_a_dead_probe(self) -> None:
-        launch = mailbox.new_supervision_id()
+        launch = mailbox_validation.new_supervision_id()
         self.write_liveness_record(launch)
-        mailbox.append_question(
+        mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,
@@ -164,17 +174,19 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         self.assertEqual("ACTION questions=1", lines[0])
 
     def test_outbox_wait_all_wakes_on_a_supervision_end_mid_wait(self) -> None:
-        mailbox_path = mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
-        empty = mailbox.MailboxView(mailbox_path=mailbox_path)
-        record = mailbox.MailboxMessage(
+        mailbox_path = mailbox_cursors.mailbox_path_for_plan(
+            self.plan_dir, self.state_dir
+        )
+        empty = mailbox_snapshot.MailboxView(mailbox_path=mailbox_path)
+        record = mailbox_models.MailboxMessage(
             seq=1,
             id=str(uuid.uuid4()),
-            kind=mailbox.KIND_SUPERVISION_END,
+            kind=mailbox_vocabulary.KIND_SUPERVISION_END,
             created_at="2026-08-10T12:00:00+00:00",
             text="helper exited: complete",
-            supervision_outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            supervision_outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
         )
-        landed = mailbox.MailboxView(
+        landed = mailbox_snapshot.MailboxView(
             mailbox_path=mailbox_path,
             messages=(record,),
             last_seq=1,
@@ -233,10 +245,10 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
             )
             self.assertEqual(0, code)
 
-        record = mailbox.append_supervision_end(
+        record = mailbox_appenders.append_supervision_end(
             self.plan_dir,
             "helper exited: complete",
-            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
             state_dir=self.state_dir,
         )
 
@@ -271,16 +283,16 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         self,
     ) -> None:
         self.write_active_turn(run_id="run-live")
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Proceed?",
             state_dir=self.state_dir,
             run_id="run-live",
         )
-        record = mailbox.append_supervision_end(
+        record = mailbox_appenders.append_supervision_end(
             self.plan_dir,
             "helper exited: paused",
-            outcome=mailbox.SUPERVISION_OUTCOME_PAUSED,
+            outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_PAUSED,
             state_dir=self.state_dir,
             run_id="run-live",
         )
@@ -319,10 +331,10 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         self,
     ) -> None:
         self.write_active_turn(run_id="run-live")
-        record = mailbox.append_supervision_end(
+        record = mailbox_appenders.append_supervision_end(
             self.plan_dir,
             "helper exited: complete",
-            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
             state_dir=self.state_dir,
             run_id="run-live",
         )
@@ -359,10 +371,10 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
             stdout.getvalue(),
         )
 
-        record = mailbox.append_supervision_end(
+        record = mailbox_appenders.append_supervision_end(
             self.plan_dir,
             "helper exited: complete",
-            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
             state_dir=self.state_dir,
         )
         stdout = io.StringIO()
@@ -387,7 +399,7 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
                 "id": record.id,
                 "seq": record.seq,
                 "text": "helper exited: complete",
-                "outcome": mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                "outcome": mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
             },
             rendered,
         )
@@ -395,10 +407,10 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
 
     def test_outbox_supervision_end_text_is_bounded(self) -> None:
         appended = [
-            mailbox.append_supervision_end(
+            mailbox_appenders.append_supervision_end(
                 self.plan_dir,
                 f"{index:02d}:" + ("S" * 40000),
-                outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
                 state_dir=self.state_dir,
             )
             for index in range(30)
@@ -430,7 +442,7 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         )
 
     def test_outbox_retries_transient_reads(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "eventual",
             state_dir=self.state_dir,
@@ -439,8 +451,8 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
             self.plan_dir,
             state_dir=self.state_dir,
         )
-        transient = mailbox.MailboxError(
-            mailbox.ERROR_MAILBOX_READ,
+        transient = mailbox_models.MailboxError(
+            mailbox_constants.ERROR_MAILBOX_READ,
             "temporarily unavailable",
             path=view.mailbox_path,
         )
@@ -460,10 +472,10 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         self.assertEqual([question.id], [item["id"] for item in payload["questions"]])
 
     def test_outbox_reports_stable_error_when_no_read_succeeds(self) -> None:
-        error = mailbox.MailboxError(
-            mailbox.ERROR_MAILBOX_READ,
+        error = mailbox_models.MailboxError(
+            mailbox_constants.ERROR_MAILBOX_READ,
             "unavailable",
-            path=mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir),
+            path=mailbox_cursors.mailbox_path_for_plan(self.plan_dir, self.state_dir),
         )
         with mock.patch.object(
             mailbox_cli.mailbox,

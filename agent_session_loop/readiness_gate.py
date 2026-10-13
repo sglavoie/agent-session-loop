@@ -56,7 +56,7 @@ Invariants that survive the move:
   ``complete`` rather than downgrading the lifecycle marker to pass the gate.
 * **The escape hatch has a floor.** ``--allow-not-loop-ready`` waves through
   findings an operator may reasonably accept, but never the categories in
-  ``preflight.NON_BYPASSABLE_PREFLIGHT_CATEGORIES``: a plan reaching beyond its
+  ``preflight_models.NON_BYPASSABLE_PREFLIGHT_CATEGORIES``: a plan reaching beyond its
   bound root has no execution root the runner can honour, so running it anyway
   would write somewhere nobody declared.
 * **Growth is re-gated, not grandfathered.** The startup gate sees the plan as
@@ -83,6 +83,10 @@ from . import (
     events,
     plans,
     preflight,
+    preflight_auto_repair,
+    preflight_environment,
+    preflight_hint_resolution,
+    preflight_models,
     progress_repair,
     run_inputs,
     run_persistence,
@@ -96,7 +100,7 @@ def _allow_not_loop_ready(args: argparse.Namespace) -> bool:
 
 
 def _readiness_repair_hints(
-    report: preflight.PreflightReport, *, cwd: Path | None
+    report: preflight_models.PreflightReport, *, cwd: Path | None
 ) -> list[dict[str, Any]]:
     """Substituted remediation for each blocking finding, deduped by check id.
 
@@ -110,10 +114,10 @@ def _readiness_repair_hints(
     for finding in report.findings:
         if finding.severity not in {"red", "yellow"}:
             continue
-        hint = preflight.repair_hint_for_finding(finding)
+        hint = preflight_hint_resolution.repair_hint_for_finding(finding)
         if hint.check_id in hints:
             continue
-        substituted = preflight.repair_hint_payload(
+        substituted = preflight_auto_repair.repair_hint_payload(
             hint,
             plan_dir=str(report.plan_dir),
             cwd=None if cwd is None else str(cwd),
@@ -128,7 +132,7 @@ def _readiness_repair_hints(
 
 
 def _readiness_gate_payload(
-    report: preflight.PreflightReport,
+    report: preflight_models.PreflightReport,
     *,
     cwd: Path | None = None,
 ) -> dict[str, Any]:
@@ -163,7 +167,7 @@ def _readiness_gate_payload(
 
 
 def _non_bypassable_blockers(
-    report: preflight.PreflightReport,
+    report: preflight_models.PreflightReport,
 ) -> tuple[str, ...]:
     """Findings ``--allow-not-loop-ready`` may not wave through.
 
@@ -175,12 +179,12 @@ def _non_bypassable_blockers(
             finding.category
             for finding in report.findings
             if finding.severity == "red"
-            and finding.category in preflight.NON_BYPASSABLE_PREFLIGHT_CATEGORIES
+            and finding.category in preflight_models.NON_BYPASSABLE_PREFLIGHT_CATEGORIES
         )
     )
 
 
-def _readiness_gate_passed(report: preflight.PreflightReport) -> bool:
+def _readiness_gate_passed(report: preflight_models.PreflightReport) -> bool:
     if not report.ok:
         return False
     readiness = report.readiness
@@ -189,7 +193,7 @@ def _readiness_gate_passed(report: preflight.PreflightReport) -> bool:
     return readiness.state == "loop-ready"
 
 
-def _resume_gate_passed(report: preflight.PreflightReport) -> bool:
+def _resume_gate_passed(report: preflight_models.PreflightReport) -> bool:
     """Return True when a reduced report may stand in for a full one.
 
     Deliberately wider than :func:`_readiness_gate_passed`: what licenses the
@@ -221,7 +225,7 @@ def _reopened_plan_gate_payload(
     session itself. The verdicts are otherwise identical, so without it an
     audit reading one gate payload cannot tell which growth it authorized.
     """
-    findings = preflight.check_env_turn_budget(
+    findings = preflight_environment.check_env_turn_budget(
         snapshot, max_pending_sessions=max_pending_sessions
     )
     blocking = [finding for finding in findings if finding.severity != "green"]
@@ -306,7 +310,7 @@ def _regate_reopened_plan(
 
 
 def _review_only_complete_start(
-    report: preflight.PreflightReport,
+    report: preflight_models.PreflightReport,
     *,
     review_requested: bool,
     snapshot: plans.PlanSnapshot,
@@ -332,7 +336,7 @@ def _review_only_complete_start(
 
 
 def _readiness_gate_failure_message(
-    report: preflight.PreflightReport,
+    report: preflight_models.PreflightReport,
 ) -> str:
     if report.readiness is None:
         return "plan manifest is missing readiness metadata"
@@ -411,15 +415,15 @@ def _final_readiness_state(
 
 
 def _strip_own_lock_findings(
-    report: preflight.PreflightReport,
+    report: preflight_models.PreflightReport,
     *,
     lock_info: state.LockInfo,
-) -> preflight.PreflightReport:
+) -> preflight_models.PreflightReport:
     """Drop env-lock findings that point at the runner's own active lock."""
     own_pid = os.getpid()
     own_lock_path = str(lock_info.path)
 
-    def is_self_lock(finding: preflight.PreflightFinding) -> bool:
+    def is_self_lock(finding: preflight_models.PreflightFinding) -> bool:
         if finding.category != "env-lock":
             return False
         if finding.path != own_lock_path:
@@ -431,7 +435,7 @@ def _strip_own_lock_findings(
     )
     if len(filtered) == len(report.findings):
         return report
-    return preflight.PreflightReport(
+    return preflight_models.PreflightReport(
         plan_dir=report.plan_dir,
         findings=filtered,
         snapshot=report.snapshot,
@@ -445,8 +449,8 @@ def _strip_own_lock_findings(
 
 
 def _readiness_gate_blockers(
-    report: preflight.PreflightReport,
-) -> tuple[preflight.PreflightFinding, ...]:
+    report: preflight_models.PreflightReport,
+) -> tuple[preflight_models.PreflightFinding, ...]:
     return tuple(
         finding for finding in report.findings if finding.severity in {"red", "yellow"}
     )
@@ -458,7 +462,7 @@ def _reduced_preflight_report(
     snapshot: plans.PlanSnapshot,
     lock_info: state.LockInfo,
     preflight_kwargs: dict[str, Any],
-) -> preflight.PreflightReport | None:
+) -> preflight_models.PreflightReport | None:
     """Return a reduced report that may replace the full preflight, else None.
 
     ``None`` means the caller must run the complete ``run_preflight`` once: the
@@ -487,7 +491,7 @@ def _reduced_preflight_report(
 
 
 def _repair_readiness_gate(
-    report: preflight.PreflightReport,
+    report: preflight_models.PreflightReport,
     *,
     plan_dir: Path,
     lock_info: state.LockInfo,
@@ -501,7 +505,7 @@ def _repair_readiness_gate(
     snapshot: plans.PlanSnapshot,
     review_requested: bool,
     core_skipped: bool = False,
-) -> tuple[preflight.PreflightReport, dict[str, Any]]:
+) -> tuple[preflight_models.PreflightReport, dict[str, Any]]:
     """Try to auto-repair progress/manifest-readiness-only gate failures.
 
     The helper only repairs categories the operator can safely have the
@@ -535,7 +539,7 @@ def _repair_readiness_gate(
         "max_pending_sessions": max_pending_sessions,
     }
 
-    def rerun() -> preflight.PreflightReport | None:
+    def rerun() -> preflight_models.PreflightReport | None:
         nonlocal core_skipped
         try:
             if core_skipped:
@@ -556,7 +560,7 @@ def _repair_readiness_gate(
         return _strip_own_lock_findings(rerun_report, lock_info=lock_info)
 
     attempted: list[str] = []
-    auto_repairs: list[preflight.AutoRepair] = []
+    auto_repairs: list[preflight_auto_repair.AutoRepair] = []
     errors: list[dict[str, str]] = []
 
     blockers = _readiness_gate_blockers(report)
@@ -572,7 +576,7 @@ def _repair_readiness_gate(
                 }
             )
         else:
-            repair = preflight.AutoRepair(
+            repair = preflight_auto_repair.AutoRepair(
                 action=repair_result.action,
                 category="progress-journal-missing",
                 path=str(repair_result.path),
@@ -621,7 +625,7 @@ def _repair_readiness_gate(
                 }
             )
         else:
-            repair = preflight.AutoRepair(
+            repair = preflight_auto_repair.AutoRepair(
                 action="rewrite",
                 category="manifest-readiness",
                 path=str(plan_dir / "manifest.md"),

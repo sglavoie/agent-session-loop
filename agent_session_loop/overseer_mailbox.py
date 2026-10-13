@@ -95,6 +95,11 @@ from typing import Literal
 from . import (
     intervention,
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_models,
+    mailbox_snapshot,
+    mailbox_vocabulary,
     overseer_decisions,
     overseer_dispatch,
     overseer_store,
@@ -187,13 +192,13 @@ _ID_NAMESPACE = uuid.UUID("6f4a1d38-5f2e-5a63-9a2d-2b0f0f1a7c11")
 #: absent from here is ``record_rejected``; ``duplicate-id`` and
 #: ``mailbox-write-error`` are not refusals at all and are handled separately.
 _REFUSAL_FOR_REASON: dict[str, Refusal] = {
-    mailbox.REJECT_QUESTION_NOT_FOUND: "question_unknown",
-    mailbox.REJECT_QUESTION_ALREADY_ANSWERED: "question_closed",
-    mailbox.REJECT_QUESTION_ALREADY_RESOLVED: "question_closed",
-    mailbox.REJECT_QUESTION_NOT_OPEN: "question_stale",
-    mailbox.REJECT_QUESTION_NOT_WAITING: "question_stale",
-    mailbox.ERROR_MAILBOX_FULL: "mailbox_full",
-    mailbox.ERROR_MAILBOX_READ: "mailbox_unreadable",
+    mailbox_constants.REJECT_QUESTION_NOT_FOUND: "question_unknown",
+    mailbox_constants.REJECT_QUESTION_ALREADY_ANSWERED: "question_closed",
+    mailbox_constants.REJECT_QUESTION_ALREADY_RESOLVED: "question_closed",
+    mailbox_constants.REJECT_QUESTION_NOT_OPEN: "question_stale",
+    mailbox_constants.REJECT_QUESTION_NOT_WAITING: "question_stale",
+    mailbox_constants.ERROR_MAILBOX_FULL: "mailbox_full",
+    mailbox_constants.ERROR_MAILBOX_READ: "mailbox_unreadable",
 }
 
 
@@ -321,7 +326,7 @@ def message_id(
 
 
 def inspect_posting(
-    view: mailbox.MailboxView,
+    view: mailbox_snapshot.MailboxView,
     *,
     plan_dir: str,
     incident_id: int | None,
@@ -351,7 +356,7 @@ def inspect_posting(
         mailbox_state = view.guidance_delivery_state(identity)
         state = (
             "delivered"
-            if mailbox_state in mailbox.GUIDANCE_DELIVERED_STATES
+            if mailbox_state in mailbox_vocabulary.GUIDANCE_DELIVERED_STATES
             else "queued"
         )
     return Posting(
@@ -413,7 +418,7 @@ def post_reply(
         return refused(*granted)
     try:
         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
-    except (mailbox.MailboxError, OSError) as error:
+    except (mailbox_models.MailboxError, OSError) as error:
         return refused("mailbox_unreadable", str(error))
     landed = inspect_posting(
         view,
@@ -443,14 +448,14 @@ def post_reply(
             f"{_decision_id(ruling)} was replaced by {_decision_id(current)}",
         )
     try:
-        message = mailbox.append_reply(
+        message = mailbox_appenders.append_reply(
             plan_dir,
             question_id,
             text,
             state_dir=state_dir,
             message_id=identity,
         )
-    except mailbox.MailboxError as error:
+    except mailbox_models.MailboxError as error:
         return _after_failed_append(
             error,
             plan_dir=plan_dir,
@@ -518,7 +523,7 @@ def post_guidance(
         return refused(*granted)
     try:
         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
-    except (mailbox.MailboxError, OSError) as error:
+    except (mailbox_models.MailboxError, OSError) as error:
         return refused("mailbox_unreadable", str(error))
     landed = inspect_posting(
         view,
@@ -545,13 +550,13 @@ def post_guidance(
             f"{_decision_id(ruling)} was replaced by {_decision_id(current)}",
         )
     try:
-        message = mailbox.append_guidance(
+        message = mailbox_appenders.append_guidance(
             plan_dir,
             text,
             state_dir=state_dir,
             message_id=identity,
         )
-    except mailbox.MailboxError as error:
+    except mailbox_models.MailboxError as error:
         return _after_failed_append(
             error,
             plan_dir=plan_dir,
@@ -571,7 +576,7 @@ def post_guidance(
         target=target,
         message_id=identity,
         state="queued",
-        mailbox_state=mailbox.GUIDANCE_STATE_QUEUED,
+        mailbox_state=mailbox_vocabulary.GUIDANCE_STATE_QUEUED,
         seq=message.seq,
         created_at=message.created_at,
     )
@@ -597,7 +602,7 @@ def poll_plan(
     )
     try:
         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
-    except (mailbox.MailboxError, OSError) as error:
+    except (mailbox_models.MailboxError, OSError) as error:
         _stamp(ledger, plan_dir=plan_dir, position=None, marker="")
         return PlanPoll(plan_dir=plan_dir, read=False, detail=str(error))
     postings = tuple(
@@ -691,7 +696,7 @@ class ReplyAdapter:
             return overseer_dispatch.Preparation.declined(_phrase(*granted))
         try:
             facts = self.inspect(action.plan_dir, state_dir=self.state_dir)
-        except (mailbox.MailboxError, OSError) as error:
+        except (mailbox_models.MailboxError, OSError) as error:
             return overseer_dispatch.Preparation.declined(
                 _phrase("mailbox_unreadable", str(error))
             )
@@ -824,9 +829,9 @@ def _operation(value: str) -> Operation:
 
 
 def _message(
-    view: mailbox.MailboxView,
+    view: mailbox_snapshot.MailboxView,
     identity: str,
-) -> mailbox.MailboxMessage | None:
+) -> mailbox_models.MailboxMessage | None:
     for message in view.messages:
         if message.id == identity:
             return message
@@ -953,7 +958,7 @@ def _same_decision(
 
 
 def _check_question(
-    view: mailbox.MailboxView,
+    view: mailbox_snapshot.MailboxView,
     *,
     question_id: str,
     run_id: str,
@@ -979,7 +984,8 @@ def _check_question(
     )
     if question_id not in open_ids:
         known = any(
-            message.kind == mailbox.KIND_QUESTION and message.id == question_id
+            message.kind == mailbox_vocabulary.KIND_QUESTION
+            and message.id == question_id
             for message in view.messages
         )
         if not known:
@@ -989,7 +995,7 @@ def _check_question(
 
 
 def _after_failed_append(
-    error: mailbox.MailboxError,
+    error: mailbox_models.MailboxError,
     *,
     plan_dir: str,
     incident_id: int,
@@ -1005,10 +1011,13 @@ def _after_failed_append(
     there; a write error is the case nobody can conclude from, so both re-read
     and only a re-read that also fails is uncertain.
     """
-    if error.reason in (mailbox.REJECT_DUPLICATE_ID, mailbox.ERROR_MAILBOX_WRITE):
+    if error.reason in (
+        mailbox_constants.REJECT_DUPLICATE_ID,
+        mailbox_constants.ERROR_MAILBOX_WRITE,
+    ):
         try:
             view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
-        except (mailbox.MailboxError, OSError) as failure:
+        except (mailbox_models.MailboxError, OSError) as failure:
             raise PostingUncertain(
                 f"{error}; the mailbox could not be re-read: {failure}",
                 message_id=identity,
@@ -1022,7 +1031,7 @@ def _after_failed_append(
         )
         if landed is not None:
             return landed
-        if error.reason == mailbox.REJECT_DUPLICATE_ID:
+        if error.reason == mailbox_constants.REJECT_DUPLICATE_ID:
             return refused("record_rejected", str(error))
         raise PostingUncertain(str(error), message_id=identity)
     return refused(
@@ -1069,7 +1078,7 @@ def _reconcile(
     )
     try:
         view = mailbox.read_mailbox(record.plan_dir, state_dir=state_dir)
-    except (mailbox.MailboxError, OSError) as error:
+    except (mailbox_models.MailboxError, OSError) as error:
         return overseer_dispatch.Receipt.uncertain(
             detail=_phrase("mailbox_unreadable", str(error)),
             locator=identity,

@@ -51,7 +51,7 @@ from . import (
     agent_mux_pairing,
     agent_mux_projection,
     events,
-    mailbox,
+    mailbox_constants,
     plans,
     responses,
     state,
@@ -694,7 +694,7 @@ def _receipts_section(
     and it is not reversible into the reply.
     """
     records, summary = _read_jsonl(
-        state_dir / mailbox.MAILBOX_FILE_NAME, "receipts", omissions
+        state_dir / mailbox_constants.MAILBOX_FILE_NAME, "receipts", omissions
     )
 
     entries: list[dict[str, Any]] = []

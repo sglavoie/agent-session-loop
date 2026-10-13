@@ -50,6 +50,9 @@ from agent_session_loop import (
     clock,
     events,
     mailbox,
+    mailbox_appenders,
+    mailbox_models,
+    mailbox_snapshot,
     overseer_context,
     overseer_discovery,
     overseer_policy_client,
@@ -207,8 +210,8 @@ class _Plan:
         path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
         return path
 
-    def ask(self, text: str, *, question_id: str) -> mailbox.MailboxMessage:
-        return mailbox.append_question(
+    def ask(self, text: str, *, question_id: str) -> mailbox_models.MailboxMessage:
+        return mailbox_appenders.append_question(
             self.plan_dir,
             text,
             state_dir=self.state_root,
@@ -219,12 +222,14 @@ class _Plan:
         )
 
     def answer(self, question_id: str) -> None:
-        mailbox.append_reply(
+        mailbox_appenders.append_reply(
             self.plan_dir, question_id, "go ahead", state_dir=self.state_root
         )
 
-    def guide(self, text: str) -> mailbox.MailboxMessage:
-        return mailbox.append_guidance(self.plan_dir, text, state_dir=self.state_root)
+    def guide(self, text: str) -> mailbox_models.MailboxMessage:
+        return mailbox_appenders.append_guidance(
+            self.plan_dir, text, state_dir=self.state_root
+        )
 
     def populate(self) -> None:
         """Every family, so a packet has all six sources to describe."""
@@ -275,7 +280,7 @@ class _Plan:
 
     def read_mailbox(
         self, plan_dir: str | Path, *, state_dir: str | Path | None = None
-    ) -> mailbox.MailboxView:
+    ) -> mailbox_snapshot.MailboxView:
         """The mailbox seam, counted, so "refused without reading" is provable."""
         self.mailbox_reads += 1
         return mailbox.read_mailbox(plan_dir, state_dir=state_dir)

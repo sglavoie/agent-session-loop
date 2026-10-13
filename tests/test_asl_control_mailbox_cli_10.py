@@ -15,6 +15,11 @@ from agent_session_loop import (
     control_cli,
     mailbox,
     mailbox_cli,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_models,
+    mailbox_snapshot,
+    mailbox_vocabulary,
     plans,
 )
 from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
@@ -25,23 +30,25 @@ from tests.support import (
 
 class MailboxCliTestsPart10(MailboxCliTestsBase):
     def test_outbox_wait_skips_full_reads_until_mailbox_changes(self) -> None:
-        mailbox_path = mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
-        large_view = mailbox.MailboxView(
-            mailbox_path=mailbox_path,
-            size_bytes=mailbox.MAILBOX_MAX_BYTES - 1,
+        mailbox_path = mailbox_cursors.mailbox_path_for_plan(
+            self.plan_dir, self.state_dir
         )
-        question = mailbox.MailboxMessage(
+        large_view = mailbox_snapshot.MailboxView(
+            mailbox_path=mailbox_path,
+            size_bytes=mailbox_constants.MAILBOX_MAX_BYTES - 1,
+        )
+        question = mailbox_models.MailboxMessage(
             seq=1,
             id=str(uuid.uuid4()),
-            kind=mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T12:00:00+00:00",
             text="changed",
         )
-        changed_view = mailbox.MailboxView(
+        changed_view = mailbox_snapshot.MailboxView(
             mailbox_path=mailbox_path,
             messages=(question,),
             last_seq=1,
-            size_bytes=mailbox.MAILBOX_MAX_BYTES,
+            size_bytes=mailbox_constants.MAILBOX_MAX_BYTES,
         )
         unchanged_token = (1, 2, large_view.size_bytes, 3)
         changed_token = (1, 2, changed_view.size_bytes, 4)
@@ -86,17 +93,19 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
         self.assertEqual([mock.call(5.0), mock.call(5.0)], sleep.call_args_list)
 
     def test_outbox_renews_lease_after_thirty_seconds(self) -> None:
-        empty = mailbox.MailboxView(
-            mailbox_path=mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
+        empty = mailbox_snapshot.MailboxView(
+            mailbox_path=mailbox_cursors.mailbox_path_for_plan(
+                self.plan_dir, self.state_dir
+            )
         )
-        question = mailbox.MailboxMessage(
+        question = mailbox_models.MailboxMessage(
             seq=1,
             id=str(uuid.uuid4()),
-            kind=mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T12:00:00+00:00",
             text="after renewal",
         )
-        found = mailbox.MailboxView(
+        found = mailbox_snapshot.MailboxView(
             mailbox_path=empty.mailbox_path,
             messages=(question,),
             last_seq=1,
@@ -138,26 +147,28 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
     def test_outbox_wait_lease_renewal_failure_recovers_and_returns_question(
         self,
     ) -> None:
-        mailbox_path = mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
-        empty = mailbox.MailboxView(mailbox_path=mailbox_path)
-        question = mailbox.MailboxMessage(
+        mailbox_path = mailbox_cursors.mailbox_path_for_plan(
+            self.plan_dir, self.state_dir
+        )
+        empty = mailbox_snapshot.MailboxView(mailbox_path=mailbox_path)
+        question = mailbox_models.MailboxMessage(
             seq=1,
             id=str(uuid.uuid4()),
-            kind=mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T12:00:00+00:00",
             text="arrived after renewal recovery",
         )
-        found = mailbox.MailboxView(
+        found = mailbox_snapshot.MailboxView(
             mailbox_path=mailbox_path,
             messages=(question,),
             last_seq=1,
         )
         unchanged_token = (1, 2, 0, 3)
         changed_token = (1, 2, 1, 4)
-        renewal_failure = mailbox.MailboxError(
-            mailbox.ERROR_LEASE_WRITE,
+        renewal_failure = mailbox_models.MailboxError(
+            mailbox_constants.ERROR_LEASE_WRITE,
             "temporarily unavailable",
-            path=mailbox.lease_path_for_plan(self.plan_dir, self.state_dir),
+            path=mailbox_cursors.lease_path_for_plan(self.plan_dir, self.state_dir),
         )
         landed_lease = mock.Mock(supervisor_id=str(uuid.uuid4()))
         context = mock.Mock()
@@ -213,11 +224,11 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
     def test_outbox_wait_initial_lease_failure_remains_fail_closed(
         self,
     ) -> None:
-        lease_path = mailbox.lease_path_for_plan(self.plan_dir, self.state_dir)
+        lease_path = mailbox_cursors.lease_path_for_plan(self.plan_dir, self.state_dir)
         context = mock.Mock()
         context.snapshot.plan_dir = self.plan_dir
-        initial_failure = mailbox.MailboxError(
-            mailbox.ERROR_LEASE_WRITE,
+        initial_failure = mailbox_models.MailboxError(
+            mailbox_constants.ERROR_LEASE_WRITE,
             "cannot establish supervision",
             path=lease_path,
         )
@@ -243,7 +254,7 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
             )
 
         self.assertEqual(1, code)
-        self.assertEqual(mailbox.ERROR_LEASE_WRITE, payload["reason"])
+        self.assertEqual(mailbox_constants.ERROR_LEASE_WRITE, payload["reason"])
         self.assertEqual({"path": str(lease_path)}, payload["details"])
         self.assertEqual(1, write.call_count)
         read.assert_not_called()

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from agent_session_loop import (
     events,
-    preflight,
+    preflight_runtime_hints,
     process_tree,
     task_packet,
     verification,
@@ -118,7 +118,7 @@ class AuthoritativeLaneDocsTests(unittest.TestCase):
 
     def test_the_pause_no_reply_clears_says_where_to_look_in_both_places(self) -> None:
         """A stop nobody can answer has to name the evidence that ends it."""
-        hint = preflight.RUNTIME_REPAIR_HINTS[
+        hint = preflight_runtime_hints.RUNTIME_REPAIR_HINTS[
             events.PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED
         ]
         for phrase in (

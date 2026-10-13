@@ -22,6 +22,7 @@ from agent_session_loop import (
     harnesses,
     plans,
     preflight,
+    preflight_models,
     readiness_gate,
     review_guard,
     run_entry,
@@ -129,8 +130,8 @@ class ResumeGateTests(unittest.TestCase):
         self,
         *,
         state: str | None,
-        findings: tuple[preflight.PreflightFinding, ...] = (),
-    ) -> preflight.PreflightReport:
+        findings: tuple[preflight_models.PreflightFinding, ...] = (),
+    ) -> preflight_models.PreflightReport:
         readiness = None
         if state is not None:
             readiness = plans.ReadinessMetadata(
@@ -138,7 +139,7 @@ class ResumeGateTests(unittest.TestCase):
                 readiness_sha256="0" * 64,
                 checked_at="2026-06-19T00:00:00Z",
             )
-        return preflight.PreflightReport(
+        return preflight_models.PreflightReport(
             plan_dir=Path("/plan"),
             findings=findings,
             readiness=readiness,
@@ -168,7 +169,7 @@ class ResumeGateTests(unittest.TestCase):
                 report = self._report(
                     state="running",
                     findings=(
-                        preflight.PreflightFinding(
+                        preflight_models.PreflightFinding(
                             severity=severity,
                             category="env-harness",
                             message="broken",

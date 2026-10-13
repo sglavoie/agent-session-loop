@@ -4,11 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent_session_loop import (
-    events,
-    plans,
-    preflight,
-)
+from agent_session_loop import events, plans, preflight_environment
 from tests.support_asl_run_readiness import RunReadinessGateFixture
 
 
@@ -60,7 +56,7 @@ class RunReadinessLifecycleTests(RunReadinessGateFixture):
     def test_run_uses_max_pending_sessions_override_for_readiness_gate(
         self,
     ) -> None:
-        pending_count = preflight.TURN_BUDGET_YELLOW_THRESHOLD + 5
+        pending_count = preflight_environment.TURN_BUDGET_YELLOW_THRESHOLD + 5
         self._write_plan(tuple(["pending"] * pending_count), readiness="loop-ready")
 
         completed, payload = self._run(

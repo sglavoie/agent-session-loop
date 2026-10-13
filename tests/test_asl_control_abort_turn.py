@@ -19,6 +19,7 @@ from agent_session_loop import (
     events,
     harnesses,
     mailbox,
+    mailbox_appenders,
     plans,
     review_session_body,
     run_control,
@@ -77,10 +78,10 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
     def _activate_mailbox(self) -> None:
         # Creating the file is what enables the mailbox, so seed it with an
         # already-answered record rather than pending guidance.
-        seeded = mailbox.append_guidance(
+        seeded = mailbox_appenders.append_guidance(
             self.plan_dir, "seeded", state_dir=self.state_dir
         )
-        mailbox.append_acknowledgement(
+        mailbox_appenders.append_acknowledgement(
             self.plan_dir, seeded.seq, state_dir=self.state_dir
         )
 

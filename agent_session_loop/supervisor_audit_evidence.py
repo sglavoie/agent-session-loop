@@ -30,7 +30,8 @@ from . import (
     events,
     external_write_evidence,
     harnesses,
-    mailbox,
+    mailbox_constants,
+    mailbox_vocabulary,
     plans,
     review,
     state,
@@ -145,7 +146,9 @@ _CONTENT_KEYS = frozenset(
 
 #: Mailbox kinds the bundle gives up first under the size cap. They time-stamp
 #: an exchange; the question, the ruling on it, and the notice never go.
-_SHEDDABLE_MAILBOX_KINDS = frozenset(mailbox.LIFECYCLE_KINDS) | {mailbox.KIND_ACK}
+_SHEDDABLE_MAILBOX_KINDS = frozenset(mailbox_vocabulary.LIFECYCLE_KINDS) | {
+    mailbox_vocabulary.KIND_ACK
+}
 
 #: Fields through which a mailbox record joins an exchange it does not name a
 #: run for: a reply and a resolution point at their question, a receipt at the
@@ -1537,7 +1540,7 @@ def _delivered_mailbox_ids(
 
     Guidance is addressed to the plan, not to a run: a supervisor appends it
     without knowing which run — or which turn — will read it, so
-    ``mailbox.append_guidance`` writes no ``run_id`` and the record cannot be
+    ``mailbox_appenders.append_guidance`` writes no ``run_id`` and the record cannot be
     claimed the way ``append_notice``'s is. Delivery is the tie, and delivery is
     already recorded: the runner appends a ``guidance-observed`` mailbox event
     naming the message it read into a turn. Joining on that accounts for the
@@ -1638,15 +1641,15 @@ def _read_mailbox(
         str(parsed["to"])
         for _, parsed in parsed_lines
         if parsed.get("run_id") == run_id
-        and parsed.get("kind") == mailbox.KIND_GUIDANCE_DELIVERY
+        and parsed.get("kind") == mailbox_vocabulary.KIND_GUIDANCE_DELIVERY
         and parsed.get("to") is not None
     )
     delivered_ids = delivered_ids | frozenset(
         str(parsed["to"])
         for _, parsed in parsed_lines
         if parsed.get("run_id") == run_id
-        and parsed.get("kind") == mailbox.KIND_GUIDANCE_DELIVERY
-        and parsed.get("delivery_state") in mailbox.GUIDANCE_DELIVERED_STATES
+        and parsed.get("kind") == mailbox_vocabulary.KIND_GUIDANCE_DELIVERY
+        and parsed.get("delivery_state") in mailbox_vocabulary.GUIDANCE_DELIVERED_STATES
         and parsed.get("to") is not None
     )
     present_ids = {str(parsed["id"]) for _, parsed in parsed_lines if parsed.get("id")}
@@ -1906,7 +1909,7 @@ def _moment(value: object) -> datetime | None:
 def _mailbox_asks(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Every question in the run's mailbox slice, with how far it got.
 
-    Mirrors :meth:`mailbox.MailboxView.delivery_state_for`: a question is
+    Mirrors :meth:`mailbox_snapshot.MailboxView.delivery_state_for`: a question is
     answered once a reply or a resolution targets it, and answered *and
     consumed* once a receipt names that closure. Only the consumed state
     proves the answer reached the run rather than sitting unread.
@@ -1916,13 +1919,19 @@ def _mailbox_asks(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     for record in records:
         kind = record.get("kind")
         target = record.get("to")
-        if kind in mailbox.CLOSURE_KINDS and target is not None:
+        if kind in mailbox_vocabulary.CLOSURE_KINDS and target is not None:
             closures.setdefault(str(target), record)
-        elif kind == mailbox.KIND_RECEIPT and record.get("closure_id") is not None:
+        elif (
+            kind == mailbox_vocabulary.KIND_RECEIPT
+            and record.get("closure_id") is not None
+        ):
             receipted.add(str(record["closure_id"]))
     asks: list[dict[str, Any]] = []
     for record in records:
-        if record.get("kind") != mailbox.KIND_QUESTION or record.get("id") is None:
+        if (
+            record.get("kind") != mailbox_vocabulary.KIND_QUESTION
+            or record.get("id") is None
+        ):
             continue
         closure = closures.get(str(record["id"]))
         closure_id = None if closure is None else closure.get("id")
@@ -2221,7 +2230,7 @@ def collect_audit_input(
         state_dir / events.EVENTS_FILE_NAME, run_id, collector
     )
     mailbox_records, mailbox_summary = _read_mailbox(
-        state_dir / mailbox.MAILBOX_FILE_NAME,
+        state_dir / mailbox_constants.MAILBOX_FILE_NAME,
         run_id,
         collector,
         delivered_ids=_delivered_mailbox_ids(event_records, run_id),

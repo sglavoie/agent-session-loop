@@ -13,7 +13,11 @@ from pathlib import Path
 from agent_session_loop import (
     authoring,
     contracts,
-    mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_leases,
+    mailbox_vocabulary,
     plans,
     state,
 )
@@ -341,7 +345,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertFalse(status["active"])
             self.assertFalse(status["lease_present"])
             self.assertEqual(0, status["size_bytes"])
-            self.assertEqual(mailbox.MAILBOX_MAX_BYTES, status["max_bytes"])
+            self.assertEqual(mailbox_constants.MAILBOX_MAX_BYTES, status["max_bytes"])
             self.assertFalse(status["full"])
             self.assertTrue(status["accepts_questions"])
             self.assertTrue(status["accepts_replies"])
@@ -364,15 +368,19 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
-            mailbox.append_guidance(plan_dir, "keep the API small", state_dir=state_dir)
-            mailbox.append_question(plan_dir, "Which mode?", state_dir=state_dir)
-            mailbox.write_lease(
+            mailbox_appenders.append_guidance(
+                plan_dir, "keep the API small", state_dir=state_dir
+            )
+            mailbox_appenders.append_question(
+                plan_dir, "Which mode?", state_dir=state_dir
+            )
+            mailbox_leases.write_lease(
                 plan_dir,
                 "00000000-0000-4000-8000-000000000001",
                 state_dir=state_dir,
             )
-            mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
-            lease_path = mailbox.lease_path_for_plan(plan_dir, state_dir)
+            mailbox_path = mailbox_cursors.mailbox_path_for_plan(plan_dir, state_dir)
+            lease_path = mailbox_cursors.lease_path_for_plan(plan_dir, state_dir)
             mailbox_before = mailbox_path.read_bytes()
             lease_before = lease_path.read_bytes()
 
@@ -418,7 +426,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
-            guidance = mailbox.append_guidance(
+            guidance = mailbox_appenders.append_guidance(
                 plan_dir, "keep the API small", state_dir=state_dir
             )
 
@@ -427,7 +435,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             [entry] = payload["mailbox"]["guidance"]
             self.assertEqual(guidance.id, entry["id"])
             self.assertEqual(guidance.seq, entry["seq"])
-            self.assertEqual(mailbox.GUIDANCE_STATE_QUEUED, entry["state"])
+            self.assertEqual(mailbox_vocabulary.GUIDANCE_STATE_QUEUED, entry["state"])
             # Nothing has ever attempted it, which is exactly what queued means.
             self.assertIsNone(entry["latest_attempt"])
             buffer = io.StringIO()

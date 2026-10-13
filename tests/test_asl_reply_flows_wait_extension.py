@@ -13,6 +13,12 @@ from agent_session_loop import (
     events,
     harnesses,
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_leases,
+    mailbox_models,
+    mailbox_snapshot,
+    mailbox_vocabulary,
     run_coordination,
     run_persistence,
     state,
@@ -36,12 +42,12 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
-            mailbox.append_guidance(
+            mailbox_appenders.append_guidance(
                 plan_dir,
                 "Supervision is active.",
                 state_dir=state_dir,
             )
-            mailbox.write_lease(
+            mailbox_leases.write_lease(
                 plan_dir,
                 "00000000-0000-0000-0000-000000000002",
                 state_dir=state_dir,
@@ -127,7 +133,9 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
             self.assertEqual([], cleared_events, records)
             self.assertEqual(1, len(preparation_failed_events), records)
             preparation_payload = preparation_failed_events[0]["payload"]
-            self.assertEqual(mailbox.LEASE_EXPIRED, preparation_payload["reason"])
+            self.assertEqual(
+                mailbox_constants.LEASE_EXPIRED, preparation_payload["reason"]
+            )
             self.assertEqual("1", preparation_payload["session_id"])
             self.assertEqual(1, preparation_payload["session_number"])
             self.assertEqual(1, preparation_payload["turn_index"])
@@ -144,33 +152,33 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
         self,
     ) -> None:
         question_id = "00000000-0000-0000-0000-000000000014"
-        question = mailbox.MailboxMessage(
+        question = mailbox_models.MailboxMessage(
             seq=1,
             id=question_id,
-            kind=mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T12:00:00+00:00",
             text="Which option?",
         )
-        view = mailbox.MailboxView(
+        view = mailbox_snapshot.MailboxView(
             mailbox_path=Path("/tmp/mailbox.jsonl"),
             messages=(question,),
             last_seq=1,
         )
-        lease_record = mailbox.MailboxLease(
+        lease_record = mailbox_models.MailboxLease(
             supervisor_id="00000000-0000-0000-0000-000000000015",
             updated_at="2026-07-24T12:00:00+00:00",
         )
         lease_path = Path("/tmp/mailbox-lease.json")
-        fresh_lease = mailbox.MailboxLeaseView(
+        fresh_lease = mailbox_models.MailboxLeaseView(
             lease_path=lease_path,
             lease=lease_record,
             fresh=True,
         )
-        stale_lease = mailbox.MailboxLeaseView(
+        stale_lease = mailbox_models.MailboxLeaseView(
             lease_path=lease_path,
             lease=lease_record,
             fresh=False,
-            reason=mailbox.LEASE_EXPIRED,
+            reason=mailbox_constants.LEASE_EXPIRED,
         )
         settings = run_coordination.MailboxWaitSettings(
             base_seconds=4.0,
@@ -212,7 +220,7 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
                 side_effect=read_mailbox,
             ),
             mock.patch.object(
-                mailbox,
+                mailbox_leases,
                 "read_lease",
                 side_effect=read_lease,
             ),
@@ -251,32 +259,32 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
         self,
     ) -> None:
         question_id = "00000000-0000-0000-0000-000000000019"
-        question = mailbox.MailboxMessage(
+        question = mailbox_models.MailboxMessage(
             seq=1,
             id=question_id,
-            kind=mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T12:00:00+00:00",
             text="Which option?",
         )
-        view = mailbox.MailboxView(
+        view = mailbox_snapshot.MailboxView(
             mailbox_path=Path("/tmp/mailbox.jsonl"),
             messages=(question,),
             last_seq=1,
         )
-        lease_record = mailbox.MailboxLease(
+        lease_record = mailbox_models.MailboxLease(
             supervisor_id="00000000-0000-0000-0000-000000000020",
             updated_at="2026-07-24T12:00:00+00:00",
         )
-        fresh_lease = mailbox.MailboxLeaseView(
+        fresh_lease = mailbox_models.MailboxLeaseView(
             lease_path=Path("/tmp/mailbox-lease.json"),
             lease=lease_record,
             fresh=True,
         )
-        stale_lease = mailbox.MailboxLeaseView(
+        stale_lease = mailbox_models.MailboxLeaseView(
             lease_path=Path("/tmp/mailbox-lease.json"),
             lease=lease_record,
             fresh=False,
-            reason=mailbox.LEASE_EXPIRED,
+            reason=mailbox_constants.LEASE_EXPIRED,
         )
         settings = run_coordination.mailbox_reply_wait_settings({})
         self.assertEqual(
@@ -300,7 +308,7 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
         supervision_ends = 4 * settings.unsupervised_ceiling_seconds
 
         def run_wait(
-            lease: mailbox.MailboxLeaseView,
+            lease: mailbox_models.MailboxLeaseView,
             *,
             until: float | None = None,
         ) -> tuple[run_coordination.MailboxWaitResult, float, int]:
@@ -330,7 +338,7 @@ class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
                     return_value=view,
                 ),
                 mock.patch.object(
-                    mailbox,
+                    mailbox_leases,
                     "read_lease",
                     side_effect=read_lease_seam,
                 ) as read_lease,

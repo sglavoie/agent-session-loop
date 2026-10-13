@@ -155,6 +155,8 @@ from asl_autopilot_termination import (
 from agent_session_loop import artifacts as _artifacts
 from agent_session_loop import events as _events
 from agent_session_loop import mailbox as _mailbox
+from agent_session_loop import mailbox_validation as _mailbox_validation
+from agent_session_loop import mailbox_vocabulary as _mailbox_vocabulary
 from agent_session_loop import state as _state
 from agent_session_loop import (
     supervision_liveness as _supervision_liveness,
@@ -172,7 +174,7 @@ def _write_liveness_record(args: argparse.Namespace, parsed: dict) -> dict:
     safety net must not cost the run it was watching.
     """
     supervision_id = getattr(args, "supervision_id", None) or (
-        _mailbox.new_supervision_id()
+        _mailbox_validation.new_supervision_id()
     )
     plan_dir = parsed["plan_dir"]
     state_dir = parsed.get("state_dir")
@@ -348,7 +350,7 @@ def _supervise_and_report(
         # that record and still exits 128+n.
         emitter.emit(
             parse_command(args.command),
-            outcome=_mailbox.SUPERVISION_OUTCOME_ERROR,
+            outcome=_mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
             text=f"supervision ended: error - {_termination_detail(exc)}",
         )
         raise
@@ -388,7 +390,7 @@ def main(
     # Every launch carries an identity even when the agent supplied none, so a
     # terminal record without a matching id is always someone else's.
     supervision_id = getattr(args, "supervision_id", None) or (
-        _mailbox.new_supervision_id()
+        _mailbox_validation.new_supervision_id()
     )
     # The liveness record and the terminal record must name the same launch, so
     # a generated id is put back on the namespace before supervision reads it.

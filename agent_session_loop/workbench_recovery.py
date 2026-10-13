@@ -27,7 +27,8 @@ from . import (
     events,
     intervention,
     plans,
-    preflight,
+    preflight_models,
+    preflight_runtime_hints,
     qna,
     redirect_cli,
     review_continuation,
@@ -769,7 +770,9 @@ def _runtime_failure_reason(
     return None
 
 
-def _hint_evidence_row(hint: preflight.RepairHint | None) -> RecoveryEvidenceRow | None:
+def _hint_evidence_row(
+    hint: preflight_models.RepairHint | None,
+) -> RecoveryEvidenceRow | None:
     if hint is None:
         return None
     severity: RecoveryEvidenceSeverity
@@ -1221,7 +1224,7 @@ def _runtime_recovery_evidence(
                 severity="error",
             )
         )
-    hint = preflight.runtime_repair_hint(
+    hint = preflight_runtime_hints.runtime_repair_hint(
         reason,
         failure_reason=failure_reason,
     )

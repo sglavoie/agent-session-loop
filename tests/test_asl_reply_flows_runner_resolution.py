@@ -17,6 +17,10 @@ from agent_session_loop import (
     events,
     harnesses,
     mailbox,
+    mailbox_appenders,
+    mailbox_leases,
+    mailbox_models,
+    mailbox_vocabulary,
     qna,
     run_coordination,
     run_prompts,
@@ -43,12 +47,12 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending", "pending"))
-            mailbox.append_guidance(
+            mailbox_appenders.append_guidance(
                 plan_dir,
                 "Supervision is active.",
                 state_dir=state_dir,
             )
-            mailbox.write_lease(
+            mailbox_leases.write_lease(
                 plan_dir,
                 "00000000-0000-0000-0000-000000000061",
                 state_dir=state_dir,
@@ -93,7 +97,7 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                 )
 
             responder_error: list[BaseException] = []
-            resolution_holder: list[mailbox.MailboxMessage] = []
+            resolution_holder: list[mailbox_models.MailboxMessage] = []
 
             def resolve() -> None:
                 try:
@@ -103,7 +107,8 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                         questions = [
                             message
                             for message in view.unanswered_questions
-                            if message.waiter_origin == mailbox.WAITER_ORIGIN_RUNNER
+                            if message.waiter_origin
+                            == mailbox_vocabulary.WAITER_ORIGIN_RUNNER
                         ]
                         if questions:
                             question = questions[0]
@@ -114,10 +119,10 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                                 state_dir=state_dir,
                             )
                             resolution_holder.append(
-                                mailbox.append_resolution(
+                                mailbox_appenders.append_resolution(
                                     plan_dir,
                                     question.id,
-                                    mailbox.RESOLUTION_ACTION_CONTINUE,
+                                    mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
                                     expected_run_id=question.run_id,
                                     note=hostile_note,
                                     state_dir=state_dir,
@@ -178,12 +183,14 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
             [question] = [
                 message
                 for message in view.messages
-                if message.kind == mailbox.KIND_QUESTION
+                if message.kind == mailbox_vocabulary.KIND_QUESTION
             ]
             self.assertEqual(payload["run_id"], question.run_id)
             self.assertEqual("1", question.session_id)
             self.assertEqual(1, question.turn_index)
-            self.assertEqual(mailbox.WAITER_ORIGIN_RUNNER, question.waiter_origin)
+            self.assertEqual(
+                mailbox_vocabulary.WAITER_ORIGIN_RUNNER, question.waiter_origin
+            )
             [resolution] = resolution_holder
 
             plan_state = state.plan_state_dir(plan_dir, state_dir)
@@ -223,12 +230,12 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
-            mailbox.append_guidance(
+            mailbox_appenders.append_guidance(
                 plan_dir,
                 "Supervision is active.",
                 state_dir=state_dir,
             )
-            mailbox.write_lease(
+            mailbox_leases.write_lease(
                 plan_dir,
                 "00000000-0000-0000-0000-000000000062",
                 state_dir=state_dir,
@@ -253,7 +260,7 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                 )
 
             responder_error: list[BaseException] = []
-            resolution_holder: list[mailbox.MailboxMessage] = []
+            resolution_holder: list[mailbox_models.MailboxMessage] = []
 
             def resolve() -> None:
                 try:
@@ -264,10 +271,10 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                             question = view.unanswered_questions[0]
                             assert question.run_id is not None
                             resolution_holder.append(
-                                mailbox.append_resolution(
+                                mailbox_appenders.append_resolution(
                                     plan_dir,
                                     question.id,
-                                    mailbox.RESOLUTION_ACTION_PAUSE,
+                                    mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
                                     expected_run_id=question.run_id,
                                     note=sensitive_note,
                                     state_dir=state_dir,
@@ -313,7 +320,9 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
             self.assertEqual(pause_message, payload["pause_message"])
             self.assertEqual("last_message", payload["pause_details"]["source"])
             closure = payload["pause_details"]["mailbox_resolution"]
-            self.assertEqual(mailbox.WAITER_ORIGIN_RUNNER, closure["waiter_origin"])
+            self.assertEqual(
+                mailbox_vocabulary.WAITER_ORIGIN_RUNNER, closure["waiter_origin"]
+            )
             [remediation] = payload["action_required"]["remediation"]
             self.assertIn("--resume --reply-stdin", remediation["message"])
             self.assertIn(f"--state-dir {state_dir}", remediation["message"])
@@ -361,12 +370,12 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
-            mailbox.append_guidance(
+            mailbox_appenders.append_guidance(
                 plan_dir,
                 "Supervision is active.",
                 state_dir=state_dir,
             )
-            mailbox.write_lease(
+            mailbox_leases.write_lease(
                 plan_dir,
                 "00000000-0000-0000-0000-000000000063",
                 state_dir=state_dir,
@@ -382,19 +391,19 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                     (plan_state / events.STATE_FILE_NAME).read_text(encoding="utf-8")
                 )
                 active_turn = state_payload["active_turn"]
-                question = mailbox.append_question(
+                question = mailbox_appenders.append_question(
                     plan_dir,
                     "Pause this worker ask?",
                     state_dir=state_dir,
                     run_id=active_turn["run_id"],
                     session_id=active_turn["session_id"],
                     turn_index=active_turn["turn_index"],
-                    waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+                    waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_WORKER,
                 )
-                mailbox.append_resolution(
+                mailbox_appenders.append_resolution(
                     plan_dir,
                     question.id,
-                    mailbox.RESOLUTION_ACTION_PAUSE,
+                    mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
                     expected_run_id=active_turn["run_id"],
                     note=sensitive_note,
                     state_dir=state_dir,
@@ -444,7 +453,9 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                 payload["pause_message"],
             )
             correlation = payload["pause_details"]["mailbox_resolution"]
-            self.assertEqual(mailbox.WAITER_ORIGIN_WORKER, correlation["waiter_origin"])
+            self.assertEqual(
+                mailbox_vocabulary.WAITER_ORIGIN_WORKER, correlation["waiter_origin"]
+            )
             self.assertEqual("pause", correlation["action"])
             self.assertEqual(len(sensitive_note), correlation["note_length"])
             [remediation] = payload["action_required"]["remediation"]
@@ -457,10 +468,12 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
             questions = [
                 message
                 for message in view.messages
-                if message.kind == mailbox.KIND_QUESTION
+                if message.kind == mailbox_vocabulary.KIND_QUESTION
             ]
             self.assertEqual(1, len(questions))
-            self.assertEqual(mailbox.WAITER_ORIGIN_WORKER, questions[0].waiter_origin)
+            self.assertEqual(
+                mailbox_vocabulary.WAITER_ORIGIN_WORKER, questions[0].waiter_origin
+            )
             plan_state = state.plan_state_dir(plan_dir, state_dir)
             records = read_jsonl(plan_state / events.EVENTS_FILE_NAME)
             wait_events = [
@@ -484,7 +497,7 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                 "run-current",
                 "1",
                 3,
-                mailbox.WAITER_ORIGIN_WORKER,
+                mailbox_vocabulary.WAITER_ORIGIN_WORKER,
                 True,
             ),
             (
@@ -492,7 +505,7 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                 "run-old",
                 "1",
                 3,
-                mailbox.WAITER_ORIGIN_WORKER,
+                mailbox_vocabulary.WAITER_ORIGIN_WORKER,
                 False,
             ),
             (
@@ -500,7 +513,7 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                 "run-current",
                 "2",
                 3,
-                mailbox.WAITER_ORIGIN_WORKER,
+                mailbox_vocabulary.WAITER_ORIGIN_WORKER,
                 False,
             ),
             (
@@ -508,7 +521,7 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                 "run-current",
                 "1",
                 2,
-                mailbox.WAITER_ORIGIN_WORKER,
+                mailbox_vocabulary.WAITER_ORIGIN_WORKER,
                 False,
             ),
             (
@@ -516,7 +529,7 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                 "run-current",
                 "1",
                 3,
-                mailbox.WAITER_ORIGIN_RUNNER,
+                mailbox_vocabulary.WAITER_ORIGIN_RUNNER,
                 False,
             ),
         )
@@ -534,7 +547,7 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                     plan_dir = tmp_dir / name / "plan"
                     state_dir = tmp_dir / name / "state"
                     plan_dir.mkdir(parents=True)
-                    question = mailbox.append_question(
+                    question = mailbox_appenders.append_question(
                         plan_dir,
                         "Pause?",
                         state_dir=state_dir,
@@ -543,10 +556,10 @@ class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
                         turn_index=question_turn_index,
                         waiter_origin=waiter_origin,
                     )
-                    resolution = mailbox.append_resolution(
+                    resolution = mailbox_appenders.append_resolution(
                         plan_dir,
                         question.id,
-                        mailbox.RESOLUTION_ACTION_PAUSE,
+                        mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
                         expected_run_id=question_run_id,
                         state_dir=state_dir,
                     )

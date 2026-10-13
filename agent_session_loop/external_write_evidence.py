@@ -25,8 +25,8 @@ Nothing here imports the runner. The plan directory, the state-dir argument,
 the run directory, the workspace root, the registered repository roots, the
 pre-turn digests and the turn's start time all enter as parameters, and the
 two collaborators this module needs -- ``run_inputs._runner_owned_roots`` and
-``preflight.plan_provenance_exempt_roots`` -- are read at their owning modules,
-so no seam is required.
+``preflight_footprint.plan_provenance_exempt_roots`` -- are read at their owning
+modules, so no seam is required.
 
 Invariants that survive the move:
 
@@ -71,7 +71,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
-    preflight,
+    preflight_footprint,
     repository_intent,
     run_inputs,
     state,
@@ -580,7 +580,7 @@ def _turn_external_write_evidence(
         control_plane_roots=run_inputs._runner_owned_roots(
             plan_dir, state_dir_arg, run_dir=run_dir
         ),
-        provenance_roots=preflight.plan_provenance_exempt_roots(plan_dir),
+        provenance_roots=preflight_footprint.plan_provenance_exempt_roots(plan_dir),
         digests_before=digests_before if digests_before is not None else {},
         turn_started_ns=turn_started_ns,
         authorized_roots=authorized_roots,

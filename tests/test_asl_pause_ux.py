@@ -24,6 +24,12 @@ from agent_session_loop import (
     harnesses,
     intervention,
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_leases,
+    mailbox_models,
+    mailbox_snapshot,
+    mailbox_vocabulary,
     overseer_resume,
     pause_policy,
     qna,
@@ -456,33 +462,33 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
     def test_resolution_clears_wait_with_body_free_identity_metadata(self) -> None:
         question_id = "00000000-0000-4000-8000-000000000101"
         resolution_id = "00000000-0000-4000-8000-000000000102"
-        question = mailbox.MailboxMessage(
+        question = mailbox_models.MailboxMessage(
             seq=1,
             id=question_id,
-            kind=mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T12:00:00+00:00",
             text="Continue without an answer?",
             run_id="run-1",
             session_id="9",
             turn_index=3,
-            waiter_origin=mailbox.WAITER_ORIGIN_RUNNER,
+            waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_RUNNER,
         )
-        resolution = mailbox.MailboxMessage(
+        resolution = mailbox_models.MailboxMessage(
             seq=2,
             id=resolution_id,
-            kind=mailbox.KIND_RESOLUTION,
+            kind=mailbox_vocabulary.KIND_RESOLUTION,
             created_at="2026-07-24T12:00:01+00:00",
             to=question_id,
             run_id="run-1",
-            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             note="sensitive supervisor note",
         )
         # A committed closure wins even when no further mailbox append can fit.
-        view = mailbox.MailboxView(
+        view = mailbox_snapshot.MailboxView(
             mailbox_path=Path("/tmp/mailbox.jsonl"),
             messages=(question, resolution),
             last_seq=2,
-            size_bytes=mailbox.MAILBOX_MAX_BYTES,
+            size_bytes=mailbox_constants.MAILBOX_MAX_BYTES,
         )
         settings = run_coordination.MailboxWaitSettings(
             base_seconds=2.0,
@@ -698,33 +704,33 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         self,
     ) -> None:
         question_id = "00000000-0000-0000-0000-000000000010"
-        question = mailbox.MailboxMessage(
+        question = mailbox_models.MailboxMessage(
             seq=1,
             id=question_id,
-            kind=mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T12:00:00+00:00",
             text="Which option?",
         )
-        view = mailbox.MailboxView(
+        view = mailbox_snapshot.MailboxView(
             mailbox_path=Path("/tmp/mailbox.jsonl"),
             messages=(question,),
             last_seq=1,
         )
-        lease_record = mailbox.MailboxLease(
+        lease_record = mailbox_models.MailboxLease(
             supervisor_id="00000000-0000-0000-0000-000000000011",
             updated_at="2026-07-24T12:00:00+00:00",
         )
         lease_path = Path("/tmp/mailbox-lease.json")
-        fresh_lease = mailbox.MailboxLeaseView(
+        fresh_lease = mailbox_models.MailboxLeaseView(
             lease_path=lease_path,
             lease=lease_record,
             fresh=True,
         )
-        stale_lease = mailbox.MailboxLeaseView(
+        stale_lease = mailbox_models.MailboxLeaseView(
             lease_path=lease_path,
             lease=lease_record,
             fresh=False,
-            reason=mailbox.LEASE_EXPIRED,
+            reason=mailbox_constants.LEASE_EXPIRED,
         )
         settings = run_coordination.MailboxWaitSettings(
             base_seconds=2.0,
@@ -759,7 +765,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         )
         with (
             mock.patch.object(mailbox, "read_mailbox", return_value=view),
-            mock.patch.object(mailbox, "read_lease", side_effect=read_lease),
+            mock.patch.object(mailbox_leases, "read_lease", side_effect=read_lease),
         ):
             result = run_coordination.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
@@ -808,7 +814,9 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         with mock.patch.object(
             mailbox,
             "read_mailbox",
-            side_effect=mailbox.MailboxError(mailbox.ERROR_MAILBOX_READ),
+            side_effect=mailbox_models.MailboxError(
+                mailbox_constants.ERROR_MAILBOX_READ
+            ),
         ):
             result = run_coordination.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
@@ -826,7 +834,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             )
 
         self.assertIsNone(result.reply)
-        self.assertEqual(mailbox.ERROR_MAILBOX_READ, result.reason)
+        self.assertEqual(mailbox_constants.ERROR_MAILBOX_READ, result.reason)
         self.assertEqual(3.0, now[0])
 
     def test_mailbox_reply_wait_gate_excludes_recoverable_and_failed_turns(
@@ -1438,8 +1446,12 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             write_plan(plan_dir, ("pending", "pending"))
             # Creating the mailbox file is what activates the protocol, so seed
             # it with an already-answered record rather than pending guidance.
-            seeded = mailbox.append_guidance(plan_dir, "seeded", state_dir=state_dir)
-            mailbox.append_acknowledgement(plan_dir, seeded.seq, state_dir=state_dir)
+            seeded = mailbox_appenders.append_guidance(
+                plan_dir, "seeded", state_dir=state_dir
+            )
+            mailbox_appenders.append_acknowledgement(
+                plan_dir, seeded.seq, state_dir=state_dir
+            )
             observed_guidance: list[str] = []
 
             def fake_run_harness(name, **kwargs):

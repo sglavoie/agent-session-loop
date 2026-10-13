@@ -19,7 +19,12 @@ from unittest import mock
 from agent_session_loop import (
     cli,
     mailbox,
+    mailbox_appenders,
     mailbox_cli,
+    mailbox_cursors,
+    mailbox_leases,
+    mailbox_models,
+    mailbox_vocabulary,
     process_tree,
     supervision_liveness,
 )
@@ -115,7 +120,7 @@ class MailboxCliTestsBase(unittest.TestCase):
         lands before the wait's first read, so no iteration ever sleeps.
         """
         real_token = mailbox.mailbox_change_token
-        appended: list[mailbox.MailboxMessage] = []
+        appended: list[mailbox_models.MailboxMessage] = []
 
         def hook(path):
             if not appended:
@@ -123,16 +128,16 @@ class MailboxCliTestsBase(unittest.TestCase):
                 guidance = next(
                     message
                     for message in reversed(view.messages)
-                    if message.kind == mailbox.KIND_GUIDANCE
+                    if message.kind == mailbox_vocabulary.KIND_GUIDANCE
                 )
                 values = {
-                    "delivery_state": mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
-                    "delivery_reason": mailbox.GUIDANCE_REASON_DELIVERED,
-                    "channel": mailbox.GUIDANCE_CHANNEL_LIVE,
+                    "delivery_state": mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_LIVE,
+                    "delivery_reason": mailbox_vocabulary.GUIDANCE_REASON_DELIVERED,
+                    "channel": mailbox_vocabulary.GUIDANCE_CHANNEL_LIVE,
                 }
                 values.update(overrides)
                 appended.append(
-                    mailbox.append_guidance_delivery(
+                    mailbox_appenders.append_guidance_delivery(
                         self.plan_dir,
                         guidance.id,
                         state_dir=self.state_dir,
@@ -146,13 +151,13 @@ class MailboxCliTestsBase(unittest.TestCase):
     def _write_projected_lease(
         self,
         supervisor_id: str,
-        question: mailbox.MailboxMessage,
+        question: mailbox_models.MailboxMessage,
         *,
         run_id: str = "run-live",
         age_seconds: float = 30.0,
-    ) -> mailbox.MailboxLease:
+    ) -> mailbox_models.MailboxLease:
         anchored = datetime.now(UTC) - timedelta(seconds=age_seconds)
-        return mailbox.write_lease(
+        return mailbox_leases.write_lease(
             self.plan_dir,
             supervisor_id,
             state_dir=self.state_dir,
@@ -164,16 +169,16 @@ class MailboxCliTestsBase(unittest.TestCase):
             latest_unanswered_question_created_at=question.created_at,
         )
 
-    def _lease_on_disk(self) -> mailbox.MailboxLease:
-        view = mailbox.read_lease(self.plan_dir, state_dir=self.state_dir)
+    def _lease_on_disk(self) -> mailbox_models.MailboxLease:
+        view = mailbox_leases.read_lease(self.plan_dir, state_dir=self.state_dir)
         self.assertTrue(view.fresh)
         assert view.lease is not None
         return view.lease
 
     def assert_heartbeat(
         self,
-        original: mailbox.MailboxLease,
-        after: mailbox.MailboxLease,
+        original: mailbox_models.MailboxLease,
+        after: mailbox_models.MailboxLease,
     ) -> None:
         """Everything but ``updated_at`` survived byte-identically."""
         self.assertEqual(
@@ -196,7 +201,7 @@ class MailboxCliTestsBase(unittest.TestCase):
         return code, stdout.getvalue().splitlines()
 
     def cursor_on_disk(self, supervision_id: str) -> int:
-        return mailbox.read_supervision_cursor(
+        return mailbox_cursors.read_supervision_cursor(
             self.plan_dir,
             supervision_id,
             state_dir=self.state_dir,
@@ -218,7 +223,7 @@ class MailboxCliTestsBase(unittest.TestCase):
 
     def age_grace_anchor(self, supervision_id: str, seconds: float) -> None:
         """Backdate this launch's grace anchor as an earlier poll would have."""
-        mailbox.write_supervision_cursor(
+        mailbox_cursors.write_supervision_cursor(
             self.plan_dir,
             supervision_id,
             0,

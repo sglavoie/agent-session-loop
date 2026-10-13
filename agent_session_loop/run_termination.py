@@ -79,7 +79,8 @@ from . import (
     overseer_discovery,
     pause_policy,
     plans,
-    preflight,
+    preflight_auto_repair,
+    preflight_runtime_hints,
     run_control,
     run_coordination,
     run_persistence,
@@ -515,14 +516,14 @@ def _runtime_reason_remediation(
     details instead of the generic hint.
     """
 
-    hint = preflight.runtime_repair_hint(reason)
+    hint = preflight_runtime_hints.runtime_repair_hint(reason)
     if hint is None:
         return None
     message = hint.message
     if plan_dir:
-        message = preflight.repair_hint_payload(hint, plan_dir=plan_dir, cwd=cwd)[
-            "message"
-        ]
+        message = preflight_auto_repair.repair_hint_payload(
+            hint, plan_dir=plan_dir, cwd=cwd
+        )["message"]
     if hint.category == "commit-failed":
         message = (
             _commit_failed_remediation_message(
@@ -551,7 +552,8 @@ def _pause_remediation(
     A gate that already resolved its findings to repair hints carries them in
     the pause details, and those are the most specific guidance available. A
     runner-side refusal carries findings but no hints, so the stable pause
-    reason resolves one from ``preflight.RUNTIME_REPAIR_HINTS`` instead. Without
+    reason resolves one from
+    ``preflight_runtime_hints.RUNTIME_REPAIR_HINTS`` instead. Without
     that fallback an ``inspect`` pause tells an operator to look without saying
     where, which is what the audit filed against `commit-preflight`.
     """

@@ -12,7 +12,7 @@ from typing import Any
 from agent_session_loop import (
     events,
     plans,
-    preflight,
+    preflight_models,
     readiness_gate,
     run_commit,
     state,
@@ -191,10 +191,10 @@ class ParserAndStateTestsBase(unittest.TestCase):
         }
 
     def _baseline_missing_gate(self, plan_dir: Path, cwd: Path) -> dict[str, Any]:
-        report = preflight.PreflightReport(
+        report = preflight_models.PreflightReport(
             plan_dir=plan_dir,
             findings=(
-                preflight.PreflightFinding(
+                preflight_models.PreflightFinding(
                     severity="red",
                     category="baseline-missing",
                     message="session 1 declares a baseline expectation",

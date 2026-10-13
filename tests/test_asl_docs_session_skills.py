@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent_session_loop import (
-    authoring,
-    preflight,
-)
+from agent_session_loop import authoring, preflight_models
 from tests.asl_docs_support import read_asl_reference
 from tests.support import (
     REPO_ROOT,
@@ -111,11 +108,11 @@ class SessionSkillDocsTests(unittest.TestCase):
     def test_docs_name_every_preflight_category_and_no_retired_one(self) -> None:
         text = read_asl_reference()
 
-        for category in preflight.PREFLIGHT_CATEGORIES:
+        for category in preflight_models.PREFLIGHT_CATEGORIES:
             self.assertIn(f"`{category}`", text)
         # `env-spec` was retired with the external `spec commit` dependency;
         # the finding list must not keep advertising a category no run emits.
-        self.assertNotIn("env-spec", preflight.PREFLIGHT_CATEGORIES)
+        self.assertNotIn("env-spec", preflight_models.PREFLIGHT_CATEGORIES)
         self.assertNotIn("env-spec", text)
 
     def test_docs_document_every_asl_commit_mode(self) -> None:

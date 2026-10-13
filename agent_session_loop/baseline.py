@@ -12,7 +12,7 @@ plans aggregate every declared repository; legacy plans retain one fingerprint.
 The recorded evidence is what the preflight readiness gate consults (without
 ever running commands itself) to decide whether a pre-existing broad-suite
 failure should block before implementation. See
-:func:`agent_session_loop.preflight._check_baselines`.
+:func:`agent_session_loop.preflight_baseline_checks._check_baselines`.
 
 Storage uses a *fingerprint-independent identity key* (recipe + cwd +
 executable + environment, plus a registry digest when present, with repository

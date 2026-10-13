@@ -17,7 +17,7 @@ from unittest import mock
 from agent_session_loop import (
     cli,
     events,
-    mailbox,
+    mailbox_leases,
     review_guard,
     run_entry,
     run_selection,
@@ -121,7 +121,7 @@ class ParserReviewGuardAndResumeOverlayTests(unittest.TestCase):
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             plan_dir.mkdir()
-            mailbox.write_lease(
+            mailbox_leases.write_lease(
                 plan_dir,
                 "11111111-1111-4111-8111-111111111111",
                 state_dir=state_dir,

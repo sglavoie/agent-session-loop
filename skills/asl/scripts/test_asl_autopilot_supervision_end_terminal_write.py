@@ -17,6 +17,8 @@ from asl_autopilot_test_support import (  # noqa: F401
     tearDownModule,
 )
 
+from agent_session_loop import mailbox_appenders, mailbox_vocabulary
+
 
 class SupervisionEndTerminalWriteTest(SupervisionEndBase):
     def test_failed_append_still_reports_a_deferred_signal(self) -> None:
@@ -26,7 +28,7 @@ class SupervisionEndTerminalWriteTest(SupervisionEndBase):
 
         result = self._complete_result(self.command)
         self._patch(autopilot, "run_autopilot", lambda args: result)
-        self._patch(autopilot._mailbox, "append_supervision_end", boom)
+        self._patch(mailbox_appenders, "append_supervision_end", boom)
 
         with (
             self.assertRaises(SystemExit) as caught,
@@ -47,7 +49,7 @@ class SupervisionEndTerminalWriteTest(SupervisionEndBase):
         # The contract is readable from the outcome alone only while `error`
         # stays reserved for an abnormal exit: no mapped reason, and no
         # unmapped one, may reach it from the normal path.
-        error = autopilot._mailbox.SUPERVISION_OUTCOME_ERROR
+        error = mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR
         self.assertNotIn(error, set(autopilot.SUPERVISION_END_OUTCOMES.values()))
         self.assertNotEqual(error, autopilot.DEFAULT_SUPERVISION_OUTCOME)
         outcome, _ = autopilot._supervision_end_fields({"reason": "no-such-reason"})

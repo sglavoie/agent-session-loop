@@ -26,13 +26,15 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Literal
 
-#: Mirrors ``mailbox.GUIDANCE_STATE_DELIVERED_LIVE`` / ``GUIDANCE_STATE_DEFERRED``.
+#: Mirrors ``mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_LIVE`` and
+#: ``GUIDANCE_STATE_DEFERRED``.
 DeliveryState = Literal["delivered-live", "deferred"]
 STATE_DELIVERED_LIVE: DeliveryState = "delivered-live"
 STATE_DEFERRED: DeliveryState = "deferred"
 
-#: Mirrors ``mailbox.GUIDANCE_CHANNEL_LIVE``. This endpoint has exactly one
-#: channel: an attempt it records is always an attempt at same-turn delivery.
+#: Mirrors ``mailbox_vocabulary.GUIDANCE_CHANNEL_LIVE``. This endpoint has
+#: exactly one channel: an attempt it records is always an attempt at
+#: same-turn delivery.
 CHANNEL_LIVE = "live"
 
 #: Mirrors the mailbox's delivery reasons. ``REASON_DELIVERED`` is the only one

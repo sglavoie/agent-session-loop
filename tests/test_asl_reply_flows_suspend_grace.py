@@ -11,6 +11,11 @@ import tests.reply_flow_support as rfs
 from agent_session_loop import (
     events,
     mailbox,
+    mailbox_constants,
+    mailbox_leases,
+    mailbox_models,
+    mailbox_snapshot,
+    mailbox_vocabulary,
     run_coordination,
     run_persistence,
 )
@@ -77,7 +82,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
         self.assertEqual(91.0, elapsed)
         self.assertEqual(4.0, probe_times[0])
         self.assertEqual(91.0, probe_times[-1])
-        self.assertEqual(mailbox.LEASE_EXPIRED, result.lease_reason)
+        self.assertEqual(mailbox_constants.LEASE_EXPIRED, result.lease_reason)
         self.assertEqual(
             "00000000-0000-0000-0000-000000000046",
             result.lease_supervisor_id,
@@ -153,7 +158,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
         self.assertGreater(elapsed, settings.unsupervised_ceiling_seconds)
         # Only the final probe rejected the lease, so the wait spent one
         # extension unsupervised however long it ran.
-        self.assertEqual(mailbox.LEASE_EXPIRED, result.lease_reason)
+        self.assertEqual(mailbox_constants.LEASE_EXPIRED, result.lease_reason)
         self.assertEqual(
             settings.lease_extension_seconds,
             result.unsupervised_seconds,
@@ -194,7 +199,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
             settings.unsupervised_ceiling_seconds,
             result.unsupervised_seconds,
         )
-        self.assertEqual(mailbox.LEASE_EXPIRED, result.lease_reason)
+        self.assertEqual(mailbox_constants.LEASE_EXPIRED, result.lease_reason)
         self.assertEqual(3600.0, result.suspend_skew_seconds)
         self.assertEqual(
             run_coordination.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
@@ -276,33 +281,33 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
         self,
     ) -> None:
         question_id = "00000000-0000-0000-0000-000000000047"
-        question = mailbox.MailboxMessage(
+        question = mailbox_models.MailboxMessage(
             seq=1,
             id=question_id,
-            kind=mailbox.KIND_QUESTION,
+            kind=mailbox_vocabulary.KIND_QUESTION,
             created_at="2026-07-24T12:00:00+00:00",
             text="Which option?",
         )
-        view = mailbox.MailboxView(
+        view = mailbox_snapshot.MailboxView(
             mailbox_path=Path("/tmp/mailbox.jsonl"),
             messages=(question,),
             last_seq=1,
         )
-        lease_record = mailbox.MailboxLease(
+        lease_record = mailbox_models.MailboxLease(
             supervisor_id="00000000-0000-0000-0000-000000000048",
             updated_at="2026-07-24T12:00:00+00:00",
         )
         lease_path = Path("/tmp/mailbox-lease.json")
-        fresh_lease = mailbox.MailboxLeaseView(
+        fresh_lease = mailbox_models.MailboxLeaseView(
             lease_path=lease_path,
             lease=lease_record,
             fresh=True,
         )
-        stale_lease = mailbox.MailboxLeaseView(
+        stale_lease = mailbox_models.MailboxLeaseView(
             lease_path=lease_path,
             lease=lease_record,
             fresh=False,
-            reason=mailbox.LEASE_EXPIRED,
+            reason=mailbox_constants.LEASE_EXPIRED,
         )
         settings = run_coordination.MailboxWaitSettings(
             base_seconds=4.0,
@@ -334,7 +339,7 @@ class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
                 return_value=view,
             ),
             mock.patch.object(
-                mailbox,
+                mailbox_leases,
                 "read_lease",
                 side_effect=read_lease,
             ),

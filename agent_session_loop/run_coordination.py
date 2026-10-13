@@ -81,6 +81,14 @@ from . import (
     guidance_delivery,
     harnesses,
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_leases,
+    mailbox_models,
+    mailbox_snapshot,
+    mailbox_vocabulary,
+    mailbox_waits,
     pause_policy,
     plans,
     qna,
@@ -118,14 +126,16 @@ MAILBOX_REPLY_WAIT_SUSPEND_SKEW_SECONDS = 5.0
 # window would kill a healthy wait. After a detected suspend the supervisor
 # therefore gets this much *awake* (monotonic) time to re-prove liveness
 # before a non-fresh lease ends the wait. It equals one full lease freshness
-# window (mailbox.MAILBOX_LEASE_FRESH_SECONDS, 90 seconds) — roughly eighteen
+# window (mailbox_constants.MAILBOX_LEASE_FRESH_SECONDS, 90 seconds) — roughly eighteen
 # chances at the autopilot's 5-second poll cadence, the tick that actually
 # republishes the projection. Inside the grace a stale lease neither ends the
 # wait nor extends the active deadline, and the grace never extends the
 # unsupervised ceiling. Like the skew threshold above, this is a detection
 # bound rather than an operator budget, exercised through the injected clock
 # seams, so it deliberately has no environment override.
-MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS = mailbox.MAILBOX_LEASE_FRESH_SECONDS
+MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS = (
+    mailbox_constants.MAILBOX_LEASE_FRESH_SECONDS
+)
 # A question body is the worker's last-message artifact, which is unbounded,
 # while the mailbox log is capped at 4 MiB with no rotation — one oversized
 # message could consume it. Longer bodies are truncated deterministically to
@@ -138,20 +148,20 @@ MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS = mailbox.MAILBOX_LEASE_FRESH_SEC
 MAILBOX_QUESTION_TEXT_MAX_CHARS = 16000
 MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST = "supervisor-lost"
 MAILBOX_REPLY_WAIT_PREPARATION_REASONS: tuple[str, ...] = (
-    mailbox.LEASE_MISSING,
-    mailbox.LEASE_INVALID_SIZE,
-    mailbox.LEASE_EMPTY,
-    mailbox.LEASE_INVALID_JSON,
-    mailbox.LEASE_NOT_OBJECT,
-    mailbox.LEASE_UNSUPPORTED_VERSION,
-    mailbox.LEASE_INVALID_SUPERVISOR_ID,
-    mailbox.LEASE_INVALID_UPDATED_AT,
-    mailbox.LEASE_FUTURE_UPDATED_AT,
-    mailbox.LEASE_EXPIRED,
-    mailbox.ERROR_LEASE_READ,
-    mailbox.ERROR_MAILBOX_FULL,
-    mailbox.ERROR_MAILBOX_READ,
-    mailbox.ERROR_MAILBOX_WRITE,
+    mailbox_constants.LEASE_MISSING,
+    mailbox_constants.LEASE_INVALID_SIZE,
+    mailbox_constants.LEASE_EMPTY,
+    mailbox_constants.LEASE_INVALID_JSON,
+    mailbox_constants.LEASE_NOT_OBJECT,
+    mailbox_constants.LEASE_UNSUPPORTED_VERSION,
+    mailbox_constants.LEASE_INVALID_SUPERVISOR_ID,
+    mailbox_constants.LEASE_INVALID_UPDATED_AT,
+    mailbox_constants.LEASE_FUTURE_UPDATED_AT,
+    mailbox_constants.LEASE_EXPIRED,
+    mailbox_constants.ERROR_LEASE_READ,
+    mailbox_constants.ERROR_MAILBOX_FULL,
+    mailbox_constants.ERROR_MAILBOX_READ,
+    mailbox_constants.ERROR_MAILBOX_WRITE,
     *qna.QNA_ERROR_REASONS,
 )
 MAILBOX_REPLY_WAIT_BASE_ENV_VAR = "ASL_MAILBOX_REPLY_WAIT_BASE_SECONDS"
@@ -447,7 +457,7 @@ class LeaseEvidence:
     @classmethod
     def observed(
         cls,
-        lease: mailbox.MailboxLeaseView | None,
+        lease: mailbox_models.MailboxLeaseView | None,
         *,
         suspend_skew_seconds: float = 0.0,
         suspend_lease_grace_seconds: float = 0.0,
@@ -664,7 +674,7 @@ def clear_waiting_for_reply(
     suspend_skew_seconds: float | None = None,
     suspend_lease_grace_seconds: float | None = None,
     unsupervised_seconds: float | None = None,
-    resolution_action: mailbox.ResolutionAction | None = None,
+    resolution_action: mailbox_vocabulary.ResolutionAction | None = None,
     resolution_message_id: str | None = None,
     resolution_seq: int | None = None,
     persistence: CoordinationPersistence,
@@ -690,7 +700,7 @@ def clear_waiting_for_reply(
             raise ValueError(
                 "resolution metadata must be complete and use reason resolution"
             )
-        if resolution_action not in mailbox.RESOLUTION_ACTIONS:
+        if resolution_action not in mailbox_vocabulary.RESOLUTION_ACTIONS:
             raise ValueError("resolution_action must be continue or pause")
         if not isinstance(resolution_message_id, str) or not resolution_message_id:
             raise ValueError("resolution_message_id must be a non-empty string")
@@ -870,8 +880,8 @@ class MailboxWaitSettings:
 @dataclass(frozen=True)
 class PreparedMailboxWait:
     context: qna.QnAContext
-    question: mailbox.MailboxMessage
-    wait_start: mailbox.MailboxMessage
+    question: mailbox_models.MailboxMessage
+    wait_start: mailbox_models.MailboxMessage
     waiting_for_reply: dict[str, Any]
     pending_outbox: int
     settings: MailboxWaitSettings
@@ -882,8 +892,8 @@ class PreparedMailboxWait:
 class MailboxWaitResult:
     reason: str
     pending_outbox: int | None
-    reply: mailbox.MailboxMessage | None = None
-    resolution: mailbox.MailboxMessage | None = None
+    reply: mailbox_models.MailboxMessage | None = None
+    resolution: mailbox_models.MailboxMessage | None = None
     lease_updated_at: str | None = None
     lease_reason: str | None = None
     lease_supervisor_id: str | None = None
@@ -919,7 +929,7 @@ class MailboxWaitResult:
         )
 
     @property
-    def closure(self) -> mailbox.MailboxMessage | None:
+    def closure(self) -> mailbox_models.MailboxMessage | None:
         """The message that ended the wait, whichever kind it was."""
         return self.reply if self.reply is not None else self.resolution
 
@@ -962,7 +972,7 @@ class SupervisionCursor:
     wall_clock: Callable[[], datetime]
     active_deadline: float = field(init=False)
     last_fresh_lease: float = field(init=False)
-    lease: mailbox.MailboxLeaseView | None = None
+    lease: mailbox_models.MailboxLeaseView | None = None
     lease_grace_until: float | None = None
     suspend_skew_seconds: float = 0.0
     suspend_lease_grace_seconds: float = 0.0
@@ -1031,7 +1041,7 @@ class SupervisionCursor:
             ),
         )
 
-    def observe_lease(self, lease: mailbox.MailboxLeaseView, now: float) -> str:
+    def observe_lease(self, lease: mailbox_models.MailboxLeaseView, now: float) -> str:
         """Fold one lease probe in and name what it proved.
 
         Returns ``"fresh"`` when supervision was re-proven, ``"lost"`` when a
@@ -1141,7 +1151,7 @@ def worker_pause_resolution_for_turn(
     run_id: str,
     session_id: str,
     turn_index: int,
-) -> mailbox.MailboxMessage | None:
+) -> mailbox_models.MailboxMessage | None:
     """Return this worker turn's committed pause resolution, if any.
 
     This lookup is deliberately fail-open: a mailbox read failure or any
@@ -1151,22 +1161,22 @@ def worker_pause_resolution_for_turn(
     """
     try:
         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir_arg)
-    except OSError, mailbox.MailboxError:
+    except OSError, mailbox_models.MailboxError:
         return None
 
     worker_question_ids = {
         message.id
         for message in view.messages
-        if message.kind == mailbox.KIND_QUESTION
+        if message.kind == mailbox_vocabulary.KIND_QUESTION
         and message.run_id == run_id
         and message.session_id == session_id
         and message.turn_index == turn_index
-        and message.waiter_origin == mailbox.WAITER_ORIGIN_WORKER
+        and message.waiter_origin == mailbox_vocabulary.WAITER_ORIGIN_WORKER
     }
     for message in view.messages:
         if (
-            message.kind == mailbox.KIND_RESOLUTION
-            and message.action == mailbox.RESOLUTION_ACTION_PAUSE
+            message.kind == mailbox_vocabulary.KIND_RESOLUTION
+            and message.action == mailbox_vocabulary.RESOLUTION_ACTION_PAUSE
             and message.run_id == run_id
             and message.to in worker_question_ids
         ):
@@ -1198,12 +1208,12 @@ def ensure_mailbox_question(
     run_id: str,
     session_id: str,
     turn_index: int,
-) -> mailbox.MailboxMessage:
+) -> mailbox_models.MailboxMessage:
     """Append one deterministic question or reuse the identical existing one."""
 
     def existing_question(
-        view: mailbox.MailboxView,
-    ) -> mailbox.MailboxMessage | None:
+        view: mailbox_snapshot.MailboxView,
+    ) -> mailbox_models.MailboxMessage | None:
         existing = next(
             (message for message in view.messages if message.id == question_id),
             None,
@@ -1212,43 +1222,48 @@ def ensure_mailbox_question(
             return None
         closed = view.closure_for(existing.id)
         if (
-            existing.kind != mailbox.KIND_QUESTION
+            existing.kind != mailbox_vocabulary.KIND_QUESTION
             or existing.text != text
             or existing.run_id != run_id
             or existing.session_id != session_id
             or existing.turn_index != turn_index
-            or existing.waiter_origin != mailbox.WAITER_ORIGIN_RUNNER
-            or (existing.delivery_mode != mailbox.DELIVERY_MODE_WAIT and closed is None)
+            or existing.waiter_origin != mailbox_vocabulary.WAITER_ORIGIN_RUNNER
+            or (
+                existing.delivery_mode != mailbox_vocabulary.DELIVERY_MODE_WAIT
+                and closed is None
+            )
         ):
             raise MailboxWaitUnavailable(qna.REASON_MISSING_QUESTION_CONTEXT)
         return existing
 
     try:
         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir_arg)
-    except (OSError, mailbox.MailboxError) as error:
+    except (OSError, mailbox_models.MailboxError) as error:
         reason = (
             error.reason
-            if isinstance(error, mailbox.MailboxError)
-            else mailbox.ERROR_MAILBOX_READ
+            if isinstance(error, mailbox_models.MailboxError)
+            else mailbox_constants.ERROR_MAILBOX_READ
         )
         raise MailboxWaitUnavailable(reason) from error
     existing = existing_question(view)
     if existing is not None:
         if (
-            existing.delivery_mode == mailbox.DELIVERY_MODE_WAIT
+            existing.delivery_mode == mailbox_vocabulary.DELIVERY_MODE_WAIT
             and view.active_wait_for(existing.id) is None
             and view.closure_for(existing.id) is None
         ):
-            mailbox.append_wait_start(plan_dir, existing.id, state_dir=state_dir_arg)
+            mailbox_waits.append_wait_start(
+                plan_dir, existing.id, state_dir=state_dir_arg
+            )
         return existing
     # A question append is refused at the reduced question cap, not the file
     # cap; the wait loop's own guard stays on ``view.full`` because there the
     # question is whether the *reply* can still land.
     if not view.accepts_questions:
-        raise MailboxWaitUnavailable(mailbox.ERROR_MAILBOX_FULL)
+        raise MailboxWaitUnavailable(mailbox_constants.ERROR_MAILBOX_FULL)
 
     try:
-        question, _wait_start = mailbox.append_wait_question(
+        question, _wait_start = mailbox_waits.append_wait_question(
             plan_dir,
             text,
             state_dir=state_dir_arg,
@@ -1256,22 +1271,22 @@ def ensure_mailbox_question(
             run_id=run_id,
             session_id=session_id,
             turn_index=turn_index,
-            waiter_origin=mailbox.WAITER_ORIGIN_RUNNER,
+            waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_RUNNER,
         )
         return question
-    except mailbox.MailboxError as error:
-        if error.reason != mailbox.REJECT_DUPLICATE_ID:
+    except mailbox_models.MailboxError as error:
+        if error.reason != mailbox_constants.REJECT_DUPLICATE_ID:
             raise MailboxWaitUnavailable(error.reason) from error
 
     # Another process can win the deterministic append race. Re-read and
     # accept only the exact question this turn intended to publish.
     try:
         raced_view = mailbox.read_mailbox(plan_dir, state_dir=state_dir_arg)
-    except (OSError, mailbox.MailboxError) as error:
+    except (OSError, mailbox_models.MailboxError) as error:
         reason = (
             error.reason
-            if isinstance(error, mailbox.MailboxError)
-            else mailbox.ERROR_MAILBOX_READ
+            if isinstance(error, mailbox_models.MailboxError)
+            else mailbox_constants.ERROR_MAILBOX_READ
         )
         raise MailboxWaitUnavailable(reason) from error
     raced = existing_question(raced_view)
@@ -1296,19 +1311,19 @@ def prepare_mailbox_reply_wait(
 ) -> PreparedMailboxWait:
     """Validate turn context, ensure its question, and prepare persisted state."""
     try:
-        lease = mailbox.read_lease(
+        lease = mailbox_leases.read_lease(
             snapshot.plan_dir,
             state_dir=state_dir_arg,
         )
-    except (OSError, mailbox.MailboxError) as error:
+    except (OSError, mailbox_models.MailboxError) as error:
         reason = (
             error.reason
-            if isinstance(error, mailbox.MailboxError)
-            else mailbox.ERROR_LEASE_READ
+            if isinstance(error, mailbox_models.MailboxError)
+            else mailbox_constants.ERROR_LEASE_READ
         )
         raise MailboxWaitUnavailable(reason) from error
     if not lease.fresh:
-        raise MailboxWaitUnavailable(lease.reason or mailbox.ERROR_LEASE_READ)
+        raise MailboxWaitUnavailable(lease.reason or mailbox_constants.ERROR_LEASE_READ)
 
     settings = mailbox_reply_wait_settings(environ)
     started_monotonic = monotonic()
@@ -1357,16 +1372,16 @@ def prepare_mailbox_reply_wait(
             snapshot.plan_dir,
             state_dir=state_dir_arg,
         )
-    except (OSError, mailbox.MailboxError) as error:
+    except (OSError, mailbox_models.MailboxError) as error:
         reason = (
             error.reason
-            if isinstance(error, mailbox.MailboxError)
-            else mailbox.ERROR_MAILBOX_READ
+            if isinstance(error, mailbox_models.MailboxError)
+            else mailbox_constants.ERROR_MAILBOX_READ
         )
         raise MailboxWaitUnavailable(reason) from error
     wait_start = prepared_view.active_wait_for(question.id)
     if wait_start is None:
-        raise MailboxWaitUnavailable(mailbox.REJECT_QUESTION_NOT_WAITING)
+        raise MailboxWaitUnavailable(mailbox_constants.REJECT_QUESTION_NOT_WAITING)
     return PreparedMailboxWait(
         context=context,
         question=question,
@@ -1403,8 +1418,8 @@ def wait_for_mailbox_reply(
     )
     io_failure_started: float | None = None
     pending_outbox: int | None = None
-    mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir_arg)
-    last_successful_view: mailbox.MailboxView | None = None
+    mailbox_path = mailbox_cursors.mailbox_path_for_plan(plan_dir, state_dir_arg)
+    last_successful_view: mailbox_snapshot.MailboxView | None = None
     last_read_token: object = MAILBOX_TOKEN_UNSEEN
 
     while True:
@@ -1427,7 +1442,7 @@ def wait_for_mailbox_reply(
         view = last_successful_view
         if (
             last_read_token is MAILBOX_TOKEN_UNSEEN
-            or current_token is mailbox.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
+            or current_token is mailbox_constants.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
             or current_token != last_read_token
         ):
             try:
@@ -1435,12 +1450,12 @@ def wait_for_mailbox_reply(
                     plan_dir,
                     state_dir=state_dir_arg,
                 )
-            except (OSError, mailbox.MailboxError) as error:
+            except (OSError, mailbox_models.MailboxError) as error:
                 view = None
                 io_failure_reason = (
                     error.reason
-                    if isinstance(error, mailbox.MailboxError)
-                    else mailbox.ERROR_MAILBOX_READ
+                    if isinstance(error, mailbox_models.MailboxError)
+                    else mailbox_constants.ERROR_MAILBOX_READ
                 )
             else:
                 last_successful_view = view
@@ -1451,13 +1466,16 @@ def wait_for_mailbox_reply(
         if view is not None:
             pending_outbox = len(view.open_questions(run_id))
             closure = view.closure_for(question_id)
-            if closure is not None and closure.kind == mailbox.KIND_REPLY:
+            if closure is not None and closure.kind == mailbox_vocabulary.KIND_REPLY:
                 return MailboxWaitResult(
                     reason=WAIT_REASON_REPLY,
                     pending_outbox=pending_outbox,
                     reply=closure,
                 )
-            if closure is not None and closure.kind == mailbox.KIND_RESOLUTION:
+            if (
+                closure is not None
+                and closure.kind == mailbox_vocabulary.KIND_RESOLUTION
+            ):
                 return MailboxWaitResult(
                     reason=WAIT_REASON_RESOLUTION,
                     pending_outbox=pending_outbox,
@@ -1465,7 +1483,7 @@ def wait_for_mailbox_reply(
                 )
             if view.full:
                 return MailboxWaitResult.unclosed(
-                    mailbox.ERROR_MAILBOX_FULL,
+                    mailbox_constants.ERROR_MAILBOX_FULL,
                     pending_outbox=pending_outbox,
                     evidence=cursor.evidence(),
                 )
@@ -1474,7 +1492,7 @@ def wait_for_mailbox_reply(
                     message
                     for message in view.messages
                     if message.id == question_id
-                    and message.kind == mailbox.KIND_QUESTION
+                    and message.kind == mailbox_vocabulary.KIND_QUESTION
                 ),
                 None,
             )
@@ -1492,15 +1510,15 @@ def wait_for_mailbox_reply(
             and now >= cursor.active_deadline
         ):
             try:
-                lease = mailbox.read_lease(
+                lease = mailbox_leases.read_lease(
                     plan_dir,
                     state_dir=state_dir_arg,
                 )
-            except (OSError, mailbox.MailboxError) as error:
+            except (OSError, mailbox_models.MailboxError) as error:
                 io_failure_reason = (
                     error.reason
-                    if isinstance(error, mailbox.MailboxError)
-                    else mailbox.ERROR_LEASE_READ
+                    if isinstance(error, mailbox_models.MailboxError)
+                    else mailbox_constants.ERROR_LEASE_READ
                 )
             else:
                 if lease.updated_at is not None:
@@ -1570,18 +1588,18 @@ def finish_mailbox_reply_wait_lifecycle(
 
     This is the recovery half of the exactly-once reply guarantee: the poll
     loop reads the mailbox without its lock, so a reply appended in the instant
-    the wait gave up is invisible to it. ``mailbox.finish_wait`` takes the
+    the wait gave up is invisible to it. ``mailbox_waits.finish_wait`` takes the
     lock, and whatever closure it finds there wins over the reason the loop
     arrived with.
     """
-    completion = mailbox.finish_wait(
+    completion = mailbox_waits.finish_wait(
         plan_dir,
         question_id,
         wait_id,
         reason=(
-            mailbox.WAIT_END_REASON_TIMEOUT
+            mailbox_vocabulary.WAIT_END_REASON_TIMEOUT
             if result.reason == WAIT_REASON_TIMEOUT
-            else mailbox.WAIT_END_REASON_ERROR
+            else mailbox_vocabulary.WAIT_END_REASON_ERROR
         ),
         state_dir=state_dir_arg,
     )
@@ -1592,7 +1610,7 @@ def finish_mailbox_reply_wait_lifecycle(
     # rewritten, so a timeout that lost the race still reports the lease it saw.
     # Both closure fields are named on both branches: a wait can end on exactly
     # one, and carrying the other over would describe two endings.
-    if closure.kind == mailbox.KIND_REPLY:
+    if closure.kind == mailbox_vocabulary.KIND_REPLY:
         return dataclass_replace(
             result, reason=WAIT_REASON_REPLY, reply=closure, resolution=None
         )
@@ -1645,7 +1663,7 @@ class MailboxWaitCoordinator:
         self._finish_lifecycle = finish_lifecycle
 
     @property
-    def question(self) -> mailbox.MailboxMessage:
+    def question(self) -> mailbox_models.MailboxMessage:
         return self._prepared.question
 
     @property
@@ -2120,8 +2138,8 @@ def arm_requested_abort(
         return
     # The kill is already armed; failing to warn the worker must not
     # terminate the turn or lose the abort.
-    with contextlib.suppress(OSError, mailbox.MailboxError):
-        mailbox.append_guidance(
+    with contextlib.suppress(OSError, mailbox_models.MailboxError):
+        mailbox_appenders.append_guidance(
             plan_dir,
             abort_turn_guidance_text(
                 reason=reason,
@@ -2348,7 +2366,7 @@ class MailboxPoll:
         self._settled_guidance_ids: set[str] = set()
         self._recorded_guidance_attempts: set[tuple[str, str, str]] = set()
         self._unconfirmed_guidance_ids: set[str] = set()
-        self._mailbox_path = mailbox.mailbox_path_for_plan(
+        self._mailbox_path = mailbox_cursors.mailbox_path_for_plan(
             plan_dir,
             state_dir_arg,
         )
@@ -2431,7 +2449,7 @@ class MailboxPoll:
             # ledger append happened to move the token.
             not self._unconfirmed_guidance_ids
             and self._last_read_token is not MAILBOX_TOKEN_UNSEEN
-            and current_token is not mailbox.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
+            and current_token is not mailbox_constants.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
             and current_token == self._last_read_token
         ):
             return
@@ -2441,7 +2459,7 @@ class MailboxPoll:
                 self._plan_dir,
                 state_dir=self._state_dir_arg,
             )
-        except OSError, mailbox.MailboxError:
+        except OSError, mailbox_models.MailboxError:
             # Mailbox status remains authoritative through its own direct read;
             # a live observation failure must not terminate the harness turn.
             return
@@ -2480,7 +2498,7 @@ class MailboxPoll:
 
         self._deliver_guidance(view)
 
-    def _deliver_guidance(self, view: mailbox.MailboxView) -> None:
+    def _deliver_guidance(self, view: mailbox_snapshot.MailboxView) -> None:
         """Offer each undelivered guidance record to the turn now running.
 
         Nothing happens between turns: with no endpoint there is no live
@@ -2522,7 +2540,7 @@ class MailboxPoll:
 
     def _record_delivery(
         self,
-        message: mailbox.MailboxMessage,
+        message: mailbox_models.MailboxMessage,
         outcome: guidance_delivery.GuidanceOutcome,
         turn: guidance_delivery.TurnIdentity,
     ) -> None:
@@ -2547,7 +2565,7 @@ class MailboxPoll:
             return
         self._recorded_guidance_attempts.add(signature)
         try:
-            record = mailbox.append_guidance_delivery(
+            record = mailbox_appenders.append_guidance_delivery(
                 self._plan_dir,
                 message.id,
                 delivery_state=outcome.delivery_state,
@@ -2559,7 +2577,7 @@ class MailboxPoll:
                 harness=turn.harness,
                 state_dir=self._state_dir_arg,
             )
-        except OSError, mailbox.MailboxError:
+        except OSError, mailbox_models.MailboxError:
             # Same fail-open discipline as the read above: a mailbox that
             # cannot record a delivery must not end the harness turn. The
             # signature is released so a retried attempt can still record what
@@ -2572,7 +2590,7 @@ class MailboxPoll:
                 if outcome.delivered
                 else events.MAILBOX_ACTION_GUIDANCE_DELIVERY_DEFERRED
             ),
-            **mailbox.guidance_delivery_event_payload(record),
+            **mailbox_appenders.guidance_delivery_event_payload(record),
         }
         self._persistence.append_event(
             self._event_path,

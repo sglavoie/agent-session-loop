@@ -53,6 +53,8 @@ from . import (
     harness_failures,
     harnesses,
     mailbox,
+    mailbox_models,
+    mailbox_vocabulary,
     plans,
     process_tree,
 )
@@ -234,7 +236,7 @@ def sanitize_reply_argv(
 
 
 def resolution_argv_placeholder(
-    action: mailbox.ResolutionAction | str,
+    action: mailbox_vocabulary.ResolutionAction | str,
     note_length: int | None,
 ) -> str:
     note_label = "omitted" if note_length is None else f"{note_length} chars"
@@ -245,7 +247,7 @@ def sanitize_resolution_argv(
     argv: list[str] | tuple[str, ...],
     *,
     full_prompt: str,
-    action: mailbox.ResolutionAction | str,
+    action: mailbox_vocabulary.ResolutionAction | str,
     note_length: int | None,
 ) -> list[str]:
     placeholder = resolution_argv_placeholder(action, note_length)
@@ -289,7 +291,7 @@ def persisted_result_argv(
     )
     if (
         prompt_kind == "resolution"
-        and action in mailbox.RESOLUTION_ACTIONS
+        and action in mailbox_vocabulary.RESOLUTION_ACTIONS
         and (note_length is None or type(note_length) is int)
     ):
         return sanitize_resolution_argv(
@@ -2176,7 +2178,7 @@ def worker_input_wait_probe(
     """Whether this exact worker turn is intentionally waiting for an answer."""
     try:
         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
-    except mailbox.MailboxError:
+    except mailbox_models.MailboxError:
         # A read failure cannot safely suppress stall detection.
         return False
     return (

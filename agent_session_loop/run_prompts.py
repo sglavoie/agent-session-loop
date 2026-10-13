@@ -52,8 +52,9 @@ from typing import Any
 
 from . import (
     harnesses,
-    mailbox,
+    mailbox_models,
     mailbox_rendering,
+    mailbox_vocabulary,
     plans,
     qna,
     redirect_ack,
@@ -233,7 +234,7 @@ def _mailbox_protocol_lines(
     notify_command: str,
     ask_command: str,
     resume_ask_command: str,
-    pending_guidance: Sequence[mailbox.MailboxMessage],
+    pending_guidance: Sequence[mailbox_models.MailboxMessage],
 ) -> list[str]:
     """Render the worker mailbox contract without trusting guidance as markup."""
     lines = [
@@ -280,15 +281,15 @@ def _mailbox_protocol_lines(
         return lines
 
     def record_references(
-        messages: Sequence[mailbox.MailboxMessage],
+        messages: Sequence[mailbox_models.MailboxMessage],
     ) -> str:
         return ", ".join(f"seq {message.seq} (id {message.id})" for message in messages)
 
     def guidance_section(
-        records: Sequence[tuple[mailbox.MailboxMessage, str]],
-        record_cap_omitted: Sequence[mailbox.MailboxMessage],
-        individually_oversized: Sequence[mailbox.MailboxMessage],
-        aggregate_budget_omitted: Sequence[mailbox.MailboxMessage],
+        records: Sequence[tuple[mailbox_models.MailboxMessage, str]],
+        record_cap_omitted: Sequence[mailbox_models.MailboxMessage],
+        individually_oversized: Sequence[mailbox_models.MailboxMessage],
+        aggregate_budget_omitted: Sequence[mailbox_models.MailboxMessage],
     ) -> list[str]:
         section_lines = [
             "",
@@ -530,7 +531,7 @@ def build_session_prompt(
     *,
     mailbox_enabled: bool = False,
     state_dir: str | Path | None = None,
-    pending_guidance: Sequence[mailbox.MailboxMessage] = (),
+    pending_guidance: Sequence[mailbox_models.MailboxMessage] = (),
     workspace: workspaces.ResolvedWorkspace | None = None,
     session_scope: plans.SessionScope | None = None,
     corrections: redirect_ack.CarriedCorrections | None = None,
@@ -656,7 +657,7 @@ class _PendingReply:
 class _PendingResolution:
     """One answerless resolution consumed when its continuation starts."""
 
-    action: mailbox.ResolutionAction
+    action: mailbox_vocabulary.ResolutionAction
     note: str | None
     context: qna.QnAContext
     question_id: str
@@ -684,7 +685,7 @@ def build_reply_prompt(
     context: qna.QnAContext,
     mailbox_enabled: bool = False,
     state_dir: str | Path | None = None,
-    pending_guidance: Sequence[mailbox.MailboxMessage] = (),
+    pending_guidance: Sequence[mailbox_models.MailboxMessage] = (),
     workspace: workspaces.ResolvedWorkspace | None = None,
     session_scope: plans.SessionScope | None = None,
     corrections: redirect_ack.CarriedCorrections | None = None,
@@ -789,12 +790,12 @@ def build_resolution_prompt(
     harness: str,
     plan_dir: str | Path,
     *,
-    action: mailbox.ResolutionAction | str,
+    action: mailbox_vocabulary.ResolutionAction | str,
     note: str | None,
     context: qna.QnAContext,
     mailbox_enabled: bool = False,
     state_dir: str | Path | None = None,
-    pending_guidance: Sequence[mailbox.MailboxMessage] = (),
+    pending_guidance: Sequence[mailbox_models.MailboxMessage] = (),
     workspace: workspaces.ResolvedWorkspace | None = None,
     session_scope: plans.SessionScope | None = None,
     corrections: redirect_ack.CarriedCorrections | None = None,
@@ -822,14 +823,15 @@ def build_resolution_prompt(
 
 
 def _resolution_context_body(
-    action: mailbox.ResolutionAction | str,
+    action: mailbox_vocabulary.ResolutionAction | str,
     note: str | None,
     context: qna.QnAContext,
 ) -> list[str]:
     """Render the resolution context body shared by both worker modes."""
-    if action not in mailbox.RESOLUTION_ACTIONS:
+    if action not in mailbox_vocabulary.RESOLUTION_ACTIONS:
         raise ValueError(
-            "resolution action must be one of: " + ", ".join(mailbox.RESOLUTION_ACTIONS)
+            "resolution action must be one of: "
+            + ", ".join(mailbox_vocabulary.RESOLUTION_ACTIONS)
         )
     if note is not None and not isinstance(note, str):
         raise ValueError("resolution note must be a string or None")
@@ -885,7 +887,7 @@ def _resolution_context_body(
         "### Instructions",
         "- No operator answer was supplied by this resolution.",
     ]
-    if action == mailbox.RESOLUTION_ACTION_CONTINUE:
+    if action == mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE:
         lines.extend(
             (
                 (

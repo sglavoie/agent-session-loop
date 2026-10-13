@@ -62,7 +62,7 @@ from agent_session_loop import (
     control_queue,
     events,
     intervention,
-    mailbox,
+    mailbox_appenders,
     plans,
     state,
     workbench,
@@ -1625,7 +1625,7 @@ class PerformerTests(PerformerTestCase):
                 "input_wait_active": True,
             }
         )
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "May the fixture continue?",
             state_dir=self.state_dir,
@@ -1896,7 +1896,7 @@ class RestartTests(PerformerTestCase):
     def test_recovery_reports_a_consumed_in_turn_mailbox_reply(self) -> None:
         """A receipt is stronger evidence than the dead connector process."""
         self.write_state()
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "May the fixture continue?",
             state_dir=self.state_dir,
@@ -1904,13 +1904,13 @@ class RestartTests(PerformerTestCase):
             session_id=SESSION_ID,
             turn_index=1,
         )
-        reply = mailbox.append_reply(
+        reply = mailbox_appenders.append_reply(
             self.plan_dir,
             question.id,
             REPLY_TEXT,
             state_dir=self.state_dir,
         )
-        mailbox.append_receipt(
+        mailbox_appenders.append_receipt(
             self.plan_dir,
             question.id,
             reply.id,

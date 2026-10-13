@@ -24,7 +24,16 @@ from . import (
     events,
     intervention,
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_leases,
+    mailbox_models,
     mailbox_rendering,
+    mailbox_snapshot,
+    mailbox_validation,
+    mailbox_vocabulary,
+    mailbox_waits,
     plans,
     redirect_ack,
     redirect_store,
@@ -104,15 +113,15 @@ class _LeaseSupervision:
 
 @dataclass(frozen=True)
 class _OutboxWaitResult:
-    questions: tuple[mailbox.MailboxMessage, ...]
-    notices: tuple[mailbox.MailboxMessage, ...]
-    supervision_ends: tuple[mailbox.MailboxMessage, ...]
+    questions: tuple[mailbox_models.MailboxMessage, ...]
+    notices: tuple[mailbox_models.MailboxMessage, ...]
+    supervision_ends: tuple[mailbox_models.MailboxMessage, ...]
     include: str
     supervisor_id: str
     next_since: int
     timed_out: bool
     lease_supervision: _LeaseSupervision
-    mailbox_view: mailbox.MailboxView | None = None
+    mailbox_view: mailbox_snapshot.MailboxView | None = None
     lost_reason: str | None = None
 
 
@@ -132,15 +141,15 @@ class _MailboxQuestionProjection:
 
     run_id: str
     projection_seq: int
-    open_questions: tuple[mailbox.MailboxMessage, ...]
-    latest_question: mailbox.MailboxMessage
+    open_questions: tuple[mailbox_models.MailboxMessage, ...]
+    latest_question: mailbox_models.MailboxMessage
 
 
-def _message_payload(message: mailbox.MailboxMessage) -> dict[str, Any]:
+def _message_payload(message: mailbox_models.MailboxMessage) -> dict[str, Any]:
     return message.to_payload()
 
 
-def _print_framed_message(message: mailbox.MailboxMessage) -> None:
+def _print_framed_message(message: mailbox_models.MailboxMessage) -> None:
     """Render untrusted-shaped message text as one delimited ASCII JSON line."""
     print(MAILBOX_MESSAGE_BEGIN)
     print(mailbox_rendering.message_json(message))
@@ -148,7 +157,7 @@ def _print_framed_message(message: mailbox.MailboxMessage) -> None:
 
 
 def _message_references(
-    messages: Sequence[mailbox.MailboxMessage],
+    messages: Sequence[mailbox_models.MailboxMessage],
     *,
     max_rendered: int = 20,
 ) -> str:
@@ -171,19 +180,19 @@ def _message_references(
 
 
 def _inbox_read_text_lines(
-    guidance: tuple[mailbox.MailboxMessage, ...],
+    guidance: tuple[mailbox_models.MailboxMessage, ...],
     *,
     peek: bool,
-    acknowledgement: mailbox.MailboxMessage | None,
+    acknowledgement: mailbox_models.MailboxMessage | None,
     acknowledgement_error: dict[str, Any] | None,
 ) -> list[str]:
     """Render one bounded human-readable guidance snapshot."""
 
     def guidance_section(
         records: Sequence[mailbox_rendering.RenderedMessage],
-        record_cap_omitted: Sequence[mailbox.MailboxMessage],
-        individually_oversized: Sequence[mailbox.MailboxMessage],
-        aggregate_budget_omitted: Sequence[mailbox.MailboxMessage],
+        record_cap_omitted: Sequence[mailbox_models.MailboxMessage],
+        individually_oversized: Sequence[mailbox_models.MailboxMessage],
+        aggregate_budget_omitted: Sequence[mailbox_models.MailboxMessage],
     ) -> list[str]:
         lines: list[str] = []
         if records:
@@ -255,15 +264,15 @@ def _inbox_read_text_lines(
 
 
 def _outbox_question_text_lines(
-    questions: tuple[mailbox.MailboxMessage, ...],
+    questions: tuple[mailbox_models.MailboxMessage, ...],
 ) -> list[str]:
     """Render question bodies under the notice count and byte bounds."""
 
     def question_section(
         records: Sequence[mailbox_rendering.RenderedMessage],
-        record_cap_omitted: Sequence[mailbox.MailboxMessage],
-        individually_oversized: Sequence[mailbox.MailboxMessage],
-        aggregate_budget_omitted: Sequence[mailbox.MailboxMessage],
+        record_cap_omitted: Sequence[mailbox_models.MailboxMessage],
+        individually_oversized: Sequence[mailbox_models.MailboxMessage],
+        aggregate_budget_omitted: Sequence[mailbox_models.MailboxMessage],
     ) -> list[str]:
         lines: list[str] = []
         if records:
@@ -326,15 +335,15 @@ def _outbox_question_text_lines(
 
 
 def _outbox_notice_text_lines(
-    notices: tuple[mailbox.MailboxMessage, ...],
+    notices: tuple[mailbox_models.MailboxMessage, ...],
 ) -> list[str]:
     """Render notice bodies under explicit count and complete-byte bounds."""
 
     def notice_section(
         records: Sequence[mailbox_rendering.RenderedMessage],
-        record_cap_omitted: Sequence[mailbox.MailboxMessage],
-        individually_oversized: Sequence[mailbox.MailboxMessage],
-        aggregate_budget_omitted: Sequence[mailbox.MailboxMessage],
+        record_cap_omitted: Sequence[mailbox_models.MailboxMessage],
+        individually_oversized: Sequence[mailbox_models.MailboxMessage],
+        aggregate_budget_omitted: Sequence[mailbox_models.MailboxMessage],
     ) -> list[str]:
         lines: list[str] = []
         if records:
@@ -397,15 +406,15 @@ def _outbox_notice_text_lines(
 
 
 def _outbox_supervision_end_text_lines(
-    supervision_ends: tuple[mailbox.MailboxMessage, ...],
+    supervision_ends: tuple[mailbox_models.MailboxMessage, ...],
 ) -> list[str]:
     """Render terminal supervision records under the notice bounds."""
 
     def supervision_end_section(
         records: Sequence[mailbox_rendering.RenderedMessage],
-        record_cap_omitted: Sequence[mailbox.MailboxMessage],
-        individually_oversized: Sequence[mailbox.MailboxMessage],
-        aggregate_budget_omitted: Sequence[mailbox.MailboxMessage],
+        record_cap_omitted: Sequence[mailbox_models.MailboxMessage],
+        individually_oversized: Sequence[mailbox_models.MailboxMessage],
+        aggregate_budget_omitted: Sequence[mailbox_models.MailboxMessage],
     ) -> list[str]:
         lines: list[str] = []
         if records:
@@ -611,7 +620,7 @@ def _supervision_liveness_probe(
     return probe
 
 
-def _mailbox_error_details(error: mailbox.MailboxError) -> dict[str, Any]:
+def _mailbox_error_details(error: mailbox_models.MailboxError) -> dict[str, Any]:
     return {} if error.path is None else {"path": str(error.path)}
 
 
@@ -620,7 +629,7 @@ def _print_mailbox_error(
     *,
     command_name: str,
     text_label: str,
-    error: mailbox.MailboxError,
+    error: mailbox_models.MailboxError,
 ) -> None:
     cli_common.print_error(
         args,
@@ -663,7 +672,7 @@ def _body_from_args(
             args,
             command_name=command_name,
             text_label=text_label,
-            reason=mailbox.REJECT_MISSING_TEXT,
+            reason=mailbox_constants.REJECT_MISSING_TEXT,
             error=(f"exactly one of {inline_source} and --text-stdin is required"),
         )
         return None
@@ -695,7 +704,7 @@ def _body_from_args(
             args,
             command_name=command_name,
             text_label=text_label,
-            reason=mailbox.REJECT_MISSING_TEXT,
+            reason=mailbox_constants.REJECT_MISSING_TEXT,
             error="message text must not be blank",
         )
         return None
@@ -723,7 +732,7 @@ def _optional_note_from_args(
                 args,
                 command_name=COMMAND_INBOX_RESOLVE,
                 text_label="inbox resolve",
-                reason=mailbox.REJECT_INVALID_NOTE,
+                reason=mailbox_constants.REJECT_INVALID_NOTE,
                 error="resolution note must be text",
             )
             return False, None
@@ -820,7 +829,7 @@ def _validated_supervision_id(
     value = getattr(args, "supervision_id", None)
     if value is None:
         return None, True
-    if not mailbox.is_supervision_id(value):
+    if not mailbox_validation.is_supervision_id(value):
         _print_input_error(
             args,
             command_name=command_name,
@@ -849,7 +858,7 @@ def _write_supervisor_lease(
     plan_dir: str | Path,
     state_dir: str | Path | None,
     supervisor_id: str | None = None,
-) -> mailbox.MailboxLease:
+) -> mailbox_models.MailboxLease:
     """Heartbeat a live supervisor's lease, or take over when none is alive."""
     return intervention.write_supervisor_lease(plan_dir, state_dir, supervisor_id)
 
@@ -859,9 +868,9 @@ def _supervisor_write(
     *,
     command_name: str,
     text_label: str,
-    append: Callable[[Path], mailbox.MailboxMessage],
+    append: Callable[[Path], mailbox_models.MailboxMessage],
     before_lease: Callable[[cli_common.PlanCommandContext], None] | None = None,
-) -> tuple[cli_common.PlanCommandContext, mailbox.MailboxMessage, str] | None:
+) -> tuple[cli_common.PlanCommandContext, mailbox_models.MailboxMessage, str] | None:
     context = _resolve(
         args,
         command_name=command_name,
@@ -883,7 +892,7 @@ def _supervisor_write(
             args.state_dir,
         )
         message = append(context.snapshot.plan_dir)
-    except mailbox.MailboxError as error:
+    except mailbox_models.MailboxError as error:
         _print_mailbox_error(
             args,
             command_name=command_name,
@@ -914,7 +923,7 @@ def _status_question_ownership(
     str | None,
     str | None,
     int | None,
-    mailbox.WaiterOrigin | None,
+    mailbox_vocabulary.WaiterOrigin | None,
 ]:
     """Return exact live-turn ownership when a worker ask can prove it.
 
@@ -946,7 +955,7 @@ def _status_question_ownership(
         run_id,
         session_id,
         turn_index,
-        mailbox.WAITER_ORIGIN_WORKER,
+        mailbox_vocabulary.WAITER_ORIGIN_WORKER,
     )
 
 
@@ -1014,7 +1023,7 @@ def _active_turn_harness(
 def _record_guidance_read_deliveries(
     context: cli_common.PlanCommandContext,
     args: argparse.Namespace,
-    guidance: Sequence[mailbox.MailboxMessage],
+    guidance: Sequence[mailbox_models.MailboxMessage],
 ) -> list[dict[str, Any]]:
     """Record each guidance in this snapshot as delivered by an explicit read.
 
@@ -1041,19 +1050,19 @@ def _record_guidance_read_deliveries(
     receipts: list[dict[str, Any]] = []
     for message in guidance:
         try:
-            record = mailbox.append_guidance_delivery(
+            record = mailbox_appenders.append_guidance_delivery(
                 context.snapshot.plan_dir,
                 message.id,
-                delivery_state=mailbox.GUIDANCE_STATE_DELIVERED_BY_READ,
-                delivery_reason=mailbox.GUIDANCE_REASON_DELIVERED,
-                channel=mailbox.GUIDANCE_CHANNEL_READ,
+                delivery_state=mailbox_vocabulary.GUIDANCE_STATE_DELIVERED_BY_READ,
+                delivery_reason=mailbox_vocabulary.GUIDANCE_REASON_DELIVERED,
+                channel=mailbox_vocabulary.GUIDANCE_CHANNEL_READ,
                 run_id=run_id,
                 session_id=session_id,
                 turn_index=turn_index,
                 harness=harness,
                 state_dir=args.state_dir,
             )
-        except OSError, mailbox.MailboxError:
+        except OSError, mailbox_models.MailboxError:
             break
         receipts.append(_message_payload(record))
     return receipts
@@ -1075,17 +1084,17 @@ def _mailbox_reply_projection(
     mailbox and predates the mailbox's first question.
     """
     try:
-        view = mailbox.read_lease(
+        view = mailbox_leases.read_lease(
             context.snapshot.plan_dir,
             state_dir=args.state_dir,
         )
-    except OSError, mailbox.MailboxError:
+    except OSError, mailbox_models.MailboxError:
         return None
     lease = view.lease
     if (
         not view.fresh
         or lease is None
-        or lease.version != mailbox.MAILBOX_LEASE_VERSION
+        or lease.version != mailbox_constants.MAILBOX_LEASE_VERSION
         or not isinstance(lease.run_id, str)
         or not lease.run_id.strip()
         or isinstance(lease.projection_seq, bool)
@@ -1104,13 +1113,14 @@ def _mailbox_reply_projection(
             context.snapshot.plan_dir,
             state_dir=args.state_dir,
         )
-    except OSError, mailbox.MailboxError:
+    except OSError, mailbox_models.MailboxError:
         return None
     question = next(
         (
             message
             for message in snapshot.messages
-            if message.kind == mailbox.KIND_QUESTION and message.id == question_id
+            if message.kind == mailbox_vocabulary.KIND_QUESTION
+            and message.id == question_id
         ),
         None,
     )
@@ -1140,7 +1150,7 @@ def _kitty_window_id() -> int | None:
 def _notify_agent_mux_mailbox_reply(
     context: cli_common.PlanCommandContext,
     args: argparse.Namespace,
-    message: mailbox.MailboxMessage,
+    message: mailbox_models.MailboxMessage,
     projection: _MailboxReplyProjection | None,
 ) -> dict[str, Any] | None:
     """Best-effort fast clear after a reply authoritatively empties the outbox."""
@@ -1207,7 +1217,7 @@ def _notify_agent_mux_mailbox_reply(
 def _notify_agent_mux_mailbox_resolution(
     context: cli_common.PlanCommandContext,
     args: argparse.Namespace,
-    message: mailbox.MailboxMessage,
+    message: mailbox_models.MailboxMessage,
     projection: _MailboxReplyProjection | None,
     *,
     active_run_id: str,
@@ -1217,8 +1227,8 @@ def _notify_agent_mux_mailbox_resolution(
         projection is None
         or projection.run_id != active_run_id
         or message.to != projection.question_id
-        or message.kind != mailbox.KIND_RESOLUTION
-        or message.action not in mailbox.RESOLUTION_ACTIONS
+        or message.kind != mailbox_vocabulary.KIND_RESOLUTION
+        or message.action not in mailbox_vocabulary.RESOLUTION_ACTIONS
     ):
         return None
     try:
@@ -1307,17 +1317,17 @@ def _outbox_question_projection(
 
     projected_run_id: str | None = None
     try:
-        lease_view = mailbox.read_lease(
+        lease_view = mailbox_leases.read_lease(
             context.snapshot.plan_dir,
             state_dir=args.state_dir,
         )
-    except OSError, mailbox.MailboxError:
+    except OSError, mailbox_models.MailboxError:
         lease_view = None
     if (
         lease_view is not None
         and lease_view.fresh
         and lease_view.lease is not None
-        and lease_view.lease.version == mailbox.MAILBOX_LEASE_VERSION
+        and lease_view.lease.version == mailbox_constants.MAILBOX_LEASE_VERSION
         and isinstance(lease_view.lease.run_id, str)
         and lease_view.lease.run_id
     ):
@@ -1358,8 +1368,8 @@ def _outbox_question_projection(
         )
     # Observation and AgentMux delivery remain fail-open after the initial
     # lease establishment; the returned question is still authoritative.
-    with contextlib.suppress(OSError, mailbox.MailboxError):
-        mailbox.write_lease(
+    with contextlib.suppress(OSError, mailbox_models.MailboxError):
+        mailbox_leases.write_lease(
             context.snapshot.plan_dir,
             wait_result.supervisor_id,
             state_dir=args.state_dir,
@@ -1432,7 +1442,7 @@ def _notify_agent_mux_mailbox_question(
 
 def _record_notice_published_event(
     context: cli_common.PlanCommandContext,
-    message: mailbox.MailboxMessage,
+    message: mailbox_models.MailboxMessage,
 ) -> None:
     """Best-effort body-free tail evidence for a published worker notice."""
     events_path = context.status.get("events_path")
@@ -1499,7 +1509,7 @@ def _wait_for_guidance_delivery(
     state_dir: str | Path | None,
     timeout: float,
     active_turn: tuple[str, str, int] | None,
-) -> mailbox.MailboxMessage | None:
+) -> mailbox_models.MailboxMessage | None:
     """Return the delivery attempt that ends the wait, or None on timeout.
 
     A successful attempt always ends the wait. A deferred attempt ends it only
@@ -1514,13 +1524,13 @@ def _wait_for_guidance_delivery(
     the same attempt resolves or the timeout does.
     """
     deadline = time.monotonic() + timeout
-    mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+    mailbox_path = mailbox_cursors.mailbox_path_for_plan(plan_dir, state_dir)
     token: object = _MAILBOX_TOKEN_UNSEEN
     while True:
         current = mailbox.mailbox_change_token(mailbox_path)
         if (
             token is _MAILBOX_TOKEN_UNSEEN
-            or current is mailbox.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
+            or current is mailbox_constants.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
             or current != token
         ):
             view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
@@ -1530,7 +1540,7 @@ def _wait_for_guidance_delivery(
                 return delivered
             for deferred in reversed(view.deferred_guidance_deliveries(guidance_id)):
                 if deferred.delivery_reason == (
-                    mailbox.GUIDANCE_REASON_AWAITING_CONFIRMATION
+                    mailbox_vocabulary.GUIDANCE_REASON_AWAITING_CONFIRMATION
                 ):
                     continue
                 if (
@@ -1577,7 +1587,7 @@ def inbox_guidance_from_args(args: argparse.Namespace) -> int:
         args,
         command_name=COMMAND_INBOX_GUIDANCE,
         text_label="inbox guidance",
-        append=lambda plan_dir: mailbox.append_guidance(
+        append=lambda plan_dir: mailbox_appenders.append_guidance(
             plan_dir,
             text,
             state_dir=args.state_dir,
@@ -1588,7 +1598,7 @@ def inbox_guidance_from_args(args: argparse.Namespace) -> int:
         return 1
     context, message, supervisor_id = result
     mailbox_path = _mailbox_path(context, args)
-    delivery: mailbox.MailboxMessage | None = None
+    delivery: mailbox_models.MailboxMessage | None = None
     if wait_delivered:
         try:
             delivery = _wait_for_guidance_delivery(
@@ -1598,27 +1608,29 @@ def inbox_guidance_from_args(args: argparse.Namespace) -> int:
                 timeout=delivery_timeout,
                 active_turn=active_turn,
             )
-        except mailbox.MailboxError:
+        except mailbox_models.MailboxError:
             # The guidance append is authoritative. A later observation failure
             # must stay a truthful successful append with delivered=false.
             delivery = None
-    delivery_state: mailbox.GuidanceDeliveryState
+    delivery_state: mailbox_vocabulary.GuidanceDeliveryState
     if delivery is None:
         # Without a delivery record the guidance is queued by definition: it is
         # durable and nothing has reported acting on it.
-        delivery_state = mailbox.GUIDANCE_STATE_QUEUED
+        delivery_state = mailbox_vocabulary.GUIDANCE_STATE_QUEUED
     else:
         # Every record `_wait_for_guidance_delivery` can return is a delivery
         # attempt -- successful or deferred -- so it carries a state.
         assert delivery.delivery_state is not None
         delivery_state = delivery.delivery_state
-    delivered = delivery_state in mailbox.GUIDANCE_DELIVERED_STATES
+    delivered = delivery_state in mailbox_vocabulary.GUIDANCE_DELIVERED_STATES
     payload = responses.success_payload(
         COMMAND_INBOX_GUIDANCE,
         plan_dir=str(context.snapshot.plan_dir),
         mailbox_path=str(mailbox_path),
         lease_path=str(
-            mailbox.lease_path_for_plan(context.snapshot.plan_dir, args.state_dir)
+            mailbox_cursors.lease_path_for_plan(
+                context.snapshot.plan_dir, args.state_dir
+            )
         ),
         supervisor_id=supervisor_id,
         message=_message_payload(message),
@@ -1635,7 +1647,7 @@ def inbox_guidance_from_args(args: argparse.Namespace) -> int:
         # The state, not the append, leads the line. Without `--wait-delivered`
         # nothing was observed and the honest report is that the record is
         # durable; with it, this says which of the two actually happened.
-        summary = mailbox.describe_guidance_delivery(
+        summary = mailbox_vocabulary.describe_guidance_delivery(
             delivery_state,
             delivery_reason=None if delivery is None else delivery.delivery_reason,
             harness=None if delivery is None else delivery.harness,
@@ -1646,7 +1658,9 @@ def inbox_guidance_from_args(args: argparse.Namespace) -> int:
             f"state {delivery_state})"
         )
     else:
-        queued = mailbox.describe_guidance_delivery(mailbox.GUIDANCE_STATE_QUEUED)
+        queued = mailbox_vocabulary.describe_guidance_delivery(
+            mailbox_vocabulary.GUIDANCE_STATE_QUEUED
+        )
         print(
             f"Guidance {queued} (no delivery wait requested): {message.id} for "
             f"{context.snapshot.plan_dir} (seq {message.seq}, "
@@ -1659,7 +1673,9 @@ def _mailbox_path(
     context: cli_common.PlanCommandContext,
     args: argparse.Namespace,
 ) -> Path:
-    return mailbox.mailbox_path_for_plan(context.snapshot.plan_dir, args.state_dir)
+    return mailbox_cursors.mailbox_path_for_plan(
+        context.snapshot.plan_dir, args.state_dir
+    )
 
 
 def _consumption_wait_timeout(
@@ -1694,15 +1710,15 @@ def _wait_for_receipt(
     *,
     state_dir: str | Path | None,
     timeout: float,
-) -> mailbox.MailboxMessage | None:
+) -> mailbox_models.MailboxMessage | None:
     deadline = time.monotonic() + timeout
-    mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+    mailbox_path = mailbox_cursors.mailbox_path_for_plan(plan_dir, state_dir)
     token: object = _MAILBOX_TOKEN_UNSEEN
     while True:
         current = mailbox.mailbox_change_token(mailbox_path)
         if (
             token is _MAILBOX_TOKEN_UNSEEN
-            or current is mailbox.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
+            or current is mailbox_constants.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
             or current != token
         ):
             view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
@@ -1742,7 +1758,7 @@ def inbox_reply_from_args(args: argparse.Namespace) -> int:
         args,
         command_name=COMMAND_INBOX_REPLY,
         text_label="inbox reply",
-        append=lambda plan_dir: mailbox.append_reply(
+        append=lambda plan_dir: mailbox_appenders.append_reply(
             plan_dir,
             args.to,
             text,
@@ -1763,7 +1779,7 @@ def inbox_reply_from_args(args: argparse.Namespace) -> int:
                 state_dir=args.state_dir,
                 timeout=consumption_timeout,
             )
-        except mailbox.MailboxError:
+        except mailbox_models.MailboxError:
             # The closure append is authoritative. A later observation failure
             # must remain a truthful successful append with consumed=false.
             receipt = None
@@ -1773,7 +1789,9 @@ def inbox_reply_from_args(args: argparse.Namespace) -> int:
         plan_dir=str(context.snapshot.plan_dir),
         mailbox_path=str(_mailbox_path(context, args)),
         lease_path=str(
-            mailbox.lease_path_for_plan(context.snapshot.plan_dir, args.state_dir)
+            mailbox_cursors.lease_path_for_plan(
+                context.snapshot.plan_dir, args.state_dir
+            )
         ),
         supervisor_id=supervisor_id,
         message=_message_payload(message),
@@ -1794,12 +1812,12 @@ def inbox_reply_from_args(args: argparse.Namespace) -> int:
 def inbox_resolve_from_args(args: argparse.Namespace) -> int:
     """Atomically append the first answerless closure for a live question."""
     action = getattr(args, "action", None)
-    if action not in mailbox.RESOLUTION_ACTIONS:
+    if action not in mailbox_vocabulary.RESOLUTION_ACTIONS:
         _print_input_error(
             args,
             command_name=COMMAND_INBOX_RESOLVE,
             text_label="inbox resolve",
-            reason=mailbox.REJECT_INVALID_ACTION,
+            reason=mailbox_constants.REJECT_INVALID_ACTION,
             error="--action must be either continue or pause",
         )
         return 1
@@ -1836,7 +1854,7 @@ def inbox_resolve_from_args(args: argparse.Namespace) -> int:
             context.snapshot.plan_dir,
             args.state_dir,
         )
-        message = mailbox.append_resolution(
+        message = mailbox_appenders.append_resolution(
             context.snapshot.plan_dir,
             args.to,
             action,
@@ -1844,7 +1862,7 @@ def inbox_resolve_from_args(args: argparse.Namespace) -> int:
             note=note,
             state_dir=args.state_dir,
         )
-    except mailbox.MailboxError as error:
+    except mailbox_models.MailboxError as error:
         _print_mailbox_error(
             args,
             command_name=COMMAND_INBOX_RESOLVE,
@@ -1869,7 +1887,7 @@ def inbox_resolve_from_args(args: argparse.Namespace) -> int:
                 state_dir=args.state_dir,
                 timeout=consumption_timeout,
             )
-        except mailbox.MailboxError:
+        except mailbox_models.MailboxError:
             receipt = None
     consumed = receipt is not None
 
@@ -1878,7 +1896,7 @@ def inbox_resolve_from_args(args: argparse.Namespace) -> int:
         plan_dir=str(context.snapshot.plan_dir),
         mailbox_path=str(_mailbox_path(context, args)),
         lease_path=str(
-            mailbox.lease_path_for_plan(
+            mailbox_cursors.lease_path_for_plan(
                 context.snapshot.plan_dir,
                 args.state_dir,
             )
@@ -1915,7 +1933,7 @@ def inbox_read_from_args(args: argparse.Namespace) -> int:
             context.snapshot.plan_dir,
             state_dir=args.state_dir,
         )
-    except mailbox.MailboxError as error:
+    except mailbox_models.MailboxError as error:
         _print_mailbox_error(
             args,
             command_name=COMMAND_INBOX_READ,
@@ -1935,12 +1953,12 @@ def inbox_read_from_args(args: argparse.Namespace) -> int:
         # acknowledgement below fails and the guidance stays pending.
         read_receipts = _record_guidance_read_deliveries(context, args, guidance)
         try:
-            acknowledgement = mailbox.append_acknowledgement(
+            acknowledgement = mailbox_appenders.append_acknowledgement(
                 context.snapshot.plan_dir,
                 guidance[-1].seq,
                 state_dir=args.state_dir,
             )
-        except mailbox.MailboxError as error:
+        except mailbox_models.MailboxError as error:
             # The immutable read already succeeded. A full or unwritable
             # append-only mailbox must not discard the guidance it delivered.
             acknowledgement_error = {
@@ -2158,7 +2176,7 @@ def notify_from_args(args: argparse.Namespace) -> int:
         return 1
     run_id, session_id, turn_index = ownership
     try:
-        message = mailbox.append_notice(
+        message = mailbox_appenders.append_notice(
             context.snapshot.plan_dir,
             text,
             run_id=run_id,
@@ -2166,7 +2184,7 @@ def notify_from_args(args: argparse.Namespace) -> int:
             turn_index=turn_index,
             state_dir=args.state_dir,
         )
-    except mailbox.MailboxError as error:
+    except mailbox_models.MailboxError as error:
         _print_mailbox_error(
             args,
             command_name=COMMAND_NOTIFY,
@@ -2197,20 +2215,21 @@ def notify_from_args(args: argparse.Namespace) -> int:
 
 
 def _question_from_view(
-    view: mailbox.MailboxView,
+    view: mailbox_snapshot.MailboxView,
     question_id: str,
-) -> mailbox.MailboxMessage:
+) -> mailbox_models.MailboxMessage:
     question = next(
         (
             message
             for message in view.messages
-            if message.kind == mailbox.KIND_QUESTION and message.id == question_id
+            if message.kind == mailbox_vocabulary.KIND_QUESTION
+            and message.id == question_id
         ),
         None,
     )
     if question is None:
-        raise mailbox.MailboxError(
-            mailbox.REJECT_QUESTION_NOT_FOUND,
+        raise mailbox_models.MailboxError(
+            mailbox_constants.REJECT_QUESTION_NOT_FOUND,
             question_id,
             path=view.mailbox_path,
         )
@@ -2223,19 +2242,19 @@ def _wait_for_closure(
     *,
     state_dir: str | Path | None,
     timeout: float,
-    initial_view: mailbox.MailboxView | None = None,
+    initial_view: mailbox_snapshot.MailboxView | None = None,
     wait_id: str | None = None,
-) -> tuple[mailbox.MailboxMessage | None, bool]:
+) -> tuple[mailbox_models.MailboxMessage | None, bool]:
     deadline = time.monotonic() + timeout
-    mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+    mailbox_path = mailbox_cursors.mailbox_path_for_plan(plan_dir, state_dir)
     last_successful_view = initial_view
-    last_read_error: mailbox.MailboxError | None = None
+    last_read_error: mailbox_models.MailboxError | None = None
     last_read_token: object = _MAILBOX_TOKEN_UNSEEN
     while True:
         current_token = mailbox.mailbox_change_token(mailbox_path)
         if (
             last_read_token is _MAILBOX_TOKEN_UNSEEN
-            or current_token is mailbox.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
+            or current_token is mailbox_constants.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
             or current_token != last_read_token
         ):
             try:
@@ -2243,8 +2262,8 @@ def _wait_for_closure(
                     plan_dir,
                     state_dir=state_dir,
                 )
-            except mailbox.MailboxError as error:
-                if error.reason != mailbox.ERROR_MAILBOX_READ:
+            except mailbox_models.MailboxError as error:
+                if error.reason != mailbox_constants.ERROR_MAILBOX_READ:
                     raise
                 last_read_error = error
             else:
@@ -2258,14 +2277,17 @@ def _wait_for_closure(
                 if closure is not None:
                     if wait_id is not None:
                         try:
-                            completion = mailbox.consume_wait_closure(
+                            completion = mailbox_waits.consume_wait_closure(
                                 plan_dir,
                                 question_id,
                                 wait_id,
                                 state_dir=state_dir,
                             )
-                        except mailbox.MailboxError as error:
-                            if error.reason != mailbox.REJECT_QUESTION_NOT_WAITING:
+                        except mailbox_models.MailboxError as error:
+                            if (
+                                error.reason
+                                != mailbox_constants.REJECT_QUESTION_NOT_WAITING
+                            ):
                                 raise
                             completed_view = mailbox.read_mailbox(
                                 plan_dir, state_dir=state_dir
@@ -2277,14 +2299,17 @@ def _wait_for_closure(
                                 closure = completion.closure
                     elif view.receipt_for_closure(closure.id) is None:
                         try:
-                            mailbox.append_receipt(
+                            mailbox_appenders.append_receipt(
                                 plan_dir,
                                 question_id,
                                 closure.id,
                                 state_dir=state_dir,
                             )
-                        except mailbox.MailboxError as error:
-                            if error.reason != mailbox.REJECT_CLOSURE_ALREADY_CONSUMED:
+                        except mailbox_models.MailboxError as error:
+                            if (
+                                error.reason
+                                != mailbox_constants.REJECT_CLOSURE_ALREADY_CONSUMED
+                            ):
                                 raise
                     return closure, False
 
@@ -2293,11 +2318,11 @@ def _wait_for_closure(
             if last_successful_view is None and last_read_error is not None:
                 raise last_read_error
             if wait_id is not None:
-                completion = mailbox.finish_wait(
+                completion = mailbox_waits.finish_wait(
                     plan_dir,
                     question_id,
                     wait_id,
-                    reason=mailbox.WAIT_END_REASON_TIMEOUT,
+                    reason=mailbox_vocabulary.WAIT_END_REASON_TIMEOUT,
                     state_dir=state_dir,
                 )
                 if completion.closure is not None:
@@ -2312,8 +2337,8 @@ def _wait_for_reply(
     *,
     state_dir: str | Path | None,
     timeout: float,
-    initial_view: mailbox.MailboxView | None = None,
-) -> tuple[mailbox.MailboxMessage | None, bool]:
+    initial_view: mailbox_snapshot.MailboxView | None = None,
+) -> tuple[mailbox_models.MailboxMessage | None, bool]:
     """Compatibility wrapper for callers of the former reply-only wait."""
     return _wait_for_closure(
         plan_dir,
@@ -2345,7 +2370,7 @@ def ask_from_args(args: argparse.Namespace) -> int:
             args,
             command_name=COMMAND_ASK,
             text_label="ask",
-            reason=mailbox.REJECT_MISSING_TEXT,
+            reason=mailbox_constants.REJECT_MISSING_TEXT,
             error="question text must not be blank",
         )
         return 1
@@ -2380,8 +2405,8 @@ def ask_from_args(args: argparse.Namespace) -> int:
     if context is None:
         return 1
 
-    initial_view: mailbox.MailboxView | None = None
-    wait_start: mailbox.MailboxMessage | None = None
+    initial_view: mailbox_snapshot.MailboxView | None = None
+    wait_start: mailbox_models.MailboxMessage | None = None
     created = text is not None
     try:
         if text is not None:
@@ -2392,7 +2417,7 @@ def ask_from_args(args: argparse.Namespace) -> int:
                 waiter_origin,
             ) = _status_question_ownership(context)
             if args.wait:
-                question, wait_start = mailbox.append_wait_question(
+                question, wait_start = mailbox_waits.append_wait_question(
                     context.snapshot.plan_dir,
                     text,
                     state_dir=args.state_dir,
@@ -2402,7 +2427,7 @@ def ask_from_args(args: argparse.Namespace) -> int:
                     waiter_origin=waiter_origin,
                 )
             else:
-                question = mailbox.append_question(
+                question = mailbox_appenders.append_question(
                     context.snapshot.plan_dir,
                     text,
                     state_dir=args.state_dir,
@@ -2410,7 +2435,7 @@ def ask_from_args(args: argparse.Namespace) -> int:
                     session_id=session_id,
                     turn_index=turn_index,
                     waiter_origin=waiter_origin,
-                    delivery_mode=mailbox.DELIVERY_MODE_ASYNC,
+                    delivery_mode=mailbox_vocabulary.DELIVERY_MODE_ASYNC,
                 )
         else:
             # Exactly one of text and question id is set; this is the other arm.
@@ -2424,7 +2449,7 @@ def ask_from_args(args: argparse.Namespace) -> int:
             if args.wait:
                 wait_start = initial_view.active_wait_for(question.id)
                 if wait_start is None and initial_view.closure_for(question.id) is None:
-                    wait_start = mailbox.append_wait_start(
+                    wait_start = mailbox_waits.append_wait_start(
                         context.snapshot.plan_dir,
                         question.id,
                         state_dir=args.state_dir,
@@ -2440,14 +2465,14 @@ def ask_from_args(args: argparse.Namespace) -> int:
             and initial_view.receipt_for_closure(closure.id) is None
         ):
             if wait_start is not None:
-                mailbox.consume_wait_closure(
+                mailbox_waits.consume_wait_closure(
                     context.snapshot.plan_dir,
                     question.id,
                     wait_start.id,
                     state_dir=args.state_dir,
                 )
             else:
-                mailbox.append_receipt(
+                mailbox_appenders.append_receipt(
                     context.snapshot.plan_dir,
                     question.id,
                     closure.id,
@@ -2463,7 +2488,7 @@ def ask_from_args(args: argparse.Namespace) -> int:
                 initial_view=initial_view,
                 wait_id=None if wait_start is None else wait_start.id,
             )
-    except mailbox.MailboxError as error:
+    except mailbox_models.MailboxError as error:
         _print_mailbox_error(
             args,
             command_name=COMMAND_ASK,
@@ -2473,15 +2498,18 @@ def ask_from_args(args: argparse.Namespace) -> int:
         return 1
 
     reply = (
-        closure if closure is not None and closure.kind == mailbox.KIND_REPLY else None
+        closure
+        if closure is not None and closure.kind == mailbox_vocabulary.KIND_REPLY
+        else None
     )
     resolution = (
         closure
-        if closure is not None and closure.kind == mailbox.KIND_RESOLUTION
+        if closure is not None and closure.kind == mailbox_vocabulary.KIND_RESOLUTION
         else None
     )
     pause_required = bool(
-        resolution is not None and resolution.action == mailbox.RESOLUTION_ACTION_PAUSE
+        resolution is not None
+        and resolution.action == mailbox_vocabulary.RESOLUTION_ACTION_PAUSE
     )
     receipt = None
     if closure is not None:
@@ -2563,24 +2591,24 @@ def _wait_for_questions(
     # the mailbox poll. It starts due, because a short wait that never reaches
     # the first renewal must still be able to report a helper that is gone.
     next_probe_at = started
-    mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
-    last_successful_view: mailbox.MailboxView | None = None
-    last_read_error: mailbox.MailboxError | None = None
+    mailbox_path = mailbox_cursors.mailbox_path_for_plan(plan_dir, state_dir)
+    last_successful_view: mailbox_snapshot.MailboxView | None = None
+    last_read_error: mailbox_models.MailboxError | None = None
     last_read_token: object = _MAILBOX_TOKEN_UNSEEN
     lease_degraded = False
     lease_renewal_failures = 0
     lease_renewal_recoveries = 0
     kinds = {
-        OUTBOX_INCLUDE_QUESTIONS: (mailbox.KIND_QUESTION,),
-        OUTBOX_INCLUDE_NOTICES: (mailbox.KIND_NOTICE,),
+        OUTBOX_INCLUDE_QUESTIONS: (mailbox_vocabulary.KIND_QUESTION,),
+        OUTBOX_INCLUDE_NOTICES: (mailbox_vocabulary.KIND_NOTICE,),
         OUTBOX_INCLUDE_ALL: (
-            mailbox.KIND_QUESTION,
-            mailbox.KIND_NOTICE,
-            mailbox.KIND_SUPERVISION_END,
+            mailbox_vocabulary.KIND_QUESTION,
+            mailbox_vocabulary.KIND_NOTICE,
+            mailbox_vocabulary.KIND_SUPERVISION_END,
         ),
         OUTBOX_INCLUDE_SUPERVISION: (
-            mailbox.KIND_QUESTION,
-            mailbox.KIND_SUPERVISION_END,
+            mailbox_vocabulary.KIND_QUESTION,
+            mailbox_vocabulary.KIND_SUPERVISION_END,
         ),
     }[include]
 
@@ -2596,7 +2624,7 @@ def _wait_for_questions(
         current_token = mailbox.mailbox_change_token(mailbox_path)
         if (
             last_read_token is _MAILBOX_TOKEN_UNSEEN
-            or current_token is mailbox.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
+            or current_token is mailbox_constants.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
             or current_token != last_read_token
         ):
             try:
@@ -2604,8 +2632,8 @@ def _wait_for_questions(
                     plan_dir,
                     state_dir=state_dir,
                 )
-            except mailbox.MailboxError as error:
-                if error.reason != mailbox.ERROR_MAILBOX_READ:
+            except mailbox_models.MailboxError as error:
+                if error.reason != mailbox_constants.ERROR_MAILBOX_READ:
                     raise
                 last_read_error = error
             else:
@@ -2618,17 +2646,17 @@ def _wait_for_questions(
                         questions=tuple(
                             message
                             for message in selected
-                            if message.kind == mailbox.KIND_QUESTION
+                            if message.kind == mailbox_vocabulary.KIND_QUESTION
                         ),
                         notices=tuple(
                             message
                             for message in selected
-                            if message.kind == mailbox.KIND_NOTICE
+                            if message.kind == mailbox_vocabulary.KIND_NOTICE
                         ),
                         supervision_ends=tuple(
                             message
                             for message in selected
-                            if message.kind == mailbox.KIND_SUPERVISION_END
+                            if message.kind == mailbox_vocabulary.KIND_SUPERVISION_END
                         ),
                         include=include,
                         supervisor_id=landed_supervisor_id,
@@ -2701,7 +2729,7 @@ def _wait_for_questions(
                     state_dir,
                     supervisor_id,
                 )
-            except OSError, mailbox.MailboxError:
+            except OSError, mailbox_models.MailboxError:
                 lease_degraded = True
                 lease_renewal_failures += 1
             else:
@@ -2768,7 +2796,7 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
             supervisor_id=supervisor_id,
             include=include,
         )
-    except mailbox.MailboxError as error:
+    except mailbox_models.MailboxError as error:
         _print_mailbox_error(
             args,
             command_name=COMMAND_OUTBOX_WAIT,
@@ -2796,7 +2824,9 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
         plan_dir=str(context.snapshot.plan_dir),
         mailbox_path=str(_mailbox_path(context, args)),
         lease_path=str(
-            mailbox.lease_path_for_plan(context.snapshot.plan_dir, args.state_dir)
+            mailbox_cursors.lease_path_for_plan(
+                context.snapshot.plan_dir, args.state_dir
+            )
         ),
         supervisor_id=wait_result.supervisor_id,
         since=since,
@@ -2862,7 +2892,7 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
 
 def _open_questions_in(
     wait_result: _OutboxWaitResult,
-) -> tuple[mailbox.MailboxMessage, ...]:
+) -> tuple[mailbox_models.MailboxMessage, ...]:
     """Return the woken questions no closure has already answered."""
     view = wait_result.mailbox_view
     if view is None:
@@ -2915,13 +2945,13 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
         return 1
 
     plan_dir = context.snapshot.plan_dir
-    mailbox.prune_supervision_cursors(plan_dir, state_dir=args.state_dir)
-    since = mailbox.read_supervision_cursor(
+    mailbox_cursors.prune_supervision_cursors(plan_dir, state_dir=args.state_dir)
+    since = mailbox_cursors.read_supervision_cursor(
         plan_dir,
         supervision_id,
         state_dir=args.state_dir,
     )
-    first_seen_at = mailbox.read_supervision_first_seen_at(
+    first_seen_at = mailbox_cursors.read_supervision_first_seen_at(
         plan_dir,
         supervision_id,
         state_dir=args.state_dir,
@@ -2931,7 +2961,7 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
         # a poll that dies mid-wait would otherwise restart the window and let
         # a mis-launch stay invisible for as long as polling continues.
         first_seen_at = datetime.now(UTC)
-        mailbox.write_supervision_cursor(
+        mailbox_cursors.write_supervision_cursor(
             plan_dir,
             supervision_id,
             since,
@@ -2961,7 +2991,7 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
                 include=OUTBOX_INCLUDE_SUPERVISION,
                 liveness_probe=liveness_probe,
             )
-        except mailbox.MailboxError as error:
+        except mailbox_models.MailboxError as error:
             _print_mailbox_error(
                 args,
                 command_name=COMMAND_OUTBOX_SUPERVISE,
@@ -2973,7 +3003,7 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
         renewal_recoveries += wait_result.lease_supervision.renewal_recoveries
         lease_degraded = wait_result.lease_supervision.degraded
         cursor = wait_result.next_since
-        mailbox.write_supervision_cursor(
+        mailbox_cursors.write_supervision_cursor(
             plan_dir,
             supervision_id,
             cursor,
@@ -3028,9 +3058,9 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
         COMMAND_OUTBOX_SUPERVISE,
         plan_dir=str(plan_dir),
         mailbox_path=str(_mailbox_path(context, args)),
-        lease_path=str(mailbox.lease_path_for_plan(plan_dir, args.state_dir)),
+        lease_path=str(mailbox_cursors.lease_path_for_plan(plan_dir, args.state_dir)),
         cursor_path=str(
-            mailbox.supervision_cursor_path_for_plan(
+            mailbox_cursors.supervision_cursor_path_for_plan(
                 plan_dir,
                 supervision_id,
                 args.state_dir,

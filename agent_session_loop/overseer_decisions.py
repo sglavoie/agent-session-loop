@@ -176,7 +176,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from . import clock, mailbox, overseer_history, overseer_policy_client
+from . import (
+    clock,
+    mailbox_constants,
+    mailbox_models,
+    mailbox_vocabulary,
+    overseer_history,
+    overseer_policy_client,
+)
 
 __all__ = [
     "AUDIT_PROMPT_MARKER",
@@ -503,19 +510,19 @@ GENERATED_PROMPT_MARKERS: tuple[str, ...] = (
 #: are relayed rather than attributed because ``MailboxMessage`` has no author
 #: field: an operator typing into ``asl inbox guidance`` and a supervising agent
 #: relaying them write the same record. A test pins this table to
-#: ``mailbox.MESSAGE_KINDS`` so a new kind cannot arrive unclassified.
+#: ``mailbox_vocabulary.MESSAGE_KINDS`` so a new kind cannot arrive unclassified.
 SUPERVISION_VOICES: dict[str, Voice] = {
-    mailbox.KIND_GUIDANCE: "relayed_instruction",
-    mailbox.KIND_REPLY: "relayed_instruction",
-    mailbox.KIND_RESOLUTION: "relayed_instruction",
-    mailbox.KIND_QUESTION: "worker_request",
-    mailbox.KIND_NOTICE: "worker_request",
-    mailbox.KIND_ACK: "machine_record",
-    mailbox.KIND_WAIT_START: "machine_record",
-    mailbox.KIND_WAIT_END: "machine_record",
-    mailbox.KIND_RECEIPT: "machine_record",
-    mailbox.KIND_SUPERVISION_END: "machine_record",
-    mailbox.KIND_GUIDANCE_DELIVERY: "machine_record",
+    mailbox_vocabulary.KIND_GUIDANCE: "relayed_instruction",
+    mailbox_vocabulary.KIND_REPLY: "relayed_instruction",
+    mailbox_vocabulary.KIND_RESOLUTION: "relayed_instruction",
+    mailbox_vocabulary.KIND_QUESTION: "worker_request",
+    mailbox_vocabulary.KIND_NOTICE: "worker_request",
+    mailbox_vocabulary.KIND_ACK: "machine_record",
+    mailbox_vocabulary.KIND_WAIT_START: "machine_record",
+    mailbox_vocabulary.KIND_WAIT_END: "machine_record",
+    mailbox_vocabulary.KIND_RECEIPT: "machine_record",
+    mailbox_vocabulary.KIND_SUPERVISION_END: "machine_record",
+    mailbox_vocabulary.KIND_GUIDANCE_DELIVERY: "machine_record",
 }
 
 
@@ -930,7 +937,7 @@ def statements_from_history(
 
 
 def statements_from_supervision(
-    messages: Iterable[mailbox.MailboxMessage],
+    messages: Iterable[mailbox_models.MailboxMessage],
     *,
     grant: overseer_policy_client.Grant | None,
     scope: Scope,
@@ -968,7 +975,7 @@ def statements_from_supervision(
                 statement_id=f"{STATE_SPACE}:{message.seq}:{message.id}",
                 voice=voice,
                 space=STATE_SPACE,
-                locator=f"{mailbox.MAILBOX_FILE_NAME}#{message.seq}",
+                locator=f"{mailbox_constants.MAILBOX_FILE_NAME}#{message.seq}",
                 scope=scope,
                 at=message.created_at,
                 text=text,

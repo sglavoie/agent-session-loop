@@ -14,6 +14,8 @@ from asl_autopilot_test_support import (  # noqa: F401
     tearDownModule,
 )
 
+from agent_session_loop import mailbox_constants, mailbox_vocabulary
+
 
 class MailboxWatcherLeaseTest(MailboxWatcherBase):
     def test_watcher_emits_bounded_wait_end_and_receipt_progress(self) -> None:
@@ -21,17 +23,17 @@ class MailboxWatcherLeaseTest(MailboxWatcherBase):
         wait_end = autopilot._mailbox.MailboxMessage(
             seq=2,
             id="00000000-0000-0000-0000-000000000021",
-            kind=autopilot._mailbox.KIND_WAIT_END,
+            kind=mailbox_vocabulary.KIND_WAIT_END,
             created_at="2026-07-24T19:00:01+00:00",
             to=question.id,
             wait_id="00000000-0000-0000-0000-000000000020",
-            wait_end_reason=autopilot._mailbox.WAIT_END_REASON_CLOSURE,
+            wait_end_reason=mailbox_vocabulary.WAIT_END_REASON_CLOSURE,
             closure_id="00000000-0000-0000-0000-000000000022",
         )
         receipt = autopilot._mailbox.MailboxMessage(
             seq=3,
             id="00000000-0000-0000-0000-000000000023",
-            kind=autopilot._mailbox.KIND_RECEIPT,
+            kind=mailbox_vocabulary.KIND_RECEIPT,
             created_at="2026-07-24T19:00:01+00:00",
             to=question.id,
             wait_id=wait_end.wait_id,
@@ -64,7 +66,7 @@ class MailboxWatcherLeaseTest(MailboxWatcherBase):
         guidance = autopilot._mailbox.MailboxMessage(
             seq=3,
             id="00000000-0000-0000-0000-000000000012",
-            kind=autopilot._mailbox.KIND_GUIDANCE,
+            kind=mailbox_vocabulary.KIND_GUIDANCE,
             created_at="2026-07-24T19:00:01+00:00",
             text="guidance advances the physical cursor",
         )
@@ -272,7 +274,7 @@ class MailboxWatcherLeaseTest(MailboxWatcherBase):
             writes.append((plan_dir, supervisor_id, state_dir, projection))
             if len(writes) == 1:
                 raise autopilot._mailbox.MailboxError(
-                    autopilot._mailbox.ERROR_LEASE_WRITE,
+                    mailbox_constants.ERROR_LEASE_WRITE,
                     "transient establishment failure",
                 )
 

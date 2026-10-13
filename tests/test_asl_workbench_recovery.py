@@ -13,7 +13,7 @@ from unittest import mock
 from agent_session_loop import (
     events,
     intervention,
-    preflight,
+    preflight_runtime_hints,
     redirect_cli,
     review_continuation,
     review_repair,
@@ -1520,7 +1520,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                         },
                         plan_name=f"hint-{failure_reason}",
                     )
-                    hint = preflight.runtime_repair_hint(
+                    hint = preflight_runtime_hints.runtime_repair_hint(
                         "verify-failed", failure_reason=failure_reason
                     )
                     self.assertIsNotNone(hint)

@@ -11,7 +11,8 @@ from typing import Any
 
 from agent_session_loop import (
     events,
-    mailbox,
+    mailbox_constants,
+    mailbox_vocabulary,
     supervisor_audit_evidence,
 )
 from tests import support_supervisor_audit_evidence as evidence_support
@@ -28,7 +29,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
     GUIDANCE_TEXT = "Prefer the narrower fixture; do not touch the shared one."
 
     def _append_mailbox_record(self, state_dir: Path, record: dict[str, Any]) -> None:
-        with (state_dir / mailbox.MAILBOX_FILE_NAME).open(
+        with (state_dir / mailbox_constants.MAILBOX_FILE_NAME).open(
             "a", encoding="utf-8"
         ) as handle:
             handle.write(json.dumps(record) + "\n")
@@ -58,8 +59,8 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             {
                 "created_at": "2026-08-10T10:11:11Z",
                 "id": self.GUIDANCE_ID,
-                "kind": mailbox.KIND_GUIDANCE,
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "kind": mailbox_vocabulary.KIND_GUIDANCE,
+                "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
                 "text": self.GUIDANCE_TEXT,
             },
         )
@@ -119,8 +120,8 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             state_dir,
             {
                 "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-                "kind": mailbox.KIND_GUIDANCE_DELIVERY,
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "kind": mailbox_vocabulary.KIND_GUIDANCE_DELIVERY,
+                "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
                 "run_id": run_id,
                 "to": target or self.GUIDANCE_ID,
                 "delivery_state": delivery_state,
@@ -141,7 +142,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             guidance = next(
                 record
                 for record in section["records"]
-                if record["kind"] == mailbox.KIND_GUIDANCE
+                if record["kind"] == mailbox_vocabulary.KIND_GUIDANCE
             )
             text = bundle.to_bytes().decode("utf-8")
 
@@ -151,7 +152,9 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
                 guidance["ownership"],
             )
             self.assertEqual(1, section["summary"]["delivered_count"])
-            self.assertEqual(1, section["summary"]["counts"][mailbox.KIND_GUIDANCE])
+            self.assertEqual(
+                1, section["summary"]["counts"][mailbox_vocabulary.KIND_GUIDANCE]
+            )
             self.assertNotIn(self.GUIDANCE_TEXT, text)
             self.assertIn(
                 hashlib.sha256(self.GUIDANCE_TEXT.encode("utf-8")).hexdigest()[:16],
@@ -169,12 +172,12 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
 
             self.assertEqual(3, summary["unscoped_count"])
             self.assertEqual(0, summary["delivered_count"])
-            self.assertNotIn(mailbox.KIND_GUIDANCE, summary["counts"])
+            self.assertNotIn(mailbox_vocabulary.KIND_GUIDANCE, summary["counts"])
 
     def test_explicit_read_receipts_pull_in_earlier_guidance_without_an_event(
         self,
     ) -> None:
-        for delivery_state in mailbox.GUIDANCE_DELIVERED_STATES:
+        for delivery_state in mailbox_vocabulary.GUIDANCE_DELIVERED_STATES:
             with (
                 self.subTest(delivery_state=delivery_state),
                 tempfile.TemporaryDirectory() as tmp,
@@ -187,7 +190,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
                 guidance = next(
                     row
                     for row in section["records"]
-                    if row["kind"] == mailbox.KIND_GUIDANCE
+                    if row["kind"] == mailbox_vocabulary.KIND_GUIDANCE
                 )
                 self.assertEqual(self.GUIDANCE_ID, guidance["id"])
                 self.assertEqual(
@@ -200,7 +203,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
                 receipt = next(
                     row
                     for row in section["records"]
-                    if row["kind"] == mailbox.KIND_GUIDANCE_DELIVERY
+                    if row["kind"] == mailbox_vocabulary.KIND_GUIDANCE_DELIVERY
                 )
                 self.assertLess(guidance["sequence"], receipt["sequence"])
 
@@ -210,9 +213,11 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             self._write_guidance(history[2], observed=False)
             self._write_guidance_delivery(history[2], run_id=self.FOREIGN_RUN_ID)
             section = self._collect(*history).payload["mailbox"]
-            self.assertNotIn(mailbox.KIND_GUIDANCE, section["summary"]["counts"])
             self.assertNotIn(
-                mailbox.KIND_GUIDANCE_DELIVERY, section["summary"]["counts"]
+                mailbox_vocabulary.KIND_GUIDANCE, section["summary"]["counts"]
+            )
+            self.assertNotIn(
+                mailbox_vocabulary.KIND_GUIDANCE_DELIVERY, section["summary"]["counts"]
             )
 
     def test_a_missing_delivery_target_is_an_explicit_omission(self) -> None:
@@ -242,7 +247,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             guidance = next(
                 row
                 for row in section["records"]
-                if row["kind"] == mailbox.KIND_GUIDANCE
+                if row["kind"] == mailbox_vocabulary.KIND_GUIDANCE
             )
             self.assertEqual("delivery-referenced", guidance["ownership"])
             self.assertEqual(0, section["summary"]["delivered_count"])
@@ -286,10 +291,10 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
                 {
                     "created_at": "2026-08-10T10:11:20Z",
                     "id": self.SECOND_QUESTION_ID,
-                    "kind": mailbox.KIND_QUESTION,
-                    "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                    "kind": mailbox_vocabulary.KIND_QUESTION,
+                    "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
                     "text": "And what about the second one?",
-                    "delivery_mode": mailbox.DELIVERY_MODE_ASYNC,
+                    "delivery_mode": mailbox_vocabulary.DELIVERY_MODE_ASYNC,
                     "run_id": RUN_ID,
                     "session_id": "01",
                     "turn_index": 1,

@@ -29,7 +29,22 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
-from . import control_queue, control_signal, events, mailbox, plans, qna, state
+from . import (
+    control_queue,
+    control_signal,
+    events,
+    mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_cursors,
+    mailbox_leases,
+    mailbox_models,
+    mailbox_snapshot,
+    mailbox_vocabulary,
+    plans,
+    qna,
+    state,
+)
 
 ACTION_REPLY = "question.reply"
 ACTION_RESOLVE = "question.resolve"
@@ -314,7 +329,7 @@ def unanswered_question_ids(
         unanswered = mailbox.unanswered_questions_for_run(
             plan_dir, run_id, state_dir=state_dir
         )
-    except OSError, ValueError, mailbox.MailboxError:
+    except OSError, ValueError, mailbox_models.MailboxError:
         return ()
     return tuple(
         message.id
@@ -337,8 +352,8 @@ def inspect_run(
     state_path = state.plan_state_dir(canonical, state_dir) / events.STATE_FILE_NAME
     runner_state = state._runner_state_payload(state_path, lock_info=lock_info)
     run_id = runner_state.get("run_id")
-    mailbox_view: mailbox.MailboxView | None = None
-    unanswered: tuple[mailbox.MailboxMessage, ...] = ()
+    mailbox_view: mailbox_snapshot.MailboxView | None = None
+    unanswered: tuple[mailbox_models.MailboxMessage, ...] = ()
     try:
         mailbox_view = mailbox.read_mailbox(canonical, state_dir=state_dir)
         unanswered = tuple(
@@ -346,7 +361,7 @@ def inspect_run(
             for message in mailbox_view.unanswered_questions
             if isinstance(run_id, str) and run_id and message.run_id == run_id
         )
-    except OSError, ValueError, mailbox.MailboxError:
+    except OSError, ValueError, mailbox_models.MailboxError:
         unanswered = ()
     active_wait_question_id: str | None = None
     active_turn = runner_state.get("active_turn")
@@ -523,7 +538,7 @@ def write_supervisor_lease(
     plan_dir: str | Path,
     state_dir: str | Path | None,
     supervisor_id: str | None = None,
-) -> mailbox.MailboxLease:
+) -> mailbox_models.MailboxLease:
     """Heartbeat a live supervisor's lease, or take over when none is alive.
 
     A fresh, current-version lease that carries a ``run_id`` proves a live
@@ -535,20 +550,20 @@ def write_supervisor_lease(
     A lease read failure degrades to the takeover path (fail-open, as the
     blind write always was).
     """
-    lease: mailbox.MailboxLease | None
+    lease: mailbox_models.MailboxLease | None
     try:
-        view = mailbox.read_lease(plan_dir, state_dir=state_dir)
-    except OSError, mailbox.MailboxError:
+        view = mailbox_leases.read_lease(plan_dir, state_dir=state_dir)
+    except OSError, mailbox_models.MailboxError:
         lease = None
     else:
         lease = view.lease if view.fresh else None
     if (
         lease is not None
-        and lease.version == mailbox.MAILBOX_LEASE_VERSION
+        and lease.version == mailbox_constants.MAILBOX_LEASE_VERSION
         and isinstance(lease.run_id, str)
         and lease.run_id.strip()
     ):
-        return mailbox.write_lease(
+        return mailbox_leases.write_lease(
             plan_dir,
             lease.supervisor_id,
             state_dir=state_dir,
@@ -560,7 +575,7 @@ def write_supervisor_lease(
                 lease.latest_unanswered_question_created_at
             ),
         )
-    return mailbox.write_lease(
+    return mailbox_leases.write_lease(
         plan_dir,
         str(uuid.uuid4()) if supervisor_id is None else supervisor_id,
         state_dir=state_dir,
@@ -571,7 +586,7 @@ def write_supervisor_lease(
 class ClosureOutcome:
     """One durable mailbox closure, described without its text."""
 
-    message: mailbox.MailboxMessage
+    message: mailbox_models.MailboxMessage
     supervisor_id: str
     mailbox_path: Path
     lease_path: Path
@@ -593,8 +608,8 @@ def _closure(
     return ClosureOutcome(
         message=message,
         supervisor_id=lease.supervisor_id,
-        mailbox_path=mailbox.mailbox_path_for_plan(plan_dir, state_dir),
-        lease_path=mailbox.lease_path_for_plan(plan_dir, state_dir),
+        mailbox_path=mailbox_cursors.mailbox_path_for_plan(plan_dir, state_dir),
+        lease_path=mailbox_cursors.lease_path_for_plan(plan_dir, state_dir),
     )
 
 
@@ -614,7 +629,9 @@ def append_question_reply(
     return _closure(
         canonical,
         state_dir,
-        lambda: mailbox.append_reply(canonical, question_id, text, state_dir=state_dir),
+        lambda: mailbox_appenders.append_reply(
+            canonical, question_id, text, state_dir=state_dir
+        ),
     )
 
 
@@ -629,16 +646,16 @@ def append_question_resolution(
 ) -> ClosureOutcome:
     """Append the first answerless closure for a live question."""
     canonical = _canonical_plan_dir(plan_dir)
-    if action not in mailbox.RESOLUTION_ACTIONS:
+    if action not in mailbox_vocabulary.RESOLUTION_ACTIONS:
         raise InterventionError(
-            mailbox.REJECT_INVALID_ACTION,
+            mailbox_constants.REJECT_INVALID_ACTION,
             "resolution action must be either continue or pause",
             details={"action": repr(action)},
         )
     return _closure(
         canonical,
         state_dir,
-        lambda: mailbox.append_resolution(
+        lambda: mailbox_appenders.append_resolution(
             canonical,
             question_id,
             action,
@@ -654,11 +671,11 @@ def closure_receipt(
     closure_id: str,
     *,
     state_dir: str | Path | None = None,
-) -> mailbox.MailboxMessage | None:
+) -> mailbox_models.MailboxMessage | None:
     """Return the consumer's receipt for one closure, if it has landed."""
     try:
         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
-    except OSError, ValueError, mailbox.MailboxError:
+    except OSError, ValueError, mailbox_models.MailboxError:
         return None
     return view.receipt_for_closure(closure_id)
 
@@ -684,7 +701,7 @@ def question_body(
             unanswered = mailbox.unanswered_questions_for_run(
                 canonical, facts.run_id, state_dir=state_dir
             )
-        except (OSError, ValueError, mailbox.MailboxError) as error:
+        except (OSError, ValueError, mailbox_models.MailboxError) as error:
             raise InterventionError(
                 REASON_MISSING_QUESTION_BODY,
                 f"cannot read the mailbox for {canonical}: {error}",

@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from . import mailbox
+from . import mailbox_models, mailbox_vocabulary
 
 MAILBOX_MESSAGE_BEGIN = "BEGIN ASL MAILBOX MESSAGE JSONL"
 MAILBOX_MESSAGE_END = "END ASL MAILBOX MESSAGE JSONL"
@@ -16,13 +16,13 @@ MAX_RENDERED_GUIDANCE_BYTES = 64 * 1024
 MAX_RENDERED_NOTICES = 20
 MAX_RENDERED_NOTICE_BYTES = 64 * 1024
 
-RenderedMessage = tuple[mailbox.MailboxMessage, str]
+RenderedMessage = tuple[mailbox_models.MailboxMessage, str]
 GuidanceSectionBuilder = Callable[
     [
         Sequence[RenderedMessage],
-        Sequence[mailbox.MailboxMessage],
-        Sequence[mailbox.MailboxMessage],
-        Sequence[mailbox.MailboxMessage],
+        Sequence[mailbox_models.MailboxMessage],
+        Sequence[mailbox_models.MailboxMessage],
+        Sequence[mailbox_models.MailboxMessage],
     ],
     list[str],
 ]
@@ -34,12 +34,12 @@ class BoundedGuidance:
 
     lines: tuple[str, ...]
     records: tuple[RenderedMessage, ...]
-    record_cap_omitted: tuple[mailbox.MailboxMessage, ...]
-    individually_oversized: tuple[mailbox.MailboxMessage, ...]
-    aggregate_budget_omitted: tuple[mailbox.MailboxMessage, ...]
+    record_cap_omitted: tuple[mailbox_models.MailboxMessage, ...]
+    individually_oversized: tuple[mailbox_models.MailboxMessage, ...]
+    aggregate_budget_omitted: tuple[mailbox_models.MailboxMessage, ...]
 
     @property
-    def omitted(self) -> tuple[mailbox.MailboxMessage, ...]:
+    def omitted(self) -> tuple[mailbox_models.MailboxMessage, ...]:
         return (
             self.record_cap_omitted
             + self.individually_oversized
@@ -52,17 +52,17 @@ def ascii_json(payload: Mapping[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=True, sort_keys=True)
 
 
-def message_json(message: mailbox.MailboxMessage) -> str:
+def message_json(message: mailbox_models.MailboxMessage) -> str:
     """Render one message's public identity and untrusted body fields."""
     payload: dict[str, Any] = {
         "id": message.id,
         "seq": message.seq,
     }
-    if message.kind == mailbox.KIND_RESOLUTION:
+    if message.kind == mailbox_vocabulary.KIND_RESOLUTION:
         payload["action"] = message.action
         if message.note is not None:
             payload["note"] = message.note
-    elif message.kind == mailbox.KIND_SUPERVISION_END:
+    elif message.kind == mailbox_vocabulary.KIND_SUPERVISION_END:
         payload["text"] = message.text or ""
         payload["outcome"] = message.supervision_outcome
         if message.supervision_id is not None:
@@ -73,7 +73,7 @@ def message_json(message: mailbox.MailboxMessage) -> str:
 
 
 def render_bounded_messages(
-    messages: Sequence[mailbox.MailboxMessage],
+    messages: Sequence[mailbox_models.MailboxMessage],
     build_section: GuidanceSectionBuilder,
     *,
     max_rendered: int,
@@ -93,7 +93,7 @@ def render_bounded_messages(
         (message, message_json(message)) for message in candidates
     )
 
-    individually_oversized: list[mailbox.MailboxMessage] = []
+    individually_oversized: list[mailbox_models.MailboxMessage] = []
     fitting_records: list[RenderedMessage] = []
     for record in rendered_candidates:
         single_record_lines = build_section(
@@ -107,7 +107,7 @@ def render_bounded_messages(
         else:
             fitting_records.append(record)
 
-    aggregate_budget_omitted: list[mailbox.MailboxMessage] = []
+    aggregate_budget_omitted: list[mailbox_models.MailboxMessage] = []
     rendered_lines = build_section(
         fitting_records,
         record_cap_omitted,
@@ -138,7 +138,7 @@ def render_bounded_messages(
 
 
 def render_bounded_guidance(
-    pending_guidance: Sequence[mailbox.MailboxMessage],
+    pending_guidance: Sequence[mailbox_models.MailboxMessage],
     build_section: GuidanceSectionBuilder,
 ) -> BoundedGuidance:
     """Render newest guidance under the shared prompt/CLI safety bounds."""

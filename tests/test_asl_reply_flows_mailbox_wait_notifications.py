@@ -20,6 +20,9 @@ from agent_session_loop import (
     events,
     harnesses,
     mailbox,
+    mailbox_appenders,
+    mailbox_leases,
+    mailbox_vocabulary,
     run_coordination,
     run_persistence,
     state,
@@ -47,12 +50,12 @@ class MailboxWaitLifecycleTests(rfs.ReplyResumeFlowCase):
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
-            mailbox.append_guidance(
+            mailbox_appenders.append_guidance(
                 plan_dir,
                 "Keep working after the answer.",
                 state_dir=state_dir,
             )
-            mailbox.write_lease(
+            mailbox_leases.write_lease(
                 plan_dir,
                 "00000000-0000-0000-0000-000000000001",
                 state_dir=state_dir,
@@ -101,7 +104,7 @@ class MailboxWaitLifecycleTests(rfs.ReplyResumeFlowCase):
                     while time.monotonic() < deadline:
                         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
                         if view.unanswered_questions:
-                            mailbox.append_reply(
+                            mailbox_appenders.append_reply(
                                 plan_dir,
                                 view.unanswered_questions[0].id,
                                 "Use 1a.",
@@ -165,12 +168,12 @@ class MailboxWaitLifecycleTests(rfs.ReplyResumeFlowCase):
             # A second session is what proves the pin is one-shot: the turn
             # after the continuation must be back on the loop-top baseline.
             write_plan(plan_dir, ("pending", "pending"))
-            mailbox.append_guidance(
+            mailbox_appenders.append_guidance(
                 plan_dir,
                 "Keep working after the answer.",
                 state_dir=state_dir,
             )
-            mailbox.write_lease(
+            mailbox_leases.write_lease(
                 plan_dir,
                 "00000000-0000-0000-0000-000000000001",
                 state_dir=state_dir,
@@ -220,7 +223,7 @@ class MailboxWaitLifecycleTests(rfs.ReplyResumeFlowCase):
                         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
                         if view.unanswered_questions:
                             time.sleep(human_answer_seconds)
-                            mailbox.append_reply(
+                            mailbox_appenders.append_reply(
                                 plan_dir,
                                 view.unanswered_questions[0].id,
                                 "Use 1a.",
@@ -289,12 +292,12 @@ class MailboxWaitLifecycleTests(rfs.ReplyResumeFlowCase):
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
-            mailbox.append_guidance(
+            mailbox_appenders.append_guidance(
                 plan_dir,
                 "Keep working after the answer.",
                 state_dir=state_dir,
             )
-            mailbox.write_lease(
+            mailbox_leases.write_lease(
                 plan_dir,
                 "00000000-0000-0000-0000-000000000003",
                 state_dir=state_dir,
@@ -343,7 +346,7 @@ class MailboxWaitLifecycleTests(rfs.ReplyResumeFlowCase):
                     while time.monotonic() < deadline:
                         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
                         if view.unanswered_questions:
-                            mailbox.append_reply(
+                            mailbox_appenders.append_reply(
                                 plan_dir,
                                 view.unanswered_questions[0].id,
                                 "Use 1a.",
@@ -427,7 +430,7 @@ class MailboxWaitLifecycleTests(rfs.ReplyResumeFlowCase):
             questions = [
                 message
                 for message in view.messages
-                if message.kind == mailbox.KIND_QUESTION
+                if message.kind == mailbox_vocabulary.KIND_QUESTION
             ]
             self.assertEqual(1, len(questions))
             question = questions[0]

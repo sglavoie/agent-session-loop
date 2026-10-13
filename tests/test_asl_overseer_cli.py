@@ -81,6 +81,9 @@ from agent_session_loop import (
     events,
     intervention,
     mailbox,
+    mailbox_appenders,
+    mailbox_models,
+    mailbox_vocabulary,
     overseer_checkpoint_groups,
     overseer_cli,
     overseer_context,
@@ -451,12 +454,12 @@ class _Fleet:
 
     def ask_question(self, plan_dir: Path, text: str = "which lint profile?") -> str:
         """Put a question in a run's mailbox and return its id."""
-        message = mailbox.append_question(
+        message = mailbox_appenders.append_question(
             plan_dir, text, state_dir=self.state_root, run_id=f"{plan_dir.name}-run-1"
         )
         return message.id
 
-    def messages(self, plan_dir: Path) -> tuple[mailbox.MailboxMessage, ...]:
+    def messages(self, plan_dir: Path) -> tuple[mailbox_models.MailboxMessage, ...]:
         return mailbox.read_mailbox(plan_dir, state_dir=self.state_root).messages
 
     def _make_plan_dir(self, name: str) -> Path:
@@ -791,7 +794,7 @@ class InvocationWorkflowTests(_OverseerCase):
         self.assertTrue(payload["dispatch"]["performed"], payload["dispatch"]["detail"])
         self.assertIsNone(payload["escalation"])
         kinds = [message.kind for message in self.fleet.messages(self.plan)]
-        self.assertIn(mailbox.KIND_GUIDANCE, kinds)
+        self.assertIn(mailbox_vocabulary.KIND_GUIDANCE, kinds)
 
     def test_reconcile_has_nothing_in_doubt_after_a_clean_dispatch(self) -> None:
         packet = self.observed()
@@ -1171,7 +1174,7 @@ class EvidenceBoundaryTests(_OverseerCase):
         self.assertEqual("preparation_declined", payload["dispatch"]["refusal"])
         self.assertIsNotNone(payload["escalation"])
         self.assertNotIn(
-            mailbox.KIND_GUIDANCE,
+            mailbox_vocabulary.KIND_GUIDANCE,
             [message.kind for message in self.fleet.messages(self.plan)],
         )
 
@@ -1761,7 +1764,7 @@ class EvidenceFreshnessTests(_OverseerCase):
             tuple(
                 message
                 for message in self.fleet.messages(self.plan)
-                if message.kind == mailbox.KIND_GUIDANCE
+                if message.kind == mailbox_vocabulary.KIND_GUIDANCE
             ),
         )
 
@@ -1808,7 +1811,7 @@ class EvidenceFreshnessTests(_OverseerCase):
             tuple(
                 message
                 for message in self.fleet.messages(self.plan)
-                if message.kind == mailbox.KIND_GUIDANCE
+                if message.kind == mailbox_vocabulary.KIND_GUIDANCE
             ),
             "guidance crossed a hold the host never read",
         )
@@ -1877,7 +1880,7 @@ class EvidenceFreshnessTests(_OverseerCase):
         self.assertFalse(payload["evidence"]["bound"])
         self.assertEqual("", payload["evidence"]["reviewed"])
         self.assertNotIn(
-            mailbox.KIND_GUIDANCE,
+            mailbox_vocabulary.KIND_GUIDANCE,
             [message.kind for message in self.fleet.messages(self.plan)],
         )
 
@@ -2052,7 +2055,7 @@ class EvidenceFreshnessTests(_OverseerCase):
             tuple(
                 message
                 for message in self.fleet.messages(self.plan)
-                if message.kind == mailbox.KIND_GUIDANCE
+                if message.kind == mailbox_vocabulary.KIND_GUIDANCE
             ),
             "guidance crossed a hold on a binding no listing ever issued",
         )
@@ -2287,7 +2290,7 @@ class HumanDependencyTests(_OverseerCase):
         return tuple(
             message
             for message in self.fleet.messages(self.plan)
-            if message.kind == mailbox.KIND_GUIDANCE
+            if message.kind == mailbox_vocabulary.KIND_GUIDANCE
         )
 
     def _reviewed(self, packet: dict[str, Any]) -> str:

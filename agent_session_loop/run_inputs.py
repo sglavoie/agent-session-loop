@@ -82,7 +82,7 @@ from . import (
     config,
     contracts,
     plans,
-    preflight,
+    preflight_footprint,
     repository_intent,
     repository_registration,
     run_flags,
@@ -351,7 +351,7 @@ def _run_repository_intent_report(
     """
     if context.workspace is not None:
         return None
-    _, report = preflight.plan_repository_intent(
+    _, report = preflight_footprint.plan_repository_intent(
         plan_dir,
         context.root,
         extra_exempt_roots=_runner_owned_roots(plan_dir, state_dir_arg),

@@ -5,7 +5,8 @@ from __future__ import annotations
 import contextlib
 import signal
 
-from agent_session_loop import mailbox as _mailbox
+from agent_session_loop import mailbox_appenders as _mailbox_appenders
+from agent_session_loop import mailbox_vocabulary as _mailbox_vocabulary
 
 
 class _SupervisionEndEmitter:
@@ -50,7 +51,7 @@ class _SupervisionEndEmitter:
         if not isinstance(plan_dir, str) or not plan_dir:
             return False
 
-        append = self._append or _mailbox.append_supervision_end
+        append = self._append or _mailbox_appenders.append_supervision_end
         state_dir = parsed.get("state_dir")
         try:
             with _deferred_termination_signals() as terminated:
@@ -67,7 +68,7 @@ class _SupervisionEndEmitter:
                     if signal_name is None:
                         return outcome, text
                     return (
-                        _mailbox.SUPERVISION_OUTCOME_ERROR,
+                        _mailbox_vocabulary.SUPERVISION_OUTCOME_ERROR,
                         f"supervision ended: error - {signal_name}",
                     )
 

@@ -98,7 +98,7 @@ from . import (
     guards,
     handoff_guards,
     plans,
-    preflight,
+    preflight_footprint,
     readiness_gate,
     repository_evidence,
     review_continuation,
@@ -450,7 +450,9 @@ def _enforce_legacy_implementation_write_guard(
             exempt_roots=run_inputs._runner_owned_roots(
                 before.plan_dir, state_dir_arg, run_dir=run_dir
             ),
-            provenance_roots=preflight.plan_provenance_exempt_roots(before.plan_dir),
+            provenance_roots=preflight_footprint.plan_provenance_exempt_roots(
+                before.plan_dir
+            ),
         ),
         external_writes=external_write_evidence._turn_external_write_evidence(
             plan_dir=before.plan_dir,

@@ -7,8 +7,8 @@ import unittest
 
 from agent_session_loop import (
     control_queue,
-    mailbox,
     mailbox_cli,
+    mailbox_constants,
     mailbox_rendering,
 )
 from tests.asl_docs_support import ASL_GUIDE, read_repo_text
@@ -216,9 +216,9 @@ class GuidanceAndErrorDocsTests(unittest.TestCase):
             if (
                 isinstance(node, ast.Attribute)
                 and isinstance(node.value, ast.Name)
-                and node.value.id == "mailbox"
+                and node.value.id == "mailbox_constants"
             ):
-                value = getattr(mailbox, node.attr, None)
+                value = getattr(mailbox_constants, node.attr, None)
                 return value if isinstance(value, str) else None
             return None
 
@@ -232,7 +232,7 @@ class GuidanceAndErrorDocsTests(unittest.TestCase):
         }
         operation_reasons = {
             value
-            for name, value in vars(mailbox).items()
+            for name, value in vars(mailbox_constants).items()
             if name.startswith("ERROR_") and isinstance(value, str)
         }
         expected_reasons = (

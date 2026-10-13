@@ -37,6 +37,7 @@ from typing import Any
 from agent_session_loop import (
     plans,
     preflight,
+    preflight_models,
     readiness_gate,
     run_persistence,
     run_termination,
@@ -161,9 +162,9 @@ class GateOrderingTests(unittest.TestCase):
         self,
         *,
         readiness_state: str | None,
-        findings: tuple[preflight.PreflightFinding, ...] = (),
+        findings: tuple[preflight_models.PreflightFinding, ...] = (),
         recorded_sha: str = "0" * 64,
-    ) -> preflight.PreflightReport:
+    ) -> preflight_models.PreflightReport:
         readiness = None
         if readiness_state is not None:
             readiness = plans.ReadinessMetadata(
@@ -171,7 +172,7 @@ class GateOrderingTests(unittest.TestCase):
                 readiness_sha256=recorded_sha,
                 checked_at="2026-09-01T00:00:00Z",
             )
-        return preflight.PreflightReport(
+        return preflight_models.PreflightReport(
             plan_dir=Path("/plan"),
             findings=findings,
             readiness=readiness,
@@ -196,7 +197,7 @@ class GateOrderingTests(unittest.TestCase):
         report = self._report(
             readiness_state="loop-ready",
             findings=(
-                preflight.PreflightFinding(
+                preflight_models.PreflightFinding(
                     severity="red", category="env-harness", message="broken"
                 ),
             ),
@@ -252,24 +253,24 @@ class GateOrderingTests(unittest.TestCase):
 
     def test_the_escape_hatch_never_covers_a_non_bypassable_category(self) -> None:
         findings = tuple(
-            preflight.PreflightFinding(
+            preflight_models.PreflightFinding(
                 severity="red", category=category, message=category
             )
-            for category in sorted(preflight.NON_BYPASSABLE_PREFLIGHT_CATEGORIES)
+            for category in sorted(preflight_models.NON_BYPASSABLE_PREFLIGHT_CATEGORIES)
         )
         report = self._report(readiness_state="loop-ready", findings=findings)
 
         self.assertEqual(
-            sorted(preflight.NON_BYPASSABLE_PREFLIGHT_CATEGORIES),
+            sorted(preflight_models.NON_BYPASSABLE_PREFLIGHT_CATEGORIES),
             list(readiness_gate._non_bypassable_blockers(report)),
         )
 
     def test_a_yellow_finding_is_a_blocker_but_never_non_bypassable(self) -> None:
-        category = sorted(preflight.NON_BYPASSABLE_PREFLIGHT_CATEGORIES)[0]
+        category = sorted(preflight_models.NON_BYPASSABLE_PREFLIGHT_CATEGORIES)[0]
         report = self._report(
             readiness_state="loop-ready",
             findings=(
-                preflight.PreflightFinding(
+                preflight_models.PreflightFinding(
                     severity="yellow", category=category, message="soft"
                 ),
             ),
@@ -282,13 +283,13 @@ class GateOrderingTests(unittest.TestCase):
         report = self._report(
             readiness_state="running",
             findings=(
-                preflight.PreflightFinding(
+                preflight_models.PreflightFinding(
                     severity="red", category="manifest-readiness", message="one"
                 ),
-                preflight.PreflightFinding(
+                preflight_models.PreflightFinding(
                     severity="red", category="manifest-readiness", message="two"
                 ),
-                preflight.PreflightFinding(
+                preflight_models.PreflightFinding(
                     severity="green", category="manifest-readiness", message="fine"
                 ),
             ),
@@ -317,9 +318,9 @@ class OwnLockTests(unittest.TestCase):
         )
 
     def _report(
-        self, findings: tuple[preflight.PreflightFinding, ...]
-    ) -> preflight.PreflightReport:
-        return preflight.PreflightReport(
+        self, findings: tuple[preflight_models.PreflightFinding, ...]
+    ) -> preflight_models.PreflightReport:
+        return preflight_models.PreflightReport(
             plan_dir=Path("/plan"),
             findings=findings,
             readiness=None,
@@ -332,7 +333,7 @@ class OwnLockTests(unittest.TestCase):
         lock_path = Path("/state/run.lock")
         report = self._report(
             (
-                preflight.PreflightFinding(
+                preflight_models.PreflightFinding(
                     severity="red",
                     category="env-lock",
                     message="held",
@@ -353,7 +354,7 @@ class OwnLockTests(unittest.TestCase):
         lock_path = Path("/state/run.lock")
         report = self._report(
             (
-                preflight.PreflightFinding(
+                preflight_models.PreflightFinding(
                     severity="red",
                     category="env-lock",
                     message="held",
@@ -371,7 +372,7 @@ class OwnLockTests(unittest.TestCase):
     def test_an_unrelated_finding_returns_the_same_report_object(self) -> None:
         report = self._report(
             (
-                preflight.PreflightFinding(
+                preflight_models.PreflightFinding(
                     severity="red", category="env-harness", message="broken"
                 ),
             )

@@ -12,7 +12,8 @@ from typing import Any
 from agent_session_loop import (
     assurance_models,
     events,
-    mailbox,
+    mailbox_constants,
+    mailbox_vocabulary,
     supervisor_audit_evidence,
 )
 from tests import support_supervisor_audit_evidence as evidence_support
@@ -278,12 +279,12 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             self.assertTrue(section["summary"]["available"])
             self.assertEqual(
                 [
-                    (self.QUESTION_ID, mailbox.KIND_QUESTION),
-                    (self.WAIT_ID, mailbox.KIND_WAIT_START),
-                    (self.REPLY_ID, mailbox.KIND_REPLY),
-                    (self.RECEIPT_ID, mailbox.KIND_RECEIPT),
-                    (self.WAIT_END_ID, mailbox.KIND_WAIT_END),
-                    (self.NOTICE_ID, mailbox.KIND_NOTICE),
+                    (self.QUESTION_ID, mailbox_vocabulary.KIND_QUESTION),
+                    (self.WAIT_ID, mailbox_vocabulary.KIND_WAIT_START),
+                    (self.REPLY_ID, mailbox_vocabulary.KIND_REPLY),
+                    (self.RECEIPT_ID, mailbox_vocabulary.KIND_RECEIPT),
+                    (self.WAIT_END_ID, mailbox_vocabulary.KIND_WAIT_END),
+                    (self.NOTICE_ID, mailbox_vocabulary.KIND_NOTICE),
                 ],
                 [(record["id"], record["kind"]) for record in section["records"]],
             )
@@ -317,7 +318,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
     def test_a_missing_mailbox_is_explicit_rather_than_absent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
-            (state_dir / mailbox.MAILBOX_FILE_NAME).unlink()
+            (state_dir / mailbox_constants.MAILBOX_FILE_NAME).unlink()
 
             payload = self._collect(workspace, plan_dir, state_dir, run_dir).payload
             summary = payload["mailbox"]["summary"]
@@ -338,7 +339,7 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
     def test_a_damaged_mailbox_line_is_counted_and_digested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
-            with (state_dir / mailbox.MAILBOX_FILE_NAME).open(
+            with (state_dir / mailbox_constants.MAILBOX_FILE_NAME).open(
                 "a", encoding="utf-8"
             ) as handle:
                 handle.write("{not json\n")
@@ -369,7 +370,12 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             kinds = [record["kind"] for record in payload["mailbox"]["records"]]
 
             self.assertEqual(
-                [mailbox.KIND_QUESTION, mailbox.KIND_REPLY, mailbox.KIND_NOTICE], kinds
+                [
+                    mailbox_vocabulary.KIND_QUESTION,
+                    mailbox_vocabulary.KIND_REPLY,
+                    mailbox_vocabulary.KIND_NOTICE,
+                ],
+                kinds,
             )
             self.assertTrue(
                 any(

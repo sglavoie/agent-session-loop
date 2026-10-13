@@ -60,7 +60,8 @@ from agent_session_loop import (
     handoff_correction,
     harness_failures,
     harnesses,
-    mailbox,
+    mailbox_models,
+    mailbox_vocabulary,
     model_availability,
     plans,
     run_coordination,
@@ -187,16 +188,16 @@ class FakeRunContext:
         self.pauses.append({"reason": reason, "message": message, "details": details})
 
 
-def fake_message(**overrides: Any) -> mailbox.MailboxMessage:
+def fake_message(**overrides: Any) -> mailbox_models.MailboxMessage:
     """One mailbox record, with only the fields these branches read set."""
     values: dict[str, Any] = {
         "seq": 7,
         "id": "msg-1",
-        "kind": mailbox.KIND_REPLY,
+        "kind": mailbox_vocabulary.KIND_REPLY,
         "created_at": "2026-01-01T00:00:00Z",
     }
     values.update(overrides)
-    return mailbox.MailboxMessage(**values)
+    return mailbox_models.MailboxMessage(**values)
 
 
 class DispositionTestCase(unittest.TestCase):
@@ -529,9 +530,9 @@ class RunnerPauseTests(DispositionTestCase):
     def test_an_answer_that_beat_the_pause_short_circuits_the_wait(self) -> None:
         resolution = fake_message(
             id="res-1",
-            kind=mailbox.KIND_RESOLUTION,
+            kind=mailbox_vocabulary.KIND_RESOLUTION,
             to="question-1",
-            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             note="carry on",
         )
         outcome = self.settle(resolution_for_turn=resolution)
@@ -542,7 +543,9 @@ class RunnerPauseTests(DispositionTestCase):
         self.assertEqual("question-1", recorded["question_id"])
         self.assertEqual("res-1", recorded["resolution_message_id"])
         self.assertEqual(len("carry on"), recorded["note_length"])
-        self.assertEqual(mailbox.WAITER_ORIGIN_WORKER, recorded["waiter_origin"])
+        self.assertEqual(
+            mailbox_vocabulary.WAITER_ORIGIN_WORKER, recorded["waiter_origin"]
+        )
 
     def test_the_pause_carries_its_source_and_status_repair(self) -> None:
         self.settle(can_wait=False)
@@ -586,8 +589,8 @@ class RunnerPauseTests(DispositionTestCase):
         resolution = fake_message(
             id="res-2",
             seq=12,
-            kind=mailbox.KIND_RESOLUTION,
-            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            kind=mailbox_vocabulary.KIND_RESOLUTION,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             note="proceed",
         )
         outcome = self.settle(
@@ -608,8 +611,8 @@ class RunnerPauseTests(DispositionTestCase):
     def test_a_pause_resolution_leaves_the_run_paused(self) -> None:
         resolution = fake_message(
             id="res-3",
-            kind=mailbox.KIND_RESOLUTION,
-            action=mailbox.RESOLUTION_ACTION_PAUSE,
+            kind=mailbox_vocabulary.KIND_RESOLUTION,
+            action=mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
         )
         outcome = self.settle(
             wait_result=run_coordination.MailboxWaitResult(
@@ -624,7 +627,9 @@ class RunnerPauseTests(DispositionTestCase):
         self.assertEqual("question-1", closure["question_id"])
         self.assertEqual("res-3", closure["resolution_message_id"])
         self.assertEqual("pause", closure["action"])
-        self.assertEqual(mailbox.WAITER_ORIGIN_RUNNER, closure["waiter_origin"])
+        self.assertEqual(
+            mailbox_vocabulary.WAITER_ORIGIN_RUNNER, closure["waiter_origin"]
+        )
 
     def test_a_timed_out_wait_leaves_the_run_paused(self) -> None:
         outcome = self.settle(

@@ -10,6 +10,12 @@ from unittest import mock
 
 from agent_session_loop import (
     mailbox,
+    mailbox_appenders,
+    mailbox_constants,
+    mailbox_leases,
+    mailbox_models,
+    mailbox_vocabulary,
+    mailbox_waits,
 )
 from tests.asl_control_mailbox_support import MailboxTestsBase
 
@@ -23,78 +29,78 @@ class MailboxTestsPart4(MailboxTestsBase):
             {
                 "created_at": self.timestamp(),
                 "id": question_id,
-                "kind": mailbox.KIND_QUESTION,
-                "delivery_mode": mailbox.DELIVERY_MODE_ASYNC,
+                "kind": mailbox_vocabulary.KIND_QUESTION,
+                "delivery_mode": mailbox_vocabulary.DELIVERY_MODE_ASYNC,
                 "run_id": "run-A",
                 "text": "valid question",
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
             }
         )
         malformed = (
             (
-                mailbox.REJECT_INVALID_RUN_ID,
+                mailbox_constants.REJECT_INVALID_RUN_ID,
                 {
-                    "kind": mailbox.KIND_QUESTION,
+                    "kind": mailbox_vocabulary.KIND_QUESTION,
                     "run_id": "",
                     "text": "bad run",
                 },
             ),
             (
-                mailbox.REJECT_INVALID_SESSION_ID,
+                mailbox_constants.REJECT_INVALID_SESSION_ID,
                 {
-                    "kind": mailbox.KIND_QUESTION,
+                    "kind": mailbox_vocabulary.KIND_QUESTION,
                     "session_id": "01",
                     "text": "bad session",
                 },
             ),
             (
-                mailbox.REJECT_INVALID_TURN_INDEX,
+                mailbox_constants.REJECT_INVALID_TURN_INDEX,
                 {
-                    "kind": mailbox.KIND_QUESTION,
+                    "kind": mailbox_vocabulary.KIND_QUESTION,
                     "text": "bad turn",
                     "turn_index": 0,
                 },
             ),
             (
-                mailbox.REJECT_INVALID_WAITER_ORIGIN,
+                mailbox_constants.REJECT_INVALID_WAITER_ORIGIN,
                 {
-                    "kind": mailbox.KIND_QUESTION,
+                    "kind": mailbox_vocabulary.KIND_QUESTION,
                     "text": "bad waiter",
                     "waiter_origin": "supervisor",
                 },
             ),
             (
-                mailbox.REJECT_INVALID_RUN_ID,
+                mailbox_constants.REJECT_INVALID_RUN_ID,
                 {
-                    "kind": mailbox.KIND_NOTICE,
+                    "kind": mailbox_vocabulary.KIND_NOTICE,
                     "session_id": "1",
                     "text": "missing run",
                     "turn_index": 1,
                 },
             ),
             (
-                mailbox.REJECT_INVALID_ACTION,
+                mailbox_constants.REJECT_INVALID_ACTION,
                 {
                     "action": "answer",
-                    "kind": mailbox.KIND_RESOLUTION,
+                    "kind": mailbox_vocabulary.KIND_RESOLUTION,
                     "run_id": "run-A",
                     "to": question_id,
                 },
             ),
             (
-                mailbox.REJECT_QUESTION_NOT_OPEN,
+                mailbox_constants.REJECT_QUESTION_NOT_OPEN,
                 {
-                    "action": mailbox.RESOLUTION_ACTION_PAUSE,
-                    "kind": mailbox.KIND_RESOLUTION,
+                    "action": mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
+                    "kind": mailbox_vocabulary.KIND_RESOLUTION,
                     "run_id": "run-B",
                     "to": question_id,
                 },
             ),
             (
-                mailbox.REJECT_INVALID_NOTE,
+                mailbox_constants.REJECT_INVALID_NOTE,
                 {
-                    "action": mailbox.RESOLUTION_ACTION_PAUSE,
-                    "kind": mailbox.KIND_RESOLUTION,
+                    "action": mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
+                    "kind": mailbox_vocabulary.KIND_RESOLUTION,
                     "note": 1,
                     "run_id": "run-A",
                     "to": question_id,
@@ -102,55 +108,56 @@ class MailboxTestsPart4(MailboxTestsBase):
             ),
         )
         for _reason, fields in malformed:
-            if fields.get("kind") == mailbox.KIND_QUESTION:
+            if fields.get("kind") == mailbox_vocabulary.KIND_QUESTION:
                 fields = {
-                    "delivery_mode": mailbox.DELIVERY_MODE_ASYNC,
+                    "delivery_mode": mailbox_vocabulary.DELIVERY_MODE_ASYNC,
                     **fields,
                 }
             self.append_raw(
                 {
                     "created_at": self.timestamp(),
                     "id": self.message_id(),
-                    "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                    "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
                     **fields,
                 }
             )
         self.append_raw(
             {
-                "action": mailbox.RESOLUTION_ACTION_PAUSE,
+                "action": mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
                 "created_at": self.timestamp(),
                 "id": self.message_id(),
-                "kind": mailbox.KIND_RESOLUTION,
+                "kind": mailbox_vocabulary.KIND_RESOLUTION,
                 "run_id": "run-A",
                 "to": question_id,
-                "version": mailbox.MAILBOX_LEGACY_SCHEMA_VERSION,
+                "version": mailbox_constants.MAILBOX_LEGACY_SCHEMA_VERSION,
             }
         )
 
         view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
 
         self.assertEqual(
-            [reason for reason, _fields in malformed] + [mailbox.REJECT_UNKNOWN_KIND],
+            [reason for reason, _fields in malformed]
+            + [mailbox_constants.REJECT_UNKNOWN_KIND],
             [record.reason for record in view.rejected],
         )
         self.assertEqual((view.messages[0],), view.unanswered_questions)
 
     def test_reply_and_resolution_share_atomic_first_close_wins(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Reply or resolve?",
             run_id="run-A",
             state_dir=self.state_dir,
             created_at=self.timestamp(),
         )
-        successes: list[mailbox.MailboxMessage] = []
+        successes: list[mailbox_models.MailboxMessage] = []
         failures: list[str] = []
         result_lock = threading.Lock()
 
         def close(index: int) -> None:
             try:
                 if index % 2:
-                    result = mailbox.append_reply(
+                    result = mailbox_appenders.append_reply(
                         self.plan_dir,
                         question.id,
                         f"reply-{index}",
@@ -158,15 +165,15 @@ class MailboxTestsPart4(MailboxTestsBase):
                         created_at=self.timestamp(),
                     )
                 else:
-                    result = mailbox.append_resolution(
+                    result = mailbox_appenders.append_resolution(
                         self.plan_dir,
                         question.id,
-                        mailbox.RESOLUTION_ACTION_CONTINUE,
+                        mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
                         expected_run_id="run-A",
                         state_dir=self.state_dir,
                         created_at=self.timestamp(),
                     )
-            except mailbox.MailboxError as error:
+            except mailbox_models.MailboxError as error:
                 with result_lock:
                     failures.append(error.reason)
             else:
@@ -183,9 +190,9 @@ class MailboxTestsPart4(MailboxTestsBase):
         self.assertEqual(1, len(successes))
         self.assertEqual(19, len(failures))
         expected_failure = (
-            mailbox.REJECT_QUESTION_ALREADY_ANSWERED
-            if successes[0].kind == mailbox.KIND_REPLY
-            else mailbox.REJECT_QUESTION_ALREADY_RESOLVED
+            mailbox_constants.REJECT_QUESTION_ALREADY_ANSWERED
+            if successes[0].kind == mailbox_vocabulary.KIND_REPLY
+            else mailbox_constants.REJECT_QUESTION_ALREADY_RESOLVED
         )
         self.assertEqual({expected_failure}, set(failures))
         view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
@@ -194,14 +201,14 @@ class MailboxTestsPart4(MailboxTestsBase):
         self.assertEqual((), view.unanswered_questions)
 
     def test_concurrent_resolutions_commit_exactly_one_action(self) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Continue or pause?",
             run_id="run-A",
             state_dir=self.state_dir,
             created_at=self.timestamp(),
         )
-        successes: list[mailbox.MailboxMessage] = []
+        successes: list[mailbox_models.MailboxMessage] = []
         failures: list[str] = []
         result_lock = threading.Lock()
         race_barrier = threading.Barrier(20)
@@ -209,12 +216,12 @@ class MailboxTestsPart4(MailboxTestsBase):
         def resolve(index: int) -> None:
             race_barrier.wait(timeout=3)
             action = (
-                mailbox.RESOLUTION_ACTION_CONTINUE
+                mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE
                 if index % 2
-                else mailbox.RESOLUTION_ACTION_PAUSE
+                else mailbox_vocabulary.RESOLUTION_ACTION_PAUSE
             )
             try:
-                result = mailbox.append_resolution(
+                result = mailbox_appenders.append_resolution(
                     self.plan_dir,
                     question.id,
                     action,
@@ -222,7 +229,7 @@ class MailboxTestsPart4(MailboxTestsBase):
                     state_dir=self.state_dir,
                     created_at=self.timestamp(),
                 )
-            except mailbox.MailboxError as error:
+            except mailbox_models.MailboxError as error:
                 with result_lock:
                     failures.append(error.reason)
             else:
@@ -240,7 +247,7 @@ class MailboxTestsPart4(MailboxTestsBase):
 
         self.assertEqual(1, len(successes))
         self.assertEqual(
-            [mailbox.REJECT_QUESTION_ALREADY_RESOLVED] * 19,
+            [mailbox_constants.REJECT_QUESTION_ALREADY_RESOLVED] * 19,
             sorted(failures),
         )
         view = mailbox.read_mailbox(
@@ -248,14 +255,14 @@ class MailboxTestsPart4(MailboxTestsBase):
             state_dir=self.state_dir,
         )
         self.assertEqual(successes[0], view.closure_for(question.id))
-        self.assertIn(successes[0].action, mailbox.RESOLUTION_ACTIONS)
+        self.assertIn(successes[0].action, mailbox_vocabulary.RESOLUTION_ACTIONS)
         self.assertEqual(2, len(view.messages))
         self.assertEqual((), view.unanswered_questions)
 
     def test_resolution_uses_reserved_capacity_after_nonclosure_saturation(
         self,
     ) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Can the reserved closure still land?",
             run_id="run-A",
@@ -264,7 +271,8 @@ class MailboxTestsPart4(MailboxTestsBase):
         )
         path = self.mailbox_path()
         nonclosure_limit = (
-            mailbox.MAILBOX_MAX_BYTES - mailbox.MAILBOX_CLOSURE_RESERVE_BYTES
+            mailbox_constants.MAILBOX_MAX_BYTES
+            - mailbox_constants.MAILBOX_CLOSURE_RESERVE_BYTES
         )
         current_size = path.stat().st_size
         filler_size = nonclosure_limit - current_size
@@ -281,8 +289,8 @@ class MailboxTestsPart4(MailboxTestsBase):
         self.assertTrue(saturated.accepts_replies)
         self.assertTrue(saturated.accepts_resolutions)
         self.assertFalse(saturated.full)
-        with self.assertRaises(mailbox.MailboxError) as refused:
-            mailbox.append_notice(
+        with self.assertRaises(mailbox_models.MailboxError) as refused:
+            mailbox_appenders.append_notice(
                 self.plan_dir,
                 "This non-closure must not consume the reserve.",
                 run_id="run-A",
@@ -291,12 +299,12 @@ class MailboxTestsPart4(MailboxTestsBase):
                 state_dir=self.state_dir,
                 created_at=self.timestamp(),
             )
-        self.assertEqual(mailbox.ERROR_MAILBOX_FULL, refused.exception.reason)
+        self.assertEqual(mailbox_constants.ERROR_MAILBOX_FULL, refused.exception.reason)
 
-        resolution = mailbox.append_resolution(
+        resolution = mailbox_appenders.append_resolution(
             self.plan_dir,
             question.id,
-            mailbox.RESOLUTION_ACTION_CONTINUE,
+            mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
             expected_run_id="run-A",
             state_dir=self.state_dir,
             created_at=self.timestamp(),
@@ -308,28 +316,30 @@ class MailboxTestsPart4(MailboxTestsBase):
         self.assertEqual(resolution, closed.closure_for(question.id))
         self.assertEqual((), closed.unanswered_questions)
         self.assertGreater(closed.size_bytes, nonclosure_limit)
-        self.assertLessEqual(closed.size_bytes, mailbox.MAILBOX_MAX_BYTES)
+        self.assertLessEqual(closed.size_bytes, mailbox_constants.MAILBOX_MAX_BYTES)
 
     def test_resolution_requires_expected_owner_and_defeats_later_closers(
         self,
     ) -> None:
-        question = mailbox.append_question(
+        question = mailbox_appenders.append_question(
             self.plan_dir,
             "Continue?",
             run_id="run-A",
             state_dir=self.state_dir,
             created_at=self.timestamp(),
         )
-        with self.assertRaises(mailbox.MailboxError) as mismatched:
-            mailbox.append_resolution(
+        with self.assertRaises(mailbox_models.MailboxError) as mismatched:
+            mailbox_appenders.append_resolution(
                 self.plan_dir,
                 question.id,
-                mailbox.RESOLUTION_ACTION_CONTINUE,
+                mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
                 expected_run_id="run-B",
                 state_dir=self.state_dir,
                 created_at=self.timestamp(),
             )
-        self.assertEqual(mailbox.REJECT_QUESTION_NOT_OPEN, mismatched.exception.reason)
+        self.assertEqual(
+            mailbox_constants.REJECT_QUESTION_NOT_OPEN, mismatched.exception.reason
+        )
         self.assertEqual(
             (question,),
             mailbox.read_mailbox(
@@ -337,33 +347,33 @@ class MailboxTestsPart4(MailboxTestsBase):
             ).unanswered_questions,
         )
 
-        resolution = mailbox.append_resolution(
+        resolution = mailbox_appenders.append_resolution(
             self.plan_dir,
             question.id,
-            mailbox.RESOLUTION_ACTION_PAUSE,
+            mailbox_vocabulary.RESOLUTION_ACTION_PAUSE,
             expected_run_id="run-A",
             state_dir=self.state_dir,
             created_at=self.timestamp(),
         )
         for closer in (
-            lambda: mailbox.append_reply(
+            lambda: mailbox_appenders.append_reply(
                 self.plan_dir,
                 question.id,
                 "too late",
                 state_dir=self.state_dir,
             ),
-            lambda: mailbox.append_resolution(
+            lambda: mailbox_appenders.append_resolution(
                 self.plan_dir,
                 question.id,
-                mailbox.RESOLUTION_ACTION_CONTINUE,
+                mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE,
                 expected_run_id="run-A",
                 state_dir=self.state_dir,
             ),
         ):
-            with self.assertRaises(mailbox.MailboxError) as closed:
+            with self.assertRaises(mailbox_models.MailboxError) as closed:
                 closer()
             self.assertEqual(
-                mailbox.REJECT_QUESTION_ALREADY_RESOLVED,
+                mailbox_constants.REJECT_QUESTION_ALREADY_RESOLVED,
                 closed.exception.reason,
             )
         self.assertEqual(
@@ -383,7 +393,7 @@ class MailboxTestsPart4(MailboxTestsBase):
 
         def append_many(worker: int) -> None:
             for index in range(20):
-                mailbox.append_guidance(
+                mailbox_appenders.append_guidance(
                     self.plan_dir,
                     f"{worker}:{index}",
                     state_dir=self.state_dir,
@@ -423,7 +433,7 @@ class MailboxTestsPart4(MailboxTestsBase):
         self,
     ) -> None:
         with mock.patch.object(mailbox.durability, "fullsync") as fullsync:
-            mailbox.append_guidance(
+            mailbox_appenders.append_guidance(
                 self.plan_dir,
                 "durable guidance",
                 state_dir=self.state_dir,
@@ -432,20 +442,20 @@ class MailboxTestsPart4(MailboxTestsBase):
             fullsync.assert_called_once()
 
             fullsync.reset_mock()
-            mailbox.append_wait_question(
+            mailbox_waits.append_wait_question(
                 self.plan_dir,
                 "durable wait",
                 state_dir=self.state_dir,
                 run_id="run-A",
                 session_id="1",
                 turn_index=1,
-                waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+                waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_WORKER,
                 created_at=self.timestamp(),
             )
             fullsync.assert_called_once()
 
             fullsync.reset_mock()
-            mailbox.write_lease(
+            mailbox_leases.write_lease(
                 self.plan_dir,
                 self.message_id(),
                 state_dir=self.state_dir,
