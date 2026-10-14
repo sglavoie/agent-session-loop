@@ -1,6 +1,6 @@
 """The one hop the rest of the suite supplies for itself: the actual link.
 
-``tests/test_workbench_fullstack.py`` assembles the whole deployment except the
+``tests/test_workbench_fullstack_*.py`` assembles the whole deployment except the
 network, and says so -- its ``Link`` "is the only piece written for this
 module". That seam is exactly where the release pinned for the deployed staging
 rehearsal turned out to be hollow: every lane had coverage, the store was

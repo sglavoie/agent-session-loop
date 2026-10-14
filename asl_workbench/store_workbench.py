@@ -41,7 +41,7 @@ had survives while project membership stops being a copy on every ending.
 What is stored is bounded by :mod:`asl_workbench.observation`'s allowlists
 rather than by these tables: every column here is named in one of them, or is
 ingestion bookkeeping the source never sent.
-``tests/test_workbench_store.py`` asserts exactly that against the schema.
+``tests/test_workbench_store_*.py`` asserts exactly that against the schema.
 
 Migrations 1 through 3 are the Companion's, statement for statement. An
 existing ``companion.sqlite3`` at ``user_version = 3`` therefore skips straight

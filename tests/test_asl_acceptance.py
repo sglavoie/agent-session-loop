@@ -86,18 +86,18 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "Every eligible persisted loop ends with exactly one truthful assurance state.",
         (
-            "tests.test_asl_assurance_lifecycle:"
+            "tests.test_asl_assurance_lifecycle_terminal_outcomes:"
             "TerminalBranchRoutingTests."
             "test_a_completed_run_is_audited_once_and_keeps_its_exit_code",
-            "tests.test_asl_assurance_lifecycle:"
+            "tests.test_asl_assurance_lifecycle_terminal_outcomes:"
             "TerminalBranchRoutingTests."
             "test_a_paused_run_is_audited_once_and_keeps_its_pause_reason",
-            "tests.test_asl_assurance_lifecycle:"
+            "tests.test_asl_assurance_lifecycle_coordinator:"
             "TerminalizationCoordinatorTests."
             "test_finalizing_is_reachable_only_through_the_coordinator",
-            "tests.test_asl_assurance_lifecycle:"
+            "tests.test_asl_assurance_lifecycle_terminal_audit:"
             "TerminalAuditTests.test_an_all_clear_audit_writes_every_canonical_artifact",
-            "tests.test_asl_assurance_lifecycle:"
+            "tests.test_asl_assurance_lifecycle_terminal_audit:"
             "TerminalAuditTests.test_republishing_the_same_audit_leaves_one_occurrence",
             "tests.test_asl_acceptance:"
             "AdvisoryVerdictTests."
@@ -112,9 +112,9 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
             "AllClearTests.test_all_clear_needs_every_lane_to_pass",
             "tests.test_asl_assurance_models:AllClearTests.test_all_clear_cannot_carry_findings",
             "tests.test_asl_assurance_models:SummaryInvariantTests.test_all_clear_creates_no_issue",
-            "tests.test_asl_assurance_lifecycle:"
+            "tests.test_asl_assurance_lifecycle_terminal_audit:"
             "TerminalAuditTests.test_an_agent_that_never_answers_still_publishes_the_checks",
-            "tests.test_asl_assurance_lifecycle:"
+            "tests.test_asl_assurance_lifecycle_terminal_audit:"
             "TerminalAuditTests.test_a_failed_publication_leaves_no_report_behind",
             "tests.test_asl_supervisor_audit_run_config:"
             "AuditPlanTests.test_opting_out_is_persisted_as_skipped_immediately",
@@ -132,9 +132,9 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
             "AgentAuditEngineTests.test_the_prompt_orders_evidence_before_any_source_reading",
             "tests.test_asl_supervisor_audit_restricted:"
             "RestrictedAuditTests.test_the_auditor_is_launched_read_only_without_the_plan_directory",
-            "tests.test_asl_assurance_lifecycle:"
+            "tests.test_asl_assurance_lifecycle_terminal_audit:"
             "TerminalAuditTests.test_a_harness_that_cannot_enforce_the_profile_never_runs",
-            "tests.test_asl_assurance_lifecycle:"
+            "tests.test_asl_assurance_lifecycle_terminal_audit:"
             "TerminalAuditTests.test_an_auditor_that_touched_the_workspace_is_unavailable",
             "tests.test_asl_supervisor_audit_agent_engine_delivery:"
             "AgentAuditEngineTests.test_a_malformed_answer_is_retried_in_a_fresh_invocation",
@@ -156,14 +156,14 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
             "IssueIdTests.test_concurrent_processes_never_mint_the_same_id",
             "tests.test_asl_assurance_ledger:"
             "CrashRecoveryTests.test_a_partial_final_line_is_readable_history_not_a_read_failure",
-            "tests.test_asl_assurance_projection:"
+            "tests.test_asl_assurance_projection_publication:"
             "DeduplicationTests.test_a_matching_fingerprint_routes_to_the_existing_issue",
-            "tests.test_asl_assurance_projection:"
+            "tests.test_asl_assurance_projection_lifecycle:"
             "LifecycleTests.test_a_recurrence_after_resolution_reopens_the_issue",
-            "tests.test_asl_assurance_projection:"
+            "tests.test_asl_assurance_projection_lifecycle:"
             "LifecycleTests.test_a_recurrence_after_dismissal_stays_closed",
-            "tests.test_asl_assurance_projection:MergeTests.test_merge_is_irreversible",
-            "tests.test_asl_assurance_projection:MergeTests.test_merge_rejects_a_cycle",
+            "tests.test_asl_assurance_projection_lifecycle:MergeTests.test_merge_is_irreversible",
+            "tests.test_asl_assurance_projection_lifecycle:MergeTests.test_merge_rejects_a_cycle",
             "tests.test_asl_assurance_cli:AssuranceCloseoutTests.test_a_second_closeout_needs_replace",
             "tests.test_asl_assurance_cli:"
             "AssuranceCloseoutTests.test_a_replacement_names_the_closeout_it_supersedes",
@@ -177,9 +177,9 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "tests.test_asl_supervisor_audit_run_output_state:"
             "AuditStateProjectionTests.test_status_projects_the_audit_without_launching_one",
-            "tests.test_asl_assurance_lifecycle:"
+            "tests.test_asl_assurance_lifecycle_coordinator:"
             "TerminalizationCoordinatorTests.test_the_exit_code_survives_the_coordinator_unchanged",
-            "tests.test_asl_assurance_lifecycle:"
+            "tests.test_asl_assurance_lifecycle_terminal_outcomes:"
             "TerminalBranchRoutingTests.test_an_unavailable_audit_changes_nothing_it_graded",
             "tests.test_asl_workbench_summary:"
             "WorkbenchSummaryTests.test_assurance_summary_carries_no_audit_controls",
@@ -215,11 +215,11 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
             "EndToEndQATests.test_full_lifecycle_repairs_legacy_plan_and_runs_to_completion",
             "tests.test_asl_supervisor_audit_run_config:"
             "AuditRunConfigPersistenceTests.test_resume_restores_persisted_audit_settings",
-            "tests.test_asl_assurance_lifecycle:"
+            "tests.test_asl_assurance_lifecycle_catchup:"
             "PendingAuditCatchupTests.test_an_abandoned_run_is_audited_after_the_fact",
-            "tests.test_asl_assurance_lifecycle:"
+            "tests.test_asl_assurance_lifecycle_catchup:"
             "PendingAuditCatchupTests.test_processing_twice_publishes_one_audit",
-            "tests.test_asl_assurance_lifecycle:"
+            "tests.test_asl_assurance_lifecycle_catchup:"
             "PendingAuditCatchupTests.test_a_run_that_predates_auditing_is_reported_never_audited",
             "tests.test_asl_retention:"
             "AssurancePinningTests.test_open_issue_pins_an_otherwise_reclaimable_run",

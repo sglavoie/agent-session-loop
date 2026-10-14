@@ -1,7 +1,7 @@
 """The service's own half of the link.
 
 ``tests/test_workbench_connector.py`` covers the Mac end and
-``tests/test_workbench_fullstack.py`` runs both ends over a link it can break.
+``tests/test_workbench_fullstack_*.py`` runs both ends over a link it can break.
 This module is about the object in between: what an upload does to the store,
 what rides back down in its acknowledgement, and how a read or a control
 settles when nothing ever carries it.

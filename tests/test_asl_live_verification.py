@@ -3,7 +3,7 @@
 The behavioural coverage of what those records *say* lives where it always has
 — ``tests/test_asl_harness_*.py`` drives whole verification recipes
 and reads their state, events and progress lines back, and
-``tests/test_asl_assurance_lifecycle.py`` owns the terminal phase an audit runs
+``tests/test_asl_assurance_lifecycle_*.py`` owns the terminal phase an audit runs
 inside. What is asserted here is the contract those modules cannot state,
 because they exercise the run rather than the seam:
 

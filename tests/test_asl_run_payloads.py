@@ -2,7 +2,7 @@
 
 The behavioural coverage of these three builders already exists and stays where
 it is: `tests/test_asl_supervisor_audit_run_config.py` owns the persisted
-`run_config` and the audit block, `tests/test_asl_assurance_lifecycle.py` and
+`run_config` and the audit block, `tests/test_asl_assurance_lifecycle_*.py` and
 `tests/test_asl_harness_*.py` drive real runs through the seeded
 payload, and `tests/test_asl_cli.py` owns the `--dry-run` output. None of them
 can cheaply state the thing this module actually owns, which is the *shape* the

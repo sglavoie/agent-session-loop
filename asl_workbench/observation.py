@@ -7,7 +7,7 @@ allowlist*. A table can only hold what its columns hold, but a table grows a
 column the moment somebody adds one, and the widened wire shape that motivated
 the column is usually the same change. So the boundary lives here, as data, and
 :mod:`asl_workbench.store_workbench` projects every record through it on the way in and
-on the way out. ``tests/test_workbench_store.py`` then asserts the other
+on the way out. ``tests/test_workbench_store_*.py`` then asserts the other
 direction: every column in the schema is a name on one of these lists or is
 ingestion bookkeeping the source never sent.
 
@@ -49,7 +49,7 @@ from .operations import OperationError, assert_body_free
 #: as a view this application understands.
 #:
 #: The value matches the Companion's ``protocol.SUPPORTED_CONTRACT_SET_IDS``
-#: exactly, and ``tests/test_workbench_store.py`` checks it against the Pi
+#: exactly, and ``tests/test_workbench_store_*.py`` checks it against the Pi
 #: checkout when one is reachable: a divergence here would silently mark every
 #: existing connector incompatible on the first deploy.
 SUPPORTED_CONTRACT_SET_IDS: tuple[str, ...] = ("asl-amx-1.85ec3041b9f03f47",)

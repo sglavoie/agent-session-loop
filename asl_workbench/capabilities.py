@@ -208,7 +208,7 @@ _DOCS_TESTS = "scripts:tests/test_asl_docs_authoritative_lanes.py"
 _CLI_TESTS = "scripts:tests/test_asl_cli_parser_review_guard_and_resume_overlay.py"
 _CONTROL_TESTS = "scripts:tests/test_workbench_controls.py"
 _CONTROL_CLI_TESTS = "scripts:tests/test_asl_control_cli_1.py"
-_STORE_TESTS = "scripts:tests/test_workbench_store.py"
+_STORE_TESTS = "scripts:tests/test_workbench_store_ingestion.py"
 _TRANSPORT_TESTS = "scripts:tests/test_workbench_transport_contract.py"
 _CONNECTOR_TESTS = "scripts:tests/test_workbench_connector_delivery.py"
 #: The service's own half of the link: what an upload does to the store, what
@@ -222,7 +222,7 @@ _UPLINK_TESTS = "scripts:tests/test_workbench_uplink.py"
 #: nothing carries a frame" was true until a deployed rehearsal found it.
 _WIRE_TESTS = "scripts:tests/test_workbench_wire.py"
 _REMOTE_READ_TESTS = "scripts:tests/test_workbench_remote_reads.py"
-_REMOTE_ACTION_TESTS = "scripts:tests/test_workbench_remote_actions.py"
+_REMOTE_ACTION_TESTS = "scripts:tests/test_workbench_remote_actions_performer.py"
 _HTTP_TESTS = "scripts:tests/test_workbench_http.py"
 #: Packaging and the native lifecycle, split by what each half can prove. The
 #: Mac module drives install, upgrade, rollback, recovery and removal against a
@@ -272,7 +272,7 @@ _INTERACTION_BROWSER_TESTS = "scripts:tests/workbench_browser/interactions.spec.
 #: inert interpreter. Named on the rows whose behaviour is only observable with
 #: all of it running -- a settlement that has to cross the link twice, a
 #: database nobody may find prose in, a ceiling a dead link fills.
-_FULLSTACK_TESTS = "scripts:tests/test_workbench_fullstack.py"
+_FULLSTACK_TESTS = "scripts:tests/test_workbench_fullstack_corpus_link.py"
 
 
 # -- The matrix -------------------------------------------------------------
