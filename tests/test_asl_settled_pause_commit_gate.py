@@ -20,7 +20,7 @@ from agent_session_loop import (
     run_selection,
     state,
     state_locks,
-    verification,
+    verification_models,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -104,7 +104,7 @@ class SettledPauseCommitGateTests(unittest.TestCase):
             self.workspace_root,
             registry.digest,
         )
-        self.context = verification.VerificationContext.from_plan(
+        self.context = verification_models.VerificationContext.from_plan(
             self.plan_dir,
             self.workspace_root,
         )

@@ -276,7 +276,7 @@ def expected_target_fields(raw: Any, *, label: str) -> dict[str, Any]:
     Shape only: this checks that the object is an object and that
     ``turn_index`` is an integer rather than a bool wearing one's clothes,
     because those are the two errors a JSON body produces on its own. Whether
-    the ids are well formed is :mod:`agent_session_loop.redirect_store`'s
+    the ids are well formed is :mod:`agent_session_loop.redirect_store_validation`'s
     answer, and asking it twice is how two surfaces come to disagree.
     """
     if not isinstance(raw, Mapping):

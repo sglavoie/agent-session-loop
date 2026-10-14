@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import events, verification
+from . import events, verification_models
 from . import supervisor_audit_evidence_failures as audit_evidence_failures
 from . import supervisor_audit_evidence_helpers as audit_evidence_helpers
 from .supervisor_audit_checks_success import _accepted_verification_is_accounted_for
@@ -245,9 +245,11 @@ def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
         # lets a skipped diagnostic stand in for a gate that failed.
         absorbable = max(diagnostics - skipped, 0)
         roles = [payload.get("role") for payload in failures]
-        gate_failures = sum(1 for role in roles if role == verification.CHECK_ROLE_GATE)
+        gate_failures = sum(
+            1 for role in roles if role == verification_models.CHECK_ROLE_GATE
+        )
         diagnostic_failures = sum(
-            1 for role in roles if role == verification.CHECK_ROLE_DIAGNOSTIC
+            1 for role in roles if role == verification_models.CHECK_ROLE_DIAGNOSTIC
         )
         unidentified = len(roles) - gate_failures - diagnostic_failures
         if gate_failures:

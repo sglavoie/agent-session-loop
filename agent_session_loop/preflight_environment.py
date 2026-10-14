@@ -19,9 +19,7 @@ from .plans_errors import PlanError
 from .plans_files import canonicalize_path
 from .plans_models import PlanSnapshot
 from .preflight_models import COMMIT_MODES, CommitMode, PreflightFinding, _finding
-from .verification import (
-    VerificationContext,
-)
+from .verification_models import VerificationContext
 
 TURN_BUDGET_YELLOW_THRESHOLD = 25
 

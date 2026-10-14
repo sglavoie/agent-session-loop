@@ -49,7 +49,9 @@ from typing import Any
 
 from agent_session_loop import events, plans_files, state, workbench_remote_reads
 from asl_workbench import catalog, details, remote_reads
-from asl_workbench import connector as portable
+from asl_workbench import connector_protocols as portable_protocols
+from asl_workbench import connector_runtime as portable_runtime
+from asl_workbench import connector_support as portable_support
 from asl_workbench.transport import (
     CAPABILITY_CATALOG,
     CAPABILITY_DETAIL,
@@ -110,7 +112,7 @@ class LinkChannel:
 
     def send(self, frame: bytes) -> bytes | None:
         if self.failing:
-            raise portable.ChannelError("the link is down")
+            raise portable_support.ChannelError("the link is down")
         self.frames.append(json.loads(frame.decode("utf-8")))
         return self.inbound.pop(0) if self.inbound else None
 
@@ -141,16 +143,18 @@ class LinkChannel:
 class StubSource:
     """An observation source with a fixed cycle, and its commits counted."""
 
-    def __init__(self, cycle: portable.ObservationCycle | None = None) -> None:
+    def __init__(
+        self, cycle: portable_protocols.ObservationCycle | None = None
+    ) -> None:
         self.cycle = cycle
-        self.committed: list[portable.ObservationCycle] = []
+        self.committed: list[portable_protocols.ObservationCycle] = []
 
-    def observe(self, now: float) -> portable.ObservationCycle:
+    def observe(self, now: float) -> portable_protocols.ObservationCycle:
         if self.cycle is None:
-            return portable.ObservationCycle(observed_at=now)
+            return portable_protocols.ObservationCycle(observed_at=now)
         return self.cycle
 
-    def commit(self, cycle: portable.ObservationCycle) -> None:
+    def commit(self, cycle: portable_protocols.ObservationCycle) -> None:
         self.committed.append(cycle)
 
 
@@ -289,7 +293,7 @@ def make_client(**overrides: Any) -> remote_reads.DetailReadClient:
     return client
 
 
-def make_connector(**overrides: Any) -> portable.ObservationConnector:
+def make_connector(**overrides: Any) -> portable_runtime.ObservationConnector:
     """A connector wired for the correlated lane, with inline workers."""
     fields: dict[str, Any] = {
         "connector_id": CONNECTOR_ID,
@@ -305,7 +309,7 @@ def make_connector(**overrides: Any) -> portable.ObservationConnector:
         "run_answer": inline,
     }
     fields.update(overrides)
-    return portable.ObservationConnector(**fields)
+    return portable_runtime.ObservationConnector(**fields)
 
 
 # --------------------------------------------------------------------------
@@ -900,7 +904,7 @@ class LaneTests(unittest.TestCase):
         connector = make_connector(responder=None)
         self.assertNotIn(CAPABILITY_DETAIL, connector.capabilities)
         self.assertEqual(
-            tuple(connector.capabilities), portable.OBSERVATION_CAPABILITIES
+            tuple(connector.capabilities), portable_support.OBSERVATION_CAPABILITIES
         )
 
     # -- a round trip ----------------------------------------------------
@@ -1093,14 +1097,14 @@ class LaneTests(unittest.TestCase):
             2,
         )
 
-    def big_cycle(self) -> portable.ObservationCycle:
+    def big_cycle(self) -> portable_protocols.ObservationCycle:
         """A cycle with a snapshot and several pages waiting behind it."""
         records = [
             catalog.record_from_summary(self.summary(f"/tmp/plans/plan-{index}"))
             for index in range(4)
         ]
         built = catalog.build_catalog(records)
-        return portable.ObservationCycle(
+        return portable_protocols.ObservationCycle(
             observed_at=NOW,
             catalog_pages=tuple(
                 built.page(offset=index, limit=1) for index in range(4)
@@ -1140,7 +1144,7 @@ class LaneTests(unittest.TestCase):
         connector = make_connector(
             channel=channel, run_answer=worker, heartbeat_interval=0.25
         )
-        for index in range(portable.MAX_PENDING_REQUESTS + 3):
+        for index in range(portable_support.MAX_PENDING_REQUESTS + 3):
             channel.carry(self.read_request(f"r{index}"))
         self.drive(connector, channel, 40)
         refusals = [
@@ -1225,7 +1229,7 @@ class LaneTests(unittest.TestCase):
         channel.failing = True
         connector.step(NOW + 3.0)
         self.assertEqual(connector.pending_reads(), 0)
-        self.assertEqual(connector.state, portable.STATE_BACKOFF)
+        self.assertEqual(connector.state, portable_support.STATE_BACKOFF)
         self.assertEqual(channel.answers(), [])
 
     def test_a_stopped_connector_holds_no_material(self) -> None:
@@ -1234,7 +1238,7 @@ class LaneTests(unittest.TestCase):
         connector.stop()
         self.assertEqual(connector.pending_reads(), 0)
         self.assertEqual(connector.pending(), 0)
-        self.assertEqual(connector.state, portable.STATE_STOPPED)
+        self.assertEqual(connector.state, portable_support.STATE_STOPPED)
         self.assertIsNone(connector.step(NOW + 10.0))
         self.assertEqual(channel.answers(), [])
 

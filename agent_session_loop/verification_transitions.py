@@ -30,7 +30,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from . import contracts, events, review, review_continuation, verification
+from . import (
+    contracts,
+    events,
+    review,
+    review_continuation,
+    verification_cli,
+    verification_models,
+)
 from .transitions import StateMachine
 
 # --------------------------------------------------------------------------
@@ -71,7 +78,7 @@ PLAN_COMPLETION_REASONS = frozenset({"all-complete"})
 VERIFY_REFUSAL_MALFORMED_CONTRACT = "malformed-contract"
 VERIFY_REFUSAL_NO_CONTRACT = "no-contract"
 VERIFY_REFUSAL_INTERRUPTED = "interrupted"
-VERIFY_REFUSAL_UNAVAILABLE = verification.VERIFY_EXIT_REASON_FAILED
+VERIFY_REFUSAL_UNAVAILABLE = verification_cli.VERIFY_EXIT_REASON_FAILED
 
 VerificationState = Literal[
     "scheduled",
@@ -293,7 +300,7 @@ def refuse_unavailable_verification(
 # --------------------------------------------------------------------------
 
 
-def verification_failure_summary(result: verification.VerificationResult) -> str:
+def verification_failure_summary(result: verification_models.VerificationResult) -> str:
     failures = result.failures
     total = result.gate_count
     parts = [f"{check.name} ({check.failure_reason or 'failed'})" for check in failures]
@@ -302,7 +309,7 @@ def verification_failure_summary(result: verification.VerificationResult) -> str
 
 
 def verification_failure_details(
-    result: verification.VerificationResult,
+    result: verification_models.VerificationResult,
     contract: contracts.CompletionContract,
 ) -> dict[str, Any]:
     diagnostic_count = sum(
@@ -327,8 +334,8 @@ def verification_failure_details(
 
 
 def broad_failures_only(
-    result: verification.VerificationResult,
-) -> tuple[verification.CheckResult, ...] | None:
+    result: verification_models.VerificationResult,
+) -> tuple[verification_models.CheckResult, ...] | None:
     """The failing gates when *every* one of them is a replayed broad gate.
 
     ``None`` when the result has no failures or when any failure is one of the
@@ -357,7 +364,7 @@ class BroadFailureDeferral:
 
 
 def broad_failure_acceptance(
-    failures: Sequence[verification.CheckResult],
+    failures: Sequence[verification_models.CheckResult],
     verdict: Mapping[str, Any],
 ) -> BroadFailureDeferral | None:
     """Accept only findings-backed failures from replayed plan gates.
@@ -434,7 +441,7 @@ class VerificationAdjudication:
 
 def adjudicate_verification(
     *,
-    result: verification.VerificationResult,
+    result: verification_models.VerificationResult,
     contract: contracts.CompletionContract,
     deferral: BroadFailureDeferral | None = None,
 ) -> VerificationAdjudication:
@@ -458,9 +465,9 @@ def adjudicate_verification(
         state=state,
         passed=result.passed,
         reason=(
-            verification.VERIFY_EXIT_REASON_OK
+            verification_cli.VERIFY_EXIT_REASON_OK
             if result.passed
-            else verification.VERIFY_EXIT_REASON_FAILED
+            else verification_cli.VERIFY_EXIT_REASON_FAILED
         ),
         summary=None if result.passed else verification_failure_summary(result),
         details=details,
@@ -539,7 +546,7 @@ def read_prior_verification_failures(
         payload = record.get("payload")
         if not isinstance(payload, dict):
             continue
-        if payload.get("reason") != verification.VERIFY_EXIT_REASON_FAILED:
+        if payload.get("reason") != verification_cli.VERIFY_EXIT_REASON_FAILED:
             continue
         details = payload.get("details")
         if not isinstance(details, dict):

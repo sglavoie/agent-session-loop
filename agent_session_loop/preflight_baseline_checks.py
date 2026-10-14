@@ -16,9 +16,7 @@ from .plans_errors import PlanError
 from .plans_models import PlanSnapshot, ProgressEntry
 from .plans_progress import progress_path, read_progress_entries
 from .preflight_models import PreflightFinding, _finding
-from .verification import (
-    VerificationContext,
-)
+from .verification_models import VerificationContext
 
 
 def _any_session_complete(snapshot: PlanSnapshot | None) -> bool:

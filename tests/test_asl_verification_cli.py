@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import artifacts, plans_files, verification
+from agent_session_loop import artifacts, plans_files, verification_cli
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
@@ -279,7 +279,7 @@ class VerifyCliTests(unittest.TestCase):
         # still round-trip as a single argument in every advertised no-contract
         # remediation command (both next_steps commands and the message text).
         weird_plan = "/plans/de mo; rm -rf $(evil) 'q'"
-        remediation = verification._no_contract_skill_remediation(weird_plan)
+        remediation = verification_cli._no_contract_skill_remediation(weird_plan)
         commands = [step["command"] for step in remediation["next_steps"]]
         self.assertEqual(
             [

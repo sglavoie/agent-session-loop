@@ -25,7 +25,7 @@ from agent_session_loop import (
     state,
     state_locks,
     turn_execution_constants,
-    verification,
+    verification_run,
 )
 from tests.support import (
     REPO_ROOT,
@@ -124,7 +124,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
             raise KeyboardInterrupt
 
         with mock.patch.object(
-            verification,
+            verification_run,
             "run_verification",
             side_effect=raise_keyboard_interrupt,
         ):

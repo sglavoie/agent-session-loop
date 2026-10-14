@@ -35,7 +35,13 @@ from agent_session_loop import (
     redirect_admission,
     redirect_cli,
     redirect_recovery,
-    redirect_store,
+    redirect_store_carry,
+    redirect_store_delivery,
+    redirect_store_journal,
+    redirect_store_models,
+    redirect_store_requests,
+    redirect_store_validation,
+    redirect_store_vocab,
 )
 from tests.support import (
     _write_lock_file,
@@ -112,16 +118,18 @@ class RedirectCliTestCase(unittest.TestCase):
         self.write_state(**state_kwargs)
         self.write_lock(redirect_endpoint=self.state_dir / "nothing-here.fifo")
 
-    def target(self, *, turn_index: int = 1) -> redirect_store.RedirectTarget:
-        return redirect_store.RedirectTarget(
+    def target(self, *, turn_index: int = 1) -> redirect_store_models.RedirectTarget:
+        return redirect_store_models.RedirectTarget(
             run_id=RUN_ID,
             session_id=SESSION_ID,
             turn_index=turn_index,
             harness="claude",
         )
 
-    def journal(self) -> redirect_store.RedirectJournalView:
-        return redirect_store.read_journal(self.plan_dir, state_dir=self.state_dir)
+    def journal(self) -> redirect_store_models.RedirectJournalView:
+        return redirect_store_journal.read_journal(
+            self.plan_dir, state_dir=self.state_dir
+        )
 
     # -- invocation -------------------------------------------------------
 
@@ -170,7 +178,7 @@ class RedirectCliTestCase(unittest.TestCase):
         )
 
     def accept_when_pending(
-        self, target: redirect_store.RedirectTarget
+        self, target: redirect_store_models.RedirectTarget
     ) -> threading.Thread:
         """Play the runner: accept the first correction that appears.
 
@@ -184,11 +192,11 @@ class RedirectCliTestCase(unittest.TestCase):
         def accept() -> None:
             deadline = time.monotonic() + 10.0
             while time.monotonic() < deadline:
-                pending = redirect_store.read_journal(
+                pending = redirect_store_journal.read_journal(
                     self.plan_dir, state_dir=self.state_dir
                 ).pending()
                 if pending:
-                    redirect_store.accept_request(
+                    redirect_store_requests.accept_request(
                         self.plan_dir,
                         pending[0].operation_id,
                         target=target,
@@ -298,7 +306,7 @@ class SuccessfulRedirectTests(RedirectCliTestCase):
         # captured the command's output.
         self.assertNotIn(FEEDBACK, json.dumps(payload))
         self.assertEqual(
-            redirect_store.feedback_digest(FEEDBACK),
+            redirect_store_validation.feedback_digest(FEEDBACK),
             payload["request"]["feedback_digest"],
         )
 
@@ -310,7 +318,7 @@ class SuccessfulRedirectTests(RedirectCliTestCase):
 
         self.assertEqual(redirect_cli.EXIT_OK, code)
         self.assertEqual(
-            redirect_store.feedback_digest(FEEDBACK),
+            redirect_store_validation.feedback_digest(FEEDBACK),
             payload["request"]["feedback_digest"],
         )
 
@@ -363,7 +371,7 @@ class SuccessfulRedirectTests(RedirectCliTestCase):
         code, payload = self.redirect("--text", FEEDBACK, "--ttl", "0")
 
         self.assertEqual(redirect_cli.EXIT_REFUSED, code)
-        self.assertEqual(redirect_store.ERROR_INVALID_TTL, payload["reason"])
+        self.assertEqual(redirect_store_vocab.ERROR_INVALID_TTL, payload["reason"])
         self.assertEqual((), self.journal().requests)
 
 
@@ -380,13 +388,13 @@ class UnavailableControlTests(RedirectCliTestCase):
         self.assertEqual(redirect_admission.OUTCOME_UNAVAILABLE, facts["outcome"])
         self.assertEqual(redirect_cli.STAGE_BLOCKED, facts["stage"])
         self.assertEqual(
-            redirect_store.REASON_URGENT_CHANNEL_UNAVAILABLE, payload["reason"]
+            redirect_store_vocab.REASON_URGENT_CHANNEL_UNAVAILABLE, payload["reason"]
         )
         # Persisted *and* settled: the operator gets an id for the record, and
         # no later runner can pick it up.
         self.assertIsNotNone(facts["operation_id"])
         request = self.journal().request(facts["operation_id"])
-        self.assertEqual(redirect_store.STATE_REJECTED, request.state)
+        self.assertEqual(redirect_store_vocab.STATE_REJECTED, request.state)
 
     def test_an_unavailable_submission_says_the_request_will_not_be_acted_on(
         self,
@@ -492,7 +500,9 @@ class UnavailableControlTests(RedirectCliTestCase):
         )
 
         self.assertEqual(redirect_cli.EXIT_REFUSED, code)
-        self.assertEqual(redirect_store.ERROR_INVALID_OPERATION_ID, payload["reason"])
+        self.assertEqual(
+            redirect_store_vocab.ERROR_INVALID_OPERATION_ID, payload["reason"]
+        )
         self.assertEqual(1, len(self.journal().requests))
 
 
@@ -559,25 +569,27 @@ class StaleTargetTests(RedirectCliTestCase):
 class RedirectStatusTests(RedirectCliTestCase):
     """Looking up corrections without touching them."""
 
-    def submitted(self, *, turn_index: int = 1) -> redirect_store.RedirectRequest:
-        return redirect_store.submit_request(
+    def submitted(
+        self, *, turn_index: int = 1
+    ) -> redirect_store_models.RedirectRequest:
+        return redirect_store_requests.submit_request(
             self.plan_dir,
             target=self.target(turn_index=turn_index),
             feedback=FEEDBACK,
             state_dir=self.state_dir,
         )
 
-    def delivered(self, *, turn_index: int) -> redirect_store.RedirectRequest:
+    def delivered(self, *, turn_index: int) -> redirect_store_models.RedirectRequest:
         """A correction a worker on ``turn_index`` was actually launched with."""
         request = self.submitted()
         continuation = self.target(turn_index=turn_index)
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             request.operation_id,
             continuation=continuation,
             state_dir=self.state_dir,
         )
-        redirect_store.deliver_request(
+        redirect_store_delivery.deliver_request(
             self.plan_dir,
             request.operation_id,
             continuation=continuation,
@@ -621,7 +633,7 @@ class RedirectStatusTests(RedirectCliTestCase):
     def test_an_accepted_correction_on_the_live_turn_is_interrupting(self) -> None:
         self.make_live_run()
         request = self.submitted()
-        redirect_store.accept_request(
+        redirect_store_requests.accept_request(
             self.plan_dir,
             request.operation_id,
             target=self.target(),
@@ -637,7 +649,7 @@ class RedirectStatusTests(RedirectCliTestCase):
     def test_the_same_record_once_the_turn_is_gone_is_stopped(self) -> None:
         self.make_live_run()
         request = self.submitted()
-        redirect_store.accept_request(
+        redirect_store_requests.accept_request(
             self.plan_dir,
             request.operation_id,
             target=self.target(),
@@ -669,7 +681,7 @@ class RedirectStatusTests(RedirectCliTestCase):
     def test_a_carried_correction_not_yet_launched_is_also_resuming(self) -> None:
         self.make_live_run(turn_index=2)
         request = self.submitted()
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             request.operation_id,
             continuation=self.target(turn_index=2),
@@ -702,7 +714,7 @@ class RedirectStatusTests(RedirectCliTestCase):
     def test_a_carry_that_never_launched_is_owed_rather_than_in_doubt(self) -> None:
         self.make_live_run(turn_index=2)
         request = self.submitted()
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             request.operation_id,
             continuation=self.target(turn_index=2),
@@ -736,22 +748,22 @@ class RedirectStatusTests(RedirectCliTestCase):
     ) -> None:
         self.make_live_run()
         ended = self.submitted()
-        redirect_store.reject_request(
+        redirect_store_requests.reject_request(
             self.plan_dir,
             ended.operation_id,
-            reason=redirect_store.REASON_RUN_ENDED,
+            reason=redirect_store_vocab.REASON_RUN_ENDED,
             state_dir=self.state_dir,
         )
-        unavailable = redirect_store.submit_request(
+        unavailable = redirect_store_requests.submit_request(
             self.plan_dir,
             target=self.target(),
             feedback="a second correction",
             state_dir=self.state_dir,
         )
-        redirect_store.reject_request(
+        redirect_store_requests.reject_request(
             self.plan_dir,
             unavailable.operation_id,
-            reason=redirect_store.REASON_URGENT_CHANNEL_UNAVAILABLE,
+            reason=redirect_store_vocab.REASON_URGENT_CHANNEL_UNAVAILABLE,
             state_dir=self.state_dir,
         )
 
@@ -771,12 +783,12 @@ class RedirectStatusTests(RedirectCliTestCase):
         code, payload = self.status("--redirect-id", "op-nobody-wrote")
 
         self.assertEqual(redirect_cli.EXIT_REFUSED, code)
-        self.assertEqual(redirect_store.ERROR_UNKNOWN_REQUEST, payload["reason"])
+        self.assertEqual(redirect_store_vocab.ERROR_UNKNOWN_REQUEST, payload["reason"])
 
     def test_named_ids_narrow_the_report(self) -> None:
         self.make_live_run()
         first = self.submitted()
-        redirect_store.submit_request(
+        redirect_store_requests.submit_request(
             self.plan_dir,
             target=self.target(),
             feedback="a second correction",
@@ -793,33 +805,33 @@ class RedirectStatusTests(RedirectCliTestCase):
     def test_reading_the_status_changes_nothing(self) -> None:
         self.make_live_run()
         self.submitted()
-        before = redirect_store.journal_path_for_plan(
+        before = redirect_store_journal.journal_path_for_plan(
             self.plan_dir, self.state_dir
         ).read_bytes()
 
         self.status()
         self.status()
 
-        after = redirect_store.journal_path_for_plan(
+        after = redirect_store_journal.journal_path_for_plan(
             self.plan_dir, self.state_dir
         ).read_bytes()
         self.assertEqual(before, after)
 
-    def acknowledged_request(self) -> redirect_store.RedirectRequest:
+    def acknowledged_request(self) -> redirect_store_models.RedirectRequest:
         """One correction carried into turn 2 and receipted by its worker."""
-        request = redirect_store.submit_request(
+        request = redirect_store_requests.submit_request(
             self.plan_dir,
             target=self.target(),
             feedback=FEEDBACK,
             state_dir=self.state_dir,
         )
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             request.operation_id,
             continuation=self.target(turn_index=2),
             state_dir=self.state_dir,
         )
-        return redirect_store.acknowledge_request(
+        return redirect_store_delivery.acknowledge_request(
             self.plan_dir,
             request.operation_id,
             attempt=self.target(turn_index=2),
@@ -830,14 +842,14 @@ class RedirectStatusTests(RedirectCliTestCase):
 class AcknowledgmentWaitTests(RedirectCliTestCase):
     """Waiting for a worker receipt, and what a timeout is allowed to mean."""
 
-    def carried(self) -> redirect_store.RedirectRequest:
-        request = redirect_store.submit_request(
+    def carried(self) -> redirect_store_models.RedirectRequest:
+        request = redirect_store_requests.submit_request(
             self.plan_dir,
             target=self.target(),
             feedback=FEEDBACK,
             state_dir=self.state_dir,
         )
-        return redirect_store.carry_request(
+        return redirect_store_carry.carry_request(
             self.plan_dir,
             request.operation_id,
             continuation=self.target(turn_index=2),
@@ -847,7 +859,7 @@ class AcknowledgmentWaitTests(RedirectCliTestCase):
     def test_a_receipt_already_recorded_completes_the_wait(self) -> None:
         self.make_live_run(turn_index=2)
         request = self.carried()
-        redirect_store.acknowledge_request(
+        redirect_store_delivery.acknowledge_request(
             self.plan_dir,
             request.operation_id,
             attempt=self.target(turn_index=2),
@@ -889,7 +901,7 @@ class AcknowledgmentWaitTests(RedirectCliTestCase):
         # in the worker's prompt, and still unsettled.
         self.assertTrue(wait["observational"])
         carried = self.journal().request(request.operation_id)
-        self.assertEqual(redirect_store.STATE_ACCEPTED, carried.state)
+        self.assertEqual(redirect_store_vocab.STATE_ACCEPTED, carried.state)
         self.assertTrue(carried.carried)
 
     def test_the_timeout_text_says_the_worker_still_holds_it(self) -> None:
@@ -943,7 +955,7 @@ class AcknowledgmentWaitTests(RedirectCliTestCase):
         attempt = self.target(turn_index=2)
 
         def acknowledge_during_wait(*args, **kwargs):
-            redirect_store.acknowledge_request(
+            redirect_store_delivery.acknowledge_request(
                 self.plan_dir,
                 request.operation_id,
                 attempt=attempt,
@@ -1033,7 +1045,7 @@ class FreshConversationRecoveryTests(RedirectCliTestCase):
 
     def test_corrections_a_fresh_start_would_carry_are_named(self) -> None:
         self.pause_on_recovery()
-        request = redirect_store.submit_request(
+        request = redirect_store_requests.submit_request(
             self.plan_dir,
             target=self.target(),
             feedback=FEEDBACK,
@@ -1067,15 +1079,15 @@ class StageProjectionTests(unittest.TestCase):
     """The one derivation this module owns, checked without a filesystem."""
 
     def outcome(self, **overrides) -> redirect_recovery.OperationOutcome:
-        target = redirect_store.RedirectTarget(
+        target = redirect_store_models.RedirectTarget(
             run_id=RUN_ID, session_id=SESSION_ID, turn_index=1
         )
         payload = {
             "operation_id": "op-1",
             "status": redirect_recovery.STATUS_ACCEPTED,
             "target": target,
-            "journal_state": redirect_store.STATE_ACCEPTED,
-            "feedback_digest": redirect_store.feedback_digest(FEEDBACK),
+            "journal_state": redirect_store_vocab.STATE_ACCEPTED,
+            "feedback_digest": redirect_store_validation.feedback_digest(FEEDBACK),
             "feedback_bytes": len(FEEDBACK.encode("utf-8")),
             "created_at": clock.utc_iso_now(),
             "expires_at": clock.utc_iso_now(),
@@ -1100,7 +1112,7 @@ class StageProjectionTests(unittest.TestCase):
         self.assertEqual(redirect_cli.STAGE_REJECTED, stage)
 
     def test_a_different_run_on_the_same_turn_index_is_not_the_same_turn(self) -> None:
-        other_run = redirect_store.RedirectTarget(
+        other_run = redirect_store_models.RedirectTarget(
             run_id="run-somebody-else", session_id=SESSION_ID, turn_index=1
         )
         stage = redirect_cli.stage_for_operation(self.outcome(), live_target=other_run)

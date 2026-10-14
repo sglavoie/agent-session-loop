@@ -33,7 +33,7 @@ from agent_session_loop import (
     turn_execution_artifacts,
     turn_execution_commit,
     turn_settlement,
-    verification,
+    verification_checks,
     verification_transitions,
 )
 from tests import support_asl_run_loop_view as run_loop_view
@@ -324,8 +324,8 @@ class HandoffCorrectionAttemptTests(unittest.TestCase):
 
 
 class CommandFailureDetailTests(unittest.TestCase):
-    def check(self) -> verification.CommandCheck:
-        return verification.CommandCheck(
+    def check(self) -> contracts.CommandCheck:
+        return contracts.CommandCheck(
             name="final-review-artifact-consistent",
             argv=("python3", "-c", "pass"),
             timeout_seconds=60,
@@ -337,7 +337,7 @@ class CommandFailureDetailTests(unittest.TestCase):
         Every consumer that bounds an inline string cuts the tail, so an
         argv-first detail is exactly the one that loses the reason.
         """
-        detail = verification._command_failure_detail(
+        detail = verification_checks._command_failure_detail(
             self.check(),
             1,
             {
@@ -360,7 +360,7 @@ class CommandFailureDetailTests(unittest.TestCase):
         last line must reach it through no route at all -- not on stderr, and
         not on stdout when stderr is silent.
         """
-        detail = verification._command_failure_detail(
+        detail = verification_checks._command_failure_detail(
             self.check(),
             2,
             {
@@ -372,19 +372,19 @@ class CommandFailureDetailTests(unittest.TestCase):
         self.assertEqual("command exited 2: python3", detail)
 
     def test_the_authored_argv_stays_out_of_the_detail(self) -> None:
-        check = verification.CommandCheck(
+        check = contracts.CommandCheck(
             name="final-review-output-evidence-based",
             argv=("python3", "-c", "x = 1  # " + "y" * 4000),
             timeout_seconds=60,
         )
 
-        detail = verification._command_failure_detail(check, 1, {})
+        detail = verification_checks._command_failure_detail(check, 1, {})
 
         self.assertEqual("command exited 1: python3", detail)
 
     def test_diagnostic_lead_is_truncated(self) -> None:
         """A total on the lead, independent of the parser's own vocabulary."""
-        detail = verification._command_failure_detail(
+        detail = verification_checks._command_failure_detail(
             self.check(),
             1,
             {
@@ -396,7 +396,7 @@ class CommandFailureDetailTests(unittest.TestCase):
         )
         self.assertLessEqual(
             len(detail) - len("; command exited 1: python3"),
-            verification._COMMAND_DIAGNOSTIC_LIMIT,
+            verification_checks._COMMAND_DIAGNOSTIC_LIMIT,
         )
 
 

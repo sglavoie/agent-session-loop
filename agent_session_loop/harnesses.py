@@ -55,7 +55,8 @@ ACCESS_PROFILE_NAMES: tuple[AccessProfileName, ...] = ("worker", "audit-read-onl
 # keeps the inherited pipes open. The post-turn sweep runs after this join and
 # kills such a descendant if it is still in the turn's process group, but one
 # that started a session of its own outlives both, so this caps what a turn
-# pays to walk away from it (mirrors verification._ABANDONED_READER_JOIN_SECONDS).
+# pays to walk away from it (mirrors
+# verification_process._ABANDONED_READER_JOIN_SECONDS).
 _ABANDONED_READER_JOIN_SECONDS = 5.0
 
 #: How often a turn with an abort signal attached re-checks its deadlines. The
@@ -305,7 +306,7 @@ def _kill_process_group(process: subprocess.Popen) -> None:
     group ID is its PID and every descendant inherits that group unless it
     starts a session of its own. Killing only the direct child leaves a harness
     that fanned out into helper processes running, still holding the captured
-    pipes open (mirrors :func:`verification._kill_process_group`).
+    pipes open (mirrors :func:`verification_process._kill_process_group`).
     """
     try:
         os.killpg(process.pid, signal.SIGKILL)

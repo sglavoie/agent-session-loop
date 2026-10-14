@@ -66,7 +66,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import clock, redirect_store
+from . import (
+    clock,
+    redirect_store_carry,
+    redirect_store_delivery,
+    redirect_store_journal,
+    redirect_store_models,
+    redirect_store_validation,
+    redirect_store_vocab,
+)
 
 # ---------------------------------------------------------------------------
 # Attempt identity
@@ -78,7 +86,7 @@ from . import clock, redirect_store
 ATTEMPT_TOKEN_SEPARATOR = "/"
 
 
-def attempt_token(target: redirect_store.RedirectTarget) -> str:
+def attempt_token(target: redirect_store_models.RedirectTarget) -> str:
     """Return the opaque identity a worker echoes back to receipt a correction.
 
     Built from the turn's identity triple and deliberately *not* from the
@@ -102,7 +110,7 @@ def attempt_token(target: redirect_store.RedirectTarget) -> str:
 
 def token_identifies(
     token: str,
-    target: redirect_store.RedirectTarget,
+    target: redirect_store_models.RedirectTarget,
 ) -> bool:
     """Whether ``token`` is exactly the token ``target`` would mint."""
     return isinstance(token, str) and token == attempt_token(target)
@@ -113,7 +121,7 @@ def token_identifies(
 # ---------------------------------------------------------------------------
 
 #: Failure reasons this module raises on its own behalf. Journal refusals keep
-#: `redirect_store`'s reasons; these two are about the *worker's* claim.
+#: `redirect_store_vocab`'s reasons; these two are about the *worker's* claim.
 ERROR_ATTEMPT_MISMATCH = "redirect-attempt-mismatch"
 ERROR_NO_LIVE_ATTEMPT = "redirect-no-live-attempt"
 
@@ -149,7 +157,7 @@ class Correction:
     words, and it exists because a prompt has to say them. ``to_payload`` omits
     the text on purpose: an event, a state file, or a diagnostic bundle built
     from this object carries the digest and the byte count, exactly as
-    :class:`redirect_store.RedirectRequest` does.
+    :class:`redirect_store_models.RedirectRequest` does.
     """
 
     operation_id: str
@@ -197,7 +205,7 @@ class RefusedCorrection:
 class CarriedCorrections:
     """Everything one continuation attempt carries, in submission order."""
 
-    continuation: redirect_store.RedirectTarget
+    continuation: redirect_store_models.RedirectTarget
     corrections: tuple[Correction, ...] = ()
     refused: tuple[RefusedCorrection, ...] = ()
 
@@ -225,9 +233,9 @@ class CarriedCorrections:
 
 
 def coalesced_candidates(
-    view: redirect_store.RedirectJournalView,
+    view: redirect_store_models.RedirectJournalView,
     *,
-    continuation: redirect_store.RedirectTarget,
+    continuation: redirect_store_models.RedirectTarget,
     accepted_operation_ids: Sequence[str] = (),
     recovered_operation_ids: Sequence[str] = (),
 ) -> tuple[str, ...]:
@@ -279,7 +287,7 @@ def coalesced_candidates(
 def carry_corrections(
     plan_dir: str | Path,
     *,
-    continuation: redirect_store.RedirectTarget,
+    continuation: redirect_store_models.RedirectTarget,
     accepted_operation_ids: Sequence[str] = (),
     recovered_operation_ids: Sequence[str] = (),
     state_dir: str | Path | None = None,
@@ -301,8 +309,8 @@ def carry_corrections(
     refused, so a caller cannot widen the rule for the batch by naming one
     genuine recovery in it.
     """
-    redirect_store.validate_target(continuation)
-    view = redirect_store.read_journal(plan_dir, state_dir=state_dir)
+    redirect_store_validation.validate_target(continuation)
+    view = redirect_store_journal.read_journal(plan_dir, state_dir=state_dir)
     candidates = coalesced_candidates(
         view,
         continuation=continuation,
@@ -314,7 +322,7 @@ def carry_corrections(
     refused: list[RefusedCorrection] = []
     for operation_id in candidates:
         try:
-            request = redirect_store.carry_request(
+            request = redirect_store_carry.carry_request(
                 plan_dir,
                 operation_id,
                 continuation=continuation,
@@ -322,7 +330,7 @@ def carry_corrections(
                 now=now,
                 allow_recovery=operation_id in recovered,
             )
-        except redirect_store.RedirectStoreError as error:
+        except redirect_store_models.RedirectStoreError as error:
             refused.append(
                 RefusedCorrection(
                     operation_id=operation_id,
@@ -331,7 +339,7 @@ def carry_corrections(
                 )
             )
             continue
-        text = redirect_store.read_feedback(
+        text = redirect_store_journal.read_feedback(
             plan_dir,
             operation_id,
             state_dir=state_dir,
@@ -343,7 +351,7 @@ def carry_corrections(
             refused.append(
                 RefusedCorrection(
                     operation_id=operation_id,
-                    reason=redirect_store.ERROR_INVALID_FEEDBACK,
+                    reason=redirect_store_vocab.ERROR_INVALID_FEEDBACK,
                     message="carried redirect request has no readable feedback",
                 )
             )
@@ -369,7 +377,7 @@ def carry_corrections(
 def carried_corrections(
     plan_dir: str | Path,
     *,
-    attempt: redirect_store.RedirectTarget,
+    attempt: redirect_store_models.RedirectTarget,
     state_dir: str | Path | None = None,
 ) -> CarriedCorrections:
     """Re-read what ``attempt`` already carries, appending nothing.
@@ -378,12 +386,12 @@ def carried_corrections(
     twice -- a retried launch, a diagnostic rebuild -- must show the same
     corrections rather than sweep up whatever arrived in between.
     """
-    redirect_store.validate_target(attempt)
-    view = redirect_store.read_journal(plan_dir, state_dir=state_dir)
+    redirect_store_validation.validate_target(attempt)
+    view = redirect_store_journal.read_journal(plan_dir, state_dir=state_dir)
     carried: list[Correction] = []
     refused: list[RefusedCorrection] = []
     for request in view.carried_for(attempt):
-        text = redirect_store.read_feedback(
+        text = redirect_store_journal.read_feedback(
             plan_dir,
             request.operation_id,
             state_dir=state_dir,
@@ -392,7 +400,7 @@ def carried_corrections(
             refused.append(
                 RefusedCorrection(
                     operation_id=request.operation_id,
-                    reason=redirect_store.ERROR_INVALID_FEEDBACK,
+                    reason=redirect_store_vocab.ERROR_INVALID_FEEDBACK,
                     message="carried redirect request has no readable feedback",
                 )
             )
@@ -416,17 +424,17 @@ def carried_corrections(
 
 
 class _CarryAnnotator(Protocol):
-    """The shape :func:`redirect_store.deliver_request` and its siblings share."""
+    """The shape :func:`redirect_store_delivery.deliver_request` and kin share."""
 
     def __call__(
         self,
         plan_dir: str | Path,
         operation_id: str,
         *,
-        continuation: redirect_store.RedirectTarget,
+        continuation: redirect_store_models.RedirectTarget,
         state_dir: str | Path | None = None,
         now: datetime | None = None,
-    ) -> redirect_store.RedirectRequest: ...
+    ) -> redirect_store_models.RedirectRequest: ...
 
 
 @dataclass(frozen=True)
@@ -440,7 +448,7 @@ class CarryAnnotations:
     which the journal would not move.
     """
 
-    continuation: redirect_store.RedirectTarget
+    continuation: redirect_store_models.RedirectTarget
     kind: str
     operation_ids: tuple[str, ...] = ()
     refused: tuple[RefusedCorrection, ...] = ()
@@ -466,7 +474,7 @@ class CarryAnnotations:
 def _carry_annotation_targets(
     plan_dir: str | Path,
     *,
-    continuation: redirect_store.RedirectTarget,
+    continuation: redirect_store_models.RedirectTarget,
     operation_ids: Sequence[str] | None,
     state_dir: str | Path | None,
 ) -> tuple[str, ...]:
@@ -480,14 +488,14 @@ def _carry_annotation_targets(
     """
     if operation_ids is not None:
         return tuple(operation_ids)
-    view = redirect_store.read_journal(plan_dir, state_dir=state_dir)
+    view = redirect_store_journal.read_journal(plan_dir, state_dir=state_dir)
     return tuple(request.operation_id for request in view.carried_for(continuation))
 
 
 def launch_corrections(
     plan_dir: str | Path,
     *,
-    continuation: redirect_store.RedirectTarget,
+    continuation: redirect_store_models.RedirectTarget,
     operation_ids: Sequence[str] | None = None,
     state_dir: str | Path | None = None,
     now: datetime | None = None,
@@ -510,8 +518,8 @@ def launch_corrections(
         plan_dir,
         continuation=continuation,
         operation_ids=operation_ids,
-        kind=redirect_store.KIND_LAUNCHING,
-        annotate=redirect_store.launch_request,
+        kind=redirect_store_vocab.KIND_LAUNCHING,
+        annotate=redirect_store_carry.launch_request,
         state_dir=state_dir,
         now=now,
     )
@@ -520,7 +528,7 @@ def launch_corrections(
 def deliver_corrections(
     plan_dir: str | Path,
     *,
-    continuation: redirect_store.RedirectTarget,
+    continuation: redirect_store_models.RedirectTarget,
     operation_ids: Sequence[str] | None = None,
     state_dir: str | Path | None = None,
     now: datetime | None = None,
@@ -540,8 +548,8 @@ def deliver_corrections(
         plan_dir,
         continuation=continuation,
         operation_ids=operation_ids,
-        kind=redirect_store.KIND_DELIVERED,
-        annotate=redirect_store.deliver_request,
+        kind=redirect_store_vocab.KIND_DELIVERED,
+        annotate=redirect_store_delivery.deliver_request,
         state_dir=state_dir,
         now=now,
     )
@@ -550,7 +558,7 @@ def deliver_corrections(
 def release_corrections(
     plan_dir: str | Path,
     *,
-    continuation: redirect_store.RedirectTarget,
+    continuation: redirect_store_models.RedirectTarget,
     operation_ids: Sequence[str] | None = None,
     state_dir: str | Path | None = None,
     now: datetime | None = None,
@@ -571,8 +579,8 @@ def release_corrections(
         plan_dir,
         continuation=continuation,
         operation_ids=operation_ids,
-        kind=redirect_store.KIND_RELEASED,
-        annotate=redirect_store.release_request,
+        kind=redirect_store_vocab.KIND_RELEASED,
+        annotate=redirect_store_delivery.release_request,
         state_dir=state_dir,
         now=now,
     )
@@ -581,14 +589,14 @@ def release_corrections(
 def _annotate_carries(
     plan_dir: str | Path,
     *,
-    continuation: redirect_store.RedirectTarget,
+    continuation: redirect_store_models.RedirectTarget,
     operation_ids: Sequence[str] | None,
     kind: str,
     annotate: _CarryAnnotator,
     state_dir: str | Path | None,
     now: datetime | None,
 ) -> CarryAnnotations:
-    redirect_store.validate_target(continuation)
+    redirect_store_validation.validate_target(continuation)
     annotated: list[str] = []
     refused: list[RefusedCorrection] = []
     for operation_id in _carry_annotation_targets(
@@ -605,7 +613,7 @@ def _annotate_carries(
                 state_dir=state_dir,
                 now=now,
             )
-        except redirect_store.RedirectStoreError as error:
+        except redirect_store_models.RedirectStoreError as error:
             refused.append(
                 RefusedCorrection(
                     operation_id=operation_id,
@@ -655,7 +663,7 @@ def acknowledge_correction(
     operation_id: str,
     *,
     token: str,
-    live_attempt: redirect_store.RedirectTarget | None,
+    live_attempt: redirect_store_models.RedirectTarget | None,
     state_dir: str | Path | None = None,
     now: datetime | None = None,
 ) -> Acknowledgment:
@@ -667,7 +675,7 @@ def acknowledge_correction(
     that does not name the live attempt is refused, which is what a stale worker
     from the interrupted turn and a transcript replaying an older prompt both
     present. The second check is the journal's:
-    :func:`redirect_store.acknowledge_request` refuses an attempt it did not
+    :func:`redirect_store_delivery.acknowledge_request` refuses an attempt it did not
     record as the carrier.
 
     A missing live attempt is a refusal rather than a pass. Without one there is
@@ -690,11 +698,11 @@ def acknowledge_correction(
                 "live_attempt": attempt_token(live_attempt),
             },
         )
-    before = redirect_store.read_journal(plan_dir, state_dir=state_dir).request(
+    before = redirect_store_journal.read_journal(plan_dir, state_dir=state_dir).request(
         operation_id
     )
     already = before is not None and before.acknowledged
-    request = redirect_store.acknowledge_request(
+    request = redirect_store_delivery.acknowledge_request(
         plan_dir,
         operation_id,
         attempt=live_attempt,
@@ -753,7 +761,7 @@ class AcknowledgmentWait:
 def wait_for_acknowledgment(
     plan_dir: str | Path,
     *,
-    attempt: redirect_store.RedirectTarget,
+    attempt: redirect_store_models.RedirectTarget,
     operation_ids: Sequence[str] = (),
     timeout_seconds: float = DEFAULT_ACK_WAIT_SECONDS,
     state_dir: str | Path | None = None,
@@ -770,12 +778,12 @@ def wait_for_acknowledgment(
     correction either way -- it is durable in the journal and already in the
     prompt.
     """
-    redirect_store.validate_target(attempt)
+    redirect_store_validation.validate_target(attempt)
     deadline_seconds = max(0.0, min(float(timeout_seconds), MAX_ACK_WAIT_SECONDS))
     wanted = tuple(dict.fromkeys(operation_ids))
     started = monotonic()
     while True:
-        view = redirect_store.read_journal(plan_dir, state_dir=state_dir)
+        view = redirect_store_journal.read_journal(plan_dir, state_dir=state_dir)
         # An explicit id list is watched even when the journal has no record of
         # it: an id that never appears stays outstanding rather than quietly
         # dropping out of the report.
@@ -812,11 +820,11 @@ def wait_for_acknowledgment(
 def acknowledgment_summary(
     plan_dir: str | Path,
     *,
-    attempt: redirect_store.RedirectTarget,
+    attempt: redirect_store_models.RedirectTarget,
     state_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Report one attempt's receipt state without waiting or writing."""
-    view = redirect_store.read_journal(plan_dir, state_dir=state_dir)
+    view = redirect_store_journal.read_journal(plan_dir, state_dir=state_dir)
     carried = view.carried_for(attempt)
     return {
         "attempt": attempt_token(attempt),

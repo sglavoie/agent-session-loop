@@ -106,7 +106,8 @@ from . import (
     run_reporting,
     run_termination,
     turn_execution_commit,
-    verification,
+    verification_models,
+    verification_run,
     verification_transitions,
 )
 
@@ -270,7 +271,7 @@ def _enforce_session_verification(
     heartbeat_interval: float = (
         live_verification.VERIFICATION_HEARTBEAT_INTERVAL_SECONDS
     ),
-    verification_context: verification.VerificationContext | None = None,
+    verification_context: verification_models.VerificationContext | None = None,
     review_broad_failure_deferral: bool = False,
     require_review_artifact: bool = False,
     generated_review_session: bool = False,
@@ -405,7 +406,7 @@ def _enforce_session_verification(
         heartbeat_interval=heartbeat_interval,
     )
 
-    def _on_check_started(event: verification.CheckStartedEvent) -> None:
+    def _on_check_started(event: verification_models.CheckStartedEvent) -> None:
         live.check_started(
             check_index=event.check_index,
             name=event.name,
@@ -415,7 +416,7 @@ def _enforce_session_verification(
             repo=event.repo,
         )
 
-    def _on_check_finished(event: verification.CheckFinishedEvent) -> None:
+    def _on_check_finished(event: verification_models.CheckFinishedEvent) -> None:
         live.check_finished(
             check_index=event.check_index,
             name=event.name,
@@ -429,7 +430,7 @@ def _enforce_session_verification(
             failure_diagnostic=event.result.failure_diagnostic,
         )
 
-    def _on_check_skipped(event: verification.CheckSkippedEvent) -> None:
+    def _on_check_skipped(event: verification_models.CheckSkippedEvent) -> None:
         live.check_skipped(
             check_index=event.check_index,
             name=event.name,
@@ -439,7 +440,7 @@ def _enforce_session_verification(
             repo=event.repo,
         )
 
-    observer = verification.VerificationObserver(
+    observer = verification_models.VerificationObserver(
         on_check_started=_on_check_started,
         on_check_finished=_on_check_finished,
         on_check_skipped=_on_check_skipped,
@@ -461,7 +462,7 @@ def _enforce_session_verification(
             verification_kwargs["repo_root"] = cwd
         else:
             verification_kwargs["context"] = verification_context
-        result = verification.run_verification(contract, **verification_kwargs)
+        result = verification_run.run_verification(contract, **verification_kwargs)
     except KeyboardInterrupt:
         cursor.advance("run-refused")
         return refuse(

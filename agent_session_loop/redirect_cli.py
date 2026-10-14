@@ -64,7 +64,10 @@ from . import (
     redirect_admission,
     redirect_recovery,
     redirect_restart,
-    redirect_store,
+    redirect_store_journal,
+    redirect_store_models,
+    redirect_store_validation,
+    redirect_store_vocab,
     responses,
 )
 
@@ -135,7 +138,7 @@ STAGE_DESCRIPTIONS: dict[str, str] = {
 #: correction settled for one of these is reported ``blocked``, which is the
 #: stage that pairs with exit code 2.
 BLOCKED_SETTLEMENT_REASONS: tuple[str, ...] = (
-    redirect_store.REASON_URGENT_CHANNEL_UNAVAILABLE,
+    redirect_store_vocab.REASON_URGENT_CHANNEL_UNAVAILABLE,
 )
 
 RECONCILE_HINT = (
@@ -158,7 +161,7 @@ FRESH_CONVERSATION_NOTE = (
 def stage_for_operation(
     operation: redirect_recovery.OperationOutcome,
     *,
-    live_target: redirect_store.RedirectTarget | None,
+    live_target: redirect_store_models.RedirectTarget | None,
 ) -> str:
     """Name what an operator can still expect from one durable operation.
 
@@ -213,7 +216,7 @@ def stage_for_operation(
 
 def _carried_into_live_attempt(
     operation: redirect_recovery.OperationOutcome,
-    live_target: redirect_store.RedirectTarget | None,
+    live_target: redirect_store_models.RedirectTarget | None,
 ) -> bool:
     """Whether the turn running now is the one holding this correction."""
     continuation = operation.continuation
@@ -227,7 +230,7 @@ def _carried_into_live_attempt(
 def operation_payload(
     operation: redirect_recovery.OperationOutcome,
     *,
-    live_target: redirect_store.RedirectTarget | None,
+    live_target: redirect_store_models.RedirectTarget | None,
 ) -> dict[str, Any]:
     """Render one operation with both its durable status and its stage."""
     stage = stage_for_operation(operation, live_target=live_target)
@@ -267,7 +270,9 @@ _SUBMISSION_EXIT_CODES: dict[str, int] = {
 }
 
 
-def _store_error_details(error: redirect_store.RedirectStoreError) -> dict[str, Any]:
+def _store_error_details(
+    error: redirect_store_models.RedirectStoreError,
+) -> dict[str, Any]:
     """Carry the journal path alongside a store refusal's own details."""
     payload = error.to_payload()
     details = dict(payload["details"])
@@ -278,7 +283,7 @@ def _store_error_details(error: redirect_store.RedirectStoreError) -> dict[str, 
 def _live_target(
     plan_dir: Path,
     state_dir: str | None,
-) -> redirect_store.RedirectTarget | None:
+) -> redirect_store_models.RedirectTarget | None:
     """Read the turn the run is on now, or ``None`` when it is not on one.
 
     Reported even when the run would refuse a redirect: a terminal audit or a
@@ -292,7 +297,7 @@ def _live_target(
     return facts.target
 
 
-def _target_summary(target: redirect_store.RedirectTarget) -> str:
+def _target_summary(target: redirect_store_models.RedirectTarget) -> str:
     return f"run {target.run_id} session {target.session_id} turn {target.turn_index}"
 
 
@@ -408,8 +413,8 @@ def _expected_target(
     args: argparse.Namespace,
     *,
     plan_dir: Path,
-    live_target: redirect_store.RedirectTarget | None,
-) -> tuple[redirect_store.RedirectTarget | None, bool]:
+    live_target: redirect_store_models.RedirectTarget | None,
+) -> tuple[redirect_store_models.RedirectTarget | None, bool]:
     """Build the turn the caller says it means, or report why it cannot.
 
     Every field the caller omits is filled from the live turn, so ``--session 7``
@@ -429,15 +434,15 @@ def _expected_target(
         return None, True
     if live_target is None:
         return None, True
-    candidate = redirect_store.RedirectTarget(
+    candidate = redirect_store_models.RedirectTarget(
         run_id=run_id if run_id is not None else live_target.run_id,
         session_id=session_id if session_id is not None else live_target.session_id,
         turn_index=turn_index if turn_index is not None else live_target.turn_index,
         harness=live_target.harness,
     )
     try:
-        redirect_store.validate_target(candidate)
-    except redirect_store.RedirectStoreError as error:
+        redirect_store_validation.validate_target(candidate)
+    except redirect_store_models.RedirectStoreError as error:
         cli_common.print_error(
             args,
             command_name=COMMAND_REDIRECT,
@@ -497,7 +502,7 @@ def control_redirect_from_args(args: argparse.Namespace) -> int:
             expected_target=expected_target,
             wait_seconds=wait_seconds,
         )
-    except redirect_store.RedirectStoreError as error:
+    except redirect_store_models.RedirectStoreError as error:
         cli_common.print_error(
             args,
             command_name=COMMAND_REDIRECT,
@@ -534,7 +539,7 @@ def _report_submission(
     args: argparse.Namespace,
     outcome: redirect_admission.SubmissionOutcome,
     *,
-    expected_target: redirect_store.RedirectTarget | None,
+    expected_target: redirect_store_models.RedirectTarget | None,
 ) -> int:
     stage = _stage_for_submission(outcome)
     exit_code = _SUBMISSION_EXIT_CODES[outcome.outcome]
@@ -647,7 +652,7 @@ def control_redirect_status_from_args(args: argparse.Namespace) -> int:
             args,
             command_name=COMMAND_REDIRECT_STATUS,
             text_label=TEXT_LABEL_REDIRECT_STATUS,
-            reason=redirect_store.ERROR_UNKNOWN_REQUEST,
+            reason=redirect_store_vocab.ERROR_UNKNOWN_REQUEST,
             error=(f"the journal holds no record of {', '.join(unknown)}"),
             details={
                 "plan_dir": str(plan_dir),
@@ -687,7 +692,7 @@ def control_redirect_status_from_args(args: argparse.Namespace) -> int:
                 timeout_seconds=timeout_seconds,
                 state_dir=state_dir,
             )
-        except redirect_store.RedirectStoreError as error:
+        except redirect_store_models.RedirectStoreError as error:
             cli_common.print_error(
                 args,
                 command_name=COMMAND_REDIRECT_STATUS,
@@ -713,7 +718,7 @@ def control_redirect_status_from_args(args: argparse.Namespace) -> int:
     operations = [
         operation_payload(operation, live_target=live_target) for operation in selected
     ]
-    journal = redirect_store.read_journal(plan_dir, state_dir=state_dir)
+    journal = redirect_store_journal.read_journal(plan_dir, state_dir=state_dir)
     for operation in operations:
         request = journal.request(operation["operation_id"])
         operation["operator_resolution"] = (
@@ -768,7 +773,7 @@ def _read_report(
 ) -> redirect_recovery.RecoveryReport | None:
     try:
         return redirect_recovery.inspect_plan_recovery(plan_dir, state_dir=state_dir)
-    except redirect_store.RedirectStoreError as error:
+    except redirect_store_models.RedirectStoreError as error:
         cli_common.print_error(
             args,
             command_name=COMMAND_REDIRECT_STATUS,
@@ -943,7 +948,7 @@ def control_recover_conversation_from_args(args: argparse.Namespace) -> int:
     report = None
     try:
         report = redirect_recovery.inspect_plan_recovery(plan_dir, state_dir=state_dir)
-    except redirect_store.RedirectStoreError, OSError:
+    except redirect_store_models.RedirectStoreError, OSError:
         # The corrections a fresh start would carry are worth reporting when
         # they can be read and are not what this command is for when they
         # cannot: an unreadable journal must not hide the recovery route.
@@ -1019,7 +1024,7 @@ def control_resolve_redirect_from_args(args: argparse.Namespace) -> int:
         OSError,
         ValueError,
         state.StateError,
-        redirect_store.RedirectStoreError,
+        redirect_store_models.RedirectStoreError,
     ) as error:
         cli_common.print_error(
             args,

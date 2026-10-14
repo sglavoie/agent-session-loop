@@ -15,9 +15,9 @@ human decisions the shared requirements name: a hold stays held, an intentional
 stop stays stopped, a finished run stays finished, and *discovering an unstarted
 plan cannot start it* -- not because a rule says so, but because there is no
 code path from here to a launch. :func:`sweep` reaches
-``overseer_discovery``, ``overseer_policy_client`` and ``overseer_store`` and
-nothing else, and ``overseer_isolation.launch`` -- the one seam that could start
-a run -- is deliberately not imported.
+``overseer_discovery``, ``overseer_policy_client`` and the ``overseer_store_*``
+modules and nothing else, and ``overseer_isolation.launch`` -- the one seam that
+could start a run -- is deliberately not imported.
 
 An enrolled plan therefore means *this watcher is watching it and AgentMux
 currently permits that*. It is not a plan to act on, and the enrollment carries
@@ -66,7 +66,7 @@ pass is never mistaken for a quiet fleet.
 ## Concurrent watchers
 
 Two watchers over one state root coordinate through
-:meth:`agent_session_loop.overseer_store.Ledger.claim_watch`: a plan is
+:meth:`agent_session_loop.overseer_store_ledger.Ledger.claim_watch`: a plan is
 serviced only by the watcher holding its lease, and a lease is taken from an
 unwilling holder only after its term expires. The claim is attempted *before*
 the authorization question, so a duplicate watcher spends no subprocess on work
@@ -95,7 +95,8 @@ from . import (
     events,
     overseer_discovery,
     overseer_policy_client,
-    overseer_store,
+    overseer_store_ledger,
+    overseer_store_models,
     pause_policy,
     plans_files,
 )
@@ -353,7 +354,7 @@ class Sweep:
     warnings: tuple[str, ...]
     inventory_complete: bool
     considered: int
-    epoch: overseer_store.PolicyTransition | None = None
+    epoch: overseer_store_models.PolicyTransition | None = None
 
     @property
     def deferred(self) -> tuple[Excluded, ...]:
@@ -410,13 +411,13 @@ class _Pass:
 
     enrolled: list[Enrollment] = field(default_factory=list)
     excluded: list[Excluded] = field(default_factory=list)
-    epoch: overseer_store.PolicyTransition | None = None
+    epoch: overseer_store_models.PolicyTransition | None = None
 
 
 def sweep(
     *,
     watcher: Watcher,
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     selection: Selection = WHOLE_FLEET,
     state_dir: str | Path | None = None,
     now: Callable[[], datetime] = clock.utc_now,
@@ -521,7 +522,7 @@ def sweep(
 def watch(
     *,
     watcher: Watcher,
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     until: datetime,
     selection: Selection = WHOLE_FLEET,
     state_dir: str | Path | None = None,
@@ -578,7 +579,7 @@ def watch(
     )
 
 
-def release(*, watcher: Watcher, ledger: overseer_store.Ledger) -> int:
+def release(*, watcher: Watcher, ledger: overseer_store_ledger.Ledger) -> int:
     """Hand back every lease this watcher holds, and report how many.
 
     Released rather than deleted: the lease row keeps the run it last named, so
@@ -597,7 +598,7 @@ def _service(
     candidate: overseer_discovery.Candidate,
     *,
     watcher: Watcher,
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     selection: Selection,
     pass_: _Pass,
     moment: datetime,
@@ -759,7 +760,7 @@ def _paused_scope(
 
 
 def _service_order(
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     candidates: Sequence[overseer_discovery.Candidate],
 ) -> list[overseer_discovery.Candidate]:
     """Least recently answered first, so no plan can monopolize a bounded pass.

@@ -18,7 +18,7 @@ from agent_session_loop import (
     review,
     review_session_body,
     review_session_contract,
-    verification,
+    verification_run,
 )
 from tests.support import (
     write_plan,
@@ -418,7 +418,7 @@ class ReviewSessionHelperTests(unittest.TestCase):
                 plan_dir, session_file.session_id
             )
             self.assertIsNotNone(contract)
-            result = verification.run_verification(contract, repo_root=plan_dir)
+            result = verification_run.run_verification(contract, repo_root=plan_dir)
             self.assertTrue(result.passed, result.failures)
 
     def test_ensure_generated_review_session_contract_fails_without_output(
@@ -439,7 +439,7 @@ class ReviewSessionHelperTests(unittest.TestCase):
                 plan_dir, session_file.session_id
             )
             self.assertIsNotNone(contract)
-            result = verification.run_verification(contract, repo_root=plan_dir)
+            result = verification_run.run_verification(contract, repo_root=plan_dir)
             self.assertFalse(result.passed)
 
     def test_ensure_generated_review_session_contract_fails_without_status(
@@ -469,7 +469,7 @@ class ReviewSessionHelperTests(unittest.TestCase):
                 plan_dir, session_file.session_id
             )
             self.assertIsNotNone(contract)
-            result = verification.run_verification(contract, repo_root=plan_dir)
+            result = verification_run.run_verification(contract, repo_root=plan_dir)
             self.assertFalse(result.passed)
 
     def test_ensure_generated_review_session_contract_fails_low_effort_output(
@@ -490,7 +490,7 @@ class ReviewSessionHelperTests(unittest.TestCase):
                 plan_dir, session_file.session_id
             )
             self.assertIsNotNone(contract)
-            result = verification.run_verification(contract, repo_root=plan_dir)
+            result = verification_run.run_verification(contract, repo_root=plan_dir)
             self.assertFalse(result.passed)
 
 

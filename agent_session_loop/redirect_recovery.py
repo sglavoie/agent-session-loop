@@ -75,7 +75,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from . import clock, conversations, redirect_store, state, state_locks
+from . import (
+    clock,
+    conversations,
+    redirect_store_delivery,
+    redirect_store_journal,
+    redirect_store_models,
+    redirect_store_requests,
+    redirect_store_vocab,
+    state,
+    state_locks,
+)
 
 # ---------------------------------------------------------------------------
 # Status vocabulary
@@ -289,7 +299,7 @@ def inspect_conversations(
 
 
 def operation_status(
-    request: redirect_store.RedirectRequest,
+    request: redirect_store_models.RedirectRequest,
     *,
     owner: OwnerEvidence,
     now: datetime | None = None,
@@ -308,9 +318,9 @@ def operation_status(
     that will never be answered unless something picks it up.
     """
     moment = clock.utc_now() if now is None else now
-    if request.state == redirect_store.STATE_REJECTED:
+    if request.state == redirect_store_vocab.STATE_REJECTED:
         return STATUS_REJECTED
-    if request.state == redirect_store.STATE_EXPIRED:
+    if request.state == redirect_store_vocab.STATE_EXPIRED:
         return STATUS_EXPIRED
     if request.accepted:
         if request.acknowledged:
@@ -351,13 +361,13 @@ class OperationOutcome:
 
     operation_id: str
     status: OperationStatus
-    target: redirect_store.RedirectTarget
+    target: redirect_store_models.RedirectTarget
     journal_state: str
     feedback_digest: str
     feedback_bytes: int
     created_at: str
     expires_at: str
-    continuation: redirect_store.RedirectTarget | None = None
+    continuation: redirect_store_models.RedirectTarget | None = None
     continuation_recovered: bool = False
     reason: str | None = None
 
@@ -368,7 +378,7 @@ class OperationOutcome:
             "target": self.target.to_payload(),
             "journal_state": self.journal_state,
             # Digest and byte count, exactly as the journal reports them. The
-            # operator's words stay behind ``redirect_store.read_feedback``.
+            # operator's words stay behind ``redirect_store_journal.read_feedback``.
             "feedback_digest": self.feedback_digest,
             "feedback_bytes": self.feedback_bytes,
             "created_at": self.created_at,
@@ -384,7 +394,7 @@ class OperationOutcome:
 
 
 def _outcome(
-    request: redirect_store.RedirectRequest,
+    request: redirect_store_models.RedirectRequest,
     status: OperationStatus,
 ) -> OperationOutcome:
     return OperationOutcome(
@@ -477,7 +487,7 @@ def inspect_plan_recovery(
     moment = clock.utc_now() if now is None else now
     owner = inspect_owner(plan_dir, state_dir=state_dir)
     ledger = inspect_conversations(plan_dir, state_dir=state_dir)
-    view = redirect_store.read_journal(plan_dir, state_dir=state_dir)
+    view = redirect_store_journal.read_journal(plan_dir, state_dir=state_dir)
     return RecoveryReport(
         plan_dir=str(plan_dir),
         journal_path=str(view.journal_path),
@@ -654,23 +664,23 @@ def reconcile_startup(
         return _blocked(plan_dir, run_id, BLOCKED_LIVE_OWNER, owner)
 
     try:
-        expired = redirect_store.expire_due_requests(
+        expired = redirect_store_requests.expire_due_requests(
             plan_dir, state_dir=state_dir, now=moment
         )
-    except redirect_store.RedirectStoreError:
+    except redirect_store_models.RedirectStoreError:
         # An unreadable or unwritable journal stops reconciliation rather than
         # being worked around. Every answer below is a claim about what the
         # journal says, and a journal that cannot be read supports none of them.
         return _blocked(plan_dir, run_id, BLOCKED_JOURNAL_UNREADABLE, owner)
 
     ledger = inspect_conversations(plan_dir, state_dir=state_dir)
-    view = redirect_store.read_journal(plan_dir, state_dir=state_dir)
+    view = redirect_store_journal.read_journal(plan_dir, state_dir=state_dir)
     released = _release_unlaunched_carries(plan_dir, view, run_id, state_dir, moment)
     if released:
         # The releases changed what the journal says about these requests, and
         # every answer below is read off the view. Re-reading is cheaper than
         # reasoning about which of the two states each branch wanted.
-        view = redirect_store.read_journal(plan_dir, state_dir=state_dir)
+        view = redirect_store_journal.read_journal(plan_dir, state_dir=state_dir)
     live_sessions = frozenset(pending_session_ids)
 
     settled: list[str] = []
@@ -690,14 +700,14 @@ def reconcile_startup(
             stranded.append(where)
             continue
         try:
-            redirect_store.reject_request(
+            redirect_store_requests.reject_request(
                 plan_dir,
                 request.operation_id,
-                reason=redirect_store.REASON_RUN_ENDED,
+                reason=redirect_store_vocab.REASON_RUN_ENDED,
                 state_dir=state_dir,
                 now=moment,
             )
-        except redirect_store.RedirectStoreError:
+        except redirect_store_models.RedirectStoreError:
             # Settled by someone else between the read and here, or a journal
             # that just filled. Either way the request is not this run's to
             # report as settled, and nothing is lost by saying less.
@@ -735,7 +745,7 @@ def reconcile_startup(
 
 def _release_unlaunched_carries(
     plan_dir: str | Path,
-    view: redirect_store.RedirectJournalView,
+    view: redirect_store_models.RedirectJournalView,
     run_id: str,
     state_dir: str | Path | None,
     moment: datetime,
@@ -770,14 +780,14 @@ def _release_unlaunched_carries(
             # evidence for. Left carried, and reported as uncertain below.
             continue
         try:
-            redirect_store.release_request(
+            redirect_store_delivery.release_request(
                 plan_dir,
                 request.operation_id,
                 continuation=carried_into,
                 state_dir=state_dir,
                 now=moment,
             )
-        except redirect_store.RedirectStoreError:
+        except redirect_store_models.RedirectStoreError:
             continue
         released.append(request.operation_id)
     return tuple(released)

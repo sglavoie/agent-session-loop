@@ -30,7 +30,8 @@ from agent_session_loop import (
     plans_session_scope,
     qna,
     redirect_ack,
-    redirect_store,
+    redirect_store_models,
+    redirect_store_vocab,
     review,
     run_prompts,
     run_selection,
@@ -1759,7 +1760,7 @@ class CorrectionContextPromptTests(unittest.TestCase):
         refused: int = 0,
     ) -> redirect_ack.CarriedCorrections:
         return redirect_ack.CarriedCorrections(
-            continuation=redirect_store.RedirectTarget(
+            continuation=redirect_store_models.RedirectTarget(
                 run_id="run-abc",
                 session_id="3",
                 turn_index=turn_index,
@@ -1779,7 +1780,7 @@ class CorrectionContextPromptTests(unittest.TestCase):
             refused=tuple(
                 redirect_ack.RefusedCorrection(
                     operation_id=f"refused-{index}",
-                    reason=redirect_store.ERROR_REQUEST_EXPIRED,
+                    reason=redirect_store_vocab.ERROR_REQUEST_EXPIRED,
                     message="expired before the prompt was finalized",
                 )
                 for index in range(refused)

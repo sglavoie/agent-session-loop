@@ -4,17 +4,18 @@ The behavioural coverage of the two gates is end to end and lives where it
 always has: `tests/test_asl_run_verification_enforcement.py` drives real contracts
 through real checks and asserts what an operator sees after a failure,
 `tests/test_asl_review_lifecycle_*.py` owns the review-verdict retry and
-exhaustion accounting, and `tests/test_asl_e2e.py` owns the verification repair
-budget. None of them can cheaply state the things this module owns, so they are
-stated here: the extraction contract (runner-free, no alias left behind, the one
-remaining seam required rather than defaulted and supplied at both call sites),
+exhaustion accounting, and `tests/test_asl_e2e_verification_repair.py` owns
+the verification repair budget. None of them can cheaply state the things this
+module owns, so they are stated here: the extraction contract (runner-free, no
+alias left behind, the one remaining seam required rather than defaulted and
+supplied at both call sites),
 the **verify -> progress -> ledgers** ordering this gate is the first step of,
 the refusal shape both gates perform, and the post-mutation re-read every guard
 in the package reaches through a seam.
 
 Two of the module's paths are driven for real against a plan on disk -- the
 refusal a contract-less session earns and the waiver the same session earns
-under `--allow-not-loop-ready`. Neither reaches `verification.run_verification`,
+under `--allow-not-loop-ready`. Neither reaches `verification_run.run_verification`,
 so nothing here spawns a process, which is what keeps this module in
 `PORTABLE_MODULES`.
 """

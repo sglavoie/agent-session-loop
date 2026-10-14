@@ -59,7 +59,7 @@ from agent_session_loop import (
     overseer_dispatch,
     overseer_mailbox,
     overseer_policy_client,
-    overseer_store,
+    overseer_store_ledger,
 )
 from tests.support import assert_no_runner_import
 
@@ -119,7 +119,7 @@ class _MailboxCase(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="asl-overseer-mailbox-"))
         self.addCleanup(self._close)
-        self.ledger = overseer_store.open_ledger(state_dir=self.root)
+        self.ledger = overseer_store_ledger.open_ledger(state_dir=self.root)
         self.ledger.note_policy(config_fingerprint=FINGERPRINT)
         self.plan = self.new_plan("plan-a")
         self.incident_id = self.ledger.open_incident(
@@ -938,7 +938,7 @@ class FleetPolling(_MailboxCase):
             f"2026-01-01T00:00:{index:02d}+00:00" for index in range(1, 60)
         )
         self.ledger.close()
-        self.ledger = overseer_store.open_ledger(
+        self.ledger = overseer_store_ledger.open_ledger(
             state_dir=self.root,
             now=lambda: next(self.stamps),
         )
@@ -1044,7 +1044,7 @@ class FleetPolling(_MailboxCase):
             state_dir=self.root,
         )
         self.ledger.close()
-        self.ledger = overseer_store.open_ledger(
+        self.ledger = overseer_store_ledger.open_ledger(
             state_dir=self.root,
             now=lambda: next(self.stamps),
         )

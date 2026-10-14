@@ -10,7 +10,7 @@ than was asked for.
 status, its open questions, its run configuration, its verification results,
 what the worker changed, and the supervision records that bear on it -- and
 writes into the ledger exactly what
-:class:`agent_session_loop.overseer_store.EvidenceInput` allows: a locator and
+:class:`agent_session_loop.overseer_store_models.EvidenceInput` allows: a locator and
 a digest. No content is stored. The consequence is the point: a packet cannot
 outlive the authorization it was assembled under, because there is nothing
 durable to outlive it with. Every later read goes back to the source, under a
@@ -37,7 +37,7 @@ permission itself rather than merely the evidence it covered.
 
 Exclusion is a different refusal and a stronger one. Loading and expanding both
 gate through
-:meth:`agent_session_loop.overseer_store.Ledger.read_evidence`, so a revoked
+:meth:`agent_session_loop.overseer_store_ledger.Ledger.read_evidence`, so a revoked
 enrollment, an unobserved policy and a superseded one withhold the rows before
 any file is touched -- and a revoked plan can never produce the fresh
 ``context`` grant that would unseal them. "Cannot be loaded or expanded after
@@ -79,7 +79,8 @@ from . import (
     mailbox_vocabulary,
     overseer_discovery,
     overseer_policy_client,
-    overseer_store,
+    overseer_store_ledger,
+    overseer_store_models,
     state,
 )
 
@@ -227,7 +228,7 @@ Refusal = Literal[
 ]
 
 #: Every reason a packet is not handed over. The first four are
-#: :data:`agent_session_loop.overseer_store.WITHHOLDING_REASONS` unchanged --
+#: :data:`agent_session_loop.overseer_store_models.WITHHOLDING_REASONS` unchanged --
 #: this boundary reports the ledger's refusal rather than paraphrasing it -- the
 #: next three are :data:`STALENESS_REASONS`, and the last two are this
 #: boundary's own.
@@ -476,7 +477,7 @@ def revalidate(
 def build_packet(
     *,
     grant: overseer_policy_client.Grant | None,
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     candidate: overseer_discovery.Candidate,
     kind: str,
     summary: str,
@@ -551,7 +552,7 @@ def build_packet(
     )
     sources: list[Source] = []
     gaps: list[Gap] = []
-    evidence: list[overseer_store.EvidenceInput] = []
+    evidence: list[overseer_store_models.EvidenceInput] = []
     questions: tuple[str, ...] = ()
 
     for source_kind in SOURCE_KINDS:
@@ -605,7 +606,7 @@ def build_packet(
             )
         )
         evidence.append(
-            overseer_store.EvidenceInput(
+            overseer_store_models.EvidenceInput(
                 alias=STATE_SPACE,
                 kind=source_kind,
                 locator=locator,
@@ -620,7 +621,7 @@ def build_packet(
     # a file, and naming the state record here says where it was declared.
     evidence.insert(
         0,
-        overseer_store.EvidenceInput(
+        overseer_store_models.EvidenceInput(
             alias=STATE_SPACE,
             kind=SCOPE_KIND,
             locator=events.STATE_FILE_NAME,
@@ -637,7 +638,7 @@ def build_packet(
             summary=summary,
             evidence=tuple(evidence),
         )
-    except overseer_store.LedgerRefused:
+    except overseer_store_models.LedgerRefused:
         # The gate above passed and this one did not, so the policy moved while
         # the sources were being read. Nothing was written; report the refusal
         # the ledger would report now rather than the one it would have then.
@@ -674,7 +675,7 @@ def build_packet(
 def load_packet(
     *,
     grant: overseer_policy_client.Grant | None,
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     incident_id: int,
     state_dir: str | Path | None = None,
     now: Callable[[], str] = clock.utc_iso_now,
@@ -839,7 +840,7 @@ def load_packet(
 def expand(
     *,
     grant: overseer_policy_client.Grant | None,
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     incident_id: int,
     kind: SourceKind,
     state_dir: str | Path | None = None,

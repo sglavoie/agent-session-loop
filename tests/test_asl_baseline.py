@@ -20,7 +20,7 @@ from agent_session_loop import (
     contracts,
     plans_content_hash,
     plans_errors,
-    verification,
+    verification_models,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -488,7 +488,7 @@ class BaselineTotalBudgetTests(unittest.TestCase):
     """The total baseline budget is a fail-closed gate, not advisory (M2)."""
 
     def _pass_result(self, check: contracts.VerificationCheck, duration: float):
-        return verification.CheckResult(
+        return verification_models.CheckResult(
             name=check.name,
             kind="command",
             status="pass",
@@ -612,7 +612,7 @@ class MultiRepositoryBaselineTests(unittest.TestCase):
                 contracts_by_id={"1": contract},
                 specs=specs,
             )
-            context = verification.verification_context_from_plan(
+            context = verification_models.verification_context_from_plan(
                 plan_dir, workspace_root
             )
             shutil.rmtree(repositories["SVC"] / ".git")
@@ -694,7 +694,7 @@ class MultiRepositoryBaselineTests(unittest.TestCase):
             init_multi_repo_workspace(workspace_root, specs)
             plan_dir = root / "plan"
             write_multi_repo_plan(plan_dir, ("pending",), specs=specs)
-            context = verification.verification_context_from_plan(
+            context = verification_models.verification_context_from_plan(
                 plan_dir, workspace_root
             )
 
@@ -755,7 +755,7 @@ class MultiRepositoryBaselineTests(unittest.TestCase):
             cache = baseline_cache.BaselineCache.load(run.results_path)
             record = cache.get(outcome.key)
             assert record is not None
-            context = verification.verification_context_from_plan(
+            context = verification_models.verification_context_from_plan(
                 plan_dir, workspace_root
             )
             self.assertTrue(

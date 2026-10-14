@@ -19,7 +19,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from asl_workbench.connector import heartbeat_payload
+from asl_workbench.connector_payloads import heartbeat_payload
 from asl_workbench.observation import ObservationPolicy
 from asl_workbench.operations import (
     METHOD_QUESTION_REPLY,

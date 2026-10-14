@@ -114,7 +114,7 @@ from . import (
     state,
     task_packet,
     turn_execution_argv,
-    verification,
+    verification_models,
     workspace_evidence,
     workspaces,
     write_guards,
@@ -156,7 +156,7 @@ class RunContext(Protocol):
     def plan_cache(self) -> plans_snapshot.PlanSnapshotCache: ...
 
     @property
-    def verification_context(self) -> verification.VerificationContext: ...
+    def verification_context(self) -> verification_models.VerificationContext: ...
 
     def record_final_snapshot(self, snapshot: plans_models.PlanSnapshot) -> None: ...
 

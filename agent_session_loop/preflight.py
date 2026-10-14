@@ -82,9 +82,7 @@ from .preflight_verification_checks import (
     _check_duplicate_verification_commands,
     _check_verification_scope,
 )
-from .verification import (
-    VerificationContext,
-)
+from .verification_models import VerificationContext
 
 
 def run_core_preflight(plan_dir: str | Path) -> PreflightReport:

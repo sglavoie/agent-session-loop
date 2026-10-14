@@ -13,7 +13,8 @@ from agent_session_loop import (
     contracts,
     plans_session_ids,
     process_tree,
-    verification,
+    verification_checks,
+    verification_run,
 )
 from tests.support_asl_verification import VerificationExecutorFixtures
 
@@ -32,7 +33,7 @@ class VerificationOutputCaptureTests(VerificationExecutorFixtures):
                 )
             )
 
-            result = verification.run_check(
+            result = verification_checks.run_check(
                 check, repo_root=repo_root, artifact_dir=artifact_dir
             )
 
@@ -60,7 +61,7 @@ class VerificationOutputCaptureTests(VerificationExecutorFixtures):
                 )
             )
 
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertEqual("pass", result.status)
             self.assertEqual(size, result.stdout_byte_count)
@@ -92,7 +93,7 @@ class VerificationOutputCaptureTests(VerificationExecutorFixtures):
                 name="boom",
             )
 
-            result = verification.run_check(
+            result = verification_checks.run_check(
                 check, repo_root=repo_root, artifact_dir=artifact_dir
             )
 
@@ -137,7 +138,7 @@ class VerificationOutputCaptureTests(VerificationExecutorFixtures):
                         ),
                         name=name,
                     )
-                    result = verification.run_check(
+                    result = verification_checks.run_check(
                         check, repo_root=repo_root, artifact_dir=artifact_dir
                     )
                     self.assertEqual("fail", result.status)
@@ -175,7 +176,7 @@ class VerificationOutputCaptureTests(VerificationExecutorFixtures):
                 )
             )
 
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertEqual("fail", result.status)
             self.assertEqual("nope", result.stderr)
@@ -201,7 +202,7 @@ class VerificationOutputCaptureTests(VerificationExecutorFixtures):
                 timeout_seconds=0.3,
             )
 
-            result = verification.run_check(
+            result = verification_checks.run_check(
                 check, repo_root=repo_root, artifact_dir=artifact_dir
             )
 
@@ -232,7 +233,7 @@ class VerificationOutputCaptureTests(VerificationExecutorFixtures):
                 )
             )
 
-            result = verification.run_check(
+            result = verification_checks.run_check(
                 check, repo_root=repo_root, artifact_dir=artifact_dir
             )
 
@@ -265,7 +266,7 @@ class VerificationOutputCaptureTests(VerificationExecutorFixtures):
                 ),
             )
 
-            result = verification.run_verification(
+            result = verification_run.run_verification(
                 contract, repo_root=repo_root, artifact_dir=artifact_dir
             )
 
@@ -303,7 +304,7 @@ class VerificationOutputCaptureTests(VerificationExecutorFixtures):
             ):
                 tracemalloc.start()
                 try:
-                    result = verification.run_check(check, repo_root=repo_root)
+                    result = verification_checks.run_check(check, repo_root=repo_root)
                     _, peak = tracemalloc.get_traced_memory()
                 finally:
                     tracemalloc.stop()
@@ -331,7 +332,7 @@ class VerificationOutputCaptureTests(VerificationExecutorFixtures):
                 )
             )
 
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             reference = artifacts.store_stream_output(expected, failed=False)
             self.assertEqual("pass", result.status)

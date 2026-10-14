@@ -84,7 +84,7 @@ Every checkpoint commit carries an ``Asl-Checkpoint-Id`` trailer whose value is
 :func:`checkpoint_id`: a UUID5 over the plan directory, the incident, the
 operation and the dispatch target --- the four fields carried by both an
 :class:`~agent_session_loop.overseer_dispatch.Action` and a stored
-:class:`~agent_session_loop.overseer_store.ActionRecord`. Nothing about the
+:class:`~agent_session_loop.overseer_store_models.ActionRecord`. Nothing about the
 moment goes into it. So :meth:`CheckpointAdapter.reconcile` can ask git whether
 that exact commit exists, from the ledger row alone, with no timestamp heuristic
 and no risk of reading another supervisor's checkpoint as our own. A repository
@@ -114,7 +114,7 @@ from . import (
     overseer_discovery,
     overseer_dispatch,
     overseer_policy_client,
-    overseer_store,
+    overseer_store_models,
     state,
 )
 from .git_subprocess import run_git_reporting
@@ -790,7 +790,7 @@ class CheckpointAdapter:
 
     def reconcile(
         self,
-        record: overseer_store.ActionRecord,
+        record: overseer_store_models.ActionRecord,
     ) -> overseer_dispatch.Receipt:
         """Say whether a checkpoint a dead process may have made is in the history."""
         if record.operation != "commit":

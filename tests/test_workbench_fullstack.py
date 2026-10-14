@@ -10,7 +10,7 @@ while the assembly of the three carries nothing.
 So nothing here is stubbed that the deployment has. The corpus is a real ASL
 plan tree. The observations come from
 :class:`agent_session_loop.workbench_connector.AslObservationSource` and are
-published by the real :class:`asl_workbench.connector.ObservationConnector`. The
+published by the real :class:`asl_workbench.connector_runtime.ObservationConnector`. The
 :class:`Link` between them is the only piece written for this module, and it is
 written as a *network* rather than as a double: it validates every frame through
 :func:`asl_workbench.transport.validate_frame` and applies it through the store's
@@ -112,7 +112,9 @@ from asl_workbench import (
     runtime,
     transport,
 )
-from asl_workbench import connector as portable
+from asl_workbench import connector_payloads as portable_payloads
+from asl_workbench import connector_runtime as portable_runtime
+from asl_workbench import connector_support as portable_support
 from asl_workbench import http as workbench_http
 from asl_workbench.credentials import IDENTITY_HEADER, CredentialStore
 from asl_workbench.installation import (
@@ -163,7 +165,7 @@ DRAIN_STEPS = 24
 #: here would wait most of its 20s deadline for a carrier and the module would
 #: spend its time proving the arithmetic of a schedule that
 #: ``tests/test_workbench_connector.py`` already covers. The deployment tightens
-#: to :data:`~asl_workbench.connector.ACTIVE_READ_INTERVAL_SECONDS` -- one
+#: to :data:`~asl_workbench.connector_support.ACTIVE_READ_INTERVAL_SECONDS` -- one
 #: second -- whenever a service is asking, so this is a cadence the real link
 #: runs at and not one invented for the test.
 HEARTBEAT_SECONDS = 2.0
@@ -221,7 +223,7 @@ class Pumper:
     def __init__(
         self,
         *,
-        connector: portable.ObservationConnector,
+        connector: portable_runtime.ObservationConnector,
         clock: Clock,
         step_seconds: float = 0.25,
     ) -> None:
@@ -250,7 +252,7 @@ class Pumper:
             moment = self.clock.tick(self.step_seconds)
             # A down link is reported through the connector's state, not raised
             # at whoever happened to be stepping it.
-            with contextlib.suppress(portable.ChannelError):
+            with contextlib.suppress(portable_support.ChannelError):
                 self.connector.step(moment)
         finally:
             with self._cond:
@@ -278,14 +280,14 @@ def inline(attempt: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-class LinkDown(portable.ChannelError):
+class LinkDown(portable_support.ChannelError):
     """The link is not there. Raised as the channel contract requires."""
 
 
 class Link:
     """The network between the Mac and the Pi, with faults it can be given.
 
-    A :class:`~asl_workbench.connector.Channel`, and on the far side of it the
+    A :class:`~asl_workbench.connector_protocols.Channel`, and on the far side of it the
     Pi's real ingestion. Everything that crosses is validated by
     :func:`~asl_workbench.transport.validate_frame` in the direction it is
     travelling and then handed to the object that owns it -- the store for an
@@ -609,7 +611,7 @@ class FullStackCase(unittest.TestCase):
                 connector_id=CONNECTOR_ID, target_id=TARGET_ID
             )
         self.link = Link(self.store, clock=self.clock, reads=self.client)
-        self.connector = portable.ObservationConnector(
+        self.connector = portable_runtime.ObservationConnector(
             connector_id=CONNECTOR_ID,
             target_id=TARGET_ID,
             source=self.source,
@@ -715,7 +717,9 @@ class FullStackCase(unittest.TestCase):
         for _ in range(steps):
             try:
                 view = self.connector.step(self.clock.now)
-            except portable.ChannelError:  # pragma: no cover - reported by state
+            except (
+                portable_support.ChannelError
+            ):  # pragma: no cover - reported by state
                 view = None
             if view is not None:
                 sent.append(view)
@@ -862,7 +866,7 @@ class LinkFailureTests(FullStackCase):
     def test_a_link_that_goes_away_leaves_the_connector_backing_off(self) -> None:
         self.link.down()
         self.publish()
-        self.assertEqual(portable.STATE_BACKOFF, self.connector.state)
+        self.assertEqual(portable_support.STATE_BACKOFF, self.connector.state)
         # Nothing was committed, so the next pass re-reads the same window
         # rather than skipping over an undelivered one.
         self.assertEqual([], self.link.landed)
@@ -892,7 +896,7 @@ class LinkFailureTests(FullStackCase):
         self.link.up()
         self.idle(100.0)
         self.publish()
-        self.assertEqual(portable.STATE_READY, self.connector.state)
+        self.assertEqual(portable_support.STATE_READY, self.connector.state)
         self.assertGreater(self.connector.generation, first)
 
     def test_ten_reconnects_leave_one_row_and_one_entry_per_plan(self) -> None:
@@ -904,7 +908,7 @@ class LinkFailureTests(FullStackCase):
             # and will not try again until its retry falls due, which is the
             # behaviour that keeps a flapping tailnet from being hammered. Time
             # has to pass before the reconnect can happen at all.
-            self.idle(portable.BACKOFF_CAP_SECONDS)
+            self.idle(portable_support.BACKOFF_CAP_SECONDS)
             self.publish()
             self.assertEqual(
                 len(self.corpus.plan_dirs),
@@ -1121,7 +1125,7 @@ class MutationBoundaryTests(FullStackCase):
         # A new connector over the same corpus and the same link: the process
         # the operator restarted. `recover` reads the journal the performer
         # wrote and reports, and it re-attempts nothing.
-        revived = portable.ObservationConnector(
+        revived = portable_runtime.ObservationConnector(
             connector_id=CONNECTOR_ID,
             target_id=TARGET_ID,
             source=self.source,
@@ -1286,7 +1290,7 @@ class IdentityAndCompatibilityTests(FullStackCase):
 
     def test_a_frame_addressed_to_another_pi_is_refused_at_the_wire(self) -> None:
         envelope = transport.observation_envelope(
-            payload=portable.heartbeat_payload(
+            payload=portable_payloads.heartbeat_payload(
                 observed_at=NOW, bridge_alive=True, source_generation=1
             ),
             connector_id=CONNECTOR_ID,
@@ -1300,7 +1304,7 @@ class IdentityAndCompatibilityTests(FullStackCase):
 
     def test_a_transport_version_nobody_speaks_grants_nothing(self) -> None:
         self.assertIsNone(transport.negotiate_protocol([0, 99]))
-        hello = portable.connector_hello(
+        hello = portable_payloads.connector_hello(
             connector_id=CONNECTOR_ID,
             target_id=TARGET_ID,
             capabilities=self.connector.capabilities,
@@ -1318,7 +1322,7 @@ class IdentityAndCompatibilityTests(FullStackCase):
     def test_an_unknown_capability_narrows_the_pairing_without_killing_it(
         self,
     ) -> None:
-        hello = portable.connector_hello(
+        hello = portable_payloads.connector_hello(
             connector_id=CONNECTOR_ID,
             target_id=TARGET_ID,
             capabilities=(*self.connector.capabilities, "invented.capability"),
@@ -1376,7 +1380,7 @@ class StorageFailureTests(FullStackCase):
 
     def heartbeat(self, at: float) -> Mapping[str, Any]:
         return transport.observation_envelope(
-            payload=portable.heartbeat_payload(
+            payload=portable_payloads.heartbeat_payload(
                 observed_at=at, bridge_alive=True, source_generation=2
             ),
             connector_id=CONNECTOR_ID,
@@ -1764,7 +1768,7 @@ class ResourceTests(FullStackCase):
         for page in pages:
             self.link.deliver(
                 transport.observation_envelope(
-                    payload=portable.catalog_page_payload(
+                    payload=portable_payloads.catalog_page_payload(
                         page, observed_at=self.clock.now, source_generation=2
                     ),
                     connector_id=CONNECTOR_ID,
@@ -1803,7 +1807,7 @@ class ResourceTests(FullStackCase):
         self.publish_large_catalog()
         self.link.deliver(
             transport.observation_envelope(
-                payload=portable.heartbeat_payload(
+                payload=portable_payloads.heartbeat_payload(
                     observed_at=self.clock.now,
                     bridge_alive=True,
                     source_generation=2,
@@ -1834,11 +1838,13 @@ class ResourceTests(FullStackCase):
             self.publish(steps=4, tick=150.0)
         # Bounded by construction, not by how long the link stays down.
         self.assertLessEqual(
-            self.connector.pending_reads(), portable.MAX_PENDING_REQUESTS
+            self.connector.pending_reads(), portable_support.MAX_PENDING_REQUESTS
         )
         self.assertLessEqual(
             self.connector.pending(),
-            portable.MAX_PENDING_REQUESTS + portable.MAX_QUEUED_ANSWERS + 4,
+            portable_support.MAX_PENDING_REQUESTS
+            + portable_support.MAX_QUEUED_ANSWERS
+            + 4,
         )
 
     def test_reads_past_the_pending_ceiling_are_refused_rather_than_queued(

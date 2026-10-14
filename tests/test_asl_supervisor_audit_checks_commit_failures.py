@@ -12,7 +12,7 @@ from agent_session_loop import (
     supervisor_audit_checks,
     supervisor_audit_evidence_constants,
     supervisor_audit_evidence_input,
-    verification,
+    verification_models,
 )
 from tests import support_supervisor_audit_checks as checks_support
 from tests.support_supervisor_audit import RUN_ID
@@ -33,7 +33,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
                     "name": "diagnose",
                     "kind": "command",
                     "on_failure_of": ["tests"],
-                    "reason": verification.SKIP_REASON_CONDITION_NOT_MET,
+                    "reason": verification_models.SKIP_REASON_CONDITION_NOT_MET,
                 },
             ),
             (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
@@ -108,7 +108,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
                         "name": "diagnose",
                         "kind": "command",
                         "on_failure_of": ["tests"],
-                        "reason": verification.SKIP_REASON_CONDITION_NOT_MET,
+                        "reason": verification_models.SKIP_REASON_CONDITION_NOT_MET,
                     }
                 ],
             }
@@ -125,7 +125,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
                             "name": "diagnose",
                             "kind": "command",
                             "on_failure_of": ["tests"],
-                            "reason": verification.SKIP_REASON_CONDITION_NOT_MET,
+                            "reason": verification_models.SKIP_REASON_CONDITION_NOT_MET,
                         },
                     ),
                     (
@@ -190,7 +190,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
                         "name": "diagnose",
                         "kind": "command",
                         "on_failure_of": ["tests"],
-                        "reason": verification.SKIP_REASON_CONDITION_NOT_MET,
+                        "reason": verification_models.SKIP_REASON_CONDITION_NOT_MET,
                     }
                 ],
             }

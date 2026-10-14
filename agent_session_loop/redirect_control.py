@@ -1,6 +1,6 @@
 """The urgent controller: one live turn's route from correction to dead worker.
 
-:mod:`agent_session_loop.redirect_store` makes a correction durable and
+:mod:`agent_session_loop.redirect_store_requests` makes a correction durable and
 :mod:`agent_session_loop.redirect_admission` decides whether a live run may take
 it. Neither of them stops anything. This module is what turns an accepted
 correction into a worker that has actually stopped, inside a bound the operator
@@ -71,7 +71,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from . import process_tree, redirect_admission, redirect_restart, redirect_store
+from . import process_tree, redirect_admission, redirect_restart, redirect_store_models
 
 #: The escalation deadline, measured from arming. Derived from the one number
 #: the producer's own bounded wait is derived from, rather than set beside it:
@@ -605,10 +605,10 @@ class UrgentController:
         plan_dir: str | Path,
         operation_id: str,
         *,
-        target: redirect_store.RedirectTarget,
+        target: redirect_store_models.RedirectTarget,
         state_dir: str | Path | None = None,
         reason: str = REASON_REDIRECT,
-    ) -> redirect_store.RedirectRequest:
+    ) -> redirect_store_models.RedirectRequest:
         """Arm, record acceptance, and start cancelling — in that order.
 
         The order is the contract. Arming first means the escalation is running
@@ -619,7 +619,7 @@ class UrgentController:
         are expiry and a target that moved, and both mean the correction is not
         this turn's to act on.
 
-        Raises :class:`~agent_session_loop.redirect_store.RedirectStoreError`
+        Raises :class:`~agent_session_loop.redirect_store_models.RedirectStoreError`
         exactly as the store does, with the watchdog already stood down.
         """
         self.arm(operation_id=operation_id, reason=reason)
@@ -627,7 +627,7 @@ class UrgentController:
             request = redirect_admission.accept_redirect(
                 plan_dir, operation_id, target=target, state_dir=state_dir
             )
-        except redirect_store.RedirectStoreError:
+        except redirect_store_models.RedirectStoreError:
             self.abandon(SKIP_ABANDONED)
             raise
         self.confirm(operation_id=request.operation_id)

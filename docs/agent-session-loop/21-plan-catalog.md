@@ -84,7 +84,7 @@ yields the complete catalog and the summaries that back the run rows, and
 `workbench_history.project_history()` supplies the checkpointed history
 window. There is no bridge subprocess, no NDJSON hop, and no second
 projection to drift: the command spawns nothing and the connector module
-itself (`asl_workbench/connector.py`) never reads a plan or names a path.
+itself (`asl_workbench/connector_runtime.py`) never reads a plan or names a path.
 
 **Observation cannot modify what it observes.** Summaries are built with
 `reclaim=False`, lock files are inspected rather than read for recovery, and

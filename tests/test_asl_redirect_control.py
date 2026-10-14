@@ -26,7 +26,9 @@ from agent_session_loop import (
     harnesses,
     process_tree,
     redirect_control,
-    redirect_store,
+    redirect_store_models,
+    redirect_store_requests,
+    redirect_store_vocab,
 )
 
 # Real-process cases wait on other threads; every wait is bounded so a broken
@@ -556,12 +558,12 @@ class AcceptanceOrderingTests(unittest.TestCase):
         self.plan_dir = Path(root.name) / "plan"
         self.plan_dir.mkdir()
         self.state_dir = Path(root.name) / "state"
-        self.target = redirect_store.RedirectTarget(
+        self.target = redirect_store_models.RedirectTarget(
             run_id="run-1", session_id="10", turn_index=1, harness="codex"
         )
 
     def _submit(self, operation_id: str = "op-1") -> None:
-        redirect_store.submit_request(
+        redirect_store_requests.submit_request(
             self.plan_dir,
             target=self.target,
             feedback="stop editing the lock file",
@@ -594,7 +596,7 @@ class AcceptanceOrderingTests(unittest.TestCase):
                 self.plan_dir, "op-1", target=self.target, state_dir=self.state_dir
             )
 
-        self.assertEqual(redirect_store.STATE_ACCEPTED, request.state)
+        self.assertEqual(redirect_store_vocab.STATE_ACCEPTED, request.state)
         self.assertEqual([(redirect_control.PHASE_ARMED, 1002.0)], seen)
         self.assertEqual(redirect_control.PHASE_CONFIRMED, controller.phase)
 
@@ -615,7 +617,7 @@ class AcceptanceOrderingTests(unittest.TestCase):
         cancellation = _FakeCancellation()
         controller = self._controller(cancellation=cancellation)
 
-        with self.assertRaises(redirect_store.RedirectStoreError):
+        with self.assertRaises(redirect_store_models.RedirectStoreError):
             controller.accept(
                 self.plan_dir,
                 "op-missing",
@@ -638,7 +640,7 @@ class AcceptanceOrderingTests(unittest.TestCase):
         self._submit("op-2")
         cancellation = _FakeCancellation()
         controller = self._controller(cancellation=cancellation)
-        with self.assertRaises(redirect_store.RedirectStoreError):
+        with self.assertRaises(redirect_store_models.RedirectStoreError):
             controller.accept(
                 self.plan_dir,
                 "op-missing",
@@ -651,7 +653,7 @@ class AcceptanceOrderingTests(unittest.TestCase):
             self.plan_dir, "op-2", target=self.target, state_dir=self.state_dir
         )
 
-        self.assertEqual(redirect_store.STATE_ACCEPTED, request.state)
+        self.assertEqual(redirect_store_vocab.STATE_ACCEPTED, request.state)
         self.assertEqual(redirect_control.PHASE_CONFIRMED, controller.phase)
         self.assertEqual(1, len(cancellation.armed))
         self.clock.advance(2.0)
@@ -671,7 +673,7 @@ class AcceptanceOrderingTests(unittest.TestCase):
         )
         self.clock.advance(1.0)
 
-        with self.assertRaises(redirect_store.RedirectStoreError):
+        with self.assertRaises(redirect_store_models.RedirectStoreError):
             controller.accept(
                 self.plan_dir,
                 "op-missing",

@@ -22,7 +22,7 @@ from . import (
     run_persistence,
     run_reporting,
     run_termination,
-    verification,
+    verification_models,
 )
 
 # Registered implementation turns are enabled only because every such turn is
@@ -63,7 +63,7 @@ class RunContext:
     audit_context: run_coordination_terminal.TerminalAuditContext
     guard_controller: guards.GuardController
     plan_cache: plans_snapshot.PlanSnapshotCache
-    verification_context: verification.VerificationContext
+    verification_context: verification_models.VerificationContext
     commit_generation: run_commit._CommitGeneration
     #: What each session's earlier attempts in *this* run were seen to change.
     #: Bound at run start rather than per session because the loop re-attempts

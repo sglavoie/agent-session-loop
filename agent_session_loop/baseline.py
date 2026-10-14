@@ -55,10 +55,10 @@ from .baseline_cache import (
 from .contracts import CommandCheck, VerificationCheck, VerifyRecipe
 from .plans_errors import PlanError
 from .plans_files import canonicalize_path
-from .verification import (
+from .verification_checks import run_check
+from .verification_models import (
     CheckResult,
     VerificationContext,
-    run_check,
     verification_context_from_plan,
 )
 

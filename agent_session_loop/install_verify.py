@@ -545,9 +545,9 @@ def _check_maintenance_job(home: Path) -> dict[str, Any]:
     failed. A stale definition or a failed last pass surfaces here rather than
     waiting for the volume to fill.
     """
-    from . import maintenance
+    from . import maintenance_job, maintenance_policy, maintenance_run
 
-    target = maintenance.plist_path(home)
+    target = maintenance_job.plist_path(home)
     if not target.is_file():
         return _advisory(
             "maintenance-job",
@@ -559,25 +559,25 @@ def _check_maintenance_job(home: Path) -> dict[str, Any]:
     # Report on the corpus the *installed* job maintains, not whichever one
     # this process would default to, so a job pinned to an explicit state root
     # is never judged against somebody else's manifest.
-    manifest = maintenance.read_manifest(_job_state_dir(target))
+    manifest = maintenance_run.read_manifest(_job_state_dir(target))
     last_run = manifest.get("last_run")
     if not isinstance(last_run, dict):
         return _advisory(
             "maintenance-job",
-            f"{maintenance.JOB_LABEL} is installed but has not recorded a run "
+            f"{maintenance_policy.JOB_LABEL} is installed but has not recorded a run "
             "yet; `asl maintenance status` reports it once the job has fired",
             ok=True,
         )
     if not last_run.get("ok", True):
         return _advisory(
             "maintenance-job",
-            f"{maintenance.JOB_LABEL} last ran at {last_run.get('finished_at')} "
+            f"{maintenance_policy.JOB_LABEL} last ran at {last_run.get('finished_at')} "
             f"and failed: {last_run.get('failure_count')} failure(s), "
             f"health {last_run.get('health_codes') or last_run.get('outcome')}",
         )
     return _success(
         "maintenance-job",
-        f"{maintenance.JOB_LABEL} last ran at {last_run.get('finished_at')} "
+        f"{maintenance_policy.JOB_LABEL} last ran at {last_run.get('finished_at')} "
         f"({last_run.get('outcome')}), reclaiming "
         f"{last_run.get('reclaimed_bytes')} bytes with no failures",
     )

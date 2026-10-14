@@ -117,7 +117,7 @@ CONVERSATION_CONTINUATION_EVENT = "conversation_continuation"
 # Appended when a correction accepted mid-turn becomes the next attempt of the
 # same session, is dropped because selection moved on, or is consumed by the
 # attempt that carries it. Never carries the feedback itself: the operation ids
-# are the handle, and the words stay behind `redirect_store.read_feedback`.
+# are the handle, and the words stay behind `redirect_store_journal.read_feedback`.
 REDIRECT_CONTINUATION_EVENT = "redirect_continuation"
 STATE_FILE_NAME = "state.json"
 EVENTS_FILE_NAME = "events.jsonl"

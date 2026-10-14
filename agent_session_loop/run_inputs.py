@@ -96,7 +96,7 @@ from . import (
     run_prompts,
     run_selection,
     state,
-    verification,
+    verification_models,
     workspaces,
 )
 from .run_errors import RunError
@@ -225,7 +225,7 @@ def _validate_run_inputs(
 def _resolve_run_verification_context(
     plan_dir: str | Path,
     cwd: Path,
-) -> verification.VerificationContext:
+) -> verification_models.VerificationContext:
     """Resolve the run root once and enforce prepare's durable binding."""
     registry = plans_registry.read_repository_registry(plan_dir)
     metadata = plans_metadata.load_plan_metadata(plan_dir)
@@ -240,7 +240,7 @@ def _resolve_run_verification_context(
             raise plans_errors.PlanError(
                 f"run cwd does not match stored plan metadata: {cwd} != {metadata.cwd}"
             )
-        return verification.VerificationContext.legacy(cwd, plan_dir=plan_dir)
+        return verification_models.VerificationContext.legacy(cwd, plan_dir=plan_dir)
 
     try:
         workspace = workspaces.resolve_workspace(cwd, registry)
@@ -261,12 +261,12 @@ def _resolve_run_verification_context(
         raise plans_errors.PlanError(
             "run workspace does not match the prepared workspace binding"
         )
-    return verification.VerificationContext.resolved_workspace(workspace)
+    return verification_models.VerificationContext.resolved_workspace(workspace)
 
 
 def _validate_resume_workspace_binding(
     args: argparse.Namespace,
-    context: verification.VerificationContext,
+    context: verification_models.VerificationContext,
 ) -> None:
     """Reject a resume whose current binding differs from its paused run."""
     persisted = getattr(args, "_resume_workspace_config", None)
@@ -347,7 +347,7 @@ def _repository_intent_message(
 
 def _run_repository_intent_report(
     plan_dir: Path,
-    context: verification.VerificationContext,
+    context: verification_models.VerificationContext,
     *,
     state_dir_arg: str | None,
 ) -> dict[str, Any] | None:
@@ -523,7 +523,7 @@ def _task_packet_repository_intent_report(
 
 def _ensure_legacy_run_metadata(
     plan_dir: Path,
-    context: verification.VerificationContext,
+    context: verification_models.VerificationContext,
 ) -> None:
     """First-bind an unprepared legacy plan without rewriting existing metadata."""
     if context.workspace is not None:

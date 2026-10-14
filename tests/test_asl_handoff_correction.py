@@ -15,7 +15,7 @@ about.
 
 The correction turn is driven for real against a plan on disk, with the
 persistence handle's state writes switched off and the events appended to a
-temporary path. Nothing here reaches Git or `verification.run_verification`, so
+temporary path. Nothing here reaches Git or `verification_run.run_verification`, so
 nothing spawns a process, which is what keeps this module in
 `PORTABLE_MODULES`; `test_the_correction_turn_spawns_no_process` asserts that
 rather than assuming it.

@@ -29,7 +29,7 @@ naming one here would let a caller verify session 3's contract against session
 
 ## The check runs where the action was authorized
 
-:func:`agent_session_loop.verification.VerificationContext` already refuses a
+:func:`agent_session_loop.verification_models.VerificationContext` already refuses a
 check whose location escapes its repository. What it cannot know is which
 repositories *this action* was permitted in, because AgentMux answered that
 about the action and not about the plan. So the resolved root is checked
@@ -136,12 +136,13 @@ from . import (
     overseer_discovery,
     overseer_dispatch,
     overseer_policy_client,
-    overseer_store,
+    overseer_store_models,
     plans_errors,
     plans_files,
     plans_registry,
     plans_session_ids,
-    verification,
+    verification_checks,
+    verification_models,
     workspaces,
 )
 
@@ -278,7 +279,7 @@ Authority = Callable[[overseer_dispatch.Action], overseer_decisions.Ruling | Non
 BuildInventory = Callable[..., overseer_discovery.Inventory]
 InspectRun = Callable[..., intervention.RunFacts]
 ReadContract = Callable[..., contracts.CompletionContract | None]
-RunCheck = Callable[..., verification.CheckResult]
+RunCheck = Callable[..., verification_models.CheckResult]
 
 
 @dataclass(frozen=True)
@@ -293,7 +294,7 @@ class Selection:
     session_id: str
     declared: tuple[str, ...]
     check: contracts.VerificationCheck | None = None
-    context: verification.VerificationContext | None = None
+    context: verification_models.VerificationContext | None = None
     resolved_root: str = ""
     refusal: Refusal | None = None
     detail: str = ""
@@ -460,7 +461,7 @@ class VerifyAdapter:
     build_inventory: BuildInventory = overseer_discovery.build_inventory
     inspect_run: InspectRun = intervention.inspect_run
     read_contract: ReadContract = contracts.read_completion_contract
-    run_check: RunCheck = verification.run_check
+    run_check: RunCheck = verification_checks.run_check
     prepared: dict[str, Prepared] = field(
         default_factory=dict, repr=False, compare=False
     )
@@ -584,7 +585,7 @@ class VerifyAdapter:
 
     def reconcile(
         self,
-        record: overseer_store.ActionRecord,
+        record: overseer_store_models.ActionRecord,
     ) -> overseer_dispatch.Receipt:
         """Settle a verify whose result a dead process took with it.
 
@@ -640,7 +641,7 @@ def adapters(
     build_inventory: BuildInventory = overseer_discovery.build_inventory,
     inspect_run: InspectRun = intervention.inspect_run,
     read_contract: ReadContract = contracts.read_completion_contract,
-    run_check: RunCheck = verification.run_check,
+    run_check: RunCheck = verification_checks.run_check,
 ) -> overseer_dispatch.Registry:
     """Build a dispatcher registry holding exactly the verify adapter.
 
@@ -672,7 +673,7 @@ def _context(
     repositories: Sequence[overseer_policy_client.Repository],
     state_dir: str | Path | None,
     build_inventory: BuildInventory,
-) -> verification.VerificationContext | tuple[Refusal, str]:
+) -> verification_models.VerificationContext | tuple[Refusal, str]:
     """Build the context this plan's checks resolve against, or say why not.
 
     Three questions are answered here, and all three from the record rather
@@ -746,7 +747,7 @@ def _context(
             return drifted
 
     try:
-        context = verification.verification_context_from_plan(plan_dir, cwd)
+        context = verification_models.verification_context_from_plan(plan_dir, cwd)
     except plans_errors.PlanError as error:
         return ("workspace_unrecoverable", str(error))
     # And again once every declared path has been followed to a real root: a
@@ -879,7 +880,7 @@ def _registry_bound(
 
 
 def _resolved_bound(
-    context: verification.VerificationContext,
+    context: verification_models.VerificationContext,
     repositories: Sequence[overseer_policy_client.Repository],
 ) -> tuple[Refusal, str] | None:
     """Require every resolved repository to be one the action carries."""
@@ -950,7 +951,7 @@ def _render(participants: Participants) -> str:
 
 
 def _receipt(
-    result: verification.CheckResult, selection: Selection
+    result: verification_models.CheckResult, selection: Selection
 ) -> overseer_dispatch.Receipt:
     """Report what the check said, in the vocabulary the dispatcher settles on.
 
@@ -973,7 +974,7 @@ def _receipt(
     )
 
 
-def _locator(result: verification.CheckResult, selection: Selection) -> str:
+def _locator(result: verification_models.CheckResult, selection: Selection) -> str:
     """Where the check ran, which is the only evidence a verification leaves."""
     where = (
         result.qualified_cwd

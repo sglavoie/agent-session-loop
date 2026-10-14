@@ -15,7 +15,7 @@ from agent_session_loop import (
     commit_settlement,
     turn_settlement,
 )
-from agent_session_loop import verification as verification_module
+from agent_session_loop import verification_models as verification_module
 from tests.support import (
     init_git_repo,
 )

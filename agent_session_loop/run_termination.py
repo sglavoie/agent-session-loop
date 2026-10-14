@@ -94,7 +94,7 @@ from . import (
     run_coordination_terminal,
     run_persistence,
     run_reporting,
-    verification,
+    verification_models,
     verification_transitions,
 )
 
@@ -177,7 +177,7 @@ _UNAUDITED_TERMINAL_OUTCOMES = frozenset({"dry-run"})
 
 
 def _audited_repositories(
-    context: verification.VerificationContext,
+    context: verification_models.VerificationContext,
 ) -> tuple[tuple[str, ...], bool]:
     """Name the repositories the audit's boundary check covers, and their source.
 

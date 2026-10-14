@@ -7,7 +7,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
-from . import artifacts, assurance_models_findings, assurance_models_vocab, verification
+from . import (
+    artifacts,
+    assurance_models_findings,
+    assurance_models_vocab,
+    verification_diagnostics,
+)
 from .assurance_models_vocab import EvidenceKind
 from .supervisor_audit_evidence_constants import (
     MAX_INLINE_STRING_BYTES,
@@ -91,14 +96,16 @@ class _Collector:
         self, value: Any, *, key: str | None = None, parent: str | None = None
     ) -> Any:
         """Return ``value`` with credentials, content, and unsafe paths removed."""
-        if parent == verification.FAILURE_DIAGNOSTIC_KEY:
+        if parent == verification_diagnostics.FAILURE_DIAGNOSTIC_KEY:
             # A structured rejection travels as control-plane evidence, so
             # every field inside it is held to that standard: a value drawn
             # from ASL's own closed gate vocabulary passes, and anything else —
             # an unknown key, a nested structure, an application token in a
             # field that must name a gate or a reason — is the rejected
             # artifact's own text and is withheld like any output.
-            if not verification.is_control_plane_diagnostic_field(key, value):
+            if not verification_diagnostics.is_control_plane_diagnostic_field(
+                key, value
+            ):
                 return self._content_stub(
                     value
                     if isinstance(value, str)

@@ -8,7 +8,7 @@ from typing import Any
 from . import baseline
 from .baseline_cache import BASELINE_RESULTS_FILENAME, BaselineCache
 from .prepare_results import _REUSABLE_BASELINE_STATUSES
-from .verification import VerificationContext
+from .verification_models import VerificationContext
 
 
 def _baseline_check_entry(

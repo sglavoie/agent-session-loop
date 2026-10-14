@@ -49,7 +49,7 @@ from . import (
     redirect_admission,
     redirect_cli,
     redirect_recovery,
-    redirect_store,
+    redirect_store_vocab,
     workbench_summary_model,
 )
 
@@ -338,8 +338,8 @@ REDIRECT_REASONS: tuple[str, ...] = tuple(
     dict.fromkeys(
         (
             *redirect_admission.REFUSAL_REASONS,
-            *redirect_store.SETTLEMENT_REASONS,
-            redirect_store.STATE_SUBMITTED,
+            *redirect_store_vocab.SETTLEMENT_REASONS,
+            redirect_store_vocab.STATE_SUBMITTED,
         )
     )
 )

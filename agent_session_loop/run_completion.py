@@ -106,7 +106,7 @@ from . import (
     run_reporting,
     run_selection,
     run_termination,
-    verification,
+    verification_models,
     workspace_evidence,
 )
 from .run_errors import RunError
@@ -157,7 +157,7 @@ class RunContext(Protocol):
     def plan_cache(self) -> plans_snapshot.PlanSnapshotCache: ...
 
     @property
-    def verification_context(self) -> verification.VerificationContext: ...
+    def verification_context(self) -> verification_models.VerificationContext: ...
 
     @property
     def commit_generation(self) -> run_commit._CommitGeneration: ...

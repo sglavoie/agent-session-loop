@@ -93,7 +93,7 @@ from . import (
     run_selection,
     state,
     task_packet,
-    verification,
+    verification_models,
     workspaces,
 )
 
@@ -157,11 +157,13 @@ def doctor_from_args(args: argparse.Namespace) -> int:
             cwd=cwd,
         )
 
-    verification_context = verification.VerificationContext.legacy(cwd)
+    verification_context = verification_models.VerificationContext.legacy(cwd)
     if repository_registry is not None:
         try:
-            verification_context = verification.VerificationContext.resolved_workspace(
-                workspaces.resolve_workspace(cwd, repository_registry)
+            verification_context = (
+                verification_models.VerificationContext.resolved_workspace(
+                    workspaces.resolve_workspace(cwd, repository_registry)
+                )
             )
         except workspaces.WorkspaceError as error:
             return _print_doctor_error(

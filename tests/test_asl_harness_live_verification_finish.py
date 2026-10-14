@@ -18,7 +18,8 @@ from agent_session_loop import (
     plans_session_ids,
     run_persistence,
     run_reporting,
-    verification,
+    verification_models,
+    verification_run,
 )
 from tests.harness_integration_base import FakeHarnessIntegrationBase
 from tests.support import (
@@ -76,7 +77,7 @@ class LiveVerificationFinishTests(FakeHarnessIntegrationBase):
                     check_index=0,
                     name="first",
                     kind="command",
-                    role=verification.CHECK_ROLE_GATE,
+                    role=verification_models.CHECK_ROLE_GATE,
                     status="pass",
                     duration_seconds=1.0,
                     failure_reason=None,
@@ -181,7 +182,7 @@ class LiveVerificationFinishTests(FakeHarnessIntegrationBase):
                         check_index=0,
                         name="first",
                         kind="command",
-                        role=verification.CHECK_ROLE_GATE,
+                        role=verification_models.CHECK_ROLE_GATE,
                         status="pass",
                         duration_seconds=1.0,
                         failure_reason=None,
@@ -263,7 +264,7 @@ class LiveVerificationFinishTests(FakeHarnessIntegrationBase):
                     check_index=0,
                     name="first",
                     kind="command",
-                    role=verification.CHECK_ROLE_GATE,
+                    role=verification_models.CHECK_ROLE_GATE,
                     status="pass",
                     duration_seconds=1.0,
                     failure_reason=None,
@@ -394,7 +395,7 @@ class LiveVerificationFinishTests(FakeHarnessIntegrationBase):
 
             finishes: list[int] = []
 
-            def on_check_started(event: verification.CheckStartedEvent) -> None:
+            def on_check_started(event: verification_models.CheckStartedEvent) -> None:
                 live.check_started(
                     check_index=event.check_index,
                     name=event.name,
@@ -403,7 +404,9 @@ class LiveVerificationFinishTests(FakeHarnessIntegrationBase):
                     cwd=event.cwd,
                 )
 
-            def on_check_finished(event: verification.CheckFinishedEvent) -> None:
+            def on_check_finished(
+                event: verification_models.CheckFinishedEvent,
+            ) -> None:
                 live.check_finished(
                     check_index=event.check_index,
                     name=event.name,
@@ -423,14 +426,14 @@ class LiveVerificationFinishTests(FakeHarnessIntegrationBase):
             live.start()
             with (
                 mock.patch.object(
-                    verification, "as_completed", interrupt_once_all_running
+                    verification_run, "as_completed", interrupt_once_all_running
                 ),
                 self.assertRaises(KeyboardInterrupt),
             ):
-                verification.run_verification(
+                verification_run.run_verification(
                     contract,
                     repo_root=repo_root,
-                    observer=verification.VerificationObserver(
+                    observer=verification_models.VerificationObserver(
                         on_check_started=on_check_started,
                         on_check_finished=on_check_finished,
                     ),

@@ -61,7 +61,7 @@ from . import (
     plans_session_scope,
     qna,
     redirect_ack,
-    verification,
+    verification_models,
     workspaces,
 )
 
@@ -92,7 +92,7 @@ def _resolved_repositories_payload(
 
 
 def _claimed_repository_roots(
-    context: verification.VerificationContext,
+    context: verification_models.VerificationContext,
 ) -> tuple[str, ...]:
     """Return the resolved repository roots this run is about to claim."""
     if context.workspace is None:
@@ -101,7 +101,7 @@ def _claimed_repository_roots(
 
 
 def _workspace_payload_fields(
-    context: verification.VerificationContext,
+    context: verification_models.VerificationContext,
 ) -> dict[str, Any]:
     """Return additive workspace fields, leaving legacy payloads unchanged."""
     if context.workspace is None:

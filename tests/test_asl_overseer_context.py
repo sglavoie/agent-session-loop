@@ -56,7 +56,8 @@ from agent_session_loop import (
     overseer_context,
     overseer_discovery,
     overseer_policy_client,
-    overseer_store,
+    overseer_store_ledger,
+    overseer_store_models,
     plans_files,
     state,
 )
@@ -110,7 +111,7 @@ class _Plan:
         self.plan_dir = plans_files.canonicalize_path(self.plan_dir)
         self.run_id = "run-1"
         self.now = EPOCH
-        self.ledger = overseer_store.open_ledger(
+        self.ledger = overseer_store_ledger.open_ledger(
             state_dir=self.state_root, now=self.iso_now
         )
         case.addCleanup(self.ledger.close)
@@ -501,7 +502,7 @@ class EvidenceIsReferencedNotStoredTests(unittest.TestCase):
         plan.build()
 
         plan.ledger.close()
-        blob = overseer_store.ledger_path(plan.state_root).read_bytes()
+        blob = overseer_store_ledger.ledger_path(plan.state_root).read_bytes()
         self.assertNotIn(MARKER.encode("utf-8"), blob)
 
     def test_the_digest_is_the_digest_of_the_source_as_it_was_read(self) -> None:
@@ -668,7 +669,7 @@ class BoundsTests(unittest.TestCase):
             kind="blocked",
             summary="hand-written evidence",
             evidence=(
-                overseer_store.EvidenceInput(
+                overseer_store_models.EvidenceInput(
                     alias=overseer_context.STATE_SPACE,
                     kind="status",
                     locator="../../../outside.json",
@@ -947,7 +948,7 @@ class PermanentExclusionTests(unittest.TestCase):
         plan.ledger.revoke(plan_dir=str(plan.plan_dir), reason="operator excluded it")
         plan.ledger.close()
 
-        reopened = overseer_store.open_ledger(
+        reopened = overseer_store_ledger.open_ledger(
             state_dir=plan.state_root, now=plan.iso_now
         )
         self.addCleanup(reopened.close)
@@ -986,7 +987,7 @@ class ContractTests(unittest.TestCase):
     def test_the_ledger_withholdings_are_reported_unparaphrased(self) -> None:
         """A refusal an operator reads must be the ledger's word for it."""
         self.assertLessEqual(
-            set(overseer_store.WITHHOLDING_REASONS),
+            set(overseer_store_models.WITHHOLDING_REASONS),
             set(overseer_context.REFUSALS),
         )
 

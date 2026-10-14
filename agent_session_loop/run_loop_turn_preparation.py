@@ -12,7 +12,7 @@ from . import (
     harnesses,
     plans_content_hash,
     redirect_continuation,
-    redirect_store,
+    redirect_store_models,
     run_commit,
     run_selection,
     state,
@@ -149,7 +149,7 @@ def _prepare_turn_prompt(frame: RunFrame) -> RunResult | LoopSignal | None:
     # wakeup, so a correction never queues behind the control poll.
     frame.turn_redirect = redirect_continuation.TurnRedirect(
         plan_dir=frame.before.plan_dir,
-        target=redirect_store.RedirectTarget(
+        target=redirect_store_models.RedirectTarget(
             run_id=frame.ctx.run_id,
             session_id=frame.session_id,
             turn_index=frame.turn_index,

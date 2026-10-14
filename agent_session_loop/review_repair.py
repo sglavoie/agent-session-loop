@@ -99,7 +99,7 @@ from . import (
     review,
     state,
     state_locks,
-    verification,
+    verification_models,
     workspaces,
 )
 from .authoring_manifest import ManifestSession
@@ -1153,7 +1153,7 @@ def _validate_children_contract(
     covers it.
     """
     try:
-        context = verification.VerificationContext.from_plan(plan_dir, cwd)
+        context = verification_models.VerificationContext.from_plan(plan_dir, cwd)
     except PlanError:
         return []
     blockers: list[str] = []

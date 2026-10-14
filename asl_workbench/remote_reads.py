@@ -1,6 +1,6 @@
 """Correlated detail reads, from the side of the link that asks for them.
 
-:mod:`asl_workbench.connector` publishes what the Mac decides to say. This is
+:mod:`asl_workbench.connector_runtime` publishes what the Mac decides to say. This is
 the other half of the conversation: the service's runtime for *asking*, one
 question at a time, over the connector's own outbound channel. A request goes
 down as the acknowledgement of an upload, the answer comes back up correlated

@@ -11,11 +11,8 @@ from .contracts import (
 )
 from .plans_errors import PlanError
 from .preflight_models import PreflightFinding, _finding
-from .verification import (
-    VerificationContext,
-    diagnose_command,
-    diagnose_command_scope,
-)
+from .verification_command_diagnosis import diagnose_command, diagnose_command_scope
+from .verification_models import VerificationContext
 
 
 def _check_verification_scope(

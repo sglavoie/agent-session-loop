@@ -165,7 +165,9 @@ def _add_maintenance_commands(
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    maintenance_install_parser.set_defaults(handler_ref="maintenance:install_from_args")
+    maintenance_install_parser.set_defaults(
+        handler_ref="maintenance_cli:install_from_args"
+    )
 
     maintenance_run_parser = maintenance_sub.add_parser(
         "run",
@@ -228,7 +230,7 @@ def _add_maintenance_commands(
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    maintenance_run_parser.set_defaults(handler_ref="maintenance:run_from_args")
+    maintenance_run_parser.set_defaults(handler_ref="maintenance_cli:run_from_args")
 
     maintenance_status_parser = maintenance_sub.add_parser(
         "status",
@@ -259,7 +261,9 @@ def _add_maintenance_commands(
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    maintenance_status_parser.set_defaults(handler_ref="maintenance:status_from_args")
+    maintenance_status_parser.set_defaults(
+        handler_ref="maintenance_cli:status_from_args"
+    )
 
     maintenance_uninstall_parser = maintenance_sub.add_parser(
         "uninstall",
@@ -285,7 +289,7 @@ def _add_maintenance_commands(
         help="Print machine-readable JSON output",
     )
     maintenance_uninstall_parser.set_defaults(
-        handler_ref="maintenance:uninstall_from_args"
+        handler_ref="maintenance_cli:uninstall_from_args"
     )
 
 

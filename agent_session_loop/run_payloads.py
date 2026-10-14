@@ -121,7 +121,7 @@ from . import (
     supervisor_audit,
     task_packet,
     turn_execution_artifacts,
-    verification,
+    verification_models,
 )
 from .run_errors import RunError
 
@@ -131,7 +131,7 @@ def _run_config_payload(
     *,
     cwd: Path,
     commit_mode: str | None,
-    verification_context: verification.VerificationContext | None = None,
+    verification_context: verification_models.VerificationContext | None = None,
 ) -> dict[str, Any]:
     """Snapshot the resolved run flags so ``asl run --resume`` can rehydrate.
 
@@ -148,7 +148,9 @@ def _run_config_payload(
     harness/model/effort selection that a default resume would otherwise reset
     to the ``codex`` defaults.
     """
-    context = verification_context or verification.VerificationContext.legacy(cwd)
+    context = verification_context or verification_models.VerificationContext.legacy(
+        cwd
+    )
     return {
         "harness": args.harness,
         "harness_model": getattr(args, "harness_model", None),
@@ -198,9 +200,11 @@ def _initial_payload(
     run_id: str,
     commit_mode: str | None,
     mailbox_activation: Mapping[str, Any],
-    verification_context: verification.VerificationContext | None = None,
+    verification_context: verification_models.VerificationContext | None = None,
 ) -> dict[str, Any]:
-    context = verification_context or verification.VerificationContext.legacy(cwd)
+    context = verification_context or verification_models.VerificationContext.legacy(
+        cwd
+    )
     model_effort = run_selection._selected_model_effort_payload(args)
     spark = run_selection._safe_initial_spark_payload(args)
     review_harness = getattr(args, "review_harness", None)
@@ -320,9 +324,11 @@ def _dry_run_payload(
     reply_text: str | None = None,
     reply_context: qna.QnAContext | None = None,
     reply_origin: str = run_prompts.REPLY_ORIGIN_ARGV,
-    verification_context: verification.VerificationContext | None = None,
+    verification_context: verification_models.VerificationContext | None = None,
 ) -> dict[str, Any]:
-    context = verification_context or verification.VerificationContext.legacy(cwd)
+    context = verification_context or verification_models.VerificationContext.legacy(
+        cwd
+    )
     review_harness = getattr(args, "review_harness", None)
     review_requested = review_harness is not None
     review_output_path = (

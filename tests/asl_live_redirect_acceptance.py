@@ -103,7 +103,9 @@ from agent_session_loop import (
     harnesses,
     process_tree,
     redirect_ack,
-    redirect_store,
+    redirect_store_models,
+    redirect_store_requests,
+    redirect_store_vocab,
     run_prompts,
 )
 from agent_session_loop.harnesses import HARNESS_NAMES, HarnessName
@@ -199,7 +201,7 @@ TERMINATION_WAIT_SECONDS = 60.0
 #: The redirect TTL for the acceptance correction. The default 120 seconds is
 #: shorter than a live turn, which would expire the correction before the
 #: interrupted turn even ended.
-CORRECTION_TTL_SECONDS = redirect_store.REDIRECT_MAX_TTL_SECONDS
+CORRECTION_TTL_SECONDS = redirect_store_vocab.REDIRECT_MAX_TTL_SECONDS
 
 NOTES_FILE = "notes.txt"
 RUNNING_FILE = "running.txt"
@@ -813,7 +815,10 @@ def _seed_correction(
     harness: HarnessName,
     run_id: str,
 ) -> tuple[
-    redirect_store.RedirectTarget, redirect_store.RedirectTarget, str, list[str]
+    redirect_store_models.RedirectTarget,
+    redirect_store_models.RedirectTarget,
+    str,
+    list[str],
 ]:
     """Submit, accept, and carry one correction through the real journal.
 
@@ -821,26 +826,26 @@ def _seed_correction(
     operation id, and the correction block exactly as the runner would render
     it into a resumed prompt.
     """
-    target = redirect_store.RedirectTarget(
+    target = redirect_store_models.RedirectTarget(
         run_id=run_id,
         session_id="live-acceptance",
         turn_index=1,
         harness=harness,
     )
-    continuation = redirect_store.RedirectTarget(
+    continuation = redirect_store_models.RedirectTarget(
         run_id=run_id,
         session_id="live-acceptance",
         turn_index=2,
         harness=harness,
     )
-    request = redirect_store.submit_request(
+    request = redirect_store_requests.submit_request(
         workspace.plan_dir,
         target=target,
         feedback=correction_text(),
         state_dir=workspace.state_dir,
         ttl_seconds=CORRECTION_TTL_SECONDS,
     )
-    redirect_store.accept_request(
+    redirect_store_requests.accept_request(
         workspace.plan_dir,
         request.operation_id,
         target=target,

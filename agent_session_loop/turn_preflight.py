@@ -101,7 +101,7 @@ from . import (
     scope_recovery,
     turn_execution_live,
     turn_preparation,
-    verification,
+    verification_models,
     workspace_evidence,
     workspaces,
 )
@@ -136,7 +136,7 @@ class RunContext(Protocol):
     def persistence(self) -> run_persistence._RunPersistence: ...
 
     @property
-    def verification_context(self) -> verification.VerificationContext: ...
+    def verification_context(self) -> verification_models.VerificationContext: ...
 
     @property
     def runner_work_finished_at(self) -> datetime | None: ...

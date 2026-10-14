@@ -277,12 +277,12 @@ export const REDIRECT_RECONCILE_HINT =
   "one is a second correction";
 // Mirrors intervention.ACTION_REDIRECT.
 export const REDIRECT_ACTION = "run.redirect";
-// Mirrors redirect_store.REDIRECT_MAX_FEEDBACK_BYTES so the composer refuses
+// Mirrors redirect_store_vocab.REDIRECT_MAX_FEEDBACK_BYTES so the composer refuses
 // a body the journal would refuse anyway.
 export const REDIRECT_MAX_FEEDBACK_BYTES = 65536;
-// Mirrors redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS.
+// Mirrors redirect_store_vocab.REDIRECT_MAX_OPERATION_ID_CHARS.
 export const REDIRECT_MAX_OPERATION_ID_CHARS = 64;
-// Mirrors redirect_store.ERROR_REPLAY_CONFLICT. The server says this when the
+// Mirrors redirect_store_vocab.ERROR_REPLAY_CONFLICT. The server says this when the
 // operation id in hand already names a *different* correction, which is the
 // one refusal the composer cannot answer on the operator's behalf: the draft
 // in the textarea and the words in the journal are two corrections, and only

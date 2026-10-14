@@ -17,7 +17,9 @@ from agent_session_loop import (
     supervisor_audit_evidence_collector,
     supervisor_audit_evidence_constants,
     supervisor_audit_evidence_models,
-    verification,
+    verification_checks,
+    verification_cli,
+    verification_diagnostics,
 )
 from tests.support_supervisor_audit import RUN_ID, RunHistoryFixture
 
@@ -368,7 +370,7 @@ class ValidatorDiagnosticProjectionTests(RunHistoryFixture, unittest.TestCase):
             plan_dir=plan_dir,
         )
         turn_dir = run_dir / "turn-0001-01"
-        result = verification.run_check(
+        result = verification_checks.run_check(
             contract.verify.checks[0],
             repo_root=run_dir,
             artifact_dir=turn_dir / "verification",
@@ -377,10 +379,10 @@ class ValidatorDiagnosticProjectionTests(RunHistoryFixture, unittest.TestCase):
         payload = self._read_result(run_dir)
         payload["verification"] = {
             "passed": False,
-            "checks": [verification._check_result_payload(result)],
+            "checks": [verification_cli._check_result_payload(result)],
         }
         self._write_result(turn_dir, payload)
-        return verification._check_result_payload(result)
+        return verification_cli._check_result_payload(result)
 
     def test_the_bundle_carries_the_reason_the_streams_cannot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -465,7 +467,7 @@ class ValidatorDiagnosticProjectionTests(RunHistoryFixture, unittest.TestCase):
         """Record one real failed command and project it through a bundle."""
         _, _, _, run_dir = history
         turn_dir = run_dir / "turn-0001-01"
-        result = verification.run_check(
+        result = verification_checks.run_check(
             contracts.CommandCheck(
                 name=name,
                 argv=(
@@ -482,7 +484,7 @@ class ValidatorDiagnosticProjectionTests(RunHistoryFixture, unittest.TestCase):
         payload = self._read_result(run_dir)
         payload["verification"] = {
             "passed": False,
-            "checks": [verification._check_result_payload(result)],
+            "checks": [verification_cli._check_result_payload(result)],
         }
         self._write_result(turn_dir, payload)
         return self._bundle(history).payload["turns"][0]["result"]["verification"][
@@ -495,8 +497,8 @@ class ValidatorDiagnosticProjectionTests(RunHistoryFixture, unittest.TestCase):
             json.dumps(
                 {
                     **fields,
-                    verification.FAILURE_DIAGNOSTIC_MARKER_KEY: (
-                        verification.FAILURE_DIAGNOSTIC_MARKER_VALUE
+                    verification_diagnostics.FAILURE_DIAGNOSTIC_MARKER_KEY: (
+                        verification_diagnostics.FAILURE_DIAGNOSTIC_MARKER_VALUE
                     ),
                 },
                 sort_keys=True,

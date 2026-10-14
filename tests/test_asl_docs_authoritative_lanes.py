@@ -12,7 +12,7 @@ from agent_session_loop import (
     preflight_runtime_hints,
     process_tree,
     task_packet,
-    verification,
+    verification_process,
 )
 from tests import run_suite
 from tests.asl_docs_support import ASL_GUIDE, read_asl_reference
@@ -204,8 +204,8 @@ class AuthoritativeLaneDocsTests(unittest.TestCase):
         self.assertNotIn("is **not** stopped by either", self.docs)
 
     def test_reader_join_bounds_match_the_documented_numbers(self) -> None:
-        self.assertEqual(5.0, verification._ABANDONED_READER_JOIN_SECONDS)
-        self.assertEqual(30.0, verification._EXITED_READER_JOIN_SECONDS)
+        self.assertEqual(5.0, verification_process._ABANDONED_READER_JOIN_SECONDS)
+        self.assertEqual(30.0, verification_process._EXITED_READER_JOIN_SECONDS)
         self.assertIn(
             "the pipe readers of a killed check are joined under a five-second\n"
             "  limit and those of a check that exited on its own under thirty "

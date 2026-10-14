@@ -97,28 +97,32 @@ from .compatibility import (
     check_boundary,
     check_runtime,
 )
-from .connector import (
+from .connector_payloads import (
+    catalog_page_payload,
+    connector_hello,
+    heartbeat_payload,
+    history_batch_payload,
+    snapshot_payload,
+)
+from .connector_protocols import (
+    Channel,
+    DetailResponder,
+    MutationBodySource,
+    MutationPerformer,
+    ObservationCycle,
+    ObservationSource,
+)
+from .connector_runtime import ObservationConnector
+from .connector_support import (
     CONNECTOR_CAPABILITIES,
     CONNECTOR_STATES,
     LOCK_FILE_NAME,
     MUTATION_CAPABILITIES,
     OBSERVATION_CAPABILITIES,
     Backoff,
-    Channel,
     ChannelError,
     ConnectorError,
-    DetailResponder,
-    MutationBodySource,
-    MutationPerformer,
-    ObservationConnector,
-    ObservationCycle,
-    ObservationSource,
     SingleInstanceLock,
-    catalog_page_payload,
-    connector_hello,
-    heartbeat_payload,
-    history_batch_payload,
-    snapshot_payload,
 )
 from .controls import (
     ABORT_NOTE_CODES,

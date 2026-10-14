@@ -166,7 +166,7 @@ _REVISION = re.compile(r"[0-9a-f]{40}")
 #: pins rather than the ones this process was imported with.
 _HELLO_PROBE = (
     "import json, sys\n"
-    "from asl_workbench.connector import CONNECTOR_CAPABILITIES, connector_hello\n"
+    "from asl_workbench import CONNECTOR_CAPABILITIES, connector_hello\n"
     "print(json.dumps(connector_hello(\n"
     "    connector_id=sys.argv[1],\n"
     "    target_id=sys.argv[2],\n"

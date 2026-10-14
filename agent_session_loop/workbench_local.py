@@ -56,7 +56,7 @@ from . import (
     plans_files,
     redirect_admission,
     redirect_cli,
-    redirect_store,
+    redirect_store_vocab,
     state,
     workbench_actions,
     workbench_archive,
@@ -81,7 +81,7 @@ MAX_LAUNCH_RECEIPTS = 64
 #: Same ceiling the redirect journal puts on an operation id, for the same
 #: reason: an idempotency key is an identifier a client chooses, and an
 #: unbounded one is an unbounded allocation on this side of the wire.
-MAX_LAUNCH_ID_CHARS = redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS
+MAX_LAUNCH_ID_CHARS = redirect_store_vocab.REDIRECT_MAX_OPERATION_ID_CHARS
 
 
 class LocalConfig(Protocol):

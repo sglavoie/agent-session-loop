@@ -14,7 +14,9 @@ from agent_session_loop import (
     review,
     review_session_contract,
     run_persistence,
-    verification,
+    verification_checks,
+    verification_cli,
+    verification_diagnostics,
 )
 from tests.support_asl_verification import VerificationExecutorFixtures
 
@@ -36,7 +38,7 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
                 generated_gate=True,
             )
 
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             # The marker is the line's first filter and is not evidence about
             # the failure, so it is read and dropped rather than carried.
@@ -60,7 +62,7 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
                 )
             )
 
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertEqual("pass", result.status)
             self.assertIsNone(result.failure_diagnostic)
@@ -91,7 +93,9 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
                 {
                     "check": self.GATE,
                     "reason": "artifact-missing",
-                    verification.FAILURE_DIAGNOSTIC_MARKER_KEY: "not-the-marker",
+                    (
+                        verification_diagnostics.FAILURE_DIAGNOSTIC_MARKER_KEY
+                    ): "not-the-marker",
                 },
                 sort_keys=True,
             )
@@ -114,7 +118,9 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
         for label, stderr in cases.items():
             with self.subTest(case=label):
                 self.assertIsNone(
-                    verification._parse_failure_diagnostic(stderr, check=gate)
+                    verification_diagnostics._parse_failure_diagnostic(
+                        stderr, check=gate
+                    )
                 )
 
     def test_a_copied_marker_promotes_no_application_token(self) -> None:
@@ -145,7 +151,7 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
                         name="user-authored-command",
                     )
 
-                    result = verification.run_check(check, repo_root=repo_root)
+                    result = verification_checks.run_check(check, repo_root=repo_root)
 
                     self.assertIsNone(result.failure_diagnostic)
                     self.assertEqual("command exited 1: python3", result.detail)
@@ -177,7 +183,7 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
                 generated_gate=True,
             )
 
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertEqual(text, result.failure_diagnostic["customer_payload"])
             self.assertEqual(
@@ -195,7 +201,7 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
                 self._writes_stderr(f"{text}\n", exit_code=2), name="user-command"
             )
 
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertIsNone(result.failure_diagnostic)
             self.assertNotIn(text, result.detail)
@@ -217,8 +223,8 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
                 generated_gate=True,
             )
 
-            result = verification.run_check(check, repo_root=repo_root)
-            payload = verification._check_result_payload(result)
+            result = verification_checks.run_check(check, repo_root=repo_root)
+            payload = verification_cli._check_result_payload(result)
             compacted = run_persistence._strip_check_output(payload)
 
             self.assertEqual(result.failure_diagnostic, payload["failure_diagnostic"])
@@ -242,7 +248,7 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
                 if item.name == "final-review-output-evidence-based"
             )
 
-            result = verification.run_check(check, repo_root=plan_dir)
+            result = verification_checks.run_check(check, repo_root=plan_dir)
 
             self.assertTrue(check.generated_gate)
             self.assertEqual("fail", result.status)
@@ -265,7 +271,7 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp) / "repo"
             repo_root.mkdir()
-            for gate in sorted(verification.GENERATED_GATE_CHECK_NAMES):
+            for gate in sorted(verification_diagnostics.GENERATED_GATE_CHECK_NAMES):
                 with self.subTest(gate=gate):
                     check = self._command(
                         self._writes_stderr(
@@ -277,7 +283,7 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
                         name=gate,
                     )
 
-                    result = verification.run_check(check, repo_root=repo_root)
+                    result = verification_checks.run_check(check, repo_root=repo_root)
 
                     self.assertIsNone(result.failure_diagnostic)
                     self.assertEqual("command exited 1: python3", result.detail)
@@ -320,7 +326,7 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
                 [True, True, False],
                 [check.generated_gate for check in stamped.verify.checks],
             )
-            result = verification.run_check(
+            result = verification_checks.run_check(
                 stamped.verify.checks[-1], repo_root=plan_dir
             )
             self.assertIsNone(result.failure_diagnostic)
@@ -376,5 +382,5 @@ class FailureDiagnosticTests(VerificationExecutorFixtures):
                     names |= stamped
                     reasons |= emitted
 
-        self.assertEqual(verification.GENERATED_GATE_CHECK_NAMES, names)
-        self.assertEqual(verification.GENERATED_GATE_REASONS, reasons)
+        self.assertEqual(verification_diagnostics.GENERATED_GATE_CHECK_NAMES, names)
+        self.assertEqual(verification_diagnostics.GENERATED_GATE_REASONS, reasons)

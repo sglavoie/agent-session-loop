@@ -41,16 +41,19 @@ class _RedirectJournalSurvey:
 def _survey_redirect_journal(state_dir: Path) -> _RedirectJournalSurvey:
     """Count the redirect journal's requests, or refuse if it cannot be read.
 
-    Imported locally because :mod:`redirect_store` imports this module; a
+    Imported locally because :mod:`redirect_store_journal` imports this module; a
     top-level import would close the cycle. Migration needs only counts, so
     nothing here reaches ``read_feedback`` and no operator correction can travel
     into a report, an event, or a printed line.
     """
-    from . import redirect_store  # local: it imports state
+    from . import (  # local: it imports state
+        redirect_store_journal,
+        redirect_store_models,
+    )
 
     try:
-        view = redirect_store.read_journal_at(state_dir)
-    except redirect_store.RedirectStoreError as error:
+        view = redirect_store_journal.read_journal_at(state_dir)
+    except redirect_store_models.RedirectStoreError as error:
         raise MigrationError(
             "redirect-journal-error",
             f"source redirect journal could not be read: {error}",

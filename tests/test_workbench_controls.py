@@ -56,7 +56,12 @@ from agent_session_loop import (
     redirect_admission,
     redirect_cli,
     redirect_recovery,
-    redirect_store,
+    redirect_store_carry,
+    redirect_store_delivery,
+    redirect_store_journal,
+    redirect_store_models,
+    redirect_store_requests,
+    redirect_store_vocab,
     workbench_controls,
     workbench_server,
 )
@@ -313,16 +318,18 @@ class ControlsTestCase(unittest.TestCase):
         self.write_state(**state_kwargs)
         return self.serve_redirects()
 
-    def target(self, *, turn_index: int = 1) -> redirect_store.RedirectTarget:
-        return redirect_store.RedirectTarget(
+    def target(self, *, turn_index: int = 1) -> redirect_store_models.RedirectTarget:
+        return redirect_store_models.RedirectTarget(
             run_id=RUN_ID,
             session_id=SESSION_ID,
             turn_index=turn_index,
             harness="claude",
         )
 
-    def journal(self) -> redirect_store.RedirectJournalView:
-        return redirect_store.read_journal(self.plan_dir, state_dir=self.state_dir)
+    def journal(self) -> redirect_store_models.RedirectJournalView:
+        return redirect_store_journal.read_journal(
+            self.plan_dir, state_dir=self.state_dir
+        )
 
     def queued(self) -> control_queue.DrainResult:
         return control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
@@ -334,7 +341,7 @@ class ControlsTestCase(unittest.TestCase):
         return intervention.action_token(self.facts())
 
     def accept_when_pending(
-        self, target: redirect_store.RedirectTarget | None = None
+        self, target: redirect_store_models.RedirectTarget | None = None
     ) -> threading.Thread:
         """Play the runner: record acceptance while the submit wait is running."""
         wanted = self.target() if target is None else target
@@ -344,7 +351,7 @@ class ControlsTestCase(unittest.TestCase):
             while time.monotonic() < deadline:
                 pending = self.journal().pending()
                 if pending:
-                    redirect_store.accept_request(
+                    redirect_store_requests.accept_request(
                         self.plan_dir,
                         pending[0].operation_id,
                         target=wanted,
@@ -724,8 +731,12 @@ class CorrectionTests(ControlsTestCase):
         with self.assertRaises(workbench_controls.RedirectConflict) as caught:
             self.submit(text=EDITED_FEEDBACK)
 
-        self.assertEqual(redirect_store.CONFLICT_FEEDBACK, caught.exception.conflict)
-        self.assertEqual(redirect_store.ERROR_REPLAY_CONFLICT, caught.exception.reason)
+        self.assertEqual(
+            redirect_store_vocab.CONFLICT_FEEDBACK, caught.exception.conflict
+        )
+        self.assertEqual(
+            redirect_store_vocab.ERROR_REPLAY_CONFLICT, caught.exception.reason
+        )
         self.assertEqual(controls.SCOPE_CONFLICT, caught.exception.scope)
         # Nothing was written and the recorded request is untouched, which is
         # why the refusal still carries the receipt for the one on file.
@@ -747,7 +758,9 @@ class CorrectionTests(ControlsTestCase):
                 }
             )
 
-        self.assertEqual(redirect_store.CONFLICT_TARGET, caught.exception.conflict)
+        self.assertEqual(
+            redirect_store_vocab.CONFLICT_TARGET, caught.exception.conflict
+        )
 
     def test_a_turn_that_moved_is_a_refusal_the_receipt_reports(self) -> None:
         """The race a composer actually loses: the turn ended while they typed.
@@ -778,13 +791,13 @@ class CorrectionTests(ControlsTestCase):
         each surface turns that into a 400 rather than a server fault.
         """
         self.live_run()
-        oversized = "o" * (redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS + 1)
+        oversized = "o" * (redirect_store_vocab.REDIRECT_MAX_OPERATION_ID_CHARS + 1)
 
         with self.assertRaises(workbench_controls.RedirectSubmitFailed) as caught:
             self.submit(operation_id=oversized)
 
         self.assertEqual(
-            redirect_store.ERROR_INVALID_OPERATION_ID, caught.exception.reason
+            redirect_store_vocab.ERROR_INVALID_OPERATION_ID, caught.exception.reason
         )
         self.assertEqual(controls.SOURCE_JOURNAL, caught.exception.source)
         self.assertTrue(caught.exception.request_shaped)
@@ -863,13 +876,13 @@ class CorrectionTests(ControlsTestCase):
         self.live_run()
         self.accept_when_pending()
         self.submit(wait_seconds_raw=5.0)
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             OPERATION_ID,
             continuation=self.target(turn_index=2),
             state_dir=self.state_dir,
         )
-        redirect_store.deliver_request(
+        redirect_store_delivery.deliver_request(
             self.plan_dir,
             OPERATION_ID,
             continuation=self.target(turn_index=2),
@@ -1054,13 +1067,15 @@ class SurfaceParityTests(ControlsTestCase):
         bridge_response = self.bridge_redirect(text=EDITED_FEEDBACK)
 
         self.assertEqual(409, http_status)
-        self.assertEqual(redirect_store.ERROR_REPLAY_CONFLICT, http_body["reason"])
         self.assertEqual(
-            redirect_store.ERROR_REPLAY_CONFLICT,
+            redirect_store_vocab.ERROR_REPLAY_CONFLICT, http_body["reason"]
+        )
+        self.assertEqual(
+            redirect_store_vocab.ERROR_REPLAY_CONFLICT,
             bridge_response["error"]["details"]["reason"],
         )
         self.assertEqual(
-            redirect_store.CONFLICT_FEEDBACK,
+            redirect_store_vocab.CONFLICT_FEEDBACK,
             bridge_response["error"]["details"]["conflict"],
         )
         self.assertEqual(1, len(self.journal().requests))
@@ -1084,13 +1099,13 @@ class SurfaceParityTests(ControlsTestCase):
         self.live_run()
         self.accept_when_pending()
         self.assertEqual(202, self.http_redirect(wait_seconds=5.0)[0])
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             OPERATION_ID,
             continuation=self.target(turn_index=2),
             state_dir=self.state_dir,
         )
-        redirect_store.deliver_request(
+        redirect_store_delivery.deliver_request(
             self.plan_dir,
             OPERATION_ID,
             continuation=self.target(turn_index=2),

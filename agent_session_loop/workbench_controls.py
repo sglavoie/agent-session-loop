@@ -56,7 +56,9 @@ from . import (
     redirect_admission,
     redirect_cli,
     redirect_recovery,
-    redirect_store,
+    redirect_store_models,
+    redirect_store_validation,
+    redirect_store_vocab,
 )
 
 #: The operator-facing sentence each abort note code stands for. The codes are
@@ -77,11 +79,11 @@ ABORT_NOTES: Mapping[str, str] = {
 #: carry, which are the smaller of the two.
 REDIRECT_REQUEST_REASONS = frozenset(
     {
-        redirect_store.ERROR_INVALID_TARGET,
-        redirect_store.ERROR_INVALID_FEEDBACK,
-        redirect_store.ERROR_INVALID_TTL,
-        redirect_store.ERROR_INVALID_OPERATION_ID,
-        redirect_store.ERROR_INVALID_REASON,
+        redirect_store_vocab.ERROR_INVALID_TARGET,
+        redirect_store_vocab.ERROR_INVALID_FEEDBACK,
+        redirect_store_vocab.ERROR_INVALID_TTL,
+        redirect_store_vocab.ERROR_INVALID_OPERATION_ID,
+        redirect_store_vocab.ERROR_INVALID_REASON,
     }
 )
 
@@ -225,7 +227,7 @@ class RedirectConflict(ControlRefused):
         plan_dir: Path | None = None,
     ) -> None:
         super().__init__(
-            redirect_store.ERROR_REPLAY_CONFLICT,
+            redirect_store_vocab.ERROR_REPLAY_CONFLICT,
             (
                 "operation id already names a different correction; "
                 "the recorded one was left untouched"
@@ -579,7 +581,7 @@ def redirect_report(
     """
     try:
         return redirect_recovery.inspect_plan_recovery(plan_dir, state_dir=state_dir)
-    except redirect_store.RedirectStoreError as error:
+    except redirect_store_models.RedirectStoreError as error:
         raise ControlUnavailable(
             f"redirect journal could not be read: {error.message}",
             details={"reason": error.reason},
@@ -592,7 +594,7 @@ def redirect_report(
 
 def live_redirect_target(
     plan_dir: Path, *, state_dir: str | Path | None = None
-) -> redirect_store.RedirectTarget | None:
+) -> redirect_store_models.RedirectTarget | None:
     """Read the turn this run is on now, or ``None`` when it is not on one.
 
     Reported even where a correction would be refused: a terminal audit or a
@@ -645,7 +647,7 @@ class RedirectSubmission:
     facts: intervention.RunFacts
     operation_id: str | None
     operation: redirect_recovery.OperationOutcome | None
-    live_target: redirect_store.RedirectTarget | None
+    live_target: redirect_store_models.RedirectTarget | None
     #: ``None`` on a replay: that call submitted nothing, so it has no submission
     #: outcome to report and ``operation`` carries the truth.
     outcome: str | None
@@ -703,7 +705,7 @@ def _submission(
 
 def expected_target(
     raw: Any, *, label: str = "expected_target"
-) -> redirect_store.RedirectTarget | None:
+) -> redirect_store_models.RedirectTarget | None:
     """Build the turn a client believes it is correcting, if it named one.
 
     Shape is checked portably and validity is left to the journal's own rules,
@@ -716,15 +718,15 @@ def expected_target(
         fields = portable_controls.expected_target_fields(raw, label=label)
     except portable_controls.ControlRequestError as error:
         raise _refuse_request(error) from error
-    target = redirect_store.RedirectTarget(
+    target = redirect_store_models.RedirectTarget(
         run_id=fields["run_id"],
         session_id=fields["session_id"],
         turn_index=fields["turn_index"],
         harness=fields["harness"],
     )
     try:
-        redirect_store.validate_target(target)
-    except redirect_store.RedirectStoreError as error:
+        redirect_store_validation.validate_target(target)
+    except redirect_store_models.RedirectStoreError as error:
         raise ControlRefused(
             portable_controls.REASON_INVALID_REQUEST,
             f"{label} is not a valid turn: {error.message}",
@@ -803,7 +805,7 @@ def submit_correction(
             persisted=True,
             accepted=False,
         )
-        conflict = redirect_store.replay_conflict(
+        conflict = redirect_store_validation.replay_conflict(
             recorded.feedback_digest,
             recorded.target,
             feedback=correction,
@@ -856,7 +858,7 @@ def submit_correction(
             details=dict(error.details),
             plan_dir=facts.plan_dir,
         ) from error
-    except redirect_store.RedirectStoreError as error:
+    except redirect_store_models.RedirectStoreError as error:
         # Split on the journal's own reason rather than on the exception type:
         # one exception covers both "this body is not a correction" and "this
         # journal cannot be written", and calling an oversized correction a
@@ -910,7 +912,7 @@ class RedirectStatusView:
 
     facts: intervention.RunFacts
     report: redirect_recovery.RecoveryReport
-    live_target: redirect_store.RedirectTarget | None
+    live_target: redirect_store_models.RedirectTarget | None
     operations: tuple[redirect_recovery.OperationOutcome, ...]
     truncated: bool
 
@@ -965,7 +967,7 @@ class RecoveryView:
 
     facts: intervention.RunFacts
     report: redirect_recovery.RecoveryReport
-    live_target: redirect_store.RedirectTarget | None
+    live_target: redirect_store_models.RedirectTarget | None
     decision: intervention.RecoveryDecision
     inspect_command: str | None
     authorization_command: str | None

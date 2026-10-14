@@ -7,7 +7,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import contracts, plans_errors, plans_session_ids, verification
+from agent_session_loop import (
+    contracts,
+    plans_errors,
+    plans_session_ids,
+    verification_checks,
+    verification_models,
+    verification_run,
+)
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     init_multi_repo_workspace,
@@ -50,15 +57,15 @@ class MultiRepositoryVerificationTests(unittest.TestCase):
                     )
                 ),
             )
-            context = verification.verification_context_from_plan(
+            context = verification_models.verification_context_from_plan(
                 plan_dir, workspace_root
             )
-            started: list[verification.CheckStartedEvent] = []
+            started: list[verification_models.CheckStartedEvent] = []
 
-            result = verification.run_verification(
+            result = verification_run.run_verification(
                 contract,
                 context=context,
-                observer=verification.VerificationObserver(
+                observer=verification_models.VerificationObserver(
                     on_check_started=started.append
                 ),
             )
@@ -83,7 +90,7 @@ class MultiRepositoryVerificationTests(unittest.TestCase):
             init_multi_repo_workspace(workspace_root, specs)
             plan_dir = root / "plan"
             write_multi_repo_plan(plan_dir, ("pending",), specs=specs)
-            context = verification.verification_context_from_plan(
+            context = verification_models.verification_context_from_plan(
                 plan_dir, workspace_root
             )
             check = contracts.FileExistsCheck(
@@ -91,7 +98,7 @@ class MultiRepositoryVerificationTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(plans_errors.PlanError, "stay beneath"):
-                verification.run_check(check, context=context)
+                verification_checks.run_check(check, context=context)
 
     def test_legacy_command_cwd_outside_the_bound_root_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -99,7 +106,7 @@ class MultiRepositoryVerificationTests(unittest.TestCase):
             bound = root / "repo"
             bound.mkdir()
             (root / "elsewhere").mkdir()
-            context = verification.VerificationContext.legacy(bound)
+            context = verification_models.VerificationContext.legacy(bound)
             check = contracts.CommandCheck(
                 name="escape",
                 argv=(sys.executable, "-c", "pass"),
@@ -110,7 +117,7 @@ class MultiRepositoryVerificationTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 plans_errors.PlanError, "escapes the bound root"
             ):
-                verification.run_check(check, context=context)
+                verification_checks.run_check(check, context=context)
 
     def test_parallel_repository_results_stay_in_declared_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,11 +146,11 @@ class MultiRepositoryVerificationTests(unittest.TestCase):
                 done_when=("done",),
                 verify=contracts.VerifyRecipe(checks=checks, parallel=True),
             )
-            context = verification.verification_context_from_plan(
+            context = verification_models.verification_context_from_plan(
                 plan_dir, workspace_root
             )
 
-            result = verification.run_verification(contract, context=context)
+            result = verification_run.run_verification(contract, context=context)
 
             self.assertEqual(
                 ["slow-svc", "fast-oak"], [check.name for check in result.checks]

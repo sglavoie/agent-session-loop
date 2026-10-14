@@ -31,7 +31,8 @@ from . import (
     overseer_decisions,
     overseer_dispatch,
     overseer_policy_client,
-    overseer_store,
+    overseer_store_ledger,
+    overseer_store_models,
 )
 
 __all__ = [
@@ -254,7 +255,7 @@ class GroupAdapter:
     """
 
     authority: Authority
-    ledger: overseer_store.Ledger
+    ledger: overseer_store_ledger.Ledger
     state_dir: Path | None = None
     repositories: Repositories = overseer_checkpoint.declared_repositories
     authorize: Authorize = field(default=overseer_policy_client.authorize, repr=False)
@@ -305,7 +306,7 @@ class GroupAdapter:
         )
         try:
             stored = self.ledger.checkpoint_group(key)
-        except overseer_store.LedgerError as error:
+        except overseer_store_models.LedgerError as error:
             return _decline("group_unreadable", str(error))
         ordered = [repository.alias for repository in repositories]
         previous: dict[str, Any] | None = None
@@ -424,7 +425,10 @@ class GroupAdapter:
                 incident_id=action.incident_id,
                 phase="prepared",
             )
-        except (overseer_store.LedgerError, overseer_store.LedgerRefused) as error:
+        except (
+            overseer_store_models.LedgerError,
+            overseer_store_models.LedgerRefused,
+        ) as error:
             return _decline("ledger_refused", str(error))
         return overseer_dispatch.Preparation.ok()
 
@@ -450,7 +454,7 @@ class GroupAdapter:
         )
         try:
             stored = self.ledger.checkpoint_group(key)
-        except overseer_store.LedgerError as error:
+        except overseer_store_models.LedgerError as error:
             return overseer_dispatch.Receipt.failed(
                 _phrase("group_unreadable", str(error)), locator=key
             )
@@ -515,7 +519,7 @@ class GroupAdapter:
 
     def reconcile(
         self,
-        record: overseer_store.ActionRecord,
+        record: overseer_store_models.ActionRecord,
     ) -> overseer_dispatch.Receipt:
         """Say what a group a dead process may have made actually committed.
 
@@ -560,7 +564,7 @@ class GroupAdapter:
             )
         try:
             stored = self.ledger.checkpoint_group(key)
-        except overseer_store.LedgerError as error:
+        except overseer_store_models.LedgerError as error:
             return overseer_dispatch.Receipt.uncertain(
                 detail=_phrase("group_unreadable", str(error)), locator=key
             )
@@ -733,7 +737,7 @@ class GroupAdapter:
         action: overseer_dispatch.Action,
         target: Mapping[str, Any],
         *,
-        stored: overseer_store.CheckpointGroupRecord,
+        stored: overseer_store_models.CheckpointGroupRecord,
     ) -> dict[str, Any]:
         """Recheck permission, reconcile, and commit one repository.
 
@@ -891,7 +895,7 @@ class GroupAdapter:
 def adapters(
     *,
     authority: Authority,
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     state_dir: Path | None = None,
     repositories: Repositories = overseer_checkpoint.declared_repositories,
     authorize: Authorize = overseer_policy_client.authorize,
@@ -997,7 +1001,7 @@ def _target_rows(group: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
 
 
 def _group_roots(
-    stored: overseer_store.CheckpointGroupRecord | None,
+    stored: overseer_store_models.CheckpointGroupRecord | None,
 ) -> dict[str, str]:
     """Where a stored group's repositories were, as that group recorded them.
 

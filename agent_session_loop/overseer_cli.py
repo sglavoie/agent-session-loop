@@ -67,7 +67,8 @@ from . import (
     overseer_mailbox,
     overseer_policy_client,
     overseer_resume,
-    overseer_store,
+    overseer_store_ledger,
+    overseer_store_models,
     overseer_verify,
     overseer_watch,
     responses,
@@ -94,7 +95,7 @@ OPERATIONS: tuple[str, ...] = overseer_decisions.OPERATIONS
 #: :mod:`overseer_context`; naming it here keeps argparse honest about it.
 SOURCE_KINDS: tuple[str, ...] = overseer_context.SOURCE_KINDS
 
-type OpenLedger = Callable[..., overseer_store.Ledger]
+type OpenLedger = Callable[..., overseer_store_ledger.Ledger]
 type BuildInventory = Callable[..., overseer_discovery.Inventory]
 type Authorize = Callable[..., overseer_policy_client.Decision]
 type InspectRun = Callable[..., intervention.RunFacts]
@@ -117,7 +118,7 @@ class Seams:
     the guarded dispatcher, and no substitution can quietly make that untrue.
     """
 
-    open_ledger: OpenLedger = overseer_store.open_ledger
+    open_ledger: OpenLedger = overseer_store_ledger.open_ledger
     build_inventory: BuildInventory = overseer_discovery.build_inventory
     authorize: Authorize = overseer_policy_client.authorize
     inspect_run: InspectRun = intervention.inspect_run
@@ -420,7 +421,7 @@ def _ruling_payload(ruling: overseer_decisions.Ruling) -> dict[str, Any]:
 
 
 def _record_payload(
-    record: overseer_store.ActionRecord | None,
+    record: overseer_store_models.ActionRecord | None,
 ) -> dict[str, Any] | None:
     if record is None:
         return None
@@ -838,7 +839,7 @@ def unbound(
 def _adapters(
     *,
     authority: Callable[[overseer_dispatch.Action], overseer_decisions.Ruling | None],
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     state_dir: str | None,
     seams: Seams,
     timeout: float,

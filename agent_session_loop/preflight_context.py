@@ -17,9 +17,7 @@ from .preflight_models import (
     RepositorySummary,
     _finding,
 )
-from .verification import (
-    VerificationContext,
-)
+from .verification_models import VerificationContext
 
 
 def _repository_summaries(

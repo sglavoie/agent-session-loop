@@ -22,12 +22,12 @@ from agent_session_loop import (
     prepare_models,
     redirect_ack,
     redirect_admission,
-    redirect_store,
+    redirect_store_vocab,
     repository_registration,
     retention,
     review,
     turn_execution_constants,
-    verification,
+    verification_contract_check,
     workbench_cli,
     workbench_server,
 )
@@ -81,8 +81,13 @@ class ParserSubcommandRegistrationTests(unittest.TestCase):
         self.assertEqual("/tmp/plan", args.plan_dir)
         self.assertEqual("3", args.session)
         self.assertEqual("/repo", args.cwd)
-        self.assertEqual("verification:contract_check_from_args", args.handler_ref)
-        self.assertIs(cli.resolve_handler(args), verification.contract_check_from_args)
+        self.assertEqual(
+            "verification_contract_check:contract_check_from_args", args.handler_ref
+        )
+        self.assertIs(
+            cli.resolve_handler(args),
+            verification_contract_check.contract_check_from_args,
+        )
 
     def test_register_repositories_subcommand_registers_handler(self) -> None:
         parser = cli.build_parser()
@@ -230,11 +235,11 @@ class ParserSubcommandRegistrationTests(unittest.TestCase):
             cli_defaults._COMMIT_DEFAULT_GENERATION_TIMEOUT_SECONDS,
         )
         self.assertEqual(
-            redirect_store.REDIRECT_DEFAULT_TTL_SECONDS,
+            redirect_store_vocab.REDIRECT_DEFAULT_TTL_SECONDS,
             cli_defaults._REDIRECT_DEFAULT_TTL_SECONDS,
         )
         self.assertEqual(
-            redirect_store.REDIRECT_MAX_TTL_SECONDS,
+            redirect_store_vocab.REDIRECT_MAX_TTL_SECONDS,
             cli_defaults._REDIRECT_MAX_TTL_SECONDS,
         )
         self.assertEqual(

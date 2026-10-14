@@ -92,7 +92,7 @@ from .prepare_validation_stage import (
 from .prepare_validation_store import ensure_plan_metadata
 from .prepare_validation_support import _positive_validator_control
 from .prepare_validator import ValidatorRunner, _launch_validator
-from .verification import VerificationContext
+from .verification_models import VerificationContext
 
 
 def prepare_plan(

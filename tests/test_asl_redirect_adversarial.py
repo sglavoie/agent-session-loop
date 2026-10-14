@@ -74,7 +74,10 @@ from agent_session_loop import (
     redirect_continuation,
     redirect_control,
     redirect_recovery,
-    redirect_store,
+    redirect_store_journal,
+    redirect_store_models,
+    redirect_store_requests,
+    redirect_store_vocab,
 )
 
 from .support import (
@@ -101,8 +104,8 @@ def target(
     run_id: str = RUN_ID,
     session_id: str = SESSION_ID,
     harness: str | None = "codex",
-) -> redirect_store.RedirectTarget:
-    return redirect_store.RedirectTarget(
+) -> redirect_store_models.RedirectTarget:
+    return redirect_store_models.RedirectTarget(
         run_id=run_id,
         session_id=session_id,
         turn_index=turn_index,
@@ -228,8 +231,8 @@ class JournalTestCase(unittest.TestCase):
         ttl_seconds: int | None = None,
         now=None,
         session_id: str = SESSION_ID,
-    ) -> redirect_store.RedirectRequest:
-        return redirect_store.submit_request(
+    ) -> redirect_store_models.RedirectRequest:
+        return redirect_store_requests.submit_request(
             self.plan_dir,
             target=target(turn_index, session_id=session_id),
             feedback=feedback,
@@ -239,11 +242,15 @@ class JournalTestCase(unittest.TestCase):
             now=now,
         )
 
-    def journal(self) -> redirect_store.RedirectJournalView:
-        return redirect_store.read_journal(self.plan_dir, state_dir=self.state_dir)
+    def journal(self) -> redirect_store_models.RedirectJournalView:
+        return redirect_store_journal.read_journal(
+            self.plan_dir, state_dir=self.state_dir
+        )
 
     def raw_records(self) -> list[dict]:
-        path = redirect_store.journal_path_for_plan(self.plan_dir, self.state_dir)
+        path = redirect_store_journal.journal_path_for_plan(
+            self.plan_dir, self.state_dir
+        )
         return [
             json.loads(line)
             for line in path.read_text(encoding="utf-8").splitlines()
@@ -289,7 +296,7 @@ class SlowStorageTests(JournalTestCase):
         self.submit("op-slow")
         released = threading.Event()
         entered = threading.Event()
-        real_accept = redirect_store.accept_request
+        real_accept = redirect_store_requests.accept_request
 
         def stalled_accept(*args, **kwargs):
             entered.set()
@@ -299,11 +306,11 @@ class SlowStorageTests(JournalTestCase):
         clock_source = _Clock()
         tools = _Tools()
         controller = self._controller(clock_source, tools)
-        accepted: list[redirect_store.RedirectRequest] = []
+        accepted: list[redirect_store_models.RedirectRequest] = []
 
         def accept() -> None:
             with mock.patch.object(
-                redirect_store, "accept_request", side_effect=stalled_accept
+                redirect_store_requests, "accept_request", side_effect=stalled_accept
             ):
                 accepted.append(
                     controller.accept(
@@ -346,7 +353,7 @@ class SlowStorageTests(JournalTestCase):
             sum(
                 1
                 for record in self.raw_records()
-                if record.get("kind") == redirect_store.KIND_ACCEPTED
+                if record.get("kind") == redirect_store_vocab.KIND_ACCEPTED
             ),
         )
 
@@ -399,7 +406,8 @@ class SlowStorageTests(JournalTestCase):
         self.assertEqual([], list(gate.accepted))
         self.assertFalse(gate.redirected)
         self.assertEqual(
-            redirect_store.STATE_SUBMITTED, self.journal().request("op-read").state
+            redirect_store_vocab.STATE_SUBMITTED,
+            self.journal().request("op-read").state,
         )
 
     def test_a_slow_fsync_still_orders_concurrent_submissions(self) -> None:
@@ -415,7 +423,7 @@ class SlowStorageTests(JournalTestCase):
         ids = tuple(f"op-sync-{index}" for index in range(8))
         with (
             mock.patch.object(
-                redirect_store.durability, "fullsync", side_effect=slow_fullsync
+                redirect_store_journal.durability, "fullsync", side_effect=slow_fullsync
             ),
             concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool,
         ):
@@ -623,7 +631,7 @@ class CompletionRaceTests(JournalTestCase):
             # The settlement won: the turn is clean and the request is left
             # submitted, so it answers to its own deadline instead.
             self.assertTrue(clean[0])
-            self.assertEqual(redirect_store.STATE_SUBMITTED, journal_state)
+            self.assertEqual(redirect_store_vocab.STATE_SUBMITTED, journal_state)
             self.assertEqual(
                 [redirect_continuation.REFUSE_TURN_SETTLED],
                 [record["reason"] for record in gate.to_payload()["refused"]],
@@ -632,7 +640,7 @@ class CompletionRaceTests(JournalTestCase):
         # The acceptance won: the record is durable and the attempt has
         # forfeited its completion claim.
         self.assertFalse(clean[0])
-        self.assertEqual(redirect_store.STATE_ACCEPTED, journal_state)
+        self.assertEqual(redirect_store_vocab.STATE_ACCEPTED, journal_state)
         self.assertTrue(gate.redirected)
         return "accepted-first"
 
@@ -676,7 +684,7 @@ class CompletionRaceTests(JournalTestCase):
         accepted_records = [
             record
             for record in self.raw_records()
-            if record.get("kind") == redirect_store.KIND_ACCEPTED
+            if record.get("kind") == redirect_store_vocab.KIND_ACCEPTED
         ]
         self.assertEqual(1, len(accepted_records), accepted_records)
         self.assertEqual(
@@ -715,7 +723,7 @@ class ConcurrentFeedbackTests(JournalTestCase):
             [
                 record["id"]
                 for record in self.raw_records()
-                if record.get("kind") == redirect_store.KIND_SUBMITTED
+                if record.get("kind") == redirect_store_vocab.KIND_SUBMITTED
             ],
         )
 
@@ -1101,7 +1109,7 @@ class StoppedSupervisorTests(JournalTestCase):
         self,
     ) -> None:
         request = self.submit("op-stranded")
-        redirect_store.accept_request(
+        redirect_store_requests.accept_request(
             self.plan_dir,
             request.operation_id,
             target=target(),
@@ -1123,7 +1131,7 @@ class StoppedSupervisorTests(JournalTestCase):
         )
         # First terminal wins: the dead run's own decision still stands.
         self.assertEqual(
-            redirect_store.STATE_ACCEPTED,
+            redirect_store_vocab.STATE_ACCEPTED,
             self.journal().request("op-stranded").state,
         )
 
@@ -1140,8 +1148,8 @@ class StoppedSupervisorTests(JournalTestCase):
 
         self.assertFalse(report.blocked)
         settled = self.journal().request("op-unanswered")
-        self.assertEqual(redirect_store.STATE_REJECTED, settled.state)
-        self.assertEqual(redirect_store.REASON_RUN_ENDED, settled.reason)
+        self.assertEqual(redirect_store_vocab.STATE_REJECTED, settled.state)
+        self.assertEqual(redirect_store_vocab.REASON_RUN_ENDED, settled.reason)
 
     def test_a_live_foreign_owner_is_left_entirely_alone(self) -> None:
         self.submit("op-foreign")
@@ -1174,7 +1182,7 @@ class StoppedSupervisorTests(JournalTestCase):
         # Nothing was settled: a second reconciler is how one correction
         # acquires two outcomes.
         self.assertEqual(
-            redirect_store.STATE_SUBMITTED,
+            redirect_store_vocab.STATE_SUBMITTED,
             self.journal().request("op-foreign").state,
         )
 
@@ -1192,7 +1200,7 @@ class StoppedSupervisorTests(JournalTestCase):
         self.assertEqual(("op-recoverable",), report.recoverable_for(SESSION_ID))
         self.assertEqual((), report.recoverable_for("other"))
         self.assertEqual(
-            redirect_store.STATE_SUBMITTED,
+            redirect_store_vocab.STATE_SUBMITTED,
             self.journal().request("op-recoverable").state,
         )
 
@@ -1375,17 +1383,17 @@ class ExpiredSubmissionTests(JournalTestCase):
         request = self.submit("op-expired", ttl_seconds=1, now=created)
         later = created + timedelta(seconds=5)
 
-        expired = redirect_store.expire_due_requests(
+        expired = redirect_store_requests.expire_due_requests(
             self.plan_dir, state_dir=self.state_dir, now=later
         )
 
         self.assertEqual([request.operation_id], [r.operation_id for r in expired])
         self.assertEqual(
-            redirect_store.STATE_EXPIRED,
+            redirect_store_vocab.STATE_EXPIRED,
             self.journal().request("op-expired").state,
         )
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
-            redirect_store.accept_request(
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
+            redirect_store_requests.accept_request(
                 self.plan_dir,
                 "op-expired",
                 target=target(),
@@ -1395,15 +1403,17 @@ class ExpiredSubmissionTests(JournalTestCase):
         # Expiry answers before settlement does, because "its deadline passed" is
         # the more concrete thing to tell an operator than "it was already
         # settled" -- and either way the acceptance is refused.
-        self.assertEqual(redirect_store.ERROR_REQUEST_EXPIRED, caught.exception.reason)
+        self.assertEqual(
+            redirect_store_vocab.ERROR_REQUEST_EXPIRED, caught.exception.reason
+        )
 
     def test_an_acceptance_past_the_deadline_expires_the_request_durably(self) -> None:
         created = clock.utc_now()
         self.submit("op-late", ttl_seconds=1, now=created)
         later = created + timedelta(seconds=5)
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
-            redirect_store.accept_request(
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
+            redirect_store_requests.accept_request(
                 self.plan_dir,
                 "op-late",
                 target=target(),
@@ -1411,13 +1421,15 @@ class ExpiredSubmissionTests(JournalTestCase):
                 now=later,
             )
 
-        self.assertEqual(redirect_store.ERROR_REQUEST_EXPIRED, caught.exception.reason)
+        self.assertEqual(
+            redirect_store_vocab.ERROR_REQUEST_EXPIRED, caught.exception.reason
+        )
         # The refusal outlives the process that reached it.
         self.assertEqual(
-            redirect_store.STATE_EXPIRED, self.journal().request("op-late").state
+            redirect_store_vocab.STATE_EXPIRED, self.journal().request("op-late").state
         )
         self.assertEqual(
-            redirect_store.REASON_EXPIRED,
+            redirect_store_vocab.REASON_EXPIRED,
             self.journal().request("op-late").reason,
         )
 
@@ -1433,8 +1445,8 @@ class ExpiredSubmissionTests(JournalTestCase):
 
         def do_accept() -> None:
             start.wait(PATIENCE)
-            with contextlib.suppress(redirect_store.RedirectStoreError):
-                redirect_store.accept_request(
+            with contextlib.suppress(redirect_store_models.RedirectStoreError):
+                redirect_store_requests.accept_request(
                     self.plan_dir,
                     operation_id,
                     target=target(turn_index),
@@ -1444,7 +1456,7 @@ class ExpiredSubmissionTests(JournalTestCase):
 
         def do_expire() -> None:
             start.wait(PATIENCE)
-            redirect_store.expire_due_requests(
+            redirect_store_requests.expire_due_requests(
                 self.plan_dir, state_dir=self.state_dir, now=later
             )
 
@@ -1464,7 +1476,7 @@ class ExpiredSubmissionTests(JournalTestCase):
             for record in self.raw_records()
             if record.get("id") == operation_id
             and record.get("kind")
-            in (redirect_store.KIND_ACCEPTED, redirect_store.KIND_EXPIRED)
+            in (redirect_store_vocab.KIND_ACCEPTED, redirect_store_vocab.KIND_EXPIRED)
         ]
         self.assertEqual(1, len(terminal), terminal)
         return self.journal().request(operation_id).state
@@ -1481,7 +1493,7 @@ class ExpiredSubmissionTests(JournalTestCase):
         self.assertEqual(self.ROUNDS, len(states))
         self.assertLessEqual(
             set(states),
-            {redirect_store.STATE_ACCEPTED, redirect_store.STATE_EXPIRED},
+            {redirect_store_vocab.STATE_ACCEPTED, redirect_store_vocab.STATE_EXPIRED},
             "a racing request reached a state neither caller wrote",
         )
 

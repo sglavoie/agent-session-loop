@@ -47,7 +47,7 @@ an overseer that cannot tell them apart cannot explain itself.
 ## The two adapters
 
 :meth:`Decision.grant` is what a permitted decision hands to
-``overseer_store``: the plan, the access category, the request identity, and
+``overseer_store_ledger``: the plan, the access category, the request identity, and
 the configuration fingerprint the store gates stored evidence on.
 :meth:`Decision.authorization` is the same permission in the shape
 ``overseer_isolation.recover_stale_lock`` already consumes. Both return

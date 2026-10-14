@@ -17,7 +17,10 @@ from agent_session_loop import (
     plans_files,
     process_tree,
     run_persistence,
-    verification,
+    verification_checks,
+    verification_cli,
+    verification_process,
+    verification_run,
 )
 from tests.support import (
     assert_marked_pids_alive,
@@ -40,7 +43,7 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
                 argv=("python3", "-c", "import sys; sys.exit(0)"),
                 timeout_seconds=10.0,
             )
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertEqual("pass", result.status)
             self.assertEqual("echo", result.name)
@@ -56,7 +59,7 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
                 argv=("python3", "-c", "import sys; sys.exit(7)"),
                 timeout_seconds=10.0,
             )
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertEqual("fail", result.status)
             self.assertEqual("command-failed", result.failure_reason)
@@ -71,7 +74,7 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
                 argv=("python3", "-c", "import time; time.sleep(5)"),
                 timeout_seconds=0.1,
             )
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertEqual("fail", result.status)
             self.assertEqual("command-timeout", result.failure_reason)
@@ -95,7 +98,7 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
                 timeout_seconds=2.0,
             )
 
-            result = verification.run_check(check, repo_root=root)
+            result = verification_checks.run_check(check, repo_root=root)
 
             self.assertEqual("command-timeout", result.failure_reason)
             # The timeout landed on a fully live tree, not on a half-spawned one.
@@ -138,7 +141,7 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
             timeout_seconds=2.0,
         )
 
-        result = verification.run_check(check, repo_root=root)
+        result = verification_checks.run_check(check, repo_root=root)
 
         self.assertEqual("command-timeout", result.failure_reason)
         self.assertEqual(["tree"], [p.name for p in (root / "started").iterdir()])
@@ -174,7 +177,7 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
                 timeout_seconds=2.0,
             )
 
-            result = verification.run_check(check, repo_root=root)
+            result = verification_checks.run_check(check, repo_root=root)
 
             self.assertEqual("command-timeout", result.failure_reason)
             assert_marked_pids_exited(root / "grandchildren", label="grandchild")
@@ -193,7 +196,7 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
                 timeout_seconds=30.0,
             )
 
-            result = verification.run_check(check, repo_root=root)
+            result = verification_checks.run_check(check, repo_root=root)
 
             self.assertEqual("pass", result.status)
             sleeper = int((root / "sleepers" / "leftover").read_text(encoding="utf-8"))
@@ -225,9 +228,9 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
 
         # Real bound is 30s; the assertion is that the join ends at the bound
         # rather than at the escapee's 120s sleep.
-        with mock.patch.object(verification, "_EXITED_READER_JOIN_SECONDS", 1.0):
+        with mock.patch.object(verification_checks, "_EXITED_READER_JOIN_SECONDS", 1.0):
             start = time.monotonic()
-            result = verification.run_check(check, repo_root=root)
+            result = verification_checks.run_check(check, repo_root=root)
             elapsed = time.monotonic() - start
 
         self.assertEqual("pass", result.status)
@@ -249,7 +252,7 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
         )
 
         with mock.patch.dict(os.environ, {process_tree.SWEEP_DISABLED_ENV_VAR: "1"}):
-            result = verification.run_check(check, repo_root=root)
+            result = verification_checks.run_check(check, repo_root=root)
 
         self.assertEqual("pass", result.status)
         # No report at all, and the leftover is exactly where it was.
@@ -272,7 +275,7 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
 
         start = time.monotonic()
         with self.assertRaises(KeyboardInterrupt):
-            verification.run_verification(contract, repo_root=root)
+            verification_run.run_verification(contract, repo_root=root)
         elapsed = time.monotonic() - start
 
         # The interrupt is what returned control, not the check's own timeout.
@@ -295,11 +298,13 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
 
         with (
             mock.patch.dict(os.environ, {process_tree.SWEEP_DISABLED_ENV_VAR: "1"}),
-            mock.patch.object(verification, "sample_process_table") as snapshot_sampler,
+            mock.patch.object(
+                verification_process, "sample_process_table"
+            ) as snapshot_sampler,
             mock.patch.object(process_tree, "sample_process_table") as sweep_sampler,
             self.assertRaises(KeyboardInterrupt),
         ):
-            verification.run_verification(contract, repo_root=root)
+            verification_run.run_verification(contract, repo_root=root)
 
         snapshot_sampler.assert_not_called()
         sweep_sampler.assert_not_called()
@@ -315,8 +320,8 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
                 timeout_seconds=30.0,
             )
 
-            result = verification.run_check(check, repo_root=root)
-            payload = verification._check_result_payload(result)
+            result = verification_checks.run_check(check, repo_root=root)
+            payload = verification_cli._check_result_payload(result)
 
             self.assertIn("sweep", payload)
             self.assertEqual(result.sweep, payload["sweep"])
@@ -333,7 +338,7 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
                 argv=("definitely-not-a-real-binary-xyz",),
                 timeout_seconds=5.0,
             )
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertEqual("fail", result.status)
             self.assertEqual("command-not-found", result.failure_reason)
@@ -348,7 +353,7 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
                 timeout_seconds=5.0,
             )
 
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertEqual("fail", result.status)
             self.assertEqual("command-overbroad", result.failure_reason)
@@ -370,7 +375,7 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
                 timeout_seconds=10.0,
                 cwd="nested",
             )
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertEqual("pass", result.status)
             self.assertEqual(
@@ -384,7 +389,7 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
             (repo_root / "target.txt").write_text("data\n", encoding="utf-8")
             check = contracts.FileExistsCheck(name="target", path="target.txt")
 
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertEqual("pass", result.status)
             self.assertIsNone(result.failure_reason)
@@ -398,11 +403,11 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
             target = repo_root / "inside.txt"
             target.write_text("absolute target\n", encoding="utf-8")
 
-            file_result = verification.run_check(
+            file_result = verification_checks.run_check(
                 contracts.FileExistsCheck(name="absolute-file", path=str(target)),
                 repo_root=repo_root,
             )
-            regex_result = verification.run_check(
+            regex_result = verification_checks.run_check(
                 contracts.RegexInFileCheck(
                     name="absolute-regex",
                     path=str(target),
@@ -425,7 +430,7 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
             with self.assertRaisesRegex(
                 plans_errors.PlanError, "escapes the bound root"
             ):
-                verification.run_check(
+                verification_checks.run_check(
                     contracts.FileExistsCheck(name="absolute-file", path=str(target)),
                     repo_root=repo_root,
                 )

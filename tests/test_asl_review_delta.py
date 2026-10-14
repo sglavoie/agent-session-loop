@@ -50,7 +50,7 @@ from agent_session_loop import (
     run_persistence,
     runner,
     state,
-    verification,
+    verification_models,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -492,7 +492,7 @@ class RegisteredScopeIsAllOrNothingTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        context = verification.VerificationContext.from_plan(
+        context = verification_models.VerificationContext.from_plan(
             self.plan_dir, self.workspace_root
         )
         assert context.workspace is not None

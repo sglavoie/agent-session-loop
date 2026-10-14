@@ -197,7 +197,7 @@ Mutating endpoints (bearer-token required):
   Replay is by request identity, not by id alone. Before answering a
   known `operation_id` the handler compares the submitted `text` — and
   the `expected_target`, when one is supplied — against the durable
-  record, the same rule `redirect_store.submit_request` applies to a
+  record, the same rule `redirect_store_requests.submit_request` applies to a
   first submission. A retry that changed either is not a retry: it is
   refused `409` with `reason: "redirect-replay-conflict"`,
   `retryable: false`, and `details.conflict` of `feedback` or `target`,
@@ -233,7 +233,7 @@ records to appeal to:
   turn, when it names one) the journal recorded under that id, or it is
   refused `409 redirect-replay-conflict` with nothing rewritten.
 - `POST /api/launch` and `POST /api/reply` accept an optional `launch_id`
-  bounded by `redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS`, and return
+  bounded by `redirect_store_vocab.REDIRECT_MAX_OPERATION_ID_CHARS`, and return
   the original launch result with `replayed: true` for a repeat of an id
   already admitted for the plan. The receipt is durable: both routes admit
   through the plan's operation journal, so a resend is idempotent across

@@ -86,7 +86,7 @@ class WorkbenchStaticRedirectTests(support_static.WorkbenchStaticCase):
         # one thing an operator watching a correction must not be told wrongly.
         import re as _re
 
-        from agent_session_loop import intervention, redirect_cli, redirect_store
+        from agent_session_loop import intervention, redirect_cli, redirect_store_vocab
 
         server = self._start_server()
         decoded = self._shell_source(server)
@@ -131,12 +131,12 @@ class WorkbenchStaticRedirectTests(support_static.WorkbenchStaticCase):
         )
         self.assertIn(
             "const REDIRECT_MAX_FEEDBACK_BYTES = "
-            f"{redirect_store.REDIRECT_MAX_FEEDBACK_BYTES};",
+            f"{redirect_store_vocab.REDIRECT_MAX_FEEDBACK_BYTES};",
             decoded,
         )
         self.assertIn(
             "const REDIRECT_MAX_OPERATION_ID_CHARS = "
-            f"{redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS};",
+            f"{redirect_store_vocab.REDIRECT_MAX_OPERATION_ID_CHARS};",
             decoded,
         )
         # A refused replay is recognized by its reason, so the string has to be
@@ -144,10 +144,10 @@ class WorkbenchStaticRedirectTests(support_static.WorkbenchStaticCase):
         # error and clear nothing up about the draft still on screen.
         self.assertIn(
             "const REDIRECT_CONFLICT_REASON = "
-            f'"{redirect_store.ERROR_REPLAY_CONFLICT}";',
+            f'"{redirect_store_vocab.ERROR_REPLAY_CONFLICT}";',
             decoded,
         )
-        self.assertIn(f'=== "{redirect_store.CONFLICT_TARGET}"', decoded)
+        self.assertIn(f'=== "{redirect_store_vocab.CONFLICT_TARGET}"', decoded)
 
     def test_app_js_redirect_reconcile_hint_mirrors_cli_text(self) -> None:
         # A browser that lost its answer and the operator reading

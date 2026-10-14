@@ -17,15 +17,20 @@ from agent_session_loop import (
     cli,
     durability,
     redirect_restart,
-    redirect_store,
+    redirect_store_carry,
+    redirect_store_delivery,
+    redirect_store_journal,
+    redirect_store_requests,
     state,
     state_locks,
 )
+from tests import asl_redirect_continuation_support as t
+from tests import support
 from tests import test_asl_lost_submission_response as lost_tests
-from tests import test_asl_redirect_continuation as t
+from tests.asl_redirect_run_support import _RedirectedRun
 
 
-class _LivePredecessor(t._RedirectedRun):
+class _LivePredecessor(_RedirectedRun):
     def _controller_factory(self):
         build = super()._controller_factory()
 
@@ -53,7 +58,7 @@ def _lost_case():
             if len(self.harness_calls) < 2:
                 return super()._fake_worker(name, **kwargs)
             self.prompts.append(str(kwargs.get("prompt") or ""))
-            return t._RedirectedRun._fake_worker(self, name, **kwargs)
+            return _RedirectedRun._fake_worker(self, name, **kwargs)
 
     return LostThenRecovered()
 
@@ -244,21 +249,21 @@ class ResolutionTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.plan = Path(temp.name) / "plan"
         self.state_dir = Path(temp.name) / "state"
-        t.write_plan(self.plan, ("pending",))
-        redirect_store.submit_request(
+        support.write_plan(self.plan, ("pending",))
+        redirect_store_requests.submit_request(
             self.plan,
             target=t.target(),
             feedback=t.FEEDBACK,
             operation_id="op",
             state_dir=self.state_dir,
         )
-        redirect_store.accept_request(
+        redirect_store_requests.accept_request(
             self.plan, "op", target=t.target(), state_dir=self.state_dir
         )
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan, "op", continuation=t.target(2), state_dir=self.state_dir
         )
-        redirect_store.launch_request(
+        redirect_store_carry.launch_request(
             self.plan, "op", continuation=t.target(2), state_dir=self.state_dir
         )
         redirect_restart.mark_stopped(
@@ -298,7 +303,9 @@ class ResolutionTests(unittest.TestCase):
     def test_decision_survives_a_crash_before_release(self):
         with (
             mock.patch.object(
-                redirect_store, "release_request", side_effect=OSError("interrupted")
+                redirect_store_delivery,
+                "release_request",
+                side_effect=OSError("interrupted"),
             ),
             self.assertRaises(OSError),
         ):
@@ -308,17 +315,17 @@ class ResolutionTests(unittest.TestCase):
                 self.plan, pending_session_ids=("1",), state_dir=self.state_dir
             )
         )
-        request = redirect_store.read_journal(
+        request = redirect_store_journal.read_journal(
             self.plan, state_dir=self.state_dir
         ).request("op")
         self.assertTrue(request.released)
 
     def test_a_previous_decision_does_not_resolve_a_new_launch_window(self):
         self.resolve("not-submitted")
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan, "op", continuation=t.target(3), state_dir=self.state_dir
         )
-        redirect_store.launch_request(
+        redirect_store_carry.launch_request(
             self.plan, "op", continuation=t.target(3), state_dir=self.state_dir
         )
         blocked = redirect_restart.restart_blocker(
@@ -327,7 +334,7 @@ class ResolutionTests(unittest.TestCase):
         self.assertEqual("redirect-submission-unresolved", blocked["reason"])
 
     def test_recorded_delivery_cannot_be_replayed_as_unsent(self):
-        redirect_store.deliver_request(
+        redirect_store_delivery.deliver_request(
             self.plan, "op", continuation=t.target(2), state_dir=self.state_dir
         )
         with self.assertRaises(ValueError):

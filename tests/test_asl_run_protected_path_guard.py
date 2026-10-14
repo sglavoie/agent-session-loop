@@ -25,7 +25,7 @@ from agent_session_loop import (
     run_loop,
     state,
     state_locks,
-    verification,
+    verification_models,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -83,7 +83,7 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
                 )
             },
         )
-        self.context = verification.VerificationContext.legacy(self.repo_root)
+        self.context = verification_models.VerificationContext.legacy(self.repo_root)
         self.cwd = self.repo_root
         self.review_harness: str | None = None
 
@@ -170,7 +170,7 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
             self.workspace_root,
             registry.digest,
         )
-        self.context = verification.VerificationContext.from_plan(
+        self.context = verification_models.VerificationContext.from_plan(
             self.plan_dir,
             self.workspace_root,
         )

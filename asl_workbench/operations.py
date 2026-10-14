@@ -18,7 +18,7 @@ refusal decided here rather than at a route:
   fingerprint disagrees. A retry of the same request replays; an id reused for
   a *different* action is a producer bug and is refused rather than silently
   overwriting a mutation that may already have run. This is the rule
-  ``redirect_store.replay_conflict`` already applies to corrections, stated
+  ``redirect_store_validation.replay_conflict`` already applies to corrections, stated
   once for every mutation.
 
 * **One outstanding mutation per contended scope.** ``unconfirmed`` counts as

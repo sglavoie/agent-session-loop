@@ -56,7 +56,8 @@ from agent_session_loop import (
     overseer_decisions,
     overseer_dispatch,
     overseer_policy_client,
-    overseer_store,
+    overseer_store_ledger,
+    overseer_store_models,
     state,
 )
 from tests import support
@@ -121,7 +122,7 @@ class _CheckpointCase(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp(prefix="asl-overseer-checkpoint-"))
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.addCleanup(self._close)
-        self.ledger = overseer_store.open_ledger(state_dir=self.root)
+        self.ledger = overseer_store_ledger.open_ledger(state_dir=self.root)
         self.ledger.note_policy(config_fingerprint=FINGERPRINT)
         self.plan = self.new_plan("plan-a")
         self.repo = self.root / "repos" / ALIAS
@@ -327,7 +328,7 @@ class _CheckpointCase(unittest.TestCase):
     def attempted(
         self,
         action: overseer_dispatch.Action,
-    ) -> overseer_store.ActionRecord:
+    ) -> overseer_store_models.ActionRecord:
         """The ledger row a dispatch writes before the adapter is called."""
         return self.ledger.attempt_action(
             grant=self.grant(),
@@ -887,7 +888,7 @@ class CrashReconciliation(_CheckpointCase):
 
     def commit_then_forget(
         self,
-    ) -> tuple[overseer_store.ActionRecord, overseer_dispatch.Action, str]:
+    ) -> tuple[overseer_store_models.ActionRecord, overseer_dispatch.Action, str]:
         """Make a real checkpoint, then keep only what the ledger persisted."""
         adapter = self.adapter()
         action = self.action()
@@ -935,7 +936,7 @@ class CrashReconciliation(_CheckpointCase):
 
     def test_another_plans_checkpoint_is_not_read_as_ours(self) -> None:
         record, _, _ = self.commit_then_forget()
-        elsewhere = overseer_store.ActionRecord(
+        elsewhere = overseer_store_models.ActionRecord(
             action_id=record.action_id,
             plan_dir=self.new_plan("plan-other"),
             incident_id=record.incident_id,
@@ -958,7 +959,7 @@ class CrashReconciliation(_CheckpointCase):
 
     def test_a_row_for_another_operation_is_never_answered_here(self) -> None:
         record = self.attempted(self.action())
-        other = overseer_store.ActionRecord(
+        other = overseer_store_models.ActionRecord(
             action_id=record.action_id,
             plan_dir=record.plan_dir,
             incident_id=record.incident_id,

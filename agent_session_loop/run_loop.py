@@ -71,7 +71,7 @@ from typing import Any
 from . import (
     run_prompts,
     state,
-    verification,
+    verification_models,
 )
 from .run_loop_finalization import _finalize_run, _handle_run_crash
 from .run_loop_frame import LoopSignal, RunFrame, RunResult
@@ -120,7 +120,7 @@ def run_locked(
     run_id: str,
     reply_text: str | None = None,
     reply_origin: str = run_prompts.REPLY_ORIGIN_ARGV,
-    verification_context: verification.VerificationContext | None = None,
+    verification_context: verification_models.VerificationContext | None = None,
     wakeup: threading.Event | None = None,
     redirect_wakeup: threading.Event | None = None,
 ) -> tuple[int, dict[str, Any]]:

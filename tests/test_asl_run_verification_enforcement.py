@@ -18,7 +18,7 @@ from agent_session_loop import (
     plans_models,
     plans_readiness,
     state,
-    verification,
+    verification_models,
 )
 from tests.support import (
     REPO_ROOT,
@@ -196,7 +196,7 @@ class RunVerificationEnforcementTests(unittest.TestCase):
             if record["name"] == events.VERIFICATION_CHECK_FINISHED_EVENT
         )
         self.assertEqual("readme", check_finished["name"])
-        self.assertEqual(verification.CHECK_ROLE_GATE, check_finished["role"])
+        self.assertEqual(verification_models.CHECK_ROLE_GATE, check_finished["role"])
         finished = next(
             record["payload"]
             for record in event_records

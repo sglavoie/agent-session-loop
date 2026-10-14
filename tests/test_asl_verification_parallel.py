@@ -14,7 +14,8 @@ from unittest import mock
 from agent_session_loop import (
     contracts,
     plans_session_ids,
-    verification,
+    verification_models,
+    verification_run,
     verification_transitions,
 )
 from tests.support import (
@@ -66,19 +67,19 @@ class ParallelVerificationTests(unittest.TestCase):
 
     def _recording_observer(
         self,
-    ) -> tuple[verification.VerificationObserver, list[tuple[str, str, str]]]:
+    ) -> tuple[verification_models.VerificationObserver, list[tuple[str, str, str]]]:
         seen: list[tuple[str, str, str]] = []
         lock = threading.Lock()
 
-        def started(event: verification.CheckStartedEvent) -> None:
+        def started(event: verification_models.CheckStartedEvent) -> None:
             with lock:
                 seen.append(("started", event.name, event.kind))
 
-        def finished(event: verification.CheckFinishedEvent) -> None:
+        def finished(event: verification_models.CheckFinishedEvent) -> None:
             with lock:
                 seen.append(("finished", event.name, event.kind))
 
-        observer = verification.VerificationObserver(
+        observer = verification_models.VerificationObserver(
             on_check_started=started, on_check_finished=finished
         )
         return observer, seen
@@ -112,7 +113,7 @@ class ParallelVerificationTests(unittest.TestCase):
         checks = self._rendezvous_checks((0.4, 0.2, 0.0))
         observer, seen = self._recording_observer()
 
-        result = verification.run_verification(
+        result = verification_run.run_verification(
             self._contract(checks, parallel=True),
             repo_root=self.repo_root,
             observer=observer,
@@ -144,7 +145,7 @@ class ParallelVerificationTests(unittest.TestCase):
         )
         observer, seen = self._recording_observer()
 
-        result = verification.run_verification(
+        result = verification_run.run_verification(
             self._contract(checks, parallel=True),
             repo_root=self.repo_root,
             observer=observer,
@@ -179,7 +180,7 @@ class ParallelVerificationTests(unittest.TestCase):
         )
         observer, seen = self._recording_observer()
 
-        result = verification.run_verification(
+        result = verification_run.run_verification(
             self._contract(checks, parallel=True),
             repo_root=self.repo_root,
             observer=observer,
@@ -213,7 +214,7 @@ class ParallelVerificationTests(unittest.TestCase):
             ),
         )
 
-        result = verification.run_verification(
+        result = verification_run.run_verification(
             self._contract(checks, parallel=True), repo_root=self.repo_root
         )
 
@@ -239,15 +240,15 @@ class ParallelVerificationTests(unittest.TestCase):
     def test_parallel_failures_match_sequential_details_and_fingerprint(self) -> None:
         checks = self._failing_checks()
 
-        sequential = verification.run_verification(
+        sequential = verification_run.run_verification(
             self._contract(checks, parallel=False), repo_root=self.repo_root
         )
-        parallel = verification.run_verification(
+        parallel = verification_run.run_verification(
             self._contract(checks, parallel=True), repo_root=self.repo_root
         )
 
         def details(
-            result: verification.VerificationResult, parallel_flag: bool
+            result: verification_models.VerificationResult, parallel_flag: bool
         ) -> dict:
             payload = verification_transitions.verification_failure_details(
                 result, self._contract(checks, parallel=parallel_flag)
@@ -294,16 +295,18 @@ class ParallelVerificationTests(unittest.TestCase):
         )
         interrupted = threading.Event()
 
-        def started(event: verification.CheckStartedEvent) -> None:
+        def started(event: verification_models.CheckStartedEvent) -> None:
             if not interrupted.is_set():
                 interrupted.set()
                 raise KeyboardInterrupt
 
         with self.assertRaises(KeyboardInterrupt):
-            verification.run_verification(
+            verification_run.run_verification(
                 self._contract(checks, parallel=True),
                 repo_root=self.repo_root,
-                observer=verification.VerificationObserver(on_check_started=started),
+                observer=verification_models.VerificationObserver(
+                    on_check_started=started
+                ),
             )
 
         # At most `max_workers` checks ever started, and the futures still
@@ -346,7 +349,7 @@ class ParallelVerificationTests(unittest.TestCase):
             for index in range(total)
         )
         finished: list[str] = []
-        observer = verification.VerificationObserver(
+        observer = verification_models.VerificationObserver(
             on_check_finished=lambda event: finished.append(event.name)
         )
 
@@ -362,10 +365,10 @@ class ParallelVerificationTests(unittest.TestCase):
 
         start = time.monotonic()
         with (
-            mock.patch.object(verification, "as_completed", interrupt_once_running),
+            mock.patch.object(verification_run, "as_completed", interrupt_once_running),
             self.assertRaises(KeyboardInterrupt),
         ):
-            verification.run_verification(
+            verification_run.run_verification(
                 self._contract(checks, parallel=True),
                 repo_root=self.repo_root,
                 observer=observer,
@@ -412,7 +415,7 @@ class ParallelVerificationTests(unittest.TestCase):
             for index in range(total)
         )
         finished: list[str] = []
-        observer = verification.VerificationObserver(
+        observer = verification_models.VerificationObserver(
             on_check_finished=lambda event: finished.append(event.name)
         )
 
@@ -429,11 +432,11 @@ class ParallelVerificationTests(unittest.TestCase):
         start = time.monotonic()
         with (
             mock.patch.object(
-                verification, "as_completed", interrupt_once_trees_are_live
+                verification_run, "as_completed", interrupt_once_trees_are_live
             ),
             self.assertRaises(KeyboardInterrupt),
         ):
-            verification.run_verification(
+            verification_run.run_verification(
                 self._contract(checks, parallel=True),
                 repo_root=self.repo_root,
                 observer=observer,
@@ -485,7 +488,7 @@ class ParallelVerificationTests(unittest.TestCase):
             for index in range(total)
         )
         finished: list[str] = []
-        observer = verification.VerificationObserver(
+        observer = verification_models.VerificationObserver(
             on_check_finished=lambda event: finished.append(event.name)
         )
 
@@ -500,11 +503,11 @@ class ParallelVerificationTests(unittest.TestCase):
         start = time.monotonic()
         with (
             mock.patch.object(
-                verification, "as_completed", interrupt_once_trees_are_live
+                verification_run, "as_completed", interrupt_once_trees_are_live
             ),
             self.assertRaises(KeyboardInterrupt),
         ):
-            verification.run_verification(
+            verification_run.run_verification(
                 self._contract(checks, parallel=True),
                 repo_root=self.repo_root,
                 observer=observer,

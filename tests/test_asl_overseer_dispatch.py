@@ -56,7 +56,8 @@ from agent_session_loop import (
     overseer_discovery,
     overseer_dispatch,
     overseer_policy_client,
-    overseer_store,
+    overseer_store_ledger,
+    overseer_store_models,
 )
 from tests.support import assert_no_runner_import
 
@@ -250,7 +251,9 @@ class _Adapter:
 
     world: _World
     executions: list[overseer_dispatch.Action] = field(default_factory=list)
-    reconciliations: list[overseer_store.ActionRecord] = field(default_factory=list)
+    reconciliations: list[overseer_store_models.ActionRecord] = field(
+        default_factory=list
+    )
     receipts: list[overseer_dispatch.Receipt] = field(default_factory=list)
     reconciled: list[overseer_dispatch.Receipt] = field(default_factory=list)
     raises: BaseException | None = None
@@ -273,7 +276,7 @@ class _Adapter:
         return overseer_dispatch.Receipt.executed("done", locator="msg-1")
 
     def reconcile(
-        self, record: overseer_store.ActionRecord
+        self, record: overseer_store_models.ActionRecord
     ) -> overseer_dispatch.Receipt:
         self.reconciliations.append(record)
         if self.reconciled:
@@ -287,7 +290,7 @@ class _DispatchCase(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="asl-overseer-dispatch-"))
         self.addCleanup(self._close)
-        self.ledger = overseer_store.open_ledger(state_dir=self.root)
+        self.ledger = overseer_store_ledger.open_ledger(state_dir=self.root)
         self.now = 1000.0
         self.world = _World(
             inventory=_inventory(_candidate()),
@@ -325,7 +328,7 @@ class _DispatchCase(unittest.TestCase):
     def reopen(self) -> None:
         """Close and open again over the same path: the restart under test."""
         self.ledger.close()
-        self.ledger = overseer_store.open_ledger(state_dir=self.root)
+        self.ledger = overseer_store_ledger.open_ledger(state_dir=self.root)
 
     def action(
         self,

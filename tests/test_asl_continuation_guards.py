@@ -54,7 +54,8 @@ from agent_session_loop import (
     run_persistence,
     run_selection,
     turn_postflight,
-    verification,
+    verification_cli,
+    verification_models,
     verification_transitions,
     write_guards,
 )
@@ -757,12 +758,12 @@ class ContinuationCommitScopeTests(unittest.TestCase):
         self.repositories = init_multi_repo_workspace(self.workspace_root, SPECS)
         self.plan_dir = self.tmp_path / "plan"
         write_multi_repo_plan(self.plan_dir, ("pending",), specs=SPECS)
-        self.registered = verification.VerificationContext.from_plan(
+        self.registered = verification_models.VerificationContext.from_plan(
             self.plan_dir, self.workspace_root
         )
         self.legacy_root = self.tmp_path / "legacy"
         init_git_repo(self.legacy_root)
-        self.legacy = verification.VerificationContext.legacy(self.legacy_root)
+        self.legacy = verification_models.VerificationContext.legacy(self.legacy_root)
         self.run_dir = self.tmp_path / "run"
         self.event_path = self.tmp_path / "events.jsonl"
         self.artifact_dir = self.tmp_path / "turn-0002"
@@ -819,7 +820,7 @@ class ContinuationCommitScopeTests(unittest.TestCase):
 
     def settle(
         self,
-        context: verification.VerificationContext,
+        context: verification_models.VerificationContext,
         *,
         guard: dict[str, Any] | None,
         commit_mode: str | None = run_selection.COMMIT_MODE_PER_SESSION,
@@ -1058,7 +1059,7 @@ class InterruptionEarnsNothingTests(unittest.TestCase):
     def test_a_verification_failure_beside_it_still_spends_one(self) -> None:
         # The companion claim: the budget is not simply inert here.
         self.write_events(
-            "interrupted", verification.VERIFY_EXIT_REASON_FAILED, "interrupted"
+            "interrupted", verification_cli.VERIFY_EXIT_REASON_FAILED, "interrupted"
         )
 
         self.assertEqual(

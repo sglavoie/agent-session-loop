@@ -58,7 +58,7 @@ having asked.
 
 ## Attempted is not executed
 
-:meth:`agent_session_loop.overseer_store.Ledger.attempt_action` writes the row
+:meth:`agent_session_loop.overseer_store_ledger.Ledger.attempt_action` writes the row
 *before* the adapter is called, and only a receipt settles it. A process that
 dies mid-dispatch therefore leaves a durable ``attempted`` row, and the next
 dispatch against that plan refuses with ``outcome_uncertain`` until
@@ -103,7 +103,8 @@ from . import (
     overseer_decisions,
     overseer_discovery,
     overseer_policy_client,
-    overseer_store,
+    overseer_store_ledger,
+    overseer_store_models,
 )
 
 __all__ = [
@@ -427,7 +428,7 @@ class Adapter(Protocol):
         """Perform the action, and say what became of it."""
         ...
 
-    def reconcile(self, record: overseer_store.ActionRecord) -> Receipt:
+    def reconcile(self, record: overseer_store_models.ActionRecord) -> Receipt:
         """Say what became of a dispatch that was left in doubt."""
         ...
 
@@ -526,7 +527,7 @@ class Dispatch:
     performed: bool
     refusal: Refusal | None
     detail: str
-    record: overseer_store.ActionRecord | None
+    record: overseer_store_models.ActionRecord | None
     receipt: Receipt | None
     escalated: bool
     recoveries: int
@@ -536,7 +537,7 @@ class Dispatch:
 class Reconciliation:
     """What one in-doubt dispatch turned out to be."""
 
-    record: overseer_store.ActionRecord
+    record: overseer_store_models.ActionRecord
     receipt: Receipt | None
     settled: bool
     detail: str
@@ -598,7 +599,7 @@ def dispatch(
     *,
     action: Action,
     watcher_id: str,
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     adapters: Registry,
     authorize: Authorize = overseer_policy_client.authorize,
     build_inventory: BuildInventory = overseer_discovery.build_inventory,
@@ -744,7 +745,7 @@ def dispatch(
 def reconcile(
     *,
     plan_dir: str,
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     adapters: Registry,
     grant: overseer_policy_client.Grant,
 ) -> tuple[Reconciliation, ...]:
@@ -866,7 +867,7 @@ def _locate(
     *,
     action: Action,
     watcher_id: str,
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     build_inventory: BuildInventory,
     state_dir: str | Path | None,
     now: Now,
@@ -940,7 +941,7 @@ def _examine(
     *,
     action: Action,
     located: _Located,
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     inspect_run: InspectRun,
     state_dir: str | Path | None,
 ) -> Identity | _Refused:
@@ -1034,7 +1035,7 @@ def _permit(
     *,
     action: Action,
     repositories: tuple[overseer_policy_client.Repository, ...],
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     authorize: Authorize,
     timeout: float,
 ) -> overseer_policy_client.Grant | _Refused:
@@ -1084,7 +1085,7 @@ def _perform(
     identity: Identity,
     grant: overseer_policy_client.Grant,
     adapter: Adapter,
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
 ) -> Dispatch:
     """Write the attempt, call the adapter, settle what came back."""
     try:
@@ -1096,7 +1097,7 @@ def _perform(
             incident_id=action.incident_id,
             progress_token=identity.progress,
         )
-    except overseer_store.LedgerRefused as error:
+    except overseer_store_models.LedgerRefused as error:
         return _refusal(action, "ledger_refused", str(error))
 
     try:
@@ -1168,7 +1169,7 @@ def _perform(
 
 
 def _settle_refusal(
-    action: Action, refused: _Refused, ledger: overseer_store.Ledger
+    action: Action, refused: _Refused, ledger: overseer_store_ledger.Ledger
 ) -> Dispatch:
     """Turn a guard's answer into a result, escalating if it asked for that."""
     escalated = _escalate(ledger, action.incident_id) if refused.escalate else False
@@ -1198,7 +1199,7 @@ def _refusal(action: Action, refusal: Refusal, detail: str) -> Dispatch:
     )
 
 
-def _escalate(ledger: overseer_store.Ledger, incident_id: int) -> bool:
+def _escalate(ledger: overseer_store_ledger.Ledger, incident_id: int) -> bool:
     """Escalate an open incident, and say whether this call is what did it.
 
     An incident that is already settled is left alone: escalating it again

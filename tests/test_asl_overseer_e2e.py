@@ -101,7 +101,8 @@ from agent_session_loop import (
     overseer_history,
     overseer_policy_client,
     overseer_resume,
-    overseer_store,
+    overseer_store_ledger,
+    overseer_store_models,
     plans_files,
     plans_snapshot,
     process_tree,
@@ -279,7 +280,7 @@ class _World:
         self.workspace_root = str(self.repos[AUTHORIZED])
         self.write_config()
         self.parser = cli.build_parser(prog="asl")
-        self.ledgers: list[overseer_store.Ledger] = []
+        self.ledgers: list[overseer_store_ledger.Ledger] = []
         self.children: list[subprocess.Popen[bytes]] = []
         case.addCleanup(self._stop_children)
         case.addCleanup(self._close_ledgers)
@@ -506,8 +507,8 @@ class _World:
             run_command=self.run_command,
         )
 
-    def open_ledger(self, **kwargs: Any) -> overseer_store.Ledger:
-        ledger = overseer_store.open_ledger(**kwargs)
+    def open_ledger(self, **kwargs: Any) -> overseer_store_ledger.Ledger:
+        ledger = overseer_store_ledger.open_ledger(**kwargs)
         self.ledgers.append(ledger)
         return ledger
 
@@ -1618,7 +1619,7 @@ class FaultQualificationTests(_WorldCase):
 
     def _strand_a_commit(
         self, packet: dict[str, Any], message: str
-    ) -> overseer_store.ActionRecord:
+    ) -> overseer_store_models.ActionRecord:
         """Leave exactly the trace a process that died mid-commit leaves.
 
         The attempt is written before the commit and settled after it, so a

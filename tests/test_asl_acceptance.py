@@ -72,13 +72,13 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests.test_asl_run_readiness_hard_gate:"
             "RunReadinessHardGateTests."
             "test_allow_not_loop_ready_does_not_bypass_repository_intent",
-            "tests.test_asl_e2e:"
+            "tests.test_asl_e2e_kiln_twin_clone:"
             "KilnTwinCloneRegressionTests."
             "test_legacy_plan_declaring_the_sibling_clone_launches_no_harness",
-            "tests.test_asl_e2e:"
+            "tests.test_asl_e2e_kiln_twin_clone:"
             "KilnTwinCloneRegressionTests."
             "test_expansion_note_redirect_to_the_sibling_clone_launches_no_harness",
-            "tests.test_asl_e2e:"
+            "tests.test_asl_e2e_kiln_twin_clone:"
             "KilnTwinCloneRegressionTests."
             "test_registered_workspace_targeting_the_testing_clone_succeeds",
         ),
@@ -209,9 +209,9 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
         "single-repository compatibility, state/event readers, retention, "
         "and current tests remain intact.",
         (
-            "tests.test_asl_e2e:"
+            "tests.test_asl_e2e_multi_repo_lifecycle:"
             "MultiRepositoryEndToEndQATests.test_four_repository_public_core_lifecycle",
-            "tests.test_asl_e2e:"
+            "tests.test_asl_e2e_lifecycle:"
             "EndToEndQATests.test_full_lifecycle_repairs_legacy_plan_and_runs_to_completion",
             "tests.test_asl_supervisor_audit_run_config:"
             "AuditRunConfigPersistenceTests.test_resume_restores_persisted_audit_settings",

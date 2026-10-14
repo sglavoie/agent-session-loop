@@ -25,7 +25,7 @@ from agent_session_loop import (
     prepare_validation_cache,
     prepare_validation_store,
     state_locks,
-    verification,
+    verification_models,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -149,7 +149,7 @@ class PrepareRegisteredWorkspaceTests(PrepareEndToEndFixtures):
         )
         self.assertTrue(result.ok, result)
         assert result.plan_dir is not None
-        context = verification.verification_context_from_plan(
+        context = verification_models.verification_context_from_plan(
             result.plan_dir, workspace
         )
         collected = baseline.collect_baseline_checks(

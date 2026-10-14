@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from . import events, state, verification
+from . import events, state, verification_models
 from . import supervisor_audit_evidence_constants as audit_evidence_constants
 from . import supervisor_audit_evidence_helpers as audit_evidence_helpers
 from . import supervisor_audit_evidence_turns as audit_evidence_turns
@@ -208,7 +208,7 @@ def _is_expected_conditional_skip(entry: Any) -> bool:
     if not isinstance(entry, Mapping):
         return False
     return bool(
-        entry.get("reason") == verification.SKIP_REASON_CONDITION_NOT_MET
+        entry.get("reason") == verification_models.SKIP_REASON_CONDITION_NOT_MET
         and audit_evidence_helpers._sequence(entry.get("on_failure_of"))
     )
 

@@ -15,9 +15,7 @@ from .contracts import (
 )
 from .plans_models import PlanSnapshot, ReadinessMetadata
 from .repository_intent import RepositoryIntent
-from .verification import (
-    VerificationContext,
-)
+from .verification_models import VerificationContext
 
 PreflightSeverity = Literal["red", "yellow", "green"]
 

@@ -15,7 +15,7 @@ from agent_session_loop import (
     plans_snapshot,
     review_guard,
     turn_execution_commit,
-    verification,
+    verification_run,
 )
 from tests.asl_turn_commit_support import TurnCommitRunCase
 from tests.support import (
@@ -141,7 +141,7 @@ class TurnCommitRejectionTests(TurnCommitRunCase):
                 ),
             ),
             mock.patch.object(
-                verification,
+                verification_run,
                 "run_verification",
                 side_effect=OSError("verifier unavailable"),
             ),

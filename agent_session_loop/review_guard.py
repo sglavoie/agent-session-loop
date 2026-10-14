@@ -74,7 +74,7 @@ from . import (
     plans_session_scope,
     repository_evidence,
     run_selection,
-    verification,
+    verification_models,
     workspaces,
 )
 from .git_subprocess import run_git_or_raise
@@ -162,7 +162,7 @@ def _review_guard_include_ignored(args: argparse.Namespace) -> bool:
 
 def _external_change_aliases(
     args: argparse.Namespace,
-    context: verification.VerificationContext,
+    context: verification_models.VerificationContext,
 ) -> frozenset[str]:
     """Resolve ``--allow-external-changes`` against the plan's registry.
 
@@ -314,7 +314,7 @@ def _git_status_is_clean(cwd: Path) -> bool:
 def _validate_commit_preflight(
     cwd: Path,
     *,
-    verification_context: verification.VerificationContext | None = None,
+    verification_context: verification_models.VerificationContext | None = None,
     needed_aliases: frozenset[str] | None = None,
     clean_aliases: frozenset[str] | None = None,
 ) -> dict[str, Any]:
@@ -326,7 +326,9 @@ def _validate_commit_preflight(
     the session only reads: it must still be an inspectable worktree, but its
     dirt cannot enter the session's commit, so it is recorded and not refused.
     """
-    context = verification_context or verification.VerificationContext.legacy(cwd)
+    context = verification_context or verification_models.VerificationContext.legacy(
+        cwd
+    )
     if context.workspace is None:
         _validate_git_worktree(cwd)
         _validate_clean_git_status(cwd)
@@ -555,7 +557,7 @@ def _retained_turn_content_drift(
 def _repair_commit_preflight(
     cwd: Path,
     *,
-    verification_context: verification.VerificationContext,
+    verification_context: verification_models.VerificationContext,
     session_scope: plans_session_scope.SessionScope | None,
     workspace_evidence: WorkspaceEvidenceProbe,
     plan_dir: Path | None = None,

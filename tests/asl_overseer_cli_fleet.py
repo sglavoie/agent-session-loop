@@ -23,7 +23,7 @@ from agent_session_loop import (
     mailbox_models,
     overseer_cli,
     overseer_discovery,
-    overseer_store,
+    overseer_store_ledger,
     plans_files,
     plans_session_ids,
     state,
@@ -66,7 +66,7 @@ class _Fleet:
         self.facts: dict[str, intervention.RunFacts] = {}
         self.reads: list[str] = []
         self.parser = cli.build_parser(prog="asl")
-        self.ledgers: list[overseer_store.Ledger] = []
+        self.ledgers: list[overseer_store_ledger.Ledger] = []
         case.addCleanup(self._close_ledgers)
 
     # -- corpus ------------------------------------------------------------
@@ -204,7 +204,7 @@ class _Fleet:
         self.reads.append(str(plan_dir))
         return self.facts[str(plan_dir)]
 
-    def open_ledger(self, **kwargs: Any) -> overseer_store.Ledger:
+    def open_ledger(self, **kwargs: Any) -> overseer_store_ledger.Ledger:
         """A real ledger, tracked so the fixture closes what the leaves open.
 
         A leaf opens a ledger and lets the process own it, which is right for a
@@ -212,7 +212,7 @@ class _Fleet:
         Owning the lifetime here keeps the connections from piling up without
         changing what the leaf does.
         """
-        ledger = overseer_store.open_ledger(**kwargs)
+        ledger = overseer_store_ledger.open_ledger(**kwargs)
         self.ledgers.append(ledger)
         return ledger
 

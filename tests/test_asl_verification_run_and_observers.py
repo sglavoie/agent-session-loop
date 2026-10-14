@@ -5,7 +5,13 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from agent_session_loop import contracts, plans_files, verification
+from agent_session_loop import (
+    contracts,
+    plans_files,
+    verification_checks,
+    verification_models,
+    verification_run,
+)
 from tests.support_asl_verification import VerificationExecutorFixtures
 
 
@@ -15,7 +21,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
             repo_root = Path(tmp)
             check = contracts.FileExistsCheck(name="absent", path="nope.txt")
 
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertEqual("fail", result.status)
             self.assertEqual("file-missing", result.failure_reason)
@@ -34,7 +40,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
                 pattern=r"^def parse_completion_contract",
             )
 
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertEqual("pass", result.status)
 
@@ -48,7 +54,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
                 pattern=r"^def parse_completion_contract",
             )
 
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertEqual("fail", result.status)
             self.assertEqual("regex-not-matched", result.failure_reason)
@@ -63,7 +69,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
                 pattern=r"anything",
             )
 
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification_checks.run_check(check, repo_root=repo_root)
 
             self.assertEqual("fail", result.status)
             self.assertEqual("file-missing", result.failure_reason)
@@ -84,7 +90,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
                 )
             )
 
-            result = verification.run_verification(contract, repo_root=repo_root)
+            result = verification_run.run_verification(contract, repo_root=repo_root)
 
             self.assertEqual("1", result.session_id.value)
             self.assertEqual(3, len(result.checks))
@@ -107,7 +113,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
                 )
             )
 
-            result = verification.run_verification(contract, repo_root=repo_root)
+            result = verification_run.run_verification(contract, repo_root=repo_root)
 
             self.assertTrue(result.passed)
             self.assertEqual((), result.failures)
@@ -133,12 +139,12 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
                     ),
                 )
             )
-            skipped_events: list[verification.CheckSkippedEvent] = []
-            observer = verification.VerificationObserver(
+            skipped_events: list[verification_models.CheckSkippedEvent] = []
+            observer = verification_models.VerificationObserver(
                 on_check_skipped=skipped_events.append
             )
 
-            result = verification.run_verification(
+            result = verification_run.run_verification(
                 contract, repo_root=repo_root, observer=observer
             )
 
@@ -173,7 +179,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
                 )
             )
 
-            result = verification.run_verification(contract, repo_root=repo_root)
+            result = verification_run.run_verification(contract, repo_root=repo_root)
 
             self.assertFalse(result.passed)
             self.assertTrue(marker.exists())
@@ -199,7 +205,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
                 )
             )
 
-            result = verification.run_verification(contract, repo_root=repo_root)
+            result = verification_run.run_verification(contract, repo_root=repo_root)
 
             self.assertFalse(result.passed)
             self.assertEqual(["suite"], [check.name for check in result.failures])
@@ -221,7 +227,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
             contract = self._contract(checks=(check,))
             observer, events = self._record_observer()
 
-            result = verification.run_verification(
+            result = verification_run.run_verification(
                 contract, repo_root=repo_root, observer=observer
             )
 
@@ -229,8 +235,8 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
             self.assertEqual(["started", "finished"], [tag for tag, _ in events])
             started = events[0][1]
             finished = events[1][1]
-            self.assertIsInstance(started, verification.CheckStartedEvent)
-            self.assertIsInstance(finished, verification.CheckFinishedEvent)
+            self.assertIsInstance(started, verification_models.CheckStartedEvent)
+            self.assertIsInstance(finished, verification_models.CheckFinishedEvent)
             self.assertEqual(0, started.check_index)
             self.assertEqual(1, started.check_count)
             self.assertEqual("ok", started.name)
@@ -259,7 +265,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
             contract = self._contract(checks=(check,))
             observer, events = self._record_observer()
 
-            result = verification.run_verification(
+            result = verification_run.run_verification(
                 contract, repo_root=repo_root, observer=observer
             )
 
@@ -283,7 +289,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
             contract = self._contract(checks=(check,))
             observer, events = self._record_observer()
 
-            result = verification.run_verification(
+            result = verification_run.run_verification(
                 contract, repo_root=repo_root, observer=observer
             )
 
@@ -301,7 +307,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
             contract = self._contract(checks=(check,))
             observer, events = self._record_observer()
 
-            result = verification.run_verification(
+            result = verification_run.run_verification(
                 contract, repo_root=repo_root, observer=observer
             )
 
@@ -330,7 +336,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
             contract = self._contract(checks=(check,))
             observer, events = self._record_observer()
 
-            result = verification.run_verification(
+            result = verification_run.run_verification(
                 contract, repo_root=repo_root, observer=observer
             )
 
@@ -361,7 +367,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
             )
             observer, events = self._record_observer()
 
-            result = verification.run_verification(
+            result = verification_run.run_verification(
                 contract, repo_root=repo_root, observer=observer
             )
 
@@ -398,7 +404,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
             contract = self._contract(checks=(check,))
             observer, events = self._record_observer()
 
-            verification.run_verification(
+            verification_run.run_verification(
                 contract, repo_root=repo_root, observer=observer
             )
 
@@ -424,14 +430,14 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
             )
             observer, events = self._record_observer()
 
-            verification.run_verification(
+            verification_run.run_verification(
                 contract, repo_root=repo_root, observer=observer
             )
 
             self.assertEqual(
                 [
-                    ("suite", verification.CHECK_ROLE_GATE),
-                    ("focused", verification.CHECK_ROLE_DIAGNOSTIC),
+                    ("suite", verification_models.CHECK_ROLE_GATE),
+                    ("focused", verification_models.CHECK_ROLE_DIAGNOSTIC),
                 ],
                 [
                     (event.name, event.role)
@@ -449,13 +455,13 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
             contract = self._contract(
                 checks=(contracts.FileExistsCheck(name="present", path="present.txt"),)
             )
-            finished_events: list[verification.CheckFinishedEvent] = []
-            observer = verification.VerificationObserver(
+            finished_events: list[verification_models.CheckFinishedEvent] = []
+            observer = verification_models.VerificationObserver(
                 on_check_started=None,
                 on_check_finished=finished_events.append,
             )
 
-            verification.run_verification(
+            verification_run.run_verification(
                 contract, repo_root=repo_root, observer=observer
             )
 
@@ -470,7 +476,7 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
                 checks=(contracts.FileExistsCheck(name="present", path="present.txt"),)
             )
 
-            result = verification.run_verification(contract, repo_root=repo_root)
+            result = verification_run.run_verification(contract, repo_root=repo_root)
 
             self.assertTrue(result.passed)
             self.assertEqual(1, len(result.checks))
@@ -488,12 +494,14 @@ class RunVerificationAndObserverTests(VerificationExecutorFixtures):
             class _Boom(RuntimeError):
                 pass
 
-            def _explode(_event: verification.CheckStartedEvent) -> None:
+            def _explode(_event: verification_models.CheckStartedEvent) -> None:
                 raise _Boom("observer error")
 
-            observer = verification.VerificationObserver(on_check_started=_explode)
+            observer = verification_models.VerificationObserver(
+                on_check_started=_explode
+            )
 
             with self.assertRaises(_Boom):
-                verification.run_verification(
+                verification_run.run_verification(
                     contract, repo_root=repo_root, observer=observer
                 )

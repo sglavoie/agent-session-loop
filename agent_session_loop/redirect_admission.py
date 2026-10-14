@@ -1,7 +1,7 @@
 """Admission control between a redirect producer and the runner that serves it.
 
 Submitting a redirect and having one accepted are different events, and this
-module exists to keep them different. :mod:`agent_session_loop.redirect_store`
+module exists to keep them different. :mod:`agent_session_loop.redirect_store_requests`
 makes a correction durable; only the process holding the live turn can accept
 one. A producer that conflated the two would report success for a correction no
 runner ever saw — which is the specific way an urgent channel fails an operator,
@@ -69,7 +69,11 @@ from . import (
     intervention,
     plans_files,
     plans_payloads,
-    redirect_store,
+    redirect_store_journal,
+    redirect_store_models,
+    redirect_store_requests,
+    redirect_store_validation,
+    redirect_store_vocab,
     state_locks,
 )
 
@@ -171,7 +175,7 @@ class TargetFacts:
     """One non-mutating read of whether a run can accept a redirect right now."""
 
     plan_dir: Path
-    target: redirect_store.RedirectTarget | None = None
+    target: redirect_store_models.RedirectTarget | None = None
     session_kind: str | None = None
     run_active: bool = False
     paused: bool = False
@@ -211,8 +215,8 @@ class SubmissionOutcome:
     plan_dir: Path
     reason: str | None = None
     operation_id: str | None = None
-    request: redirect_store.RedirectRequest | None = None
-    target: redirect_store.RedirectTarget | None = None
+    request: redirect_store_models.RedirectRequest | None = None
+    target: redirect_store_models.RedirectTarget | None = None
     delivery: control_signal.NotifyResult | None = field(default=None, repr=False)
     waited_seconds: float = 0.0
 
@@ -249,7 +253,7 @@ def _canonical_plan_dir(plan_dir: str | Path) -> Path:
 def _active_turn_target(
     runner_state: Mapping[str, Any],
     run_id: str,
-) -> tuple[redirect_store.RedirectTarget, str | None] | None:
+) -> tuple[redirect_store_models.RedirectTarget, str | None] | None:
     """Read the live turn's identity, or ``None`` if there is not one.
 
     Every field is re-validated rather than trusted: this payload is written by
@@ -272,15 +276,15 @@ def _active_turn_target(
     ):
         return None
     session_kind = active_turn.get("session_kind")
-    target = redirect_store.RedirectTarget(
+    target = redirect_store_models.RedirectTarget(
         run_id=run_id,
         session_id=session_id,
         turn_index=turn_index,
         harness=harness if isinstance(harness, str) and harness else None,
     )
     try:
-        redirect_store.validate_target(target)
-    except redirect_store.RedirectStoreError:
+        redirect_store_validation.validate_target(target)
+    except redirect_store_models.RedirectStoreError:
         return None
     return target, session_kind if isinstance(session_kind, str) else None
 
@@ -289,7 +293,7 @@ def inspect_target(
     plan_dir: str | Path,
     *,
     state_dir: str | Path | None = None,
-    expected_target: redirect_store.RedirectTarget | None = None,
+    expected_target: redirect_store_models.RedirectTarget | None = None,
 ) -> TargetFacts:
     """Read whether ``plan_dir`` can accept a redirect, writing nothing.
 
@@ -388,7 +392,7 @@ def submit_redirect(
     state_dir: str | Path | None = None,
     operation_id: str | None = None,
     ttl_seconds: int | None = None,
-    expected_target: redirect_store.RedirectTarget | None = None,
+    expected_target: redirect_store_models.RedirectTarget | None = None,
     wait_seconds: float = ACCEPTANCE_WAIT_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
@@ -416,7 +420,7 @@ def submit_redirect(
     bound that a clock adjustment can lengthen is not a bound.
     """
     wait = _validate_wait(wait_seconds)
-    redirect_store.validate_feedback(feedback)
+    redirect_store_validation.validate_feedback(feedback)
     facts = inspect_target(
         plan_dir, state_dir=state_dir, expected_target=expected_target
     )
@@ -434,7 +438,7 @@ def submit_redirect(
         )
 
     target = facts.target
-    request = redirect_store.submit_request(
+    request = redirect_store_requests.submit_request(
         facts.plan_dir,
         target=target,
         feedback=feedback,
@@ -448,7 +452,7 @@ def submit_redirect(
         return SubmissionOutcome(
             outcome=OUTCOME_UNAVAILABLE,
             plan_dir=facts.plan_dir,
-            reason=redirect_store.REASON_URGENT_CHANNEL_UNAVAILABLE,
+            reason=redirect_store_vocab.REASON_URGENT_CHANNEL_UNAVAILABLE,
             operation_id=request.operation_id,
             request=_settle_undeliverable(facts.plan_dir, request, state_dir=state_dir),
             target=target,
@@ -469,10 +473,10 @@ def submit_redirect(
 
 def _settle_undeliverable(
     plan_dir: Path,
-    request: redirect_store.RedirectRequest,
+    request: redirect_store_models.RedirectRequest,
     *,
     state_dir: str | Path | None,
-) -> redirect_store.RedirectRequest:
+) -> redirect_store_models.RedirectRequest:
     """Close a request the urgent channel could not carry.
 
     Best-effort by necessity — the journal may be unwritable for the same
@@ -481,21 +485,21 @@ def _settle_undeliverable(
     its own expiry closes it, and the caller was already told ``unavailable``.
     """
     try:
-        return redirect_store.reject_request(
+        return redirect_store_requests.reject_request(
             plan_dir,
             request.operation_id,
-            reason=redirect_store.REASON_URGENT_CHANNEL_UNAVAILABLE,
+            reason=redirect_store_vocab.REASON_URGENT_CHANNEL_UNAVAILABLE,
             state_dir=state_dir,
         )
-    except redirect_store.RedirectStoreError:
+    except redirect_store_models.RedirectStoreError:
         return request
 
 
 def _await_settlement(
     plan_dir: Path,
-    request: redirect_store.RedirectRequest,
+    request: redirect_store_models.RedirectRequest,
     *,
-    target: redirect_store.RedirectTarget,
+    target: redirect_store_models.RedirectTarget,
     state_dir: str | Path | None,
     delivery: control_signal.NotifyResult,
     wait: float,
@@ -524,7 +528,7 @@ def _await_settlement(
             return SubmissionOutcome(
                 outcome=OUTCOME_UNCERTAIN,
                 plan_dir=plan_dir,
-                reason=redirect_store.STATE_SUBMITTED,
+                reason=redirect_store_vocab.STATE_SUBMITTED,
                 operation_id=current.operation_id,
                 request=current,
                 target=target,
@@ -536,10 +540,10 @@ def _await_settlement(
 
 def _current_request(
     plan_dir: Path,
-    request: redirect_store.RedirectRequest,
+    request: redirect_store_models.RedirectRequest,
     *,
     state_dir: str | Path | None,
-) -> redirect_store.RedirectRequest:
+) -> redirect_store_models.RedirectRequest:
     """Re-read one request, falling back to the last known copy.
 
     An unreadable journal is reported as "still submitted" rather than as a
@@ -547,8 +551,8 @@ def _current_request(
     manufacture an outcome the journal does not contain.
     """
     try:
-        view = redirect_store.read_journal(plan_dir, state_dir=state_dir)
-    except redirect_store.RedirectStoreError:
+        view = redirect_store_journal.read_journal(plan_dir, state_dir=state_dir)
+    except redirect_store_models.RedirectStoreError:
         return request
     return view.request(request.operation_id) or request
 
@@ -556,9 +560,9 @@ def _current_request(
 def pending_redirects(
     plan_dir: str | Path,
     *,
-    target: redirect_store.RedirectTarget,
+    target: redirect_store_models.RedirectTarget,
     state_dir: str | Path | None = None,
-) -> tuple[redirect_store.RedirectRequest, ...]:
+) -> tuple[redirect_store_models.RedirectRequest, ...]:
     """Return unsettled requests aimed at ``target``, oldest first.
 
     The runner's read side. Filtered by target rather than returning everything
@@ -566,7 +570,7 @@ def pending_redirects(
     turn's to answer and must not be swept into it.
     """
     canonical = _canonical_plan_dir(plan_dir)
-    view = redirect_store.read_journal(canonical, state_dir=state_dir)
+    view = redirect_store_journal.read_journal(canonical, state_dir=state_dir)
     return view.pending_for(target)
 
 
@@ -574,18 +578,18 @@ def accept_redirect(
     plan_dir: str | Path,
     operation_id: str,
     *,
-    target: redirect_store.RedirectTarget,
+    target: redirect_store_models.RedirectTarget,
     state_dir: str | Path | None = None,
-) -> redirect_store.RedirectRequest:
+) -> redirect_store_models.RedirectRequest:
     """Record the live runner's acceptance of one request.
 
-    A thin pass-through to :func:`redirect_store.accept_request`, and thin on
+    A thin pass-through to :func:`redirect_store_requests.accept_request`, and thin on
     purpose: acceptance is one durable, target-checked, expiry-checked append
     under the journal's lock, and any pre-check added here would be a second
     opinion formed outside that lock. ``target`` must be the turn the caller is
     currently executing; the store refuses anything else.
     """
-    return redirect_store.accept_request(
+    return redirect_store_requests.accept_request(
         _canonical_plan_dir(plan_dir),
         operation_id,
         target=target,

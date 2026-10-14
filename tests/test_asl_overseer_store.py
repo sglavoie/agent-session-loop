@@ -38,7 +38,15 @@ from unittest import mock
 
 from agent_session_loop import (
     overseer_policy_client,
-    overseer_store,
+    overseer_store_actions,
+    overseer_store_core,
+    overseer_store_groups,
+    overseer_store_incidents,
+    overseer_store_ledger,
+    overseer_store_models,
+    overseer_store_rows,
+    overseer_store_schema,
+    overseer_store_watch,
     state,
     state_plan_refs,
 )
@@ -96,9 +104,9 @@ def _grant(
     return granted
 
 
-def _evidence(count: int = 1) -> tuple[overseer_store.EvidenceInput, ...]:
+def _evidence(count: int = 1) -> tuple[overseer_store_models.EvidenceInput, ...]:
     return tuple(
-        overseer_store.EvidenceInput(
+        overseer_store_models.EvidenceInput(
             alias="scripts",
             kind="transcript",
             locator=f"scripts:sessions/{index}.jsonl",
@@ -108,7 +116,7 @@ def _evidence(count: int = 1) -> tuple[overseer_store.EvidenceInput, ...]:
     )
 
 
-def _columns(ledger: overseer_store.Ledger, table: str) -> set[str]:
+def _columns(ledger: overseer_store_ledger.Ledger, table: str) -> set[str]:
     """One table's column names, read from the file by a separate connection."""
     raw = sqlite3.connect(str(ledger.path))
     try:
@@ -120,7 +128,7 @@ def _columns(ledger: overseer_store.Ledger, table: str) -> set[str]:
 class _FlakyConnection:
     """A connection proxy that fails one chosen statement.
 
-    Only ``execute`` and ``close`` are used by :class:`~overseer_store.Ledger`,
+    Only ``execute`` and ``close`` are used by :class:`~overseer_store_ledger.Ledger`,
     so a proxy is enough, and it is a proxy rather than a patched method because
     :class:`sqlite3.Connection` is a C type that will not take one.
     """
@@ -146,16 +154,16 @@ class _LedgerCase(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="asl-overseer-store-"))
         self.addCleanup(self._close)
-        self.ledger = overseer_store.open_ledger(state_dir=self.root)
+        self.ledger = overseer_store_ledger.open_ledger(state_dir=self.root)
 
     def _close(self) -> None:
         with contextlib.suppress(sqlite3.ProgrammingError):
             self.ledger.close()
 
-    def reopen(self) -> overseer_store.Ledger:
+    def reopen(self) -> overseer_store_ledger.Ledger:
         """Close and open again over the same path: the restart under test."""
         self.ledger.close()
-        self.ledger = overseer_store.open_ledger(state_dir=self.root)
+        self.ledger = overseer_store_ledger.open_ledger(state_dir=self.root)
         return self.ledger
 
     def enrolled(self, *, plan_dir: str = PLAN) -> overseer_policy_client.Grant:
@@ -169,14 +177,25 @@ class LedgerLocationTests(_LedgerCase):
     """Where the database lives, and what must not notice it."""
 
     def test_module_does_not_import_the_runner(self) -> None:
-        assert_no_runner_import(self, overseer_store)
+        for module in (
+            overseer_store_actions,
+            overseer_store_core,
+            overseer_store_groups,
+            overseer_store_incidents,
+            overseer_store_ledger,
+            overseer_store_models,
+            overseer_store_rows,
+            overseer_store_schema,
+            overseer_store_watch,
+        ):
+            assert_no_runner_import(self, module)
 
     def test_the_ledger_is_a_file_beside_the_plan_state_directories(self) -> None:
         """A directory here would be enumerated as a plan by the fleet
         inventory and reported as a run nobody can read."""
         self.assertEqual(
-            overseer_store.ledger_path(self.root),
-            state.state_root(self.root) / overseer_store.LEDGER_FILE_NAME,
+            overseer_store_ledger.ledger_path(self.root),
+            state.state_root(self.root) / overseer_store_models.LEDGER_FILE_NAME,
         )
         self.assertTrue(self.ledger.path.is_file())
         self.assertEqual(
@@ -188,8 +207,12 @@ class MigrationTests(_LedgerCase):
     """The schema moves forward, one step at a time, or not at all."""
 
     def test_a_fresh_database_lands_on_the_current_version(self) -> None:
-        self.assertEqual(self.ledger.schema_version, overseer_store.SCHEMA_VERSION)
-        self.assertEqual(overseer_store.SCHEMA_VERSION, len(overseer_store.MIGRATIONS))
+        self.assertEqual(
+            self.ledger.schema_version, overseer_store_schema.SCHEMA_VERSION
+        )
+        self.assertEqual(
+            overseer_store_schema.SCHEMA_VERSION, len(overseer_store_schema.MIGRATIONS)
+        )
 
     def test_reopening_replays_nothing_and_keeps_every_row(self) -> None:
         grant = self.enrolled()
@@ -202,7 +225,7 @@ class MigrationTests(_LedgerCase):
             evidence=_evidence(2),
         )
         reopened = self.reopen()
-        self.assertEqual(reopened.schema_version, overseer_store.SCHEMA_VERSION)
+        self.assertEqual(reopened.schema_version, overseer_store_schema.SCHEMA_VERSION)
         self.assertEqual(len(reopened.incidents(plan_dir=PLAN)), 1)
         view = reopened.read_evidence(plan_dir=PLAN, grant=grant)
         self.assertEqual(len(view.records), 2)
@@ -221,22 +244,22 @@ class MigrationTests(_LedgerCase):
         def probe(connection: sqlite3.Connection) -> None:
             connection.execute("ALTER TABLE incident ADD COLUMN probe TEXT")
 
-        upgraded = overseer_store.SCHEMA_VERSION + 1
+        upgraded = overseer_store_schema.SCHEMA_VERSION + 1
         with (
             mock.patch.object(
-                overseer_store,
+                overseer_store_schema,
                 "MIGRATIONS",
-                overseer_store.MIGRATIONS + (probe,),
+                overseer_store_schema.MIGRATIONS + (probe,),
             ),
-            mock.patch.object(overseer_store, "SCHEMA_VERSION", upgraded),
+            mock.patch.object(overseer_store_schema, "SCHEMA_VERSION", upgraded),
         ):
-            self.ledger = overseer_store.open_ledger(state_dir=self.root)
+            self.ledger = overseer_store_ledger.open_ledger(state_dir=self.root)
             self.assertEqual(self.ledger.schema_version, upgraded)
             self.assertEqual(len(self.ledger.incidents(plan_dir=PLAN)), 1)
             self.ledger.close()
             # A second open at the same version must not replay the step, which
             # would fail on the duplicate column.
-            self.ledger = overseer_store.open_ledger(state_dir=self.root)
+            self.ledger = overseer_store_ledger.open_ledger(state_dir=self.root)
             self.assertEqual(self.ledger.schema_version, upgraded)
 
     def test_a_failed_migration_leaves_the_version_and_schema_untouched(self) -> None:
@@ -256,19 +279,23 @@ class MigrationTests(_LedgerCase):
 
         with (
             mock.patch.object(
-                overseer_store,
+                overseer_store_schema,
                 "MIGRATIONS",
-                overseer_store.MIGRATIONS + (half_applied,),
+                overseer_store_schema.MIGRATIONS + (half_applied,),
             ),
             mock.patch.object(
-                overseer_store, "SCHEMA_VERSION", overseer_store.SCHEMA_VERSION + 1
+                overseer_store_schema,
+                "SCHEMA_VERSION",
+                overseer_store_schema.SCHEMA_VERSION + 1,
             ),
-            self.assertRaises(overseer_store.LedgerError),
+            self.assertRaises(overseer_store_models.LedgerError),
         ):
-            overseer_store.open_ledger(state_dir=self.root)
+            overseer_store_ledger.open_ledger(state_dir=self.root)
 
-        self.ledger = overseer_store.open_ledger(state_dir=self.root)
-        self.assertEqual(self.ledger.schema_version, overseer_store.SCHEMA_VERSION)
+        self.ledger = overseer_store_ledger.open_ledger(state_dir=self.root)
+        self.assertEqual(
+            self.ledger.schema_version, overseer_store_schema.SCHEMA_VERSION
+        )
         self.assertEqual(len(self.ledger.incidents(plan_dir=PLAN)), 1)
         self.assertNotIn("probe", _columns(self.ledger, "incident"))
 
@@ -278,10 +305,10 @@ class MigrationTests(_LedgerCase):
         path = self.ledger.path
         self.ledger.close()
         raw = sqlite3.connect(str(path), isolation_level=None)
-        raw.execute(f"PRAGMA user_version = {overseer_store.SCHEMA_VERSION + 3}")
+        raw.execute(f"PRAGMA user_version = {overseer_store_schema.SCHEMA_VERSION + 3}")
         raw.close()
-        with self.assertRaises(overseer_store.LedgerError) as caught:
-            overseer_store.open_ledger(state_dir=self.root)
+        with self.assertRaises(overseer_store_models.LedgerError) as caught:
+            overseer_store_ledger.open_ledger(state_dir=self.root)
         self.assertIn("newer", str(caught.exception))
 
 
@@ -334,7 +361,7 @@ class RestartTests(_LedgerCase):
             grant=grant, plan_dir=PLAN, operation="reply", target="question-4"
         )
         self.ledger.confirm_action(action_id=action.action_id, outcome="delivered")
-        with self.assertRaises(overseer_store.LedgerError):
+        with self.assertRaises(overseer_store_models.LedgerError):
             self.ledger.confirm_action(action_id=action.action_id, outcome="failed")
         settled = self.ledger.action(action.action_id)
         assert settled is not None
@@ -514,11 +541,11 @@ class UnavailablePolicyTests(_LedgerCase):
         self.assertEqual(view.records, ())
         self.assertEqual(view.withheld, 1)
         self.assertFalse(view.complete)
-        with self.assertRaises(overseer_store.LedgerRefused):
+        with self.assertRaises(overseer_store_models.LedgerRefused):
             self.ledger.attempt_action(
                 grant=None, plan_dir=PLAN, operation="reply", target="q"
             )
-        with self.assertRaises(overseer_store.LedgerRefused):
+        with self.assertRaises(overseer_store_models.LedgerRefused):
             self.ledger.open_incident(
                 grant=None,
                 plan_dir=PLAN,
@@ -551,12 +578,12 @@ class UnavailablePolicyTests(_LedgerCase):
         """Not knowing which configuration applies is never read as any
         configuration applying."""
         fresh = Path(tempfile.mkdtemp(prefix="asl-overseer-store-"))
-        ledger = overseer_store.open_ledger(state_dir=fresh)
+        ledger = overseer_store_ledger.open_ledger(state_dir=fresh)
         self.addCleanup(ledger.close)
         self.assertFalse(ledger.current_epoch().observed)
         view = ledger.read_evidence(plan_dir=PLAN, grant=_grant())
         self.assertEqual(view.refusal, "policy_unobserved")
-        with self.assertRaises(overseer_store.LedgerRefused):
+        with self.assertRaises(overseer_store_models.LedgerRefused):
             ledger.attempt_action(
                 grant=_grant(access=overseer_policy_client.ACCESS_ACTION),
                 plan_dir=PLAN,
@@ -628,7 +655,7 @@ class PolicyChangeTests(_LedgerCase):
         self.enrolled()
         grant = _grant(access=overseer_policy_client.ACCESS_ACTION, digest="rd-act")
         self.ledger.note_policy(config_fingerprint=NEXT_FINGERPRINT)
-        with self.assertRaises(overseer_store.LedgerRefused):
+        with self.assertRaises(overseer_store_models.LedgerRefused):
             self.ledger.attempt_action(
                 grant=grant, plan_dir=PLAN, operation="reply", target="q"
             )
@@ -680,7 +707,7 @@ class RevocationTests(_LedgerCase):
         self.ledger.record_enrollment(_decision(allowed=False, digest="rd-no"))
         view = self.ledger.read_evidence(plan_dir=PLAN, grant=grant)
         self.assertEqual(view.refusal, "enrollment_revoked")
-        with self.assertRaises(overseer_store.LedgerRefused):
+        with self.assertRaises(overseer_store_models.LedgerRefused):
             self.ledger.attempt_action(
                 grant=_grant(access=overseer_policy_client.ACCESS_ACTION),
                 plan_dir=PLAN,

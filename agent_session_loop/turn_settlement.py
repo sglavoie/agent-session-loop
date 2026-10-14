@@ -116,7 +116,7 @@ from . import (
     state,
     turn_execution_commit,
     turn_execution_executor,
-    verification,
+    verification_models,
 )
 from .run_errors import RunError
 
@@ -170,7 +170,7 @@ class RunContext(Protocol):
     def session_attempts(self) -> continuation_guards.SessionAttempts: ...
 
     @property
-    def verification_context(self) -> verification.VerificationContext: ...
+    def verification_context(self) -> verification_models.VerificationContext: ...
 
     @property
     def commit_generation(self) -> run_commit._CommitGeneration: ...

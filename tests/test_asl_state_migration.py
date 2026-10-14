@@ -22,7 +22,10 @@ from agent_session_loop import (
     plans_errors,
     plans_files,
     plans_snapshot,
-    redirect_store,
+    redirect_store_journal,
+    redirect_store_models,
+    redirect_store_requests,
+    redirect_store_vocab,
     state,
     state_abandonment,
     state_migration,
@@ -1019,22 +1022,22 @@ class RedirectJournalMigrationTests(StateMigrationTestBase):
 
     def _seed_redirect(
         self, *, session_id: str = "1", accept: bool = False
-    ) -> redirect_store.RedirectRequest:
+    ) -> redirect_store_models.RedirectRequest:
         self.old_state_dir.mkdir(parents=True, exist_ok=True)
-        target = redirect_store.RedirectTarget(
+        target = redirect_store_models.RedirectTarget(
             run_id="run-gone",
             session_id=session_id,
             turn_index=1,
             harness="claude",
         )
-        request = redirect_store.submit_request(
+        request = redirect_store_requests.submit_request(
             self.old_plan,
             target=target,
             feedback="the second column is the one that matters",
             state_dir=self.state_dir,
         )
         if accept:
-            request = redirect_store.accept_request(
+            request = redirect_store_requests.accept_request(
                 self.old_plan,
                 request.operation_id,
                 target=target,
@@ -1043,10 +1046,10 @@ class RedirectJournalMigrationTests(StateMigrationTestBase):
         return request
 
     def _old_journal(self) -> Path:
-        return self.old_state_dir / redirect_store.REDIRECT_JOURNAL_FILE_NAME
+        return self.old_state_dir / redirect_store_vocab.REDIRECT_JOURNAL_FILE_NAME
 
     def _new_journal(self) -> Path:
-        return self.new_state_dir / redirect_store.REDIRECT_JOURNAL_FILE_NAME
+        return self.new_state_dir / redirect_store_vocab.REDIRECT_JOURNAL_FILE_NAME
 
     def test_dry_run_counts_the_journal_without_writing(self) -> None:
         self._write_orphan_state()
@@ -1078,7 +1081,9 @@ class RedirectJournalMigrationTests(StateMigrationTestBase):
         self.assertEqual(before, self._new_journal().read_bytes())
         # And it still replays to the same request at the new location, which
         # is what makes the correction survivable across the move.
-        view = redirect_store.read_journal(self.new_plan, state_dir=self.state_dir)
+        view = redirect_store_journal.read_journal(
+            self.new_plan, state_dir=self.state_dir
+        )
         stored = view.request(request.operation_id)
         assert stored is not None
         self.assertTrue(stored.accepted)
@@ -1086,10 +1091,10 @@ class RedirectJournalMigrationTests(StateMigrationTestBase):
     def test_a_settled_request_is_counted_but_not_called_unfinished(self) -> None:
         self._write_orphan_state()
         request = self._seed_redirect()
-        redirect_store.reject_request(
+        redirect_store_requests.reject_request(
             self.old_plan,
             request.operation_id,
-            reason=redirect_store.REASON_RUN_ENDED,
+            reason=redirect_store_vocab.REASON_RUN_ENDED,
             state_dir=self.state_dir,
         )
         report = state_migration.migrate_plan_state(

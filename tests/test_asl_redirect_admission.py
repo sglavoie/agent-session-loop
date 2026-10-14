@@ -19,7 +19,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import clock, control_signal, redirect_admission, redirect_store
+from agent_session_loop import (
+    clock,
+    control_signal,
+    redirect_admission,
+    redirect_store_journal,
+    redirect_store_models,
+    redirect_store_requests,
+    redirect_store_vocab,
+)
 from tests.support import (
     _write_lock_file,
     _write_state_payload,
@@ -125,8 +133,10 @@ class AdmissionTestCase(unittest.TestCase):
         feedback = params.pop("feedback")
         return redirect_admission.submit_redirect(self.plan_dir, feedback, **params)
 
-    def journal(self) -> redirect_store.RedirectJournalView:
-        return redirect_store.read_journal(self.plan_dir, state_dir=self.state_dir)
+    def journal(self) -> redirect_store_models.RedirectJournalView:
+        return redirect_store_journal.read_journal(
+            self.plan_dir, state_dir=self.state_dir
+        )
 
     def assertNothingPersisted(self) -> None:
         self.assertEqual((), self.journal().requests)
@@ -317,7 +327,9 @@ class TargetInspectionTests(AdmissionTestCase):
         facts = redirect_admission.inspect_target(
             self.plan_dir,
             state_dir=self.state_dir,
-            expected_target=redirect_store.RedirectTarget(RUN_ID, "session-9", 3),
+            expected_target=redirect_store_models.RedirectTarget(
+                RUN_ID, "session-9", 3
+            ),
         )
 
         self.assertEqual(redirect_admission.REFUSE_STALE_TARGET, facts.refusal)
@@ -328,7 +340,9 @@ class TargetInspectionTests(AdmissionTestCase):
         redirect_admission.inspect_target(self.plan_dir, state_dir=self.state_dir)
 
         self.assertFalse(
-            redirect_store.journal_path_for_plan(self.plan_dir, self.state_dir).exists()
+            redirect_store_journal.journal_path_for_plan(
+                self.plan_dir, self.state_dir
+            ).exists()
         )
 
     def test_an_unusable_plan_directory_raises_rather_than_refuses(self) -> None:
@@ -398,7 +412,7 @@ class RefusalTests(AdmissionTestCase):
         self.make_live_run(turn_index=4)
 
         outcome = self.submit(
-            expected_target=redirect_store.RedirectTarget(RUN_ID, "session-9", 3)
+            expected_target=redirect_store_models.RedirectTarget(RUN_ID, "session-9", 3)
         )
 
         self.assertEqual(redirect_admission.OUTCOME_REJECTED, outcome.outcome)
@@ -406,7 +420,7 @@ class RefusalTests(AdmissionTestCase):
         self.assertNothingPersisted()
 
     def test_malformed_feedback_raises_before_the_run_is_even_read(self) -> None:
-        with self.assertRaises(redirect_store.RedirectStoreError):
+        with self.assertRaises(redirect_store_models.RedirectStoreError):
             self.submit(feedback="   ")
         self.assertNothingPersisted()
 
@@ -431,7 +445,7 @@ class SubmissionOutcomeTests(AdmissionTestCase):
         self.assertEqual(redirect_admission.OUTCOME_UNCERTAIN, outcome.outcome)
         self.assertTrue(outcome.persisted)
         self.assertEqual(
-            redirect_store.STATE_SUBMITTED,
+            redirect_store_vocab.STATE_SUBMITTED,
             self.journal().request(outcome.operation_id).state,
         )
 
@@ -494,17 +508,17 @@ class SubmissionOutcomeTests(AdmissionTestCase):
             self.clock.slept.append(seconds)
             self.clock.now += seconds
             for request in self.journal().pending():
-                redirect_store.reject_request(
+                redirect_store_requests.reject_request(
                     self.plan_dir,
                     request.operation_id,
-                    reason=redirect_store.REASON_RUN_ENDED,
+                    reason=redirect_store_vocab.REASON_RUN_ENDED,
                     state_dir=self.state_dir,
                 )
 
         outcome = self.submit(sleep=settle)
 
         self.assertEqual(redirect_admission.OUTCOME_REJECTED, outcome.outcome)
-        self.assertEqual(redirect_store.REASON_RUN_ENDED, outcome.reason)
+        self.assertEqual(redirect_store_vocab.REASON_RUN_ENDED, outcome.reason)
 
     def test_the_urgent_channel_receives_the_wakeup(self) -> None:
         self.make_live_run()
@@ -576,23 +590,25 @@ class UndeliverableChannelTests(AdmissionTestCase):
         outcome = self.submit()
 
         settled = self.journal().request(outcome.operation_id)
-        self.assertEqual(redirect_store.STATE_REJECTED, settled.state)
+        self.assertEqual(redirect_store_vocab.STATE_REJECTED, settled.state)
         self.assertEqual(
-            redirect_store.REASON_URGENT_CHANNEL_UNAVAILABLE, settled.reason
+            redirect_store_vocab.REASON_URGENT_CHANNEL_UNAVAILABLE, settled.reason
         )
 
     def test_a_settled_undeliverable_request_cannot_later_be_accepted(self) -> None:
         outcome = self.submit()
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
             redirect_admission.accept_redirect(
                 self.plan_dir,
                 outcome.operation_id,
-                target=redirect_store.RedirectTarget(RUN_ID, "session-9", 1),
+                target=redirect_store_models.RedirectTarget(RUN_ID, "session-9", 1),
                 state_dir=self.state_dir,
             )
 
-        self.assertEqual(redirect_store.ERROR_ALREADY_SETTLED, caught.exception.reason)
+        self.assertEqual(
+            redirect_store_vocab.ERROR_ALREADY_SETTLED, caught.exception.reason
+        )
 
     def test_the_feedback_is_still_recoverable_after_the_refusal(self) -> None:
         """Refused is not lost: the operator's words are still in the journal."""
@@ -600,7 +616,7 @@ class UndeliverableChannelTests(AdmissionTestCase):
 
         self.assertEqual(
             "the correction that did not land",
-            redirect_store.read_feedback(
+            redirect_store_journal.read_feedback(
                 self.plan_dir, outcome.operation_id, state_dir=self.state_dir
             ),
         )
@@ -608,22 +624,22 @@ class UndeliverableChannelTests(AdmissionTestCase):
     def test_an_unwritable_settlement_leaves_the_request_open_not_accepted(
         self,
     ) -> None:
-        original = redirect_store.reject_request
+        original = redirect_store_requests.reject_request
 
         def failing(*args, **kwargs):
-            raise redirect_store.RedirectStoreError(
-                redirect_store.ERROR_JOURNAL_WRITE, "device is gone"
+            raise redirect_store_models.RedirectStoreError(
+                redirect_store_vocab.ERROR_JOURNAL_WRITE, "device is gone"
             )
 
-        redirect_store.reject_request = failing
-        self.addCleanup(setattr, redirect_store, "reject_request", original)
+        redirect_store_requests.reject_request = failing
+        self.addCleanup(setattr, redirect_store_requests, "reject_request", original)
 
         outcome = self.submit()
 
-        redirect_store.reject_request = original
+        redirect_store_requests.reject_request = original
         self.assertEqual(redirect_admission.OUTCOME_UNAVAILABLE, outcome.outcome)
         self.assertEqual(
-            redirect_store.STATE_SUBMITTED,
+            redirect_store_vocab.STATE_SUBMITTED,
             self.journal().request(outcome.operation_id).state,
         )
 
@@ -633,10 +649,10 @@ class RunnerSideTests(AdmissionTestCase):
 
     def test_pending_requests_are_scoped_to_the_turn_that_owns_them(self) -> None:
         self.make_live_run()
-        this_turn = redirect_store.RedirectTarget(RUN_ID, "session-9", 1)
-        next_turn = redirect_store.RedirectTarget(RUN_ID, "session-9", 2)
+        this_turn = redirect_store_models.RedirectTarget(RUN_ID, "session-9", 1)
+        next_turn = redirect_store_models.RedirectTarget(RUN_ID, "session-9", 2)
         mine = self.submit(wait_seconds=0.0).operation_id
-        redirect_store.submit_request(
+        redirect_store_requests.submit_request(
             self.plan_dir,
             target=next_turn,
             feedback="for the next turn",
@@ -651,7 +667,7 @@ class RunnerSideTests(AdmissionTestCase):
 
     def test_accepting_settles_the_request_and_empties_the_queue(self) -> None:
         self.make_live_run()
-        target = redirect_store.RedirectTarget(RUN_ID, "session-9", 1)
+        target = redirect_store_models.RedirectTarget(RUN_ID, "session-9", 1)
         outcome = self.submit(wait_seconds=0.0)
 
         accepted = redirect_admission.accept_redirect(
@@ -670,15 +686,17 @@ class RunnerSideTests(AdmissionTestCase):
         self.make_live_run()
         outcome = self.submit(wait_seconds=0.0)
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
             redirect_admission.accept_redirect(
                 self.plan_dir,
                 outcome.operation_id,
-                target=redirect_store.RedirectTarget(RUN_ID, "session-9", 2),
+                target=redirect_store_models.RedirectTarget(RUN_ID, "session-9", 2),
                 state_dir=self.state_dir,
             )
 
-        self.assertEqual(redirect_store.ERROR_TARGET_MISMATCH, caught.exception.reason)
+        self.assertEqual(
+            redirect_store_vocab.ERROR_TARGET_MISMATCH, caught.exception.reason
+        )
 
 
 if __name__ == "__main__":

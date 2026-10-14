@@ -49,7 +49,13 @@ from agent_session_loop import (
     redirect_admission,
     redirect_cli,
     redirect_recovery,
-    redirect_store,
+    redirect_store_carry,
+    redirect_store_delivery,
+    redirect_store_journal,
+    redirect_store_models,
+    redirect_store_requests,
+    redirect_store_validation,
+    redirect_store_vocab,
 )
 
 from .support import (
@@ -161,19 +167,21 @@ class RedirectBridgeTestCase(unittest.TestCase):
         self.write_state(**state_kwargs)
         return self.serve_redirects()
 
-    def target(self, *, turn_index: int = 1) -> redirect_store.RedirectTarget:
-        return redirect_store.RedirectTarget(
+    def target(self, *, turn_index: int = 1) -> redirect_store_models.RedirectTarget:
+        return redirect_store_models.RedirectTarget(
             run_id=RUN_ID,
             session_id=SESSION_ID,
             turn_index=turn_index,
             harness="claude",
         )
 
-    def journal(self) -> redirect_store.RedirectJournalView:
-        return redirect_store.read_journal(self.plan_dir, state_dir=self.state_dir)
+    def journal(self) -> redirect_store_models.RedirectJournalView:
+        return redirect_store_journal.read_journal(
+            self.plan_dir, state_dir=self.state_dir
+        )
 
     def accept_when_pending(
-        self, target: redirect_store.RedirectTarget | None = None
+        self, target: redirect_store_models.RedirectTarget | None = None
     ) -> threading.Thread:
         """Play the runner: record acceptance while the submit wait is running.
 
@@ -188,7 +196,7 @@ class RedirectBridgeTestCase(unittest.TestCase):
             while time.monotonic() < deadline:
                 pending = self.journal().pending()
                 if pending:
-                    redirect_store.accept_request(
+                    redirect_store_requests.accept_request(
                         self.plan_dir,
                         pending[0].operation_id,
                         target=wanted,
@@ -387,14 +395,15 @@ class SubmissionTests(RedirectBridgeTestCase):
         self.assertEqual(1, len(requests))
         self.assertEqual("amx-op-9c31aa", requests[0].operation_id)
         self.assertEqual(
-            redirect_store.feedback_digest(FEEDBACK), requests[0].feedback_digest
+            redirect_store_validation.feedback_digest(FEEDBACK),
+            requests[0].feedback_digest,
         )
         self.assertEqual(
             requests[0].feedback_digest, result["operation"]["feedback_digest"]
         )
         self.assertEqual(
             FEEDBACK,
-            redirect_store.read_feedback(
+            redirect_store_journal.read_feedback(
                 self.plan_dir, "amx-op-9c31aa", state_dir=self.state_dir
             ),
         )
@@ -441,13 +450,13 @@ class SubmissionTests(RedirectBridgeTestCase):
 
         self.assertEqual(redirect_admission.OUTCOME_UNAVAILABLE, result["outcome"])
         self.assertEqual(
-            redirect_store.REASON_URGENT_CHANNEL_UNAVAILABLE, result["reason"]
+            redirect_store_vocab.REASON_URGENT_CHANNEL_UNAVAILABLE, result["reason"]
         )
         # Durably settled rather than merely reported: a runner replaying this
         # journal later must not decide the correction is still owed.
         self.assertEqual(redirect_cli.STAGE_BLOCKED, result["operation"]["stage"])
         self.assertEqual(
-            redirect_store.STATE_REJECTED, result["operation"]["journal_state"]
+            redirect_store_vocab.STATE_REJECTED, result["operation"]["journal_state"]
         )
 
 
@@ -676,7 +685,7 @@ class ReplayTests(RedirectBridgeTestCase):
         self.assertTrue(replay["ok"])
         self.assertTrue(replay["result"]["replayed"])
         self.assertEqual(
-            redirect_store.feedback_digest(FEEDBACK),
+            redirect_store_validation.feedback_digest(FEEDBACK),
             replay["result"]["operation"]["feedback_digest"],
         )
         self.assertEqual(1, len(self.journal().requests))
@@ -714,12 +723,13 @@ class ReplayIdentityTests(RedirectBridgeTestCase):
         requests = self.journal().requests
         self.assertEqual(1, len(requests))
         self.assertEqual(
-            redirect_store.feedback_digest(FEEDBACK), requests[0].feedback_digest
+            redirect_store_validation.feedback_digest(FEEDBACK),
+            requests[0].feedback_digest,
         )
         self.assertEqual(self.target(), requests[0].target)
         self.assertEqual(
             FEEDBACK,
-            redirect_store.read_feedback(
+            redirect_store_journal.read_feedback(
                 self.plan_dir, "amx-op-9c31aa", state_dir=self.state_dir
             ),
         )
@@ -734,10 +744,12 @@ class ReplayIdentityTests(RedirectBridgeTestCase):
             bridge_protocol.ERROR_INVALID_REQUEST, refusal["error"]["code"]
         )
         self.assertEqual(
-            redirect_store.ERROR_REPLAY_CONFLICT, refusal["error"]["details"]["reason"]
+            redirect_store_vocab.ERROR_REPLAY_CONFLICT,
+            refusal["error"]["details"]["reason"],
         )
         self.assertEqual(
-            redirect_store.CONFLICT_FEEDBACK, refusal["error"]["details"]["conflict"]
+            redirect_store_vocab.CONFLICT_FEEDBACK,
+            refusal["error"]["details"]["conflict"],
         )
         self.assertFalse(refusal["error"]["retryable"])
         self.assert_journal_unchanged()
@@ -753,7 +765,8 @@ class ReplayIdentityTests(RedirectBridgeTestCase):
 
         self.assertFalse(refusal["ok"])
         self.assertEqual(
-            redirect_store.CONFLICT_TARGET, refusal["error"]["details"]["conflict"]
+            redirect_store_vocab.CONFLICT_TARGET,
+            refusal["error"]["details"]["conflict"],
         )
         self.assert_journal_unchanged()
 
@@ -789,7 +802,8 @@ class ReplayIdentityTests(RedirectBridgeTestCase):
 
         self.assertFalse(refusal["ok"])
         self.assertEqual(
-            redirect_store.ERROR_REPLAY_CONFLICT, refusal["error"]["details"]["reason"]
+            redirect_store_vocab.ERROR_REPLAY_CONFLICT,
+            refusal["error"]["details"]["reason"],
         )
         self.assert_journal_unchanged()
 
@@ -830,13 +844,13 @@ class RestartTests(RedirectBridgeTestCase):
         self.live_run()
         self.accept_when_pending()
         self.submit(wait_seconds=5.0)
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             "amx-op-9c31aa",
             continuation=self.target(turn_index=2),
             state_dir=self.state_dir,
         )
-        redirect_store.acknowledge_request(
+        redirect_store_delivery.acknowledge_request(
             self.plan_dir,
             "amx-op-9c31aa",
             attempt=self.target(turn_index=2),
@@ -999,7 +1013,8 @@ class BodyFreedomTests(RedirectBridgeTestCase):
         operation = self.submit(wait_seconds=5.0)["result"]["operation"]
 
         self.assertEqual(
-            redirect_store.feedback_digest(FEEDBACK), operation["feedback_digest"]
+            redirect_store_validation.feedback_digest(FEEDBACK),
+            operation["feedback_digest"],
         )
         self.assertEqual(len(FEEDBACK.encode("utf-8")), operation["feedback_bytes"])
 
@@ -1169,7 +1184,7 @@ class VocabularyTests(RedirectBridgeTestCase):
 
     def test_the_journal_state_vocabulary_is_the_journals_own(self) -> None:
         self.assertEqual(
-            list(redirect_store.REQUEST_STATES),
+            list(redirect_store_vocab.REQUEST_STATES),
             self.schema_enum("RedirectJournalState"),
         )
 
@@ -1182,7 +1197,7 @@ class VocabularyTests(RedirectBridgeTestCase):
     def test_the_refusal_reasons_cover_admission_and_settlement(self) -> None:
         declared = set(self.schema_enum("RedirectReason"))
         self.assertLessEqual(set(redirect_admission.REFUSAL_REASONS), declared)
-        self.assertLessEqual(set(redirect_store.SETTLEMENT_REASONS), declared)
+        self.assertLessEqual(set(redirect_store_vocab.SETTLEMENT_REASONS), declared)
 
     def test_a_redirect_status_is_not_an_operation_receipt_status(self) -> None:
         """A redirect outlives the session that submitted it; a receipt does not."""

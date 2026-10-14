@@ -57,7 +57,9 @@ from agent_session_loop import (
     events,
     overseer_discovery,
     overseer_policy_client,
-    overseer_store,
+    overseer_store_ledger,
+    overseer_store_models,
+    overseer_store_schema,
     overseer_watch,
     pause_policy,
     plans_files,
@@ -225,9 +227,9 @@ class _Fleet:
 
     # -- ledger ------------------------------------------------------------
 
-    def open_ledger(self) -> overseer_store.Ledger:
+    def open_ledger(self) -> overseer_store_ledger.Ledger:
         """A fresh handle on the same file -- how a restart is staged."""
-        return overseer_store.open_ledger(
+        return overseer_store_ledger.open_ledger(
             state_dir=self.state_root, now=self.clock.utc_iso_now
         )
 
@@ -872,7 +874,9 @@ class WatchLeaseTests(unittest.TestCase):
         self.ledger = self.fleet.ledger
         self.plan = "/plans/plan-alpha"
 
-    def _claim(self, watcher_id: str, **overrides: Any) -> overseer_store.WatchClaim:
+    def _claim(
+        self, watcher_id: str, **overrides: Any
+    ) -> overseer_store_models.WatchClaim:
         kwargs: dict[str, Any] = {
             "plan_dir": self.plan,
             "watcher_id": watcher_id,
@@ -954,7 +958,7 @@ class WatchLeaseTests(unittest.TestCase):
         self.assertEqual("", claim.superseded_run)
 
     def test_a_claim_without_a_watcher_is_refused_outright(self) -> None:
-        with self.assertRaises(overseer_store.LedgerError):
+        with self.assertRaises(overseer_store_models.LedgerError):
             self._claim("")
 
     def test_leases_are_listed_by_watcher(self) -> None:
@@ -979,7 +983,9 @@ class WatchLeaseTests(unittest.TestCase):
 
         assert lease is not None
         self.assertEqual("watcher-a", lease.watcher_id)
-        self.assertEqual(overseer_store.SCHEMA_VERSION, len(overseer_store.MIGRATIONS))
+        self.assertEqual(
+            overseer_store_schema.SCHEMA_VERSION, len(overseer_store_schema.MIGRATIONS)
+        )
 
 
 class BoundaryTests(unittest.TestCase):

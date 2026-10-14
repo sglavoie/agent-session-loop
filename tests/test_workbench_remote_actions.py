@@ -73,7 +73,9 @@ from agent_session_loop import (
 )
 from asl_workbench import archive as portable_archive
 from asl_workbench import catalog, remote_actions
-from asl_workbench import connector as portable
+from asl_workbench import connector_protocols as portable_protocols
+from asl_workbench import connector_runtime as portable_runtime
+from asl_workbench import connector_support as portable_support
 from asl_workbench.operations import (
     DETAIL_BRIDGE_UNAVAILABLE,
     DETAIL_CONNECTOR_RESTARTED,
@@ -168,7 +170,7 @@ class LinkChannel:
 
     def send(self, frame: bytes) -> bytes | None:
         if self.failing:
-            raise portable.ChannelError("the link is down")
+            raise portable_support.ChannelError("the link is down")
         self.frames.append(json.loads(frame.decode("utf-8")))
         return self.inbound.pop(0) if self.inbound else None
 
@@ -187,12 +189,12 @@ class StubSource:
     """An observation source with an empty cycle, and its commits counted."""
 
     def __init__(self) -> None:
-        self.committed: list[portable.ObservationCycle] = []
+        self.committed: list[portable_protocols.ObservationCycle] = []
 
-    def observe(self, now: float) -> portable.ObservationCycle:
-        return portable.ObservationCycle(observed_at=now)
+    def observe(self, now: float) -> portable_protocols.ObservationCycle:
+        return portable_protocols.ObservationCycle(observed_at=now)
 
-    def commit(self, cycle: portable.ObservationCycle) -> None:
+    def commit(self, cycle: portable_protocols.ObservationCycle) -> None:
         self.committed.append(cycle)
 
 
@@ -374,7 +376,7 @@ def make_request(**overrides: Any) -> remote_actions.MutationRequest:
     return remote_actions.MutationRequest(**fields)
 
 
-def make_connector(**overrides: Any) -> portable.ObservationConnector:
+def make_connector(**overrides: Any) -> portable_runtime.ObservationConnector:
     """A connector wired for the mutation lane, with inline workers."""
     fields: dict[str, Any] = {
         "connector_id": CONNECTOR_ID,
@@ -393,7 +395,7 @@ def make_connector(**overrides: Any) -> portable.ObservationConnector:
         "run_mutation": inline,
     }
     fields.update(overrides)
-    return portable.ObservationConnector(**fields)
+    return portable_runtime.ObservationConnector(**fields)
 
 
 def drive(connector: Any, steps: int, *, start: float = NOW) -> list[str]:

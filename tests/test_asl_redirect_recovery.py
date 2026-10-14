@@ -54,7 +54,13 @@ from agent_session_loop import (
     plans_snapshot,
     redirect_ack,
     redirect_recovery,
-    redirect_store,
+    redirect_store_carry,
+    redirect_store_delivery,
+    redirect_store_journal,
+    redirect_store_models,
+    redirect_store_requests,
+    redirect_store_validation,
+    redirect_store_vocab,
     run_loop_carried_corrections,
     run_loop_control_redirects,
     state,
@@ -77,8 +83,8 @@ def target(
     run_id: str = DEAD_RUN,
     session_id: str = SESSION_ID,
     harness: str | None = "claude",
-) -> redirect_store.RedirectTarget:
-    return redirect_store.RedirectTarget(
+) -> redirect_store_models.RedirectTarget:
+    return redirect_store_models.RedirectTarget(
         run_id=run_id,
         session_id=session_id,
         turn_index=turn_index,
@@ -116,8 +122,8 @@ class RecoveryTestCase(unittest.TestCase):
         session_id: str = SESSION_ID,
         run_id: str = DEAD_RUN,
         **kwargs: Any,
-    ) -> redirect_store.RedirectRequest:
-        return redirect_store.submit_request(
+    ) -> redirect_store_models.RedirectRequest:
+        return redirect_store_requests.submit_request(
             self.plan_dir,
             target=target(turn_index, run_id=run_id, session_id=session_id),
             feedback=feedback,
@@ -126,20 +132,24 @@ class RecoveryTestCase(unittest.TestCase):
         )
 
     def accept(
-        self, request: redirect_store.RedirectRequest
-    ) -> redirect_store.RedirectRequest:
-        return redirect_store.accept_request(
+        self, request: redirect_store_models.RedirectRequest
+    ) -> redirect_store_models.RedirectRequest:
+        return redirect_store_requests.accept_request(
             self.plan_dir,
             request.operation_id,
             target=request.target,
             state_dir=self.state_dir,
         )
 
-    def read(self) -> redirect_store.RedirectJournalView:
-        return redirect_store.read_journal(self.plan_dir, state_dir=self.state_dir)
+    def read(self) -> redirect_store_models.RedirectJournalView:
+        return redirect_store_journal.read_journal(
+            self.plan_dir, state_dir=self.state_dir
+        )
 
     def journal_path(self) -> Path:
-        return redirect_store.journal_path_for_plan(self.plan_dir, self.state_dir)
+        return redirect_store_journal.journal_path_for_plan(
+            self.plan_dir, self.state_dir
+        )
 
     def journal_lines(self) -> list[dict[str, Any]]:
         path = self.journal_path()
@@ -262,13 +272,13 @@ class StatusProjectionTests(RecoveryTestCase):
         self,
     ) -> None:
         request = self.accept(self.submit())
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             request.operation_id,
             continuation=target(2),
             state_dir=self.state_dir,
         )
-        redirect_store.deliver_request(
+        redirect_store_delivery.deliver_request(
             self.plan_dir,
             request.operation_id,
             continuation=target(2),
@@ -288,7 +298,7 @@ class StatusProjectionTests(RecoveryTestCase):
         self,
     ) -> None:
         request = self.accept(self.submit())
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             request.operation_id,
             continuation=target(2),
@@ -306,13 +316,13 @@ class StatusProjectionTests(RecoveryTestCase):
 
     def test_a_receipt_settles_the_status(self) -> None:
         request = self.accept(self.submit())
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             request.operation_id,
             continuation=target(2),
             state_dir=self.state_dir,
         )
-        redirect_store.acknowledge_request(
+        redirect_store_delivery.acknowledge_request(
             self.plan_dir,
             request.operation_id,
             attempt=target(2),
@@ -326,7 +336,7 @@ class StatusProjectionTests(RecoveryTestCase):
         )
 
     def test_a_past_deadline_reads_as_expired_before_any_sweep_records_it(self) -> None:
-        request = self.submit(ttl_seconds=redirect_store.REDIRECT_MIN_TTL_SECONDS)
+        request = self.submit(ttl_seconds=redirect_store_vocab.REDIRECT_MIN_TTL_SECONDS)
         self.write_lock(pid=self.DEAD_PID)
         later = clock.utc_now() + timedelta(days=1)
 
@@ -340,7 +350,7 @@ class StatusProjectionTests(RecoveryTestCase):
         # And the read did not record it: reporting a refusal is not making one.
         self.assertEqual(
             self.read().request(request.operation_id).state,  # type: ignore[union-attr]
-            redirect_store.STATE_SUBMITTED,
+            redirect_store_vocab.STATE_SUBMITTED,
         )
 
     def test_the_report_never_carries_the_operator_words(self) -> None:
@@ -349,7 +359,7 @@ class StatusProjectionTests(RecoveryTestCase):
 
         rendered = json.dumps(self.inspect().to_payload())
         self.assertNotIn(FIRST, rendered)
-        self.assertIn(redirect_store.feedback_digest(FIRST), rendered)
+        self.assertIn(redirect_store_validation.feedback_digest(FIRST), rendered)
 
 
 class ReadingIsInertTests(RecoveryTestCase):
@@ -366,7 +376,7 @@ class ReadingIsInertTests(RecoveryTestCase):
         self.assertEqual(self.journal_path().read_bytes(), before)
         self.assertEqual(
             self.read().request(request.operation_id).state,  # type: ignore[union-attr]
-            redirect_store.STATE_SUBMITTED,
+            redirect_store_vocab.STATE_SUBMITTED,
         )
 
     def test_inspecting_does_not_reclaim_the_dead_lock_it_classifies(self) -> None:
@@ -419,7 +429,7 @@ class ReconciliationRefusalTests(RecoveryTestCase):
         self.assertEqual(self.journal_path().read_bytes(), before)
         self.assertEqual(
             self.read().request(request.operation_id).state,  # type: ignore[union-attr]
-            redirect_store.STATE_SUBMITTED,
+            redirect_store_vocab.STATE_SUBMITTED,
         )
 
     def test_a_plan_with_no_lock_at_all_is_reconciled(self) -> None:
@@ -537,7 +547,7 @@ class NoLostCorrectionTests(RecoveryTestCase):
         continued = [
             line
             for line in self.journal_lines()
-            if line["kind"] == redirect_store.KIND_CONTINUED
+            if line["kind"] == redirect_store_vocab.KIND_CONTINUED
         ]
         self.assertEqual([line.get("recovered") for line in continued], [True])
 
@@ -629,10 +639,10 @@ class CrashBeforeLaunchTests(RecoveryTestCase):
     separately, so its absence is evidence rather than silence.
     """
 
-    def carried_but_unlaunched(self) -> redirect_store.RedirectRequest:
+    def carried_but_unlaunched(self) -> redirect_store_models.RedirectRequest:
         """Accepted, bound into the next attempt's prompt, and then the crash."""
         request = self.accept(self.submit(turn_index=7))
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             request.operation_id,
             continuation=target(8),
@@ -690,13 +700,13 @@ class CrashBeforeLaunchTests(RecoveryTestCase):
         reported as uncertain rather than handed to a second worker.
         """
         request = self.accept(self.submit(turn_index=7))
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             request.operation_id,
             continuation=target(8),
             state_dir=self.state_dir,
         )
-        redirect_store.deliver_request(
+        redirect_store_delivery.deliver_request(
             self.plan_dir,
             request.operation_id,
             continuation=target(8),
@@ -753,16 +763,16 @@ class CrashInsideTheLaunchWindowTests(RecoveryTestCase):
     reported to the operator as the only party who can find out.
     """
 
-    def carried_and_launching(self) -> redirect_store.RedirectRequest:
+    def carried_and_launching(self) -> redirect_store_models.RedirectRequest:
         """Accepted, bound into a prompt, declared outbound, and then the crash."""
         request = self.accept(self.submit(turn_index=7))
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             request.operation_id,
             continuation=target(8),
             state_dir=self.state_dir,
         )
-        redirect_store.launch_request(
+        redirect_store_carry.launch_request(
             self.plan_dir,
             request.operation_id,
             continuation=target(8),
@@ -846,19 +856,19 @@ class CrashInsideTheLaunchWindowTests(RecoveryTestCase):
         correction survives the same crash as an offer rather than a doubt.
         """
         request = self.accept(self.submit(turn_index=7))
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             request.operation_id,
             continuation=target(8),
             state_dir=self.state_dir,
         )
-        redirect_store.launch_request(
+        redirect_store_carry.launch_request(
             self.plan_dir,
             request.operation_id,
             continuation=target(8),
             state_dir=self.state_dir,
         )
-        redirect_store.release_request(
+        redirect_store_delivery.release_request(
             self.plan_dir,
             request.operation_id,
             continuation=target(8),
@@ -878,9 +888,9 @@ class CrashInsideTheLaunchWindowTests(RecoveryTestCase):
 class NoSilentRedeliveryTests(RecoveryTestCase):
     """A crash after delivery is ambiguous, and ambiguity is reported."""
 
-    def delivered_but_unreceipted(self) -> redirect_store.RedirectRequest:
+    def delivered_but_unreceipted(self) -> redirect_store_models.RedirectRequest:
         request = self.accept(self.submit(turn_index=7))
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             request.operation_id,
             continuation=target(8),
@@ -889,7 +899,7 @@ class NoSilentRedeliveryTests(RecoveryTestCase):
         # The launch mark, not just the carry: a carry on its own says a prompt
         # was assembled, and the ambiguity these tests are about begins only
         # once a worker was started holding the words.
-        redirect_store.deliver_request(
+        redirect_store_delivery.deliver_request(
             self.plan_dir,
             request.operation_id,
             continuation=target(8),
@@ -986,7 +996,7 @@ class LegacyJournalUpgradeTests(RecoveryTestCase):
         self,
         *,
         acknowledged: bool = False,
-        version: int = redirect_store.REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION,
+        version: int = redirect_store_vocab.REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION,
     ) -> None:
         """Lay down the journal a writer of that version would have left behind."""
         created = clock.utc_now()
@@ -1106,7 +1116,7 @@ class LegacyJournalUpgradeTests(RecoveryTestCase):
         the release rule has nothing to read and the operator gets the question.
         """
         self.write_legacy_carry(
-            version=redirect_store.REDIRECT_JOURNAL_LEGACY_LAUNCH_VERSION
+            version=redirect_store_vocab.REDIRECT_JOURNAL_LEGACY_LAUNCH_VERSION
         )
 
         report = self.reconcile()
@@ -1126,7 +1136,7 @@ class LegacyJournalUpgradeTests(RecoveryTestCase):
         that were never earned, so the carry stays carried and unacknowledged.
         """
         self.write_legacy_carry(
-            version=redirect_store.REDIRECT_JOURNAL_LEGACY_LAUNCH_VERSION
+            version=redirect_store_vocab.REDIRECT_JOURNAL_LEGACY_LAUNCH_VERSION
         )
 
         stored = self.read().request(self.LEGACY_OP)
@@ -1147,7 +1157,7 @@ class LegacyJournalUpgradeTests(RecoveryTestCase):
         """
         self.write_legacy_carry()
         fresh = self.accept(self.submit(SECOND, turn_index=7))
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir,
             fresh.operation_id,
             continuation=target(8),
@@ -1173,8 +1183,8 @@ class StrandedSettlementTests(RecoveryTestCase):
         self.assertEqual(report.settled, (request.operation_id,))
         stored = self.read().request(request.operation_id)
         assert stored is not None
-        self.assertEqual(stored.state, redirect_store.STATE_REJECTED)
-        self.assertEqual(stored.reason, redirect_store.REASON_RUN_ENDED)
+        self.assertEqual(stored.state, redirect_store_vocab.STATE_REJECTED)
+        self.assertEqual(stored.reason, redirect_store_vocab.REASON_RUN_ENDED)
 
     def test_an_accepted_one_is_reported_stranded_rather_than_overwritten(self) -> None:
         request = self.accept(self.submit(session_id="4"))
@@ -1191,7 +1201,7 @@ class StrandedSettlementTests(RecoveryTestCase):
         )
         stored = self.read().request(request.operation_id)
         assert stored is not None
-        self.assertEqual(stored.state, redirect_store.STATE_ACCEPTED)
+        self.assertEqual(stored.state, redirect_store_vocab.STATE_ACCEPTED)
 
     def test_run_ended_is_a_different_answer_from_expired(self) -> None:
         request = self.submit(session_id="4")
@@ -1203,7 +1213,7 @@ class StrandedSettlementTests(RecoveryTestCase):
         assert stored is not None
         # Its window had not closed. What ended was the process that owed the
         # operator an answer, and saying "expired" would blame the clock.
-        self.assertEqual(stored.reason, redirect_store.REASON_RUN_ENDED)
+        self.assertEqual(stored.reason, redirect_store_vocab.REASON_RUN_ENDED)
         self.assertFalse(stored.is_expired_at(clock.utc_now()))
 
     def test_the_settlement_survives_the_process_that_made_it(self) -> None:
@@ -1223,7 +1233,7 @@ class StrandedSettlementTests(RecoveryTestCase):
         )
 
     def test_due_requests_are_expired_in_the_journal(self) -> None:
-        request = self.submit(ttl_seconds=redirect_store.REDIRECT_MIN_TTL_SECONDS)
+        request = self.submit(ttl_seconds=redirect_store_vocab.REDIRECT_MIN_TTL_SECONDS)
         self.write_lock(pid=self.DEAD_PID)
 
         report = redirect_recovery.reconcile_startup(
@@ -1238,7 +1248,7 @@ class StrandedSettlementTests(RecoveryTestCase):
         self.assertEqual(report.recoverable, ())
         stored = self.read().request(request.operation_id)
         assert stored is not None
-        self.assertEqual(stored.state, redirect_store.STATE_EXPIRED)
+        self.assertEqual(stored.state, redirect_store_vocab.STATE_EXPIRED)
 
     def test_this_runs_own_requests_are_never_reconciled(self) -> None:
         request = self.accept(self.submit(run_id=NEW_RUN))
@@ -1327,8 +1337,8 @@ class DamagedEvidenceTests(RecoveryTestCase):
     def test_a_hand_written_recovery_marker_cannot_forge_a_delivery(self) -> None:
         request = self.accept(self.submit(turn_index=7))
         forged = {
-            "version": redirect_store.REDIRECT_JOURNAL_VERSION,
-            "kind": redirect_store.KIND_CONTINUED,
+            "version": redirect_store_vocab.REDIRECT_JOURNAL_VERSION,
+            "kind": redirect_store_vocab.KIND_CONTINUED,
             "id": request.operation_id,
             "created_at": clock.utc_iso_now(),
             # A different session, dressed up as a recovery.
@@ -1347,15 +1357,15 @@ class DamagedEvidenceTests(RecoveryTestCase):
         assert stored is not None
         self.assertFalse(stored.carried)
         self.assertIn(
-            redirect_store.REJECT_INVALID_CONTINUATION,
+            redirect_store_vocab.REJECT_INVALID_CONTINUATION,
             [item.reason for item in self.read().rejected],
         )
 
     def test_an_unmarked_cross_run_continuation_is_still_refused(self) -> None:
         request = self.accept(self.submit(turn_index=7))
         unmarked = {
-            "version": redirect_store.REDIRECT_JOURNAL_VERSION,
-            "kind": redirect_store.KIND_CONTINUED,
+            "version": redirect_store_vocab.REDIRECT_JOURNAL_VERSION,
+            "kind": redirect_store_vocab.KIND_CONTINUED,
             "id": request.operation_id,
             "created_at": clock.utc_iso_now(),
             "continuation": {
@@ -1376,8 +1386,8 @@ class DamagedEvidenceTests(RecoveryTestCase):
     def test_carrying_across_runs_without_the_opt_in_is_refused(self) -> None:
         request = self.accept(self.submit(turn_index=7))
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
-            redirect_store.carry_request(
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
+            redirect_store_carry.carry_request(
                 self.plan_dir,
                 request.operation_id,
                 continuation=target(1, run_id=NEW_RUN),
@@ -1385,14 +1395,14 @@ class DamagedEvidenceTests(RecoveryTestCase):
             )
 
         self.assertEqual(
-            caught.exception.reason, redirect_store.ERROR_INVALID_CONTINUATION
+            caught.exception.reason, redirect_store_vocab.ERROR_INVALID_CONTINUATION
         )
 
     def test_the_opt_in_does_not_reach_another_session(self) -> None:
         request = self.accept(self.submit(turn_index=7))
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
-            redirect_store.carry_request(
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
+            redirect_store_carry.carry_request(
                 self.plan_dir,
                 request.operation_id,
                 continuation=target(1, run_id=NEW_RUN, session_id="9"),
@@ -1401,7 +1411,7 @@ class DamagedEvidenceTests(RecoveryTestCase):
             )
 
         self.assertEqual(
-            caught.exception.reason, redirect_store.ERROR_INVALID_CONTINUATION
+            caught.exception.reason, redirect_store_vocab.ERROR_INVALID_CONTINUATION
         )
 
 
@@ -1501,7 +1511,7 @@ class RunLoopRecoveryTests(RecoveryTestCase):
         self.assertEqual([], self.events())
         stored = self.read().request(request.operation_id)
         assert stored is not None
-        self.assertEqual(stored.state, redirect_store.STATE_SUBMITTED)
+        self.assertEqual(stored.state, redirect_store_vocab.STATE_SUBMITTED)
 
     def test_a_live_owner_is_recorded_and_the_run_still_starts(self) -> None:
         self.accept(self.submit())

@@ -17,14 +17,23 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 
-from agent_session_loop import clock, redirect_store
+from agent_session_loop import (
+    clock,
+    redirect_store_carry,
+    redirect_store_delivery,
+    redirect_store_journal,
+    redirect_store_models,
+    redirect_store_requests,
+    redirect_store_validation,
+    redirect_store_vocab,
+)
 from tests.support import write_plan
 
 
 def _target(
     turn_index: int = 1, *, run_id: str = "run-1"
-) -> redirect_store.RedirectTarget:
-    return redirect_store.RedirectTarget(
+) -> redirect_store_models.RedirectTarget:
+    return redirect_store_models.RedirectTarget(
         run_id=run_id,
         session_id="session-9",
         turn_index=turn_index,
@@ -43,20 +52,24 @@ class RedirectStoreTestCase(unittest.TestCase):
         self.state_dir = root / "state"
         write_plan(self.plan_dir, ("pending",))
 
-    def submit(self, **kwargs) -> redirect_store.RedirectRequest:
+    def submit(self, **kwargs) -> redirect_store_models.RedirectRequest:
         params = {
             "target": _target(),
             "feedback": "stop editing README and re-read the contract",
             "state_dir": self.state_dir,
         }
         params.update(kwargs)
-        return redirect_store.submit_request(self.plan_dir, **params)
+        return redirect_store_requests.submit_request(self.plan_dir, **params)
 
-    def read(self) -> redirect_store.RedirectJournalView:
-        return redirect_store.read_journal(self.plan_dir, state_dir=self.state_dir)
+    def read(self) -> redirect_store_models.RedirectJournalView:
+        return redirect_store_journal.read_journal(
+            self.plan_dir, state_dir=self.state_dir
+        )
 
     def journal_path(self) -> Path:
-        return redirect_store.journal_path_for_plan(self.plan_dir, self.state_dir)
+        return redirect_store_journal.journal_path_for_plan(
+            self.plan_dir, self.state_dir
+        )
 
     def raw_lines(self) -> list[dict[str, object]]:
         return [
@@ -78,7 +91,7 @@ class SubmissionTests(RedirectStoreTestCase):
     def test_a_submission_is_durable_pending_and_addressable(self) -> None:
         request = self.submit()
 
-        self.assertEqual(redirect_store.STATE_SUBMITTED, request.state)
+        self.assertEqual(redirect_store_vocab.STATE_SUBMITTED, request.state)
         self.assertEqual(1, request.submitted_seq)
         self.assertFalse(request.terminal)
         view = self.read()
@@ -115,7 +128,8 @@ class SubmissionTests(RedirectStoreTestCase):
         self.assertNotIn(secret, json.dumps(payload))
         self.assertNotIn(secret, json.dumps(self.read().to_payload()))
         self.assertEqual(
-            redirect_store.feedback_digest(secret), payload["feedback_digest"]
+            redirect_store_validation.feedback_digest(secret),
+            payload["feedback_digest"],
         )
         self.assertEqual(len(secret.encode("utf-8")), payload["feedback_bytes"])
 
@@ -124,50 +138,56 @@ class SubmissionTests(RedirectStoreTestCase):
 
         self.assertEqual(
             "use the durable journal",
-            redirect_store.read_feedback(
+            redirect_store_journal.read_feedback(
                 self.plan_dir, request.operation_id, state_dir=self.state_dir
             ),
         )
         self.assertIsNone(
-            redirect_store.read_feedback(
+            redirect_store_journal.read_feedback(
                 self.plan_dir, "no-such-operation", state_dir=self.state_dir
             )
         )
 
     def test_empty_and_oversized_feedback_are_refused(self) -> None:
         for feedback in ("", "   \n\t "):
-            with self.assertRaises(redirect_store.RedirectStoreError) as caught:
+            with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
                 self.submit(feedback=feedback)
             self.assertEqual(
-                redirect_store.ERROR_INVALID_FEEDBACK, caught.exception.reason
+                redirect_store_vocab.ERROR_INVALID_FEEDBACK, caught.exception.reason
             )
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
-            self.submit(feedback="x" * (redirect_store.REDIRECT_MAX_FEEDBACK_BYTES + 1))
-        self.assertEqual(redirect_store.ERROR_INVALID_FEEDBACK, caught.exception.reason)
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
+            self.submit(
+                feedback="x" * (redirect_store_vocab.REDIRECT_MAX_FEEDBACK_BYTES + 1)
+            )
+        self.assertEqual(
+            redirect_store_vocab.ERROR_INVALID_FEEDBACK, caught.exception.reason
+        )
         self.assertFalse(self.journal_path().exists())
 
     def test_a_malformed_target_is_refused_before_anything_is_written(self) -> None:
         for target in (
-            redirect_store.RedirectTarget("", "session-9", 1),
-            redirect_store.RedirectTarget("run-1", "", 1),
-            redirect_store.RedirectTarget("run-1", "session-9", 0),
-            redirect_store.RedirectTarget("run-1", "session-9", -3),
-            redirect_store.RedirectTarget("run-1", "x" * 200, 1),
+            redirect_store_models.RedirectTarget("", "session-9", 1),
+            redirect_store_models.RedirectTarget("run-1", "", 1),
+            redirect_store_models.RedirectTarget("run-1", "session-9", 0),
+            redirect_store_models.RedirectTarget("run-1", "session-9", -3),
+            redirect_store_models.RedirectTarget("run-1", "x" * 200, 1),
         ):
-            with self.assertRaises(redirect_store.RedirectStoreError) as caught:
+            with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
                 self.submit(target=target)
             self.assertEqual(
-                redirect_store.ERROR_INVALID_TARGET, caught.exception.reason
+                redirect_store_vocab.ERROR_INVALID_TARGET, caught.exception.reason
             )
         self.assertFalse(self.journal_path().exists())
 
     def test_a_ttl_outside_the_permitted_window_is_refused_not_clamped(self) -> None:
         """Clamping would silently retire a correction earlier than asked."""
-        for ttl in (0, -1, redirect_store.REDIRECT_MAX_TTL_SECONDS + 1):
-            with self.assertRaises(redirect_store.RedirectStoreError) as caught:
+        for ttl in (0, -1, redirect_store_vocab.REDIRECT_MAX_TTL_SECONDS + 1):
+            with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
                 self.submit(ttl_seconds=ttl)
-            self.assertEqual(redirect_store.ERROR_INVALID_TTL, caught.exception.reason)
+            self.assertEqual(
+                redirect_store_vocab.ERROR_INVALID_TTL, caught.exception.reason
+            )
 
     def test_the_expiry_window_follows_the_requested_ttl(self) -> None:
         now = clock.utc_now()
@@ -194,28 +214,28 @@ class IdempotencyTests(RedirectStoreTestCase):
     def test_a_retry_after_settlement_learns_the_outcome(self) -> None:
         """The point of idempotency: a producer that never saw its first answer."""
         first = self.submit(operation_id="op-1")
-        redirect_store.accept_request(
+        redirect_store_requests.accept_request(
             self.plan_dir, "op-1", target=_target(), state_dir=self.state_dir
         )
 
         replayed = self.submit(operation_id="op-1")
 
-        self.assertEqual(redirect_store.STATE_ACCEPTED, replayed.state)
+        self.assertEqual(redirect_store_vocab.STATE_ACCEPTED, replayed.state)
         self.assertEqual(first.submitted_seq, replayed.submitted_seq)
         self.assertEqual(2, len(self.raw_lines()))
 
     def test_reusing_an_id_for_different_text_is_refused(self) -> None:
         self.submit(operation_id="op-1", feedback="first correction")
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
             self.submit(operation_id="op-1", feedback="a completely different one")
 
         self.assertEqual(
-            redirect_store.ERROR_INVALID_OPERATION_ID, caught.exception.reason
+            redirect_store_vocab.ERROR_INVALID_OPERATION_ID, caught.exception.reason
         )
         self.assertEqual(
             "first correction",
-            redirect_store.read_feedback(
+            redirect_store_journal.read_feedback(
                 self.plan_dir, "op-1", state_dir=self.state_dir
             ),
         )
@@ -223,11 +243,11 @@ class IdempotencyTests(RedirectStoreTestCase):
     def test_reusing_an_id_for_a_different_turn_is_refused(self) -> None:
         self.submit(operation_id="op-1", target=_target(1))
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
             self.submit(operation_id="op-1", target=_target(2))
 
         self.assertEqual(
-            redirect_store.ERROR_INVALID_OPERATION_ID, caught.exception.reason
+            redirect_store_vocab.ERROR_INVALID_OPERATION_ID, caught.exception.reason
         )
 
     def test_minted_identities_do_not_collide(self) -> None:
@@ -245,7 +265,7 @@ class AcceptanceTests(RedirectStoreTestCase):
     def test_acceptance_is_a_terminal_record_not_a_rewrite(self) -> None:
         request = self.submit()
 
-        accepted = redirect_store.accept_request(
+        accepted = redirect_store_requests.accept_request(
             self.plan_dir,
             request.operation_id,
             target=_target(),
@@ -256,21 +276,21 @@ class AcceptanceTests(RedirectStoreTestCase):
         self.assertEqual(2, accepted.settled_seq)
         lines = self.raw_lines()
         self.assertEqual(
-            [redirect_store.KIND_SUBMITTED, redirect_store.KIND_ACCEPTED],
+            [redirect_store_vocab.KIND_SUBMITTED, redirect_store_vocab.KIND_ACCEPTED],
             [line["kind"] for line in lines],
         )
         self.assertEqual(request.operation_id, lines[0]["id"])
 
     def test_a_second_acceptance_changes_nothing(self) -> None:
         request = self.submit()
-        first = redirect_store.accept_request(
+        first = redirect_store_requests.accept_request(
             self.plan_dir,
             request.operation_id,
             target=_target(),
             state_dir=self.state_dir,
         )
 
-        second = redirect_store.accept_request(
+        second = redirect_store_requests.accept_request(
             self.plan_dir,
             request.operation_id,
             target=_target(),
@@ -282,72 +302,80 @@ class AcceptanceTests(RedirectStoreTestCase):
 
     def test_a_settled_request_cannot_be_accepted(self) -> None:
         request = self.submit()
-        redirect_store.reject_request(
+        redirect_store_requests.reject_request(
             self.plan_dir,
             request.operation_id,
-            reason=redirect_store.REASON_RUN_ENDED,
+            reason=redirect_store_vocab.REASON_RUN_ENDED,
             state_dir=self.state_dir,
         )
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
-            redirect_store.accept_request(
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
+            redirect_store_requests.accept_request(
                 self.plan_dir,
                 request.operation_id,
                 target=_target(),
                 state_dir=self.state_dir,
             )
 
-        self.assertEqual(redirect_store.ERROR_ALREADY_SETTLED, caught.exception.reason)
+        self.assertEqual(
+            redirect_store_vocab.ERROR_ALREADY_SETTLED, caught.exception.reason
+        )
 
     def test_an_unknown_operation_cannot_be_accepted(self) -> None:
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
-            redirect_store.accept_request(
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
+            redirect_store_requests.accept_request(
                 self.plan_dir,
                 "never-submitted",
                 target=_target(),
                 state_dir=self.state_dir,
             )
 
-        self.assertEqual(redirect_store.ERROR_UNKNOWN_REQUEST, caught.exception.reason)
+        self.assertEqual(
+            redirect_store_vocab.ERROR_UNKNOWN_REQUEST, caught.exception.reason
+        )
 
     def test_a_stale_target_is_refused_and_durably_closed(self) -> None:
         """Advice written for one turn is never re-aimed at its successor."""
         request = self.submit(target=_target(1))
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
-            redirect_store.accept_request(
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
+            redirect_store_requests.accept_request(
                 self.plan_dir,
                 request.operation_id,
                 target=_target(2),
                 state_dir=self.state_dir,
             )
 
-        self.assertEqual(redirect_store.ERROR_TARGET_MISMATCH, caught.exception.reason)
+        self.assertEqual(
+            redirect_store_vocab.ERROR_TARGET_MISMATCH, caught.exception.reason
+        )
         settled = self.read().request(request.operation_id)
-        self.assertEqual(redirect_store.STATE_REJECTED, settled.state)
-        self.assertEqual(redirect_store.REASON_STALE_TARGET, settled.reason)
+        self.assertEqual(redirect_store_vocab.STATE_REJECTED, settled.state)
+        self.assertEqual(redirect_store_vocab.REASON_STALE_TARGET, settled.reason)
 
     def test_a_target_from_another_run_is_refused(self) -> None:
         request = self.submit(target=_target(run_id="run-1"))
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
-            redirect_store.accept_request(
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
+            redirect_store_requests.accept_request(
                 self.plan_dir,
                 request.operation_id,
                 target=_target(run_id="run-2"),
                 state_dir=self.state_dir,
             )
 
-        self.assertEqual(redirect_store.ERROR_TARGET_MISMATCH, caught.exception.reason)
+        self.assertEqual(
+            redirect_store_vocab.ERROR_TARGET_MISMATCH, caught.exception.reason
+        )
 
     def test_a_re_selected_harness_does_not_make_the_turn_a_different_one(self) -> None:
         """Identity is run/session/turn; the harness says what runs it."""
         request = self.submit(target=_target())
 
-        accepted = redirect_store.accept_request(
+        accepted = redirect_store_requests.accept_request(
             self.plan_dir,
             request.operation_id,
-            target=redirect_store.RedirectTarget(
+            target=redirect_store_models.RedirectTarget(
                 "run-1", "session-9", 1, harness="codex"
             ),
             state_dir=self.state_dir,
@@ -358,15 +386,17 @@ class AcceptanceTests(RedirectStoreTestCase):
     def test_a_rejection_requires_a_known_reason(self) -> None:
         request = self.submit()
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
-            redirect_store.reject_request(
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
+            redirect_store_requests.reject_request(
                 self.plan_dir,
                 request.operation_id,
                 reason="invented",
                 state_dir=self.state_dir,
             )
 
-        self.assertEqual(redirect_store.ERROR_INVALID_REASON, caught.exception.reason)
+        self.assertEqual(
+            redirect_store_vocab.ERROR_INVALID_REASON, caught.exception.reason
+        )
 
 
 class ExpirationTests(RedirectStoreTestCase):
@@ -376,8 +406,8 @@ class ExpirationTests(RedirectStoreTestCase):
         request = self.submit(ttl_seconds=1)
         later = clock.parse_datetime(request.expires_at) + timedelta(seconds=1)
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
-            redirect_store.accept_request(
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
+            redirect_store_requests.accept_request(
                 self.plan_dir,
                 request.operation_id,
                 target=_target(),
@@ -385,23 +415,25 @@ class ExpirationTests(RedirectStoreTestCase):
                 now=later,
             )
 
-        self.assertEqual(redirect_store.ERROR_REQUEST_EXPIRED, caught.exception.reason)
+        self.assertEqual(
+            redirect_store_vocab.ERROR_REQUEST_EXPIRED, caught.exception.reason
+        )
         settled = self.read().request(request.operation_id)
-        self.assertEqual(redirect_store.STATE_EXPIRED, settled.state)
-        self.assertEqual(redirect_store.REASON_EXPIRED, settled.reason)
+        self.assertEqual(redirect_store_vocab.STATE_EXPIRED, settled.state)
+        self.assertEqual(redirect_store_vocab.REASON_EXPIRED, settled.reason)
 
     def test_an_expired_request_stays_refused_after_a_restart(self) -> None:
         """The refusal has to outlive the process that reached it."""
         request = self.submit(ttl_seconds=1)
         later = clock.parse_datetime(request.expires_at) + timedelta(seconds=1)
-        redirect_store.expire_due_requests(
+        redirect_store_requests.expire_due_requests(
             self.plan_dir, state_dir=self.state_dir, now=later
         )
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
             # A fresh reader with no memory of the sweep, at a moment inside the
             # original window: only the written record can refuse this.
-            redirect_store.accept_request(
+            redirect_store_requests.accept_request(
                 self.plan_dir,
                 request.operation_id,
                 target=_target(),
@@ -409,39 +441,43 @@ class ExpirationTests(RedirectStoreTestCase):
                 now=clock.parse_datetime(request.created_at),
             )
 
-        self.assertEqual(redirect_store.ERROR_REQUEST_EXPIRED, caught.exception.reason)
+        self.assertEqual(
+            redirect_store_vocab.ERROR_REQUEST_EXPIRED, caught.exception.reason
+        )
 
     def test_a_sweep_expires_only_what_is_due_and_still_open(self) -> None:
         due = self.submit(operation_id="due", ttl_seconds=1)
         fresh = self.submit(operation_id="fresh", ttl_seconds=3600)
         self.submit(operation_id="settled", ttl_seconds=1)
-        redirect_store.accept_request(
+        redirect_store_requests.accept_request(
             self.plan_dir, "settled", target=_target(), state_dir=self.state_dir
         )
         later = clock.parse_datetime(due.expires_at) + timedelta(seconds=1)
 
-        expired = redirect_store.expire_due_requests(
+        expired = redirect_store_requests.expire_due_requests(
             self.plan_dir, state_dir=self.state_dir, now=later
         )
 
         self.assertEqual(("due",), tuple(r.operation_id for r in expired))
         view = self.read()
         self.assertEqual(
-            redirect_store.STATE_SUBMITTED, view.request(fresh.operation_id).state
+            redirect_store_vocab.STATE_SUBMITTED, view.request(fresh.operation_id).state
         )
-        self.assertEqual(redirect_store.STATE_ACCEPTED, view.request("settled").state)
+        self.assertEqual(
+            redirect_store_vocab.STATE_ACCEPTED, view.request("settled").state
+        )
 
     def test_a_repeated_sweep_writes_nothing_further(self) -> None:
         request = self.submit(ttl_seconds=1)
         later = clock.parse_datetime(request.expires_at) + timedelta(seconds=1)
-        redirect_store.expire_due_requests(
+        redirect_store_requests.expire_due_requests(
             self.plan_dir, state_dir=self.state_dir, now=later
         )
         lines = len(self.raw_lines())
 
         self.assertEqual(
             (),
-            redirect_store.expire_due_requests(
+            redirect_store_requests.expire_due_requests(
                 self.plan_dir, state_dir=self.state_dir, now=later
             ),
         )
@@ -449,10 +485,10 @@ class ExpirationTests(RedirectStoreTestCase):
 
     def test_an_unreadable_deadline_reads_as_expired(self) -> None:
         """A timestamp we cannot evaluate must not mean an open-ended window."""
-        request = redirect_store.RedirectRequest(
+        request = redirect_store_models.RedirectRequest(
             operation_id="op",
             target=_target(),
-            state=redirect_store.STATE_SUBMITTED,
+            state=redirect_store_vocab.STATE_SUBMITTED,
             created_at=clock.utc_iso_now(),
             expires_at="not-a-timestamp",
             feedback_bytes=1,
@@ -471,7 +507,7 @@ class ReplayTests(RedirectStoreTestCase):
         with self.journal_path().open("a", encoding="utf-8") as handle:
             handle.write('{"version":1,"kind":"acce')
 
-        accepted = redirect_store.accept_request(
+        accepted = redirect_store_requests.accept_request(
             self.plan_dir,
             request.operation_id,
             target=_target(),
@@ -482,7 +518,8 @@ class ReplayTests(RedirectStoreTestCase):
         self.assertEqual(3, accepted.settled_seq)
         view = self.read()
         self.assertEqual(
-            [redirect_store.REJECT_INVALID_JSON], [r.reason for r in view.rejected]
+            [redirect_store_vocab.REJECT_INVALID_JSON],
+            [r.reason for r in view.rejected],
         )
         self.assertEqual([2], [r.seq for r in view.rejected])
 
@@ -507,7 +544,8 @@ class ReplayTests(RedirectStoreTestCase):
         view = self.read()
 
         self.assertEqual(
-            [redirect_store.REJECT_INVALID_TARGET], [r.reason for r in view.rejected]
+            [redirect_store_vocab.REJECT_INVALID_TARGET],
+            [r.reason for r in view.rejected],
         )
         self.assertNotIn("confidential", json.dumps(view.to_payload()))
 
@@ -521,17 +559,20 @@ class ReplayTests(RedirectStoreTestCase):
         self.assertEqual(1, len(view.requests))
         self.assertEqual(first.feedback_digest, view.request("op").feedback_digest)
         self.assertEqual(
-            [redirect_store.REJECT_DUPLICATE_ID], [r.reason for r in view.rejected]
+            [redirect_store_vocab.REJECT_DUPLICATE_ID],
+            [r.reason for r in view.rejected],
         )
         self.assertEqual(
             "the real correction",
-            redirect_store.read_feedback(self.plan_dir, "op", state_dir=self.state_dir),
+            redirect_store_journal.read_feedback(
+                self.plan_dir, "op", state_dir=self.state_dir
+            ),
         )
 
     def test_a_second_terminal_line_never_revises_the_answer(self) -> None:
         """Two racing writers cannot make one request redirect two turns."""
         self.submit(operation_id="op")
-        redirect_store.accept_request(
+        redirect_store_requests.accept_request(
             self.plan_dir, "op", target=_target(), state_dir=self.state_dir
         )
         self.append_raw(
@@ -541,16 +582,17 @@ class ReplayTests(RedirectStoreTestCase):
                     "kind": "rejected",
                     "id": "op",
                     "created_at": clock.utc_iso_now(),
-                    "reason": redirect_store.REASON_RUN_ENDED,
+                    "reason": redirect_store_vocab.REASON_RUN_ENDED,
                 }
             )
         )
 
         view = self.read()
 
-        self.assertEqual(redirect_store.STATE_ACCEPTED, view.request("op").state)
+        self.assertEqual(redirect_store_vocab.STATE_ACCEPTED, view.request("op").state)
         self.assertEqual(
-            [redirect_store.REJECT_ALREADY_SETTLED], [r.reason for r in view.rejected]
+            [redirect_store_vocab.REJECT_ALREADY_SETTLED],
+            [r.reason for r in view.rejected],
         )
 
     def test_a_settlement_for_an_unknown_request_is_not_applied(self) -> None:
@@ -569,7 +611,8 @@ class ReplayTests(RedirectStoreTestCase):
 
         self.assertEqual((), view.requests)
         self.assertEqual(
-            [redirect_store.REJECT_UNKNOWN_REQUEST], [r.reason for r in view.rejected]
+            [redirect_store_vocab.REJECT_UNKNOWN_REQUEST],
+            [r.reason for r in view.rejected],
         )
 
     def test_unsupported_versions_and_kinds_are_rejected_as_lines(self) -> None:
@@ -588,11 +631,11 @@ class ReplayTests(RedirectStoreTestCase):
 
         self.assertEqual(
             [
-                redirect_store.REJECT_UNSUPPORTED_VERSION,
-                redirect_store.REJECT_UNKNOWN_KIND,
-                redirect_store.REJECT_INVALID_TIMESTAMP,
-                redirect_store.REJECT_NOT_OBJECT,
-                redirect_store.REJECT_EMPTY_LINE,
+                redirect_store_vocab.REJECT_UNSUPPORTED_VERSION,
+                redirect_store_vocab.REJECT_UNKNOWN_KIND,
+                redirect_store_vocab.REJECT_INVALID_TIMESTAMP,
+                redirect_store_vocab.REJECT_NOT_OBJECT,
+                redirect_store_vocab.REJECT_EMPTY_LINE,
             ],
             [r.reason for r in view.rejected],
         )
@@ -621,9 +664,10 @@ class ReplayTests(RedirectStoreTestCase):
 
         view = self.read()
 
-        self.assertEqual(redirect_store.STATE_SUBMITTED, view.request("op").state)
+        self.assertEqual(redirect_store_vocab.STATE_SUBMITTED, view.request("op").state)
         self.assertEqual(
-            [redirect_store.REJECT_INVALID_REASON], [r.reason for r in view.rejected]
+            [redirect_store_vocab.REJECT_INVALID_REASON],
+            [r.reason for r in view.rejected],
         )
 
 
@@ -637,23 +681,25 @@ class LaunchDeclarationTests(RedirectStoreTestCase):
     of that line a given shape falls on.
     """
 
-    def carried(self, operation_id: str = "op") -> redirect_store.RedirectRequest:
+    def carried(
+        self, operation_id: str = "op"
+    ) -> redirect_store_models.RedirectRequest:
         self.submit(operation_id=operation_id)
-        redirect_store.accept_request(
+        redirect_store_requests.accept_request(
             self.plan_dir,
             operation_id,
             target=_target(),
             state_dir=self.state_dir,
         )
-        return redirect_store.carry_request(
+        return redirect_store_carry.carry_request(
             self.plan_dir,
             operation_id,
             continuation=_target(2),
             state_dir=self.state_dir,
         )
 
-    def launch(self, operation_id: str = "op") -> redirect_store.RedirectRequest:
-        return redirect_store.launch_request(
+    def launch(self, operation_id: str = "op") -> redirect_store_models.RedirectRequest:
+        return redirect_store_carry.launch_request(
             self.plan_dir,
             operation_id,
             continuation=_target(2),
@@ -689,7 +735,7 @@ class LaunchDeclarationTests(RedirectStoreTestCase):
         self.carried()
         self.launch()
 
-        redirect_store.deliver_request(
+        redirect_store_delivery.deliver_request(
             self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
         )
 
@@ -702,7 +748,7 @@ class LaunchDeclarationTests(RedirectStoreTestCase):
         self.carried()
         self.launch()
 
-        released = redirect_store.release_request(
+        released = redirect_store_delivery.release_request(
             self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
         )
 
@@ -720,11 +766,11 @@ class LaunchDeclarationTests(RedirectStoreTestCase):
     def test_a_recarry_after_a_release_starts_the_window_closed(self) -> None:
         self.carried()
         self.launch()
-        redirect_store.release_request(
+        redirect_store_delivery.release_request(
             self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
         )
 
-        recarried = redirect_store.carry_request(
+        recarried = redirect_store_carry.carry_request(
             self.plan_dir, "op", continuation=_target(3), state_dir=self.state_dir
         )
 
@@ -744,7 +790,7 @@ class LaunchDeclarationTests(RedirectStoreTestCase):
     def test_a_declaration_after_the_delivery_it_precedes_is_a_no_op(self) -> None:
         self.carried()
         self.launch()
-        redirect_store.deliver_request(
+        redirect_store_delivery.deliver_request(
             self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
         )
 
@@ -756,26 +802,28 @@ class LaunchDeclarationTests(RedirectStoreTestCase):
     def test_a_declaration_naming_another_attempt_is_refused(self) -> None:
         self.carried()
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
-            redirect_store.launch_request(
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
+            redirect_store_carry.launch_request(
                 self.plan_dir, "op", continuation=_target(3), state_dir=self.state_dir
             )
 
         self.assertEqual(
-            redirect_store.ERROR_CONTINUATION_MISMATCH, caught.exception.reason
+            redirect_store_vocab.ERROR_CONTINUATION_MISMATCH, caught.exception.reason
         )
         self.assertFalse(self.read().request("op").launching)
 
     def test_a_declaration_for_an_uncarried_request_is_refused(self) -> None:
         self.submit(operation_id="op")
-        redirect_store.accept_request(
+        redirect_store_requests.accept_request(
             self.plan_dir, "op", target=_target(), state_dir=self.state_dir
         )
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
             self.launch()
 
-        self.assertEqual(redirect_store.ERROR_NOT_CARRIED, caught.exception.reason)
+        self.assertEqual(
+            redirect_store_vocab.ERROR_NOT_CARRIED, caught.exception.reason
+        )
 
     def test_replay_refuses_a_second_declaration_written_by_hand(self) -> None:
         """The appender's idempotence is not a rule replay may take on trust."""
@@ -785,8 +833,8 @@ class LaunchDeclarationTests(RedirectStoreTestCase):
         self.append_raw(
             json.dumps(
                 {
-                    "version": redirect_store.REDIRECT_JOURNAL_VERSION,
-                    "kind": redirect_store.KIND_LAUNCHING,
+                    "version": redirect_store_vocab.REDIRECT_JOURNAL_VERSION,
+                    "kind": redirect_store_vocab.KIND_LAUNCHING,
                     "id": "op",
                     "created_at": clock.utc_iso_now(),
                     "continuation": _target(2).to_payload(),
@@ -796,7 +844,7 @@ class LaunchDeclarationTests(RedirectStoreTestCase):
 
         view = self.read()
         self.assertEqual(
-            [redirect_store.REJECT_ALREADY_LAUNCHING],
+            [redirect_store_vocab.REJECT_ALREADY_LAUNCHING],
             [item.reason for item in view.rejected],
         )
         self.assertEqual(4, view.request("op").launching_seq)
@@ -804,15 +852,15 @@ class LaunchDeclarationTests(RedirectStoreTestCase):
     def test_replay_refuses_a_declaration_after_the_launch_happened(self) -> None:
         self.carried()
         self.launch()
-        redirect_store.deliver_request(
+        redirect_store_delivery.deliver_request(
             self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
         )
 
         self.append_raw(
             json.dumps(
                 {
-                    "version": redirect_store.REDIRECT_JOURNAL_VERSION,
-                    "kind": redirect_store.KIND_LAUNCHING,
+                    "version": redirect_store_vocab.REDIRECT_JOURNAL_VERSION,
+                    "kind": redirect_store_vocab.KIND_LAUNCHING,
                     "id": "op",
                     "created_at": clock.utc_iso_now(),
                     "continuation": _target(2).to_payload(),
@@ -821,7 +869,7 @@ class LaunchDeclarationTests(RedirectStoreTestCase):
         )
 
         self.assertEqual(
-            [redirect_store.REJECT_ALREADY_DELIVERED],
+            [redirect_store_vocab.REJECT_ALREADY_DELIVERED],
             [item.reason for item in self.read().rejected],
         )
 
@@ -829,7 +877,7 @@ class LaunchDeclarationTests(RedirectStoreTestCase):
         """Ambiguity is about an open question, not about a missing line."""
         self.carried()
         self.launch()
-        redirect_store.acknowledge_request(
+        redirect_store_delivery.acknowledge_request(
             self.plan_dir, "op", attempt=_target(2), state_dir=self.state_dir
         )
 
@@ -854,9 +902,11 @@ class RecordVersionTests(RedirectStoreTestCase):
     may have gone out is sent again.
     """
 
-    def accepted(self, operation_id: str = "op") -> redirect_store.RedirectRequest:
+    def accepted(
+        self, operation_id: str = "op"
+    ) -> redirect_store_models.RedirectRequest:
         self.submit(operation_id=operation_id)
-        return redirect_store.accept_request(
+        return redirect_store_requests.accept_request(
             self.plan_dir,
             operation_id,
             target=_target(),
@@ -865,10 +915,11 @@ class RecordVersionTests(RedirectStoreTestCase):
 
     def append_legacy(self, kind: str, operation_id: str = "op") -> None:
         """Append the line a pre-split writer would have written."""
+        version = redirect_store_vocab.REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION
         self.append_raw(
             json.dumps(
                 {
-                    "version": redirect_store.REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION,
+                    "version": version,
                     "kind": kind,
                     "id": operation_id,
                     "created_at": clock.utc_iso_now(),
@@ -879,15 +930,15 @@ class RecordVersionTests(RedirectStoreTestCase):
 
     def test_every_line_a_writer_appends_names_the_current_version(self) -> None:
         self.accepted()
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
         )
-        redirect_store.deliver_request(
+        redirect_store_delivery.deliver_request(
             self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
         )
 
         self.assertEqual(
-            [redirect_store.REDIRECT_JOURNAL_VERSION] * 4,
+            [redirect_store_vocab.REDIRECT_JOURNAL_VERSION] * 4,
             [line["version"] for line in self.raw_lines()],
         )
 
@@ -908,10 +959,11 @@ class RecordVersionTests(RedirectStoreTestCase):
 
     def append_unlaunchable(self, kind: str, operation_id: str = "op") -> None:
         """Append the line a writer with the split but no launch record wrote."""
+        version = redirect_store_vocab.REDIRECT_JOURNAL_LEGACY_LAUNCH_VERSION
         self.append_raw(
             json.dumps(
                 {
-                    "version": redirect_store.REDIRECT_JOURNAL_LEGACY_LAUNCH_VERSION,
+                    "version": version,
                     "kind": kind,
                     "id": operation_id,
                     "created_at": clock.utc_iso_now(),
@@ -926,7 +978,7 @@ class RecordVersionTests(RedirectStoreTestCase):
         """The distinction the version bump exists to preserve."""
         self.accepted()
 
-        redirect_store.carry_request(
+        redirect_store_carry.carry_request(
             self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
         )
 
@@ -969,7 +1021,7 @@ class RecordVersionTests(RedirectStoreTestCase):
         self.accepted()
         self.append_unlaunchable("continued")
 
-        released = redirect_store.release_request(
+        released = redirect_store_delivery.release_request(
             self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
         )
 
@@ -995,7 +1047,7 @@ class RecordVersionTests(RedirectStoreTestCase):
         view = self.read()
 
         self.assertEqual(
-            [redirect_store.REJECT_UNSUPPORTED_VERSION],
+            [redirect_store_vocab.REJECT_UNSUPPORTED_VERSION],
             [r.reason for r in view.rejected],
         )
         self.assertFalse(view.request("op").carried)
@@ -1006,13 +1058,13 @@ class RecordVersionTests(RedirectStoreTestCase):
         self.accepted()
         self.append_legacy("continued")
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
-            redirect_store.release_request(
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
+            redirect_store_delivery.release_request(
                 self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
             )
 
         self.assertEqual(
-            redirect_store.ERROR_ALREADY_DELIVERED, caught.exception.reason
+            redirect_store_vocab.ERROR_ALREADY_DELIVERED, caught.exception.reason
         )
         self.assertTrue(self.read().request("op").carried)
 
@@ -1038,7 +1090,7 @@ class RecordVersionTests(RedirectStoreTestCase):
         self.accepted()
         self.append_legacy("continued")
 
-        delivered = redirect_store.deliver_request(
+        delivered = redirect_store_delivery.deliver_request(
             self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
         )
 
@@ -1051,31 +1103,33 @@ class BoundsTests(RedirectStoreTestCase):
 
     def test_a_submission_stops_short_of_the_cap(self) -> None:
         limit = (
-            redirect_store.REDIRECT_JOURNAL_MAX_BYTES
-            - redirect_store.REDIRECT_SETTLEMENT_RESERVE_BYTES
+            redirect_store_vocab.REDIRECT_JOURNAL_MAX_BYTES
+            - redirect_store_vocab.REDIRECT_SETTLEMENT_RESERVE_BYTES
         )
         self.journal_path().parent.mkdir(parents=True, exist_ok=True)
         self.journal_path().write_bytes(b"x\n" * (limit // 2))
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
             self.submit()
 
-        self.assertEqual(redirect_store.ERROR_JOURNAL_FULL, caught.exception.reason)
+        self.assertEqual(
+            redirect_store_vocab.ERROR_JOURNAL_FULL, caught.exception.reason
+        )
 
     def test_the_reserve_keeps_a_pending_request_settleable(self) -> None:
         """The failure this reserve exists to prevent is an unanswerable request."""
         request = self.submit(operation_id="op")
         padding = (
-            redirect_store.REDIRECT_JOURNAL_MAX_BYTES
-            - redirect_store.REDIRECT_SETTLEMENT_RESERVE_BYTES
+            redirect_store_vocab.REDIRECT_JOURNAL_MAX_BYTES
+            - redirect_store_vocab.REDIRECT_SETTLEMENT_RESERVE_BYTES
             - self.journal_path().stat().st_size
         )
         with self.journal_path().open("ab") as handle:
             handle.write(b"x\n" * (padding // 2))
 
-        with self.assertRaises(redirect_store.RedirectStoreError):
+        with self.assertRaises(redirect_store_models.RedirectStoreError):
             self.submit(operation_id="op-2", feedback="a second correction")
-        accepted = redirect_store.accept_request(
+        accepted = redirect_store_requests.accept_request(
             self.plan_dir,
             request.operation_id,
             target=_target(),
@@ -1088,10 +1142,10 @@ class BoundsTests(RedirectStoreTestCase):
         self.submit(operation_id="op")
         before = self.journal_path().read_bytes()
 
-        with self.assertRaises(redirect_store.RedirectStoreError):
+        with self.assertRaises(redirect_store_models.RedirectStoreError):
             self.submit(
                 operation_id="op-2",
-                feedback="x" * (redirect_store.REDIRECT_MAX_FEEDBACK_BYTES + 1),
+                feedback="x" * (redirect_store_vocab.REDIRECT_MAX_FEEDBACK_BYTES + 1),
             )
 
         self.assertEqual(before, self.journal_path().read_bytes())
@@ -1119,7 +1173,7 @@ class ConcurrencyTests(RedirectStoreTestCase):
         self.assertEqual(
             {f"correction {index}" for index in range(count)},
             {
-                redirect_store.read_feedback(
+                redirect_store_journal.read_feedback(
                     self.plan_dir, r.operation_id, state_dir=self.state_dir
                 )
                 for r in requests
@@ -1141,20 +1195,20 @@ class ConcurrencyTests(RedirectStoreTestCase):
 
         def attempt(_index: int) -> str:
             try:
-                return redirect_store.accept_request(
+                return redirect_store_requests.accept_request(
                     self.plan_dir, "op", target=_target(), state_dir=self.state_dir
                 ).state
-            except redirect_store.RedirectStoreError as error:
+            except redirect_store_models.RedirectStoreError as error:
                 return error.reason
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             outcomes = list(pool.map(attempt, range(16)))
 
-        self.assertEqual({redirect_store.STATE_ACCEPTED}, set(outcomes))
+        self.assertEqual({redirect_store_vocab.STATE_ACCEPTED}, set(outcomes))
         kinds = [line["kind"] for line in self.raw_lines()]
-        self.assertEqual(1, kinds.count(redirect_store.KIND_ACCEPTED))
+        self.assertEqual(1, kinds.count(redirect_store_vocab.KIND_ACCEPTED))
         self.assertEqual(
-            redirect_store.STATE_ACCEPTED,
+            redirect_store_vocab.STATE_ACCEPTED,
             self.read().request(request.operation_id).state,
         )
 
@@ -1164,16 +1218,16 @@ class ConcurrencyTests(RedirectStoreTestCase):
 
         def accept(_index: int) -> str:
             try:
-                return redirect_store.accept_request(
+                return redirect_store_requests.accept_request(
                     self.plan_dir, "op", target=_target(), state_dir=self.state_dir
                 ).state
-            except redirect_store.RedirectStoreError as error:
+            except redirect_store_models.RedirectStoreError as error:
                 return error.reason
 
         def expire(_index: int) -> str:
             return str(
                 len(
-                    redirect_store.expire_due_requests(
+                    redirect_store_requests.expire_due_requests(
                         self.plan_dir, state_dir=self.state_dir, now=past
                     )
                 )
@@ -1183,11 +1237,11 @@ class ConcurrencyTests(RedirectStoreTestCase):
             list(pool.map(lambda index: (accept(index), expire(index)), range(12)))
 
         kinds = [line["kind"] for line in self.raw_lines()]
-        terminal = [k for k in kinds if k != redirect_store.KIND_SUBMITTED]
+        terminal = [k for k in kinds if k != redirect_store_vocab.KIND_SUBMITTED]
         self.assertEqual(1, len(terminal))
         self.assertIn(
             self.read().request("op").state,
-            (redirect_store.STATE_ACCEPTED, redirect_store.STATE_EXPIRED),
+            (redirect_store_vocab.STATE_ACCEPTED, redirect_store_vocab.STATE_EXPIRED),
         )
 
 
@@ -1196,17 +1250,19 @@ class DurabilityTests(RedirectStoreTestCase):
 
     def test_every_completed_append_is_fullsynced(self) -> None:
         synced: list[int] = []
-        original = redirect_store.durability.fullsync
+        original = redirect_store_journal.durability.fullsync
 
         def record(fd: int) -> None:
             synced.append(fd)
             original(fd)
 
-        redirect_store.durability.fullsync = record
-        self.addCleanup(setattr, redirect_store.durability, "fullsync", original)
+        redirect_store_journal.durability.fullsync = record
+        self.addCleanup(
+            setattr, redirect_store_journal.durability, "fullsync", original
+        )
 
         request = self.submit()
-        redirect_store.accept_request(
+        redirect_store_requests.accept_request(
             self.plan_dir,
             request.operation_id,
             target=_target(),
@@ -1222,7 +1278,7 @@ class DurabilityTests(RedirectStoreTestCase):
         original = os.write
 
         def truncated_write(fd: int, data: bytes) -> int:
-            # Scoped to this journal by inode. `redirect_store.os` is the real
+            # Scoped to this journal by inode. `redirect_store_journal.os` is the real
             # `os` module, so an unconditional patch would truncate the test
             # runner's own writes for the duration of this block.
             if os.fstat(fd).st_ino != journal_inode:
@@ -1232,29 +1288,35 @@ class DurabilityTests(RedirectStoreTestCase):
         os.write = truncated_write
         self.addCleanup(setattr, os, "write", original)
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
             self.submit(operation_id="op-2", feedback="second correction")
 
         os.write = original
-        self.assertEqual(redirect_store.ERROR_JOURNAL_WRITE, caught.exception.reason)
+        self.assertEqual(
+            redirect_store_vocab.ERROR_JOURNAL_WRITE, caught.exception.reason
+        )
         self.assertEqual(before, self.journal_path().read_bytes())
         self.assertEqual(1, len(self.read().requests))
 
     def test_a_failed_append_is_not_reported_as_a_submission(self) -> None:
         """A producer told the write failed must not find it accepted later."""
-        original = redirect_store.durability.fullsync
+        original = redirect_store_journal.durability.fullsync
 
         def failing(_fd: int) -> None:
             raise OSError("device is gone")
 
-        redirect_store.durability.fullsync = failing
-        self.addCleanup(setattr, redirect_store.durability, "fullsync", original)
+        redirect_store_journal.durability.fullsync = failing
+        self.addCleanup(
+            setattr, redirect_store_journal.durability, "fullsync", original
+        )
 
-        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
             self.submit(operation_id="op")
 
-        self.assertEqual(redirect_store.ERROR_JOURNAL_WRITE, caught.exception.reason)
-        redirect_store.durability.fullsync = original
+        self.assertEqual(
+            redirect_store_vocab.ERROR_JOURNAL_WRITE, caught.exception.reason
+        )
+        redirect_store_journal.durability.fullsync = original
         self.assertIsNone(self.read().request("op"))
 
 

@@ -17,7 +17,7 @@ from agent_session_loop import (
     contracts,
     plans_files,
     plans_session_ids,
-    verification,
+    verification_contract_check,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -89,7 +89,10 @@ class ContractCheckCliTests(unittest.TestCase):
         args = cli.build_parser().parse_args(
             ["contract-check", "/plan", "--session", "2"]
         )
-        self.assertIs(verification.contract_check_from_args, cli.resolve_handler(args))
+        self.assertIs(
+            verification_contract_check.contract_check_from_args,
+            cli.resolve_handler(args),
+        )
         self.assertEqual("/plan", args.plan_dir)
         self.assertEqual("2", args.session)
         self.assertEqual(".", args.cwd)
@@ -266,9 +269,11 @@ class ContractCheckCliTests(unittest.TestCase):
             ),
         )
         with mock.patch.object(
-            verification, "read_completion_contract", return_value=contract
+            verification_contract_check,
+            "read_completion_contract",
+            return_value=contract,
         ):
-            rows = verification._contract_check_rows(
+            rows = verification_contract_check._contract_check_rows(
                 "/plan", plans_session_ids.parse_session_id("1"), repo_root=Path(".")
             )
 

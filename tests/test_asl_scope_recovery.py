@@ -548,12 +548,14 @@ class ExternalRecoveryTests(unittest.TestCase):
         from agent_session_loop import (
             preflight_environment,
             review_guard,
-            verification,
+            verification_models,
         )
 
         git_stdout(self.repos["notes"], "add", "README.md")
         git_stdout(self.repos["notes"], "commit", "-m", "manual checkpoint")
-        context = verification.VerificationContext.resolved_workspace(self.resolved)
+        context = verification_models.VerificationContext.resolved_workspace(
+            self.resolved
+        )
         snapshot = plans_snapshot.inspect_plan(self.plan)
         self.assertEqual(
             (),
@@ -664,7 +666,7 @@ class ExternalRecoveryTests(unittest.TestCase):
         self.assertFalse(verdict(before, self.capture())["passed"])
 
     def test_external_change_alias_is_recorded_not_convicted(self):
-        from agent_session_loop import review_guard, verification
+        from agent_session_loop import review_guard, verification_models
 
         before = self.capture()
         (self.repos["notes"] / "README.md").write_text("session work\n")
@@ -701,7 +703,9 @@ class ExternalRecoveryTests(unittest.TestCase):
         self.assertNotIn("external_changes", owned)
         self.assertEqual(["notes", "pi"], owned["authorized_aliases"])
 
-        context = verification.VerificationContext.resolved_workspace(self.resolved)
+        context = verification_models.VerificationContext.resolved_workspace(
+            self.resolved
+        )
         args = mock.Mock(allow_external_changes=["pi", "pi"])
         self.assertEqual(
             frozenset({"pi"}), review_guard._external_change_aliases(args, context)
@@ -712,7 +716,7 @@ class ExternalRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(review_guard.RunError, "registered"):
             review_guard._external_change_aliases(
                 mock.Mock(allow_external_changes=["pi"]),
-                verification.VerificationContext.legacy(self.workspace),
+                verification_models.VerificationContext.legacy(self.workspace),
             )
 
     def test_interruption_after_commit_reconciles_without_duplicate(self):
@@ -920,7 +924,7 @@ class ExternalChangeCommitTargetTests(unittest.TestCase):
     """An allowed external alias's recorded change is never a commit target."""
 
     def test_session_commit_ignores_allowed_external_change(self):
-        from agent_session_loop import commit_settlement, verification
+        from agent_session_loop import commit_settlement, verification_models
 
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -960,7 +964,9 @@ class ExternalChangeCommitTargetTests(unittest.TestCase):
         self.assertIn("pi", {r["alias"] for r in guard["changed"].values()})
 
         targets = commit_settlement._registered_session_commit_targets(
-            verification.VerificationContext(root=resolved.root, workspace=resolved),
+            verification_models.VerificationContext(
+                root=resolved.root, workspace=resolved
+            ),
             guard,
         )
 

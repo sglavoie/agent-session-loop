@@ -256,7 +256,7 @@ def _add_check_commands(
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    verify_parser.set_defaults(handler_ref="verification:verify_from_args")
+    verify_parser.set_defaults(handler_ref="verification_cli:verify_from_args")
 
     contract_check_parser = subparsers.add_parser(
         "contract-check",
@@ -303,7 +303,7 @@ def _add_check_commands(
         help="Print machine-readable JSON output",
     )
     contract_check_parser.set_defaults(
-        handler_ref="verification:contract_check_from_args"
+        handler_ref="verification_contract_check:contract_check_from_args"
     )
 
     harness_compat_parser = subparsers.add_parser(

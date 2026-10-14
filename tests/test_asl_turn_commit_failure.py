@@ -33,7 +33,7 @@ from agent_session_loop import (
     state,
     state_locks,
 )
-from agent_session_loop import verification as verification_module
+from agent_session_loop import verification_models as verification_module
 from tests.asl_turn_commit_support import SPECS
 from tests.support import (
     _contract_block,

@@ -184,7 +184,7 @@ from . import (
     run_reporting,
     run_selection,
     turn_execution_signals,
-    verification,
+    verification_models,
 )
 from .run_errors import RunError
 
@@ -459,7 +459,7 @@ def _commit_target_is_clean(target: Mapping[str, Any]) -> bool:
 
 
 def _commit_targets(
-    verification_context: verification.VerificationContext,
+    verification_context: verification_models.VerificationContext,
     *,
     aliases: Sequence[str] | None = None,
     qualified_paths: Mapping[str, Sequence[str]] | None = None,
@@ -497,7 +497,7 @@ def _commit_targets(
 
 
 def _dirty_commit_targets(
-    verification_context: verification.VerificationContext,
+    verification_context: verification_models.VerificationContext,
 ) -> list[dict[str, Any]]:
     """Commit targets that actually have something to commit.
 
@@ -520,7 +520,7 @@ def _dirty_commit_targets(
 
 
 def _registered_session_commit_targets(
-    verification_context: verification.VerificationContext,
+    verification_context: verification_models.VerificationContext,
     guard: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     if guard.get("passed") is not True:
@@ -601,7 +601,7 @@ def _registered_session_commit_targets(
 
 
 def _registered_end_commit_targets(
-    verification_context: verification.VerificationContext,
+    verification_context: verification_models.VerificationContext,
 ) -> list[dict[str, Any]]:
     workspace = verification_context.workspace
     if workspace is None:
@@ -616,7 +616,7 @@ def _registered_end_commit_targets(
 
 def _resolve_recovered_commit_targets(
     group: Mapping[str, Any],
-    verification_context: verification.VerificationContext,
+    verification_context: verification_models.VerificationContext,
 ) -> list[dict[str, Any]]:
     keys = group.get("ordered_aliases")
     if not isinstance(keys, list) or any(not isinstance(key, str) for key in keys):
@@ -705,7 +705,7 @@ def _run_commit_group(
     event_path: Path,
     payload: dict[str, Any],
     progress: run_reporting._ProgressReporter,
-    verification_context: verification.VerificationContext,
+    verification_context: verification_models.VerificationContext,
     run_dir: Path,
     run_id: str,
     session_id: str | None,
@@ -843,7 +843,7 @@ def _run_commit_group(
 
 
 def _paused_work_commit_targets(
-    verification_context: verification.VerificationContext,
+    verification_context: verification_models.VerificationContext,
     *,
     guard: Mapping[str, Any],
     whole_workspace: bool,
@@ -1164,7 +1164,7 @@ def _settle_paused_retained_work(
     event_path: Path,
     payload: dict[str, Any],
     progress: run_reporting._ProgressReporter,
-    verification_context: verification.VerificationContext,
+    verification_context: verification_models.VerificationContext,
     run_dir: Path,
     run_id: str,
     retained: RetainedWorkContext,

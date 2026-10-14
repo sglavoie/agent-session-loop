@@ -40,7 +40,7 @@ Two invariants survive the move out of ``runner.py``:
   so a change that leaves the constants alone but alters the path
   substitutions still fails.
 * Every rejection leaves through ``fail``, whose vocabulary is pinned equal
-  to ``verification.GENERATED_GATE_REASONS`` by a test that extracts this
+  to ``verification_diagnostics.GENERATED_GATE_REASONS`` by a test that extracts this
   module's source.
 
 Nothing here imports the runner. What the loop owns enters as a parameter:
@@ -63,7 +63,7 @@ from . import (
     plans_handoff,
     plans_session_ids,
     review,
-    verification,
+    verification_diagnostics,
     verification_transitions,
 )
 
@@ -137,13 +137,13 @@ def parse_review_verdict(text: str) -> dict[str, Any]:
 # only its first filter, and none of the three is what authenticates the line —
 # ``_authenticated_generated_review_contract`` is. Adding a reason here means
 # adding it to
-# ``verification.GENERATED_GATE_REASONS`` — a test extracts this source and
+# ``verification_diagnostics.GENERATED_GATE_REASONS`` — a test extracts this source and
 # pins the two equal.
 _VALIDATOR_FAIL_HELPER = (
     "def fail(reason, **detail):",
     "    detail.update(check=CHECK, reason=reason, "
-    f"{verification.FAILURE_DIAGNOSTIC_MARKER_KEY}="
-    f"{verification.FAILURE_DIAGNOSTIC_MARKER_VALUE!r})",
+    f"{verification_diagnostics.FAILURE_DIAGNOSTIC_MARKER_KEY}="
+    f"{verification_diagnostics.FAILURE_DIAGNOSTIC_MARKER_VALUE!r})",
     "    sys.stderr.write(json.dumps(detail, sort_keys=True) + '\\n')",
     "    sys.exit(1)",
 )

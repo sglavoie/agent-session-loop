@@ -28,7 +28,7 @@ can never both win:
 :class:`PendingRedirect` is what survives the turn. It carries the operation
 ids, the conversation the interrupted attempt ran on, and the attempt lineage
 -- never the feedback text. The text stays in the journal, reachable only
-through ``redirect_store.read_feedback``, which is the single egress that
+through ``redirect_store_journal.read_feedback``, which is the single egress that
 module exists to keep it behind; a copy in the run payload would put an
 operator's words into every state file, projection and diagnostic export that
 reads one.
@@ -53,7 +53,7 @@ from . import (
     redirect_admission,
     redirect_control,
     redirect_restart,
-    redirect_store,
+    redirect_store_models,
 )
 
 # ---------------------------------------------------------------------------
@@ -130,19 +130,21 @@ class AcceptedRedirect:
     """One correction this turn was interrupted for.
 
     Carries the digest and the byte count rather than the feedback, for the
-    reason ``redirect_store.RedirectRequest`` already states: they are enough to
+    reason ``redirect_store_models.RedirectRequest`` already states: they are enough to
     prove *which* correction this is in any surface, and the words themselves
     stay behind the journal's single reader.
     """
 
     operation_id: str
-    target: redirect_store.RedirectTarget
+    target: redirect_store_models.RedirectTarget
     accepted_at: str
     feedback_digest: str
     feedback_bytes: int
 
     @classmethod
-    def from_request(cls, request: redirect_store.RedirectRequest) -> AcceptedRedirect:
+    def from_request(
+        cls, request: redirect_store_models.RedirectRequest
+    ) -> AcceptedRedirect:
         return cls(
             operation_id=request.operation_id,
             target=request.target,
@@ -287,9 +289,9 @@ class TurnController(Protocol):
         plan_dir: str | Path,
         operation_id: str,
         *,
-        target: redirect_store.RedirectTarget,
+        target: redirect_store_models.RedirectTarget,
         state_dir: str | Path | None = None,
-    ) -> redirect_store.RedirectRequest: ...
+    ) -> redirect_store_models.RedirectRequest: ...
 
     def release(self) -> None: ...
 
@@ -303,7 +305,7 @@ class TurnController(Protocol):
 
 
 ControllerFactory = Callable[[redirect_control.OwnedWorker], TurnController]
-PendingReader = Callable[..., tuple[redirect_store.RedirectRequest, ...]]
+PendingReader = Callable[..., tuple[redirect_store_models.RedirectRequest, ...]]
 
 
 class TurnRedirect:
@@ -328,7 +330,7 @@ class TurnRedirect:
         self,
         *,
         plan_dir: str | Path,
-        target: redirect_store.RedirectTarget,
+        target: redirect_store_models.RedirectTarget,
         state_dir: str | Path | None = None,
         wakeup: threading.Event | None = None,
         cancellation: redirect_control.CancellableTurn | None = None,
@@ -364,7 +366,7 @@ class TurnRedirect:
     # -- state ---------------------------------------------------------------
 
     @property
-    def target(self) -> redirect_store.RedirectTarget:
+    def target(self) -> redirect_store_models.RedirectTarget:
         return self._target
 
     @property
@@ -489,7 +491,7 @@ class TurnRedirect:
     # -- acceptance ----------------------------------------------------------
 
     def accept(
-        self, request: redirect_store.RedirectRequest
+        self, request: redirect_store_models.RedirectRequest
     ) -> AcceptedRedirect | None:
         """Accept one correction against this turn, or refuse and say why.
 
@@ -518,7 +520,7 @@ class TurnRedirect:
                     target=self._target,
                     state_dir=self._state_dir,
                 )
-            except redirect_store.RedirectStoreError as error:
+            except redirect_store_models.RedirectStoreError as error:
                 self._refuse_locked(request.operation_id, error.reason)
                 return None
             record = AcceptedRedirect.from_request(settled)
@@ -616,7 +618,7 @@ class TurnRedirect:
             requests = self._read_pending(
                 self._plan_dir, target=self._target, state_dir=self._state_dir
             )
-        except redirect_store.RedirectStoreError as error:
+        except redirect_store_models.RedirectStoreError as error:
             self._refuse(None, error.reason)
             return
         except OSError:

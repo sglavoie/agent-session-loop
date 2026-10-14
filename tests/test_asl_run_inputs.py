@@ -37,7 +37,7 @@ from agent_session_loop import (
     run_inputs,
     run_selection,
     state,
-    verification,
+    verification_models,
 )
 from agent_session_loop.run_errors import RunError
 from tests.support import _contract_block, assert_no_runner_import, write_plan
@@ -599,7 +599,7 @@ class LegacyBindingTests(unittest.TestCase):
             first.mkdir()
 
             run_inputs._ensure_legacy_run_metadata(
-                plan_dir, verification.VerificationContext.legacy(first)
+                plan_dir, verification_models.VerificationContext.legacy(first)
             )
             bound = plans_metadata.load_plan_metadata(plan_dir)
 
@@ -608,7 +608,7 @@ class LegacyBindingTests(unittest.TestCase):
             second = Path(tmp) / "second"
             second.mkdir()
             run_inputs._ensure_legacy_run_metadata(
-                plan_dir, verification.VerificationContext.legacy(second)
+                plan_dir, verification_models.VerificationContext.legacy(second)
             )
 
             self.assertEqual(bound, plans_metadata.load_plan_metadata(plan_dir))
@@ -618,7 +618,7 @@ class LegacyBindingTests(unittest.TestCase):
 
     def test_a_resume_without_a_persisted_binding_is_admitted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            context = verification.VerificationContext.legacy(tmp)
+            context = verification_models.VerificationContext.legacy(tmp)
 
             run_inputs._validate_resume_workspace_binding(_args(), context)
             run_inputs._validate_resume_workspace_binding(
@@ -627,7 +627,7 @@ class LegacyBindingTests(unittest.TestCase):
 
     def test_a_resume_that_changed_workspace_mode_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            context = verification.VerificationContext.legacy(tmp)
+            context = verification_models.VerificationContext.legacy(tmp)
             args = _args(_resume_workspace_config={"workspace_root": tmp})
 
             with self.assertRaises(plans_errors.PlanError) as caught:

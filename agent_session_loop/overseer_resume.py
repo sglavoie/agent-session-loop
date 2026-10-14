@@ -111,7 +111,7 @@ from . import (
     overseer_decisions,
     overseer_discovery,
     overseer_dispatch,
-    overseer_store,
+    overseer_store_models,
     pause_policy,
     state,
     supervision_liveness,
@@ -768,7 +768,7 @@ class ResumeAdapter:
 
     def reconcile(
         self,
-        record: overseer_store.ActionRecord,
+        record: overseer_store_models.ActionRecord,
     ) -> overseer_dispatch.Receipt:
         """Say whether a resume a dead process may have started took hold.
 

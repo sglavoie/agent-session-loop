@@ -203,14 +203,14 @@ _DETAIL_TESTS = "scripts:tests/test_workbench_details.py"
 _HISTORY_TESTS = "scripts:tests/test_workbench_history.py"
 _OPERATION_TESTS = "scripts:tests/test_workbench_operations.py"
 _ACTION_TESTS = "scripts:tests/test_workbench_launch_reply.py"
-_BRIDGE_TESTS = "scripts:tests/test_asl_bridge_server.py"
+_BRIDGE_TESTS = "scripts:tests/test_asl_bridge_server_capabilities_rows.py"
 _DOCS_TESTS = "scripts:tests/test_asl_docs_authoritative_lanes.py"
 _CLI_TESTS = "scripts:tests/test_asl_cli_parser_review_guard_and_resume_overlay.py"
 _CONTROL_TESTS = "scripts:tests/test_workbench_controls.py"
 _CONTROL_CLI_TESTS = "scripts:tests/test_asl_control_cli_1.py"
 _STORE_TESTS = "scripts:tests/test_workbench_store.py"
 _TRANSPORT_TESTS = "scripts:tests/test_workbench_transport_contract.py"
-_CONNECTOR_TESTS = "scripts:tests/test_workbench_connector.py"
+_CONNECTOR_TESTS = "scripts:tests/test_workbench_connector_delivery.py"
 #: The service's own half of the link: what an upload does to the store, what
 #: rides back down in its acknowledgement, and how a read or a control settles
 #: when nothing carries it. Named separately from the connector module because

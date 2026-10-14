@@ -16,7 +16,8 @@ from agent_session_loop import (
     plans_session_ids,
     review_session_body,
     review_session_contract,
-    verification,
+    verification_diagnostics,
+    verification_models,
 )
 from tests.support import (
     kill_marked_pids,
@@ -130,9 +131,9 @@ class VerificationExecutorFixtures(unittest.TestCase):
 
     def _record_observer(
         self,
-    ) -> tuple[verification.VerificationObserver, list[tuple[str, Any]]]:
+    ) -> tuple[verification_models.VerificationObserver, list[tuple[str, Any]]]:
         events: list[tuple[str, Any]] = []
-        observer = verification.VerificationObserver(
+        observer = verification_models.VerificationObserver(
             on_check_started=lambda event: events.append(("started", event)),
             on_check_finished=lambda event: events.append(("finished", event)),
         )
@@ -166,8 +167,8 @@ class VerificationExecutorFixtures(unittest.TestCase):
             json.dumps(
                 {
                     **fields,
-                    verification.FAILURE_DIAGNOSTIC_MARKER_KEY: (
-                        verification.FAILURE_DIAGNOSTIC_MARKER_VALUE
+                    verification_diagnostics.FAILURE_DIAGNOSTIC_MARKER_KEY: (
+                        verification_diagnostics.FAILURE_DIAGNOSTIC_MARKER_VALUE
                     ),
                 },
                 sort_keys=True,

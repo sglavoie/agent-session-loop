@@ -12,7 +12,7 @@ from . import (
     redirect_continuation,
     redirect_recovery,
     redirect_restart,
-    redirect_store,
+    redirect_store_models,
     run_control,
     run_coordination_control,
     run_coordination_mailbox_poll,
@@ -172,7 +172,7 @@ def _pause_for_redirect_restart(
             ),
             state_dir=args.state_dir,
         )
-    except (OSError, redirect_store.RedirectStoreError) as error:
+    except (OSError, redirect_store_models.RedirectStoreError) as error:
         blocked = {"reason": "redirect-successor-blocked", "error": str(error)}
     if blocked is None:
         return False
@@ -222,7 +222,7 @@ def _reconcile_stranded_redirects(
             pending_session_ids=pending_sessions,
             state_dir=args.state_dir,
         )
-    except (redirect_store.RedirectStoreError, OSError) as error:
+    except (redirect_store_models.RedirectStoreError, OSError) as error:
         ctx.persistence.append_event(
             ctx.event_path,
             events.REDIRECT_CONTINUATION_EVENT,

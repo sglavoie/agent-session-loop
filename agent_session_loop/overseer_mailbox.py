@@ -13,7 +13,7 @@ from *consumed*, and a poll that reads one plan without holding up the rest.
 Every posting's ``message_id`` is :func:`message_id`, a UUID5 over the plan
 directory, the incident, the operation and the dispatch target -- the four
 fields that appear in both :class:`~agent_session_loop.overseer_dispatch.Action`
-and :class:`~agent_session_loop.overseer_store.ActionRecord`. Nothing about the
+and :class:`~agent_session_loop.overseer_store_models.ActionRecord`. Nothing about the
 moment goes into it, which is the whole point: a process that appended and then
 died wrote a record whose id the next process can compute rather than guess.
 So the append is idempotent by construction. A retry either lands or is refused
@@ -102,7 +102,8 @@ from . import (
     mailbox_vocabulary,
     overseer_decisions,
     overseer_dispatch,
-    overseer_store,
+    overseer_store_ledger,
+    overseer_store_models,
 )
 
 __all__ = [
@@ -315,7 +316,7 @@ def message_id(
     process that never saw it.
 
     ``incident_id`` is optional because the ledger's is:
-    :class:`~agent_session_loop.overseer_store.ActionRecord` carries a nullable
+    :class:`~agent_session_loop.overseer_store_models.ActionRecord` carries a nullable
     incident, and the derivation has to accept whatever a row actually holds or
     a reconciliation could not look up the row it is reconciling. An absent
     incident derives its own stable id, which is what keeps such a row findable
@@ -585,7 +586,7 @@ def post_guidance(
 def poll_plan(
     *,
     plan_dir: str,
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     state_dir: str | Path | None = None,
 ) -> PlanPoll:
     """Read one plan's mailbox once and project every posting it holds.
@@ -637,7 +638,7 @@ def poll_plan(
 def poll_fleet(
     *,
     plan_dirs: Sequence[str],
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     state_dir: str | Path | None = None,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -733,7 +734,7 @@ class ReplyAdapter:
 
     def reconcile(
         self,
-        record: overseer_store.ActionRecord,
+        record: overseer_store_models.ActionRecord,
     ) -> overseer_dispatch.Receipt:
         """Say whether a reply a dead process may have appended is in there."""
         return _reconcile(record, operation="reply", state_dir=self.state_dir)
@@ -791,7 +792,7 @@ class GuidanceAdapter:
 
     def reconcile(
         self,
-        record: overseer_store.ActionRecord,
+        record: overseer_store_models.ActionRecord,
     ) -> overseer_dispatch.Receipt:
         """Say whether guidance a dead process may have appended is in there."""
         return _reconcile(record, operation="guidance", state_dir=self.state_dir)
@@ -1060,7 +1061,7 @@ def _receipt(posting: Posting) -> overseer_dispatch.Receipt:
 
 
 def _reconcile(
-    record: overseer_store.ActionRecord,
+    record: overseer_store_models.ActionRecord,
     *,
     operation: str,
     state_dir: Path | None,
@@ -1108,7 +1109,7 @@ def _reconcile(
 
 
 def _stamp(
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
     *,
     plan_dir: str,
     position: int | None,
@@ -1133,7 +1134,7 @@ def _stamp(
 
 def _service_order(
     plan_dirs: Sequence[str],
-    ledger: overseer_store.Ledger,
+    ledger: overseer_store_ledger.Ledger,
 ) -> tuple[str, ...]:
     """Order plans least-recently-polled first, never-polled ahead of all."""
     unique = tuple(dict.fromkeys(plan_dirs))

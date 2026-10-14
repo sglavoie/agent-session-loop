@@ -27,7 +27,8 @@ from agent_session_loop import (
     plans_session_ids,
     review,
     review_continuation,
-    verification,
+    verification_cli,
+    verification_models,
     verification_transitions,
 )
 from agent_session_loop.transitions import IllegalTransitionError
@@ -47,8 +48,8 @@ def _check(
     returncode: int | None = 1,
     stdout_sha256: str | None = "aa",
     stderr_sha256: str | None = "bb",
-) -> verification.CheckResult:
-    return verification.CheckResult(
+) -> verification_models.CheckResult:
+    return verification_models.CheckResult(
         name=name,
         kind=kind,
         status=status,
@@ -61,10 +62,10 @@ def _check(
 
 
 def _result(
-    *checks: verification.CheckResult,
+    *checks: verification_models.CheckResult,
     session_id: str = "1",
-) -> verification.VerificationResult:
-    return verification.VerificationResult(
+) -> verification_models.VerificationResult:
+    return verification_models.VerificationResult(
         session_id=plans_session_ids.SessionId.parse(session_id),
         checks=list(checks),
         skipped_checks=[],
@@ -237,7 +238,7 @@ class RunRefusalTests(unittest.TestCase):
         refusal = verification_transitions.refuse_unavailable_verification(
             session_label="session 1", error="no such file"
         )
-        self.assertEqual(refusal.reason, verification.VERIFY_EXIT_REASON_FAILED)
+        self.assertEqual(refusal.reason, verification_cli.VERIFY_EXIT_REASON_FAILED)
         self.assertEqual(refusal.error, "no such file")
         self.assertEqual(
             refusal.turn_verification("1"),
@@ -291,7 +292,7 @@ class AdjudicateVerificationTests(unittest.TestCase):
         self.assertEqual((graded.event, graded.state), ("defer", "deferred"))
         self.assertTrue(graded.continues)
         self.assertFalse(graded.passed)
-        self.assertEqual(graded.reason, verification.VERIFY_EXIT_REASON_FAILED)
+        self.assertEqual(graded.reason, verification_cli.VERIFY_EXIT_REASON_FAILED)
         turn = graded.turn_verification("1")
         self.assertIs(turn["passed"], False)
         self.assertEqual(turn["acceptance"]["deferred_failure_names"], ["broad:tests"])
@@ -447,7 +448,7 @@ class VerificationRepairBudgetTests(unittest.TestCase):
         self._append(
             events.RUN_PAUSED_EVENT,
             {
-                "reason": verification.VERIFY_EXIT_REASON_FAILED,
+                "reason": verification_cli.VERIFY_EXIT_REASON_FAILED,
                 "details": {
                     "session": session,
                     "failures": [

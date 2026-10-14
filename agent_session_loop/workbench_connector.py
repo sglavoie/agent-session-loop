@@ -1,6 +1,6 @@
 """The Mac provider behind ``asl workbench connect``.
 
-:mod:`asl_workbench.connector` decides *when* a connector publishes and *what*
+:mod:`asl_workbench.connector_runtime` decides *when* a connector publishes and *what*
 a frame may contain; this module is the half that knows what ASL is. It holds
 three things:
 
@@ -55,17 +55,19 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from asl_workbench import connector as portable_connector
+from asl_workbench import connector_payloads as portable_payloads
+from asl_workbench import connector_protocols as portable_protocols
+from asl_workbench import connector_support as portable_support
 from asl_workbench import history as portable_history
 from asl_workbench.catalog import CatalogEntry
-from asl_workbench.connector import (
+from asl_workbench.connector_protocols import ObservationCycle
+from asl_workbench.connector_runtime import ObservationConnector
+from asl_workbench.connector_support import (
     CATALOG_PAGE_LIMIT,
     MAX_PUBLISHED_RUNS,
     Backoff,
     ChannelError,
     ConnectorError,
-    ObservationConnector,
-    ObservationCycle,
     SingleInstanceLock,
 )
 from asl_workbench.operations import (
@@ -209,11 +211,11 @@ def project_run(
         "actions": _remote_actions(row.get("actions")),
         "last_activity_at": activity,
         "action_token": row.get("action_token"),
-        "session_id": portable_connector.session_id_word(row.get("session_id")),
+        "session_id": portable_payloads.session_id_word(row.get("session_id")),
         "harness": row.get("harness"),
         "run_started_at": portable_history.epoch(row.get("run_started_at")),
         "run_finished_at": portable_history.epoch(row.get("run_finished_at")),
-        "pause_reason": portable_connector.pause_reason_word(row.get("pause_reason")),
+        "pause_reason": portable_payloads.pause_reason_word(row.get("pause_reason")),
         "warnings": list(row.get("warnings") or ()),
     }
     if question is not None:
@@ -463,7 +465,7 @@ class HttpsChannel:
     a POST replayed by a layer that cannot see the queue is how one frame
     arrives twice.
 
-    Every failure becomes :class:`asl_workbench.connector.ChannelError`, which
+    Every failure becomes :class:`asl_workbench.connector_support.ChannelError`, which
     is the only exception the runtime knows how to classify as "the link, not
     the code".
     """
@@ -735,11 +737,11 @@ def publish_forever(
 def build_connector(
     args: Any,
     *,
-    channel: portable_connector.Channel | None = None,
-    source: portable_connector.ObservationSource | None = None,
-    responder: portable_connector.DetailResponder | None = None,
-    performer: portable_connector.MutationPerformer | None = None,
-    body_source: portable_connector.MutationBodySource | None = None,
+    channel: portable_protocols.Channel | None = None,
+    source: portable_protocols.ObservationSource | None = None,
+    responder: portable_protocols.DetailResponder | None = None,
+    performer: portable_protocols.MutationPerformer | None = None,
+    body_source: portable_protocols.MutationBodySource | None = None,
 ) -> ObservationConnector:
     """Assemble the connector this invocation asked for.
 
@@ -805,11 +807,11 @@ def build_connector(
         )
     heartbeat = float(
         getattr(args, "heartbeat_interval", None)
-        or portable_connector.DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+        or portable_support.DEFAULT_HEARTBEAT_INTERVAL_SECONDS
     )
     observation = float(
         getattr(args, "observation_interval", None)
-        or portable_connector.DEFAULT_OBSERVATION_INTERVAL_SECONDS
+        or portable_support.DEFAULT_OBSERVATION_INTERVAL_SECONDS
     )
     try:
         return ObservationConnector(
@@ -843,14 +845,14 @@ def _asl_version() -> str | None:
 
 def connector_lock_path(state_dir: str | Path | None = None) -> Path:
     """Where the single-instance pid file lives for a state root."""
-    return state.state_root(state_dir) / portable_connector.LOCK_FILE_NAME
+    return state.state_root(state_dir) / portable_support.LOCK_FILE_NAME
 
 
 def workbench_connect_from_args(
     args: Any,
     *,
-    channel: portable_connector.Channel | None = None,
-    source: portable_connector.ObservationSource | None = None,
+    channel: portable_protocols.Channel | None = None,
+    source: portable_protocols.ObservationSource | None = None,
     publish: Callable[[ObservationConnector, threading.Event], None] | None = None,
     install_signal_handlers: Callable[[threading.Event], Callable[[], None]]
     | None = None,

@@ -39,19 +39,16 @@ from agent_session_loop import (
     harness_codex,
     harnesses,
     redirect_recovery,
-    redirect_store,
+    redirect_store_journal,
+    redirect_store_models,
 )
 
+from .asl_redirect_continuation_support import FEEDBACK, SESSION_ID, WORKER_PID
+from .asl_redirect_run_support import _RedirectedRun
 from .test_asl_codex_app_server import (
     FAKE_APP_SERVER_FIXTURE,
     PROMPT,
     WAIT_SECONDS,
-)
-from .test_asl_redirect_continuation import (
-    FEEDBACK,
-    SESSION_ID,
-    WORKER_PID,
-    _RedirectedRun,
 )
 
 #: The conversation the fixture run opens and its successor asks to continue.
@@ -131,8 +128,8 @@ class LostSubmissionResponseRunTests(_RedirectedRun):
         kwargs["abort"].release()
         return dataclasses.replace(self.lost, name=name)
 
-    def _request(self) -> redirect_store.RedirectRequest:
-        request = redirect_store.read_journal(
+    def _request(self) -> redirect_store_models.RedirectRequest:
+        request = redirect_store_journal.read_journal(
             self.plan_dir, state_dir=self.state_dir
         ).request("op-1")
         assert request is not None

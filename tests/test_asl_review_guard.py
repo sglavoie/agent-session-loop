@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_session_loop import plans_snapshot, review_guard, verification
+from agent_session_loop import plans_snapshot, review_guard, verification_models
 from agent_session_loop.run_errors import RunError
 from tests.support import assert_no_runner_import, init_git_repo, write_plan
 
@@ -208,7 +208,7 @@ class WorktreeGateTests(unittest.TestCase):
         self.assertFalse(review_guard._git_status_is_clean(self.repo))
 
     def test_the_legacy_preflight_reports_no_repository_rows(self) -> None:
-        context = verification.VerificationContext.legacy(self.repo)
+        context = verification_models.VerificationContext.legacy(self.repo)
         self.assertEqual(
             {},
             review_guard._validate_commit_preflight(
@@ -296,7 +296,7 @@ class RepairCommitPreflightTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.repo = Path(self._tmp.name) / "repo"
         init_git_repo(self.repo)
-        self.context = verification.VerificationContext.legacy(self.repo)
+        self.context = verification_models.VerificationContext.legacy(self.repo)
 
     def test_the_error_is_a_run_error_that_carries_its_details(self) -> None:
         error = review_guard.RepairCommitPreflightError("boom", {"key": "value"})
@@ -363,7 +363,9 @@ class RepairCommitPreflightTests(unittest.TestCase):
         with self.assertRaises(review_guard.RepairCommitPreflightError) as caught:
             review_guard._repair_commit_preflight(
                 outside,
-                verification_context=verification.VerificationContext.legacy(outside),
+                verification_context=verification_models.VerificationContext.legacy(
+                    outside
+                ),
                 session_scope=None,
                 workspace_evidence=_unused_workspace_evidence,
             )

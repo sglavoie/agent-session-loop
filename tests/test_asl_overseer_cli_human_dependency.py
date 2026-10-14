@@ -8,7 +8,7 @@ from agent_session_loop import (
     mailbox_vocabulary,
     overseer_cli,
     overseer_decisions,
-    overseer_store,
+    overseer_store_models,
 )
 from tests.asl_overseer_cli_fleet import _OverseerCase
 from tests.asl_overseer_cli_support import ACTION
@@ -314,7 +314,7 @@ class ReconciliationPermissionTests(_OverseerCase):
 
     # -- helpers -----------------------------------------------------------
 
-    def _leave_in_doubt(self) -> overseer_store.ActionRecord:
+    def _leave_in_doubt(self) -> overseer_store_models.ActionRecord:
         """The trace a dispatch that died mid-flight leaves behind.
 
         Written straight to the ledger rather than through `act`, because a

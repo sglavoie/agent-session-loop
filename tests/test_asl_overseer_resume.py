@@ -72,7 +72,8 @@ from agent_session_loop import (
     overseer_dispatch,
     overseer_policy_client,
     overseer_resume,
-    overseer_store,
+    overseer_store_ledger,
+    overseer_store_models,
     pause_policy,
     run_entry,
     state,
@@ -154,7 +155,7 @@ class _ResumeCase(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp(prefix="asl-overseer-resume-"))
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.addCleanup(self._close)
-        self.ledger = overseer_store.open_ledger(state_dir=self.root)
+        self.ledger = overseer_store_ledger.open_ledger(state_dir=self.root)
         self.ledger.note_policy(config_fingerprint=FINGERPRINT)
         self.plan = self.new_plan("plan-a")
         self.repo = self.root / "repos" / ALIAS
@@ -480,7 +481,7 @@ class _ResumeCase(unittest.TestCase):
         action: overseer_dispatch.Action,
         *,
         progress_token: str | None = None,
-    ) -> overseer_store.ActionRecord:
+    ) -> overseer_store_models.ActionRecord:
         """The ledger row the dispatcher writes before the adapter is called."""
         token = (
             overseer_dispatch.progress_token(self.facts())

@@ -18,7 +18,7 @@ from agent_session_loop import (
     plans_registry,
     run_inputs,
     run_prompts,
-    verification,
+    verification_models,
     workspaces,
 )
 from tests.support import (
@@ -491,7 +491,9 @@ class WorkspaceMetadataTests(unittest.TestCase):
                 workspace_root,
                 _registry(specs),
             )
-            context = verification.VerificationContext.resolved_workspace(resolved)
+            context = verification_models.VerificationContext.resolved_workspace(
+                resolved
+            )
             current_binding = run_prompts._workspace_payload_fields(context)
             self.assertNotIn("workspace_inventory_excludes", current_binding)
 

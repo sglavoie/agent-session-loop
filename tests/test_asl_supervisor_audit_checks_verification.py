@@ -14,7 +14,7 @@ from agent_session_loop import (
     supervisor_audit_checks,
     supervisor_audit_models,
     supervisor_audit_write_scope,
-    verification,
+    verification_models,
 )
 from tests import support_supervisor_audit_checks as checks_support
 from tests.support_supervisor_audit import DEFERRED_REASON, RUN_ID
@@ -170,7 +170,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
                             "turn_index": 1,
                             "name": "diagnose",
                             "kind": "command",
-                            "role": verification.CHECK_ROLE_DIAGNOSTIC,
+                            "role": verification_models.CHECK_ROLE_DIAGNOSTIC,
                             "status": "fail",
                             "returncode": 1,
                             "failure_reason": "command-failed",
@@ -315,7 +315,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
                             "turn_index": 1,
                             "name": "tests",
                             "kind": "command",
-                            "role": verification.CHECK_ROLE_GATE,
+                            "role": verification_models.CHECK_ROLE_GATE,
                             "status": "fail",
                             "returncode": 1,
                             "failure_reason": "command-failed",
@@ -329,7 +329,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
                             "name": "diagnose",
                             "kind": "command",
                             "on_failure_of": ["lint"],
-                            "reason": verification.SKIP_REASON_CONDITION_NOT_MET,
+                            "reason": verification_models.SKIP_REASON_CONDITION_NOT_MET,
                         },
                     ),
                     (
@@ -371,7 +371,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
                             "turn_index": 1,
                             "name": "tests",
                             "kind": "command",
-                            "role": verification.CHECK_ROLE_GATE,
+                            "role": verification_models.CHECK_ROLE_GATE,
                             "status": "fail",
                             "returncode": 1,
                             "failure_reason": "command-failed",
@@ -384,7 +384,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
                             "turn_index": 1,
                             "name": "diagnose",
                             "kind": "command",
-                            "role": verification.CHECK_ROLE_DIAGNOSTIC,
+                            "role": verification_models.CHECK_ROLE_DIAGNOSTIC,
                             "status": "pass",
                             "returncode": 0,
                             "failure_reason": None,

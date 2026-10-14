@@ -14,7 +14,7 @@ from . import (
     redirect_ack,
     redirect_continuation,
     redirect_recovery,
-    redirect_store,
+    redirect_store_models,
 )
 from .run_loop_context import RunContext
 
@@ -66,7 +66,7 @@ def _carried_corrections(
         if pending is not None and redirected_here
         else {**plans_payloads.session_identity_payload(session_id), "recovered": True}
     )
-    continuation = redirect_store.RedirectTarget(
+    continuation = redirect_store_models.RedirectTarget(
         run_id=ctx.run_id,
         session_id=session_id,
         turn_index=turn_index,
@@ -82,7 +82,7 @@ def _carried_corrections(
             recovered_operation_ids=recovered_ids,
             state_dir=state_dir_arg,
         )
-    except redirect_store.RedirectStoreError as error:
+    except redirect_store_models.RedirectStoreError as error:
         ctx.persistence.append_event(
             ctx.event_path,
             events.REDIRECT_CONTINUATION_EVENT,
@@ -154,7 +154,7 @@ def _annotate_carried_corrections(
             operation_ids=carried.operation_ids(),
             state_dir=state_dir_arg,
         )
-    except redirect_store.RedirectStoreError as error:
+    except redirect_store_models.RedirectStoreError as error:
         ctx.persistence.append_event(
             ctx.event_path,
             events.REDIRECT_CONTINUATION_EVENT,
@@ -222,7 +222,7 @@ def _launch_carried_corrections(
             operation_ids=carried.operation_ids(),
             state_dir=state_dir_arg,
         )
-    except redirect_store.RedirectStoreError as failure:
+    except redirect_store_models.RedirectStoreError as failure:
         error = {"reason": failure.reason, "message": str(failure)}
     else:
         if result.refused:
@@ -394,7 +394,7 @@ class _TurnDelivery:
         that died between the write and the notification, a delivery line the
         journal refused. Releasing on the silence is how the same correction
         reaches a second worker, so an unproven turn releases nothing and the
-        carry stands as :attr:`~.redirect_store.RedirectRequest.launch_ambiguous`
+        carry stands as :attr:`~.redirect_store_models.RedirectRequest.launch_ambiguous`
         for an operator to reconcile.
 
         Called on every path out of the turn, including the ones that submitted:

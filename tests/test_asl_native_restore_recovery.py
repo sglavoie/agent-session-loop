@@ -32,7 +32,7 @@ conversation the failure interrupted and spends no fresh-start authorization.
 
 The fixtures are the real ones: a spawned app-server, a spawned ACP agent, and
 for the run-loop story the whole-loop fixture from
-:mod:`tests.test_asl_redirect_continuation`. The result the run loop is driven
+:mod:`tests.asl_redirect_run_support`. The result the run loop is driven
 by is produced by the real adapter against the real refusing app-server rather
 than assembled by hand, so the branch cannot keep passing against a result shape
 no transport produces.
@@ -62,11 +62,21 @@ from agent_session_loop import (
     harnesses,
     redirect_ack,
     redirect_recovery,
-    redirect_store,
+    redirect_store_delivery,
+    redirect_store_journal,
+    redirect_store_models,
+    redirect_store_vocab,
     restore_diagnosis,
     state,
     turn_execution_artifacts,
 )
+from tests.asl_redirect_continuation_support import (
+    FEEDBACK,
+    SESSION_ID,
+    WORKER_PID,
+    target,
+)
+from tests.asl_redirect_run_support import _RedirectedRun
 from tests.test_asl_codex_app_server import (
     FAKE_APP_SERVER_FIXTURE,
     PROMPT,
@@ -75,13 +85,6 @@ from tests.test_asl_codex_app_server import (
 from tests.test_asl_copilot_acp import FAKE_ACP_FIXTURE
 from tests.test_asl_copilot_acp import SESSION_ID as ACP_SESSION_ID
 from tests.test_asl_harness_lifecycle import _FakePipe, _FakeProcess, _TurnTestCase
-from tests.test_asl_redirect_continuation import (
-    FEEDBACK,
-    SESSION_ID,
-    WORKER_PID,
-    _RedirectedRun,
-    target,
-)
 
 #: The native conversation the adapter-level refusals ask for.
 THREAD_ID = "thread-77"
@@ -1115,8 +1118,8 @@ class _NativeRestoreRun(_RedirectedRun):
             ),
         )
 
-    def _request(self) -> redirect_store.RedirectRequest:
-        request = redirect_store.read_journal(
+    def _request(self) -> redirect_store_models.RedirectRequest:
+        request = redirect_store_journal.read_journal(
             self.plan_dir, state_dir=self.state_dir
         ).request("op-1")
         assert request is not None
@@ -1346,15 +1349,15 @@ class RefusedRestoreRunTests(_NativeRestoreRun):
         # live attempt.
         assert self.stale_refusal is not None
         self.assertEqual(redirect_ack.ERROR_ATTEMPT_MISMATCH, self.stale_refusal.reason)
-        with self.assertRaises(redirect_store.RedirectStoreError) as raised:
-            redirect_store.acknowledge_request(
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as raised:
+            redirect_store_delivery.acknowledge_request(
                 self.plan_dir,
                 "op-1",
                 attempt=target(2),
                 state_dir=self.state_dir,
             )
         self.assertEqual(
-            redirect_store.ERROR_CONTINUATION_MISMATCH, raised.exception.reason
+            redirect_store_vocab.ERROR_CONTINUATION_MISMATCH, raised.exception.reason
         )
 
     def _recover_after_pause(self) -> dict[str, Any]:
@@ -1558,15 +1561,15 @@ class ClaudeRefusedRestoreRunTests(_NativeRestoreRun):
 
         assert self.stale_refusal is not None
         self.assertEqual(redirect_ack.ERROR_ATTEMPT_MISMATCH, self.stale_refusal.reason)
-        with self.assertRaises(redirect_store.RedirectStoreError) as raised:
-            redirect_store.acknowledge_request(
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as raised:
+            redirect_store_delivery.acknowledge_request(
                 self.plan_dir,
                 "op-1",
                 attempt=target(2),
                 state_dir=self.state_dir,
             )
         self.assertEqual(
-            redirect_store.ERROR_CONTINUATION_MISMATCH, raised.exception.reason
+            redirect_store_vocab.ERROR_CONTINUATION_MISMATCH, raised.exception.reason
         )
 
 

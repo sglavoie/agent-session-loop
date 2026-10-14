@@ -110,7 +110,7 @@ from . import (
     state_locks,
     supervisor_audit,
     turn_execution_constants,
-    verification,
+    verification_models,
 )
 from .run_errors import RunError
 
@@ -137,7 +137,7 @@ class LockedRun(Protocol):
         run_id: str,
         reply_text: str | None,
         reply_origin: str,
-        verification_context: verification.VerificationContext | None,
+        verification_context: verification_models.VerificationContext | None,
         wakeup: threading.Event | None,
         redirect_wakeup: threading.Event | None,
     ) -> tuple[int, dict[str, Any]]: ...

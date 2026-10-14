@@ -24,7 +24,7 @@ from agent_session_loop import (
     turn_preflight,
     turn_preparation,
     turn_settlement,
-    verification,
+    verification_models,
     workspace_evidence,
 )
 from tests import support_asl_run_loop_view as run_loop_view
@@ -138,7 +138,7 @@ class RepairChildWriteScopeRegenerationTests(unittest.TestCase):
         raise AssertionError("the repair child was not materialized")
 
     def _regenerate(self) -> dict[str, Any] | None:
-        context = verification.VerificationContext.from_plan(
+        context = verification_models.VerificationContext.from_plan(
             self.plan_dir,
             self.workspace_root,
         )

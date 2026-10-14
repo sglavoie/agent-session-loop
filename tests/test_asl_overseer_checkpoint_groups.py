@@ -57,7 +57,8 @@ from agent_session_loop import (
     overseer_decisions,
     overseer_dispatch,
     overseer_policy_client,
-    overseer_store,
+    overseer_store_ledger,
+    overseer_store_models,
     state,
 )
 from tests import support
@@ -87,7 +88,7 @@ class _GroupCase(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp(prefix="asl-overseer-groups-"))
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.addCleanup(self._close)
-        self.ledgers: list[overseer_store.Ledger] = []
+        self.ledgers: list[overseer_store_ledger.Ledger] = []
         self.ledger = self.open_ledger()
         self.ledger.note_policy(config_fingerprint=FINGERPRINT)
         self.plan = self.new_plan("plan-a")
@@ -111,9 +112,9 @@ class _GroupCase(unittest.TestCase):
         self.asked: list[dict[str, Any]] = []
         self.turn_index = 0
 
-    def open_ledger(self) -> overseer_store.Ledger:
+    def open_ledger(self) -> overseer_store_ledger.Ledger:
         """A ledger handle of its own, so a restart can open the same file."""
-        ledger = overseer_store.open_ledger(state_dir=self.root)
+        ledger = overseer_store_ledger.open_ledger(state_dir=self.root)
         self.ledgers.append(ledger)
         return ledger
 
@@ -320,7 +321,7 @@ class _GroupCase(unittest.TestCase):
         rulings: tuple[overseer_decisions.Ruling | None, ...] = (),
         decisions: tuple[overseer_policy_client.Decision, ...] = (),
         repositories: tuple[overseer_policy_client.Repository, ...] | None = None,
-        ledger: overseer_store.Ledger | None = None,
+        ledger: overseer_store_ledger.Ledger | None = None,
     ) -> overseer_checkpoint_groups.GroupAdapter:
         answers = list(rulings) or [self.ruling()]
 
@@ -378,13 +379,13 @@ class _GroupCase(unittest.TestCase):
     def group(
         self,
         action: overseer_dispatch.Action,
-        ledger: overseer_store.Ledger | None = None,
-    ) -> overseer_store.CheckpointGroupRecord | None:
+        ledger: overseer_store_ledger.Ledger | None = None,
+    ) -> overseer_store_models.CheckpointGroupRecord | None:
         return (ledger or self.ledger).checkpoint_group(self.key(action))
 
     def attempted(
         self, action: overseer_dispatch.Action
-    ) -> overseer_store.ActionRecord:
+    ) -> overseer_store_models.ActionRecord:
         """The ledger row a dispatch writes before the adapter is called."""
         return self.ledger.attempt_action(
             grant=overseer_policy_client.Grant(
@@ -1043,7 +1044,7 @@ class Reconciliation(_GroupCase):
         record = self.attempted(action)
         adapter = self.adapter()
         receipt = adapter.reconcile(
-            overseer_store.ActionRecord(
+            overseer_store_models.ActionRecord(
                 **{**record.__dict__, "operation": "resume"},
             )
         )

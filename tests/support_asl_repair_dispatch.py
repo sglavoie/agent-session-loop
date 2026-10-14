@@ -20,7 +20,7 @@ from agent_session_loop import (
     run_loop,
     state,
     state_locks,
-    verification,
+    verification_models,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -180,7 +180,7 @@ class GeneratedRepairDispatchFixture(unittest.TestCase):
             note=None,
             allow_not_loop_ready=True,
         )
-        context = verification.VerificationContext.from_plan(
+        context = verification_models.VerificationContext.from_plan(
             self.plan_dir, self.workspace_root
         )
         lock_info = state_locks.acquire_lock(self.plan_dir, self.state_dir)

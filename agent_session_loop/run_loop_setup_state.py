@@ -37,7 +37,7 @@ from . import (
     state,
     state_abandonment,
     supervisor_audit,
-    verification,
+    verification_models,
 )
 from .run_loop_context import RunContext
 from .run_loop_control_redirects import (
@@ -57,7 +57,9 @@ def _open_run_state(frame: RunFrame) -> RunResult | None:
     # on. A wakeup that lands outside the poll loop below only leaves the
     # event set for the next waiter to observe.
     if frame.verification_context is None:
-        frame.verification_context = verification.VerificationContext.legacy(frame.cwd)
+        frame.verification_context = verification_models.VerificationContext.legacy(
+            frame.cwd
+        )
     plan_cache = plans_snapshot.PlanSnapshotCache()
     frame.normalized_review_handoffs = list(
         plans_handoff.normalize_generated_review_handoff_artifacts(frame.args.plan_dir)

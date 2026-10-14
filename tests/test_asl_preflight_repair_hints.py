@@ -250,7 +250,7 @@ class PreflightRepairHintTests(unittest.TestCase):
         self.assertEqual("env-install", hint.fix_category)
 
     def test_runtime_verify_failed_every_failure_reason_resolves(self) -> None:
-        # Every failure_reason emitted by verification.py must resolve so the
+        # Every failure_reason emitted by the verification modules must resolve so the
         # guided skill can surface a fix for any per-check failure.
         for failure_reason in (
             "command-failed",

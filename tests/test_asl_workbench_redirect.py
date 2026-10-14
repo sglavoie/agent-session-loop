@@ -51,7 +51,11 @@ from agent_session_loop import (
     plans_files,
     redirect_admission,
     redirect_cli,
-    redirect_store,
+    redirect_store_journal,
+    redirect_store_models,
+    redirect_store_requests,
+    redirect_store_validation,
+    redirect_store_vocab,
     state,
     workbench_launch,
     workbench_registry_models,
@@ -153,19 +157,21 @@ class WorkbenchRedirectTestCase(unittest.TestCase):
         self.write_state(**state_kwargs)
         return self.serve_redirects()
 
-    def target(self, *, turn_index: int = 1) -> redirect_store.RedirectTarget:
-        return redirect_store.RedirectTarget(
+    def target(self, *, turn_index: int = 1) -> redirect_store_models.RedirectTarget:
+        return redirect_store_models.RedirectTarget(
             run_id=RUN_ID,
             session_id=SESSION_ID,
             turn_index=turn_index,
             harness="claude",
         )
 
-    def journal(self) -> redirect_store.RedirectJournalView:
-        return redirect_store.read_journal(self.plan_dir, state_dir=self.state_dir)
+    def journal(self) -> redirect_store_models.RedirectJournalView:
+        return redirect_store_journal.read_journal(
+            self.plan_dir, state_dir=self.state_dir
+        )
 
     def accept_when_pending(
-        self, target: redirect_store.RedirectTarget | None = None
+        self, target: redirect_store_models.RedirectTarget | None = None
     ) -> threading.Thread:
         """Play the runner: record acceptance while the submit wait is running.
 
@@ -180,7 +186,7 @@ class WorkbenchRedirectTestCase(unittest.TestCase):
             while time.monotonic() < deadline:
                 pending = self.journal().pending()
                 if pending:
-                    redirect_store.accept_request(
+                    redirect_store_requests.accept_request(
                         self.plan_dir,
                         pending[0].operation_id,
                         target=wanted,
@@ -451,7 +457,8 @@ class RedirectSubmissionTests(WorkbenchRedirectTestCase):
         self.assertEqual(1, len(requests))
         self.assertEqual(OPERATION_ID, requests[0].operation_id)
         self.assertEqual(
-            redirect_store.feedback_digest(FEEDBACK), requests[0].feedback_digest
+            redirect_store_validation.feedback_digest(FEEDBACK),
+            requests[0].feedback_digest,
         )
 
     def test_a_persisted_but_unaccepted_correction_is_still_a_receipt(self) -> None:
@@ -488,7 +495,7 @@ class RedirectSubmissionTests(WorkbenchRedirectTestCase):
         # a fact about the frames rather than about a lost correction.
         self.assertEqual(
             FEEDBACK,
-            redirect_store.read_feedback(
+            redirect_store_journal.read_feedback(
                 self.plan_dir, OPERATION_ID, state_dir=self.state_dir
             ),
         )
@@ -509,14 +516,14 @@ class RedirectRefusalTests(WorkbenchRedirectTestCase):
     def test_an_oversized_correction_is_the_clients_error(self) -> None:
         """The journal's feedback cap is reported as a 400, not as a 500."""
         self.live_run()
-        oversized = "x" * (redirect_store.REDIRECT_MAX_FEEDBACK_BYTES + 1)
+        oversized = "x" * (redirect_store_vocab.REDIRECT_MAX_FEEDBACK_BYTES + 1)
 
         status, body, _ = self.submit(text=oversized)
 
         self.assertEqual(400, status)
-        self.assertEqual(redirect_store.ERROR_INVALID_FEEDBACK, body["reason"])
+        self.assertEqual(redirect_store_vocab.ERROR_INVALID_FEEDBACK, body["reason"])
         self.assertEqual(
-            redirect_store.REDIRECT_MAX_FEEDBACK_BYTES,
+            redirect_store_vocab.REDIRECT_MAX_FEEDBACK_BYTES,
             body["details"]["max_feedback_bytes"],
         )
         self.assertEqual((), self.journal().requests)
@@ -524,12 +531,14 @@ class RedirectRefusalTests(WorkbenchRedirectTestCase):
     def test_an_overlong_operation_id_is_the_clients_error(self) -> None:
         """Every journal field cap is a 400, not a retryable server fault."""
         self.live_run()
-        oversized = "o" * (redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS + 1)
+        oversized = "o" * (redirect_store_vocab.REDIRECT_MAX_OPERATION_ID_CHARS + 1)
 
         status, body, _ = self.submit(operation_id=oversized)
 
         self.assertEqual(400, status)
-        self.assertEqual(redirect_store.ERROR_INVALID_OPERATION_ID, body["reason"])
+        self.assertEqual(
+            redirect_store_vocab.ERROR_INVALID_OPERATION_ID, body["reason"]
+        )
         # Telling a client to retry a key that can never be accepted is the one
         # unhelpful answer available here.
         self.assertFalse(body.get("retryable", False))
@@ -678,12 +687,13 @@ class ReplayIdentityTests(WorkbenchRedirectTestCase):
         requests = self.journal().requests
         self.assertEqual(1, len(requests))
         self.assertEqual(
-            redirect_store.feedback_digest(FEEDBACK), requests[0].feedback_digest
+            redirect_store_validation.feedback_digest(FEEDBACK),
+            requests[0].feedback_digest,
         )
         self.assertEqual(self.target(), requests[0].target)
         self.assertEqual(
             FEEDBACK,
-            redirect_store.read_feedback(
+            redirect_store_journal.read_feedback(
                 self.plan_dir, OPERATION_ID, state_dir=self.state_dir
             ),
         )
@@ -696,8 +706,10 @@ class ReplayIdentityTests(WorkbenchRedirectTestCase):
         # 409, not 400: the body is well formed and what it contradicts is a
         # durable record, which a client resolves by reconciling the id.
         self.assertEqual(409, status)
-        self.assertEqual(redirect_store.ERROR_REPLAY_CONFLICT, body["reason"])
-        self.assertEqual(redirect_store.CONFLICT_FEEDBACK, body["details"]["conflict"])
+        self.assertEqual(redirect_store_vocab.ERROR_REPLAY_CONFLICT, body["reason"])
+        self.assertEqual(
+            redirect_store_vocab.CONFLICT_FEEDBACK, body["details"]["conflict"]
+        )
         self.assertFalse(body["retryable"])
         self.assert_journal_unchanged()
 
@@ -713,7 +725,7 @@ class ReplayIdentityTests(WorkbenchRedirectTestCase):
         # The digest of the correction that landed, so a browser can say which
         # one it is refusing to overwrite without ever holding its words.
         self.assertEqual(
-            redirect_store.feedback_digest(FEEDBACK),
+            redirect_store_validation.feedback_digest(FEEDBACK),
             receipt["operation"]["feedback_digest"],
         )
 
@@ -726,8 +738,10 @@ class ReplayIdentityTests(WorkbenchRedirectTestCase):
         )
 
         self.assertEqual(409, status)
-        self.assertEqual(redirect_store.ERROR_REPLAY_CONFLICT, body["reason"])
-        self.assertEqual(redirect_store.CONFLICT_TARGET, body["details"]["conflict"])
+        self.assertEqual(redirect_store_vocab.ERROR_REPLAY_CONFLICT, body["reason"])
+        self.assertEqual(
+            redirect_store_vocab.CONFLICT_TARGET, body["details"]["conflict"]
+        )
         self.assert_journal_unchanged()
 
     def test_a_retry_naming_the_same_turn_still_replays(self) -> None:
@@ -761,7 +775,7 @@ class ReplayIdentityTests(WorkbenchRedirectTestCase):
         )
 
         self.assertEqual(409, status)
-        self.assertEqual(redirect_store.ERROR_REPLAY_CONFLICT, body["reason"])
+        self.assertEqual(redirect_store_vocab.ERROR_REPLAY_CONFLICT, body["reason"])
         self.assert_journal_unchanged()
 
     def test_an_edited_draft_is_refused_after_the_turn_ended(self) -> None:
@@ -772,7 +786,7 @@ class ReplayIdentityTests(WorkbenchRedirectTestCase):
         status, body, _ = self.submit(text=EDITED_FEEDBACK)
 
         self.assertEqual(409, status)
-        self.assertEqual(redirect_store.ERROR_REPLAY_CONFLICT, body["reason"])
+        self.assertEqual(redirect_store_vocab.ERROR_REPLAY_CONFLICT, body["reason"])
         self.assert_journal_unchanged()
 
     def test_a_new_operation_id_sends_the_edited_draft(self) -> None:
@@ -789,8 +803,8 @@ class ReplayIdentityTests(WorkbenchRedirectTestCase):
         digests = {request.feedback_digest for request in self.journal().requests}
         self.assertEqual(
             {
-                redirect_store.feedback_digest(FEEDBACK),
-                redirect_store.feedback_digest(EDITED_FEEDBACK),
+                redirect_store_validation.feedback_digest(FEEDBACK),
+                redirect_store_validation.feedback_digest(EDITED_FEEDBACK),
             },
             digests,
         )
@@ -999,7 +1013,7 @@ class ConversationRecoveryTests(WorkbenchRedirectTestCase):
         self.assertIn("redirect-status", body["inspect_command"])
 
     def test_a_fresh_start_reports_the_corrections_it_would_inherit(self) -> None:
-        request = redirect_store.submit_request(
+        request = redirect_store_requests.submit_request(
             self.plan_dir,
             target=self.target(),
             feedback=FEEDBACK,

@@ -416,7 +416,7 @@ def snapshot_digest(snapshot: Mapping[str, Any]) -> str:
 #
 # Everything below reads the redirect journal and derives the same stage
 # `asl control redirect-status` prints. None of it reaches
-# `redirect_store.read_feedback`, which is the only function that returns an
+# `redirect_store_journal.read_feedback`, which is the only function that returns an
 # operator's words, so a correction's text cannot enter a frame by accident:
 # the bridge never holds it in the first place.
 # ---------------------------------------------------------------------------

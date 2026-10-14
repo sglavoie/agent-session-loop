@@ -104,7 +104,7 @@ from . import (
     run_prompts,
     run_selection,
     turn_execution_live,
-    verification,
+    verification_models,
 )
 from .run_errors import RunError
 
@@ -176,7 +176,7 @@ def _build_invocation_payload(
     invocation: harnesses.HarnessInvocation,
     *,
     model_effort: dict[str, str | None] | None = None,
-    verification_context: verification.VerificationContext | None = None,
+    verification_context: verification_models.VerificationContext | None = None,
 ) -> dict[str, Any]:
     if model_effort is None:
         model_effort = config.model_effort_payload(

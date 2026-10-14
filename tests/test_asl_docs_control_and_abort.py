@@ -361,7 +361,7 @@ class ControlAndAbortDocsTests(unittest.TestCase):
 
         for marker in (
             "accept an optional `launch_id` bounded by "
-            "`redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS`",
+            "`redirect_store_vocab.REDIRECT_MAX_OPERATION_ID_CHARS`",
             "both routes admit through the plan's operation journal, so a "
             "resend is idempotent across Workbench processes and across a "
             "restart, not only within the process that spawned",

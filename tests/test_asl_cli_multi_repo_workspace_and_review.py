@@ -17,7 +17,7 @@ from agent_session_loop import (
     review_delta,
     review_session_body,
     task_packet,
-    verification,
+    verification_models,
     workspace_evidence,
 )
 from tests.support_asl_cli_multi_repo import MultiRepoRunnerHelpers
@@ -260,7 +260,7 @@ class MultiRepoWorkspaceAndReviewTests(MultiRepoRunnerHelpers, unittest.TestCase
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             workspace_root, plan_dir, repositories = self._workspace_plan(tmp_dir)
-            context = verification.VerificationContext.from_plan(
+            context = verification_models.VerificationContext.from_plan(
                 plan_dir, workspace_root
             )
             assert context.workspace is not None

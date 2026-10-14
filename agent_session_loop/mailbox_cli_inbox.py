@@ -17,7 +17,7 @@ from . import (
     mailbox_cli_status,
     mailbox_models,
     redirect_ack,
-    redirect_store,
+    redirect_store_models,
     responses,
 )
 
@@ -113,13 +113,13 @@ def inbox_read_from_args(args: argparse.Namespace) -> int:
 
 def live_attempt(
     context: cli_common.PlanCommandContext,
-) -> redirect_store.RedirectTarget | None:
+) -> redirect_store_models.RedirectTarget | None:
     """Return the attempt the run's own state says is running right now."""
     ownership = mailbox_cli_status.active_turn_ownership(context)
     if ownership is None:
         return None
     run_id, session_id, turn_index = ownership
-    return redirect_store.RedirectTarget(
+    return redirect_store_models.RedirectTarget(
         run_id=run_id,
         session_id=session_id,
         turn_index=turn_index,
@@ -128,7 +128,7 @@ def live_attempt(
 
 
 def _redirect_refusal(
-    error: redirect_ack.RedirectAckError | redirect_store.RedirectStoreError,
+    error: redirect_ack.RedirectAckError | redirect_store_models.RedirectStoreError,
 ) -> dict[str, Any]:
     payload = error.to_payload()
     return {
@@ -192,7 +192,7 @@ def inbox_acknowledge_from_args(args: argparse.Namespace) -> int:
                 attempt=attempt,
                 state_dir=args.state_dir,
             )
-        except redirect_store.RedirectStoreError as error:
+        except redirect_store_models.RedirectStoreError as error:
             cli_common.print_error(
                 args,
                 command_name=mailbox_cli_constants.COMMAND_INBOX_ACKNOWLEDGE,
@@ -217,7 +217,7 @@ def inbox_acknowledge_from_args(args: argparse.Namespace) -> int:
             )
         except (
             redirect_ack.RedirectAckError,
-            redirect_store.RedirectStoreError,
+            redirect_store_models.RedirectStoreError,
         ) as error:
             refused.append(
                 {"operation_id": operation_id, **_redirect_refusal(error)},

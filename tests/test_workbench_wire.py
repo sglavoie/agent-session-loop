@@ -59,7 +59,7 @@ from agent_session_loop import (
     workbench_remote_actions,
     workbench_remote_reads,
 )
-from asl_workbench import connector as portable
+from asl_workbench import connector_runtime as portable_runtime
 from asl_workbench import http as workbench_http
 from asl_workbench import observation, operations
 from asl_workbench.credentials import (
@@ -183,7 +183,7 @@ class WireCase(unittest.TestCase):
         self.serving.start()
         self.addCleanup(self.stop_server)
 
-        self.connector = portable.ObservationConnector(
+        self.connector = portable_runtime.ObservationConnector(
             connector_id=CONNECTOR_ID,
             target_id=TARGET_ID,
             source=workbench_connector.AslObservationSource(

@@ -14,12 +14,20 @@ import socket
 from pathlib import Path
 from typing import Any
 
-from . import durability, process_tree, redirect_store, state, state_locks
+from . import (
+    durability,
+    process_tree,
+    redirect_store_delivery,
+    redirect_store_journal,
+    redirect_store_models,
+    state,
+    state_locks,
+)
 
 
 def evidence_dir(
     plan_dir: str | Path,
-    target: redirect_store.RedirectTarget,
+    target: redirect_store_models.RedirectTarget,
     state_dir: str | Path | None = None,
 ) -> Path:
     # Harness is descriptive metadata, not part of a turn's durable identity.
@@ -100,7 +108,7 @@ def predecessor_blocker(directory: Path) -> dict[str, Any] | None:
 
 def _resolution_path(
     plan_dir: str | Path,
-    request: redirect_store.RedirectRequest,
+    request: redirect_store_models.RedirectRequest,
     state_dir: str | Path | None,
 ) -> Path:
     continuation = request.continuation or request.released_from
@@ -118,7 +126,7 @@ def _resolution_path(
 
 def resolution_for(
     plan_dir: str | Path,
-    request: redirect_store.RedirectRequest,
+    request: redirect_store_models.RedirectRequest,
     state_dir: str | Path | None = None,
 ) -> dict[str, Any] | None:
     try:
@@ -155,9 +163,9 @@ def resolve_submission(
         raise ValueError("an explicit outcome and reason are required")
     state_locks.acquire_lock(plan_dir, state_dir, owner="redirect-resolution")
     try:
-        request = redirect_store.read_journal(plan_dir, state_dir=state_dir).request(
-            operation_id
-        )
+        request = redirect_store_journal.read_journal(
+            plan_dir, state_dir=state_dir
+        ).request(operation_id)
         if request is None or request.acknowledged:
             raise ValueError("operation has no unresolved submission")
         prior = resolution_for(plan_dir, request, state_dir)
@@ -181,7 +189,7 @@ def resolve_submission(
             _resolution_path(plan_dir, request, state_dir), payload, durable=True
         )
         if outcome == "not-submitted":
-            redirect_store.release_request(
+            redirect_store_delivery.release_request(
                 plan_dir,
                 operation_id,
                 continuation=request.continuation,
@@ -198,7 +206,7 @@ def restart_blocker(
     pending_session_ids: tuple[str, ...],
     state_dir: str | Path | None = None,
 ) -> dict[str, Any] | None:
-    view = redirect_store.read_journal(plan_dir, state_dir=state_dir)
+    view = redirect_store_journal.read_journal(plan_dir, state_dir=state_dir)
     if view.torn_tail or view.rejected:
         return {
             "reason": "redirect-successor-blocked",
@@ -224,7 +232,7 @@ def restart_blocker(
                 resolution["outcome"] == "not-submitted"
                 and request.continuation is not None
             ):
-                redirect_store.release_request(
+                redirect_store_delivery.release_request(
                     plan_dir,
                     request.operation_id,
                     continuation=request.continuation,

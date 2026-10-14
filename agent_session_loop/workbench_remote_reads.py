@@ -2,8 +2,9 @@
 
 :mod:`asl_workbench.remote_reads` is the side that asks; this is the side that
 looks. It is the only ASL-aware code the connector's correlated lane ever
-reaches, and it exists so that :class:`asl_workbench.connector.DetailResponder`
-can stay a one-method protocol with no idea what a plan directory is.
+reaches, and it exists so that
+:class:`asl_workbench.connector_protocols.DetailResponder` can stay a one-method
+protocol with no idea what a plan directory is.
 
 Three translations happen here and nowhere else:
 
@@ -390,7 +391,7 @@ def detail_payload(
 class AslDetailResponder:
     """Answers one ``detail.read`` against this Mac, and changes nothing.
 
-    Satisfies :class:`asl_workbench.connector.DetailResponder`. The connector
+    Satisfies :class:`asl_workbench.connector_protocols.DetailResponder`. The connector
     calls :meth:`answer` on a worker and takes whatever comes back as the frame
     it sends, so this class raises nothing it can help raising: a read that
     failed is a payload carrying a reason, which is an answer the far end can

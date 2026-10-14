@@ -17,7 +17,7 @@ from agent_session_loop import (
     harnesses,
     run_loop,
     state_locks,
-    verification,
+    verification_models,
     workspaces,
 )
 from tests.support import (
@@ -46,7 +46,7 @@ class LegacyImplementationGuardTests(unittest.TestCase):
                 )
             },
         )
-        self.context = verification.VerificationContext.legacy(self.repo_root)
+        self.context = verification_models.VerificationContext.legacy(self.repo_root)
 
     def _args(self) -> argparse.Namespace:
         return argparse.Namespace(

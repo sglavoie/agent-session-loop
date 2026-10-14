@@ -78,7 +78,7 @@ from . import (
     review_guard,
     review_session_body,
     run_persistence,
-    verification,
+    verification_models,
     verification_transitions,
     workspaces,
 )
@@ -110,7 +110,7 @@ class ReviewVerdictReader(Protocol):
 
 
 def _review_broad_failure_acceptance(
-    result: verification.VerificationResult,
+    result: verification_models.VerificationResult,
     *,
     plan_dir: Path,
     require_artifact: bool,
