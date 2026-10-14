@@ -16,6 +16,7 @@ supervisor helper.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from . import events
@@ -198,7 +199,8 @@ USER_ACTION_INSPECT = "inspect"
 # reservation to :data:`UNANSWERABLE_OUTCOME_PAUSE_REASONS`, the guard verdicts
 # and unclassifiable turn outcomes that were still reaching ``reply`` by
 # falling through.
-POLICY_VERSION = 4
+# v5 carries exhausted verification-repair budgets into the recovery policy.
+POLICY_VERSION = 5
 
 # How many times a supervisor relaunches the same session for a given
 # recoverable pause reason before giving up and surfacing the pause.
@@ -213,7 +215,9 @@ DEFAULT_MAX_RETRIES = 2
 TRANSPORT_RETRY_DELAYS_SECONDS: tuple[float, ...] = (5.0, 30.0)
 
 
-def classify_pause(reason: str | None) -> dict[str, Any]:
+def classify_pause(
+    reason: str | None, details: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     """Classify a pause ``reason`` into a serializable policy block.
 
     Returns a bounded dict describing how the pause should be handled:
@@ -240,10 +244,15 @@ def classify_pause(reason: str | None) -> dict[str, Any]:
       ``transport-failed`` schedule (5s, 30s) for that reason, else an empty
       list (the other recoverable pauses relaunch immediately).
     """
-    recoverable = reason in RECOVERABLE_PAUSE_REASONS
+    repair_exhausted = (
+        reason == "verify-failed"
+        and details is not None
+        and details.get("verification_repair_exhausted") is True
+    )
+    recoverable = reason in RECOVERABLE_PAUSE_REASONS and not repair_exhausted
     if recoverable:
         user_action: str | None = None
-    elif reason in INSPECT_PAUSE_REASONS:
+    elif repair_exhausted or reason in INSPECT_PAUSE_REASONS:
         user_action = USER_ACTION_INSPECT
     else:
         user_action = USER_ACTION_REPLY

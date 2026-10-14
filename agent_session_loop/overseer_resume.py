@@ -393,7 +393,11 @@ def pause_classification(facts: intervention.RunFacts) -> Mapping[str, Any]:
     if isinstance(persisted, Mapping):
         return dict(persisted)
     reason = facts.runner_state.get("reason")
-    return pause_policy.classify_pause(reason if isinstance(reason, str) else None)
+    details = facts.runner_state.get("pause_details")
+    return pause_policy.classify_pause(
+        reason if isinstance(reason, str) else None,
+        details if isinstance(details, Mapping) else None,
+    )
 
 
 def recovery_refusal(facts: intervention.RunFacts) -> tuple[Refusal, str] | None:

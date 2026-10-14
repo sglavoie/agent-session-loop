@@ -9,6 +9,7 @@ from . import (
     clock,
     model_availability,
     plans_payloads,
+    review_guard,
     review_repair,
     run_completion,
     run_coordination_control_drain,
@@ -356,7 +357,13 @@ def _select_turn_harness(frame: RunFrame) -> RunResult | LoopSignal | None:
             frame.ctx.pause(
                 reason="commit-preflight",
                 message=str(frame.refusal),
-                details=frame.session_details,
+                details={
+                    **frame.session_details,
+                    **review_guard.commit_preflight_pause_details(
+                        frame.ctx.verification_context
+                    ),
+                    "commit_preflight_phase": "continuation",
+                },
             )
             return LoopSignal.BREAK
     return None

@@ -124,7 +124,8 @@ def _effective_pause_policy(run_payload: dict, pause_reason: str) -> dict:
     policy = run_payload.get("pause_policy")
     if isinstance(policy, dict):
         return policy
-    return classify_pause(pause_reason)
+    details = run_payload.get("pause_details")
+    return classify_pause(pause_reason, details if isinstance(details, dict) else None)
 
 
 def _verification_repair_exhausted(run_payload: dict) -> bool:

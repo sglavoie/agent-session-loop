@@ -15,6 +15,7 @@ from . import (
     mailbox_cli_status,
     mailbox_constants,
     mailbox_cursors,
+    mailbox_leases,
     mailbox_models,
     mailbox_snapshot,
     mailbox_vocabulary,
@@ -123,6 +124,18 @@ def wait_for_closure(
                     return closure, False
 
         now = time.monotonic()
+        # The timeout bounds an unwatched question. A live supervisor may need
+        # longer to collect a human answer, just as it may for a runner pause.
+        # Zero remains a single poll; a missing or unreadable lease never
+        # extends the deadline, and finish_wait still arbitrates reply races.
+        if timeout > 0 and last_read_error is None:
+            try:
+                lease = mailbox_leases.read_lease(plan_dir, state_dir=state_dir)
+            except OSError, mailbox_models.MailboxError:
+                pass
+            else:
+                if lease.fresh:
+                    deadline = max(deadline, now + timeout)
         if now >= deadline:
             if last_successful_view is None and last_read_error is not None:
                 raise last_read_error

@@ -21,9 +21,12 @@ from agent_session_loop import (
     mailbox_cli_inbox,
     mailbox_constants,
     mailbox_cursors,
+    mailbox_leases,
+    mailbox_models,
     mailbox_rendering,
     mailbox_snapshot,
     mailbox_vocabulary,
+    mailbox_waits,
 )
 from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
 from tests.support import (
@@ -33,6 +36,86 @@ from tests.support import (
 
 
 class MailboxCliTestsPart6(MailboxCliTestsBase):
+    def test_supervised_ask_accepts_answer_after_original_deadline(self) -> None:
+        question, wait = mailbox_waits.append_wait_question(
+            self.plan_dir, "Need a decision", state_dir=self.state_dir
+        )
+        now = 0.0
+
+        def sleep(seconds: float) -> None:
+            nonlocal now
+            now += seconds
+            if now >= 8:
+                mailbox_appenders.append_reply(
+                    self.plan_dir, question.id, "Proceed", state_dir=self.state_dir
+                )
+
+        with (
+            mock.patch.object(time, "monotonic", side_effect=lambda: now),
+            mock.patch.object(time, "sleep", side_effect=sleep),
+            mock.patch.object(
+                mailbox_leases, "read_lease", return_value=mock.Mock(fresh=True)
+            ),
+        ):
+            closure, timed_out = mailbox_cli_ask.wait_for_closure(
+                self.plan_dir,
+                question.id,
+                state_dir=self.state_dir,
+                timeout=4,
+                wait_id=wait.id,
+            )
+        self.assertFalse(timed_out)
+        self.assertIsNotNone(closure)
+        self.assertGreater(now, 4)
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        assert closure is not None
+        self.assertIsNotNone(view.receipt_for_closure(closure.id))
+        self.assertIsNone(view.active_wait_for(question.id))
+
+    def test_ask_deadline_stops_extending_when_supervision_is_lost(self) -> None:
+        question = mailbox_appenders.append_question(
+            self.plan_dir, "Need a decision", state_dir=self.state_dir
+        )
+        now = 0.0
+
+        def sleep(seconds: float) -> None:
+            nonlocal now
+            now += seconds
+
+        with (
+            mock.patch.object(time, "monotonic", side_effect=lambda: now),
+            mock.patch.object(time, "sleep", side_effect=sleep),
+            mock.patch.object(
+                mailbox_leases,
+                "read_lease",
+                side_effect=lambda *a, **kw: mock.Mock(fresh=now <= 2),
+            ),
+        ):
+            closure, timed_out = mailbox_cli_ask.wait_for_closure(
+                self.plan_dir, question.id, state_dir=self.state_dir, timeout=4
+            )
+        self.assertTrue(timed_out)
+        self.assertIsNone(closure)
+        self.assertEqual(6, now)
+
+    def test_fresh_supervision_does_not_hide_an_unreadable_mailbox(self) -> None:
+        error = mailbox_models.MailboxError(
+            mailbox_constants.ERROR_MAILBOX_READ, "unreadable"
+        )
+        with (
+            mock.patch.object(time, "monotonic", side_effect=[0, 0, 2]),
+            mock.patch.object(time, "sleep"),
+            mock.patch.object(mailbox, "read_mailbox", side_effect=error),
+            mock.patch.object(
+                mailbox_leases, "read_lease", return_value=mock.Mock(fresh=True)
+            ),
+            self.assertRaises(mailbox_models.MailboxError) as raised,
+        ):
+            mailbox_cli_ask.wait_for_closure(
+                self.plan_dir, "question", state_dir=self.state_dir, timeout=2
+            )
+        self.assertEqual(mailbox_constants.ERROR_MAILBOX_READ, raised.exception.reason)
+
     def test_inbox_text_rendering_uses_shared_count_and_byte_budget(
         self,
     ) -> None:

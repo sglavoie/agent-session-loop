@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import unittest
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -39,7 +40,7 @@ from tests.support import (
 )
 
 
-class RepairCycleFixtures:
+class RepairCycleFixtures(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)

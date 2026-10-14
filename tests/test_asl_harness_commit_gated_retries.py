@@ -468,6 +468,8 @@ class GatedCommitRetryTests(FakeHarnessIntegrationBase):
         self.assertNotEqual([], second_payload["turns"])
         second_details = second_payload["pause_details"]
         self.assertTrue(second_details["verification_repair_exhausted"])
+        self.assertFalse(second_payload["pause_policy"]["recoverable"])
+        self.assertEqual("inspect", second_payload["action_required"]["user_action"])
         self.assertEqual(
             verification_transitions.MAX_VERIFICATION_REPAIR_ATTEMPTS,
             second_details["verification_repair_attempt"],

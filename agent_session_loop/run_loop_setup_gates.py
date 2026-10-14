@@ -405,6 +405,10 @@ def _pass_readiness_gate(frame: RunFrame) -> RunResult | None:
             reason="commit-preflight",
             message=str(error),
             details={
+                **review_guard.commit_preflight_pause_details(
+                    frame.ctx.verification_context
+                ),
+                "commit_preflight_phase": "startup",
                 "commit_mode": frame.commit_mode,
                 "max_sessions": frame.max_sessions,
                 "pending_sessions": plans_payloads.status_counts(frame.snapshot)[

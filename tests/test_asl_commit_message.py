@@ -1276,8 +1276,8 @@ class CommitHandlerTests(unittest.TestCase):
         # carries, including one staged for deletion — no `--index-info` entry
         # exists to overwrite it — so it needs removing again or it would
         # quietly survive the commit meant to delete it.  Driven below the
-        # CLI: `--pathspec` stages its named paths with `git add`, which
-        # refuses a path already gone from the worktree.
+        # CLI. Re-staging the deleted path must also succeed: it is still in
+        # the commit scope even though it has already left the index.
         self.write("src/alpha.py", "print('alpha')\n")
         self.write("src/beta.py", "print('beta')\n")
         commit_message.stage_paths(self.repo, ["src/alpha.py", "src/beta.py"])
@@ -1287,6 +1287,8 @@ class CommitHandlerTests(unittest.TestCase):
         self.write("src/beta.py", "print('beta edited')\n")
         commit_message.stage_paths(self.repo, ["src/alpha.py", "src/beta.py"])
 
+        staged = commit_message.stage_paths(self.repo, ["src/alpha.py"])
+        self.assertEqual(0, staged.returncode, staged.stderr)
         committed = commit_message.commit_staged(
             self.repo, "chore: drop alpha\n", pathspec=["src/alpha.py"]
         )

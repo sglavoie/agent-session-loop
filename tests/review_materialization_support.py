@@ -3,6 +3,7 @@
 import json
 import subprocess
 import tempfile
+import unittest
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,7 @@ from tests.support import (
 )
 
 
-class MaterializationFixtures:
+class MaterializationFixtures(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)

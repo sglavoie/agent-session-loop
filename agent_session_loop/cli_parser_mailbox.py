@@ -199,8 +199,8 @@ def _add_worker_message_commands(
         default=None,
         metavar="SECONDS",
         help=(
-            "Closure wait timeout in seconds; requires --wait "
-            "(default: 90; maximum: 1800)"
+            "Unsupervised closure wait in seconds; a fresh supervisor lease "
+            "extends it; requires --wait (default: 90; maximum: 1800; 0 polls once)"
         ),
     )
     ask_parser.set_defaults(handler_ref="mailbox_cli_ask:ask_from_args")

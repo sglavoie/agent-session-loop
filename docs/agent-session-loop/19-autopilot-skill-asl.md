@@ -263,6 +263,10 @@ revision that moved the blocked-precondition reasons off `reply`, and
 `policy_version: 4` the one that moved the guard verdicts and unclassifiable
 turn outcomes off it too.
 
+`policy_version: 5` also makes `verify-failed`
+require inspection when `verification_repair_exhausted` is true; an exhausted
+repair budget is never automatically retried.
+
 Every pause with `requires_user` also populates the state payload's
 `action_required` block (`source: pause`), echoing the pause reason, message,
 and `user_action` alongside a `remediation` list. Each remediation entry is a

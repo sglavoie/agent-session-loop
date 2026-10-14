@@ -289,6 +289,55 @@ class ReadinessCloseTests(_TerminationCase):
 class PauseWriteTests(_TerminationCase):
     """The pause block, its policy, and the event that publishes it."""
 
+    def test_exhausted_verification_repairs_require_inspection(self) -> None:
+        run_termination.set_pause(
+            self.payload,
+            reason="verify-failed",
+            message="repair budget exhausted",
+            details={
+                "verification_repair_attempt": 3,
+                "verification_repair_max_attempts": 2,
+                "verification_repair_exhausted": True,
+            },
+        )
+        policy = self.payload["pause_policy"]
+        self.assertFalse(policy["recoverable"])
+        self.assertTrue(policy["requires_user"])
+        self.assertEqual(0, policy["max_retries"])
+        self.assertEqual("inspect", self.payload["action_required"]["user_action"])
+
+    def test_packet_only_registry_refusal_explains_plan_scan_mismatch(self) -> None:
+        [entry] = run_termination._pause_remediation(
+            {"repository_intent_source": "task-packet"},
+            reason="repository-registry-required",
+            plan_dir="/plans/demo",
+            cwd="/workspace/app",
+        )
+        self.assertIn("not-required", entry["message"])
+        self.assertIn("first declare", entry["message"])
+        self.assertIn("read/write scope", entry["message"])
+        self.assertIn(
+            "asl register-repositories /plans/demo --cwd /workspace/app",
+            entry["message"],
+        )
+
+    def test_commit_preflight_remediation_inspects_checkout_not_workspace(self) -> None:
+        [entry] = run_termination._pause_remediation(
+            {
+                "commit_preflight_phase": "continuation",
+                "commit_repositories": [
+                    {"alias": "app", "resolved_root": "/workspace/my app"}
+                ],
+            },
+            reason="commit-preflight",
+            plan_dir="/plans/demo",
+            cwd="/workspace",
+        )
+        self.assertIn("git -C '/workspace/my app' status --short", entry["message"])
+        self.assertIn("blocked continuation", entry["message"])
+        self.assertNotIn("blocked startup", entry["message"])
+        self.assertNotIn("details.dirty_repositories", entry["message"])
+
     def test_a_pause_run_writes_the_block_and_appends_the_event(self) -> None:
         run_termination._pause_run(
             self.event_path,

@@ -3,6 +3,7 @@
 import json
 import subprocess
 import tempfile
+import unittest
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -188,7 +189,7 @@ def _write_repair_ready_plan(
     )
 
 
-class PublicationWindowFixtures:
+class PublicationWindowFixtures(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -244,7 +245,7 @@ class PublicationWindowFixtures:
         return before
 
 
-class ContractGateFixtures:
+class ContractGateFixtures(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)

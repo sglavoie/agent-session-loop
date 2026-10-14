@@ -136,6 +136,7 @@ def _observed_repository_writes(
                     "repository": _declared_repository_alias(guard, str(key)),
                     "repository_key": str(key),
                     "session_id": result.get("session_id"),
+                    "external_activity": key in _mapping(guard.get("external_changes")),
                     "head_changed": head_changed,
                     "transition": _mapping(changes.get("head_transition")) or None,
                     "head_before": changes.get("head_before"),
@@ -155,6 +156,7 @@ def _observed_head_transitions(
             "turn": entry.get("turn"),
             "repository": entry.get("repository"),
             "transition": entry.get("transition"),
+            "external_activity": entry.get("external_activity", False),
         }
         for entry in observed
         if entry.get("head_changed") is True
@@ -198,6 +200,10 @@ def _reconcile_observed_commits(
     attempts: list[dict[str, Any]] = []
     groups: dict[Any, dict[str, Any]] = {}
     for entry in observed:
+        # A permitted concurrent writer's head move is evidence of activity,
+        # not a commit attributable to this session (ASI-166 / ASI-117).
+        if entry.get("external_activity") is True:
+            continue
         alias = entry.get("repository")
         transition = _mapping(entry.get("transition"))
         # A transition is one measured move, so its endpoints and its count

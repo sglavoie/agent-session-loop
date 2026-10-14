@@ -89,6 +89,29 @@ class CommitObservabilityTests(RunHistoryFixture, unittest.TestCase):
             self.assertEqual("run/turn-0001-01", attempt["reference"])
             self.assertEqual(["app"], commits["commit_groups"][0]["ordered_aliases"])
 
+    def test_allowed_external_head_move_is_observed_but_not_attributed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._worker_committed(tmp)
+            turn_dir = history[3] / "turn-0001-01"
+            result_path = turn_dir / state.RESULT_FILE_NAME
+            result = json.loads(result_path.read_text())
+            guard = result["workspace_write_guard"]
+            guard["external_changes"] = {"app": guard["changed"]["app"]}
+            guard["authorized_aliases"] = []
+            self._write_result(turn_dir, result)
+
+            commits = self._bundle(history).payload["commits"]
+
+            self.assertEqual(1, len(commits["observed_head_transitions"]))
+            self.assertTrue(
+                commits["observed_head_transitions"][0]["external_activity"]
+            )
+            for key in ("attempts", "commits", "commit_groups"):
+                self.assertFalse(commits.get(key), key)
+            self.assertNotIn(
+                "committed to", self._mutation_guard_verdict(history).detail or ""
+            )
+
     def test_a_projected_commit_takes_its_range_from_one_transition(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             # A continuation merge leaves the entry's own heads on the session

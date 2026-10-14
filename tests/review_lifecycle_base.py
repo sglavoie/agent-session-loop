@@ -247,22 +247,6 @@ class RunReviewHarnessLifecycleBase(unittest.TestCase):
         ):
             subprocess.run(argv, cwd=self.repo_root, capture_output=True, check=True)
 
-    def _write_pycache_review_plan(self) -> None:
-        self._write_plan(("complete",), readiness=None)
-        self._commit_gitignore("__pycache__/\n")
-        self._write_pending_review_session()
-        plans_readiness.write_readiness_metadata(
-            self.plan_dir,
-            plans_models.ReadinessMetadata(
-                state="loop-ready",
-                readiness_sha256=plans_content_hash.stable_readiness_sha256(
-                    self.plan_dir
-                ),
-                checked_at="2026-06-19T00:00:00Z",
-            ),
-        )
-        self._install_mutating_fake_claude(("agent_session_loop/__pycache__/x.pyc",))
-
     def _write_dotted_plan(
         self,
         statuses: tuple[tuple[str, str], ...],

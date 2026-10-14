@@ -311,6 +311,22 @@ def _git_status_is_clean(cwd: Path) -> bool:
     return not bool(result.stdout)
 
 
+def commit_preflight_pause_details(
+    context: verification_models.VerificationContext,
+) -> dict[str, Any]:
+    """Name actual commit checkouts without claiming which one is dirty."""
+    return {
+        "commit_repositories": (
+            [{"alias": ".", "resolved_root": str(context.root)}]
+            if context.workspace is None
+            else [
+                {"alias": repository.alias, "resolved_root": str(repository.root)}
+                for repository in context.workspace.repositories
+            ]
+        )
+    }
+
+
 def _validate_commit_preflight(
     cwd: Path,
     *,

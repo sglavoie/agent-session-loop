@@ -862,6 +862,7 @@ def prepare_turn_prompt(
             details={
                 **session_details,
                 "repository_intent": packet_intent_report,
+                "repository_intent_source": "task-packet",
             },
         )
         return TurnPrompt(

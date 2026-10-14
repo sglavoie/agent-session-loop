@@ -544,6 +544,44 @@ def _runtime_reason_remediation(
             )
             or message
         )
+    if (
+        hint.category == "repository-registry-required"
+        and (details or {}).get("repository_intent_source") == "task-packet"
+    ):
+        message = (
+            "The rendered task packet names an additional Git repository. "
+            "Inspect details.repository_intent for the paths; these may come "
+            "from a reply, guidance, or a handoff rather than the plan. "
+            "register-repositories scans plan files, so it can report "
+            "not-required for this refusal. If the extra repository is intended, "
+            "first declare its concrete paths and intended read/write scope in "
+            "the session plan, then run "
+            f"`asl register-repositories {shlex.quote(plan_dir or 'PLAN_DIR')} "
+            f"--cwd {shlex.quote(cwd or 'REPO_ROOT')}` and the prepare/rebind "
+            "command it prints. If the path was incidental, remove it from "
+            "the continuation input that supplied it before retrying. "
+            "A path mention alone does not grant access to that repository."
+        )
+    if hint.category == "commit-preflight":
+        phase = (details or {}).get("commit_preflight_phase")
+        if phase in ("startup", "continuation"):
+            message = message.replace(
+                "blocked startup or continuation", f"blocked {phase}", 1
+            )
+        repositories = (details or {}).get("commit_repositories")
+        if isinstance(repositories, list):
+            commands = [
+                "`"
+                + shlex.join(["git", "-C", row["resolved_root"], "status", "--short"])
+                + "`"
+                for row in repositories
+                if isinstance(row, Mapping)
+                and isinstance(row.get("resolved_root"), str)
+            ]
+            if commands:
+                message += (
+                    " Inspect the commit repositories with " + ", ".join(commands) + "."
+                )
     return {
         "check_id": hint.check_id,
         "category": hint.category,
@@ -680,7 +718,7 @@ def set_pause(
     # Carry the single-source-of-truth pause classification so consumers
     # (the supervisor helper, `asl status`, `asl questions`) stop hardcoding
     # the recoverable/user-required reason sets.
-    policy = pause_policy.classify_pause(reason)
+    policy = pause_policy.classify_pause(reason, payload["pause_details"])
     payload["pause_policy"] = policy
     resolution = payload["pause_details"].get("mailbox_resolution")
     question_closed = (

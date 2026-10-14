@@ -1179,7 +1179,9 @@ def questions_payload(context: QnAContext) -> dict[str, Any]:
         pause_reason=context.pause_reason,
         pause_message=context.pause_message,
         pause_details=dict(context.pause_details),
-        pause_policy=pause_policy.classify_pause(context.pause_reason),
+        pause_policy=pause_policy.classify_pause(
+            context.pause_reason, context.pause_details
+        ),
         harness=context.harness,
         model=context.model,
         model_source=context.model_source,

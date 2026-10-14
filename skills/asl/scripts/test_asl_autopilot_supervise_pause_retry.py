@@ -329,7 +329,7 @@ class SuperviseRunPauseRetryTest(SuperviseRunInjectedBase):
         )
         result = self._supervise(status, run, max_retries=2)
         self.assertFalse(result["ok"], result)
-        self.assertEqual(result["reason"], "paused")
+        self.assertEqual(result["reason"], "user_required")
         # Only the initial chunk ran; no retry consumed.
         self.assertEqual(run.chunks, [1])
         self.assertEqual(result["retries"]["count"], 0)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -250,7 +251,10 @@ def _runner_state_payload(
     # and leave it absent when the run is not paused.
     runner_pause_policy = raw.get("pause_policy")
     if not isinstance(runner_pause_policy, dict) and raw.get("paused"):
-        runner_pause_policy = pause_policy.classify_pause(raw.get("reason"))
+        details = raw.get("pause_details")
+        runner_pause_policy = pause_policy.classify_pause(
+            raw.get("reason"), details if isinstance(details, Mapping) else None
+        )
     if not isinstance(runner_pause_policy, dict):
         runner_pause_policy = None
 

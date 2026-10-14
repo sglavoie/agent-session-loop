@@ -163,13 +163,13 @@ RUNTIME_REPAIR_HINTS: dict[str, RepairHint] = {
         check_id="runtime.commit-preflight",
         severity_hint="red",
         message=(
-            "Commit preflight refused to start the run: the repositories it "
-            "would commit are not in the state it requires — most often "
-            "uncommitted changes already present before the run. Inspect "
-            "`git -C <repo-root> status --short` plus each repository the "
-            "pause names under `details.dirty_repositories`, then commit, "
-            "stash, or discard that work and re-run. No reply can clear this: "
-            "the worktree has to change."
+            "Commit preflight blocked startup or continuation: a repository "
+            "it would commit does not meet the worktree requirements. The "
+            "changes may predate the run or come from an earlier turn. Inspect "
+            "the pause message and details.commit_repositories to locate the "
+            "affected checkout and establish who owns the changes before "
+            "committing, stashing, or discarding any work. Re-run once the "
+            "worktree is ready; a reply alone cannot clear this gate."
         ),
         question_template=(
             "Runner paused: commit preflight found the workspace unready "

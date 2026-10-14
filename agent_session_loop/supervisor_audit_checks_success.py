@@ -324,7 +324,8 @@ def _check_retry_resume(context: _CheckContext) -> _Verdict:
     # schema change as a contradiction.
     if recorded and recorded.get("policy_version") == pause_policy.POLICY_VERSION:
         expected = pause_policy.classify_pause(
-            reason if isinstance(reason, str) else None
+            reason if isinstance(reason, str) else None,
+            audit_evidence_helpers._mapping(status.get("pause_details")),
         )
         for key in ("reason", "recoverable", "requires_user", "max_retries"):
             if recorded.get(key) != expected[key]:

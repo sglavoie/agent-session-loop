@@ -344,6 +344,10 @@ def _settle_paused_retained_work(ctx: RunContext, *, commit_mode: str | None) ->
     the plan file saying ``complete`` and the revert would immediately re-dirty
     it — the same dead end, one line later.
 
+    Exhausted verification repairs still retain their work under the requested
+    commit mode; exhausting retries changes who must act next, not whether the
+    failed turn's work needs a checkpoint.
+
     The gate reads the policy the pause already recorded rather than
     classifying the reason again: ``pause_policy`` has one owner, and a second
     opinion here would be a second vocabulary for the supervisor to reconcile.
@@ -375,7 +379,15 @@ def _settle_paused_retained_work(ctx: RunContext, *, commit_mode: str | None) ->
     if payload.get("paused") is not True:
         return
     policy = payload.get("pause_policy")
-    if not isinstance(policy, Mapping) or policy.get("recoverable") is not True:
+    raw_details = payload.get("pause_details")
+    details = raw_details if isinstance(raw_details, dict) else {}
+    exhausted_verification = (
+        payload.get("pause_reason") == "verify-failed"
+        and details.get("verification_repair_exhausted") is True
+    )
+    if not isinstance(policy, Mapping) or (
+        policy.get("recoverable") is not True and not exhausted_verification
+    ):
         return
     if retained.is_review_session:
         return
@@ -386,8 +398,6 @@ def _settle_paused_retained_work(ctx: RunContext, *, commit_mode: str | None) ->
     # `set_pause` is the only writer of the block gated on above, and it always
     # writes a dict here; the isinstance is what lets the mirror below be an
     # in-place update of the payload's own details rather than of a copy.
-    raw_details = payload.get("pause_details")
-    details = raw_details if isinstance(raw_details, dict) else {}
     record = commit_settlement._settle_paused_retained_work(
         event_path=ctx.event_path,
         payload=payload,

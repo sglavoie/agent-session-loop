@@ -286,6 +286,10 @@ The eight mailbox commands share normal plan-reference, `--state-dir`, and
   `--question-id`. `--wait` polls for the first reply or resolution for
   90 seconds by default;
   `--wait-timeout` accepts 0 through 1800 seconds and requires `--wait`.
+  This bounds unsupervised time: a fresh supervisor lease extends the
+  deadline while a supervisor collects a decision. A missing, stale, or
+  unreadable lease stops extending it, as does an unreadable mailbox.
+  Zero performs one poll without a lease extension.
   Supplying `--wait-timeout` alone fails with `reason: invalid-timeout`. An
   unclosed bounded wait returns success with `timed_out: true`, allowing the
   worker to reuse the same question ID or emit `RUNNER_PAUSE:` as a fallback.
