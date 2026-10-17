@@ -5,12 +5,15 @@ import unittest
 from unittest import mock
 
 from agent_session_loop import (
+    authoring_render,
     contracts,
     plans_errors,
     plans_handoff,
     plans_models,
     review,
     review_repair,
+    review_repair_planning,
+    review_repair_render,
     workspaces,
 )
 from tests.review_materialization_support import MaterializationFixtures
@@ -25,7 +28,7 @@ class ReviewRepairMaterializerTests(MaterializationFixtures, unittest.TestCase):
     def test_revised_grouping_changes_json_digest_not_fingerprints(self) -> None:
         original = self._finding("F1", "runner")
         self._write_plan([original])
-        first = review_repair.plan_review_repair_sessions(self.plan_dir)
+        first = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
         revised = self._finding(
             "F1",
             "workbench",
@@ -43,7 +46,7 @@ class ReviewRepairMaterializerTests(MaterializationFixtures, unittest.TestCase):
             encoding="utf-8",
         )
 
-        second = review_repair.plan_review_repair_sessions(self.plan_dir)
+        second = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertTrue(first.ok, first.error)
         self.assertTrue(second.ok, second.error)
@@ -55,17 +58,17 @@ class ReviewRepairMaterializerTests(MaterializationFixtures, unittest.TestCase):
 
     def test_materializer_stages_prevalidated_planner_output(self) -> None:
         self._write_plan([self._finding("F1", "runner")])
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
         self.assertTrue(repair_plan.ok, repair_plan.error)
 
         with (
             mock.patch.object(
-                review_repair,
+                review_repair_planning,
                 "plan_review_repair_sessions",
                 return_value=repair_plan,
             ),
             mock.patch.object(
-                review_repair.authoring_render,
+                authoring_render,
                 "render_session_file",
                 side_effect=AssertionError("writer re-rendered a planned child"),
             ),
@@ -252,7 +255,7 @@ class ReviewRepairMaterializerTests(MaterializationFixtures, unittest.TestCase):
                 for alias, path, origin in DEFAULT_MULTI_REPO_SPECS[:2]
             )
         )
-        merged = review_repair._merge_verification_checks(
+        merged = review_repair_render._merge_verification_checks(
             "runner", findings, repository_registry=registry
         )
 
@@ -276,7 +279,7 @@ class ReviewRepairMaterializerTests(MaterializationFixtures, unittest.TestCase):
         ]
 
         with self.assertRaisesRegex(plans_errors.PlanError, "no absence semantics"):
-            review_repair._merge_verification_checks("runner", findings)
+            review_repair_render._merge_verification_checks("runner", findings)
 
     def test_no_finding_is_omitted_or_assigned_twice(self) -> None:
         findings = [

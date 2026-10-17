@@ -17,7 +17,7 @@ from agent_session_loop import (
     review,
     review_continuation,
     review_cycle,
-    review_repair,
+    review_repair_planning,
     review_session_body,
     run_persistence,
     session_verification,
@@ -40,7 +40,7 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
         self, findings: list[dict[str, Any]]
     ) -> plans_models.PlanSnapshot:
         write_completed_review_plan(self.plan_dir, findings)
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
         self.assertTrue(repair_plan.ok, repair_plan.error)
         for group in repair_plan.repair_groups:
             child_path = self.plan_dir / group.proposed_child_id.filename

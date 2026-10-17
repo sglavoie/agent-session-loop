@@ -31,6 +31,7 @@ from agent_session_loop import (
     guidance_delivery,
     harness_claude,
     harness_copilot,
+    harness_transport,
     harnesses,
 )
 
@@ -1559,7 +1560,7 @@ class CopilotSteerRefusalTests(unittest.TestCase):
     def test_the_output_stream_is_read_exactly_as_it_always_was(self) -> None:
         processor = self.transport().output_processor()
 
-        self.assertIs(type(processor), harnesses._OutputProcessor)
+        self.assertIs(type(processor), harness_transport._OutputProcessor)
         self.assertEqual(
             "plain text\n", processor.process_chunk("stdout", "plain text\n")
         )

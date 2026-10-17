@@ -7,6 +7,7 @@ from agent_session_loop import (
     plans_session_scope,
     review,
     review_repair,
+    review_repair_planning,
 )
 from tests.review_materialization_support import MaterializationFixtures
 
@@ -23,7 +24,7 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
         self._write_plan(findings)
         before = self._plan_bytes()
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertTrue(repair_plan.ok, repair_plan.error)
         self.assertEqual(review_repair.REVIEW_REPAIR_REASON_OK, repair_plan.reason)
@@ -55,7 +56,7 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
         """A repair child gets the packet's verification policy, not its opposite."""
         self._write_plan([self._finding("F1", "runner")])
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertTrue(repair_plan.ok, repair_plan.error)
         rendered = repair_plan.repair_groups[0].rendered_text
@@ -96,7 +97,7 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
             [self._finding("F1", "runner"), self._finding("F2", "workbench")]
         )
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertTrue(repair_plan.ok, repair_plan.error)
         for group in repair_plan.repair_groups:
@@ -130,7 +131,7 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
         )
         self._write_plan([finding])
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertTrue(repair_plan.ok, repair_plan.error)
         self.assertIn(
@@ -173,7 +174,7 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
         )
         self._write_plan([finding])
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertTrue(repair_plan.ok, repair_plan.error)
         rendered = repair_plan.repair_groups[0].rendered_text
@@ -196,7 +197,7 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
         self._write_plan([finding])
         before = self._plan_bytes()
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertFalse(repair_plan.ok)
         self.assertEqual(
@@ -227,7 +228,7 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
         )
         self._write_plan([finding])
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertFalse(repair_plan.ok)
         self.assertEqual(
@@ -243,7 +244,7 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
         )
         self._write_plan([finding])
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertTrue(repair_plan.ok, repair_plan.error)
         self.assertEqual(
@@ -266,7 +267,7 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
         )
         self._write_plan([finding])
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertTrue(repair_plan.ok, repair_plan.error)
 
@@ -280,7 +281,7 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
         ]
         self._register_plan(findings)
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertTrue(repair_plan.ok, repair_plan.error)
         shared, svc_only = repair_plan.repair_groups
@@ -330,7 +331,7 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
         narrow_finding = self._make_registered_finding("F2", "svc-only", "SVC")
         self._register_plan([widened_finding, narrow_finding])
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertTrue(repair_plan.ok, repair_plan.error)
         widened, narrow = repair_plan.repair_groups
@@ -376,7 +377,7 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
         )
         self._register_plan([finding])
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertTrue(repair_plan.ok, repair_plan.error)
         (group,) = repair_plan.repair_groups

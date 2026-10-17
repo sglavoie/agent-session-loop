@@ -20,6 +20,8 @@ from unittest import mock
 from agent_session_loop import (
     events,
     guidance_delivery,
+    harness_execution,
+    harness_process,
     harnesses,
     mailbox,
     mailbox_appenders,
@@ -416,14 +418,14 @@ class HarnessLiveDeliverySeamTests(unittest.TestCase):
         self.endpoint = guidance_delivery.LiveDeliveryEndpoint(self.turn)
         # The post-turn sweep shells out to `ps`; nothing here is about
         # descendants, and the module stays spawn-free without it.
-        sweep = mock.patch.object(harnesses, "sweep_enabled", return_value=False)
+        sweep = mock.patch.object(harness_process, "sweep_enabled", return_value=False)
         sweep.start()
         self.addCleanup(sweep.stop)
 
     def run_turn(self, adapter: _RecordingAdapter, process: _FakeProcess) -> Any:
         adapter.process = process
         with mock.patch.object(
-            harnesses.subprocess, "Popen", return_value=process
+            harness_execution.subprocess, "Popen", return_value=process
         ) as popen:
             result = adapter.run(
                 cwd=self.tmp,
@@ -488,7 +490,9 @@ class HarnessLiveDeliverySeamTests(unittest.TestCase):
         process.finish()
 
         with (
-            mock.patch.object(harnesses.subprocess, "Popen", return_value=process),
+            mock.patch.object(
+                harness_execution.subprocess, "Popen", return_value=process
+            ),
             mock.patch.object(
                 harnesses.HarnessAdapter,
                 "output_processor",
@@ -511,7 +515,7 @@ class HarnessLiveDeliverySeamTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                harnesses.subprocess,
+                harness_execution.subprocess,
                 "Popen",
                 side_effect=FileNotFoundError("no such executable"),
             ),
@@ -553,7 +557,9 @@ class HarnessLiveDeliverySeamTests(unittest.TestCase):
         process = _FakeProcess(exit_on_delivery=False)
         process.finish()
 
-        with mock.patch.object(harnesses.subprocess, "Popen", return_value=process):
+        with mock.patch.object(
+            harness_execution.subprocess, "Popen", return_value=process
+        ):
             result = adapter.run(
                 cwd=self.tmp,
                 plan_dir=self.tmp,

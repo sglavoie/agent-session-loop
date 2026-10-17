@@ -12,6 +12,7 @@ from agent_session_loop import (
     review_cycle,
     review_delta,
     review_repair,
+    review_repair_planning,
 )
 from tests.review_materialization_support import MaterializationFixtures
 
@@ -64,7 +65,7 @@ class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.Te
         self._register_plan([finding], artifact_version=review.REVIEW_ARTIFACT_VERSION)
         before = self._plan_bytes()
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertFalse(repair_plan.ok)
         self.assertIn("without an explicit repository alias", repair_plan.error)
@@ -77,7 +78,7 @@ class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.Te
         second["verification_checks"][0]["name"] = "shared-check"
         self._register_plan([first, second])
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertTrue(repair_plan.ok, repair_plan.error)
         self.assertEqual(
@@ -108,7 +109,7 @@ class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.Te
         )
         self._register_plan([first, second, literal])
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertTrue(repair_plan.ok, repair_plan.error)
         expected_names = [
@@ -145,7 +146,7 @@ class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.Te
         ]
         self._register_plan([first, second])
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertFalse(repair_plan.ok)
         self.assertIn("conflicting definitions", repair_plan.error)
@@ -179,7 +180,7 @@ class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.Te
             encoding="utf-8",
         )
 
-        planned = review_repair.plan_review_repair_sessions(self.plan_dir)
+        planned = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertTrue(planned.ok, planned.error)
         self.assertEqual(
@@ -308,7 +309,7 @@ class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.Te
     def test_dry_planning_accepts_exactly_eight_groups(self) -> None:
         self._write_plan([self._finding(f"F{i}", f"g{i}") for i in range(8)])
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertTrue(repair_plan.ok, repair_plan.error)
         self.assertEqual(8, len(repair_plan.repair_groups))
@@ -321,7 +322,7 @@ class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.Te
         self._write_plan([self._finding(f"F{i}", f"g{i}") for i in range(9)])
         before = self._plan_bytes()
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertFalse(repair_plan.ok)
         self.assertEqual(
@@ -360,7 +361,7 @@ class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.Te
             ]
         )
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertFalse(repair_plan.ok)
         self.assertIn("conflicting", repair_plan.error)
@@ -375,7 +376,7 @@ class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.Te
         artifact_body = artifact_path.read_text(encoding="utf-8")
         artifact_path.unlink()
 
-        missing = review_repair.plan_review_repair_sessions(self.plan_dir)
+        missing = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertFalse(missing.ok)
         self.assertEqual(review.REVIEW_REASON_MISSING_ARTIFACT, missing.detail)
@@ -386,7 +387,7 @@ class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.Te
             encoding="utf-8",
         )
 
-        inconsistent = review_repair.plan_review_repair_sessions(self.plan_dir)
+        inconsistent = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertFalse(inconsistent.ok)
         self.assertEqual(
@@ -401,7 +402,7 @@ class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.Te
         materialized = self._materialize()
         self.assertTrue(materialized.ok)
 
-        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 
         self.assertFalse(repair_plan.ok)
         self.assertIn("already exist", repair_plan.error)

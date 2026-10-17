@@ -6,6 +6,8 @@ from unittest import mock
 from agent_session_loop import (
     progress_repair,
     review_repair,
+    review_repair_publication,
+    review_repair_validation,
 )
 from tests.review_repair_support import ContractGateFixtures, _write_repair_ready_plan
 from tests.support import (
@@ -84,10 +86,10 @@ class ReviewRepairContractGateTests(ContractGateFixtures, unittest.TestCase):
 
         with (
             mock.patch.object(
-                review_repair, "_validate_children_contract", return_value=[]
+                review_repair_validation, "_validate_children_contract", return_value=[]
             ),
             mock.patch.object(
-                review_repair,
+                review_repair_publication,
                 "_rollback_publication_window",
                 return_value={"errors": []},
             ),

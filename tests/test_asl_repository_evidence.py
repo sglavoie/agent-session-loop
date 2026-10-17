@@ -20,6 +20,7 @@ from agent_session_loop import (
     plans_registry,
     plans_session_scope,
     repository_evidence,
+    repository_evidence_workspace,
     review_guard,
     workspace_evidence,
     workspaces,
@@ -338,14 +339,14 @@ class WorkspaceInventoryTests(unittest.TestCase):
             if "visible" in directory_names:
                 yield str(walk_root / "visible"), [".git"], []
 
-        with mock.patch.object(repository_evidence.os, "walk", fake_walk):
+        with mock.patch.object(repository_evidence_workspace.os, "walk", fake_walk):
             inventory = repository_evidence.discover_git_worktree_inventory(
                 self.workspace
             )
         self.assertEqual((visible.resolve(),), inventory.repositories)
         self.assertEqual(1, inventory.skipped_hidden_subtrees)
 
-        with mock.patch.object(repository_evidence.os, "walk", fake_walk):
+        with mock.patch.object(repository_evidence_workspace.os, "walk", fake_walk):
             self.assertEqual(
                 (visible.resolve(),),
                 repository_evidence.discover_git_worktrees(self.workspace),

@@ -10,11 +10,14 @@ from unittest import mock
 
 from agent_session_loop import (
     authoring_manifest,
+    authoring_transaction,
     plans_models,
     plans_session_ids,
     progress_repair,
     review,
     review_repair,
+    review_repair_publication,
+    review_repair_validation,
     review_session_body,
 )
 from tests.support import (
@@ -228,14 +231,16 @@ class PublicationWindowFixtures(unittest.TestCase):
         before = self._plan_bytes()
         target = {
             "authoring": (
-                review_repair.authoring_transaction,
+                authoring_transaction,
                 "refresh_readiness_metadata",
             ),
-            "validating": (review_repair, "_make_children_executable"),
+            "validating": (review_repair_validation, "_make_children_executable"),
         }[phase]
         with (
             mock.patch.object(
-                review_repair, "_rollback_publication_window", return_value={}
+                review_repair_publication,
+                "_rollback_publication_window",
+                return_value={},
             ),
             mock.patch.object(*target, side_effect=_SimulatedCrash()),
             self.assertRaises(_SimulatedCrash),

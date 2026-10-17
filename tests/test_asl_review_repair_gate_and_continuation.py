@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 from agent_session_loop import (
+    authoring_transaction,
     events,
     plans_errors,
     plans_progress,
@@ -32,7 +33,7 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
         self._write_plan([self._finding("F1", "a"), self._finding("F2", "b")])
         manifest_before = (self.plan_dir / "manifest.md").read_text(encoding="utf-8")
         with mock.patch.object(
-            review_repair.PlanTransaction,
+            authoring_transaction.PlanTransaction,
             "commit",
             side_effect=plans_errors.PlanError("boom"),
         ):

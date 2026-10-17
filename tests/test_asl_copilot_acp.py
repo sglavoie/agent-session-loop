@@ -30,7 +30,9 @@ from unittest import mock
 from agent_session_loop import (
     copilot_acp,
     guidance_delivery,
+    harness_adapter,
     harness_copilot,
+    harness_process,
     harnesses,
 )
 from tests.support import REPO_ROOT, wait_until
@@ -745,7 +747,7 @@ class AdapterTransportTests(unittest.TestCase):
         self.record = self.tmp / "record.json"
         # The real sweep shells out to ``ps``; these tests are about the
         # transport, not the process table.
-        sweep = mock.patch.object(harnesses, "sweep_enabled", return_value=False)
+        sweep = mock.patch.object(harness_process, "sweep_enabled", return_value=False)
         sweep.start()
         self.addCleanup(sweep.stop)
         self.env = mock.patch.dict("os.environ", {"FAKE_ACP_RECORD": str(self.record)})
@@ -831,7 +833,7 @@ class AdapterTransportTests(unittest.TestCase):
             json.dumps({"guards": [{"command": ["git", "push"]}]}), encoding="utf-8"
         )
         env = dict(os.environ)
-        env[harnesses.guards.GUARD_POLICY_ENV_VAR] = str(policy)
+        env[harness_adapter.guards.GUARD_POLICY_ENV_VAR] = str(policy)
 
         self._run(self._adapter(), env=env)
 

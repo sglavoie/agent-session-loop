@@ -36,6 +36,7 @@ from agent_session_loop import (
     events,
     execution_timing,
     metrics,
+    metrics_models,
     plans_content_hash,
     plans_files,
     plans_models,
@@ -420,10 +421,10 @@ def _timing_runs(state_dir: Path) -> list[execution_timing.RunTiming]:
             [
                 execution_timing.RunEvidence(
                     plan_key=plan_state_dir.name,
-                    event_records=metrics._read_event_records(
+                    event_records=metrics_models._read_event_records(
                         plan_state_dir / events.EVENTS_FILE_NAME
                     ),
-                    turn_results=metrics._iter_turn_results(plan_state_dir),
+                    turn_results=metrics_models._iter_turn_results(plan_state_dir),
                 )
             ]
         )

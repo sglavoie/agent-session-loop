@@ -15,6 +15,7 @@ from agent_session_loop import (
     clock,
     config,
     harness_claude,
+    harness_types,
     harnesses,
     run_commit,
     run_persistence,
@@ -426,7 +427,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
                 (root / "drained").write_text("ok", encoding="utf-8")
 
         live_turn.start()
-        with mock.patch.object(harnesses, "_ABANDONED_READER_JOIN_SECONDS", 0.5):
+        with mock.patch.object(harness_types, "_ABANDONED_READER_JOIN_SECONDS", 0.5):
             result = harness_claude.ClaudeAdapter(executable=str(fake_claude)).run(
                 cwd=self.tmp_dir,
                 plan_dir=self.tmp_dir,

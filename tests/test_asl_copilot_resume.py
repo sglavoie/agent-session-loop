@@ -31,6 +31,7 @@ from agent_session_loop import (
     copilot_acp,
     guidance_delivery,
     harness_copilot,
+    harness_process,
     harnesses,
 )
 from tests.support import wait_until
@@ -660,7 +661,7 @@ class AdapterResumeTransportTests(unittest.TestCase):
         self.plan_dir = self.tmp / "plan"
         self.plan_dir.mkdir()
         self.record = self.tmp / "record.json"
-        sweep = mock.patch.object(harnesses, "sweep_enabled", return_value=False)
+        sweep = mock.patch.object(harness_process, "sweep_enabled", return_value=False)
         sweep.start()
         self.addCleanup(sweep.stop)
         env = mock.patch.dict("os.environ", {"FAKE_ACP_RECORD": str(self.record)})

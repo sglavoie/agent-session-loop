@@ -17,6 +17,7 @@ from agent_session_loop import (
     cli_trace,
     events,
     metrics,
+    metrics_render,
     plans_files,
     plans_payloads,
     plans_session_ids,
@@ -371,5 +372,5 @@ class TimingSectionBase(unittest.TestCase):
         )
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            metrics._print_report(report)
+            metrics_render._print_report(report)
         return stdout.getvalue()

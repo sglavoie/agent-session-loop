@@ -11,6 +11,7 @@ from agent_session_loop import (
     events,
     execution_timing,
     metrics,
+    metrics_models,
 )
 from tests.asl_metrics_support import (
     TimingSectionBase,
@@ -408,9 +409,9 @@ class ExecutionTimingReconciliationTests(TimingSectionBase):
         read_events_by_plan: dict[str, list] = {}
         read_results_by_plan: dict[str, list] = {}
         collected_by_plan: dict[str, tuple[object, object]] = {}
-        real_read_events = metrics._read_event_records
-        real_read_result = metrics._read_result_payload
-        real_iter_results = metrics._iter_turn_results
+        real_read_events = metrics_models._read_event_records
+        real_read_result = metrics_models._read_result_payload
+        real_iter_results = metrics_models._iter_turn_results
         real_collect = execution_timing.collect_execution_timing
 
         def read_events(path: Path):
@@ -437,9 +438,9 @@ class ExecutionTimingReconciliationTests(TimingSectionBase):
             return real_collect(evidence, **kwargs)
 
         with (
-            mock.patch.object(metrics, "_read_event_records", read_events),
-            mock.patch.object(metrics, "_read_result_payload", read_result),
-            mock.patch.object(metrics, "_iter_turn_results", iter_results),
+            mock.patch.object(metrics_models, "_read_event_records", read_events),
+            mock.patch.object(metrics_models, "_read_result_payload", read_result),
+            mock.patch.object(metrics_models, "_iter_turn_results", iter_results),
             mock.patch.object(execution_timing, "collect_execution_timing", collect),
         ):
             report = metrics.collect_metrics(

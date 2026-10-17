@@ -23,6 +23,7 @@ from agent_session_loop import (
     review,
     review_cycle,
     review_repair,
+    review_repair_validation,
     review_session_body,
     run_persistence,
     session_verification,
@@ -113,7 +114,7 @@ class RepairCycleFixtures(unittest.TestCase):
         snapshot = plans_snapshot.inspect_plan(self.plan_dir)
 
         with mock.patch.object(
-            review_repair,
+            review_repair_validation,
             "_make_children_executable",
             return_value={
                 "loop_ready": False,

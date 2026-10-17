@@ -37,6 +37,7 @@ from unittest import mock
 from agent_session_loop import (
     events,
     harness_codex,
+    harness_process,
     harnesses,
     redirect_recovery,
     redirect_store_journal,
@@ -73,7 +74,7 @@ def codex_lost_response_result(tmp: Path) -> harnesses.HarnessResult:
     plan_dir.mkdir(exist_ok=True)
     last_message = tmp / "last-message.txt"
     with (
-        mock.patch.object(harnesses, "sweep_enabled", return_value=False),
+        mock.patch.object(harness_process, "sweep_enabled", return_value=False),
         mock.patch.dict(
             "os.environ",
             {

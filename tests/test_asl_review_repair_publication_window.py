@@ -4,7 +4,13 @@ import json
 import unittest
 from unittest import mock
 
-from agent_session_loop import plans_errors, review_repair
+from agent_session_loop import (
+    authoring_transaction,
+    plans_errors,
+    review_repair,
+    review_repair_publication,
+    review_repair_validation,
+)
 from tests.review_repair_support import (
     PublicationWindowFixtures,
     _SimulatedCrash,
@@ -34,7 +40,7 @@ class ReviewRepairPublicationWindowTests(PublicationWindowFixtures, unittest.Tes
         before = self._plan_bytes()
 
         with mock.patch.object(
-            review_repair,
+            review_repair_validation,
             "_make_children_executable",
             return_value=self._blocked_gate(non_bypassable=[]),
         ):
@@ -55,7 +61,7 @@ class ReviewRepairPublicationWindowTests(PublicationWindowFixtures, unittest.Tes
 
     def test_allow_not_loop_ready_still_retains_bypassable_children(self) -> None:
         with mock.patch.object(
-            review_repair,
+            review_repair_validation,
             "_make_children_executable",
             return_value=self._blocked_gate(non_bypassable=[]),
         ):
@@ -76,7 +82,7 @@ class ReviewRepairPublicationWindowTests(PublicationWindowFixtures, unittest.Tes
         before = self._plan_bytes()
 
         with mock.patch.object(
-            review_repair,
+            review_repair_validation,
             "_make_children_executable",
             return_value=self._blocked_gate(non_bypassable=["repository-footprint"]),
         ):
@@ -90,7 +96,7 @@ class ReviewRepairPublicationWindowTests(PublicationWindowFixtures, unittest.Tes
         before = self._plan_bytes()
 
         with mock.patch.object(
-            review_repair.PlanTransaction,
+            authoring_transaction.PlanTransaction,
             "commit",
             side_effect=plans_errors.PlanError("injected commit failure"),
         ):
@@ -106,7 +112,7 @@ class ReviewRepairPublicationWindowTests(PublicationWindowFixtures, unittest.Tes
 
         with (
             mock.patch.object(
-                review_repair.authoring_transaction,
+                authoring_transaction,
                 "refresh_readiness_metadata",
                 side_effect=KeyboardInterrupt(),
             ),
@@ -123,7 +129,7 @@ class ReviewRepairPublicationWindowTests(PublicationWindowFixtures, unittest.Tes
 
         with (
             mock.patch.object(
-                review_repair,
+                review_repair_validation,
                 "_make_children_executable",
                 side_effect=KeyboardInterrupt(),
             ),
@@ -165,10 +171,10 @@ class ReviewRepairPublicationWindowTests(PublicationWindowFixtures, unittest.Tes
         self,
     ) -> None:
         before = self._plan_bytes()
-        advance_phase = review_repair._advance_publication_phase
+        advance_phase = review_repair_publication._advance_publication_phase
 
         def crash_after_publishing_marker(
-            window: review_repair._PublicationWindow, phase: str
+            window: review_repair_publication._PublicationWindow, phase: str
         ) -> None:
             advance_phase(window, phase)
             if phase == review_repair.PUBLICATION_PHASE_PUBLISHING:
@@ -176,7 +182,7 @@ class ReviewRepairPublicationWindowTests(PublicationWindowFixtures, unittest.Tes
 
         with (
             mock.patch.object(
-                review_repair,
+                review_repair_publication,
                 "_advance_publication_phase",
                 side_effect=crash_after_publishing_marker,
             ),

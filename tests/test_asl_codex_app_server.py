@@ -34,6 +34,7 @@ from agent_session_loop import (
     codex_app_server,
     guidance_delivery,
     harness_codex,
+    harness_process,
     harnesses,
 )
 from tests.support import REPO_ROOT, install_fake_codex
@@ -1280,7 +1281,7 @@ class AdapterTransportTests(unittest.TestCase):
         self.launch_log = self.tmp / "launches.log"
         # The real sweep shells out to ``ps``; these tests are about the
         # transport, not the process table.
-        sweep = mock.patch.object(harnesses, "sweep_enabled", return_value=False)
+        sweep = mock.patch.object(harness_process, "sweep_enabled", return_value=False)
         sweep.start()
         self.addCleanup(sweep.stop)
         self.env = mock.patch.dict(
@@ -1574,7 +1575,7 @@ class AdapterFallbackTests(unittest.TestCase):
         self.plan_dir.mkdir()
         self.last_message = self.tmp / "last-message.txt"
         self.launch_log = self.tmp / "launches.log"
-        sweep = mock.patch.object(harnesses, "sweep_enabled", return_value=False)
+        sweep = mock.patch.object(harness_process, "sweep_enabled", return_value=False)
         sweep.start()
         self.addCleanup(sweep.stop)
 
@@ -1723,7 +1724,7 @@ class LegacyContinuityTests(unittest.TestCase):
         self.plan_dir = self.tmp / "plan"
         self.plan_dir.mkdir()
         self.last_message = self.tmp / "last-message.txt"
-        sweep = mock.patch.object(harnesses, "sweep_enabled", return_value=False)
+        sweep = mock.patch.object(harness_process, "sweep_enabled", return_value=False)
         sweep.start()
         self.addCleanup(sweep.stop)
         self.adapter = harness_codex.CodexAdapter(

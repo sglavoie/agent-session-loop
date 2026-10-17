@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
+    harness_process,
     harnesses,
     process_tree,
 )
@@ -347,7 +348,7 @@ class HarnessAbortDeadlineTests(unittest.TestCase):
         abort = harnesses.AbortSignal()
         abort.arm("supervisor stop", grace_seconds=0.1)
 
-        expired = harnesses._wait_for_turn_exit(
+        expired = harness_process._wait_for_turn_exit(
             _StubWaitProcess(0.2), timeout=0.05, abort=abort
         )
 
@@ -357,7 +358,7 @@ class HarnessAbortDeadlineTests(unittest.TestCase):
         abort = harnesses.AbortSignal()
         abort.arm("supervisor stop", grace_seconds=0.05)
 
-        expired = harnesses._wait_for_turn_exit(
+        expired = harness_process._wait_for_turn_exit(
             _StubWaitProcess(0.2), timeout=0.1, abort=abort
         )
 

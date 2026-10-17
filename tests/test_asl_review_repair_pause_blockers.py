@@ -16,7 +16,7 @@ from agent_session_loop import (
     review,
     review_continuation,
     review_delta,
-    review_repair,
+    review_repair_planning,
     review_session_body,
 )
 from tests.review_materialization_support import MaterializationFixtures
@@ -397,7 +397,7 @@ class ReviewRepairPauseBlockerTests(MaterializationFixtures, unittest.TestCase):
                     }
                 )
                 with mock.patch.object(
-                    review_repair,
+                    review_repair_planning,
                     "plan_review_repair_sessions",
                     side_effect=AssertionError(
                         "terminal continuation must not plan repair children"
