@@ -12,6 +12,9 @@ from agent_session_loop import (
     mailbox_appenders,
     overseer_dispatch,
     overseer_mailbox,
+    overseer_mailbox_authority,
+    overseer_mailbox_models,
+    overseer_mailbox_posting,
     overseer_store_ledger,
 )
 from tests.asl_overseer_mailbox_support import (
@@ -208,12 +211,27 @@ class FleetPolling(_MailboxCase):
 class ModuleShape(unittest.TestCase):
     """What the module may not reach for, asserted from its source."""
 
+    modules = (
+        overseer_mailbox,
+        overseer_mailbox_authority,
+        overseer_mailbox_models,
+        overseer_mailbox_posting,
+    )
+
+    def sources(self) -> str:
+        return "\n".join(
+            Path(module.__file__ or "").read_text(encoding="utf-8")
+            for module in self.modules
+        )
+
     def test_the_module_never_reaches_back_into_the_runner(self) -> None:
-        assert_no_runner_import(self, overseer_mailbox)
+        for module in self.modules:
+            with self.subTest(module=module.__name__):
+                assert_no_runner_import(self, module)
 
     def test_the_module_calls_nothing_that_blocks(self) -> None:
         """A fleet poll that could wait would be a fleet poll that stops."""
-        source = Path(overseer_mailbox.__file__ or "").read_text(encoding="utf-8")
+        source = self.sources()
         forbidden = {
             "sleep",
             "finish_wait",
@@ -232,7 +250,7 @@ class ModuleShape(unittest.TestCase):
 
     def test_the_module_never_writes_a_supervisor_lease(self) -> None:
         """The overseer is not the plan's supervisor and may not displace one."""
-        source = Path(overseer_mailbox.__file__ or "").read_text(encoding="utf-8")
+        source = self.sources()
         for name in ("write_supervisor_lease", "append_question_reply", "write_lease"):
             self.assertNotIn(f"{name}(", source, msg=name)
 

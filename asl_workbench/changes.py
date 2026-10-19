@@ -91,7 +91,7 @@ INTENTIONAL_CHANGES: tuple[IntentionalChange, ...] = (
             # opposite outcome, so a reintroduced maintenance pass fails here.
             "scripts:tests/test_asl_workbench_server_archive.py"
             "::test_archive_list_leaves_expired_entries_in_place",
-            "scripts:tests/test_asl_workbench_archive.py"
+            "scripts:tests/asl_workbench_archive_cases_restore.py"
             "::test_retention_marks_expired_entries_without_removing_them",
             # The half already landed. These hold the queue and plan reads to
             # the target so the remaining archive work cannot undo them.
@@ -156,9 +156,9 @@ INTENTIONAL_CHANGES: tuple[IntentionalChange, ...] = (
             "part that stays."
         ),
         pinned_coverage=(
-            "scripts:tests/test_asl_workbench_archive.py"
+            "scripts:tests/asl_workbench_archive_cases_restore.py"
             "::test_retention_marks_expired_entries_without_removing_them",
-            "scripts:tests/test_asl_workbench_archive.py"
+            "scripts:tests/asl_workbench_archive_cases_restore.py"
             "::test_shortening_retention_marks_more_candidates_only",
             "scripts:tests/test_asl_workbench_server_archive.py"
             "::test_archive_list_leaves_expired_entries_in_place",

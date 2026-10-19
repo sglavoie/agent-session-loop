@@ -212,6 +212,9 @@ FAST_MODULES = (
     "tests.test_asl_overseer_context",
     "tests.test_asl_review_delta",
     "tests.test_asl_continuation_guards",
+    "tests.test_asl_continuation_guards_commit",
+    "tests.test_asl_continuation_guards_ledger",
+    "tests.test_asl_continuation_guards_postflight",
     "tests.test_asl_repository_registration",
     "tests.test_asl_authoring_plan_rendering",
     "tests.test_asl_authoring_resplit",
@@ -680,6 +683,9 @@ INTEGRATION_MODULES = (
     "tests.test_asl_e2e_review_reopen",
     "tests.test_asl_e2e_verification_repair",
     "tests.test_asl_worker_verification",
+    "tests.test_asl_worker_verification_evidence",
+    "tests.test_asl_worker_verification_harness",
+    "tests.test_asl_worker_verification_policy",
     "tests.test_asl_review_artifact_schema",
     "tests.test_asl_review_artifact_verdicts",
     "tests.test_asl_review_cycle_advance",
@@ -718,6 +724,9 @@ INTEGRATION_MODULES = (
     # releases and starts them, because "the data a release is handed is the
     # data it ran on" cannot be proven against a switch that was faked.
     "tests.test_workbench_migration",
+    "tests.test_workbench_migration_backup",
+    "tests.test_workbench_migration_prefixes",
+    "tests.test_workbench_migration_rollback",
     # Same reason: most of it is pure catalog algebra, but the reads it proves
     # are observational are proven against a live workbench server.
     "tests.test_workbench_catalog",
@@ -728,6 +737,9 @@ INTEGRATION_MODULES = (
     # proving it takes real child interpreters racing a real flock, and the
     # route half needs a live server.
     "tests.test_workbench_operations",
+    "tests.test_workbench_operations_journal",
+    "tests.test_workbench_operations_processes",
+    "tests.test_workbench_operations_routes",
     # Integration because the claim is that two surfaces are one path: half of
     # it drives the shared action directly and half drives a live workbench
     # server, and the point is that both land in the same journal.

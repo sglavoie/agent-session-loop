@@ -277,7 +277,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
             models._LAUNCH_TESTS,
             models._SERVER_LAUNCH_REPLY_TESTS,
             models._DOCS_TESTS,
-            models._OPERATION_TESTS,
+            *models._OPERATION_TESTS,
             models._ACTION_TESTS,
         ),
     ),
@@ -287,7 +287,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         coverage=(
             models._SERVER_LAUNCH_REPLY_TESTS,
             "scripts:tests/test_asl_reply_flows_e2e_reply_resume.py",
-            models._OPERATION_TESTS,
+            *models._OPERATION_TESTS,
             models._ACTION_TESTS,
         ),
     ),

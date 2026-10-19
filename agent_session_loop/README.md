@@ -15,6 +15,14 @@ owners when substituting collaborators. Shared test fixtures live in dedicated
 support modules, and each split test module is registered in the same suite
 lanes as its original.
 
+The overseer adapters retain their entry points in `overseer_resume`,
+`overseer_checkpoint`, and `overseer_mailbox`. Their siblings separate launch
+recovery and ownership, checkpoint evidence and Git reads, and mailbox posting
+and authority checks. `assurance_ledger` owns transactions, with vocabulary,
+records, parsing, file reads, and index rebuilding in `assurance_ledger_*`.
+Workbench's `service` owns remote dispatch; `service_queries` and
+`service_mutations` share the store and connector lanes in `service_models`.
+
 Turn dispositions retain their entry points in `turn_dispositions.py`, with
 continuation models, redirect settlement, mailbox waits, and failure handling in
 `turn_disposition_*`. The tail keeps its CLI and follower in `tail.py`; its

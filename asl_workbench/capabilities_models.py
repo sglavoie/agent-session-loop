@@ -211,7 +211,12 @@ _FOUNDATION_TESTS = "scripts:tests/test_workbench_foundations.py"
 _CATALOG_TESTS = "scripts:tests/test_workbench_catalog.py"
 _DETAIL_TESTS = "scripts:tests/test_workbench_details.py"
 _HISTORY_TESTS = "scripts:tests/test_workbench_history.py"
-_OPERATION_TESTS = "scripts:tests/test_workbench_operations.py"
+_OPERATION_TESTS = (
+    "scripts:tests/test_workbench_operations.py",
+    "scripts:tests/test_workbench_operations_journal.py",
+    "scripts:tests/test_workbench_operations_processes.py",
+    "scripts:tests/test_workbench_operations_routes.py",
+)
 _ACTION_TESTS = "scripts:tests/test_workbench_launch_reply.py"
 _BRIDGE_TESTS = "scripts:tests/test_asl_bridge_server_capabilities_rows.py"
 _DOCS_TESTS = "scripts:tests/test_asl_docs_authoritative_lanes.py"

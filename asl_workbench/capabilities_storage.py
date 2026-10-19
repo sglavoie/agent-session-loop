@@ -186,7 +186,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         owner=models.OWNER_PORTABLE,
         authority=models.AUTHORITY_ASL,
         regression_coverage=(
-            models._OPERATION_TESTS,
+            *models._OPERATION_TESTS,
             models._SERVER_ARCHIVE_TESTS,
             models._ACTION_TESTS,
         ),
@@ -261,7 +261,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         # left unsettled rather than guessed at -- then restarts the connector
         # and has it close the row out instead of running the mutation twice.
         regression_coverage=(
-            models._OPERATION_TESTS,
+            *models._OPERATION_TESTS,
             models._STORE_TESTS,
             models._FULLSTACK_TESTS,
         ),

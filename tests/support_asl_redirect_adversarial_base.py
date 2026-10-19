@@ -44,7 +44,7 @@ from .support import (
     live_redirect_endpoint,
     write_plan,
 )
-from .test_asl_continuation_guards import registered_guard
+from .support_asl_continuation_guards import registered_guard
 from .test_asl_conversation_resume import ContinuationTestBase
 
 PATIENCE = 10.0

@@ -140,7 +140,7 @@ class StaleProcessIdentityTests(unittest.TestCase):
 class PartialMultiRepositoryTests(unittest.TestCase):
     """An attempt that saw only part of the workspace earns only part of a claim.
 
-    The guard-record fixture is ``tests.test_asl_continuation_guards``'s, reused
+    The guard-record fixture is ``tests.support_asl_continuation_guards``'s, reused
     rather than rebuilt: a second fixture for the same artifact is a second
     chance to get its shape wrong, and a merge test that merges a record no
     producer emits proves nothing about any run.
