@@ -27,6 +27,9 @@ from agent_session_loop import (
     plans_session_scope,
     runner,
     workspace_evidence,
+    workspace_evidence_bases,
+    workspace_evidence_guard,
+    workspace_evidence_scope_repair,
     workspaces,
 )
 from tests.support import assert_no_runner_import, called_names
@@ -112,11 +115,20 @@ class WorkspaceEvidenceBoundaryTests(unittest.TestCase):
     """The module is runner-free, aliased nowhere, and writes in one place."""
 
     def setUp(self) -> None:
-        source_path = Path(workspace_evidence.__file__ or "")
-        self.tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        self.modules = (
+            workspace_evidence_bases,
+            workspace_evidence_guard,
+            workspace_evidence_scope_repair,
+        )
+        self.trees = tuple(
+            ast.parse(Path(module.__file__ or "").read_text(encoding="utf-8"))
+            for module in self.modules
+        )
 
     def test_the_module_does_not_import_the_runner(self) -> None:
-        assert_no_runner_import(self, workspace_evidence)
+        for module in self.modules:
+            with self.subTest(module=module.__name__):
+                assert_no_runner_import(self, module)
 
     def test_the_runner_keeps_no_alias_for_the_moved_symbols(self) -> None:
         for name in MOVED_SYMBOLS:
@@ -127,19 +139,21 @@ class WorkspaceEvidenceBoundaryTests(unittest.TestCase):
     def test_the_module_owns_exactly_the_symbols_the_session_moved(self) -> None:
         defined = {
             node.name
-            for node in self.tree.body
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            for tree in self.trees
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         self.assertEqual(set(MOVED_SYMBOLS), defined)
 
     def test_each_function_makes_exactly_the_durable_writes_it_declares(self) -> None:
         observed: dict[str, frozenset[str]] = {}
-        for node in self.tree.body:
-            if not isinstance(node, ast.FunctionDef):
-                continue
-            writes = called_names(node) & DURABLE_WRITE_NAMES
-            if writes:
-                observed[node.name] = frozenset(writes)
+        for tree in self.trees:
+            for node in tree.body:
+                if not isinstance(node, ast.FunctionDef):
+                    continue
+                writes = called_names(node) & DURABLE_WRITE_NAMES
+                if writes:
+                    observed[node.name] = frozenset(writes)
         self.assertEqual(DURABLE_WRITES, observed)
 
     def test_the_probe_seam_review_guard_declared_is_satisfied_here(self) -> None:

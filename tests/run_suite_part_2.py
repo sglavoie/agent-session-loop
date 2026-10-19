@@ -137,6 +137,7 @@ PORTABLE_MODULES = (
     "tests.test_workbench_history",
     "tests.test_workbench_http",
     "tests.test_workbench_integrations",
+    "tests.test_workbench_integrations_publisher",
     "tests.test_workbench_remote_actions_submission_queue",
     "tests.test_workbench_remote_actions_lane",
     "tests.test_workbench_remote_actions_restart",
@@ -190,6 +191,8 @@ INTEGRATION_MODULES = (
     "tests.test_asl_codex_app_server_adapter",
     "tests.test_asl_codex_app_server_fallback",
     "tests.test_asl_copilot_acp",
+    "tests.test_asl_copilot_acp_rendering",
+    "tests.test_asl_copilot_acp_transport",
     "tests.test_asl_copilot_resume",
     "tests.test_asl_native_restore_recovery",
     "tests.test_asl_native_restore_recovery_claude",
@@ -345,6 +348,8 @@ INTEGRATION_MODULES = (
     # it drives the shared action directly and half drives a live workbench
     # server, and the point is that both land in the same journal.
     "tests.test_workbench_launch_reply",
+    "tests.test_workbench_launch_reply_actions",
+    "tests.test_workbench_launch_reply_surfaces",
     # And for the same reason once more, for the controls: the run controls and
     # the redirect journal are driven here through the shared service and
     # through both surfaces that call it, so a divergence shows up as a failure
