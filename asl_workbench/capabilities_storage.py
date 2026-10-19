@@ -91,7 +91,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         compatibility_adapters=(
             "existing installation prefixes and unit identifiers are preserved",
         ),
-        regression_coverage=(models._LIFECYCLE_TESTS,),
+        regression_coverage=(*models._LIFECYCLE_TESTS,),
     ),
     models.Capability(
         key=f"{models.SURFACE_PERSISTENCE}:workbench-registry",
@@ -142,7 +142,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
             *models._SUMMARY_TESTS,
             *models._RECOVERY_TESTS,
             models._FOUNDATION_TESTS,
-            models._CATALOG_TESTS,
+            *models._CATALOG_TESTS,
         ),
         intentional_changes=("observational-reads",),
     ),
@@ -232,7 +232,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         compatibility_adapters=("existing credentials are preserved, not reissued",),
         regression_coverage=(
             models._TRANSPORT_TESTS,
-            models._LIFECYCLE_TESTS,
+            *models._LIFECYCLE_TESTS,
         ),
     ),
     models.Capability(
@@ -245,7 +245,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         origin=models.ORIGIN_COMPANION,
         owner=models.OWNER_PORTABLE,
         authority=models.AUTHORITY_HOST,
-        regression_coverage=(models._LIFECYCLE_TESTS,),
+        regression_coverage=(*models._LIFECYCLE_TESTS,),
     ),
     models.Capability(
         key=f"{models.SURFACE_PERSISTENCE}:connector-operation-journal",

@@ -3,6 +3,14 @@
 
 from __future__ import annotations
 
+from agent_session_loop import (
+    handoff_guard_sessions,
+    handoff_guard_mailbox,
+    handoff_guard_review,
+    handoff_guard_artifacts,
+    handoff_guard_snapshots,
+)
+
 # ruff: noqa: F401, F403, F405
 from tests.asl_handoff_guards_test_support import *
 
@@ -11,11 +19,28 @@ class HandoffGuardsBoundaryTests(unittest.TestCase):
     """``handoff_guards`` is runner-free and writes only where it says it does."""
 
     def setUp(self) -> None:
-        self.source = Path(handoff_guards.__file__ or "").read_text(encoding="utf-8")
+        self.source = "\n".join(
+            Path(module.__file__).read_text(encoding="utf-8")
+            for module in (
+                handoff_guard_sessions,
+                handoff_guard_mailbox,
+                handoff_guard_review,
+                handoff_guard_artifacts,
+                handoff_guard_snapshots,
+            )
+        )
         self.tree = ast.parse(self.source)
 
     def test_the_module_does_not_import_the_runner(self) -> None:
-        assert_no_runner_import(self, handoff_guards)
+        for module in (
+            handoff_guards,
+            handoff_guard_sessions,
+            handoff_guard_mailbox,
+            handoff_guard_review,
+            handoff_guard_artifacts,
+            handoff_guard_snapshots,
+        ):
+            assert_no_runner_import(self, module)
 
     def test_the_runner_keeps_no_alias_for_the_moved_symbols(self) -> None:
         for name in MOVED_SYMBOLS:

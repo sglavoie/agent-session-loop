@@ -27,6 +27,7 @@ PORTABLE_MODULES = (
     "tests.test_asl_turn_dispositions",
     "tests.test_asl_turn_postflight",
     "tests.test_asl_turn_preflight",
+    "tests.test_asl_turn_preflight_baselines",
     "tests.test_asl_turn_preparation",
     "tests.test_asl_turn_settlement",
     "tests.test_asl_run_selection",
@@ -324,6 +325,8 @@ INTEGRATION_MODULES = (
     # Integration for the plainest reason: git, `plutil`, the installed `asl`
     # executable, and a service release that is genuinely started and stopped.
     "tests.test_workbench_lifecycle",
+    "tests.test_workbench_lifecycle_service",
+    "tests.test_workbench_lifecycle_connector",
     # Half of it is pure translation, but the rollback half installs two real
     # releases and starts them, because "the data a release is handed is the
     # data it ran on" cannot be proven against a switch that was faked.
@@ -334,6 +337,8 @@ INTEGRATION_MODULES = (
     # Same reason: most of it is pure catalog algebra, but the reads it proves
     # are observational are proven against a live workbench server.
     "tests.test_workbench_catalog",
+    "tests.test_workbench_catalog_observation",
+    "tests.test_workbench_catalog_generations",
     # Same again for the detail reads: containment and "a read changes
     # nothing" are only worth asserting against the routes that serve them.
     "tests.test_workbench_details",

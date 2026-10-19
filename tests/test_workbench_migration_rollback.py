@@ -14,7 +14,7 @@ from asl_workbench.installation import (
     DATABASE_PATH,
     SECRETS_PATH,
 )
-from tests.test_workbench_lifecycle import InstallationTestCase
+from tests.workbench_lifecycle_support import InstallationTestCase
 
 from .support_workbench_migration import (
     PLAN_KEY,

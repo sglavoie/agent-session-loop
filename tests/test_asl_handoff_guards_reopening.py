@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from agent_session_loop import handoff_guard_mailbox
+
 # ruff: noqa: F401, F403, F405
 from tests.asl_handoff_guards_test_support import *
 
@@ -72,7 +74,7 @@ class RefusalReopeningTruthTests(_PlanCase):
 
     def mailbox_completion_guard(self, session_id: str) -> str:
         with mock.patch.object(
-            handoff_guards,
+            handoff_guard_mailbox,
             "_mailbox_completion_guard_evidence",
             return_value={"question_id": "q-1"},
         ):

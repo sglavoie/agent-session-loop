@@ -95,13 +95,13 @@ INTENTIONAL_CHANGES: tuple[IntentionalChange, ...] = (
             "::test_retention_marks_expired_entries_without_removing_them",
             # The half already landed. These hold the queue and plan reads to
             # the target so the remaining archive work cannot undo them.
-            "scripts:tests/test_workbench_catalog.py"
+            "scripts:tests/test_workbench_catalog_observation.py"
             "::test_polling_the_queue_no_longer_empties_an_expired_archive_entry",
-            "scripts:tests/test_workbench_catalog.py"
+            "scripts:tests/test_workbench_catalog_observation.py"
             "::test_polling_the_queue_leaves_a_reclaimable_lock_alone",
-            "scripts:tests/test_workbench_catalog.py"
+            "scripts:tests/test_workbench_catalog_observation.py"
             "::test_reading_one_plan_leaves_a_reclaimable_lock_alone",
-            "scripts:tests/test_workbench_catalog.py"
+            "scripts:tests/test_workbench_catalog_observation.py"
             "::test_repeated_catalog_reads_leave_the_whole_state_tree_unchanged",
             # The detail half. These hold the four routes that still reclaimed
             # after the catalog work -- state, verification, questions and the

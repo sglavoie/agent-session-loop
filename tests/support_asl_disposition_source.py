@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from typing import cast
 
-from agent_session_loop import handoff_guards, turn_postflight
+from agent_session_loop import handoff_guard_artifacts, turn_postflight
 from tests import support_asl_run_loop_view as run_loop_view
 
 #: The modules the session loop hands a step of the turn's finalization to. A
@@ -100,7 +100,7 @@ class DispositionSourceFixture(unittest.TestCase):
         # moved to `handoff_guards`, so the two are read from separate trees
         # and only the loop's is ever mutated by these tests.
         self.disposition_tree = ast.parse(
-            Path(handoff_guards.__file__).read_text(encoding="utf-8")
+            Path(handoff_guard_artifacts.__file__).read_text(encoding="utf-8")
         )
 
     def disposition_names(self) -> list[str]:

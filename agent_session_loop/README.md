@@ -1,5 +1,20 @@
 # Agent Session Loop (ASL)
 
+Completion contracts keep their imports in `contracts`, with models, Markdown
+sections, check validation, and recipe parsing in `contract_*`. The
+`handoff_guard_*` modules separate session reopening, mailbox completion,
+review mutation, plan artifacts, and snapshot capture. Prompt fragments live
+in `run_prompt_*`; preparation models, review refresh, repair resumption, and
+packet construction live in `turn_preparation_*`.
+
+`redirect_control` preserves its public controller and records. The controller
+handles acceptance and phase transitions; its `UrgentEscalation` base owns the
+shared turn state, watchdog, termination evidence, and successor gate.
+`workbench_operation_*` separates journal storage, evidence collection, and
+mutation admission. The portable `asl_workbench.catalog_*` modules separate
+vocabularies, safe labels, records, and paginated views. These public modules
+use explicit imports to preserve existing callers.
+
 The public imports for commit messages, conversation continuity, AgentMux
 contracts, and overseer decisions, context, and CLI commands remain in their
 original modules. Their implementations live in focused sibling modules:

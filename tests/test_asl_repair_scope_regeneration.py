@@ -23,6 +23,10 @@ from agent_session_loop import (
     turn_postflight,
     turn_preflight,
     turn_preparation,
+    turn_preparation_models,
+    turn_preparation_prompt,
+    turn_preparation_repair,
+    turn_preparation_review,
     turn_settlement,
     verification_models,
     workspace_evidence,
@@ -275,6 +279,10 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
     TURN_PATH_MODULES = (
         run_loop,
         turn_preparation,
+        turn_preparation_models,
+        turn_preparation_prompt,
+        turn_preparation_repair,
+        turn_preparation_review,
         turn_preflight,
         turn_postflight,
         turn_settlement,
@@ -289,14 +297,13 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
         }
         self.trees["run_loop"] = ast.parse(run_loop_view.assembled_source())
         self.tree = self.trees["run_loop"]
-        self.preparation_tree = self.trees["turn_preparation"]
         self.run_locked = self._function("run_locked")
         self.entry_points = self._entry_points()
         self.resume_repair = self._function(
-            "resume_repair_session", tree=self.preparation_tree
+            "resume_repair_session", tree=self.trees["turn_preparation_repair"]
         )
         self.prepare_prompt = self._function(
-            "prepare_turn_prompt", tree=self.preparation_tree
+            "prepare_turn_prompt", tree=self.trees["turn_preparation_prompt"]
         )
 
     def _entry_points(self) -> dict[str, tuple[int, ast.FunctionDef]]:

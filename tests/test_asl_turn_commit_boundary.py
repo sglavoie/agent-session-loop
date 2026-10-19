@@ -25,6 +25,10 @@ from agent_session_loop import (
     turn_postflight,
     turn_preflight,
     turn_preparation,
+    turn_preparation_models,
+    turn_preparation_prompt,
+    turn_preparation_repair,
+    turn_preparation_review,
     turn_settlement,
 )
 from tests import support_asl_run_loop_view as run_loop_view
@@ -72,6 +76,10 @@ COMMIT_ARTIFACT_KEYS = ("stdout", "stderr", "result")
 TURN_PATH_MODULES = (
     run_loop,
     turn_preparation,
+    turn_preparation_models,
+    turn_preparation_prompt,
+    turn_preparation_repair,
+    turn_preparation_review,
     turn_preflight,
     turn_postflight,
     turn_settlement,

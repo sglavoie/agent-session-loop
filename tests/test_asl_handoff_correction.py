@@ -36,6 +36,11 @@ from unittest import mock
 from agent_session_loop import (
     events,
     handoff_correction,
+    handoff_guard_artifacts,
+    handoff_guard_mailbox,
+    handoff_guard_review,
+    handoff_guard_sessions,
+    handoff_guard_snapshots,
     handoff_guards,
     plans_errors,
     plans_handoff,
@@ -270,7 +275,15 @@ class ImportDirectionTests(unittest.TestCase):
     def test_neither_seam_holder_imports_this_module_back(self) -> None:
         # Both of them name this module in prose, to say why the seam exists,
         # so the check is on the import graph rather than on the text.
-        for module in (handoff_guards, session_verification):
+        for module in (
+            handoff_guards,
+            handoff_guard_artifacts,
+            handoff_guard_mailbox,
+            handoff_guard_review,
+            handoff_guard_sessions,
+            handoff_guard_snapshots,
+            session_verification,
+        ):
             with self.subTest(module=module.__name__):
                 source = Path(module.__file__ or "").read_text(encoding="utf-8")
                 imported: set[str] = set()

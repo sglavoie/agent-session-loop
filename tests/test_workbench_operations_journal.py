@@ -7,7 +7,12 @@ import unittest
 from typing import Any
 from unittest import mock
 
-from agent_session_loop import state, state_locks, workbench_operations
+from agent_session_loop import (
+    state,
+    state_locks,
+    workbench_operation_journal,
+    workbench_operations,
+)
 from asl_workbench import operations
 
 from .support_workbench_operations import DEAD_PID, JournalFixture, _record
@@ -268,9 +273,11 @@ class DurableJournalTests(JournalFixture, unittest.TestCase):
         inode = self.journal_path.stat().st_ino
         with (
             mock.patch.object(
-                workbench_operations, "OPERATIONS_JOURNAL_MAX_BYTES", 2400
+                workbench_operation_journal, "OPERATIONS_JOURNAL_MAX_BYTES", 2400
             ),
-            mock.patch.object(workbench_operations, "OPERATIONS_RETAINED_SETTLED", 2),
+            mock.patch.object(
+                workbench_operation_journal, "OPERATIONS_RETAINED_SETTLED", 2
+            ),
         ):
             for index in range(2, 12):
                 identifier = f"op-{index}"

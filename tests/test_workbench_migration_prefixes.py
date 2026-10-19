@@ -23,7 +23,7 @@ from asl_workbench.operations import (
     OPERATION_EXPIRED,
     OPERATION_UNCONFIRMED,
 )
-from tests.test_workbench_lifecycle import CONNECTOR_ID, OWNER, TARGET_ID
+from tests.workbench_lifecycle_support import CONNECTOR_ID, OWNER, TARGET_ID
 
 from .support_workbench_migration import (
     ENTRY_ID,

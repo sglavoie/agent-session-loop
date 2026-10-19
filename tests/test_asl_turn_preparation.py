@@ -50,6 +50,10 @@ from agent_session_loop import (
     run_prompts,
     task_packet,
     turn_preparation,
+    turn_preparation_models,
+    turn_preparation_prompt,
+    turn_preparation_repair,
+    turn_preparation_review,
 )
 from tests import support_asl_run_loop_view as run_loop_view
 
@@ -217,11 +221,26 @@ class PreparationBoundaryTests(unittest.TestCase):
     """The boundary's own shape, independent of any session it prepares."""
 
     def module_source(self) -> ast.Module:
-        source = Path(turn_preparation.__file__).read_text(encoding="utf-8")
+        source = "\n".join(
+            Path(module.__file__).read_text(encoding="utf-8")
+            for module in (
+                turn_preparation_models,
+                turn_preparation_review,
+                turn_preparation_repair,
+                turn_preparation_prompt,
+            )
+        )
         return ast.parse(source)
 
     def test_turn_preparation_does_not_import_the_runner(self) -> None:
-        assert_no_runner_import(self, turn_preparation)
+        for module in (
+            turn_preparation,
+            turn_preparation_models,
+            turn_preparation_review,
+            turn_preparation_repair,
+            turn_preparation_prompt,
+        ):
+            assert_no_runner_import(self, module)
 
     def test_every_pause_is_followed_by_the_return_that_carries_it(self) -> None:
         # The branches this replaced ended in `break`. Here the `break` is the

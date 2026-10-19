@@ -39,7 +39,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
             models._SERVER_QUEUE_TESTS,
             *models._SUMMARY_TESTS,
             models._FOUNDATION_TESTS,
-            models._CATALOG_TESTS,
+            *models._CATALOG_TESTS,
             *models._OVERVIEW_TESTS,
         ),
         changes=("observational-reads",),
@@ -71,7 +71,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         coverage=(
             models._SERVER_QUEUE_TESTS,
             *models._SUMMARY_TESTS,
-            models._CATALOG_TESTS,
+            *models._CATALOG_TESTS,
             models._DETAIL_TESTS,
         ),
         changes=("observational-reads",),

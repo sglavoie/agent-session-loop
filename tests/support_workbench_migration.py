@@ -34,7 +34,7 @@ from asl_workbench.operations import (
     OPERATION_PENDING,
     OPERATION_UNCONFIRMED,
 )
-from tests.test_workbench_lifecycle import ASL_EXECUTABLE, CONNECTOR_ID, OWNER
+from tests.workbench_lifecycle_support import ASL_EXECUTABLE, CONNECTOR_ID, OWNER
 
 #: The connector whose observations the legacy database holds. Not the same
 #: string as the connector this prefix would provision: the rows were uploaded

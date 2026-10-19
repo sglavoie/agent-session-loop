@@ -13,6 +13,10 @@ from agent_session_loop import (
     redirect_ack,
     redirect_store_models,
     redirect_store_vocab,
+    run_prompt_continuations,
+    run_prompt_mailbox,
+    run_prompt_session,
+    run_prompt_workspace,
     run_prompts,
     task_packet,
 )
@@ -342,10 +346,26 @@ class PromptBoundaryTests(unittest.TestCase):
     """
 
     def test_run_prompts_does_not_import_the_runner(self) -> None:
-        assert_no_runner_import(self, run_prompts)
+        for module in (
+            run_prompts,
+            run_prompt_workspace,
+            run_prompt_mailbox,
+            run_prompt_session,
+            run_prompt_continuations,
+        ):
+            assert_no_runner_import(self, module)
 
     def test_prompt_assembly_writes_no_durable_record(self) -> None:
-        source = Path(run_prompts.__file__).read_text(encoding="utf-8")
+        source = "\n".join(
+            Path(module.__file__).read_text(encoding="utf-8")
+            for module in (
+                run_prompts,
+                run_prompt_workspace,
+                run_prompt_mailbox,
+                run_prompt_session,
+                run_prompt_continuations,
+            )
+        )
 
         for writer in ("write_text(", "open(", "mkdir(", "replace(", "unlink("):
             self.assertNotIn(writer, source, msg=writer)

@@ -208,7 +208,11 @@ _STATIC_SHELL_TESTS = "scripts:tests/test_asl_workbench_static_shell.py"
 _STATIC_ASSET_TESTS = "scripts:tests/test_asl_workbench_static_assets.py"
 _STATIC_CLEANUP_TESTS = "scripts:tests/test_asl_workbench_hardening_cleanup.py"
 _FOUNDATION_TESTS = "scripts:tests/test_workbench_foundations.py"
-_CATALOG_TESTS = "scripts:tests/test_workbench_catalog.py"
+_CATALOG_TESTS = (
+    "scripts:tests/test_workbench_catalog.py",
+    "scripts:tests/test_workbench_catalog_observation.py",
+    "scripts:tests/test_workbench_catalog_generations.py",
+)
 _DETAIL_TESTS = "scripts:tests/test_workbench_details.py"
 _HISTORY_TESTS = "scripts:tests/test_workbench_history.py"
 _OPERATION_TESTS = (
@@ -250,11 +254,15 @@ _REMOTE_READ_TESTS = (
 _REMOTE_ACTION_TESTS = "scripts:tests/test_workbench_remote_actions_performer.py"
 _HTTP_TESTS = "scripts:tests/test_workbench_http.py"
 #: Packaging and the native lifecycle, split by what each half can prove. The
-#: Mac module drives install, upgrade, rollback, recovery and removal against a
+#: Mac modules drive install, upgrade, rollback, recovery and removal against a
 #: release that is genuinely started; the portable module runs under the Pi's
 #: own interpreter and holds the artifact to portable code and static assets.
 #: Both are named wherever a row is about how the application is deployed.
-_LIFECYCLE_TESTS = "scripts:tests/test_workbench_lifecycle.py"
+_LIFECYCLE_TESTS = (
+    "scripts:tests/test_workbench_lifecycle.py",
+    "scripts:tests/test_workbench_lifecycle_service.py",
+    "scripts:tests/test_workbench_lifecycle_connector.py",
+)
 _PORTABLE_TESTS = "scripts:tests/test_workbench_portable.py"
 #: The one-way trip onto this package, and the one way back. Named separately
 #: from the lifecycle module because it is the only coverage that starts from

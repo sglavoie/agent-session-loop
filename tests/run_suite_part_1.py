@@ -366,6 +366,7 @@ FAST_MODULES = (
     "tests.test_asl_run_payloads",
     "tests.test_asl_run_contention",
     "tests.test_asl_turn_preflight",
+    "tests.test_asl_turn_preflight_baselines",
     "tests.test_asl_live_verification",
     "tests.test_asl_review_cycle",
     "tests.test_asl_session_verification",

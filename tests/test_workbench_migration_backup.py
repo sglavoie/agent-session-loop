@@ -18,7 +18,7 @@ from asl_workbench.installation import (
     document,
     write_json,
 )
-from tests.test_workbench_lifecycle import TARGET_ID
+from tests.workbench_lifecycle_support import TARGET_ID
 
 from .support_workbench_migration import (
     RUN_KEY,
