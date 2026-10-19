@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 from __future__ import annotations
 
 import ast
@@ -12,6 +13,10 @@ from unittest import mock
 from agent_session_loop import (
     commit_groups,
     commit_settlement,
+    commit_settlement_finish,
+    commit_settlement_groups,
+    commit_settlement_ledger,
+    commit_settlement_paused,
     durability,
     events,
     run_persistence,
@@ -535,20 +540,26 @@ class CommitSettlementBoundaryTests(unittest.TestCase):
         # run's write mutex around every record it appends, so a second write
         # path here would be a durable record taken outside that mutex — or a
         # raw file write with no fsync behind it at all.
-        tree = ast.parse(Path(commit_settlement.__file__).read_text(encoding="utf-8"))
         receivers = set()
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if not isinstance(node.func, ast.Attribute):
-                continue
-            if node.func.attr in ("append_event", "write_state"):
-                receiver = node.func.value
-                receivers.add(
-                    receiver.id
-                    if isinstance(receiver, ast.Name)
-                    else ast.dump(receiver)
-                )
+        for module in (
+            commit_settlement_ledger,
+            commit_settlement_groups,
+            commit_settlement_paused,
+            commit_settlement_finish,
+        ):
+            tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if not isinstance(node.func, ast.Attribute):
+                    continue
+                if node.func.attr in ("append_event", "write_state"):
+                    receiver = node.func.value
+                    receivers.add(
+                        receiver.id
+                        if isinstance(receiver, ast.Name)
+                        else ast.dump(receiver)
+                    )
 
         self.assertEqual({"persistence"}, receivers)
 
