@@ -8,7 +8,7 @@ import time
 import unittest
 from unittest import mock
 
-from agent_session_loop import cli, commit_message, config
+from agent_session_loop import cli, commit_message, commit_message_git, config
 from tests import support_asl_commit_message as fixtures
 from tests.support import (
     GENERATION_TIMEOUT_PROBE_SECONDS,
@@ -39,7 +39,7 @@ class CommitHandlerTests(fixtures.CommitHandlerCase):
         # from having nothing staged at all.
         empty = commit_message.DiffResult(diff="", is_empty=True)
         with mock.patch.object(
-            commit_message, "capture_staged_diff", return_value=empty
+            commit_message_git, "capture_staged_diff", return_value=empty
         ):
             code, out, _err = self.run_commit(str(self.repo), "--yes", "--json")
 

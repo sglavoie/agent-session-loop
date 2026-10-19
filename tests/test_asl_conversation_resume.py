@@ -27,6 +27,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
+    conversation_capabilities,
     conversation_resume,
     conversations,
     events,
@@ -394,7 +395,7 @@ class TurnContinuationPlanTests(ContinuationTestBase):
 
     def test_a_harness_without_continuity_runs_the_turn_with_neither_half(self) -> None:
         with mock.patch.object(
-            conversations, "continues_conversations", return_value=False
+            conversation_capabilities, "continues_conversations", return_value=False
         ):
             continuation = self.plan()
         self.assertEqual(

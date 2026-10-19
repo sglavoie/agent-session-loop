@@ -54,12 +54,12 @@ from agent_session_loop import (
     harness_process,
 )
 from tests import support_asl_native_restore_recovery as fixtures
-from tests.support_asl_native_restore_recovery import NOT_A_MISSING_HISTORY, THREAD_ID
-from tests.test_asl_codex_app_server import (
+from tests.support_asl_codex_app_server import (
     FAKE_APP_SERVER_FIXTURE,
     PROMPT,
     WAIT_SECONDS,
 )
+from tests.support_asl_native_restore_recovery import NOT_A_MISSING_HISTORY, THREAD_ID
 from tests.test_asl_copilot_acp import FAKE_ACP_FIXTURE
 from tests.test_asl_copilot_acp import SESSION_ID as ACP_SESSION_ID
 

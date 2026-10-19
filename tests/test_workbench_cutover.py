@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from asl_workbench import lifecycle, migration
+from asl_workbench import lifecycle, lifecycle_attachment, migration
 from asl_workbench.installation import (
     CONFIG_PATH,
     DATABASE_PATH,
@@ -465,7 +465,9 @@ class SingleOwner(TemporaryCase):
             "plan_roots": [str(self.root / "plans")],
             "settings": {"public_origin": origin},
         }
-        with mock.patch.object(lifecycle, "connector_settings", return_value=settings):
+        with mock.patch.object(
+            lifecycle_attachment, "connector_settings", return_value=settings
+        ):
             name, content = lifecycle.definition(
                 self.prefix, self.prefix, "/usr/bin/python3", lifecycle.ROLE_CONNECTOR
             )

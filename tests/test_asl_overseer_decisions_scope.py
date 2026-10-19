@@ -368,7 +368,9 @@ class IsolationTests(unittest.TestCase):
         nowhere, which is the property this test is about rather than the
         length of the list.
         """
-        source = Path(overseer_decisions.__file__ or "").read_text(encoding="utf-8")
+        facade = Path(overseer_decisions.__file__ or "")
+        sources = [facade, *sorted(facade.parent.glob("overseer_decision_*.py"))]
+        internal = {path.stem for path in sources}
         permitted = {
             "__future__",
             "collections.abc",
@@ -384,16 +386,17 @@ class IsolationTests(unittest.TestCase):
             "overseer_policy_client",
         }
         imported: set[str] = set()
-        for node in ast.walk(ast.parse(source)):
-            if isinstance(node, ast.Import):
-                imported.update(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom):
-                if node.module is not None:
-                    imported.add(node.module)
-                if node.level:
+        for path in sources:
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Import):
                     imported.update(alias.name for alias in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module is not None:
+                        imported.add(node.module)
+                    elif node.level:
+                        imported.update(alias.name for alias in node.names)
 
-        self.assertEqual(imported - permitted, set())
+        self.assertEqual(imported - permitted - internal, set())
 
     def test_nothing_here_is_convertible_to_permission(self) -> None:
         """A ruling is an answer about evidence, never a grant to act on."""

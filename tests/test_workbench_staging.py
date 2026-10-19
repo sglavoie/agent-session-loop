@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from asl_workbench import lifecycle, runtime
+from asl_workbench import lifecycle, lifecycle_attachment, runtime
 from asl_workbench.http import MODE_REMOTE
 from asl_workbench.integrations import PI_SITE
 from asl_workbench.notifications import (
@@ -320,7 +320,9 @@ class RestagedLaunchAgent(TemporaryCase):
             "plan_roots": [str(self.root / "plans")],
             "settings": {"public_origin": staging.staging_site().public_origin},
         }
-        with mock.patch.object(lifecycle, "connector_settings", return_value=settings):
+        with mock.patch.object(
+            lifecycle_attachment, "connector_settings", return_value=settings
+        ):
             name, content = lifecycle.definition(
                 prefix, prefix, "/usr/bin/python3", lifecycle.ROLE_CONNECTOR
             )

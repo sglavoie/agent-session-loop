@@ -6,7 +6,7 @@ import json
 import unittest
 from unittest import mock
 
-from agent_session_loop import commit_message
+from agent_session_loop import commit_message, commit_message_git
 from tests import support_asl_commit_message as fixtures
 from tests.support import (
     git_stdout,
@@ -101,7 +101,7 @@ class CommitHandlerTests(fixtures.CommitHandlerCase):
             self.write("src/alpha.py", "print('smuggled')\n")
 
         with mock.patch.object(
-            commit_message, "assert_pathspec_snapshot", side_effect=smuggle
+            commit_message_git, "assert_pathspec_snapshot", side_effect=smuggle
         ):
             code, _out, err = self.run_commit(
                 str(self.repo), "--yes", "--pathspec", "src/alpha.py"

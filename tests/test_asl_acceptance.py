@@ -164,9 +164,8 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
             "LifecycleTests.test_a_recurrence_after_dismissal_stays_closed",
             "tests.test_asl_assurance_projection_lifecycle:MergeTests.test_merge_is_irreversible",
             "tests.test_asl_assurance_projection_lifecycle:MergeTests.test_merge_rejects_a_cycle",
-            "tests.test_asl_assurance_cli:AssuranceCloseoutTests.test_a_second_closeout_needs_replace",
-            "tests.test_asl_assurance_cli:"
-            "AssuranceCloseoutTests.test_a_replacement_names_the_closeout_it_supersedes",
+            "tests.test_asl_assurance_cli_closeout:AssuranceCloseoutTests.test_a_second_closeout_needs_replace",
+            "tests.test_asl_assurance_cli_closeout:AssuranceCloseoutTests.test_a_replacement_names_the_closeout_it_supersedes",
             "tests.test_asl_acceptance:"
             "AppendOnlyLedgerTests.test_every_canonical_operation_only_appends",
         ),
@@ -181,8 +180,7 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
             "TerminalizationCoordinatorTests.test_the_exit_code_survives_the_coordinator_unchanged",
             "tests.test_asl_assurance_lifecycle_terminal_outcomes:"
             "TerminalBranchRoutingTests.test_an_unavailable_audit_changes_nothing_it_graded",
-            "tests.test_asl_workbench_summary:"
-            "WorkbenchSummaryTests.test_assurance_summary_carries_no_audit_controls",
+            "tests.test_asl_workbench_summary_completion:WorkbenchSummaryTests.test_assurance_summary_carries_no_audit_controls",
             "tests.test_asl_assurance_metrics:"
             "CoverageMetricsTests.test_coverage_separates_graded_runs_from_merely_recorded_ones",
             "skills/asl/scripts/test_asl_autopilot_review_verdict.py:"
@@ -196,12 +194,9 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Findings become editable improvement-plan drafts only through an "
         "explicit human command.",
         (
-            "tests.test_asl_assurance_cli:"
-            "AssurancePlanTests.test_a_valid_reply_becomes_the_proposal_and_then_a_record",
-            "tests.test_asl_assurance_cli:"
-            "AssurancePlanTests.test_drafting_cannot_reach_the_commands_that_change_a_repository",
-            "tests.test_asl_assurance_cli:"
-            "AssurancePlanTests.test_a_mutation_is_reported_ahead_of_the_exit_code",
+            "tests.test_asl_assurance_cli_plan:AssurancePlanTests.test_a_valid_reply_becomes_the_proposal_and_then_a_record",
+            "tests.test_asl_assurance_cli_plan_safety:AssurancePlanTests.test_drafting_cannot_reach_the_commands_that_change_a_repository",
+            "tests.test_asl_assurance_cli_plan_safety:AssurancePlanTests.test_a_mutation_is_reported_ahead_of_the_exit_code",
         ),
     ),
     (

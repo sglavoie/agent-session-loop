@@ -1,5 +1,20 @@
 # Agent Session Loop (ASL)
 
+The public imports for commit messages, conversation continuity, AgentMux
+contracts, and overseer decisions, context, and CLI commands remain in their
+original modules. Their implementations live in focused sibling modules:
+`commit_message_*` separates diff processing, Git operations, formatting,
+generation, and command handling; `conversation_*` separates references,
+validation, capabilities, storage, selection, and relocation;
+`agent_mux_contract_*` separates schema linting, validation, manifests, and
+corpus checks. The `overseer_decision_*`, `overseer_context_*`, and
+`overseer_cli_*` families separate evidence, models, policy, and command paths.
+Workbench uses the same structure for `history_*`, `http_*`, `capabilities_*`,
+and `lifecycle_*`. Internal calls use the owning modules; tests patch those
+owners when substituting collaborators. Shared test fixtures live in
+`tests/support_*`, and each split test module is registered in the same suite
+lanes as its original.
+
 Implementation runs can explicitly authorize an external data directory with
 `--external-write-root /absolute/directory` (repeatable). Admission pins existing,
 narrow canonical roots; `run_config` retains them for `--resume`. The external

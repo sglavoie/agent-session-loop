@@ -280,10 +280,12 @@ class GuardedOperationTests(_OverseerCase):
 
     def test_no_adapter_is_prepared_or_executed_in_this_module(self) -> None:
         """Read the module's own AST: there is no second door to find."""
-        tree = ast.parse(Path(overseer_cli.__file__).read_text(encoding="utf-8"))
+        facade = Path(overseer_cli.__file__)
+        sources = [facade, *sorted(facade.parent.glob("overseer_cli_*.py"))]
         called = {
             node.func.attr
-            for node in ast.walk(tree)
+            for path in sources
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
         }
 

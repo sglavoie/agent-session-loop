@@ -56,10 +56,8 @@ from agent_session_loop import (
     overseer_policy_client,
 )
 from tests import support
-from tests.test_asl_overseer_e2e import (
-    AUTHORIZED,
-    _WorldCase,
-)
+from tests.support_asl_overseer_assertions import _WorldCase
+from tests.support_asl_overseer_e2e import AUTHORIZED
 
 #: Set to any non-empty value other than a falsehood to make a missing installed
 #: pair fail this module rather than skip it. Mirrors ``AMX_ASL_INTEGRATION`` in

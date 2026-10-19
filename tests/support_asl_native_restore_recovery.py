@@ -24,7 +24,7 @@ from tests.asl_redirect_continuation_support import (
     WORKER_PID,
 )
 from tests.asl_redirect_run_support import _RedirectedRun
-from tests.test_asl_codex_app_server import (
+from tests.support_asl_codex_app_server import (
     FAKE_APP_SERVER_FIXTURE,
     PROMPT,
     WAIT_SECONDS,

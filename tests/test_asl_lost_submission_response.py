@@ -43,14 +43,14 @@ from agent_session_loop import (
     redirect_store_journal,
     redirect_store_models,
 )
-
-from .asl_redirect_continuation_support import FEEDBACK, SESSION_ID, WORKER_PID
-from .asl_redirect_run_support import _RedirectedRun
-from .test_asl_codex_app_server import (
+from tests.support_asl_codex_app_server import (
     FAKE_APP_SERVER_FIXTURE,
     PROMPT,
     WAIT_SECONDS,
 )
+
+from .asl_redirect_continuation_support import FEEDBACK, SESSION_ID, WORKER_PID
+from .asl_redirect_run_support import _RedirectedRun
 
 #: The conversation the fixture run opens and its successor asks to continue.
 CONVERSATION_ID = "conv-1"
