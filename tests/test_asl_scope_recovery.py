@@ -20,6 +20,7 @@ from agent_session_loop import (
     plans_snapshot,
     repository_evidence,
     scope_recovery,
+    scope_recovery_ref_updates,
     state,
     state_locks,
     state_status,
@@ -290,7 +291,7 @@ class RefRecoveryTests(unittest.TestCase):
 
     def test_rechecks_after_preparation(self):
         _, preview = self.invoke()
-        real = scope_recovery._proposal
+        real = scope_recovery_ref_updates._proposal
         calls = 0
 
         def moving_proposal(*args, **kwargs):
@@ -303,7 +304,7 @@ class RefRecoveryTests(unittest.TestCase):
             return real(*args, **kwargs)
 
         with mock.patch.object(
-            scope_recovery, "_proposal", side_effect=moving_proposal
+            scope_recovery_ref_updates, "_proposal", side_effect=moving_proposal
         ):
             code, result = self.invoke(
                 "--accept", preview["evidence_digest"], "--reason", "approved"
