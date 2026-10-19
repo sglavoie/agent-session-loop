@@ -151,10 +151,10 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
         "human closeouts.",
         (
             "tests.test_asl_assurance_models:IssueIdTests.test_canonical_and_shorthand_forms_agree",
-            "tests.test_asl_assurance_ledger:IssueIdTests.test_concurrent_threads_never_mint_the_same_id",
-            "tests.test_asl_assurance_ledger:"
+            "tests.test_asl_assurance_ledger_identity:IssueIdTests.test_concurrent_threads_never_mint_the_same_id",
+            "tests.test_asl_assurance_ledger_identity:"
             "IssueIdTests.test_concurrent_processes_never_mint_the_same_id",
-            "tests.test_asl_assurance_ledger:"
+            "tests.test_asl_assurance_ledger_storage:"
             "CrashRecoveryTests.test_a_partial_final_line_is_readable_history_not_a_read_failure",
             "tests.test_asl_assurance_projection_publication:"
             "DeduplicationTests.test_a_matching_fingerprint_routes_to_the_existing_issue",

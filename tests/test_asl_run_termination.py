@@ -49,6 +49,10 @@ from agent_session_loop import (
     run_control,
     run_persistence,
     run_termination,
+    run_termination_controls,
+    run_termination_pause,
+    run_termination_shared,
+    run_termination_terminal,
     runner,
 )
 from tests.support import (
@@ -137,7 +141,15 @@ class TerminationBoundaryTests(unittest.TestCase):
 
     @property
     def source(self) -> str:
-        return Path(run_termination.__file__).read_text(encoding="utf-8")
+        return "\n".join(
+            Path(module.__file__).read_text(encoding="utf-8")
+            for module in (
+                run_termination_shared,
+                run_termination_terminal,
+                run_termination_pause,
+                run_termination_controls,
+            )
+        )
 
     def test_the_module_does_not_import_the_runner(self) -> None:
         assert_no_runner_import(self, run_termination)

@@ -28,6 +28,7 @@ from agent_session_loop import (
     run_persistence,
     run_selection,
     run_termination,
+    run_termination_terminal,
     runner,
     state,
     supervisor_audit,
@@ -162,7 +163,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
         hole the assertion exists to close.
         """
         callers: set[str] = set()
-        for module in (run_termination, runner):
+        for module in (run_termination_terminal, runner):
             tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
             callers |= {
                 node.name
