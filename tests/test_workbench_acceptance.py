@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from tests import run_suite
+from tests import run_suite, workbench_acceptance_contract
 from tests import workbench_acceptance as acceptance
 
 #: A minimal package that satisfies the artifact's required members and the
@@ -393,7 +393,9 @@ class MissingEvidence(AcceptanceCase):
 
     def test_an_unreachable_pi_checkout_is_a_refusal_rather_than_a_skip(self) -> None:
         with (
-            mock.patch.object(acceptance, "locate_pi_repository", return_value=None),
+            mock.patch.object(
+                workbench_acceptance_contract, "locate_pi_repository", return_value=None
+            ),
             self.assertRaises(acceptance.EvidenceError) as caught,
         ):
             acceptance.evidence_directory({})
@@ -402,7 +404,9 @@ class MissingEvidence(AcceptanceCase):
     def test_the_gate_reads_the_registered_pi_location(self) -> None:
         # The path is named by the plan, so it is asserted rather than assumed.
         pi = Path("/tmp/pi-checkout")
-        with mock.patch.object(acceptance, "locate_pi_repository", return_value=pi):
+        with mock.patch.object(
+            workbench_acceptance_contract, "locate_pi_repository", return_value=pi
+        ):
             path = acceptance.evidence_path(acceptance.STAGE_PRODUCTION, {})
         self.assertEqual(
             path,

@@ -36,6 +36,7 @@ from agent_session_loop import (
     run_contention,
     run_entry,
     session_overview,
+    session_overview_render,
     state,
     state_locks,
 )
@@ -301,7 +302,7 @@ class ObservationIsolationTests(unittest.TestCase):
             lock=self.corpus.local_lock(os.getpid(), (self.corpus.root_of("shared"),)),
         )
 
-        with mock.patch.object(session_overview, "scan_running_rows") as scan:
+        with mock.patch.object(session_overview_render, "scan_running_rows") as scan:
             observation = self.corpus.observe(repository_roots=())
 
         scan.assert_not_called()

@@ -42,14 +42,23 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 # those compatibility boundaries.
 [tool.ruff.lint.per-file-ignores]
 "agent_session_loop/execution_timing*.py" = ["F401", "F403", "F405"]
+"agent_session_loop/diagnostics_export*.py" = ["E501", "F401", "F403", "F405"]
+"agent_session_loop/session_overview*.py" = ["E501", "F401", "F403", "F405"]
 "agent_session_loop/workbench_local*.py" = ["F401", "F403", "F405"]
 "agent_session_loop/supervisor_audit_agent*.py" = ["F401", "F403", "F405"]
 "asl_workbench/integration*.py" = ["F401", "F403", "F405"]
 "asl_workbench/integrations.py" = ["F401", "F403", "F405"]
+"asl_workbench/operations*.py" = ["E501", "F401", "F403", "F405"]
 "tests/asl_execution_timing_*.py" = ["F401", "F403", "F405"]
 "tests/asl_turn_finalization_*.py" = ["F401", "F403", "F405"]
 "tests/asl_tail_*.py" = ["F401", "F403", "F405"]
 "tests/asl_live_redirect_*.py" = ["F401", "F403", "F405"]
+"tests/asl_overseer_checkpoint_groups_*.py" = ["E501", "F401", "F403", "F405"]
+"tests/asl_redirect_cli_*.py" = ["E501", "F401", "F403", "F405"]
+"tests/asl_repository_registration_*.py" = ["E501", "F401", "F403", "F405"]
+"tests/test_asl_overseer_checkpoint_groups.py" = ["F401", "F403", "F405"]
+"tests/test_asl_redirect_cli.py" = ["F401", "F403", "F405"]
+"tests/test_asl_repository_registration.py" = ["F401", "F403", "F405"]
 "tests/support.py" = ["F401", "F403", "F405"]
 "tests/support_base.py" = ["F401", "F403", "F405"]
 "tests/support_plans.py" = ["F401", "F403", "F405"]
@@ -58,6 +67,9 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 "tests/support_review.py" = ["F401", "F403", "F405"]
 "tests/support_workbench.py" = ["F401", "F403", "F405"]
 "tests/support_prepare.py" = ["F401", "F403", "F405"]
+"tests/workbench_acceptance*.py" = ["E501", "F401", "F403", "F405"]
+"tests/workbench_cutover*.py" = ["E501", "F401", "F403", "F405"]
+"tests/workbench_support*.py" = ["E501", "F401", "F403", "F405"]
 "tests/test_asl_execution_timing.py" = ["F401"]
 "tests/test_asl_tail.py" = ["F401"]
 "tests/test_asl_turn_finalization.py" = ["F401"]
@@ -272,6 +284,11 @@ module = [
     "agent_session_loop.conversations",
     "agent_session_loop.copilot_acp",
     "agent_session_loop.diagnostics_export",
+    "agent_session_loop.diagnostics_export_build",
+    "agent_session_loop.diagnostics_export_cli",
+    "agent_session_loop.diagnostics_export_common",
+    "agent_session_loop.diagnostics_export_read",
+    "agent_session_loop.diagnostics_export_sections",
     "agent_session_loop.durability",
     "agent_session_loop.events",
     "agent_session_loop.execution_timing",
@@ -570,6 +587,10 @@ module = [
     "agent_session_loop.runner",
     "agent_session_loop.scope_recovery",
     "agent_session_loop.session_overview",
+    "agent_session_loop.session_overview_recent",
+    "agent_session_loop.session_overview_render",
+    "agent_session_loop.session_overview_running",
+    "agent_session_loop.session_overview_types",
     "agent_session_loop.session_verification",
     "agent_session_loop.spark_status",
     "agent_session_loop.startup_context",
@@ -755,6 +776,10 @@ module = [
     "asl_workbench.notifications",
     "asl_workbench.observation",
     "asl_workbench.operations",
+    "asl_workbench.operations_admission",
+    "asl_workbench.operations_reconciliation",
+    "asl_workbench.operations_records",
+    "asl_workbench.operations_vocab",
     "asl_workbench.overview",
     "asl_workbench.remote_actions",
     "asl_workbench.remote_reads",
