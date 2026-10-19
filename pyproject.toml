@@ -36,6 +36,41 @@ extend-include = ["bin/.local/bin/agent-session-loop"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
+# Focused extraction modules intentionally share a narrow internal namespace.
+# Their facades retain the former public module surface, so static star-import
+# diagnostics and intentional namespace-forwarding imports are not useful at
+# those compatibility boundaries.
+[tool.ruff.lint.per-file-ignores]
+"agent_session_loop/execution_timing*.py" = ["F401", "F403", "F405"]
+"agent_session_loop/workbench_local*.py" = ["F401", "F403", "F405"]
+"agent_session_loop/supervisor_audit_agent*.py" = ["F401", "F403", "F405"]
+"asl_workbench/integration*.py" = ["F401", "F403", "F405"]
+"asl_workbench/integrations.py" = ["F401", "F403", "F405"]
+"tests/asl_execution_timing_*.py" = ["F401", "F403", "F405"]
+"tests/asl_turn_finalization_*.py" = ["F401", "F403", "F405"]
+"tests/asl_tail_*.py" = ["F401", "F403", "F405"]
+"tests/asl_live_redirect_*.py" = ["F401", "F403", "F405"]
+"tests/support.py" = ["F401", "F403", "F405"]
+"tests/support_base.py" = ["F401", "F403", "F405"]
+"tests/support_plans.py" = ["F401", "F403", "F405"]
+"tests/support_git.py" = ["F401", "F403", "F405"]
+"tests/support_processes.py" = ["F401", "F403", "F405"]
+"tests/support_review.py" = ["F401", "F403", "F405"]
+"tests/support_workbench.py" = ["F401", "F403", "F405"]
+"tests/support_prepare.py" = ["F401", "F403", "F405"]
+"tests/test_asl_execution_timing.py" = ["F401"]
+"tests/test_asl_tail.py" = ["F401"]
+"tests/test_asl_turn_finalization.py" = ["F401"]
+# Static ``__all__`` declarations make split-module vocabularies visible to
+# mypy.  Keep those one-line declarations readable as a single contract.
+"agent_session_loop/execution_timing_models.py" = ["E501"]
+"agent_session_loop/supervisor_audit_agent_contract.py" = ["E501"]
+"agent_session_loop/workbench_local_core.py" = ["E501"]
+"asl_workbench/integration_core.py" = ["E501"]
+"tests/asl_execution_timing_support.py" = ["E501"]
+"tests/asl_live_redirect_support.py" = ["E501"]
+"tests/asl_turn_finalization_support.py" = ["E501"]
+
 [tool.mypy]
 files = [
     "agent_session_loop",
@@ -226,6 +261,10 @@ module = [
     "agent_session_loop.durability",
     "agent_session_loop.events",
     "agent_session_loop.execution_timing",
+    "agent_session_loop.execution_timing_collect",
+    "agent_session_loop.execution_timing_ingest",
+    "agent_session_loop.execution_timing_models",
+    "agent_session_loop.execution_timing_reconcile",
     "agent_session_loop.external_write_evidence",
     "agent_session_loop.formatting",
     "agent_session_loop.git_subprocess",
@@ -513,7 +552,13 @@ module = [
     "agent_session_loop.supervision_liveness",
     "agent_session_loop.supervisor_audit",
     "agent_session_loop.supervisor_audit_agent",
+    "agent_session_loop.supervisor_audit_agent_catalog",
+    "agent_session_loop.supervisor_audit_agent_contract",
     "agent_session_loop.supervisor_audit_agent_models",
+    "agent_session_loop.supervisor_audit_agent_parse",
+    "agent_session_loop.supervisor_audit_agent_render",
+    "agent_session_loop.supervisor_audit_agent_reports",
+    "agent_session_loop.supervisor_audit_agent_resolution",
     "agent_session_loop.supervisor_audit_agent_run",
     "agent_session_loop.supervisor_audit_checks",
     "agent_session_loop.supervisor_audit_checks_anomalies",
@@ -585,6 +630,10 @@ module = [
     "agent_session_loop.workbench_details",
     "agent_session_loop.workbench_history",
     "agent_session_loop.workbench_local",
+    "agent_session_loop.workbench_local_controls",
+    "agent_session_loop.workbench_local_core",
+    "agent_session_loop.workbench_local_launch",
+    "agent_session_loop.workbench_local_reads",
     "agent_session_loop.workbench_operations",
     "agent_session_loop.workbench_remote_actions",
     "agent_session_loop.workbench_remote_reads",
@@ -638,6 +687,13 @@ module = [
     "asl_workbench.http_static",
     "asl_workbench.incidents",
     "asl_workbench.installation",
+    "asl_workbench.integration_checks",
+    "asl_workbench.integration_core",
+    "asl_workbench.integration_kuma",
+    "asl_workbench.integration_ntfy",
+    "asl_workbench.integration_provision",
+    "asl_workbench.integration_route_homepage",
+    "asl_workbench.integration_routes",
     "asl_workbench.integrations",
     "asl_workbench.lifecycle",
     "asl_workbench.lifecycle_artifacts",
