@@ -17,6 +17,8 @@ from unittest import mock
 
 from agent_session_loop import (
     control_cli,
+    control_cli_enqueue,
+    control_cli_wait,
     control_queue,
     events,
     harnesses,
@@ -370,7 +372,7 @@ class ControlCliWaitTests(unittest.TestCase):
 
     def test_abort_wait_timeout_after_delivery_reports_abort_timeout(self) -> None:
         self.mark_run_active()
-        real_wait = control_cli._wait_for_receipt
+        real_wait = control_cli_wait._wait_for_receipt
 
         def receipt_without_outcome(plan_dir, **kwargs):
             # Emulate a runner that acknowledged the command but whose grace
@@ -391,7 +393,7 @@ class ControlCliWaitTests(unittest.TestCase):
             return real_wait(plan_dir, **kwargs)
 
         with mock.patch.object(
-            control_cli, "_wait_for_receipt", receipt_without_outcome
+            control_cli_enqueue, "_wait_for_receipt", receipt_without_outcome
         ):
             exit_code, payload = self.payload_from(
                 control_cli.control_abort_from_args,
@@ -416,7 +418,7 @@ class ControlCliWaitTests(unittest.TestCase):
         # taught a supervisor to read a finalizing run as a hang.
         self.mark_run_active()
         self.mark_run_finalizing()
-        real_wait = control_cli._wait_for_receipt
+        real_wait = control_cli_wait._wait_for_receipt
 
         def receipt_then_honored(plan_dir, **kwargs):
             for action in (
@@ -437,7 +439,9 @@ class ControlCliWaitTests(unittest.TestCase):
                 )
             return real_wait(plan_dir, **kwargs)
 
-        with mock.patch.object(control_cli, "_wait_for_receipt", receipt_then_honored):
+        with mock.patch.object(
+            control_cli_enqueue, "_wait_for_receipt", receipt_then_honored
+        ):
             exit_code, payload = self.payload_from(
                 control_cli.control_abort_from_args,
                 self.args(

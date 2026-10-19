@@ -280,7 +280,9 @@ class GuidanceAndErrorDocsTests(unittest.TestCase):
         control_docs = docs.split("`asl control` is the programmatic equivalent", 1)[
             1
         ].split("\n`status` reads durable plan files", 1)[0]
-        control_cli_source = self._read("agent_session_loop/control_cli.py")
+        control_cli_paths = sorted(
+            Path(control_queue.__file__).parent.glob("control_cli_*.py")
+        )
 
         def resolve_reason(node: ast.expr) -> str | None:
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -296,7 +298,8 @@ class GuidanceAndErrorDocsTests(unittest.TestCase):
 
         expected_reasons = {
             reason
-            for call in ast.walk(ast.parse(control_cli_source))
+            for path in control_cli_paths
+            for call in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
             if isinstance(call, ast.Call)
             for keyword in call.keywords
             if keyword.arg == "reason"

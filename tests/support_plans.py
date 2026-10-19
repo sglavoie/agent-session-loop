@@ -87,6 +87,8 @@ def install_fake_harness(tmp_dir: Path, executable_name: str) -> Path:
     if executable_name != "codex":
         fake_path = tmp_dir / executable_name
     shutil.copyfile(FAKE_CODEX_FIXTURE, fake_path)
+    for support_path in FAKE_CODEX_FIXTURE.parent.glob("fake_codex_*.py"):
+        shutil.copyfile(support_path, tmp_dir / support_path.name)
     fake_path.chmod(fake_path.stat().st_mode | stat.S_IXUSR)
     return fake_path
 
