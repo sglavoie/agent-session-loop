@@ -216,7 +216,11 @@ _ACTION_TESTS = "scripts:tests/test_workbench_launch_reply.py"
 _BRIDGE_TESTS = "scripts:tests/test_asl_bridge_server_capabilities_rows.py"
 _DOCS_TESTS = "scripts:tests/test_asl_docs_authoritative_lanes.py"
 _CLI_TESTS = "scripts:tests/test_asl_cli_parser_review_guard_and_resume_overlay.py"
-_CONTROL_TESTS = "scripts:tests/test_workbench_controls.py"
+_CONTROL_TESTS = (
+    "scripts:tests/test_workbench_controls.py",
+    "scripts:tests/test_workbench_controls_corrections.py",
+    "scripts:tests/test_workbench_controls_parity.py",
+)
 _CONTROL_CLI_TESTS = "scripts:tests/test_asl_control_cli_1.py"
 _STORE_TESTS = "scripts:tests/test_workbench_store_ingestion.py"
 _TRANSPORT_TESTS = "scripts:tests/test_workbench_transport_contract.py"
@@ -271,7 +275,12 @@ _SHELL_BROWSER_TESTS = "scripts:tests/workbench_browser/shell.spec.js"
 #: identically, and the Playwright half proves one page draws both answers.
 #: Rows that used to point only at the Pi's dashboard spec name these as well,
 #: because that spec now describes an implementation this one replaced.
-_OVERVIEW_TESTS = "scripts:tests/test_workbench_overview.py"
+_OVERVIEW_TESTS = (
+    "scripts:tests/test_workbench_overview.py",
+    "scripts:tests/test_workbench_overview_selection.py",
+    "scripts:tests/test_workbench_overview_parity.py",
+    "scripts:tests/test_workbench_overview_catalog.py",
+)
 _OVERVIEW_BROWSER_TESTS = "scripts:tests/workbench_browser/overview.spec.js"
 #: The mutating half of the matrix, asserted the same two ways again. The
 #: Python half asks both providers what they will carry out and holds their

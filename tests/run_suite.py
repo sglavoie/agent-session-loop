@@ -180,6 +180,9 @@ FAST_MODULES = (
     "tests.test_asl_overseer_resume_isolation",
     "tests.test_asl_overseer_watch",
     "tests.test_asl_overseer_mailbox",
+    "tests.test_asl_overseer_mailbox_authority",
+    "tests.test_asl_overseer_mailbox_adapters",
+    "tests.test_asl_overseer_mailbox_polling",
     "tests.test_forgejo_sync",
     "tests.test_legacy_backup",
     "tests.test_asl_core_locks_plan_refs",
@@ -202,6 +205,9 @@ FAST_MODULES = (
     "tests.test_asl_redirect_store",
     "tests.test_asl_redirect_adversarial",
     "tests.test_asl_redirect_control",
+    "tests.test_asl_redirect_control_acceptance",
+    "tests.test_asl_redirect_control_successor",
+    "tests.test_asl_redirect_control_live",
     "tests.test_asl_overseer_dispatch",
     "tests.test_asl_overseer_context",
     "tests.test_asl_review_delta",
@@ -328,6 +334,8 @@ FAST_MODULES = (
     "tests.test_asl_run_termination",
     "tests.test_asl_external_write_evidence",
     "tests.test_session_overview",
+    "tests.test_session_overview_recent",
+    "tests.test_session_overview_cli",
     "tests.test_asl_handoff_guards",
     "tests.test_asl_turn_settlement",
     "tests.test_asl_redirect_admission",
@@ -507,6 +515,9 @@ PORTABLE_MODULES = (
     "tests.test_asl_overseer_history",
     "tests.test_asl_overseer_isolation",
     "tests.test_asl_overseer_mailbox",
+    "tests.test_asl_overseer_mailbox_authority",
+    "tests.test_asl_overseer_mailbox_adapters",
+    "tests.test_asl_overseer_mailbox_polling",
     "tests.test_asl_overseer_store",
     "tests.test_asl_overseer_policy_client",
     "tests.test_asl_overseer_resume",
@@ -726,6 +737,8 @@ INTEGRATION_MODULES = (
     # through both surfaces that call it, so a divergence shows up as a failure
     # rather than as two passing suites.
     "tests.test_workbench_controls",
+    "tests.test_workbench_controls_corrections",
+    "tests.test_workbench_controls_parity",
     # And once more for the archive: "browsing never deletes" is a claim about
     # what a real GET does to a real archive tree, so it is asserted against a
     # live server reading real entries rather than against a stub listing.
@@ -739,6 +752,9 @@ INTEGRATION_MODULES = (
     # only a claim about two providers answering the same questions, so both
     # are bound to loopback sockets over one corpus here too.
     "tests.test_workbench_overview",
+    "tests.test_workbench_overview_selection",
+    "tests.test_workbench_overview_parity",
+    "tests.test_workbench_overview_catalog",
     # And once more for the mutations: what a mode will carry out, whether its
     # advance warning matches its refusal, and what a recorded-but-unconfirmed
     # operation is allowed to claim are all questions about two live providers

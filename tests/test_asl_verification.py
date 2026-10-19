@@ -15,6 +15,7 @@ from agent_session_loop import (
     contracts,
     plans_errors,
     plans_files,
+    process_sampling,
     process_tree,
     run_persistence,
     verification_checks,
@@ -301,7 +302,9 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
             mock.patch.object(
                 verification_process, "sample_process_table"
             ) as snapshot_sampler,
-            mock.patch.object(process_tree, "sample_process_table") as sweep_sampler,
+            mock.patch.object(
+                process_sampling, "sample_process_table"
+            ) as sweep_sampler,
             self.assertRaises(KeyboardInterrupt),
         ):
             verification_run.run_verification(contract, repo_root=root)

@@ -73,6 +73,10 @@ from agent_session_loop import (
     run_coordination_wait_state,
     run_loop_context,
     run_termination,
+    turn_disposition_failures,
+    turn_disposition_mailbox,
+    turn_disposition_models,
+    turn_disposition_redirect,
     turn_dispositions,
     turn_execution_commit,
 )
@@ -245,11 +249,24 @@ class DispositionTestCase(unittest.TestCase):
 class BoundaryTests(unittest.TestCase):
     """The dependency runs one way, and the loop stays the loop's."""
 
+    modules = (
+        turn_dispositions,
+        turn_disposition_models,
+        turn_disposition_redirect,
+        turn_disposition_mailbox,
+        turn_disposition_failures,
+    )
+
     def test_the_module_never_imports_the_runner(self) -> None:
-        assert_no_runner_import(self, turn_dispositions)
+        for module in self.modules:
+            with self.subTest(module=module.__name__):
+                assert_no_runner_import(self, module)
 
     def test_the_module_owns_no_loop_statement(self) -> None:
-        source = Path(turn_dispositions.__file__ or "").read_text(encoding="utf-8")
+        source = "\n".join(
+            Path(module.__file__ or "").read_text(encoding="utf-8")
+            for module in self.modules
+        )
         loops = [
             node
             for node in ast.walk(ast.parse(source))

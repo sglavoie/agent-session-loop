@@ -73,7 +73,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         regression_coverage=(
             models._BRIDGE_TESTS,
             models._CONTROL_CLI_TESTS,
-            models._CONTROL_TESTS,
+            *models._CONTROL_TESTS,
         ),
     ),
     models.Capability(
@@ -87,7 +87,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         regression_coverage=(
             "scripts:tests/test_asl_bridge_redirect.py",
             models._REDIRECT_TESTS,
-            models._CONTROL_TESTS,
+            *models._CONTROL_TESTS,
         ),
     ),
     models._http(
@@ -156,7 +156,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         # The surviving references prove the transferred behaviour section by
         # section and in both deployments rather than only on the phone.
         regression_coverage=(
-            models._OVERVIEW_TESTS,
+            *models._OVERVIEW_TESTS,
             models._OVERVIEW_BROWSER_TESTS,
         ),
     ),
@@ -173,7 +173,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         # halves: the narrowing is applied before the page and counted over the
         # whole match, and every mode the select offers is one a server takes.
         regression_coverage=(
-            models._OVERVIEW_TESTS,
+            *models._OVERVIEW_TESTS,
             models._OVERVIEW_BROWSER_TESTS,
         ),
     ),
@@ -189,7 +189,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
             # Including the case the chip exists for: a partial generation
             # leaves rows the newest observation never confirmed, and the page
             # has to say so instead of drawing them as live.
-            models._OVERVIEW_TESTS,
+            *models._OVERVIEW_TESTS,
             models._OVERVIEW_BROWSER_TESTS,
         ),
     ),
@@ -255,7 +255,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         # establish whether this alert landed" -- and drawing nothing for the
         # five that would turn every raised alert into a delivery failure.
         regression_coverage=(
-            models._OVERVIEW_TESTS,
+            *models._OVERVIEW_TESTS,
             models._FULLSTACK_TESTS,
             models._OVERVIEW_BROWSER_TESTS,
         ),

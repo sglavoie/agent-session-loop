@@ -13,6 +13,7 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
+    process_sampling,
     process_tree,
     turn_execution_constants,
     turn_execution_hang_sentinel,
@@ -144,7 +145,9 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
             )
 
         with (
-            mock.patch.object(process_tree, "sample_process_table", return_value=table),
+            mock.patch.object(
+                process_sampling, "sample_process_table", return_value=table
+            ),
             mock.patch.object(
                 process_tree, "signal_verified_root_recovery", side_effect=deliver
             ),
@@ -205,7 +208,7 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                process_tree,
+                process_sampling,
                 "sample_process_table",
                 return_value={123: self.tree()[0]},
             ),
@@ -263,7 +266,9 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
         assessment = self.suspected_result(sentinel)
         table = {123: dict(self.tree()[0])}
         with (
-            mock.patch.object(process_tree, "sample_process_table", return_value=table),
+            mock.patch.object(
+                process_sampling, "sample_process_table", return_value=table
+            ),
             mock.patch.object(
                 process_tree,
                 "signal_verified_root_recovery",

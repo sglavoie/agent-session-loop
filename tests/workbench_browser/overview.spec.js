@@ -687,7 +687,7 @@ for (const deployment of DEPLOYMENTS) {
       // Everything the fixture publishes was confirmed by the newest
       // observation, in both modes: the Mac is standing on these plans and the
       // Pi's newest generation named all of them. The retained case is a
-      // partial generation, which `tests/test_workbench_overview.py` drives.
+      // partial generation, which `tests/test_workbench_overview_catalog.py` drives.
       for (const mark of marks) expect(mark).toBe("current");
       await expect(page.locator('.wb-section[data-section="unconfirmed"]')).toBeHidden();
     });

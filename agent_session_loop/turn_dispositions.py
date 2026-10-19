@@ -48,8 +48,8 @@ run's persistence seam.
 
 Nothing here imports the runner, and since Session 37 it does not import
 ``run_loop``, which owns ``RunContext``, either: the context enters as the
-structural :class:`RunContext` Protocol below, naming only the members these
-branches reach. The three mailbox wait
+structural :class:`RunContext` Protocol in ``turn_disposition_models``,
+naming only the members these branches reach. The three mailbox wait
 functions enter as callbacks rather than being called on
 ``run_coordination_mailbox_wait``
 directly, for the reason ``MailboxWaitCoordinator`` already states: callers
@@ -84,161 +84,86 @@ Four invariants survive the move:
   time, and the pin is this path's explicit opt-out from the structural refresh
   at the top of the loop -- so both the stamp and the pin have to happen here,
   where the wait is entered, not at the call site.
+
+Implementations are split by responsibility: ``turn_disposition_models`` holds
+the shared context and continuation values, ``turn_disposition_redirect`` owns
+redirect settlement, ``turn_disposition_mailbox`` owns reply waits, and
+``turn_disposition_failures`` owns failure reconciliation and retry. This
+module retains the entry points and the uninspected-plan branches.
 """
 
 from __future__ import annotations
 
-import dataclasses
-from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from . import (
-    clock,
-    conversation_resume,
-    durability,
-    events,
     handoff_correction,
     handoff_guards,
-    harness_failures,
-    harnesses,
-    mailbox_models,
-    mailbox_vocabulary,
-    model_availability,
     plans_models,
     plans_payloads,
-    plans_snapshot,
-    redirect_continuation,
-    redirect_control,
     run_control,
-    run_coordination_mailbox_poll,
-    run_coordination_mailbox_question,
-    run_coordination_mailbox_wait,
-    run_coordination_wait_models,
-    run_coordination_wait_state,
-    run_persistence,
-    run_prompts,
-    run_selection,
     run_termination,
     session_verification,
-    state,
+    turn_disposition_models,
     turn_execution_commit,
-    turn_execution_signals,
     workspaces,
 )
+from .turn_disposition_failures import (
+    _reconcile_unsettled_completion,
+    _record_spark_fallback,
+    settle_nonzero_exit,
+    settle_restore_refused,
+)
+from .turn_disposition_mailbox import (
+    _enter_mailbox_reply_wait,
+    _mailbox_pause_resolution_details,
+    settle_runner_pause,
+)
+from .turn_disposition_models import (
+    MailboxContinuation,
+    RedirectContinuation,
+    RunContext,
+    SparkRetry,
+)
+from .turn_disposition_redirect import (
+    REDIRECT_COMPLETION_NOTE,
+    REDIRECT_COMPLETION_REASON,
+    REDIRECT_OUTCOME_BLOCKED,
+    REDIRECT_OUTCOME_CONTINUED,
+    REDIRECT_OUTCOME_STOPPED,
+    _record_redirect_continuation,
+    settle_redirected_turn,
+)
 
-# ---------------------------------------------------------------------------
-# Collaborator seams
-# ---------------------------------------------------------------------------
-
-
-class RunContext(Protocol):
-    """One locked run's own state, as the terminating branches need it.
-
-    Declared structurally rather than imported so this module never depends on
-    ``run_loop``, which owns the dataclass. Only the members these seven
-    branches reach are named: the run payload and event log every record lands
-    in, the persistence seam that serializes them, the plan cache a correction
-    re-reads the plan from, the run and control identifiers the records are
-    attributed to, the two idle-clock fields the reply wait owns, and the two
-    ways a turn ends the run.
-
-    The idle-clock fields are plain attributes rather than properties because
-    the reply wait assigns both.
-    """
-
-    runner_work_finished_at: datetime | None
-    idle_baseline_pinned: bool
-
-    @property
-    def run_id(self) -> str: ...
-
-    @property
-    def event_path(self) -> Path: ...
-
-    @property
-    def payload(self) -> dict[str, Any]: ...
-
-    @property
-    def persistence(self) -> run_persistence._RunPersistence: ...
-
-    @property
-    def plan_cache(self) -> plans_snapshot.PlanSnapshotCache: ...
-
-    @property
-    def control_payload(self) -> dict[str, Any]: ...
-
-    def record_final_snapshot(self, snapshot: plans_models.PlanSnapshot) -> None: ...
-
-    def pause(
-        self,
-        *,
-        reason: str,
-        message: str,
-        details: dict[str, Any] | None,
-    ) -> None: ...
-
-
-# ---------------------------------------------------------------------------
-# What a surviving branch hands back
-# ---------------------------------------------------------------------------
-
-
-@dataclasses.dataclass(frozen=True)
-class MailboxContinuation:
-    """The turn a mailbox answer turned a runner pause back into.
-
-    Exactly one of the two continuation fields is set: a reply carries text the
-    next turn resumes from, a resolution carries an operator's decision to
-    continue without one. ``snapshot`` is the after-image the answer was given
-    against, and the next pass starts from it rather than re-reading the plan.
-    """
-
-    snapshot: plans_models.PlanSnapshot
-    pending_reply: run_prompts._PendingReply | None
-    pending_resolution: run_prompts._PendingResolution | None
-
-
-@dataclasses.dataclass(frozen=True)
-class RedirectContinuation:
-    """The same session again, carrying the correction that interrupted it.
-
-    ``snapshot`` is ``None`` when the plan could not be inspected after the
-    forced stop. The correction is not lost to that: the loop hands such a turn
-    to the malformed-plan branch, which owns every ``after is None`` turn, and
-    ``pending`` rides along into whichever attempt that repair produces.
-
-    ``pending`` is never ``None`` -- a branch reached only because an acceptance
-    was recorded always has one -- and it is what the next attempt resumes from.
-    """
-
-    snapshot: plans_models.PlanSnapshot | None
-    pending: redirect_continuation.PendingRedirect
-
-
-@dataclasses.dataclass(frozen=True)
-class SparkRetry:
-    """The same session, queued again on the baseline model.
-
-    ``run_suppression`` is echoed rather than freshly decided: it outlives the
-    turn, and a retry that could not write the shared availability ledger is
-    the only thing that sets it. ``fallback_reason`` is per-turn, and the next
-    pass reports it on the route it selects.
-    """
-
-    snapshot: plans_models.PlanSnapshot
-    fallback_reason: str
-    run_suppression: str | None
-
-
-# ---------------------------------------------------------------------------
-# Turns the plan could not be inspected after
-# ---------------------------------------------------------------------------
+__all__ = [
+    "pause_interrupted_run",
+    "pause_timed_out_turn",
+    "record_aborted_turn",
+    "settle_malformed_plan",
+    "_reconcile_unsettled_completion",
+    "_record_spark_fallback",
+    "settle_nonzero_exit",
+    "settle_restore_refused",
+    "_enter_mailbox_reply_wait",
+    "_mailbox_pause_resolution_details",
+    "settle_runner_pause",
+    "MailboxContinuation",
+    "RedirectContinuation",
+    "RunContext",
+    "SparkRetry",
+    "REDIRECT_COMPLETION_NOTE",
+    "REDIRECT_COMPLETION_REASON",
+    "REDIRECT_OUTCOME_BLOCKED",
+    "REDIRECT_OUTCOME_CONTINUED",
+    "REDIRECT_OUTCOME_STOPPED",
+    "_record_redirect_continuation",
+    "settle_redirected_turn",
+]
 
 
 def _record_uninspected_final_snapshot(
-    ctx: RunContext,
+    ctx: turn_disposition_models.RunContext,
     *,
     before: plans_models.PlanSnapshot,
     after: plans_models.PlanSnapshot | None,
@@ -259,7 +184,7 @@ def _record_uninspected_final_snapshot(
 
 
 def pause_interrupted_run(
-    ctx: RunContext,
+    ctx: turn_disposition_models.RunContext,
     *,
     before: plans_models.PlanSnapshot,
     after: plans_models.PlanSnapshot | None,
@@ -275,7 +200,7 @@ def pause_interrupted_run(
 
 
 def pause_timed_out_turn(
-    ctx: RunContext,
+    ctx: turn_disposition_models.RunContext,
     *,
     before: plans_models.PlanSnapshot,
     after: plans_models.PlanSnapshot | None,
@@ -292,7 +217,7 @@ def pause_timed_out_turn(
 
 
 def record_aborted_turn(
-    ctx: RunContext,
+    ctx: turn_disposition_models.RunContext,
     listener: run_control.RunControlListener,
     *,
     before: plans_models.PlanSnapshot,
@@ -325,7 +250,7 @@ def record_aborted_turn(
 
 
 def settle_malformed_plan(
-    ctx: RunContext,
+    ctx: turn_disposition_models.RunContext,
     *,
     before: plans_models.PlanSnapshot,
     workspace: workspaces.ResolvedWorkspace | None,
@@ -397,813 +322,5 @@ def settle_malformed_plan(
         reason="malformed-plan",
         message="plan could not be inspected after the harness turn",
         details=malformed_details,
-    )
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Turns an operator corrected while they were still running
-# ---------------------------------------------------------------------------
-
-
-#: Why the redirected attempt's completion claim is taken back. Distinct from
-#: the nonzero-exit reason because it is not a failure: the turn may have
-#: exited cleanly, and what disqualifies its claim is that a correction reached
-#: it before anything adjudicated one.
-REDIRECT_COMPLETION_REASON = "unsettled-completion-after-redirect"
-
-REDIRECT_COMPLETION_NOTE = (
-    "an operator correction was accepted against this turn before it reached "
-    "an accepted settlement; the completion claim is withdrawn and the work "
-    "this session already wrote is left in place for the next attempt"
-)
-
-#: The correction becomes the next attempt of the same session.
-REDIRECT_OUTCOME_CONTINUED = "continued"
-#: The interrupted worker could not be shown gone, so nothing may succeed it.
-REDIRECT_OUTCOME_BLOCKED = "blocked"
-#: A stop or abort queued after the correction ended the run instead.
-REDIRECT_OUTCOME_STOPPED = "stopped"
-
-
-def _record_redirect_continuation(
-    ctx: RunContext,
-    *,
-    redirect: redirect_continuation.TurnRedirect,
-    pending: redirect_continuation.PendingRedirect,
-    session_id: str,
-    turn_index: int,
-    turn_payload: dict[str, Any],
-    paths: dict[str, Path],
-    outcome: str,
-    detail: dict[str, Any] | None = None,
-) -> None:
-    """Publish what this turn's correction became, before anything acts on it.
-
-    The gate's projection is refreshed rather than left as the run loop wrote
-    it: the escalation's report only exists once the turn is torn down, so the
-    record written mid-turn names an acceptance whose outcome was still open.
-    All three writes go under one lock, because the result artifact, the event
-    and the run state are one claim about the same turn.
-    """
-    continuation_record: dict[str, Any] = {
-        "outcome": outcome,
-        "redirect": pending.to_payload(),
-        **(detail or {}),
-    }
-    with ctx.persistence.lock:
-        turn_payload[redirect_continuation.TURN_PAYLOAD_KEY] = redirect.to_payload()
-        turn_payload["redirect_continuation"] = continuation_record
-        durability.write_json_file(paths["result"], turn_payload)
-        ctx.persistence.append_event(
-            ctx.event_path,
-            events.REDIRECT_CONTINUATION_EVENT,
-            {
-                "run_id": ctx.run_id,
-                "turn_index": turn_index,
-                **plans_payloads.session_identity_payload(session_id),
-                **continuation_record,
-            },
-        )
-        ctx.persistence.write_state(ctx.payload)
-
-
-def settle_redirected_turn(
-    ctx: RunContext,
-    listener: run_control.RunControlListener,
-    *,
-    before: plans_models.PlanSnapshot,
-    after: plans_models.PlanSnapshot | None,
-    redirect: redirect_continuation.TurnRedirect,
-    harness: str,
-    conversation_id: str | None,
-    session_id: str,
-    session_label: str,
-    turn_index: int,
-    result: harnesses.HarnessResult,
-    turn_payload: dict[str, Any],
-    paths: dict[str, Path],
-    session_details: dict[str, Any],
-    pending: redirect_continuation.PendingRedirect | None,
-) -> RedirectContinuation | None:
-    """Turn an accepted correction into the next attempt of the same session.
-
-    Returns the continuation the next pass runs, or ``None`` when the run
-    stopped. Three things happen in an order that is the contract:
-
-    1. **The predecessor has to be gone.** A forced stop that could not be
-       confirmed means a worker may still hold this plan's lock, its
-       conversation and its worktree, so a successor is refused and the run
-       pauses on ``redirect-successor-blocked`` rather than starting a second
-       worker beside the first.
-    2. **The attempt gives up its completion claim.** A redirected turn is not a
-       settled one even when the harness exited zero, and the claim is withdrawn
-       through the same reverter every guard refusal uses -- the work the
-       session already wrote stays on disk for the next attempt to build on.
-    3. **A later stop or abort outranks the correction.** An operator who asked
-       to stop after telling the run what to fix meant the stop; the correction
-       stays pending in the journal for a later run rather than being spent on
-       an attempt nobody is waiting for.
-
-    No commit happens on any of these paths and none is reachable from one: the
-    branch never settles a turn, and the pause it can take is non-recoverable,
-    which is what the automatic paused-work commit is gated on.
-    """
-    carried = redirect_continuation.PendingRedirect.after_turn(
-        redirect.accepted,
-        session_id=session_id,
-        harness=harness,
-        conversation_id=conversation_id,
-        turn_index=turn_index,
-        previous=pending,
-    )
-    # The disposition is reached only from a recorded acceptance, so the fold
-    # above always has something to fold.
-    assert carried is not None
-
-    try:
-        report = redirect.require_successor_allowed()
-    except redirect_control.SuccessorBlockedError as error:
-        blocked = error.to_payload()
-        _record_redirect_continuation(
-            ctx,
-            redirect=redirect,
-            pending=carried,
-            session_id=session_id,
-            turn_index=turn_index,
-            turn_payload=turn_payload,
-            paths=paths,
-            outcome=REDIRECT_OUTCOME_BLOCKED,
-            detail={"blocked": blocked},
-        )
-        ctx.record_final_snapshot(after if after is not None else before)
-        ctx.pause(
-            reason=events.PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED,
-            message=(
-                f"the redirected turn for {session_label} could not be confirmed "
-                f"stopped: {error.reason}"
-            ),
-            details={**session_details, "redirect_continuation": blocked},
-        )
-        return None
-
-    reconciled = after
-    reconciliation: dict[str, Any] | None = None
-    if after is not None:
-        reconciled, reconciliation = _reconcile_unsettled_completion(
-            ctx,
-            after=after,
-            selected_after=next(
-                (item for item in after.sessions if item.id == session_id),
-                None,
-            ),
-            session_id=session_id,
-            turn_index=turn_index,
-            result=result,
-            turn_payload=turn_payload,
-            paths=paths,
-            reason=REDIRECT_COMPLETION_REASON,
-            failure_note=REDIRECT_COMPLETION_NOTE,
-        )
-
-    stop_snapshot = reconciled if reconciled is not None else before
-    stop_detail: dict[str, Any] = {
-        **({"completion_reconciliation": reconciliation} if reconciliation else {}),
-        "termination": report.to_payload() if report is not None else None,
-    }
-    if listener.state.abort_turn_requested:
-        _record_redirect_continuation(
-            ctx,
-            redirect=redirect,
-            pending=carried,
-            session_id=session_id,
-            turn_index=turn_index,
-            turn_payload=turn_payload,
-            paths=paths,
-            outcome=REDIRECT_OUTCOME_STOPPED,
-            detail={**stop_detail, "stopped_by": "abort-turn"},
-        )
-        with ctx.persistence.lock:
-            run_termination._honor_abort_turn(
-                listener,
-                snapshot=stop_snapshot,
-                session_id=session_id,
-                payload=ctx.payload,
-                event_path=ctx.event_path,
-                control_payload=ctx.control_payload,
-                plan_cache=ctx.plan_cache,
-                revert_session_status=handoff_guards.session_status_reverter(
-                    handoff_correction._append_handoff_note
-                ),
-                reinspect=session_verification._reinspect_after_revert,
-                context=turn_payload,
-                persistence=ctx.persistence,
-            )
-        return None
-    if listener.state.stop_after_current:
-        _record_redirect_continuation(
-            ctx,
-            redirect=redirect,
-            pending=carried,
-            session_id=session_id,
-            turn_index=turn_index,
-            turn_payload=turn_payload,
-            paths=paths,
-            outcome=REDIRECT_OUTCOME_STOPPED,
-            detail={**stop_detail, "stopped_by": "stop-after-current"},
-        )
-        run_termination._honor_stop_after_current(
-            listener,
-            snapshot=stop_snapshot,
-            payload=ctx.payload,
-            event_path=ctx.event_path,
-            control_payload=ctx.control_payload,
-            context=turn_payload,
-            persistence=ctx.persistence,
-        )
-        return None
-
-    _record_redirect_continuation(
-        ctx,
-        redirect=redirect,
-        pending=carried,
-        session_id=session_id,
-        turn_index=turn_index,
-        turn_payload=turn_payload,
-        paths=paths,
-        outcome=REDIRECT_OUTCOME_CONTINUED,
-        detail=stop_detail,
-    )
-    return RedirectContinuation(snapshot=reconciled, pending=carried)
-
-
-# ---------------------------------------------------------------------------
-# Turns the plan was inspected after
-# ---------------------------------------------------------------------------
-
-
-def _mailbox_pause_resolution_details(
-    resolution: mailbox_models.MailboxMessage,
-    *,
-    run_id: str,
-    session_id: str,
-    turn_index: int,
-    waiter_origin: mailbox_vocabulary.WaiterOrigin = (
-        mailbox_vocabulary.WAITER_ORIGIN_WORKER
-    ),
-    question_id: str | None = None,
-) -> dict[str, Any]:
-    """Describe the resolution that closed a worker or runner question."""
-    return {
-        "run_id": run_id,
-        "session_id": session_id,
-        "turn_index": turn_index,
-        "waiter_origin": waiter_origin,
-        "question_id": question_id or resolution.to,
-        "resolution_message_id": resolution.id,
-        "resolution_seq": resolution.seq,
-        "action": resolution.action,
-        "note_length": (None if resolution.note is None else len(resolution.note)),
-    }
-
-
-def _enter_mailbox_reply_wait(
-    ctx: RunContext,
-    prepared: run_coordination_wait_models.PreparedMailboxWait,
-    *,
-    plan_dir: Path,
-    state_dir_arg: str | None,
-    mailbox_poll: run_coordination_mailbox_poll.MailboxPoll,
-    wait_for_reply: Callable[..., run_coordination_wait_models.MailboxWaitResult],
-    finish_lifecycle: Callable[..., run_coordination_wait_models.MailboxWaitResult],
-) -> run_coordination_wait_models.MailboxWaitResult:
-    """Block on the question this pause asked, with the idle clock stopped.
-
-    The wait that follows is genuine idle time: the runner has no work left for
-    this turn until a human answers, so the clock starts before the wait.
-    Pinning it is this path's explicit opt-out from the structural refresh at
-    the top of the loop.
-    """
-    ctx.runner_work_finished_at = clock.utc_now()
-    ctx.idle_baseline_pinned = True
-    return run_coordination_mailbox_wait.MailboxWaitCoordinator(
-        plan_dir=plan_dir,
-        state_dir_arg=state_dir_arg,
-        prepared=prepared,
-        run_id=ctx.run_id,
-        store=run_coordination_wait_state.WaitStateStore(
-            event_path=ctx.event_path,
-            payload=ctx.payload,
-            persistence=ctx.persistence,
-        ),
-        persistence=ctx.persistence,
-        notifier=run_persistence._AgentMuxWaitNotifier(ctx.payload, ctx.persistence),
-        poll_controls=mailbox_poll,
-        # Resolved by the caller rather than inside the coordinator so the
-        # runner keeps owning both names: callers patch them on the runner to
-        # assert a wait was or was not entered.
-        wait_for_reply=wait_for_reply,
-        finish_lifecycle=finish_lifecycle,
-    ).run()
-
-
-def settle_runner_pause(
-    ctx: RunContext,
-    *,
-    after: plans_models.PlanSnapshot,
-    session_id: str,
-    turn_index: int,
-    result: harnesses.HarnessResult,
-    turn_payload: dict[str, Any],
-    session_details: dict[str, Any],
-    paused_status_repair: dict[str, Any] | None,
-    mailbox_enabled: bool,
-    mailbox_poll: run_coordination_mailbox_poll.MailboxPoll,
-    plan_state: Path,
-    state_path: Path,
-    state_dir_arg: str | None,
-    prepare_wait: Callable[..., run_coordination_wait_models.PreparedMailboxWait],
-    wait_for_reply: Callable[..., run_coordination_wait_models.MailboxWaitResult],
-    finish_lifecycle: Callable[..., run_coordination_wait_models.MailboxWaitResult],
-) -> MailboxContinuation | None:
-    """Honour a worker's own pause, waiting for an answer where one can arrive.
-
-    Returns the continuation an answer produced, or ``None`` when the run
-    paused. A resolution already recorded against this turn short-circuits the
-    wait entirely -- the answer beat the pause into the mailbox -- and only a
-    pause the worker could still be answered out of enters the live wait.
-    """
-    runner_pause = turn_payload.get("runner_pause")
-    pause_reason = turn_execution_signals.runner_pause_reason(str(runner_pause))
-    ctx.record_final_snapshot(after)
-    pause_details: dict[str, Any] = {
-        **session_details,
-        "source": turn_payload.get("runner_pause_source"),
-    }
-    if paused_status_repair is not None:
-        pause_details["handoff_status_repair"] = paused_status_repair
-    worker_pause_resolution = (
-        run_coordination_mailbox_question.worker_pause_resolution_for_turn(
-            plan_dir=after.plan_dir,
-            state_dir_arg=state_dir_arg,
-            run_id=ctx.run_id,
-            session_id=session_id,
-            turn_index=turn_index,
-        )
-        if mailbox_enabled
-        else None
-    )
-    if worker_pause_resolution is not None:
-        pause_details["mailbox_resolution"] = _mailbox_pause_resolution_details(
-            worker_pause_resolution,
-            run_id=ctx.run_id,
-            session_id=session_id,
-            turn_index=turn_index,
-        )
-        ctx.pause(
-            reason=pause_reason,
-            message=str(runner_pause),
-            details=pause_details,
-        )
-        return None
-    if run_coordination_mailbox_question.runner_pause_can_wait_for_mailbox_reply(
-        mailbox_enabled=mailbox_enabled,
-        pause_reason=pause_reason,
-        result=result,
-    ):
-        try:
-            prepared_wait = prepare_wait(
-                snapshot=after,
-                payload=ctx.payload,
-                plan_state=plan_state,
-                state_path=state_path,
-                state_dir_arg=state_dir_arg,
-                run_id=ctx.run_id,
-                session_id=session_id,
-                turn_index=turn_index,
-            )
-        except run_coordination_wait_models.MailboxWaitUnavailable as error:
-            run_coordination_wait_state.record_mailbox_reply_wait_preparation_failed(
-                ctx.event_path,
-                ctx.payload,
-                session_id=session_id,
-                turn_index=turn_index,
-                reason=error.reason,
-                persistence=ctx.persistence,
-            )
-            prepared_wait = None
-
-        if prepared_wait is not None:
-            wait_result = _enter_mailbox_reply_wait(
-                ctx,
-                prepared_wait,
-                plan_dir=after.plan_dir,
-                state_dir_arg=state_dir_arg,
-                mailbox_poll=mailbox_poll,
-                wait_for_reply=wait_for_reply,
-                finish_lifecycle=finish_lifecycle,
-            )
-
-            if wait_result.reply is not None:
-                reply_message = wait_result.reply
-                assert reply_message.text is not None
-                # The session remains pending; start its explicit reply
-                # continuation before honoring any stop-after-current request.
-                return MailboxContinuation(
-                    snapshot=after,
-                    pending_reply=run_prompts._PendingReply(
-                        text=reply_message.text,
-                        context=prepared_wait.context,
-                        origin=run_prompts.REPLY_ORIGIN_MAILBOX,
-                        process_start=False,
-                        question_id=prepared_wait.question.id,
-                        reply_message_id=reply_message.id,
-                        reply_seq=reply_message.seq,
-                    ),
-                    pending_resolution=None,
-                )
-            if wait_result.resolution is not None:
-                resolution_message = wait_result.resolution
-                assert resolution_message.action is not None
-                if (
-                    resolution_message.action
-                    == mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE
-                ):
-                    # The session remains pending; schedule its answerless
-                    # continuation before honoring any stop-after-current
-                    # request.
-                    return MailboxContinuation(
-                        snapshot=after,
-                        pending_reply=None,
-                        pending_resolution=run_prompts._PendingResolution(
-                            action=resolution_message.action,
-                            note=resolution_message.note,
-                            context=prepared_wait.context,
-                            question_id=prepared_wait.question.id,
-                            resolution_message_id=resolution_message.id,
-                            resolution_seq=resolution_message.seq,
-                        ),
-                    )
-                assert (
-                    resolution_message.action
-                    == mailbox_vocabulary.RESOLUTION_ACTION_PAUSE
-                )
-                pause_details["mailbox_resolution"] = _mailbox_pause_resolution_details(
-                    resolution_message,
-                    run_id=ctx.run_id,
-                    session_id=session_id,
-                    turn_index=turn_index,
-                    waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_RUNNER,
-                    question_id=prepared_wait.question.id,
-                )
-    ctx.pause(
-        reason=pause_reason,
-        message=str(runner_pause),
-        details=pause_details,
-    )
-    return None
-
-
-def _record_spark_fallback(
-    ctx: RunContext,
-    *,
-    after: plans_models.PlanSnapshot,
-    classification: harness_failures.FailureClassification,
-    spark_route: dict[str, Any],
-    spark_status_update: dict[str, Any],
-    fallback_reason: str,
-    session_id: str,
-    turn_index: int,
-    turn_payload: dict[str, Any],
-    paths: dict[str, Path],
-) -> None:
-    """Commit the route change, the turn artifact, and the fallback event.
-
-    All under one lock: the retry reads its model from the payload the next
-    pass sees, so a reader that caught the route half-updated would launch the
-    retry against the model that just failed.
-    """
-    with ctx.persistence.lock:
-        spark_route["fallback_reason"] = fallback_reason
-        turn_payload["spark_route"] = dict(spark_route)
-        ctx.payload["spark"].update(spark_status_update)
-        ctx.payload["spark"]["active_route"] = dict(spark_route)
-        ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(after)
-        durability.write_json_file(paths["result"], turn_payload)
-        ctx.persistence.append_event(
-            ctx.event_path,
-            "spark_fallback",
-            {
-                "run_id": ctx.run_id,
-                "session_id": session_id,
-                "failed_turn_index": turn_index,
-                "failed_model": run_selection.SPARK_MODEL,
-                "fallback_model": ctx.payload["spark"]["baseline"],
-                "failure_classification": classification.to_dict(),
-                "retry_at": ctx.payload["spark"].get("retry_at"),
-            },
-        )
-        ctx.persistence.write_state(ctx.payload)
-
-
-def _reconcile_unsettled_completion(
-    ctx: RunContext,
-    *,
-    after: plans_models.PlanSnapshot,
-    selected_after: plans_models.SessionStatus | None,
-    session_id: str,
-    turn_index: int,
-    result: harnesses.HarnessResult,
-    turn_payload: dict[str, Any],
-    paths: dict[str, Path],
-    reason: str = "unsettled-completion-after-nonzero-exit",
-    failure_note: str | None = None,
-) -> tuple[plans_models.PlanSnapshot, dict[str, Any] | None]:
-    """Take back a completion claim a terminating turn never settled.
-
-    A nonzero exit ends the turn ahead of verification and the handoff guards,
-    so a session left ``complete`` in the after-image holds a claim nothing
-    adjudicated. Publishing that image would make the unverified completion
-    permanent across a resume and advance the plan's next pending session past
-    work no check ever passed. The revert is the same one every guard refusal
-    uses, so the work on disk is untouched and only the claim is withdrawn.
-
-    ``reason`` and ``failure_note`` default to the nonzero-exit wording this was
-    written for. The redirect branch supplies its own: the claim there is
-    withdrawn because an operator's correction reached the turn before it
-    settled, which is not a failure and must not be recorded as one.
-
-    Returns the snapshot to publish and the reconciliation record, or the
-    unchanged snapshot and ``None`` when the session claimed nothing.
-    """
-    if selected_after is None or selected_after.status != "complete":
-        return after, None
-    reverted = handoff_guards._revert_session_status_to_pending(
-        after,
-        session_id,
-        failure_note=(
-            failure_note
-            if failure_note is not None
-            else (
-                f"harness exited with status {result.returncode} before this "
-                "turn reached an accepted settlement; the completion claim is "
-                "withdrawn and the work this session already wrote is left in "
-                "place"
-            )
-        ),
-        append_handoff_note=handoff_correction._append_handoff_note,
-    )
-    snapshot_after = session_verification._reinspect_after_revert(
-        after.plan_dir, after, reverted, ctx.plan_cache
-    )
-    record = {
-        "session_id": session_id,
-        "claimed_status": "complete",
-        "restored_status": "pending" if reverted is not None else "complete",
-        "reason": reason,
-        "returncode": result.returncode,
-        "reverted": reverted is not None,
-        "session_path": str(reverted.path) if reverted is not None else None,
-    }
-    with ctx.persistence.lock:
-        turn_payload["completion_reconciliation"] = record
-        durability.write_json_file(paths["result"], turn_payload)
-        if handoff_guards._reopened(reverted):
-            ctx.persistence.append_event(
-                ctx.event_path,
-                events.SESSION_REOPENED_EVENT,
-                {
-                    "run_id": ctx.run_id,
-                    "turn_index": turn_index,
-                    **plans_payloads.session_identity_payload(session_id),
-                    "from_status": "complete",
-                    "to_status": "pending",
-                    "guard": "turn-completion-reconciliation",
-                    "reason": reason,
-                    **turn_execution_commit.reopened_snapshot_identity(
-                        plans_payloads.snapshot_payload(snapshot_after)
-                    ),
-                },
-            )
-    return snapshot_after, record
-
-
-def settle_restore_refused(
-    ctx: RunContext,
-    *,
-    plan_state: Path,
-    before: plans_models.PlanSnapshot,
-    after: plans_models.PlanSnapshot | None,
-    result: harnesses.HarnessResult,
-    continuation: conversation_resume.TurnContinuation,
-    session_id: str,
-    session_label: str,
-    turn_index: int,
-    turn_payload: dict[str, Any],
-    session_details: dict[str, Any],
-    paths: dict[str, Path],
-) -> None:
-    """Block a conversation the provider will not restore, and pause for recovery.
-
-    The turn asked to continue a native conversation and was told that history
-    is gone. Classified as an ordinary failure this would pause with whatever
-    :mod:`harness_failures` made of the provider's complaint, and -- worse --
-    leave the ledger entry resumable, so every later launch would ask for the
-    same dead conversation and fail the same way. The operator's documented
-    recovery controls could not reach it, because those controls act on the
-    ledger and nothing had told the ledger anything.
-
-    So this does the one durable thing the refusal implies: retires the record
-    as ``unusable``, which is the ledger's word for a conversation that is no
-    longer a history. That single write buys both behaviours the operator needs.
-    An ordinary launch afterwards selects ``retired``, which is already outside
-    the states that may proceed, and stops for recovery. A launch carrying
-    ``--fresh-conversation`` spends its one-use authorization, supersedes
-    nothing -- there is nothing live left to supersede -- and opens a new
-    conversation with no resume id, keeping the session's retained files and
-    outstanding feedback and losing only the agent's accumulated context, which
-    was already lost.
-
-    Nothing ran on this turn, so there is no completion claim to reconcile: the
-    refusal happens in the handshake, before any work is submitted.
-    """
-    detail = result.conversation_restore_refused or "the conversation was not restored"
-    binding = continuation.binding
-    if binding is None:
-        # A turn that resumed something always has the binding it resumed
-        # against, so this is a caller that reached here without one. Report it
-        # rather than invent a binding to write a ledger record under.
-        refusal = conversation_resume.RestoreRefusal(
-            conversation=continuation.resume_conversation_id,
-            detail=detail,
-            error="restore was refused but the turn carried no conversation binding",
-        )
-    else:
-        refusal = conversation_resume.refuse_unrestorable_conversation(
-            plan_state,
-            binding=binding,
-            conversation=(
-                continuation.resume_conversation_id or result.conversation_id
-            ),
-            detail=detail,
-        )
-    record = refusal.describe()
-    with ctx.persistence.lock:
-        turn_payload["conversation_restore_refused"] = record
-        durability.write_json_file(paths["result"], turn_payload)
-        ctx.persistence.append_event(
-            ctx.event_path,
-            events.CONVERSATION_CONTINUATION_EVENT,
-            {
-                "run_id": ctx.run_id,
-                "turn_index": turn_index,
-                **plans_payloads.session_identity_payload(session_id),
-                **record,
-            },
-        )
-    # The before-image when the plan could not be re-read: nothing ran, so it is
-    # also the after-image in every case that matters, and publishing a
-    # half-known one would say the turn changed something it never started.
-    ctx.record_final_snapshot(after if after is not None else before)
-    ctx.pause(
-        reason=conversation_resume.RECOVERY_PAUSE_REASON,
-        message=(
-            f"{session_label}: {conversation_resume.restore_refusal_message(refusal)}"
-        ),
-        details={
-            **session_details,
-            "returncode": result.returncode,
-            "conversation_restore_refused": record,
-            "conversation_continuation": continuation.describe(),
-        },
-    )
-
-
-def settle_nonzero_exit(
-    ctx: RunContext,
-    *,
-    before: plans_models.PlanSnapshot,
-    after: plans_models.PlanSnapshot,
-    result: harnesses.HarnessResult,
-    spark_route: dict[str, Any],
-    session_id: str,
-    session_label: str,
-    turn_index: int,
-    turn_payload: dict[str, Any],
-    session_details: dict[str, Any],
-    paths: dict[str, Path],
-    state_dir_arg: str | None,
-    spark_run_suppression: str | None,
-) -> SparkRetry | None:
-    """Classify a failed harness exit, retrying off Spark where that is safe.
-
-    Returns the retry the fallback scheduled, or ``None`` when the run paused.
-    A Spark turn that died on an exhausted quota or a rejected model is only
-    retryable when it left no trace: the session still pending and the plan
-    byte-identical to the before-image. Anything else may have half-completed,
-    so it pauses and says why.
-    """
-    classification = harness_failures.classify_harness_failure(
-        result, shutdown=turn_payload.get("harness_shutdown")
-    )
-    spark_failure = spark_route["decision"] == "spark" and classification.reason in {
-        events.PAUSE_REASON_QUOTA_EXHAUSTED,
-        events.PAUSE_REASON_INVALID_MODEL,
-    }
-    selected_after = next(
-        (item for item in after.sessions if item.id == session_id),
-        None,
-    )
-    safely_retryable = (
-        selected_after is not None
-        and selected_after.status == "pending"
-        and after.content_sha256 == before.content_sha256
-    )
-    if spark_failure and safely_retryable:
-        try:
-            cooldown = model_availability.suppress_until(
-                state.state_root(state_dir_arg),
-                run_selection.SPARK_MODEL,
-                reason=classification.reason,
-                retry_hint=classification.retry_at,
-                run_id=ctx.run_id,
-            )
-        except OSError as error:
-            cooldown = None
-            with ctx.persistence.lock:
-                ctx.payload["spark"]["warning"] = (
-                    f"could not update model availability ledger: {error}"
-                )
-        fallback_reason = classification.reason
-        if cooldown is None:
-            spark_run_suppression = (
-                spark_run_suppression or f"{classification.reason}-for-current-run"
-            )
-            spark_status_update = {
-                "available": False,
-                "availability": False,
-                "reason": spark_run_suppression,
-                "retry_at": None,
-            }
-        else:
-            spark_status_update = cooldown.to_dict()
-        _record_spark_fallback(
-            ctx,
-            after=after,
-            classification=classification,
-            spark_route=spark_route,
-            spark_status_update=spark_status_update,
-            fallback_reason=fallback_reason,
-            session_id=session_id,
-            turn_index=turn_index,
-            turn_payload=turn_payload,
-            paths=paths,
-        )
-        return SparkRetry(
-            snapshot=after,
-            fallback_reason=fallback_reason,
-            run_suppression=spark_run_suppression,
-        )
-    if classification.reason == events.PAUSE_REASON_NONZERO_EXIT:
-        pause_message = (
-            f"harness exited with status {result.returncode} for {session_label}"
-        )
-    else:
-        pause_message = (
-            f"{session_label} failed: {classification.reason} "
-            f"(harness exit {result.returncode})"
-        )
-    # Before the snapshot is published, not after: the final image this run
-    # ends on is the reconciled one, so a resume selects the session the turn
-    # actually left unfinished rather than the one it claimed to finish.
-    reconciled, reconciliation = _reconcile_unsettled_completion(
-        ctx,
-        after=after,
-        selected_after=selected_after,
-        session_id=session_id,
-        turn_index=turn_index,
-        result=result,
-        turn_payload=turn_payload,
-        paths=paths,
-    )
-    ctx.record_final_snapshot(reconciled)
-    ctx.pause(
-        reason=classification.reason,
-        message=pause_message,
-        details={
-            **session_details,
-            "returncode": result.returncode,
-            "failure_classification": classification.to_dict(),
-            **(
-                {"spark_fallback_unsafe": True}
-                if spark_failure and not safely_retryable
-                else {}
-            ),
-            **(
-                {"completion_reconciliation": reconciliation}
-                if reconciliation is not None
-                else {}
-            ),
-        },
     )
     return None

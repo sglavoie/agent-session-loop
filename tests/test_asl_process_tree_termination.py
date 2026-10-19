@@ -6,7 +6,7 @@ import signal
 import unittest
 from unittest import mock
 
-from agent_session_loop import process_tree
+from agent_session_loop import process_sampling, process_tree
 from tests import support_asl_process_tree as fixtures
 
 
@@ -28,8 +28,8 @@ class ForceStopProcessGroupTests(fixtures._UrgentBase):
         # The guard that keeps the five-second probe off this path: the kill
         # cannot sample even if it wanted to, because it is given no sampler.
         with (
-            mock.patch.object(process_tree, "sample_process_table") as sampler,
-            mock.patch.object(process_tree, "process_birth") as birth,
+            mock.patch.object(process_sampling, "sample_process_table") as sampler,
+            mock.patch.object(process_sampling, "process_birth") as birth,
         ):
             process_tree.force_stop_process_group(4242, killpg=lambda *_: None)
 

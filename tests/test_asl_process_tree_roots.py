@@ -7,7 +7,7 @@ import signal
 import unittest
 from unittest import mock
 
-from agent_session_loop import process_tree
+from agent_session_loop import process_sampling, process_tree
 from tests import support_asl_process_tree as fixtures
 
 
@@ -22,7 +22,7 @@ class VerifiedRootRecoveryTests(unittest.TestCase):
 
     def prepare(self, table, *, force=False, prior=None):
         with mock.patch.object(
-            process_tree, "sample_process_table", return_value=table
+            process_sampling, "sample_process_table", return_value=table
         ):
             return process_tree.prepare_verified_root_recovery(
                 root_pid=10,
@@ -76,7 +76,7 @@ class VerifiedRootRecoveryTests(unittest.TestCase):
         self.assertIn("sample_error", report)
 
     def test_opt_out_and_protected_pids_never_sample_or_signal(self) -> None:
-        with mock.patch.object(process_tree, "sample_process_table") as sample:
+        with mock.patch.object(process_sampling, "sample_process_table") as sample:
             for pid, environ in [
                 (10, {process_tree.SWEEP_DISABLED_ENV_VAR: "true"}),
                 (1, {}),
@@ -114,7 +114,7 @@ class VerifiedLeafRecoveryTests(unittest.TestCase):
 
     def prepare(self, prior: list[dict], current: dict[int, dict]):
         with mock.patch.object(
-            process_tree, "sample_process_table", return_value=current
+            process_sampling, "sample_process_table", return_value=current
         ):
             return process_tree.prepare_verified_leaf_recovery(
                 root_pid=10,
@@ -207,7 +207,9 @@ class VerifiedLeafRecoveryTests(unittest.TestCase):
         self.assertEqual([], report["candidate_pids"])
         self.assertEqual((), candidates)
 
-        with mock.patch.object(process_tree, "sample_process_table", return_value=None):
+        with mock.patch.object(
+            process_sampling, "sample_process_table", return_value=None
+        ):
             failed, failed_candidates = process_tree.prepare_verified_leaf_recovery(
                 root_pid=10,
                 prior_tree=[root, self.row(30, 10, "eza -la")],
@@ -218,7 +220,7 @@ class VerifiedLeafRecoveryTests(unittest.TestCase):
 
     def test_process_sweep_opt_out_disables_recovery(self) -> None:
         prior = [self.row(10, 1, "claude --print"), self.row(30, 10, "eza -la")]
-        with mock.patch.object(process_tree, "sample_process_table") as sample:
+        with mock.patch.object(process_sampling, "sample_process_table") as sample:
             report, candidates = process_tree.prepare_verified_leaf_recovery(
                 root_pid=10,
                 prior_tree=prior,

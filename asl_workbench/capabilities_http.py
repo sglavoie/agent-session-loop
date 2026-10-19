@@ -40,7 +40,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
             *models._SUMMARY_TESTS,
             models._FOUNDATION_TESTS,
             models._CATALOG_TESTS,
-            models._OVERVIEW_TESTS,
+            *models._OVERVIEW_TESTS,
         ),
         changes=("observational-reads",),
     ),
@@ -61,7 +61,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         authority=models.AUTHORITY_ASL,
         regression_coverage=(
             models._HISTORY_TESTS,
-            models._OVERVIEW_TESTS,
+            *models._OVERVIEW_TESTS,
             models._OVERVIEW_BROWSER_TESTS,
         ),
     ),
@@ -164,7 +164,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
     models._http(
         "GET /api/redirect-status",
         "Redirect journal projection: accepted, pending, stranded corrections.",
-        coverage=(models._REDIRECT_TESTS, models._CONTROL_TESTS),
+        coverage=(models._REDIRECT_TESTS, *models._CONTROL_TESTS),
     ),
     models._http(
         "GET /api/conversation-recovery",
@@ -172,7 +172,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         coverage=(
             models._SERVER_RECOVERY_TESTS,
             models._DOCS_TESTS,
-            models._CONTROL_TESTS,
+            *models._CONTROL_TESTS,
         ),
     ),
     models._http(
@@ -307,7 +307,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         coverage=(
             models._SERVER_CONTROL_TESTS,
             models._CONTROL_CLI_TESTS,
-            models._CONTROL_TESTS,
+            *models._CONTROL_TESTS,
         ),
     ),
     models._http(
@@ -316,7 +316,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         coverage=(
             models._SERVER_CONTROL_TESTS,
             models._CONTROL_CLI_TESTS,
-            models._CONTROL_TESTS,
+            *models._CONTROL_TESTS,
         ),
     ),
     models._http(
@@ -325,13 +325,13 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         coverage=(
             models._SERVER_CONTROL_TESTS,
             models._CONTROL_CLI_TESTS,
-            models._CONTROL_TESTS,
+            *models._CONTROL_TESTS,
         ),
     ),
     models._http(
         "POST /api/control/redirect",
         "Submit a mid-run correction and wait a bounded time for its verdict.",
-        coverage=(models._REDIRECT_TESTS, models._DOCS_TESTS, models._CONTROL_TESTS),
+        coverage=(models._REDIRECT_TESTS, models._DOCS_TESTS, *models._CONTROL_TESTS),
     ),
     models._http(
         "POST /api/unlock",

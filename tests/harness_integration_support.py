@@ -11,20 +11,26 @@ from typing import Any
 from agent_session_loop import (
     harness_copilot,
     harnesses,
+    turn_disposition_failures,
+    turn_disposition_mailbox,
+    turn_disposition_models,
+    turn_disposition_redirect,
     turn_dispositions,
 )
 
 #: Boundaries the session loop hands a terminating disposition to, and so the
 #: modules the idle-baseline guard below has to search alongside the loop
-#: itself. Session 35 moved the mailbox reply wait -- the run's one sanctioned
-#: opt-out from the structural idle refresh -- out of the loop and into
-#: ``turn_dispositions``; a guard that kept searching only the loop would have
-#: passed by finding no opt-out at all. The list stays at one entry after
-#: Session 37: ``run_loop`` and ``turn_dispositions`` are still the only two
-#: modules that *write* ``runner_work_finished_at`` or ``idle_baseline_pinned``
-#: -- ``turn_preflight`` reads the stamp to measure the gap but never sets it --
-#: and the loop itself is searched as the guard's own root rather than listed.
-IDLE_BASELINE_DELEGATES = (turn_dispositions,)
+#: itself. The mailbox reply wait is the run's one sanctioned opt-out from the
+#: structural idle refresh. Search the entire disposition family so extracting
+#: a branch cannot hide a second writer of ``runner_work_finished_at`` or
+#: ``idle_baseline_pinned``. The loop is searched as the guard's own root.
+IDLE_BASELINE_DELEGATES = (
+    turn_dispositions,
+    turn_disposition_models,
+    turn_disposition_redirect,
+    turn_disposition_mailbox,
+    turn_disposition_failures,
+)
 
 # Bounds a wedged child so it cannot hang the suite; it is not a latency
 # assertion, so it stays far above what a run needs on a machine already

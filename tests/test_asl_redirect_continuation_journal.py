@@ -59,10 +59,10 @@ from .asl_redirect_continuation_support import (
     target,
     termination_report,
 )
+from .asl_redirect_control_support import _FakeCancellation, _Tools
 from .support import (
     wait_until,
 )
-from .test_asl_redirect_control import _FakeCancellation, _Tools
 
 
 class SerializationTests(JournalTestCase):
@@ -380,7 +380,9 @@ class SuccessorGateTests(JournalTestCase):
     only safe reading of it is that nothing has been proven about the worker.
     """
 
-    def _blocked_cleanup_gate(self, cleanup_gate: threading.Event):
+    def _blocked_cleanup_gate(
+        self, cleanup_gate: threading.Event, *, report_wait_seconds: float = 0.05
+    ):
         """A gate over a real controller whose escalation cannot finish."""
         tools = _Tools(cleanup_gate=cleanup_gate)
         cancellation = _FakeCancellation()
@@ -410,7 +412,7 @@ class SuccessorGateTests(JournalTestCase):
             bind_wait_seconds=0.5,
             # Shorter than the cleanup this test holds open, which is the whole
             # case: the teardown gives up and the turn is over anyway.
-            report_wait_seconds=0.05,
+            report_wait_seconds=report_wait_seconds,
         )
         self.addCleanup(turn_redirect.close)
         return turn_redirect, tools, cancellation
@@ -449,7 +451,12 @@ class SuccessorGateTests(JournalTestCase):
         """The same path with the cleanup allowed to finish: continuation."""
         cleanup = threading.Event()
         cleanup.set()
-        turn_redirect, _, cancellation = self._blocked_cleanup_gate(cleanup)
+        # This case asserts a completed cleanup, not the short timeout the
+        # blocked-cleanup case exercises. Let the watchdog publish its report
+        # even when the suite's other shards delay its scheduling.
+        turn_redirect, _, cancellation = self._blocked_cleanup_gate(
+            cleanup, report_wait_seconds=10.0
+        )
         turn_redirect.bind_worker(WORKER_PID)
         self.assertIsNotNone(turn_redirect.accept(self.submit()))
         cancellation.collect()

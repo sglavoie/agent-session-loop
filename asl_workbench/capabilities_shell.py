@@ -160,7 +160,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
             models._DOCS_TESTS,
             *models._SUMMARY_TESTS,
             models._DETAIL_TESTS,
-            models._OVERVIEW_TESTS,
+            *models._OVERVIEW_TESTS,
             models._OVERVIEW_BROWSER_TESTS,
         ),
     ),

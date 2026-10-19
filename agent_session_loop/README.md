@@ -11,9 +11,22 @@ corpus checks. The `overseer_decision_*`, `overseer_context_*`, and
 `overseer_cli_*` families separate evidence, models, policy, and command paths.
 Workbench uses the same structure for `history_*`, `http_*`, `capabilities_*`,
 and `lifecycle_*`. Internal calls use the owning modules; tests patch those
-owners when substituting collaborators. Shared test fixtures live in
-`tests/support_*`, and each split test module is registered in the same suite
+owners when substituting collaborators. Shared test fixtures live in dedicated
+support modules, and each split test module is registered in the same suite
 lanes as its original.
+
+Turn dispositions retain their entry points in `turn_dispositions.py`, with
+continuation models, redirect settlement, mailbox waits, and failure handling in
+`turn_disposition_*`. The tail keeps its CLI and follower in `tail.py`; its
+`tail_*` siblings own records, control messages, event formatting, and log reads.
+Process diagnostics keep their public entry points in `process_tree.py`, backed
+by `process_sampling`, `process_recovery`, `process_sweep`, and
+`process_termination`; sampler patches belong on `process_sampling`.
+`CodexAppServerSession` remains in `codex_app_server.py`, inheriting protocol
+handling from `codex_app_server_protocol` and locked state and transport
+primitives from `codex_app_server_transport`. `codex_app_server_types` owns
+shared protocol values. The inheritance chain uses one session object and the
+same locks across reader, driver, and mailbox threads.
 
 Implementation runs can explicitly authorize an external data directory with
 `--external-write-root /absolute/directory` (repeatable). Admission pins existing,
