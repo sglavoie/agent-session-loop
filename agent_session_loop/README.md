@@ -465,6 +465,12 @@ After a terminal harness result and confirmed idle CPU samples, hang recovery ca
 
 The deterministic `lifecycle.worker-pause-exit-accounting` check grades failed exits that carry a worker pause declaration. It requires matching session, turn, and exit evidence, a trusted declaration source, and a held pause or write-guard refusal that reverted the session to pending. Only matching exits leave the unclassified-failure catch-all; shutdown causes remain the resource lane's responsibility. An explicitly aborted exit is owned by `lifecycle.operator-abort`, which now detects a missing acknowledgment even when no honored-abort record survived. The runner records an honored abort when a post-turn guard pauses a killed turn, preserving the guard's failure and pending session.
 
+## Extracted façade boundaries
+
+`supervisor_audit.py` remains the compatibility entry point, while `supervisor_audit_config.py`, `supervisor_audit_restricted.py`, `supervisor_audit_agent_models.py`, `supervisor_audit_agent_run.py`, and `supervisor_audit_terminal.py` own configuration, the read-only invocation, attempt records, retry processing, and terminal publication. `assurance_cli.py` similarly delegates shared rendering, browse, mutating, pending, and reconciliation commands to `assurance_cli_common.py`, `assurance_cli_browse.py`, `assurance_cli_actions.py`, `assurance_cli_pending.py`, and `assurance_cli_reconcile.py`; new callers patch or import the implementation owner, while the façade retains the established command surface.
+
+`workbench_archive.py` is the compatibility surface over focused archive modules: `workbench_archive_models.py` holds archive records and errors, `workbench_archive_storage.py` owns disk layout and metadata, `workbench_archive_operations.py` moves and restores entries, `workbench_archive_commands.py` owns registry changes, and `workbench_archive_workflows.py` assembles surface-neutral workflows.
+
 ## Accepting remote-ref updates after a paused review
 
 A push or fetch during a read-only review can update remote-tracking refs and
