@@ -201,10 +201,10 @@ class ObserverStructureTests(unittest.TestCase):
         self.assertEqual(
             siblings,
             {
-                "assurance_ledger",
                 "assurance_models_primitives",
                 "assurance_models_vocab",
                 "assurance_projection",
+                "collect_assurance_metrics",
             },
         )
 

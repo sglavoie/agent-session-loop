@@ -86,26 +86,40 @@ Invariants that survive the move:
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 from . import (
-    clock,
     events,
-    plans_errors,
     plans_models,
     plans_payloads,
     plans_snapshot,
     readiness_gate,
     review,
     review_continuation,
+    review_cycle_publish,
     review_delta,
     review_repair,
     review_transitions,
     run_inputs,
     run_persistence,
     run_termination,
+)
+from .review_cycle_reopen import (
+    _has_successful_review_reopen as _has_successful_review_reopen,
+)
+from .review_cycle_reopen import _prior_review_cap as _prior_review_cap
+from .review_cycle_reopen import _record_review_reopen as _record_review_reopen
+from .review_cycle_reopen import _review_reopen_record as _review_reopen_record
+from .review_cycle_reopen import _set_review_resume as _set_review_resume
+from .review_cycle_verdict import _attest_executed_review as _attest_executed_review
+from .review_cycle_verdict import (
+    _set_existing_review_verdict as _set_existing_review_verdict,
+)
+from .review_cycle_verdict import _terminal_review_reason as _terminal_review_reason
+from .review_cycle_verdict import (
+    existing_review_verdict_recorder as existing_review_verdict_recorder,
 )
 
 # ---------------------------------------------------------------------------
@@ -122,283 +136,6 @@ PlanMutationReinspector = Callable[
     [plans_snapshot.PlanSnapshotCache, plans_models.PlanSnapshot],
     plans_models.PlanSnapshot,
 ]
-
-
-def existing_review_verdict_recorder(
-    read_review_verdict: review_delta.ReviewVerdictReader,
-) -> run_termination.ExistingReviewVerdictRecorder:
-    """Bind the verdict reader into the recorder ``run_termination`` expects.
-
-    ``ExistingReviewVerdictRecorder`` is a two-positional-argument callable, so
-    a recorder that needs its own reader seam cannot be passed directly. This
-    is the one place that binding is made, mirroring
-    ``run_termination.readiness_finalizer``, so the reader is threaded in a
-    single spot rather than at every stop that reports the verdict it has.
-    """
-
-    def record(payload: dict[str, Any], plan_dir: Path) -> None:
-        _set_existing_review_verdict(
-            payload, plan_dir, read_review_verdict=read_review_verdict
-        )
-
-    return record
-
-
-# ---------------------------------------------------------------------------
-# Reopen lineage
-# ---------------------------------------------------------------------------
-
-
-def _prior_review_cap(
-    event_path: Path,
-    resume: review_continuation.ReviewResume,
-) -> int | None:
-    """Return the cap recorded by the source cycle, including legacy events."""
-
-    for cycle in reversed(review_delta._read_prior_review_cycles(event_path)):
-        cycle_number = cycle.get("cycle")
-        cycle_session = cycle.get("review_session_id")
-        if resume.source_cycle is not None and cycle_number != resume.source_cycle:
-            continue
-        if (
-            resume.review_session_id is not None
-            and isinstance(cycle_session, str)
-            and cycle_session != resume.review_session_id
-        ):
-            continue
-        value = cycle.get("max_review_fix_cycles")
-        if type(value) is int and value >= 0:
-            return value
-    return None
-
-
-def _review_reopen_record(
-    *,
-    event_path: Path,
-    payload: dict[str, Any],
-    resume: review_continuation.ReviewResume,
-    max_review_fix_cycles: int,
-    materialized: bool,
-    repair_session_ids: Sequence[str] = (),
-    result: str,
-    error: str | None = None,
-    recovered: bool = False,
-) -> dict[str, Any]:
-    """Build the durable lineage record for one reopen attempt/result."""
-
-    before_count = resume.historical_materializations
-    if recovered and materialized:
-        # Existing children are already part of the evaluator's reconciled
-        # count. Reconstruct the pre-materialization value for the crash-window
-        # backfill record instead of counting the source twice.
-        before_count = max(0, before_count - 1)
-    after_count = before_count + (1 if materialized else 0)
-    record = {
-        "run_id": payload.get("run_id"),
-        "source_cycle": resume.source_cycle,
-        "source_review_session_id": resume.review_session_id,
-        "source_disposition": resume.source_disposition,
-        "previous_fingerprints": (
-            list(resume.source_fingerprints)
-            if resume.source_fingerprints is not None
-            else None
-        ),
-        "current_fingerprints": (
-            list(resume.current_fingerprints)
-            if resume.current_fingerprints is not None
-            else None
-        ),
-        "current_repeat_keys": (
-            list(resume.current_repeat_keys)
-            if resume.current_repeat_keys is not None
-            else None
-        ),
-        "source_review_output_sha256": resume.source_review_output_sha256,
-        "source_review_artifact_sha256": (resume.source_review_artifact_sha256),
-        "current_review_output_sha256": resume.current_review_output_sha256,
-        "current_review_artifact_sha256": (resume.current_review_artifact_sha256),
-        "repair_session_ids": list(repair_session_ids),
-        "materialized": materialized,
-        "recovered": recovered,
-        "result": result,
-        "error": error,
-        "historical_materializations_before": before_count,
-        "historical_materializations_after": after_count,
-        "minimum_required_cap": resume.minimum_required_cap,
-        "before_max_review_fix_cycles": _prior_review_cap(event_path, resume),
-        "after_max_review_fix_cycles": max_review_fix_cycles,
-    }
-    if resume.source_findings is not None:
-        record["source_findings"] = [dict(item) for item in resume.source_findings]
-    if resume.current_findings is not None:
-        record["current_findings"] = [dict(item) for item in resume.current_findings]
-    if resume.source_repositories is not None:
-        record["source_repositories"] = [
-            dict(item) for item in resume.source_repositories
-        ]
-    if resume.current_repositories is not None:
-        record["current_repositories"] = [
-            dict(item) for item in resume.current_repositories
-        ]
-    if resume.repair_groups is not None:
-        record["repair_groups"] = [dict(item) for item in resume.repair_groups]
-    # The reopen record becomes the newest repair evidence a later rereview
-    # scopes itself against, so it has to carry the tree the *source* review
-    # read. Without it the reopen supersedes a cycle record that named a base
-    # and names none itself, and every review after a reopen re-reads the whole
-    # tree. The baseline is copied from the attributed cycle only: when nothing
-    # can be attributed the fields stay absent, and full scope is the answer.
-    source = review_continuation.find_source_review_cycle(
-        event_path,
-        source_cycle=resume.source_cycle,
-        review_session_id=resume.review_session_id,
-        review_output_sha256=resume.source_review_output_sha256,
-        review_artifact_sha256=resume.source_review_artifact_sha256,
-    )
-    if source is not None:
-        record.update(review_continuation.review_baseline_evidence(source))
-    return record
-
-
-def _record_review_reopen(
-    *,
-    event_path: Path,
-    payload: dict[str, Any],
-    persistence: run_persistence._RunPersistence,
-    record: dict[str, Any],
-) -> None:
-    """Persist an append-only reopen attempt and expose it in run JSON."""
-
-    with persistence.lock:
-        payload["review_reopen"] = record
-        persistence.append_event(
-            event_path, events.REVIEW_REPAIR_REOPENED_EVENT, record
-        )
-        persistence.write_state(payload)
-
-
-def _has_successful_review_reopen(
-    event_path: Path, source_review_session_id: str | None
-) -> bool:
-    """Return whether durable reopen success already exists for a source."""
-
-    if source_review_session_id is None:
-        return False
-    for record in review_continuation.read_review_events(event_path):
-        if record.name != events.REVIEW_REPAIR_REOPENED_EVENT:
-            continue
-        source_id = record.payload.get("source_review_session_id")
-        if (
-            source_id == source_review_session_id
-            and record.payload.get("materialized") is True
-        ):
-            return True
-    return False
-
-
-# ---------------------------------------------------------------------------
-# Continuation projection
-# ---------------------------------------------------------------------------
-
-
-def _set_review_resume(
-    *,
-    snapshot: plans_models.PlanSnapshot,
-    event_path: Path,
-    payload: dict[str, Any],
-    persistence: run_persistence._RunPersistence,
-    max_repair_group_attempts: int,
-    max_review_fix_cycles: int,
-    review_requested: bool,
-) -> review_continuation.ReviewResume:
-    """Refresh the shared continuation projection in state and run JSON."""
-
-    resume = review_continuation.evaluate_review_continuation(
-        snapshot,
-        event_path,
-        max_repair_group_attempts=max_repair_group_attempts,
-        max_review_fix_cycles=max_review_fix_cycles,
-        review_harness_requested=review_requested,
-    )
-    with persistence.lock:
-        payload["review_resume"] = resume.to_payload()
-        persistence.write_state(payload)
-    return resume
-
-
-# ---------------------------------------------------------------------------
-# Verdict attestation
-# ---------------------------------------------------------------------------
-
-
-def _terminal_review_reason(payload: dict[str, Any]) -> str:
-    """Apply the review lane's terminal verdict to this run's payload.
-
-    The decision is the extracted adjudicator's, which asks the same
-    cleared-review predicate the terminal blocker asks; all that happens here is
-    recording it, so the two cannot disagree about whether a review cleared.
-    """
-    outcome = review_transitions.adjudicate_terminal_review(payload)
-    if not outcome.cleared:
-        payload["ok"] = False
-        payload["action_required"] = outcome.action_required
-    return outcome.reason
-
-
-def _set_existing_review_verdict(
-    payload: dict[str, Any],
-    plan_dir: Path,
-    *,
-    require_artifact: bool = False,
-    read_review_verdict: review_delta.ReviewVerdictReader,
-) -> None:
-    """Project the persisted verdict when a continuation stops before a turn."""
-
-    verdict = read_review_verdict(plan_dir, require_artifact=require_artifact)
-    if not verdict.get("ok"):
-        return
-    payload["review_verdict"] = {
-        key: verdict.get(key)
-        for key in (
-            "status_line",
-            "outcome",
-            "total_findings",
-            "findings_by_severity",
-        )
-    }
-
-
-def _attest_executed_review(
-    payload: dict[str, Any],
-    plan_dir: Path,
-    *,
-    require_artifact: bool,
-    read_review_verdict: review_delta.ReviewVerdictReader,
-) -> None:
-    """Attest a review that ran but never reached the commit that records it.
-
-    ``review_verdict`` is stamped on the commit path, so a review session whose
-    handoff fails plan inspection leaves the run reporting that no review
-    happened at all — while the artifact that session wrote sits on disk.
-    Reading it back here keeps the run's only independent review attestable from
-    its own output rather than from bookkeeping that never got to run.
-
-    `require_artifact` mirrors what the run itself enforced, so a verdict the
-    run refused as invalid is never re-projected here as if it stood. The
-    digests are recorded either way: they describe what the session left on
-    disk, which stays honest evidence even when the verdict does not hold.
-    """
-
-    if payload.get("review_verdict") is None:
-        _set_existing_review_verdict(
-            payload,
-            plan_dir,
-            require_artifact=require_artifact,
-            read_review_verdict=read_review_verdict,
-        )
-    output_sha256, artifact_sha256 = review_delta._review_artifact_digests(plan_dir)
-    payload["review_output_sha256"] = output_sha256
-    payload["review_artifact_sha256"] = artifact_sha256
 
 
 # ---------------------------------------------------------------------------
@@ -704,44 +441,14 @@ def _advance_review_cycle(
         cycle_record=cycle_record,
         disposition=str(settlement.disposition),
     )
-    try:
-        refreshed = plan_cache.get_fresh(snapshot.plan_dir)
-    except plans_errors.PlanError as error:
-        with persistence.lock:
-            payload["final_snapshot"] = plans_payloads.snapshot_payload(materialized)
-        run_termination._pause_run(
-            event_path,
-            payload,
-            reason="malformed-plan",
-            message=(
-                "plan could not be inspected after materializing repair "
-                f"sessions: {error}"
-            ),
-            details={**session_details, "error": str(error)},
-            persistence=persistence,
-        )
-        return "paused", materialized
-    if not readiness_gate._regate_reopened_plan(
+    return review_cycle_publish._regate_and_continue(
         event_path=event_path,
         payload=payload,
         persistence=persistence,
         args=args,
-        snapshot=refreshed,
-        repair_session_ids=cycle_record["repair_session_ids"],
-        details={**session_details, "cycle": cycle_record["cycle"]},
-    ):
-        return "paused", refreshed
-    running_success, running_error = readiness_gate.write_readiness_state(
-        refreshed.plan_dir, "running"
+        plan_cache=plan_cache,
+        snapshot=snapshot,
+        materialized=materialized,
+        session_details=session_details,
+        cycle_record=cycle_record,
     )
-    with persistence.lock:
-        payload["final_snapshot"] = plans_payloads.snapshot_payload(refreshed)
-        if running_success:
-            payload["readiness_state_active"] = True
-            payload["readiness_state_current"] = "running"
-            payload["readiness_state_refreshed_at"] = clock.isoformat(clock.utc_now())
-            payload["readiness_state_refresh_error"] = None
-        else:
-            payload["readiness_state_refresh_error"] = running_error
-        persistence.write_state(payload)
-    return "continue", refreshed

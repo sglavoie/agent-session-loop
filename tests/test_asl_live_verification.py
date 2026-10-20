@@ -43,6 +43,9 @@ from agent_session_loop import (
     agent_mux_delivery,
     events,
     live_verification,
+    live_verification_finalization,
+    live_verification_run,
+    live_verification_state,
     run_persistence,
     run_reporting,
     runner,
@@ -104,7 +107,15 @@ class LiveVerificationBoundaryTests(unittest.TestCase):
     """``live_verification`` is runner-free and writes through one handle."""
 
     def setUp(self) -> None:
-        self.source = Path(live_verification.__file__ or "").read_text(encoding="utf-8")
+        self.source = "\n".join(
+            Path(module.__file__ or "").read_text(encoding="utf-8")
+            for module in (
+                live_verification,
+                live_verification_finalization,
+                live_verification_run,
+                live_verification_state,
+            )
+        )
 
     def test_live_verification_does_not_import_the_runner(self) -> None:
         assert_no_runner_import(self, live_verification)

@@ -165,7 +165,7 @@ INTENTIONAL_CHANGES: tuple[IntentionalChange, ...] = (
             # The confirmation contract is the half that did not change, so it
             # is pinned alongside: a later session reading this record must not
             # read "retention stopped deleting" as "deletion got easier".
-            "scripts:tests/test_workbench_archive.py"
+            "scripts:tests/test_workbench_archive_cleanup.py"
             "::test_purging_without_a_matching_count_removes_nothing",
         ),
         capability_keys=(

@@ -32,6 +32,7 @@ PORTABLE_MODULES = (
     "tests.test_asl_turn_dispositions_pause",
     "tests.test_asl_turn_dispositions_exit",
     "tests.test_asl_turn_postflight",
+    "tests.test_asl_turn_postflight_verdicts",
     "tests.test_asl_turn_preflight",
     "tests.test_asl_turn_preflight_baselines",
     "tests.test_asl_turn_preparation",
@@ -122,6 +123,7 @@ PORTABLE_MODULES = (
     "tests.test_asl_retention_corpus",
     "tests.test_asl_retention_pinning",
     "tests.test_asl_harness_compatibility",
+    "tests.test_asl_harness_compatibility_live_acceptance",
     "tests.test_asl_startup_context",
     "tests.test_asl_overseer_cli_invocation",
     "tests.test_asl_overseer_cli_evidence",
@@ -338,6 +340,8 @@ INTEGRATION_MODULES = (
     # Integration rather than portable: it binds a loopback server and spawns
     # a fresh interpreter to prove the portable package loads without ASL.
     "tests.test_workbench_foundations",
+    "tests.test_workbench_foundations_api",
+    "tests.test_workbench_foundations_boundary",
     # Final cross-repository ownership audit: it reads the registered Pi
     # checkout to prove the retired implementation is gone and its historical
     # evidence remains, so it cannot run in a scripts-only portable checkout.
@@ -394,6 +398,8 @@ INTEGRATION_MODULES = (
     # what a real GET does to a real archive tree, so it is asserted against a
     # live server reading real entries rather than against a stub listing.
     "tests.test_workbench_archive",
+    "tests.test_workbench_archive_cleanup",
+    "tests.test_workbench_archive_surfaces",
     # Integration because there is no other way to ask the question: the claim
     # is that one front end serves two deployments, so both providers are bound
     # to real loopback sockets over one plan corpus and asked the same things.
@@ -419,6 +425,8 @@ INTEGRATION_MODULES = (
     # same reason: it builds the release's own native definitions and restages
     # them, so it exercises the packaging code rather than a description of it.
     "tests.test_workbench_staging",
+    "tests.test_workbench_staging_journal",
+    "tests.test_workbench_staging_units",
     # The harness that drives the cutover the rehearsal above was a rehearsal
     # for. Integration for the same reason again, and one of its own: it writes
     # real prefixes and takes real SQLite backups of them, because a backup
