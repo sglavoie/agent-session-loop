@@ -17,6 +17,7 @@ from . import (
     mailbox_cli_status,
     mailbox_models,
     redirect_ack,
+    redirect_ack_attempt,
     redirect_store_models,
     responses,
 )
@@ -128,7 +129,8 @@ def live_attempt(
 
 
 def _redirect_refusal(
-    error: redirect_ack.RedirectAckError | redirect_store_models.RedirectStoreError,
+    error: redirect_ack_attempt.RedirectAckError
+    | redirect_store_models.RedirectStoreError,
 ) -> dict[str, Any]:
     payload = error.to_payload()
     return {
@@ -173,7 +175,7 @@ def inbox_acknowledge_from_args(args: argparse.Namespace) -> int:
             args,
             command_name=mailbox_cli_constants.COMMAND_INBOX_ACKNOWLEDGE,
             text_label="inbox acknowledge",
-            reason=redirect_ack.ERROR_NO_LIVE_ATTEMPT,
+            reason=redirect_ack_attempt.ERROR_NO_LIVE_ATTEMPT,
             error=(
                 "no active turn owns this plan, so the attempt a receipt would "
                 "name cannot be identified"
@@ -216,7 +218,7 @@ def inbox_acknowledge_from_args(args: argparse.Namespace) -> int:
                 state_dir=args.state_dir,
             )
         except (
-            redirect_ack.RedirectAckError,
+            redirect_ack_attempt.RedirectAckError,
             redirect_store_models.RedirectStoreError,
         ) as error:
             refused.append(
@@ -229,7 +231,9 @@ def inbox_acknowledge_from_args(args: argparse.Namespace) -> int:
         mailbox_cli_constants.COMMAND_INBOX_ACKNOWLEDGE,
         plan_dir=str(context.snapshot.plan_dir),
         attempt=args.attempt,
-        live_attempt=(None if attempt is None else redirect_ack.attempt_token(attempt)),
+        live_attempt=(
+            None if attempt is None else redirect_ack_attempt.attempt_token(attempt)
+        ),
         requested=list(dict.fromkeys(requested)),
         acknowledged=acknowledged,
         refused=refused,

@@ -63,7 +63,7 @@ from . import (
     plans_session_ids,
     plans_session_scope,
     qna,
-    redirect_ack,
+    redirect_ack_carry,
     review,
     run_prompts,
     workspaces,
@@ -421,7 +421,7 @@ def build_task_packet(
     workspace: workspaces.ResolvedWorkspace | None = None,
     session_scope: plans_session_scope.SessionScope | None = None,
     session_kind: str = plans_payloads.SESSION_KIND_IMPLEMENTATION,
-    corrections: redirect_ack.CarriedCorrections | None = None,
+    corrections: redirect_ack_carry.CarriedCorrections | None = None,
 ) -> SessionTaskPacket:
     """Build the compact autonomous-worker packet for one selected session.
 

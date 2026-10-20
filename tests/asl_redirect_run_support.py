@@ -23,6 +23,7 @@ from agent_session_loop import (
     plans_models,
     plans_session_ids,
     redirect_ack,
+    redirect_ack_attempt,
     redirect_control,
     redirect_store_journal,
     redirect_store_models,
@@ -85,7 +86,7 @@ class _RedirectedRun(unittest.TestCase):
         self.status_at_resume: str | None = None
         self.submitted: redirect_store_models.RedirectRequest | None = None
         self.receipt: redirect_ack.Acknowledgment | None = None
-        self.stale_refusal: redirect_ack.RedirectAckError | None = None
+        self.stale_refusal: redirect_ack_attempt.RedirectAckError | None = None
 
     # -- the fakes -----------------------------------------------------------
 
@@ -257,11 +258,11 @@ class _RedirectedRun(unittest.TestCase):
             redirect_ack.acknowledge_correction(
                 self.plan_dir,
                 operation_id,
-                token=redirect_ack.attempt_token(stale),
+                token=redirect_ack_attempt.attempt_token(stale),
                 live_attempt=live,
                 state_dir=self.state_dir,
             )
-        except redirect_ack.RedirectAckError as error:
+        except redirect_ack_attempt.RedirectAckError as error:
             self.stale_refusal = error
         self.receipt = redirect_ack.acknowledge_correction(
             self.plan_dir,

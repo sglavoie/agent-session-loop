@@ -49,6 +49,9 @@ from agent_session_loop import (
     mailbox_cli_args,
     mailbox_cli_inbox,
     redirect_ack,
+    redirect_ack_annotate,
+    redirect_ack_attempt,
+    redirect_ack_carry,
     redirect_continuation,
     redirect_store_carry,
     redirect_store_journal,
@@ -136,8 +139,8 @@ class RedirectAckTestCase(unittest.TestCase):
         *,
         continuation: redirect_store_models.RedirectTarget | None = None,
         accepted: tuple[str, ...] = (),
-    ) -> redirect_ack.CarriedCorrections:
-        return redirect_ack.carry_corrections(
+    ) -> redirect_ack_carry.CarriedCorrections:
+        return redirect_ack_carry.carry_corrections(
             self.plan_dir,
             continuation=continuation or target(2, harness="codex"),
             accepted_operation_ids=accepted,

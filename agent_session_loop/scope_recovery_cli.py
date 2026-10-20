@@ -24,7 +24,7 @@ def acknowledge_external_changes(
     checkpoint_retained: bool = False,
 ) -> dict[str, Any]:
     """Preview independent changes; acceptance never grants ongoing write authority."""
-    from . import durability, run_commit
+    from . import durability, run_commit, run_commit_paused
 
     if accept is not None and (reason is None or not reason.strip()):
         raise RecoveryError("acceptance requires an explicit operator reason")
@@ -105,7 +105,7 @@ def acknowledge_external_changes(
                 != proposal
             ):
                 raise RecoveryError("evidence changed during acceptance")
-            message = run_commit._paused_work_commit_message(
+            message = run_commit_paused._paused_work_commit_message(
                 session_label=f"session {session_id}",
                 pause_reason=events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
                 commit_mode="per-session",
@@ -165,7 +165,7 @@ def acknowledge_external_changes(
                     / "external-change-recovery"
                     / proposal["evidence_digest"]
                 )
-                message_file = run_commit._write_paused_work_message(
+                message_file = run_commit_paused._write_paused_work_message(
                     artifacts, progress["message"]
                 )
                 result = run_commit._run_asl_commit(

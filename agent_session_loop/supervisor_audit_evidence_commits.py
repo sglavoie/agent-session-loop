@@ -43,7 +43,7 @@ _COMMIT_STATE_KEYS = (
 #: A commit attempt's artifact directory, as ``run_commit`` names it:
 #: ``commit-{index:04d}-{suffix}``. Matching the numbered prefix rather than
 #: ``commit-`` alone keeps sibling directories such as ``commit-group-recovery``
-#: (``run_commit.RECOVERED_PAUSED_WORK_MESSAGE_DIR_NAME``), which hold messages
+#: (``run_commit_paused.RECOVERED_PAUSED_WORK_MESSAGE_DIR_NAME``), which hold messages
 #: rather than attempts, from reading as an attempt with no result (ASI-117).
 _COMMIT_ATTEMPT_DIR_RE = re.compile(r"^commit-\d{4,}-")
 

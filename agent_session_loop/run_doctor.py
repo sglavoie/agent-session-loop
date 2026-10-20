@@ -41,7 +41,8 @@ rows at ``workspaces``, the verification context at ``verification``, the worker
 and the packet at ``task_packet``, the review-session test at
 ``review_session_contract``, the prompt and the invocation at ``run_prompts``,
 the model, effort and unsafe-bypass selection at ``run_selection``, the
-invocation payload at ``run_commit``, the model/effort lines at ``run_outcome``,
+invocation payload at ``run_commit_invocation``, the model/effort lines at
+``run_outcome``,
 the harness config at ``config``, the adapter at ``harnesses``, the state
 directory at ``state`` and the response envelopes at ``responses``.
 
@@ -87,7 +88,7 @@ from . import (
     plans_snapshot,
     responses,
     review_session_contract,
-    run_commit,
+    run_commit_invocation,
     run_outcome,
     run_prompts,
     run_selection,
@@ -322,7 +323,7 @@ def doctor_from_args(args: argparse.Namespace) -> int:
                     else None
                 ),
                 prompt=prompt,
-                invocation=run_commit._build_invocation_payload(
+                invocation=run_commit_invocation._build_invocation_payload(
                     invocation,
                     model_effort=model_effort,
                     verification_context=verification_context,

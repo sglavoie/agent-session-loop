@@ -43,7 +43,7 @@ class AnnotationReserveTests(RedirectAckTestCase):
         receipt = redirect_ack.acknowledge_correction(
             self.plan_dir,
             request.operation_id,
-            token=redirect_ack.attempt_token(continuation),
+            token=redirect_ack_attempt.attempt_token(continuation),
             live_attempt=continuation,
             state_dir=self.state_dir,
         )
@@ -119,7 +119,7 @@ class ObservationalWaitTests(RedirectAckTestCase):
                 redirect_ack.acknowledge_correction(
                     self.plan_dir,
                     self.request.operation_id,
-                    token=redirect_ack.attempt_token(self.continuation),
+                    token=redirect_ack_attempt.attempt_token(self.continuation),
                     live_attempt=self.continuation,
                     state_dir=self.state_dir,
                 )
@@ -177,7 +177,7 @@ class AcknowledgeCommandTests(RedirectAckTestCase):
             "state_dir": str(self.state_dir),
             "json": True,
             "redirect_id": None,
-            "attempt": redirect_ack.attempt_token(self.continuation),
+            "attempt": redirect_ack_attempt.attempt_token(self.continuation),
         }
         values.update(overrides)
         return argparse.Namespace(**values)
@@ -222,13 +222,13 @@ class AcknowledgeCommandTests(RedirectAckTestCase):
         code, payload = self.run_command(
             live=self.continuation,
             redirect_id=[self.request.operation_id],
-            attempt=redirect_ack.attempt_token(target(1)),
+            attempt=redirect_ack_attempt.attempt_token(target(1)),
         )
 
         self.assertEqual(1, code)
         self.assertEqual([], payload["acknowledged"])
         self.assertEqual(
-            [redirect_ack.ERROR_ATTEMPT_MISMATCH],
+            [redirect_ack_attempt.ERROR_ATTEMPT_MISMATCH],
             [record["reason"] for record in payload["refused"]],
         )
         self.assertFalse(self.read().request(self.request.operation_id).acknowledged)
@@ -241,7 +241,7 @@ class AcknowledgeCommandTests(RedirectAckTestCase):
         self.assertEqual(1, code)
         self.assertIsNone(payload["live_attempt"])
         self.assertEqual(
-            [redirect_ack.ERROR_NO_LIVE_ATTEMPT],
+            [redirect_ack_attempt.ERROR_NO_LIVE_ATTEMPT],
             [record["reason"] for record in payload["refused"]],
         )
 
@@ -254,7 +254,7 @@ class AcknowledgeCommandTests(RedirectAckTestCase):
         code, payload = self.run_command(live=None)
 
         self.assertEqual(1, code)
-        self.assertEqual(redirect_ack.ERROR_NO_LIVE_ATTEMPT, payload["reason"])
+        self.assertEqual(redirect_ack_attempt.ERROR_NO_LIVE_ATTEMPT, payload["reason"])
         self.assertFalse(self.read().request(self.request.operation_id).acknowledged)
 
     def test_a_live_attempt_carrying_nothing_reports_an_empty_receipt(self) -> None:
@@ -317,7 +317,7 @@ class RunLoopBoundaryTests(RedirectAckTestCase):
         pending: redirect_continuation.PendingRedirect | None,
         session_id: str = SESSION_ID,
         turn_index: int = 2,
-    ) -> redirect_ack.CarriedCorrections | None:
+    ) -> redirect_ack_carry.CarriedCorrections | None:
         return run_loop_carried_corrections._carried_corrections(
             self.ctx,
             plan_dir=self.plan_dir,

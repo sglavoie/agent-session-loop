@@ -21,6 +21,7 @@ from agent_session_loop import (
     maintenance_policy,
     maintenance_run,
     retention,
+    retention_projection,
 )
 from tests.asl_maintenance_support import (
     RUN_NEWEST,
@@ -232,7 +233,7 @@ class CommandTests(MaintenanceTestBase):
             "json": True,
             "apply": False,
             "force": True,
-            "max_age_days": retention.DEFAULT_MAX_AGE_DAYS,
+            "max_age_days": retention_projection.DEFAULT_MAX_AGE_DAYS,
             "max_runtime_seconds": maintenance_policy.DEFAULT_MAX_RUNTIME_SECONDS,
         }
         base.update(fields)

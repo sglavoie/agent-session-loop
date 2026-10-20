@@ -54,7 +54,7 @@ def _seed_correction(
         target=target,
         state_dir=workspace.state_dir,
     )
-    carried = redirect_ack.carry_corrections(
+    carried = redirect_ack_carry.carry_corrections(
         workspace.plan_dir,
         continuation=continuation,
         accepted_operation_ids=(request.operation_id,),
@@ -227,7 +227,7 @@ def _interrupt_and_continue(
                     live_attempt=continuation,
                     state_dir=workspace.state_dir,
                 )
-            except redirect_ack.RedirectAckError as error:
+            except redirect_ack_attempt.RedirectAckError as error:
                 ack_detail = f"the journal refused the receipt: {error}"
             else:
                 acknowledged = True
@@ -245,7 +245,7 @@ def _interrupt_and_continue(
             seconds=second.seconds,
             evidence={
                 "operation_id": operation_id,
-                "attempt": redirect_ack.attempt_token(continuation),
+                "attempt": redirect_ack_attempt.attempt_token(continuation),
                 "echoed_attempt": echoed_attempt,
                 "echoed_operation": echoed_operation,
                 "acknowledged": acknowledged,

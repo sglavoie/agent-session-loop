@@ -18,6 +18,7 @@ from agent_session_loop import (
     mailbox_appenders,
     plans_files,
     retention,
+    retention_projection,
     run_prompts,
     state,
 )
@@ -213,7 +214,10 @@ class JsonStateMaintenanceCliTests(JsonCliHelpers, unittest.TestCase):
             self.assertEqual(0, dry["removed_run_count"])
             self.assertEqual(0, dry["reclaimed_bytes"])
             self.assertEqual(
-                1, dry["retained_by_reason"][retention.RETAIN_NEWEST_RUN]["run_count"]
+                1,
+                dry["retained_by_reason"][retention_projection.RETAIN_NEWEST_RUN][
+                    "run_count"
+                ],
             )
             self.assertEqual(
                 dry["reclaimable_bytes"], dry["plans"][0]["reclaimable_bytes"]
@@ -281,7 +285,7 @@ class JsonStateMaintenanceCliTests(JsonCliHelpers, unittest.TestCase):
             self.assertEqual(1, payload["reclaimable_run_count"])
             self.assertEqual(
                 2,
-                payload["retained_by_reason"][retention.RETAIN_PLAN_LOCKED][
+                payload["retained_by_reason"][retention_projection.RETAIN_PLAN_LOCKED][
                     "run_count"
                 ],
             )
@@ -365,7 +369,7 @@ class JsonStateMaintenanceCliTests(JsonCliHelpers, unittest.TestCase):
             self.assertEqual(_decisions(corpus), _decisions(plan))
             self.assertEqual(
                 {reason for _id, _reclaimable, reason in _decisions(plan)},
-                {retention.RETAIN_PLAN_LOCKED},
+                {retention_projection.RETAIN_PLAN_LOCKED},
             )
             self.assertEqual(0, plan["reclaimable_run_count"])
 

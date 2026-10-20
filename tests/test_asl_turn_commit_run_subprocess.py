@@ -16,6 +16,7 @@ from unittest import mock
 from agent_session_loop import (
     commit_message,
     run_commit,
+    run_commit_process,
 )
 from tests.asl_turn_commit_support import TurnCommitRunCase
 from tests.support import (
@@ -249,7 +250,7 @@ class TurnCommitSubprocessTests(TurnCommitRunCase):
         ]
         self.addCleanup(self._reap_recorded_pids, early_pid_path, late_pid_path)
 
-        take_snapshot = run_commit._snapshot_commit_descendants
+        take_snapshot = run_commit_process._snapshot_commit_descendants
         captured: dict[str, Any] = {}
 
         def fork_after_snapshot(root_pid: int) -> tuple[Any, ...]:
@@ -266,7 +267,7 @@ class TurnCommitSubprocessTests(TurnCommitRunCase):
             mock.patch.object(run_commit, "_asl_commit_argv", return_value=stub),
             mock.patch.object(run_commit, "COMMIT_SUBPROCESS_GRACE_SECONDS", 1),
             mock.patch.object(
-                run_commit, "_snapshot_commit_descendants", fork_after_snapshot
+                run_commit_process, "_snapshot_commit_descendants", fork_after_snapshot
             ),
         ):
             commit = run_commit._run_asl_commit(

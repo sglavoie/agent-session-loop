@@ -28,16 +28,16 @@ class LaunchBoundaryTests(RedirectAckTestCase):
         assert stored is not None
         return stored
 
-    def deliver(self, **kwargs: Any) -> redirect_ack.CarryAnnotations:
-        return redirect_ack.deliver_corrections(
+    def deliver(self, **kwargs: Any) -> redirect_ack_annotate.CarryAnnotations:
+        return redirect_ack_annotate.deliver_corrections(
             self.plan_dir,
             continuation=self.continuation,
             state_dir=self.state_dir,
             **kwargs,
         )
 
-    def release(self, **kwargs: Any) -> redirect_ack.CarryAnnotations:
-        return redirect_ack.release_corrections(
+    def release(self, **kwargs: Any) -> redirect_ack_annotate.CarryAnnotations:
+        return redirect_ack_annotate.release_corrections(
             self.plan_dir,
             continuation=self.continuation,
             state_dir=self.state_dir,
@@ -112,7 +112,7 @@ class LaunchBoundaryTests(RedirectAckTestCase):
         """The journal's "settled once" invariant, restated for two more kinds."""
         self.release()
         self.carry(continuation=target(3), accepted=(self.request.operation_id,))
-        redirect_ack.deliver_corrections(
+        redirect_ack_annotate.deliver_corrections(
             self.plan_dir,
             continuation=target(3),
             state_dir=self.state_dir,
@@ -165,7 +165,7 @@ class LaunchBoundaryTests(RedirectAckTestCase):
         redirect_ack.acknowledge_correction(
             self.plan_dir,
             self.request.operation_id,
-            token=redirect_ack.attempt_token(self.continuation),
+            token=redirect_ack_attempt.attempt_token(self.continuation),
             live_attempt=self.continuation,
             state_dir=self.state_dir,
         )
@@ -238,7 +238,7 @@ class LaunchBoundaryTests(RedirectAckTestCase):
         ambiguity the receipt exists to remove, so an attempt annotating a carry
         that is not its own is refused rather than believed.
         """
-        annotations = redirect_ack.deliver_corrections(
+        annotations = redirect_ack_annotate.deliver_corrections(
             self.plan_dir,
             continuation=target(3),
             operation_ids=(self.request.operation_id,),
@@ -265,7 +265,7 @@ class LaunchBoundaryTests(RedirectAckTestCase):
     def test_an_empty_annotation_is_falsey_so_no_event_is_written(self) -> None:
         self.assertTrue(self.deliver())
         self.assertFalse(
-            redirect_ack.deliver_corrections(
+            redirect_ack_annotate.deliver_corrections(
                 self.plan_dir,
                 continuation=target(3),
                 state_dir=self.state_dir,
@@ -283,7 +283,7 @@ class AcknowledgmentTests(RedirectAckTestCase):
         self.carry(
             continuation=self.continuation, accepted=(self.request.operation_id,)
         )
-        self.token = redirect_ack.attempt_token(self.continuation)
+        self.token = redirect_ack_attempt.attempt_token(self.continuation)
 
     def acknowledge(
         self,
@@ -322,10 +322,12 @@ class AcknowledgmentTests(RedirectAckTestCase):
         accepted, holding a prompt of its own. Its token names the turn that was
         interrupted, which is not the turn that carried the correction.
         """
-        with self.assertRaises(redirect_ack.RedirectAckError) as caught:
-            self.acknowledge(token=redirect_ack.attempt_token(target(1)))
+        with self.assertRaises(redirect_ack_attempt.RedirectAckError) as caught:
+            self.acknowledge(token=redirect_ack_attempt.attempt_token(target(1)))
 
-        self.assertEqual(redirect_ack.ERROR_ATTEMPT_MISMATCH, caught.exception.reason)
+        self.assertEqual(
+            redirect_ack_attempt.ERROR_ATTEMPT_MISMATCH, caught.exception.reason
+        )
         self.assertFalse(self.read().request(self.request.operation_id).acknowledged)
 
     def test_a_transcript_echo_of_an_older_prompt_cannot_receipt_it(self) -> None:
@@ -335,12 +337,14 @@ class AcknowledgmentTests(RedirectAckTestCase):
         replay harmless is that the live attempt has moved on, so the token in
         the transcript no longer names it.
         """
-        with self.assertRaises(redirect_ack.RedirectAckError) as caught:
+        with self.assertRaises(redirect_ack_attempt.RedirectAckError) as caught:
             self.acknowledge(live=target(3, harness="codex"))
 
-        self.assertEqual(redirect_ack.ERROR_ATTEMPT_MISMATCH, caught.exception.reason)
         self.assertEqual(
-            redirect_ack.attempt_token(target(3)),
+            redirect_ack_attempt.ERROR_ATTEMPT_MISMATCH, caught.exception.reason
+        )
+        self.assertEqual(
+            redirect_ack_attempt.attempt_token(target(3)),
             caught.exception.details["live_attempt"],
         )
         self.assertFalse(self.read().request(self.request.operation_id).acknowledged)
@@ -351,10 +355,12 @@ class AcknowledgmentTests(RedirectAckTestCase):
         Otherwise "the run state was unreadable" becomes the way a receipt gets
         written for an attempt nobody can show was running.
         """
-        with self.assertRaises(redirect_ack.RedirectAckError) as caught:
+        with self.assertRaises(redirect_ack_attempt.RedirectAckError) as caught:
             self.acknowledge(live=None)
 
-        self.assertEqual(redirect_ack.ERROR_NO_LIVE_ATTEMPT, caught.exception.reason)
+        self.assertEqual(
+            redirect_ack_attempt.ERROR_NO_LIVE_ATTEMPT, caught.exception.reason
+        )
         self.assertEqual([], self.acknowledged_ids())
 
     def test_a_worker_naming_an_attempt_that_carried_nothing_is_refused(self) -> None:

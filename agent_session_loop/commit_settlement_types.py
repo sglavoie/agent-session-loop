@@ -91,7 +91,7 @@ and the next attempt may replace all of it. Three things keep that weaker claim
 from reading as the stronger one. The group is scoped ``session-paused`` rather
 than ``session``, so it is a different identity from the accepted commit the
 same session may still earn later and cannot overwrite its row. The message is
-rendered by :func:`run_commit._paused_work_commit_message` and committed with
+rendered by :func:`run_commit_paused._paused_work_commit_message` and committed with
 ``--message-file`` rather than generated, both because the pause may *be* the
 harness failing and because a marking that says the work is unverified must not
 be rewordable by a model — and because the group carries that text durably as
@@ -182,6 +182,7 @@ from . import (
     pause_policy,
     review_guard,
     run_commit,
+    run_commit_paused,
     run_persistence,
     run_reporting,
     run_selection,

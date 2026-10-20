@@ -21,6 +21,8 @@ class RefusalReopeningTruthTests(_PlanCase):
         "handoff_guards",
         "session_verification",
         "write_guards",
+        "write_guards_legacy",
+        "write_guards_protected",
     )
 
     def setUp(self) -> None:

@@ -24,6 +24,7 @@ from agent_session_loop import (
     review_guard,
     review_repair,
     run_commit,
+    run_commit_paused,
     run_loop,
     run_persistence,
     run_selection,
@@ -192,7 +193,7 @@ class PausedRetainedWorkCase(unittest.TestCase):
         return record, turn_payload
 
     def _message_file(self) -> Path:
-        return self.artifact_dir / run_commit.PAUSED_WORK_MESSAGE_FILE_NAME
+        return self.artifact_dir / run_commit_paused.PAUSED_WORK_MESSAGE_FILE_NAME
 
     def _events(self) -> list[dict[str, Any]]:
         # A settlement that owed nothing appends nothing, so the log may not

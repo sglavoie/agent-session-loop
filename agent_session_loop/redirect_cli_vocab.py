@@ -62,6 +62,7 @@ from . import (
     events,
     intervention,
     redirect_ack,
+    redirect_ack_attempt,
     redirect_admission,
     redirect_recovery,
     redirect_restart,

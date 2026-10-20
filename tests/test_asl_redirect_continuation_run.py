@@ -11,7 +11,7 @@ from typing import Any
 from agent_session_loop import (
     events,
     harnesses,
-    redirect_ack,
+    redirect_ack_attempt,
     redirect_continuation,
     redirect_recovery,
     redirect_store_delivery,
@@ -289,8 +289,8 @@ class PrelaunchPauseRecoveryTests(_RedirectedRun):
         self.assertFalse(request.carried)
         self.assertTrue(request.released)
         self.assertEqual(
-            redirect_ack.attempt_token(target(2)),
-            redirect_ack.attempt_token(request.released_from),
+            redirect_ack_attempt.attempt_token(target(2)),
+            redirect_ack_attempt.attempt_token(request.released_from),
         )
 
     def test_the_paused_run_hands_the_correction_back_itself(self) -> None:
@@ -339,7 +339,7 @@ class PrelaunchPauseRecoveryTests(_RedirectedRun):
         self.assertTrue(request.recovered)
         self.assertEqual(
             f"{self.RECOVERY_RUN_ID}/{SESSION_ID}/1",
-            redirect_ack.attempt_token(request.continuation),
+            redirect_ack_attempt.attempt_token(request.continuation),
         )
         self.assertFalse(payload["paused"])
         self.assertEqual([1], payload["completed_sessions"])
@@ -361,7 +361,9 @@ class PrelaunchPauseRecoveryTests(_RedirectedRun):
         # journal will not take a receipt from an attempt it never recorded as
         # the carrier -- which is the one that survives a forged live attempt.
         assert self.stale_refusal is not None
-        self.assertEqual(redirect_ack.ERROR_ATTEMPT_MISMATCH, self.stale_refusal.reason)
+        self.assertEqual(
+            redirect_ack_attempt.ERROR_ATTEMPT_MISMATCH, self.stale_refusal.reason
+        )
         with self.assertRaises(redirect_store_models.RedirectStoreError) as raised:
             redirect_store_delivery.acknowledge_request(
                 self.plan_dir,

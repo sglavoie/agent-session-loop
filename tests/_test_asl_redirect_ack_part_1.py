@@ -9,7 +9,7 @@ class AttemptTokenTests(RedirectAckTestCase):
     """The identity a worker echoes back, and what it deliberately omits."""
 
     def test_the_token_is_the_turn_identity_without_the_harness(self) -> None:
-        self.assertEqual(f"{RUN_ID}/1/2", redirect_ack.attempt_token(target(2)))
+        self.assertEqual(f"{RUN_ID}/1/2", redirect_ack_attempt.attempt_token(target(2)))
 
     def test_a_harness_switch_does_not_change_which_attempt_it_is(self) -> None:
         """Load-bearing, not incidental.
@@ -19,25 +19,27 @@ class AttemptTokenTests(RedirectAckTestCase):
         correction was delivered to.
         """
         self.assertEqual(
-            redirect_ack.attempt_token(target(2, harness="claude")),
-            redirect_ack.attempt_token(target(2, harness=None)),
+            redirect_ack_attempt.attempt_token(target(2, harness="claude")),
+            redirect_ack_attempt.attempt_token(target(2, harness=None)),
         )
 
     def test_the_token_is_compared_whole_rather_than_parsed(self) -> None:
         attempt = target(2)
-        token = redirect_ack.attempt_token(attempt)
+        token = redirect_ack_attempt.attempt_token(attempt)
 
-        self.assertTrue(redirect_ack.token_identifies(token, attempt))
+        self.assertTrue(redirect_ack_attempt.token_identifies(token, attempt))
         for impostor in (
             token + "/",
             token.replace("/2", "/20"),
             f" {token}",
             token.upper(),
-            redirect_ack.attempt_token(target(3)),
-            redirect_ack.attempt_token(target(2, session_id="2")),
+            redirect_ack_attempt.attempt_token(target(3)),
+            redirect_ack_attempt.attempt_token(target(2, session_id="2")),
         ):
             with self.subTest(impostor=impostor):
-                self.assertFalse(redirect_ack.token_identifies(impostor, attempt))
+                self.assertFalse(
+                    redirect_ack_attempt.token_identifies(impostor, attempt)
+                )
 
 
 class CoalescingTests(RedirectAckTestCase):
@@ -113,7 +115,7 @@ class CoalescingTests(RedirectAckTestCase):
         stale = self.submit(FIRST, ttl_seconds=1)
         good = self.submit(SECOND)
 
-        carried = redirect_ack.carry_corrections(
+        carried = redirect_ack_carry.carry_corrections(
             self.plan_dir,
             continuation=target(2),
             state_dir=self.state_dir,
@@ -170,7 +172,7 @@ class CoalescingTests(RedirectAckTestCase):
 
         # A prompt re-rendered for the same attempt: same corrections, no sweep.
         self.submit(SECOND)
-        again = redirect_ack.carried_corrections(
+        again = redirect_ack_carry.carried_corrections(
             self.plan_dir,
             attempt=target(2, harness="codex"),
             state_dir=self.state_dir,
@@ -254,7 +256,7 @@ class CoalescingTests(RedirectAckTestCase):
         redirect_ack.acknowledge_correction(
             self.plan_dir,
             request.operation_id,
-            token=redirect_ack.attempt_token(target(2)),
+            token=redirect_ack_attempt.attempt_token(target(2)),
             live_attempt=target(2, harness="codex"),
             state_dir=self.state_dir,
         )

@@ -19,9 +19,9 @@ consumer reads:
   2's files and silently leaves attempt 1's uncommitted.
 * ``commit_settlement._paused_work_commit_targets`` reads the same record, so a
   later recoverable pause settles the same narrowed set.
-* ``write_guards._protected_path_changed_paths`` reads it too, so a path rule an
-  operator armed between the two attempts adjudicates attempt 2's changes and
-  never sees attempt 1's.
+* ``write_guards_protected._protected_path_changed_paths`` reads it too, so a
+  path rule an operator armed between the two attempts adjudicates attempt 2's
+  changes and never sees attempt 1's.
 
 This module is the ledger that closes that gap: a run-scoped record of what each
 attempt at a session was observed to change, and one merge that projects the

@@ -112,7 +112,7 @@ from . import (
     review_guard,
     review_session_contract,
     review_transitions,
-    run_commit,
+    run_commit_invocation,
     run_coordination_control,
     run_inputs,
     run_prompts,
@@ -503,7 +503,7 @@ def _dry_run_payload(
         "next_pending": plans_payloads.session_compat_value(next_pending.id),
         "next_pending_id": next_pending.id,
         "prompt": prompt,
-        "invocation": run_commit._build_invocation_payload(
+        "invocation": run_commit_invocation._build_invocation_payload(
             invocation,
             model_effort=model_effort,
             verification_context=context,

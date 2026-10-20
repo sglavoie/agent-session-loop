@@ -15,6 +15,8 @@ from . import (
     session_verification,
     turn_execution_constants,
     write_guards,
+    write_guards_legacy,
+    write_guards_protected,
 )
 from .run_loop_commit_settlement import _settle_paused_retained_work
 from .run_loop_frame import RunFrame, RunResult
@@ -67,7 +69,7 @@ def _handle_run_crash(frame: RunFrame, error: BaseException) -> RunResult | None
         # review fingerprint, which the protected-path step below reads.
         try:
             if frame.guard_mode == "legacy":
-                write_guards._enforce_legacy_implementation_write_guard(
+                write_guards_legacy._enforce_legacy_implementation_write_guard(
                     event_path=frame.ctx.event_path,
                     payload=frame.ctx.payload,
                     persistence=frame.ctx.persistence,
@@ -131,7 +133,7 @@ def _handle_run_crash(frame: RunFrame, error: BaseException) -> RunResult | None
         # exception, not the guard, is what ended this turn: the verdict
         # is recorded and the failure it belongs to is re-raised intact.
         try:
-            write_guards._enforce_protected_path_guard(
+            write_guards_protected._enforce_protected_path_guard(
                 event_path=frame.ctx.event_path,
                 payload=frame.ctx.payload,
                 persistence=frame.ctx.persistence,
@@ -153,13 +155,13 @@ def _handle_run_crash(frame: RunFrame, error: BaseException) -> RunResult | None
                 # comparison by construction, so it is answered from its
                 # own turn-start fingerprint instead.
                 changed_paths=(
-                    write_guards._protected_path_review_changed_paths(
+                    write_guards_protected._protected_path_review_changed_paths(
                         guard_context,
                         exclude=frame.review_guard_excludes,
                         include_ignored=frame.review_guard_include_ignored,
                     )
                     if frame.guard_mode == "review"
-                    else write_guards._protected_path_changed_paths(
+                    else write_guards_protected._protected_path_changed_paths(
                         frame.turn_payload.get("workspace_write_guard")
                     )
                 ),

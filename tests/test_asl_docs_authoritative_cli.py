@@ -14,7 +14,7 @@ from agent_session_loop import (
     preflight_models,
     prepare_models,
     repository_registration,
-    retention,
+    retention_projection,
     review,
     review_continuation,
     run_inputs,
@@ -185,14 +185,14 @@ class AuthoritativeCliDocsTests(unittest.TestCase):
         )
         self.assertIn("`asl gc` is the one command exempt from all\nof this", self.docs)
         for reason in (
-            retention.RETAIN_PLAN_LOCKED,
-            retention.RETAIN_LIVE_RUN,
-            retention.RETAIN_PIN_UNKNOWN,
-            retention.RETAIN_OPEN_ISSUE,
-            retention.RETAIN_UNFINISHED,
-            retention.RETAIN_UNDATED,
-            retention.RETAIN_NEWEST_RUN,
-            retention.RETAIN_WITHIN_CUTOFF,
+            retention_projection.RETAIN_PLAN_LOCKED,
+            retention_projection.RETAIN_LIVE_RUN,
+            retention_projection.RETAIN_PIN_UNKNOWN,
+            retention_projection.RETAIN_OPEN_ISSUE,
+            retention_projection.RETAIN_UNFINISHED,
+            retention_projection.RETAIN_UNDATED,
+            retention_projection.RETAIN_NEWEST_RUN,
+            retention_projection.RETAIN_WITHIN_CUTOFF,
         ):
             self.assertIn(f"`{reason}`", self.docs)
 

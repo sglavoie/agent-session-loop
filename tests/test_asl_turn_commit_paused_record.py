@@ -7,7 +7,7 @@ import unittest
 from agent_session_loop import (
     commit_settlement,
     review_guard,
-    run_commit,
+    run_commit_paused,
     run_selection,
 )
 from tests.asl_turn_commit_support import PausedRetainedWorkCase
@@ -43,7 +43,7 @@ class PausedRetainedWorkRecordTests(PausedRetainedWorkCase):
         self._write(self.repositories["SVC"], "worked.txt")
         self._settle(self.registered, guard=self._guard(added_paths=("worked.txt",)))
 
-        expected = run_commit._paused_work_commit_message(
+        expected = run_commit_paused._paused_work_commit_message(
             session_label="session 1",
             pause_reason="verify-failed",
             commit_mode=run_selection.COMMIT_MODE_PER_SESSION,

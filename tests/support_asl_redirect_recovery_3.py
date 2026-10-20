@@ -10,7 +10,7 @@ from .support_asl_redirect_recovery_base import (
     RecoveryTestCase,
     clock,
     json,
-    redirect_ack,
+    redirect_ack_carry,
     redirect_recovery,
     redirect_store_carry,
     redirect_store_delivery,
@@ -70,7 +70,7 @@ class NoSilentRedeliveryTests(RecoveryTestCase):
         self.reconcile()
         lines_before = len(self.journal_lines())
 
-        carried = redirect_ack.carry_corrections(
+        carried = redirect_ack_carry.carry_corrections(
             self.plan_dir,
             continuation=target(1, run_id=NEW_RUN),
             recovered_operation_ids=(request.operation_id,),
@@ -94,7 +94,7 @@ class NoSilentRedeliveryTests(RecoveryTestCase):
         # own id, its own acceptance -- and the session's next attempt carries
         # it while the ambiguous one stays exactly as the crash left it.
         fresh = self.accept(self.submit(SECOND, turn_index=8))
-        carried = redirect_ack.carry_corrections(
+        carried = redirect_ack_carry.carry_corrections(
             self.plan_dir,
             continuation=target(1, run_id=NEW_RUN),
             recovered_operation_ids=(fresh.operation_id,),
@@ -218,7 +218,7 @@ class LegacyJournalUpgradeTests(RecoveryTestCase):
         self.write_legacy_carry()
         report = self.reconcile()
 
-        carried = redirect_ack.carry_corrections(
+        carried = redirect_ack_carry.carry_corrections(
             self.plan_dir,
             continuation=target(1, run_id=NEW_RUN),
             recovered_operation_ids=(self.LEGACY_OP,),

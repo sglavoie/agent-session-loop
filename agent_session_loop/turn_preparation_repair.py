@@ -20,7 +20,7 @@ from . import (
     state,
     workspace_evidence,
     workspaces,
-    write_guards,
+    write_guards_repair,
 )
 from .turn_preparation_models import RepairResumption, RunContext, SessionClassification
 
@@ -158,7 +158,7 @@ def resume_repair_session(
                 ctx.payload, snapshot.plan_dir, ctx.persistence
             )
             session_scope = run_prompts._session_scope(session, workspace)
-    repair_resume = write_guards._pending_repair_child_continuation(
+    repair_resume = write_guards_repair._pending_repair_child_continuation(
         snapshot=snapshot,
         event_path=ctx.event_path,
         payload=ctx.payload,

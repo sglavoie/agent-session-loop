@@ -9,7 +9,7 @@ from agent_session_loop import (
     commit_groups,
     commit_settlement,
     config,
-    run_commit,
+    run_commit_paused,
     run_selection,
     verification_transitions,
 )
@@ -240,7 +240,7 @@ class GatedCommitRetryTests(FakeHarnessIntegrationBase):
         self.assertEqual(commit_groups.GROUP_SCOPE_SESSION_PAUSED, owed_group["scope"])
         # The message survives the process on the group itself, which is the
         # only route the next run has back to the exact text.
-        expected_message = run_commit._paused_work_commit_message(
+        expected_message = run_commit_paused._paused_work_commit_message(
             session_label="session 1",
             pause_reason="verify-failed",
             commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
@@ -357,7 +357,7 @@ class GatedCommitRetryTests(FakeHarnessIntegrationBase):
             git_stdout(repo_dir, "log", "-1", "--pretty=%s").strip(),
         )
         self.assertEqual(
-            run_commit._paused_work_commit_message(
+            run_commit_paused._paused_work_commit_message(
                 session_label="session 1",
                 pause_reason="verify-failed",
                 commit_mode=run_selection.COMMIT_MODE_END,

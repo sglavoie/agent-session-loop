@@ -12,6 +12,7 @@ from . import (
     review_guard,
     review_repair,
     run_completion,
+    run_completion_types,
     run_coordination_control_drain,
     run_prompts,
     run_selection,
@@ -91,7 +92,7 @@ def _select_pending_session(frame: RunFrame) -> RunResult | LoopSignal | None:
             soft_fail_commit=functools.partial(_soft_fail_commit, frame.ctx),
         )
         frame.snapshot = frame.completion.snapshot
-        if frame.completion.action == run_completion.ACTION_CONTINUE:
+        if frame.completion.action == run_completion_types.ACTION_CONTINUE:
             return LoopSignal.CONTINUE
         return LoopSignal.BREAK
 

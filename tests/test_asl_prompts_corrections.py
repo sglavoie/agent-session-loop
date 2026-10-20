@@ -10,7 +10,7 @@ from pathlib import Path
 from agent_session_loop import (
     mailbox_rendering,
     plans_files,
-    redirect_ack,
+    redirect_ack_carry,
     redirect_store_models,
     redirect_store_vocab,
     run_prompt_continuations,
@@ -47,8 +47,8 @@ class CorrectionContextPromptTests(unittest.TestCase):
         *texts: str,
         turn_index: int = 2,
         refused: int = 0,
-    ) -> redirect_ack.CarriedCorrections:
-        return redirect_ack.CarriedCorrections(
+    ) -> redirect_ack_carry.CarriedCorrections:
+        return redirect_ack_carry.CarriedCorrections(
             continuation=redirect_store_models.RedirectTarget(
                 run_id="run-abc",
                 session_id="3",
@@ -56,7 +56,7 @@ class CorrectionContextPromptTests(unittest.TestCase):
                 harness="codex",
             ),
             corrections=tuple(
-                redirect_ack.Correction(
+                redirect_ack_carry.Correction(
                     operation_id=f"op-{order}",
                     submitted_at=f"2026-01-01T00:0{order}:00+00:00",
                     submitted_seq=order,
@@ -67,7 +67,7 @@ class CorrectionContextPromptTests(unittest.TestCase):
                 for order, text in enumerate(texts, start=1)
             ),
             refused=tuple(
-                redirect_ack.RefusedCorrection(
+                redirect_ack_carry.RefusedCorrection(
                     operation_id=f"refused-{index}",
                     reason=redirect_store_vocab.ERROR_REQUEST_EXPIRED,
                     message="expired before the prompt was finalized",

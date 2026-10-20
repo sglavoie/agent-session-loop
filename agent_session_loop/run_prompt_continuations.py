@@ -15,7 +15,7 @@ from . import (
     mailbox_vocabulary,
     plans_session_scope,
     qna,
-    redirect_ack,
+    redirect_ack_carry,
     workspaces,
 )
 from .run_prompt_session import build_session_prompt
@@ -102,7 +102,7 @@ def build_reply_prompt(
     pending_guidance: Sequence[mailbox_models.MailboxMessage] = (),
     workspace: workspaces.ResolvedWorkspace | None = None,
     session_scope: plans_session_scope.SessionScope | None = None,
-    corrections: redirect_ack.CarriedCorrections | None = None,
+    corrections: redirect_ack_carry.CarriedCorrections | None = None,
 ) -> str:
     """Build the resumed-turn prompt for ``asl run --reply``.
 
@@ -212,7 +212,7 @@ def build_resolution_prompt(
     pending_guidance: Sequence[mailbox_models.MailboxMessage] = (),
     workspace: workspaces.ResolvedWorkspace | None = None,
     session_scope: plans_session_scope.SessionScope | None = None,
-    corrections: redirect_ack.CarriedCorrections | None = None,
+    corrections: redirect_ack_carry.CarriedCorrections | None = None,
 ) -> str:
     """Build an answerless mailbox-resolution continuation prompt.
 

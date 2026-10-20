@@ -11,7 +11,7 @@ from agent_session_loop import (
     conversations,
     events,
     harnesses,
-    redirect_ack,
+    redirect_ack_attempt,
     redirect_recovery,
     redirect_store_delivery,
     redirect_store_models,
@@ -240,7 +240,7 @@ class RefusedRestoreRunTests(fixtures._NativeRestoreRun):
         self.assertTrue(request.recovered)
         self.assertEqual(
             f"{self.RECOVERY_RUN_ID}/{SESSION_ID}/1",
-            redirect_ack.attempt_token(request.continuation),
+            redirect_ack_attempt.attempt_token(request.continuation),
         )
 
     def test_the_recovering_attempt_acknowledges_on_its_own_attempt(self) -> None:
@@ -261,7 +261,9 @@ class RefusedRestoreRunTests(fixtures._NativeRestoreRun):
         # it never recorded as the carrier -- the refusal that survives a forged
         # live attempt.
         assert self.stale_refusal is not None
-        self.assertEqual(redirect_ack.ERROR_ATTEMPT_MISMATCH, self.stale_refusal.reason)
+        self.assertEqual(
+            redirect_ack_attempt.ERROR_ATTEMPT_MISMATCH, self.stale_refusal.reason
+        )
         with self.assertRaises(redirect_store_models.RedirectStoreError) as raised:
             redirect_store_delivery.acknowledge_request(
                 self.plan_dir,

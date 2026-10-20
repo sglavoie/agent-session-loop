@@ -12,7 +12,7 @@ from . import (
     plans_progress,
     plans_session_scope,
     preflight_footprint,
-    redirect_ack,
+    redirect_ack_carry,
     review_delta,
     review_transitions,
     run_inputs,
@@ -88,7 +88,7 @@ def prepare_turn_prompt(
     mailbox_enabled: bool,
     reply: run_prompts._PendingReply | None,
     resolution: run_prompts._PendingResolution | None,
-    corrections: redirect_ack.CarriedCorrections | None = None,
+    corrections: redirect_ack_carry.CarriedCorrections | None = None,
 ) -> TurnPrompt:
     """Render the prompt this turn carries, then judge what it reaches.
 

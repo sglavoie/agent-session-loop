@@ -13,7 +13,7 @@ from agent_session_loop import (
     harness_execution,
     harness_process,
     harnesses,
-    redirect_ack,
+    redirect_ack_attempt,
     redirect_recovery,
     redirect_store_delivery,
     redirect_store_models,
@@ -230,7 +230,9 @@ class ClaudeRefusedRestoreRunTests(fixtures._NativeRestoreRun):
         self._recover_after_pause()
 
         assert self.stale_refusal is not None
-        self.assertEqual(redirect_ack.ERROR_ATTEMPT_MISMATCH, self.stale_refusal.reason)
+        self.assertEqual(
+            redirect_ack_attempt.ERROR_ATTEMPT_MISMATCH, self.stale_refusal.reason
+        )
         with self.assertRaises(redirect_store_models.RedirectStoreError) as raised:
             redirect_store_delivery.acknowledge_request(
                 self.plan_dir,

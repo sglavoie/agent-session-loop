@@ -10,6 +10,8 @@ from .support_asl_redirect_recovery_base import (
     RecoveryTestCase,
     json,
     redirect_ack,
+    redirect_ack_attempt,
+    redirect_ack_carry,
     redirect_recovery,
     redirect_store_carry,
     redirect_store_delivery,
@@ -55,7 +57,7 @@ class NoLostCorrectionTests(RecoveryTestCase):
         # continuation has a different run id *and* a lower turn index than the
         # target. Both are exactly what the ordinary rule refuses.
         continuation = target(1, run_id=NEW_RUN)
-        carried = redirect_ack.carry_corrections(
+        carried = redirect_ack_carry.carry_corrections(
             self.plan_dir,
             continuation=continuation,
             recovered_operation_ids=redirect_recovery.recoverable_operation_ids(
@@ -74,7 +76,7 @@ class NoLostCorrectionTests(RecoveryTestCase):
         self.write_lock(pid=self.DEAD_PID)
         report = self.reconcile()
         continuation = target(1, run_id=NEW_RUN)
-        redirect_ack.carry_corrections(
+        redirect_ack_carry.carry_corrections(
             self.plan_dir,
             continuation=continuation,
             recovered_operation_ids=redirect_recovery.recoverable_operation_ids(
@@ -98,7 +100,7 @@ class NoLostCorrectionTests(RecoveryTestCase):
         self.write_lock(pid=self.DEAD_PID)
         report = self.reconcile()
         continuation = target(1, run_id=NEW_RUN)
-        redirect_ack.carry_corrections(
+        redirect_ack_carry.carry_corrections(
             self.plan_dir,
             continuation=continuation,
             recovered_operation_ids=redirect_recovery.recoverable_operation_ids(
@@ -110,7 +112,7 @@ class NoLostCorrectionTests(RecoveryTestCase):
         receipt = redirect_ack.acknowledge_correction(
             self.plan_dir,
             request.operation_id,
-            token=redirect_ack.attempt_token(continuation),
+            token=redirect_ack_attempt.attempt_token(continuation),
             live_attempt=continuation,
             state_dir=self.state_dir,
         )
@@ -128,7 +130,7 @@ class NoLostCorrectionTests(RecoveryTestCase):
         self.write_lock(pid=self.DEAD_PID)
         report = self.reconcile()
 
-        carried = redirect_ack.carry_corrections(
+        carried = redirect_ack_carry.carry_corrections(
             self.plan_dir,
             continuation=target(1, run_id=NEW_RUN),
             recovered_operation_ids=redirect_recovery.recoverable_operation_ids(
@@ -146,7 +148,7 @@ class NoLostCorrectionTests(RecoveryTestCase):
         self.write_lock(pid=self.DEAD_PID)
         report = self.reconcile()
         recovered = redirect_recovery.recoverable_operation_ids(report, SESSION_ID)
-        redirect_ack.carry_corrections(
+        redirect_ack_carry.carry_corrections(
             self.plan_dir,
             continuation=target(1, run_id=NEW_RUN),
             recovered_operation_ids=recovered,
@@ -157,7 +159,7 @@ class NoLostCorrectionTests(RecoveryTestCase):
         # A second attempt of the same session in the same run. The correction
         # is already in the pinned conversation's history; re-rendering it would
         # tell the worker its first correction is new.
-        again = redirect_ack.carry_corrections(
+        again = redirect_ack_carry.carry_corrections(
             self.plan_dir,
             continuation=target(2, run_id=NEW_RUN),
             recovered_operation_ids=recovered,
@@ -220,7 +222,7 @@ class CrashBeforeLaunchTests(RecoveryTestCase):
         request = self.carried_but_unlaunched()
         report = self.reconcile()
 
-        carried = redirect_ack.carry_corrections(
+        carried = redirect_ack_carry.carry_corrections(
             self.plan_dir,
             continuation=target(1, run_id=NEW_RUN),
             recovered_operation_ids=redirect_recovery.recoverable_operation_ids(
@@ -352,7 +354,7 @@ class CrashInsideTheLaunchWindowTests(RecoveryTestCase):
         request = self.carried_and_launching()
         report = self.reconcile()
 
-        carried = redirect_ack.carry_corrections(
+        carried = redirect_ack_carry.carry_corrections(
             self.plan_dir,
             continuation=target(1, run_id=NEW_RUN),
             recovered_operation_ids=(request.operation_id,),

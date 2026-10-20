@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 
-from . import retention
+from . import retention, retention_projection
 from .maintenance_job import JobStatus, install_job, job_status, uninstall_job
 from .maintenance_models import MaintenanceResult
 from .maintenance_policy import (
@@ -168,7 +168,9 @@ def run_from_args(args: argparse.Namespace) -> int:
             getattr(args, "state_dir", None),
             apply=bool(getattr(args, "apply", False)),
             force=bool(getattr(args, "force", False)),
-            max_age_days=getattr(args, "max_age_days", retention.DEFAULT_MAX_AGE_DAYS),
+            max_age_days=getattr(
+                args, "max_age_days", retention_projection.DEFAULT_MAX_AGE_DAYS
+            ),
             max_runtime_seconds=getattr(
                 args, "max_runtime_seconds", DEFAULT_MAX_RUNTIME_SECONDS
             ),

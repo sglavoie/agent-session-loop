@@ -17,6 +17,7 @@ from agent_session_loop import (
     pause_policy,
     plans_payloads,
     run_commit,
+    run_commit_paused,
     run_selection,
     runner,
 )
@@ -56,7 +57,7 @@ class PausedWorkCommitMessageTests(unittest.TestCase):
             "run_id": "run-20260904-abc123",
         }
         kwargs.update(overrides)
-        return run_commit._paused_work_commit_message(**kwargs)
+        return run_commit_paused._paused_work_commit_message(**kwargs)
 
     def test_the_default_generation_still_asks_for_a_generated_message(self) -> None:
         # The mode is opt-in: every commit a run makes on its accepted path
@@ -286,9 +287,9 @@ class RecoveredCommitGenerationTests(unittest.TestCase):
         # seen, and the group id is what keeps two recovered groups apart.
         self.assertEqual(
             self.run_dir
-            / run_commit.RECOVERED_PAUSED_WORK_MESSAGE_DIR_NAME
+            / run_commit_paused.RECOVERED_PAUSED_WORK_MESSAGE_DIR_NAME
             / group["group_id"]
-            / run_commit.PAUSED_WORK_MESSAGE_FILE_NAME,
+            / run_commit_paused.PAUSED_WORK_MESSAGE_FILE_NAME,
             generation.message_file,
         )
         # Everything else about the run's selection survives, so the argv the

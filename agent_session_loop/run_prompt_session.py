@@ -11,7 +11,7 @@ from . import (
     mailbox_models,
     plans_files,
     plans_session_scope,
-    redirect_ack,
+    redirect_ack_carry,
     workspaces,
 )
 from .run_prompt_mailbox import (
@@ -39,7 +39,7 @@ def build_session_prompt(
     pending_guidance: Sequence[mailbox_models.MailboxMessage] = (),
     workspace: workspaces.ResolvedWorkspace | None = None,
     session_scope: plans_session_scope.SessionScope | None = None,
-    corrections: redirect_ack.CarriedCorrections | None = None,
+    corrections: redirect_ack_carry.CarriedCorrections | None = None,
 ) -> str:
     """Build the legacy worker prompt, keeping the skill invocation first.
 

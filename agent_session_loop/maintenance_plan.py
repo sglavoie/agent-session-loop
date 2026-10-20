@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import retention, state, state_locks
+from . import retention, retention_projection, state, state_locks
 from .maintenance_bodies import _iter_bodies, _over_budget_selection
 from .maintenance_models import (
     CorpusUsage,
@@ -42,15 +42,15 @@ class _SafetyReading:
 
     def __init__(self, root: Path) -> None:
         self._root = root
-        self._live = retention.live_run_keys(root)
-        self._pinned = retention.pinned_run_ids(root)
+        self._live = retention_projection.live_run_keys(root)
+        self._pinned = retention_projection.pinned_run_ids(root)
         self._locks: dict[str, str] = {}
 
     def blocker(self, *, plan_dir: str, plan_state_dir: str, run_id: str) -> str:
         """Return why this run may not be touched now, or ``""`` when it may."""
         if plan_dir not in self._locks:
             info = state_locks.inspect_lock_info(Path(plan_dir), self._root)
-            self._locks[plan_dir] = retention.lock_blocker(info)
+            self._locks[plan_dir] = retention_projection.lock_blocker(info)
         if self._locks[plan_dir]:
             return self._locks[plan_dir]
         if (plan_state_dir, run_id) in self._live:
@@ -90,7 +90,7 @@ class _Removal:
 
     plan_dir: str
     plan_state_dir: str
-    candidate: retention.RunCandidate
+    candidate: retention_projection.RunCandidate
 
     @property
     def run_id(self) -> str:
@@ -112,7 +112,7 @@ def _compactable_runs(
     *,
     now: datetime,
     compaction_age_days: float,
-) -> list[tuple[str, retention.RunCandidate]]:
+) -> list[tuple[str, retention_projection.RunCandidate]]:
     """Return the ``(plan_dir, run)`` pairs eligible for detail compaction.
 
     Eligibility is read off retention's own ordered classification rather than
@@ -121,10 +121,10 @@ def _compactable_runs(
     executing, unpinned against a *readable* ledger, finished, and dateable.
     """
     cutoff = now - timedelta(days=compaction_age_days)
-    eligible: list[tuple[str, retention.RunCandidate]] = []
+    eligible: list[tuple[str, retention_projection.RunCandidate]] = []
     for entry in report.plans:
         for run in entry.retention.runs:
-            if run.reason != retention.RETAIN_NEWEST_RUN:
+            if run.reason != retention_projection.RETAIN_NEWEST_RUN:
                 continue
             if not run.finished_at:
                 continue
@@ -138,7 +138,7 @@ def _compactable_runs(
 
 def _project_compaction(
     plan_dir: str,
-    run: retention.RunCandidate,
+    run: retention_projection.RunCandidate,
     *,
     now: datetime,
     log_body_budget_bytes: int,
@@ -181,7 +181,7 @@ def plan_maintenance(
     *,
     now: datetime | None = None,
     force: bool = False,
-    max_age_days: float = retention.DEFAULT_MAX_AGE_DAYS,
+    max_age_days: float = retention_projection.DEFAULT_MAX_AGE_DAYS,
     compaction_age_days: float = COMPACTION_AGE_DAYS,
     log_body_budget_bytes: int = LOG_BODY_BUDGET_BYTES,
     budget_bytes: int = CORPUS_BUDGET_BYTES,

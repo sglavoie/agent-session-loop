@@ -69,7 +69,7 @@ def control_redirect_status_from_args(args: argparse.Namespace) -> int:
                 args,
                 command_name=COMMAND_REDIRECT_STATUS,
                 text_label=TEXT_LABEL_REDIRECT_STATUS,
-                reason=redirect_ack.ERROR_NO_LIVE_ATTEMPT,
+                reason=redirect_ack_attempt.ERROR_NO_LIVE_ATTEMPT,
                 error=(
                     "no live attempt is running, so there is no receipt to wait for"
                 ),

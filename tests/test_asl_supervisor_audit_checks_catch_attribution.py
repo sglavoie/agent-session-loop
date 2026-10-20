@@ -10,6 +10,7 @@ from typing import Any
 from agent_session_loop import (
     events,
     run_commit,
+    run_commit_paused,
     supervisor_audit_checks,
     supervisor_audit_evidence_constants,
     supervisor_audit_evidence_models,
@@ -282,12 +283,14 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
             _, baseline = self._audit(history)
-            # `run_commit` keeps recovered paused-work messages in a sibling of
+            # `run_commit_paused` keeps recovered paused-work messages in a sibling of
             # the attempt directories whose name also starts with `commit-`,
             # and reading it as an attempt reported an attempt with no result
             # (ASI-117).
             recovery = (
-                history[3] / run_commit.RECOVERED_PAUSED_WORK_MESSAGE_DIR_NAME / "g1"
+                history[3]
+                / run_commit_paused.RECOVERED_PAUSED_WORK_MESSAGE_DIR_NAME
+                / "g1"
             )
             recovery.mkdir(parents=True)
             (recovery / "message.txt").write_text("subject\n", encoding="utf-8")
@@ -295,7 +298,9 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
             bundle, results = self._audit(history)
 
             names = [a.get("name") for a in bundle.payload["commits"]["attempts"]]
-            self.assertNotIn(run_commit.RECOVERED_PAUSED_WORK_MESSAGE_DIR_NAME, names)
+            self.assertNotIn(
+                run_commit_paused.RECOVERED_PAUSED_WORK_MESSAGE_DIR_NAME, names
+            )
             self.assertEqual(
                 baseline["commit-failure-accounting"].status,
                 results["commit-failure-accounting"].status,

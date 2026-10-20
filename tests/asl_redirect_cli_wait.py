@@ -95,7 +95,7 @@ class AcknowledgmentWaitTests(RedirectCliTestCase):
         code, payload = self.status("--wait-acknowledged", "--timeout", "0")
 
         self.assertEqual(redirect_cli.EXIT_REFUSED, code)
-        self.assertEqual(redirect_ack.ERROR_NO_LIVE_ATTEMPT, payload["reason"])
+        self.assertEqual(redirect_ack_attempt.ERROR_NO_LIVE_ATTEMPT, payload["reason"])
 
     def test_a_timeout_without_the_wait_flag_is_a_usage_error(self) -> None:
         self.make_live_run()
@@ -126,7 +126,7 @@ class AcknowledgmentWaitTests(RedirectCliTestCase):
                 state_dir=self.state_dir,
             )
             return redirect_ack.AcknowledgmentWait(
-                attempt=redirect_ack.attempt_token(attempt),
+                attempt=redirect_ack_attempt.attempt_token(attempt),
                 waited_seconds=0.5,
                 acknowledged=(request.operation_id,),
             )
@@ -286,4 +286,4 @@ class StageProjectionTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
-__all__ = ["io", "json", "os", "socket", "tempfile", "threading", "time", "unittest", "redirect_stderr", "redirect_stdout", "Path", "mock", "asl_cli", "clock", "events", "redirect_ack", "redirect_admission", "redirect_cli", "redirect_recovery", "redirect_store_carry", "redirect_store_delivery", "redirect_store_journal", "redirect_store_models", "redirect_store_requests", "redirect_store_validation", "redirect_store_vocab", "_write_lock_file", "_write_state_payload", "live_redirect_endpoint", "write_plan", "RUN_ID", "SESSION_ID", "FEEDBACK", "RedirectCliTestCase", "WiringTests", "SuccessfulRedirectTests", "UnavailableControlTests", "StaleTargetTests", "RedirectStatusTests", "AcknowledgmentWaitTests", "FreshConversationRecoveryTests", "StageProjectionTests"]  # fmt: skip
+__all__ = ["io", "json", "os", "socket", "tempfile", "threading", "time", "unittest", "redirect_stderr", "redirect_stdout", "Path", "mock", "asl_cli", "clock", "events", "redirect_ack", "redirect_ack_attempt", "redirect_admission", "redirect_cli", "redirect_recovery", "redirect_store_carry", "redirect_store_delivery", "redirect_store_journal", "redirect_store_models", "redirect_store_requests", "redirect_store_validation", "redirect_store_vocab", "_write_lock_file", "_write_state_payload", "live_redirect_endpoint", "write_plan", "RUN_ID", "SESSION_ID", "FEEDBACK", "RedirectCliTestCase", "WiringTests", "SuccessfulRedirectTests", "UnavailableControlTests", "StaleTargetTests", "RedirectStatusTests", "AcknowledgmentWaitTests", "FreshConversationRecoveryTests", "StageProjectionTests"]  # fmt: skip

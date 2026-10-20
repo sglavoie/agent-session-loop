@@ -71,7 +71,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import durability, retention, state
+from . import durability, retention_projection, state
 from .maintenance_models import (
     CorpusUsage,
     HealthFinding,
@@ -238,7 +238,7 @@ def run_maintenance(
     apply: bool = False,
     force: bool = False,
     now: datetime | None = None,
-    max_age_days: float = retention.DEFAULT_MAX_AGE_DAYS,
+    max_age_days: float = retention_projection.DEFAULT_MAX_AGE_DAYS,
     compaction_age_days: float = COMPACTION_AGE_DAYS,
     log_body_budget_bytes: int = LOG_BODY_BUDGET_BYTES,
     budget_bytes: int = CORPUS_BUDGET_BYTES,

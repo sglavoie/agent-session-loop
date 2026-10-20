@@ -103,6 +103,8 @@ from agent_session_loop import (
     harnesses,
     process_tree,
     redirect_ack,
+    redirect_ack_attempt,
+    redirect_ack_carry,
     redirect_store_models,
     redirect_store_requests,
     redirect_store_vocab,
@@ -390,5 +392,5 @@ class _Matrix:
 
 
 # fmt: off
-__all__ = ("argparse", "json", "os", "shutil", "subprocess", "sys", "tempfile", "threading", "time", "uuid", "Callable", "Iterator", "Mapping", "Sequence", "contextmanager", "dataclass", "field", "Path", "Any", "harness_compatibility", "harnesses", "process_tree", "redirect_ack", "redirect_store_models", "redirect_store_requests", "redirect_store_vocab", "run_prompts", "HARNESS_NAMES", "HarnessName", "SCHEMA_VERSION", "OPT_IN_ENV_VAR", "_OPT_IN_TRUE", "STATUS_PASSED", "STATUS_FAILED", "STATUS_SKIPPED", "SCENARIO_CONTEXT", "SCENARIO_EDITS", "SCENARIO_STOPS", "SCENARIO_NATIVE_CANCEL", "SCENARIO_FORCED", "SCENARIO_CORRECTION", "SCENARIO_HISTORY", "Scenario", "SCENARIOS", "SCENARIO_KEYS", "TURN_TIMEOUT_SECONDS", "LONG_TOOL_SECONDS", "TOOL_START_TIMEOUT_SECONDS", "TOOL_START_POLL_SECONDS", "INTERRUPT_SETTLE_SECONDS", "NATIVE_CANCEL_WAIT_SECONDS", "TERMINATION_WAIT_SECONDS", "CORRECTION_TTL_SECONDS", "NOTES_FILE", "RUNNING_FILE", "RESUMED_FILE", "FORBIDDEN_FILE", "ABORT_REASON", "READY_TOKEN", "READY_TIMEOUT_SECONDS", "PROVIDER_UNAVAILABLE_MARKERS", "FINAL_MESSAGE_EXCERPT_CHARS", "VERIFICATION_NOTE", "live_opt_in", "ScenarioResult", "HarnessAcceptance", "_Matrix")
+__all__ = ("argparse", "json", "os", "shutil", "subprocess", "sys", "tempfile", "threading", "time", "uuid", "Callable", "Iterator", "Mapping", "Sequence", "contextmanager", "dataclass", "field", "Path", "Any", "harness_compatibility", "harnesses", "process_tree", "redirect_ack", "redirect_ack_attempt", "redirect_ack_carry", "redirect_store_models", "redirect_store_requests", "redirect_store_vocab", "run_prompts", "HARNESS_NAMES", "HarnessName", "SCHEMA_VERSION", "OPT_IN_ENV_VAR", "_OPT_IN_TRUE", "STATUS_PASSED", "STATUS_FAILED", "STATUS_SKIPPED", "SCENARIO_CONTEXT", "SCENARIO_EDITS", "SCENARIO_STOPS", "SCENARIO_NATIVE_CANCEL", "SCENARIO_FORCED", "SCENARIO_CORRECTION", "SCENARIO_HISTORY", "Scenario", "SCENARIOS", "SCENARIO_KEYS", "TURN_TIMEOUT_SECONDS", "LONG_TOOL_SECONDS", "TOOL_START_TIMEOUT_SECONDS", "TOOL_START_POLL_SECONDS", "INTERRUPT_SETTLE_SECONDS", "NATIVE_CANCEL_WAIT_SECONDS", "TERMINATION_WAIT_SECONDS", "CORRECTION_TTL_SECONDS", "NOTES_FILE", "RUNNING_FILE", "RESUMED_FILE", "FORBIDDEN_FILE", "ABORT_REASON", "READY_TOKEN", "READY_TIMEOUT_SECONDS", "PROVIDER_UNAVAILABLE_MARKERS", "FINAL_MESSAGE_EXCERPT_CHARS", "VERIFICATION_NOTE", "live_opt_in", "ScenarioResult", "HarnessAcceptance", "_Matrix")
 # fmt: on

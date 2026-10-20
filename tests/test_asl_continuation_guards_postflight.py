@@ -18,6 +18,7 @@ from agent_session_loop import (
     plans_snapshot,
     turn_postflight,
     write_guards,
+    write_guards_protected,
 )
 
 from .support import write_plan
@@ -33,8 +34,8 @@ class ContinuationPostflightTests(unittest.TestCase):
     """The sequence's own step, with the change-path projection left real.
 
     Every guard is replaced by a recorder, but
-    ``write_guards._protected_path_changed_paths`` is deliberately *not*: it is
-    the consumer whose answer the accumulation is supposed to change, so
+    ``write_guards_protected._protected_path_changed_paths`` is deliberately
+    *not*: it is the consumer whose answer the accumulation is supposed to change, so
     stubbing it would assert the plumbing and prove nothing about the verdict.
     """
 
@@ -79,7 +80,7 @@ class ContinuationPostflightTests(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch.object(
-                    write_guards, "_enforce_protected_path_guard", protected
+                    write_guards_protected, "_enforce_protected_path_guard", protected
                 )
             )
             stack.enter_context(

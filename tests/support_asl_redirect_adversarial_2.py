@@ -280,9 +280,9 @@ class ConcurrentFeedbackTests(JournalTestCase):
                 view.requests, key=lambda request: request.submitted_seq
             )
         ]
-        from agent_session_loop import redirect_ack
+        from agent_session_loop import redirect_ack_carry
 
-        candidates = redirect_ack.coalesced_candidates(
+        candidates = redirect_ack_carry.coalesced_candidates(
             view, continuation=target(turn_index=2)
         )
 

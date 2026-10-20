@@ -11,7 +11,8 @@ from . import (
     events,
     harnesses,
     plans_payloads,
-    redirect_ack,
+    redirect_ack_annotate,
+    redirect_ack_carry,
     redirect_continuation,
     redirect_recovery,
     redirect_store_models,
@@ -29,7 +30,7 @@ def _carried_corrections(
     turn_index: int,
     harness: str,
     recovery: redirect_recovery.ReconciliationReport | None = None,
-) -> redirect_ack.CarriedCorrections | None:
+) -> redirect_ack_carry.CarriedCorrections | None:
     """Bind every correction this attempt should carry, just before its prompt.
 
     This call *is* the coalescing boundary. Corrections keep arriving while the
@@ -73,7 +74,7 @@ def _carried_corrections(
         harness=harness,
     )
     try:
-        carried = redirect_ack.carry_corrections(
+        carried = redirect_ack_carry.carry_corrections(
             plan_dir,
             continuation=continuation,
             accepted_operation_ids=(
@@ -127,12 +128,12 @@ def _annotate_carried_corrections(
     *,
     plan_dir: Path,
     state_dir_arg: str | Path | None,
-    carried: redirect_ack.CarriedCorrections | None,
+    carried: redirect_ack_carry.CarriedCorrections | None,
     session_id: str,
     turn_index: int,
     harness: str,
     outcome: str,
-    annotate: Callable[..., redirect_ack.CarryAnnotations],
+    annotate: Callable[..., redirect_ack_annotate.CarryAnnotations],
 ) -> None:
     """Record what became of this attempt's carry, and say so in an event.
 
@@ -187,7 +188,7 @@ def _launch_carried_corrections(
     *,
     plan_dir: Path,
     state_dir_arg: str | Path | None,
-    carried: redirect_ack.CarriedCorrections | None,
+    carried: redirect_ack_carry.CarriedCorrections | None,
     session_id: str,
     turn_index: int,
     harness: str,
@@ -214,9 +215,9 @@ def _launch_carried_corrections(
     if carried is None or not carried.corrections:
         return True
     error: dict[str, Any] | None = None
-    result: redirect_ack.CarryAnnotations | None = None
+    result: redirect_ack_annotate.CarryAnnotations | None = None
     try:
-        result = redirect_ack.launch_corrections(
+        result = redirect_ack_annotate.launch_corrections(
             plan_dir,
             continuation=carried.continuation,
             operation_ids=carried.operation_ids(),
@@ -253,7 +254,7 @@ def _release_carried_corrections(
     *,
     plan_dir: Path,
     state_dir_arg: str | Path | None,
-    carried: redirect_ack.CarriedCorrections | None,
+    carried: redirect_ack_carry.CarriedCorrections | None,
     session_id: str,
     turn_index: int,
     harness: str,
@@ -276,7 +277,7 @@ def _release_carried_corrections(
         turn_index=turn_index,
         harness=harness,
         outcome="released",
-        annotate=redirect_ack.release_corrections,
+        annotate=redirect_ack_annotate.release_corrections,
     )
 
 
@@ -285,7 +286,7 @@ def _deliver_carried_corrections(
     *,
     plan_dir: Path,
     state_dir_arg: str | Path | None,
-    carried: redirect_ack.CarriedCorrections | None,
+    carried: redirect_ack_carry.CarriedCorrections | None,
     session_id: str,
     turn_index: int,
     harness: str,
@@ -310,7 +311,7 @@ def _deliver_carried_corrections(
         turn_index=turn_index,
         harness=harness,
         outcome="delivered",
-        annotate=redirect_ack.deliver_corrections,
+        annotate=redirect_ack_annotate.deliver_corrections,
     )
 
 
@@ -341,7 +342,7 @@ class _TurnDelivery:
         *,
         plan_dir: Path,
         state_dir_arg: str | Path | None,
-        carried: redirect_ack.CarriedCorrections | None,
+        carried: redirect_ack_carry.CarriedCorrections | None,
         session_id: str,
         turn_index: int,
         harness: str,

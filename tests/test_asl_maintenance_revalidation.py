@@ -19,7 +19,7 @@ from agent_session_loop import (
     maintenance_plan,
     maintenance_policy,
     maintenance_run,
-    retention,
+    retention_projection,
 )
 from tests.asl_maintenance_support import (
     RUN_NEWEST,
@@ -44,7 +44,7 @@ class RevalidationTests(MaintenanceTestBase):
         plan_state = str(self._state_dir())
 
         calls: list[int] = []
-        real = retention.live_run_keys
+        real = retention_projection.live_run_keys
 
         def racing(state_dir: Any = None) -> frozenset[tuple[str, str]]:
             calls.append(1)
@@ -54,7 +54,7 @@ class RevalidationTests(MaintenanceTestBase):
             # alive between planning and mutation.
             return frozenset({(plan_state, RUN_OLD)})
 
-        with unittest.mock.patch.object(retention, "live_run_keys", racing):
+        with unittest.mock.patch.object(retention_projection, "live_run_keys", racing):
             result = self._run(apply=True)
 
         self.assertGreaterEqual(len(calls), 2)

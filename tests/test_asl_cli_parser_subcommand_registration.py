@@ -24,7 +24,7 @@ from agent_session_loop import (
     redirect_admission,
     redirect_store_vocab,
     repository_registration,
-    retention,
+    retention_projection,
     review,
     turn_execution_constants,
     verification_contract_check,
@@ -208,7 +208,8 @@ class ParserSubcommandRegistrationTests(unittest.TestCase):
             metrics.DEFAULT_SINCE_DAYS, cli_defaults._METRICS_DEFAULT_SINCE_DAYS
         )
         self.assertEqual(
-            retention.DEFAULT_MAX_AGE_DAYS, cli_defaults._RETENTION_DEFAULT_MAX_AGE_DAYS
+            retention_projection.DEFAULT_MAX_AGE_DAYS,
+            cli_defaults._RETENTION_DEFAULT_MAX_AGE_DAYS,
         )
         self.assertEqual(
             prepare_models.DEFAULT_VALIDATOR_JOBS,

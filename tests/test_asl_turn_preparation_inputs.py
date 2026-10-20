@@ -110,7 +110,7 @@ class RepairResumptionTests(PreparationTestCase):
     def test_an_ineligible_child_never_reaches_commit_preflight(self) -> None:
         with (
             mock.patch.object(
-                turn_preparation.write_guards,
+                turn_preparation.write_guards_repair,
                 "_pending_repair_child_continuation",
                 return_value=FakeReviewResume(
                     action="run-repairs", eligible=False, blocker="repair-scope-stale"
@@ -133,7 +133,7 @@ class RepairResumptionTests(PreparationTestCase):
         error = review_guard.RepairCommitPreflightError("boom", {"dirty": ["a.py"]})
         with (
             mock.patch.object(
-                turn_preparation.write_guards,
+                turn_preparation.write_guards_repair,
                 "_pending_repair_child_continuation",
                 return_value=FakeReviewResume(
                     action="run-repairs", eligible=True, blocker=None
@@ -156,7 +156,7 @@ class RepairResumptionTests(PreparationTestCase):
     def test_a_clean_child_records_its_preflight_once(self) -> None:
         with (
             mock.patch.object(
-                turn_preparation.write_guards,
+                turn_preparation.write_guards_repair,
                 "_pending_repair_child_continuation",
                 return_value=FakeReviewResume(
                     action="run-repairs", eligible=True, blocker=None

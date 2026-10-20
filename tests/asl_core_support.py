@@ -15,7 +15,7 @@ from agent_session_loop import (
     plans_session_ids,
     preflight_models,
     readiness_gate,
-    run_commit,
+    run_commit_invocation,
     state,
     turn_execution_constants,
 )
@@ -179,7 +179,9 @@ class ParserAndStateTestsBase(unittest.TestCase):
     def _fold(self, *turns: dict[str, object]) -> list[dict[str, Any]]:
         projection: list[dict[str, Any]] = []
         for turn in turns:
-            projection = run_commit._merged_model_projection(projection, turn)
+            projection = run_commit_invocation._merged_model_projection(
+                projection, turn
+            )
         return projection
 
     def _live_action_required(self) -> dict[str, object]:

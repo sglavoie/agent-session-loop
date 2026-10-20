@@ -15,7 +15,7 @@ from .support_asl_redirect_recovery_base import (
     json,
     os,
     plans_snapshot,
-    redirect_ack,
+    redirect_ack_carry,
     redirect_recovery,
     redirect_store_carry,
     redirect_store_models,
@@ -48,7 +48,7 @@ class DamagedEvidenceTests(RecoveryTestCase):
         self.write_lock(pid=self.DEAD_PID)
 
         report = self.reconcile()
-        carried = redirect_ack.carry_corrections(
+        carried = redirect_ack_carry.carry_corrections(
             self.plan_dir,
             continuation=target(1, run_id=NEW_RUN),
             recovered_operation_ids=redirect_recovery.recoverable_operation_ids(
@@ -198,7 +198,7 @@ class RunLoopRecoveryTests(RecoveryTestCase):
 
     def carried(
         self, *, pending: Any = None, turn_index: int = 1
-    ) -> redirect_ack.CarriedCorrections | None:
+    ) -> redirect_ack_carry.CarriedCorrections | None:
         return run_loop_carried_corrections._carried_corrections(
             self.ctx,
             plan_dir=self.plan_dir,

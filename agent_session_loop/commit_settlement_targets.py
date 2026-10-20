@@ -252,7 +252,7 @@ def _recovered_commit_generation(
         )
     return dataclasses.replace(
         generation,
-        message_file=run_commit._write_recovered_paused_work_message(
+        message_file=run_commit_paused._write_recovered_paused_work_message(
             run_dir,
             group_id=str(group.get("group_id")),
             message=message,

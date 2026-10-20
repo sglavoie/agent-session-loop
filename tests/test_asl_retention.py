@@ -25,6 +25,7 @@ from agent_session_loop import (
     assurance_models_findings,
     plans_files,
     retention,
+    retention_projection,
     state,
     state_locks,
 )
@@ -107,16 +108,16 @@ class RetentionTestBase(unittest.TestCase):
             )
         return run_dir
 
-    def _report(self, **kwargs: object) -> retention.PlanRetention:
+    def _report(self, **kwargs: object) -> retention_projection.PlanRetention:
         kwargs.setdefault("now", NOW)
         kwargs.setdefault("live_runs", frozenset())
-        return retention.plan_retention(
+        return retention_projection.plan_retention(
             self.plan_dir, state_dir=self.state_root, **kwargs
         )
 
     def _runs_by_id(
-        self, report: retention.PlanRetention
-    ) -> dict[str, retention.RunCandidate]:
+        self, report: retention_projection.PlanRetention
+    ) -> dict[str, retention_projection.RunCandidate]:
         return {run.run_id: run for run in report.runs}
 
 
@@ -133,7 +134,7 @@ class RetentionSelectionTests(RetentionTestBase):
         self.assertTrue(runs[RUN_OLD].reclaimable)
         self.assertEqual(runs[RUN_OLD].reason, "")
         self.assertFalse(runs[RUN_NEW].reclaimable)
-        self.assertEqual(runs[RUN_NEW].reason, retention.RETAIN_NEWEST_RUN)
+        self.assertEqual(runs[RUN_NEW].reason, retention_projection.RETAIN_NEWEST_RUN)
         self.assertEqual(report.reclaimable_runs, (runs[RUN_OLD],))
         self.assertEqual(report.reclaimable_bytes, runs[RUN_OLD].size_bytes)
         self.assertEqual(
@@ -161,7 +162,7 @@ class RetentionSelectionTests(RetentionTestBase):
         self.assertFalse(runs["20260705T120001000000Z-2"].reclaimable)
         self.assertEqual(
             runs["20260705T120001000000Z-2"].reason,
-            retention.RETAIN_WITHIN_CUTOFF,
+            retention_projection.RETAIN_WITHIN_CUTOFF,
         )
 
     def test_max_age_days_moves_the_cutoff(self) -> None:
@@ -173,7 +174,9 @@ class RetentionSelectionTests(RetentionTestBase):
 
         self.assertTrue(strict[RUN_OLD].reclaimable)
         self.assertFalse(relaxed[RUN_OLD].reclaimable)
-        self.assertEqual(relaxed[RUN_OLD].reason, retention.RETAIN_WITHIN_CUTOFF)
+        self.assertEqual(
+            relaxed[RUN_OLD].reason, retention_projection.RETAIN_WITHIN_CUTOFF
+        )
 
     def test_run_finish_time_is_the_latest_turn(self) -> None:
         run_dir = self._write_run(RUN_OLD, finished_at=_stamp(45))
@@ -187,7 +190,7 @@ class RetentionSelectionTests(RetentionTestBase):
         run = self._runs_by_id(self._report())[RUN_OLD]
 
         self.assertFalse(run.reclaimable)
-        self.assertEqual(run.reason, retention.RETAIN_WITHIN_CUTOFF)
+        self.assertEqual(run.reason, retention_projection.RETAIN_WITHIN_CUTOFF)
         self.assertEqual(run.finished_at, _stamp(2))
 
     def test_newest_run_is_kept_even_when_every_run_is_ancient(self) -> None:
@@ -198,10 +201,10 @@ class RetentionSelectionTests(RetentionTestBase):
 
         self.assertTrue(runs[RUN_OLD].reclaimable)
         self.assertFalse(runs[RUN_NEW].reclaimable)
-        self.assertEqual(runs[RUN_NEW].reason, retention.RETAIN_NEWEST_RUN)
+        self.assertEqual(runs[RUN_NEW].reason, retention_projection.RETAIN_NEWEST_RUN)
 
     def test_plan_without_state_directory_reports_no_runs(self) -> None:
-        report = retention.plan_retention(
+        report = retention_projection.plan_retention(
             self.tmp_path / "never-run",
             state_dir=self.state_root,
             now=NOW,
@@ -215,7 +218,7 @@ class RetentionSelectionTests(RetentionTestBase):
         with self.assertRaises(ValueError):
             self._report(max_age_days=-1.0)
         with self.assertRaises(ValueError):
-            retention.corpus_retention(self.state_root, max_age_days=-1.0)
+            retention_projection.corpus_retention(self.state_root, max_age_days=-1.0)
 
     def test_report_serializes_for_the_cli(self) -> None:
         self._write_run(RUN_OLD, finished_at=_stamp(45))
@@ -229,10 +232,14 @@ class RetentionSelectionTests(RetentionTestBase):
         self.assertEqual(payload["state_dir"], str(self.plan_state))
         self.assertEqual(payload["run_count"], 2)
         self.assertEqual(payload["reclaimable_run_count"], 1)
-        self.assertEqual(payload["max_age_days"], retention.DEFAULT_MAX_AGE_DAYS)
+        self.assertEqual(
+            payload["max_age_days"], retention_projection.DEFAULT_MAX_AGE_DAYS
+        )
         self.assertEqual(
             payload["cutoff_at"],
-            (NOW - timedelta(days=retention.DEFAULT_MAX_AGE_DAYS)).isoformat(),
+            (
+                NOW - timedelta(days=retention_projection.DEFAULT_MAX_AGE_DAYS)
+            ).isoformat(),
         )
         self.assertEqual([run["run_id"] for run in payload["runs"]], [RUN_OLD, RUN_NEW])
         json.dumps(payload)
@@ -250,7 +257,7 @@ class RetentionSafetyTests(RetentionTestBase):
         )
 
         self.assertFalse(runs[RUN_OLD].reclaimable)
-        self.assertEqual(runs[RUN_OLD].reason, retention.RETAIN_LIVE_RUN)
+        self.assertEqual(runs[RUN_OLD].reason, retention_projection.RETAIN_LIVE_RUN)
 
     def test_live_run_keys_come_from_the_running_scan(self) -> None:
         plan_dir = self._make_plan("running-plan", run_id=RUN_NEW)
@@ -258,7 +265,7 @@ class RetentionSafetyTests(RetentionTestBase):
         self._write_run(RUN_NEW, finished_at=_stamp(1), plan_dir=plan_dir)
         plan_state = state.plan_state_dir(plan_dir, self.state_root)
 
-        keys = retention.live_run_keys(self.state_root)
+        keys = retention_projection.live_run_keys(self.state_root)
 
         self.assertIn((str(plan_state), RUN_NEW), keys)
         self.assertNotIn((str(self.plan_state), RUN_OLD), keys)
@@ -271,7 +278,8 @@ class RetentionSafetyTests(RetentionTestBase):
 
         self.assertEqual(report.reclaimable_bytes, 0)
         self.assertEqual(
-            [run.reason for run in report.runs], [retention.RETAIN_PLAN_LOCKED]
+            [run.reason for run in report.runs],
+            [retention_projection.RETAIN_PLAN_LOCKED],
         )
         self.assertIn("active", report.runs[0].detail)
 
@@ -283,7 +291,7 @@ class RetentionSafetyTests(RetentionTestBase):
         report = self._report()
 
         self.assertEqual(report.reclaimable_bytes, 0)
-        self.assertEqual(report.runs[0].reason, retention.RETAIN_PLAN_LOCKED)
+        self.assertEqual(report.runs[0].reason, retention_projection.RETAIN_PLAN_LOCKED)
 
     def test_stale_lock_retains_every_run(self) -> None:
         self._write_run(RUN_OLD, finished_at=_stamp(45))
@@ -293,7 +301,7 @@ class RetentionSafetyTests(RetentionTestBase):
         report = self._report()
 
         self.assertEqual(report.reclaimable_bytes, 0)
-        self.assertEqual(report.runs[0].reason, retention.RETAIN_PLAN_LOCKED)
+        self.assertEqual(report.runs[0].reason, retention_projection.RETAIN_PLAN_LOCKED)
         self.assertIn("stale", report.runs[0].detail)
         self.assertTrue(lock_path.exists(), "projection must not remove the lock")
 
@@ -304,7 +312,7 @@ class RetentionSafetyTests(RetentionTestBase):
         run = self._runs_by_id(self._report())[RUN_OLD]
 
         self.assertFalse(run.reclaimable)
-        self.assertEqual(run.reason, retention.RETAIN_UNFINISHED)
+        self.assertEqual(run.reason, retention_projection.RETAIN_UNFINISHED)
         self.assertIsNone(run.finished_at)
         self.assertIsNone(run.age_seconds)
 
@@ -315,7 +323,7 @@ class RetentionSafetyTests(RetentionTestBase):
         run = self._runs_by_id(self._report())[RUN_OLD]
 
         self.assertFalse(run.reclaimable)
-        self.assertEqual(run.reason, retention.RETAIN_UNFINISHED)
+        self.assertEqual(run.reason, retention_projection.RETAIN_UNFINISHED)
 
     def test_one_undated_turn_retains_the_whole_run(self) -> None:
         run_dir = self._write_run(RUN_OLD, finished_at=_stamp(45))
@@ -329,7 +337,7 @@ class RetentionSafetyTests(RetentionTestBase):
         run = self._runs_by_id(self._report())[RUN_OLD]
 
         self.assertFalse(run.reclaimable)
-        self.assertEqual(run.reason, retention.RETAIN_UNDATED)
+        self.assertEqual(run.reason, retention_projection.RETAIN_UNDATED)
 
     def test_unreadable_turn_artifact_retains_the_run(self) -> None:
         self._write_run(RUN_OLD, finished_at=None, result_text="{ not json")
@@ -338,7 +346,7 @@ class RetentionSafetyTests(RetentionTestBase):
         run = self._runs_by_id(self._report())[RUN_OLD]
 
         self.assertFalse(run.reclaimable)
-        self.assertEqual(run.reason, retention.RETAIN_UNDATED)
+        self.assertEqual(run.reason, retention_projection.RETAIN_UNDATED)
 
     def test_non_object_turn_artifact_retains_the_run(self) -> None:
         self._write_run(RUN_OLD, finished_at=None, result_text="[]")
@@ -347,7 +355,7 @@ class RetentionSafetyTests(RetentionTestBase):
         run = self._runs_by_id(self._report())[RUN_OLD]
 
         self.assertFalse(run.reclaimable)
-        self.assertEqual(run.reason, retention.RETAIN_UNDATED)
+        self.assertEqual(run.reason, retention_projection.RETAIN_UNDATED)
 
 
 class CorpusRetentionTests(RetentionTestBase):
@@ -362,7 +370,7 @@ class CorpusRetentionTests(RetentionTestBase):
         )
         self._write_run(RUN_NEW, finished_at=_stamp(2), plan_dir=other_plan)
 
-        report = retention.corpus_retention(self.state_root, now=NOW)
+        report = retention_projection.corpus_retention(self.state_root, now=NOW)
 
         self.assertEqual(len(report.plans), 2)
         self.assertEqual(
@@ -383,7 +391,7 @@ class CorpusRetentionTests(RetentionTestBase):
         orphan.mkdir(parents=True)
         (orphan / state.RUNS_DIR_NAME / RUN_OLD).mkdir(parents=True)
 
-        report = retention.corpus_retention(self.state_root, now=NOW)
+        report = retention_projection.corpus_retention(self.state_root, now=NOW)
 
         self.assertEqual(
             report.unresolved_state_dirs, (str(plans_files.canonicalize_path(orphan)),)
@@ -398,7 +406,7 @@ class CorpusRetentionTests(RetentionTestBase):
             encoding="utf-8",
         )
 
-        report = retention.corpus_retention(self.state_root, now=NOW)
+        report = retention_projection.corpus_retention(self.state_root, now=NOW)
 
         self.assertEqual(
             report.unresolved_state_dirs,
@@ -406,7 +414,9 @@ class CorpusRetentionTests(RetentionTestBase):
         )
 
     def test_missing_state_root_is_empty(self) -> None:
-        report = retention.corpus_retention(self.tmp_path / "absent", now=NOW)
+        report = retention_projection.corpus_retention(
+            self.tmp_path / "absent", now=NOW
+        )
 
         self.assertEqual(report.plans, ())
         self.assertEqual(report.reclaimable_bytes, 0)
@@ -454,7 +464,7 @@ class AssurancePinningTests(RetentionTestBase):
         runs = self._runs_by_id(self._report())
 
         self.assertFalse(runs[RUN_OLD].reclaimable)
-        self.assertEqual(runs[RUN_OLD].reason, retention.RETAIN_OPEN_ISSUE)
+        self.assertEqual(runs[RUN_OLD].reason, retention_projection.RETAIN_OPEN_ISSUE)
         self.assertIn("open assurance issue", runs[RUN_OLD].detail)
 
     def test_closing_the_issue_releases_the_run(self) -> None:
@@ -555,11 +565,15 @@ class AssurancePinningTests(RetentionTestBase):
         self.assertTrue(report.assurance["collection_blocked"])
         self.assertEqual(report.assurance["pinned_run_count"], 0)
         self.assertEqual(report.reclaimable_run_count, 0)
-        self.assertEqual(self._reasons(report), {retention.RETAIN_PIN_UNKNOWN})
+        self.assertEqual(
+            self._reasons(report), {retention_projection.RETAIN_PIN_UNKNOWN}
+        )
         payload = json.loads(json.dumps(report.to_dict()))
         self.assertTrue(payload["assurance"]["collection_blocked"])
         self.assertEqual(
-            payload["retained_by_reason"][retention.RETAIN_PIN_UNKNOWN]["run_count"],
+            payload["retained_by_reason"][retention_projection.RETAIN_PIN_UNKNOWN][
+                "run_count"
+            ],
             2,
         )
 
@@ -570,7 +584,7 @@ class AssurancePinningTests(RetentionTestBase):
         args = argparse.Namespace(
             plan_dir=None,
             state_dir=self.state_root,
-            max_age_days=retention.DEFAULT_MAX_AGE_DAYS,
+            max_age_days=retention_projection.DEFAULT_MAX_AGE_DAYS,
             apply=False,
             json=False,
         )
@@ -582,7 +596,7 @@ class AssurancePinningTests(RetentionTestBase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("collection is blocked", text)
-        self.assertIn(retention.RETAIN_PIN_UNKNOWN, text)
+        self.assertIn(retention_projection.RETAIN_PIN_UNKNOWN, text)
         self.assertNotIn("Re-run with --apply", text)
 
     def test_plan_scope_apply_removes_nothing_when_the_ledger_is_unreadable(
@@ -602,7 +616,9 @@ class AssurancePinningTests(RetentionTestBase):
         self.assertEqual(report.failure_count, 0)
         self.assertTrue(old.is_dir())
         self.assertTrue(new.is_dir())
-        self.assertEqual(self._reasons(report), {retention.RETAIN_PIN_UNKNOWN})
+        self.assertEqual(
+            self._reasons(report), {retention_projection.RETAIN_PIN_UNKNOWN}
+        )
 
     def test_corpus_scope_apply_removes_nothing_when_the_ledger_is_unreadable(
         self,
@@ -623,7 +639,9 @@ class AssurancePinningTests(RetentionTestBase):
         self.assertEqual(blocked.failure_count, 0)
         self.assertTrue(first.is_dir())
         self.assertTrue(second.is_dir())
-        self.assertEqual(self._reasons(blocked), {retention.RETAIN_PIN_UNKNOWN})
+        self.assertEqual(
+            self._reasons(blocked), {retention_projection.RETAIN_PIN_UNKNOWN}
+        )
 
         # Both runs really were sweepable, so the block above held back a
         # deletion that would otherwise have happened against an empty pin set.
@@ -655,12 +673,14 @@ class DryRunPurityTests(RetentionTestBase):
         return self.lock_path.read_bytes(), info.st_ino, info.st_size
 
     def _decisions(
-        self, report: retention.PlanRetention
+        self, report: retention_projection.PlanRetention
     ) -> list[tuple[str, bool, str]]:
         return [(run.run_id, run.reclaimable, run.reason) for run in report.runs]
 
-    def _corpus_report(self, **kwargs: object) -> retention.PlanRetention:
-        corpus = retention.corpus_retention(self.state_root, now=NOW, **kwargs)
+    def _corpus_report(self, **kwargs: object) -> retention_projection.PlanRetention:
+        corpus = retention_projection.corpus_retention(
+            self.state_root, now=NOW, **kwargs
+        )
         canonical = str(plans_files.canonicalize_path(self.plan_dir))
         return next(entry for entry in corpus.plans if entry.plan_dir == canonical)
 
@@ -676,14 +696,15 @@ class DryRunPurityTests(RetentionTestBase):
     def test_plan_scope_dry_run_preserves_the_lock(self) -> None:
         before = self._lock_state()
 
-        report = retention.plan_retention(
+        report = retention_projection.plan_retention(
             self.plan_dir, state_dir=self.state_root, now=NOW
         )
 
         self.assertEqual(before, self._lock_state())
         self.assertEqual(report.reclaimable_bytes, 0)
         self.assertEqual(
-            {run.reason for run in report.runs}, {retention.RETAIN_PLAN_LOCKED}
+            {run.reason for run in report.runs},
+            {retention_projection.RETAIN_PLAN_LOCKED},
         )
 
     def test_corpus_scope_dry_run_preserves_the_lock(self) -> None:
@@ -694,20 +715,23 @@ class DryRunPurityTests(RetentionTestBase):
         self.assertEqual(before, self._lock_state())
         self.assertEqual(report.reclaimable_bytes, 0)
         self.assertEqual(
-            {run.reason for run in report.runs}, {retention.RETAIN_PLAN_LOCKED}
+            {run.reason for run in report.runs},
+            {retention_projection.RETAIN_PLAN_LOCKED},
         )
 
     def test_the_running_scan_preserves_the_lock(self) -> None:
         before = self._lock_state()
 
-        keys = retention.live_run_keys(self.state_root)
+        keys = retention_projection.live_run_keys(self.state_root)
 
         self.assertEqual(before, self._lock_state())
         self.assertEqual(keys, frozenset())
 
     def test_both_scopes_reach_the_same_decision(self) -> None:
         plan_scope = self._decisions(
-            retention.plan_retention(self.plan_dir, state_dir=self.state_root, now=NOW)
+            retention_projection.plan_retention(
+                self.plan_dir, state_dir=self.state_root, now=NOW
+            )
         )
         # Re-establish the lock so the second scope judges the same corpus as
         # the first even when the first removed it. The bytes are identical,
@@ -718,7 +742,7 @@ class DryRunPurityTests(RetentionTestBase):
         self.assertEqual(plan_scope, corpus_scope)
         self.assertEqual(
             {reason for _id, _reclaimable, reason in plan_scope},
-            {retention.RETAIN_PLAN_LOCKED},
+            {retention_projection.RETAIN_PLAN_LOCKED},
         )
         self.assertTrue(self.lock_path.exists())
 

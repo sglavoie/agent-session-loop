@@ -107,6 +107,8 @@ from . import (
     workspace_evidence,
     workspaces,
     write_guards,
+    write_guards_legacy,
+    write_guards_protected,
 )
 from .run_errors import RunError
 
@@ -283,7 +285,7 @@ def enforce_post_turn_guards(
                     durability.write_json_file(paths["result"], turn_payload)
     elif legacy_snapshot_before is not None:
         disarm_exception_guard()
-        if write_guards._enforce_legacy_implementation_write_guard(
+        if write_guards_legacy._enforce_legacy_implementation_write_guard(
             event_path=ctx.event_path,
             payload=ctx.payload,
             persistence=ctx.persistence,
@@ -365,7 +367,7 @@ def enforce_post_turn_guards(
     # moved, and adopt that as the baseline. It is a distinct step because it
     # answers a distinct question — not "did the session stay in scope" but
     # "did the run honour the standing instruction an operator gave it".
-    protected_path_paused = write_guards._enforce_protected_path_guard(
+    protected_path_paused = write_guards_protected._enforce_protected_path_guard(
         event_path=ctx.event_path,
         payload=ctx.payload,
         persistence=ctx.persistence,
@@ -381,7 +383,7 @@ def enforce_post_turn_guards(
         append_handoff_note=handoff_correction._append_handoff_note,
         reinspect=session_verification._reinspect_after_revert,
         changed_paths=(
-            write_guards._protected_path_changed_paths(
+            write_guards_protected._protected_path_changed_paths(
                 turn_payload.get("workspace_write_guard")
             )
             if isinstance(turn_payload.get("workspace_write_guard"), Mapping)

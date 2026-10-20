@@ -177,7 +177,7 @@ class RunLoopDelegationTests(unittest.TestCase):
             "run_prompts.build_reply_prompt",
             "run_prompts.build_resolution_prompt",
             "run_prompts.build_session_prompt",
-            "write_guards._pending_repair_child_continuation",
+            "write_guards_repair._pending_repair_child_continuation",
             "review_guard._repair_commit_preflight",
             "run_inputs._task_packet_repository_intent_report",
         }

@@ -99,7 +99,7 @@ from . import plans_session_scope as plans_session_scope
 from . import plans_snapshot as plans_snapshot
 from . import preflight_footprint as preflight_footprint
 from . import readiness_gate as readiness_gate
-from . import redirect_ack as redirect_ack
+from . import redirect_ack_carry as redirect_ack_carry
 from . import repository_evidence as repository_evidence
 from . import review_delta as review_delta
 from . import review_guard as review_guard
@@ -117,7 +117,7 @@ from . import turn_execution_argv as turn_execution_argv
 from . import verification_models as verification_models
 from . import workspace_evidence as workspace_evidence
 from . import workspaces as workspaces
-from . import write_guards as write_guards
+from . import write_guards_repair as write_guards_repair
 from .turn_preparation_models import PacketInputs as PacketInputs
 from .turn_preparation_models import RepairResumption as RepairResumption
 from .turn_preparation_models import ReviewPreparation as ReviewPreparation

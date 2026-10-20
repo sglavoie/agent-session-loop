@@ -1,4 +1,4 @@
-"""Boundary tests for `agent_session_loop.write_guards`.
+"""Boundary tests for `agent_session_loop.write_guards` and its siblings.
 
 The behavioural coverage of these guards is end to end and lives elsewhere:
 `tests/test_asl_run_protected_path_guard.py` drives real runs against real checkouts and
@@ -47,6 +47,9 @@ from agent_session_loop import (
     workspace_evidence,
     workspaces,
     write_guards,
+    write_guards_legacy,
+    write_guards_protected,
+    write_guards_repair,
 )
 from tests.support import assert_no_runner_import, called_names, write_plan
 
@@ -61,6 +64,24 @@ MOVED_FUNCTIONS = (
     "_protected_path_changed_paths",
     "_protected_path_review_changed_paths",
     "_enforce_protected_path_guard",
+)
+
+#: The module that owns each moved function and constant.
+OWNERS: dict[str, Any] = {
+    "_regenerate_stale_repair_child_scopes": write_guards_repair,
+    "_pending_repair_child_continuation": write_guards_repair,
+    "_enforce_workspace_write_guard": write_guards,
+    "_enforce_legacy_implementation_write_guard": write_guards_legacy,
+    "_protected_path_changed_paths": write_guards_protected,
+    "_protected_path_review_changed_paths": write_guards_protected,
+    "_enforce_protected_path_guard": write_guards_protected,
+    "REPAIR_SCOPE_STALE_BLOCKER": write_guards_repair,
+}
+GUARD_MODULES = (
+    write_guards,
+    write_guards_legacy,
+    write_guards_protected,
+    write_guards_repair,
 )
 
 #: Moved with them, because its sole reader is
@@ -142,7 +163,7 @@ def _resume(
     *,
     action: str = "run-repairs",
     eligible: bool = False,
-    blocker: str | None = write_guards.REPAIR_SCOPE_STALE_BLOCKER,
+    blocker: str | None = write_guards_repair.REPAIR_SCOPE_STALE_BLOCKER,
     gaps: tuple[dict[str, Any], ...] | None = ({"repair_session_id": "2"},),
 ) -> review_continuation.ReviewResume:
     """One review continuation projection, named only by what the gate reads."""
@@ -164,35 +185,40 @@ class WriteGuardsBoundaryTests(unittest.TestCase):
     """The module is runner-free, aliased nowhere, and writes in one place."""
 
     def setUp(self) -> None:
-        source_path = Path(write_guards.__file__ or "")
-        self.source = source_path.read_text(encoding="utf-8")
-        self.tree = ast.parse(self.source)
+        self.trees = {
+            module: ast.parse(Path(module.__file__ or "").read_text(encoding="utf-8"))
+            for module in GUARD_MODULES
+        }
 
-    def test_the_module_does_not_import_the_runner(self) -> None:
-        assert_no_runner_import(self, write_guards)
+    def test_the_modules_do_not_import_the_runner(self) -> None:
+        for module in GUARD_MODULES:
+            with self.subTest(module=module.__name__):
+                assert_no_runner_import(self, module)
 
     def test_the_runner_keeps_no_alias_for_the_moved_symbols(self) -> None:
         for name in MOVED_FUNCTIONS + MOVED_CONSTANTS:
             with self.subTest(name=name):
                 self.assertFalse(hasattr(runner, name))
-                self.assertTrue(hasattr(write_guards, name))
+                self.assertTrue(hasattr(OWNERS[name], name))
 
     def test_the_module_owns_exactly_the_symbols_the_session_moved(self) -> None:
         defined = {
             node.name
-            for node in self.tree.body
+            for tree in self.trees.values()
+            for node in tree.body
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
         }
         self.assertEqual(set(MOVED_FUNCTIONS), defined)
 
     def test_each_function_makes_exactly_the_durable_writes_it_declares(self) -> None:
         observed: dict[str, frozenset[str]] = {}
-        for node in self.tree.body:
-            if not isinstance(node, ast.FunctionDef):
-                continue
-            writes = called_names(node) & DURABLE_WRITE_NAMES
-            if writes:
-                observed[node.name] = frozenset(writes)
+        for tree in self.trees.values():
+            for node in tree.body:
+                if not isinstance(node, ast.FunctionDef):
+                    continue
+                writes = called_names(node) & DURABLE_WRITE_NAMES
+                if writes:
+                    observed[node.name] = frozenset(writes)
         self.assertEqual(DURABLE_WRITES, observed)
 
 
@@ -200,7 +226,7 @@ class RefusalShapeTests(unittest.TestCase):
     """A refusal is five steps, and every enforcement path performs all five."""
 
     def _source(self, name: str) -> str:
-        return inspect.getsource(getattr(write_guards, name))
+        return inspect.getsource(getattr(OWNERS[name], name))
 
     def test_every_refusal_reverts_rereads_writes_records_then_pauses(self) -> None:
         for name in ENFORCEMENT_FUNCTIONS:
@@ -238,7 +264,7 @@ class SeamTests(unittest.TestCase):
 
     def test_both_seams_are_required_keyword_only_everywhere(self) -> None:
         for name in ENFORCEMENT_FUNCTIONS:
-            signature = inspect.signature(getattr(write_guards, name))
+            signature = inspect.signature(getattr(OWNERS[name], name))
             for seam in SEAM_PARAMETERS:
                 with self.subTest(name=name, seam=seam):
                     parameter = signature.parameters[seam]
@@ -287,6 +313,7 @@ class SeamTests(unittest.TestCase):
         # each is counted on its own, so a call that merely moved between them
         # cannot pass by keeping the total.
         calls: dict[str, int] = {}
+        guard_names = {module.__name__.rpartition(".")[2] for module in GUARD_MODULES}
         for module in (run_loop_finalization, turn_postflight):
             tree = ast.parse(Path(module.__file__ or "").read_text(encoding="utf-8"))
             for node in ast.walk(tree):
@@ -297,7 +324,7 @@ class SeamTests(unittest.TestCase):
                     continue
                 if (
                     not isinstance(func.value, ast.Name)
-                    or func.value.id != "write_guards"
+                    or func.value.id not in guard_names
                 ):
                     continue
                 if func.attr not in ENFORCEMENT_FUNCTIONS:
@@ -321,13 +348,13 @@ class ProtectedPathChangedPathsTests(unittest.TestCase):
     """What the guard reads out of the write guard's own recorded evidence."""
 
     def test_a_missing_comparison_cannot_answer_the_question(self) -> None:
-        self.assertIsNone(write_guards._protected_path_changed_paths(None))
+        self.assertIsNone(write_guards_protected._protected_path_changed_paths(None))
 
     def test_a_partial_inventory_cannot_answer_the_question(self) -> None:
         # An unavailable lane means the guard did not look everywhere, so an
         # empty `changed` map is not evidence that nothing moved.
         self.assertIsNone(
-            write_guards._protected_path_changed_paths(
+            write_guards_protected._protected_path_changed_paths(
                 {
                     "changed": {},
                     "unavailable": {"svc": {"after": {"reason": "unreadable"}}},
@@ -336,9 +363,9 @@ class ProtectedPathChangedPathsTests(unittest.TestCase):
         )
 
     def test_a_comparison_without_a_changed_map_cannot_answer_it_either(self) -> None:
-        self.assertIsNone(write_guards._protected_path_changed_paths({}))
+        self.assertIsNone(write_guards_protected._protected_path_changed_paths({}))
         self.assertIsNone(
-            write_guards._protected_path_changed_paths({"changed": ["svc"]})
+            write_guards_protected._protected_path_changed_paths({"changed": ["svc"]})
         )
 
     def test_a_complete_comparison_with_nothing_changed_clears_every_rule(
@@ -346,7 +373,7 @@ class ProtectedPathChangedPathsTests(unittest.TestCase):
     ) -> None:
         self.assertEqual(
             (),
-            write_guards._protected_path_changed_paths(
+            write_guards_protected._protected_path_changed_paths(
                 {"changed": {}, "unavailable": {}}
             ),
         )
@@ -354,7 +381,7 @@ class ProtectedPathChangedPathsTests(unittest.TestCase):
     def test_qualified_paths_are_collected_across_repositories_in_order(self) -> None:
         self.assertEqual(
             ("svc:a.py", "svc:b.py", "ops:c.py"),
-            write_guards._protected_path_changed_paths(
+            write_guards_protected._protected_path_changed_paths(
                 {
                     "changed": {
                         "svc": {"qualified_paths": ["svc:a.py", "svc:b.py"]},
@@ -367,7 +394,7 @@ class ProtectedPathChangedPathsTests(unittest.TestCase):
     def test_the_same_path_named_twice_is_reported_once(self) -> None:
         self.assertEqual(
             ("svc:a.py",),
-            write_guards._protected_path_changed_paths(
+            write_guards_protected._protected_path_changed_paths(
                 {
                     "changed": {
                         "svc": {"qualified_paths": ["svc:a.py"]},
@@ -380,7 +407,7 @@ class ProtectedPathChangedPathsTests(unittest.TestCase):
     def test_an_entry_that_names_no_paths_contributes_nothing(self) -> None:
         self.assertEqual(
             ("svc:a.py",),
-            write_guards._protected_path_changed_paths(
+            write_guards_protected._protected_path_changed_paths(
                 {
                     "changed": {
                         "svc": {"qualified_paths": ["svc:a.py"]},
@@ -404,7 +431,7 @@ class ProtectedPathReviewChangedPathsTests(unittest.TestCase):
 
     def _changed(self, **overrides: Any) -> tuple[str, ...] | None:
         context = {**self.context, **overrides}
-        return write_guards._protected_path_review_changed_paths(
+        return write_guards_protected._protected_path_review_changed_paths(
             context, exclude=(), include_ignored=False
         )
 
@@ -495,7 +522,7 @@ class RegenerateStaleRepairChildScopesTests(unittest.TestCase):
                 side_effect=widen,
             ),
         ):
-            records = write_guards._regenerate_stale_repair_child_scopes(
+            records = write_guards_repair._regenerate_stale_repair_child_scopes(
                 snapshot=self.snapshot,
                 workspace=self.workspace,
                 gaps=gaps,
@@ -567,17 +594,17 @@ class PendingRepairChildContinuationTests(unittest.TestCase):
                 review_cycle, "_set_review_resume", side_effect=list(projections)
             ),
             mock.patch.object(
-                write_guards,
+                write_guards_repair,
                 "_regenerate_stale_repair_child_scopes",
                 side_effect=regenerate,
             ),
             mock.patch.object(
-                write_guards.readiness_gate,
+                write_guards_repair.readiness_gate,
                 "_refresh_active_readiness_state",
                 side_effect=refresh,
             ),
         ):
-            resume = write_guards._pending_repair_child_continuation(
+            resume = write_guards_repair._pending_repair_child_continuation(
                 snapshot=cast(Any, SimpleNamespace(plan_dir=Path("/tmp/plan"))),
                 event_path=Path("/tmp/events.jsonl"),
                 payload={},

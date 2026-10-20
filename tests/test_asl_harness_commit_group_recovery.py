@@ -10,7 +10,7 @@ from agent_session_loop import (
     commit_settlement,
     plans_metadata,
     plans_registry,
-    run_commit,
+    run_commit_paused,
     run_selection,
 )
 from tests.harness_integration_base import FakeHarnessIntegrationBase
@@ -183,7 +183,7 @@ class PausedGroupCommitRecoveryTests(FakeHarnessIntegrationBase):
         # The retained-work commit carries the whole deterministic marking, not
         # just a matching subject.
         self.assertEqual(
-            run_commit._paused_work_commit_message(
+            run_commit_paused._paused_work_commit_message(
                 session_label="session 1",
                 pause_reason="verify-failed",
                 commit_mode=run_selection.COMMIT_MODE_PER_SESSION,

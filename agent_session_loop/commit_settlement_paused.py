@@ -412,7 +412,7 @@ def _settle_paused_retained_work(
             whole_workspace=commit_mode == run_selection.COMMIT_MODE_END,
         )
         if targets:
-            message = run_commit._paused_work_commit_message(
+            message = run_commit_paused._paused_work_commit_message(
                 session_label=retained.session_label,
                 pause_reason=pause_reason,
                 commit_mode=commit_mode,
@@ -420,7 +420,7 @@ def _settle_paused_retained_work(
                 repair_max_attempts=repair_max_attempts,
                 run_id=run_id,
             )
-            message_file = run_commit._write_paused_work_message(
+            message_file = run_commit_paused._write_paused_work_message(
                 retained.artifact_dir, message
             )
             group, failed_commit = _run_commit_group(

@@ -11,7 +11,7 @@ from . import (
     plans_payloads,
     redirect_continuation,
     review,
-    run_commit,
+    run_commit_invocation,
     run_persistence,
     run_prompts,
     run_selection,
@@ -174,8 +174,10 @@ def _execute_turn(frame: RunFrame) -> RunResult | LoopSignal | None:
                     frame.turn_payload["observed_model"]
                 )
             )
-        frame.ctx.payload["model_projection"] = run_commit._merged_model_projection(
-            frame.ctx.payload.get("model_projection"), frame.turn_payload
+        frame.ctx.payload["model_projection"] = (
+            run_commit_invocation._merged_model_projection(
+                frame.ctx.payload.get("model_projection"), frame.turn_payload
+            )
         )
         frame.turn_identity = {
             "run_id": frame.ctx.run_id,

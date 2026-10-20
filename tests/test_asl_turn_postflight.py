@@ -50,6 +50,8 @@ from agent_session_loop import (
     turn_postflight,
     workspace_evidence,
     write_guards,
+    write_guards_legacy,
+    write_guards_protected,
 )
 from agent_session_loop.run_errors import RunError
 from tests import support_asl_run_loop_view as run_loop_view
@@ -66,9 +68,9 @@ ENTRY_POINTS = ("turn_postflight.enforce_post_turn_guards",)
 #: The guards this boundary sequences, in the order it must run them, named as
 #: ``module._name`` so a recorder can report the order it observed.
 WORKSPACE_WRITE = "write_guards._enforce_workspace_write_guard"
-LEGACY_WRITE = "write_guards._enforce_legacy_implementation_write_guard"
+LEGACY_WRITE = "write_guards_legacy._enforce_legacy_implementation_write_guard"
 REVIEW_MUTATION = "handoff_guards._enforce_review_mutation_guard"
-PROTECTED_PATH = "write_guards._enforce_protected_path_guard"
+PROTECTED_PATH = "write_guards_protected._enforce_protected_path_guard"
 PLAN_ARTIFACT = "handoff_guards._enforce_plan_artifact_guard"
 DISPOSITION = "handoff_guards._terminating_result_disposition"
 DISARM = "disarm_exception_guard"
@@ -170,9 +172,13 @@ class GuardRecorder:
     def patched(self) -> Any:
         targets = (
             (write_guards, "_enforce_workspace_write_guard", WORKSPACE_WRITE),
-            (write_guards, "_enforce_legacy_implementation_write_guard", LEGACY_WRITE),
+            (
+                write_guards_legacy,
+                "_enforce_legacy_implementation_write_guard",
+                LEGACY_WRITE,
+            ),
             (handoff_guards, "_enforce_review_mutation_guard", REVIEW_MUTATION),
-            (write_guards, "_enforce_protected_path_guard", PROTECTED_PATH),
+            (write_guards_protected, "_enforce_protected_path_guard", PROTECTED_PATH),
             (handoff_guards, "_enforce_plan_artifact_guard", PLAN_ARTIFACT),
         )
         with contextlib.ExitStack() as stack:
@@ -194,7 +200,7 @@ class GuardRecorder:
             )
             stack.enter_context(
                 mock.patch.object(
-                    write_guards,
+                    write_guards_protected,
                     "_protected_path_changed_paths",
                     lambda evidence: self.changed_paths,
                 )

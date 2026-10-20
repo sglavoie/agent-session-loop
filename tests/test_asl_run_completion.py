@@ -15,7 +15,8 @@ claims, as properties rather than as a walk through one happy path:
 * a failed end commit soft-fails and still hands the loop "go round again";
 * the external control queue is drained *before* ``stop_after_current`` is
   read, so a stop queued while the last session ran is seen by the review;
-* every exit from :func:`run_completion.complete_plan` states an outcome, so
+* every exit from :func:`run_completion.complete_plan` (and the sibling
+  ``run_completion_*`` branches it delegates to) states an outcome, so
   the ``break``/``continue`` it replaced cannot come back as a fall-through;
 * the runner's branch does nothing but delegate and act on the outcome.
 """
@@ -33,12 +34,21 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
+    commit_settlement,
     events,
     plans_errors,
     plans_models,
     plans_payloads,
     plans_snapshot,
+    review_cycle,
+    review_delta,
+    review_session_body,
     run_completion,
+    run_completion_commit,
+    run_completion_repairs,
+    run_completion_review,
+    run_completion_support,
+    run_completion_types,
     run_control,
     run_coordination_control_drain,
     run_termination,
@@ -75,7 +85,7 @@ class RecordingPersistence:
 
 
 class FakeRunContext:
-    """A :class:`run_completion.RunContext` built by hand rather than by a run.
+    """A :class:`run_completion_types.RunContext` built by hand rather than by a run.
 
     Only the members the completion pass reaches are populated, which is what
     the Protocol declares; the collaborators a given test does not exercise are
@@ -122,7 +132,7 @@ class FakeRunControls:
 
 
 class RecordingSoftFail:
-    """A :class:`run_completion.SoftFailCommit` that records what it absorbed."""
+    """A :class:`run_completion_types.SoftFailCommit` that records what it absorbed."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -164,7 +174,7 @@ class CompletionTestCase(unittest.TestCase):
         self,
         snapshot: plans_models.PlanSnapshot,
         **overrides: Any,
-    ) -> run_completion.CompletionOutcome:
+    ) -> run_completion_types.CompletionOutcome:
         kwargs: dict[str, Any] = {
             "args": self.args(),
             "cwd": self.tmp_dir,
@@ -199,34 +209,59 @@ class CompletionBoundaryTests(unittest.TestCase):
         assert_no_runner_import(self, run_completion)
 
     def test_every_exit_states_an_outcome(self) -> None:
-        node = self.complete_plan_node()
-        returns = [
-            statement
-            for statement in ast.walk(node)
-            if isinstance(statement, ast.Return)
+        sibling_modules = (
+            run_completion_commit,
+            run_completion_repairs,
+            run_completion_review,
+            run_completion_support,
+        )
+        trees = [
+            (module.__name__, ast.parse(Path(module.__file__).read_text("utf-8")))
+            for module in sibling_modules
         ]
+        trees.append(
+            (
+                "run_completion",
+                ast.parse(Path(run_completion.__file__).read_text("utf-8")),
+            )
+        )
+        returns: list[tuple[str, ast.Return]] = []
+        for name, tree in trees:
+            for function in ast.walk(tree):
+                if not isinstance(function, ast.FunctionDef):
+                    continue
+                if name == "run_completion" and function.name != "complete_plan":
+                    continue
+                returns.extend(
+                    (name, statement)
+                    for statement in ast.walk(function)
+                    if isinstance(statement, ast.Return) and statement.value is not None
+                )
         self.assertTrue(returns)
-        for statement in returns:
+        for name, statement in returns:
+            where = f"{name}.py:{statement.lineno}"
             self.assertIsInstance(
                 statement.value,
                 ast.Call,
                 "a bare `return` leaves the caller with no plan image and no "
                 "next move, which is the fall-through the moved `break` and "
-                f"`continue` could not have (run_completion.py:{statement.lineno})",
+                f"`continue` could not have ({where})",
             )
             call = statement.value
             assert isinstance(call, ast.Call)
+            if isinstance(call.func, ast.Name):
+                # A delegation to another function checked by this same test.
+                continue
             self.assertEqual(
                 "CompletionOutcome",
                 getattr(getattr(call.func, "value", None), "id", None),
                 "every exit must be built through CompletionOutcome, so the "
-                "action and the snapshot are stated together "
-                f"(run_completion.py:{statement.lineno})",
+                f"action and the snapshot are stated together ({where})",
             )
             self.assertIn(
                 getattr(call.func, "attr", None),
                 {"again", "stop"},
-                f"unknown outcome constructor (run_completion.py:{statement.lineno})",
+                f"unknown outcome constructor ({where})",
             )
 
     def test_the_pass_never_falls_off_its_end(self) -> None:
@@ -253,8 +288,8 @@ class CompletionBoundaryTests(unittest.TestCase):
         )
 
     def test_the_two_actions_are_the_two_the_loop_had(self) -> None:
-        self.assertEqual("continue", run_completion.ACTION_CONTINUE)
-        self.assertEqual("break", run_completion.ACTION_BREAK)
+        self.assertEqual("continue", run_completion_types.ACTION_CONTINUE)
+        self.assertEqual("break", run_completion_types.ACTION_BREAK)
 
 
 class RunLoopDelegationTests(unittest.TestCase):
@@ -319,7 +354,7 @@ class PlanConsistencyTests(CompletionTestCase):
 
         outcome = self.complete(snapshot)
 
-        self.assertEqual(run_completion.ACTION_BREAK, outcome.action)
+        self.assertEqual(run_completion_types.ACTION_BREAK, outcome.action)
         self.assertIs(snapshot, outcome.snapshot)
         (pause,) = self.ctx.pauses
         self.assertEqual("no-pending-but-incomplete", pause["reason"])
@@ -335,7 +370,7 @@ class PlanConsistencyTests(CompletionTestCase):
             review_requested=True,
         )
 
-        self.assertEqual(run_completion.ACTION_BREAK, outcome.action)
+        self.assertEqual(run_completion_types.ACTION_BREAK, outcome.action)
         self.assertEqual("no-pending-but-incomplete", self.ctx.pauses[0]["reason"])
         self.assertFalse(
             self.ctx.commit_at_end_attempted,
@@ -353,7 +388,7 @@ class AllCompleteTests(CompletionTestCase):
 
         outcome = self.complete(snapshot)
 
-        self.assertEqual(run_completion.ACTION_BREAK, outcome.action)
+        self.assertEqual(run_completion_types.ACTION_BREAK, outcome.action)
         self.assertIs(snapshot, outcome.snapshot)
         self.assertEqual("all-complete", self.ctx.payload["reason"])
         self.assertEqual(
@@ -373,7 +408,7 @@ class AllCompleteTests(CompletionTestCase):
             review_requested=True,
         )
 
-        self.assertEqual(run_completion.ACTION_BREAK, outcome.action)
+        self.assertEqual(run_completion_types.ACTION_BREAK, outcome.action)
         self.assertEqual("all-complete", self.ctx.payload["reason"])
         self.assertEqual([], self.soft_fail.calls)
 
@@ -384,17 +419,17 @@ class EndCommitTests(CompletionTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.targets = mock.patch.object(
-            run_completion.commit_settlement,
+            commit_settlement,
             "_registered_end_commit_targets",
             return_value=(),
         )
         self.targets.start()
         self.addCleanup(self.targets.stop)
 
-    def run_end_commit(self, **group: Any) -> run_completion.CompletionOutcome:
+    def run_end_commit(self, **group: Any) -> run_completion_types.CompletionOutcome:
         snapshot = self.snapshot(("complete",))
         with mock.patch.object(
-            run_completion.commit_settlement, "_run_commit_group", **group
+            commit_settlement, "_run_commit_group", **group
         ) as commit_group:
             self.commit_group = commit_group
             return self.complete(snapshot, commit_mode="end")
@@ -402,7 +437,7 @@ class EndCommitTests(CompletionTestCase):
     def test_a_successful_commit_sends_the_loop_round_again(self) -> None:
         outcome = self.run_end_commit(return_value=({"ok": True}, None))
 
-        self.assertEqual(run_completion.ACTION_CONTINUE, outcome.action)
+        self.assertEqual(run_completion_types.ACTION_CONTINUE, outcome.action)
         self.assertEqual([], self.soft_fail.calls)
         self.assertTrue(self.ctx.commit_at_end_attempted)
         self.assertEqual(None, self.commit_group.call_args.kwargs["session_id"])
@@ -428,7 +463,7 @@ class EndCommitTests(CompletionTestCase):
             return_value=({"status": "failed"}, {"error": "dirty tree"})
         )
 
-        self.assertEqual(run_completion.ACTION_CONTINUE, outcome.action)
+        self.assertEqual(run_completion_types.ACTION_CONTINUE, outcome.action)
         (call,) = self.soft_fail.calls
         self.assertEqual("end", call["scope"])
         self.assertIsNone(call["session_id"])
@@ -439,7 +474,7 @@ class EndCommitTests(CompletionTestCase):
     def test_a_raised_commit_error_is_absorbed_rather_than_propagated(self) -> None:
         outcome = self.run_end_commit(side_effect=RunError("no repository"))
 
-        self.assertEqual(run_completion.ACTION_CONTINUE, outcome.action)
+        self.assertEqual(run_completion_types.ACTION_CONTINUE, outcome.action)
         (call,) = self.soft_fail.calls
         self.assertEqual("no repository", call["error"])
         self.assertIsNone(call["group"])
@@ -451,13 +486,11 @@ class EndCommitTests(CompletionTestCase):
         self.assertTrue(self.ctx.commit_at_end_attempted)
 
         snapshot = plans_snapshot.inspect_plan(self.plan_dir)
-        with mock.patch.object(
-            run_completion.commit_settlement, "_run_commit_group"
-        ) as never:
+        with mock.patch.object(commit_settlement, "_run_commit_group") as never:
             outcome = self.complete(snapshot, commit_mode="end")
 
         never.assert_not_called()
-        self.assertEqual(run_completion.ACTION_BREAK, outcome.action)
+        self.assertEqual(run_completion_types.ACTION_BREAK, outcome.action)
         self.assertEqual("all-complete", self.ctx.payload["reason"])
 
 
@@ -466,13 +499,11 @@ class StopBeforeReviewTests(CompletionTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.stopped = mock.patch.object(
-            run_completion.run_termination, "_stop_before_review_work"
-        )
+        self.stopped = mock.patch.object(run_termination, "_stop_before_review_work")
         self.stop_before_review_work = self.stopped.start()
         self.addCleanup(self.stopped.stop)
         self.resume = mock.patch.object(
-            run_completion.review_cycle,
+            review_cycle,
             "_set_review_resume",
             return_value=mock.Mock(action="review"),
         )
@@ -488,7 +519,7 @@ class StopBeforeReviewTests(CompletionTestCase):
         snapshot = self.snapshot(("complete",))
 
         with mock.patch.object(
-            run_completion.run_coordination_control_drain,
+            run_coordination_control_drain,
             "drain_external_control_queue",
             side_effect=self.drain_that_queues_a_stop,
         ):
@@ -499,7 +530,7 @@ class StopBeforeReviewTests(CompletionTestCase):
             "the drain must run before the review resume is computed",
         )
         self.stop_before_review_work.assert_called_once()
-        self.assertEqual(run_completion.ACTION_BREAK, outcome.action)
+        self.assertEqual(run_completion_types.ACTION_BREAK, outcome.action)
         self.assertFalse(
             self.ctx.review_appended,
             "a stop observed before the review means no review session is "
@@ -515,16 +546,16 @@ class StopBeforeReviewTests(CompletionTestCase):
 
         with (
             mock.patch.object(
-                run_completion.run_coordination_control_drain,
+                run_coordination_control_drain,
                 "drain_external_control_queue",
             ),
             mock.patch.object(
-                run_completion.review_delta,
+                review_delta,
                 "_compute_review_delta_context",
                 return_value=(None, None),
             ),
             mock.patch.object(
-                run_completion.review_session_body,
+                review_session_body,
                 "ensure_generated_review_session",
                 side_effect=plans_errors.PlanError("cannot write"),
             ),
@@ -532,7 +563,7 @@ class StopBeforeReviewTests(CompletionTestCase):
             outcome = self.complete(snapshot, review_requested=True)
 
         self.stop_before_review_work.assert_not_called()
-        self.assertEqual(run_completion.ACTION_BREAK, outcome.action)
+        self.assertEqual(run_completion_types.ACTION_BREAK, outcome.action)
         (pause,) = self.ctx.pauses
         self.assertEqual("malformed-plan", pause["reason"])
 
@@ -542,30 +573,26 @@ class SeamOwnershipTests(unittest.TestCase):
 
     def test_the_context_protocol_is_structural(self) -> None:
         self.assertTrue(
-            issubclass(run_completion.RunContext, object)
-            and getattr(run_completion.RunContext, "_is_protocol", False),
+            issubclass(run_completion_types.RunContext, object)
+            and getattr(run_completion_types.RunContext, "_is_protocol", False),
             "RunContext must stay a Protocol: importing the runner's "
             "dataclass is the dependency this extraction removed",
         )
 
     def test_the_modules_the_boundary_reaches_are_all_extracted(self) -> None:
-        source = Path(run_completion.__file__).read_text(encoding="utf-8")
-        imported = {
-            alias.name
-            for node in ast.parse(source).body
-            if isinstance(node, ast.ImportFrom) and node.module is None
-            for alias in node.names
-        }
-        self.assertIn("run_coordination_control_drain", imported)
-        self.assertIn("run_termination", imported)
-        self.assertNotIn("runner", imported)
-        # The three names the tests above patch through the module must be the
-        # module's own bindings, not copies, or a patch would be a no-op.
-        self.assertIs(
-            run_coordination_control_drain,
-            run_completion.run_coordination_control_drain,
-        )
-        self.assertIs(run_termination, run_completion.run_termination)
+        def imported(module: Any) -> set[str]:
+            source = Path(module.__file__).read_text(encoding="utf-8")
+            return {
+                alias.name
+                for node in ast.parse(source).body
+                if isinstance(node, ast.ImportFrom) and node.module is None
+                for alias in node.names
+            }
+
+        self.assertIn("run_coordination_control_drain", imported(run_completion))
+        self.assertIn("run_termination", imported(run_completion_support))
+        for module in (run_completion, run_completion_support):
+            self.assertNotIn("runner", imported(module))
 
 
 if __name__ == "__main__":

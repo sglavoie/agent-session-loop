@@ -6,7 +6,7 @@ import shlex
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import mailbox_models, mailbox_rendering, redirect_ack
+from . import mailbox_models, mailbox_rendering, redirect_ack_carry
 from .run_prompt_workspace import _prompt_plan_dir
 
 MAILBOX_PROTOCOL_HEADING = "## Live mailbox protocol"
@@ -245,7 +245,7 @@ def _mailbox_acknowledge_command_text(
 
 
 def _correction_context_body(
-    corrections: redirect_ack.CarriedCorrections,
+    corrections: redirect_ack_carry.CarriedCorrections,
     *,
     plan_dir: str | Path,
     state_dir: str | Path | None,

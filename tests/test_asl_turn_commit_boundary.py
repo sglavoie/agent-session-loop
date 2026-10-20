@@ -10,6 +10,9 @@ from typing import Any
 
 from agent_session_loop import (
     run_commit,
+    run_commit_invocation,
+    run_commit_paused,
+    run_commit_process,
     run_loop,
     runner,
     turn_execution_argv,
@@ -37,30 +40,31 @@ from tests.support import (
     assert_no_runner_import,
 )
 
-#: The symbols `run_commit` took from the runner. The program's no-alias rule
-#: says the runner keeps none of them behind, so a re-export added later to
-#: rescue a stale patch target fails here rather than in review.
+#: The symbols `run_commit` took from the runner, with the module that now
+#: owns each. The program's no-alias rule says the runner keeps none of them
+#: behind, so a re-export added later to rescue a stale patch target fails here
+#: rather than in review.
 MOVED_SYMBOLS = (
-    "_LiveTurn",
-    "_commit_paths",
-    "_build_invocation_payload",
-    "_resolved_model_record",
-    "_merged_model_projection",
-    "_commit_status_result",
-    "_write_commit_artifacts",
-    "_CommitGeneration",
-    "_commit_generation",
-    "_asl_commit_argv",
-    "_asl_commit_env",
-    "_snapshot_commit_descendants",
-    "_sweep_commit_descendants",
-    "_run_bounded_asl_commit",
-    "_run_asl_commit",
-    "_commit_started_payload",
-    "COMMIT_SUBPROCESS_GRACE_SECONDS",
-    "_COMMIT_DRAIN_SECONDS",
-    "CHECKOUT_ROOT",
-    "COMMIT_SUBCOMMAND_ARGV",
+    (run_commit, "_LiveTurn"),
+    (run_commit, "_commit_paths"),
+    (run_commit_invocation, "_build_invocation_payload"),
+    (run_commit_invocation, "_resolved_model_record"),
+    (run_commit_invocation, "_merged_model_projection"),
+    (run_commit, "_commit_status_result"),
+    (run_commit, "_write_commit_artifacts"),
+    (run_commit, "_CommitGeneration"),
+    (run_commit, "_commit_generation"),
+    (run_commit, "_asl_commit_argv"),
+    (run_commit_process, "_asl_commit_env"),
+    (run_commit_process, "_snapshot_commit_descendants"),
+    (run_commit_process, "_sweep_commit_descendants"),
+    (run_commit_process, "_run_bounded_asl_commit"),
+    (run_commit, "_run_asl_commit"),
+    (run_commit, "_commit_started_payload"),
+    (run_commit, "COMMIT_SUBPROCESS_GRACE_SECONDS"),
+    (run_commit_process, "_COMMIT_DRAIN_SECONDS"),
+    (run_commit_process, "CHECKOUT_ROOT"),
+    (run_commit, "COMMIT_SUBCOMMAND_ARGV"),
 )
 
 #: The three files a commit leaves behind, and the only paths this boundary is
@@ -187,10 +191,10 @@ class RunCommitBoundaryTests(unittest.TestCase):
         assert_no_runner_import(self, run_commit)
 
     def test_the_runner_keeps_no_alias_for_the_moved_symbols(self) -> None:
-        for name in MOVED_SYMBOLS:
+        for owner, name in MOVED_SYMBOLS:
             with self.subTest(name=name):
                 self.assertFalse(hasattr(runner, name))
-                self.assertTrue(hasattr(run_commit, name))
+                self.assertTrue(hasattr(owner, name))
 
     def test_only_the_artifact_writers_touch_the_filesystem(self) -> None:
         # The subprocess this module runs can take minutes, so the run's write
@@ -207,9 +211,14 @@ class RunCommitBoundaryTests(unittest.TestCase):
                     "durability.write_text",
                     "durability.write_json_file",
                 },
-                "_write_paused_work_message": {"durability.write_text"},
             },
             _filesystem_writers(self.source),
+        )
+        self.assertEqual(
+            {"_write_paused_work_message": {"durability.write_text"}},
+            _filesystem_writers(
+                Path(run_commit_paused.__file__ or "").read_text(encoding="utf-8")
+            ),
         )
 
     def test_the_artifact_layout_is_the_one_the_writer_writes(self) -> None:
@@ -229,9 +238,9 @@ class RunCommitBoundaryTests(unittest.TestCase):
         # while this module sits directly under the package directory. A module
         # one directory deeper would resolve one level short and silently
         # commit with whatever `asl` another install put on PYTHONPATH.
-        self.assertEqual(REPO_ROOT, run_commit.CHECKOUT_ROOT)
+        self.assertEqual(REPO_ROOT, run_commit_process.CHECKOUT_ROOT)
         self.assertEqual(
-            Path(run_commit.__file__ or "").parent.name, "agent_session_loop"
+            Path(run_commit_process.__file__ or "").parent.name, "agent_session_loop"
         )
 
 
