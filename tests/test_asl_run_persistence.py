@@ -2,7 +2,7 @@
 
 The behavioural coverage of what gets written lives where it always has —
 ``tests/test_asl_compaction.py`` reads back compacted state, and
-``tests/test_asl_agent_mux_projection.py`` drives the projection through whole
+``tests/test_asl_agent_mux_projection_state.py`` drives the projection through whole
 runs. What is asserted here is the contract those modules cannot state, because
 they exercise the run rather than the seam:
 

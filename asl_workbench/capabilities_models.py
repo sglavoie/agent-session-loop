@@ -213,7 +213,11 @@ _CATALOG_TESTS = (
     "scripts:tests/test_workbench_catalog_observation.py",
     "scripts:tests/test_workbench_catalog_generations.py",
 )
-_DETAIL_TESTS = "scripts:tests/test_workbench_details.py"
+_DETAIL_TESTS = (
+    "scripts:tests/test_workbench_details.py",
+    "scripts:tests/test_workbench_details_routes.py",
+    "scripts:tests/test_workbench_details_search.py",
+)
 _HISTORY_TESTS = "scripts:tests/test_workbench_history.py"
 _OPERATION_TESTS = (
     "scripts:tests/test_workbench_operations.py",

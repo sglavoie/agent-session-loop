@@ -20,16 +20,24 @@ PORTABLE_MODULES = (
     "tests.test_asl_guidance_delivery",
     "tests.test_asl_harness_lifecycle",
     "tests.test_asl_verification_transitions",
+    "tests.test_asl_verification_repair_budget",
+    "tests.test_asl_verification_terminal_checks",
     "tests.test_asl_review_transitions",
     "tests.test_asl_review_session_contract",
     "tests.test_asl_review_session_body",
     "tests.test_asl_run_completion",
     "tests.test_asl_turn_dispositions",
+    "tests.test_asl_turn_dispositions_pause",
+    "tests.test_asl_turn_dispositions_exit",
     "tests.test_asl_turn_postflight",
     "tests.test_asl_turn_preflight",
     "tests.test_asl_turn_preflight_baselines",
     "tests.test_asl_turn_preparation",
+    "tests.test_asl_turn_preparation_inputs",
+    "tests.test_asl_turn_preparation_prompt",
     "tests.test_asl_turn_settlement",
+    "tests.test_asl_turn_settlement_completion",
+    "tests.test_asl_turn_settlement_artifacts",
     "tests.test_asl_run_selection",
     "tests.test_asl_run_inputs",
     "tests.test_asl_run_loop",
@@ -70,6 +78,8 @@ PORTABLE_MODULES = (
     "tests.test_asl_bridge_fixtures",
     "tests.test_asl_agent_mux_contract",
     "tests.test_asl_agent_mux_projection",
+    "tests.test_asl_agent_mux_projection_state",
+    "tests.test_asl_agent_mux_projection_hooks",
     "tests.test_asl_agent_mux_pairing",
     "tests.test_asl_workbench_archive",
     "tests.test_asl_workbench_summary",
@@ -342,6 +352,8 @@ INTEGRATION_MODULES = (
     # Same again for the detail reads: containment and "a read changes
     # nothing" are only worth asserting against the routes that serve them.
     "tests.test_workbench_details",
+    "tests.test_workbench_details_routes",
+    "tests.test_workbench_details_search",
     # Integration for a third reason: the guarantee is cross-process, so
     # proving it takes real child interpreters racing a real flock, and the
     # route half needs a live server.
@@ -456,4 +468,6 @@ SCRIPT_SUITES = (
     "skills/asl/scripts/test_asl_autopilot_supervision_end_terminal_write.py",
     "skills/asl/scripts/test_asl_autopilot_worker_hung_reporting.py",
     "skills/session-resplit/scripts/test_resplit_session.py",
+    "skills/session-resplit/scripts/test_resplit_session_validation.py",
+    "skills/session-resplit/scripts/test_resplit_session_contracts.py",
 )

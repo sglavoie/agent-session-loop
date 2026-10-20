@@ -159,7 +159,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         regression_coverage=(
             models._DOCS_TESTS,
             *models._SUMMARY_TESTS,
-            models._DETAIL_TESTS,
+            *models._DETAIL_TESTS,
             *models._OVERVIEW_TESTS,
             models._OVERVIEW_BROWSER_TESTS,
         ),
@@ -173,7 +173,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         origin=models.ORIGIN_WORKBENCH,
         owner=models.OWNER_PORTABLE,
         authority=models.AUTHORITY_NONE,
-        regression_coverage=(models._DETAIL_TESTS,),
+        regression_coverage=(*models._DETAIL_TESTS,),
         # The service behind it is tested; the browser that calls it is not,
         # like every other row on this surface.
         coverage_gap=models.GAP_WORKBENCH_BROWSER,

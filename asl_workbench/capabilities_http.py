@@ -72,7 +72,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
             models._SERVER_QUEUE_TESTS,
             *models._SUMMARY_TESTS,
             *models._CATALOG_TESTS,
-            models._DETAIL_TESTS,
+            *models._DETAIL_TESTS,
         ),
         changes=("observational-reads",),
     ),
@@ -82,7 +82,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         coverage=(
             *models._RECOVERY_TESTS,
             models._SERVER_RECOVERY_TESTS,
-            models._DETAIL_TESTS,
+            *models._DETAIL_TESTS,
         ),
         changes=("observational-reads",),
     ),
@@ -96,7 +96,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         "Artifact descriptors for a plan's turn outputs. The listing is also "
         "the request vocabulary: a named artifact is what a detail read asks "
         "for.",
-        coverage=(models._SERVER_HTTP_TESTS, models._DETAIL_TESTS),
+        coverage=(models._SERVER_HTTP_TESTS, *models._DETAIL_TESTS),
     ),
     models._http(
         "GET /api/state",
@@ -104,52 +104,52 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         coverage=(
             models._SERVER_RUN_STATE_TESTS,
             models._DOCS_TESTS,
-            models._DETAIL_TESTS,
+            *models._DETAIL_TESTS,
         ),
         changes=("observational-reads",),
     ),
     models._http(
         "GET /api/events",
         "Bounded window over the plan's append-only event journal.",
-        coverage=(models._SERVER_RUN_STATE_TESTS, models._DETAIL_TESTS),
+        coverage=(models._SERVER_RUN_STATE_TESTS, *models._DETAIL_TESTS),
     ),
     models._http(
         "GET /api/logs",
         "Bounded stdout/stderr window, transparently reading gzip archives. "
         "Reaches only artifacts the selected plan published, or a path that "
         "plan contains.",
-        coverage=(models._SERVER_RUN_STATE_TESTS, models._DETAIL_TESTS),
+        coverage=(models._SERVER_RUN_STATE_TESTS, *models._DETAIL_TESTS),
     ),
     models._http(
         "GET /api/last-message",
         "Truncated preview of the harness's last message.",
-        coverage=(models._SERVER_RUN_RESULTS_TESTS, models._DETAIL_TESTS),
+        coverage=(models._SERVER_RUN_RESULTS_TESTS, *models._DETAIL_TESTS),
     ),
     models._http(
         "GET /api/result",
         "The turn result artifact for the plan's latest run.",
-        coverage=(models._SERVER_RUN_RESULTS_TESTS, models._DETAIL_TESTS),
+        coverage=(models._SERVER_RUN_RESULTS_TESTS, *models._DETAIL_TESTS),
     ),
     models._http(
         "GET /api/verification",
         "Verification artifact and the active check's position.",
-        coverage=(models._SERVER_RUN_RESULTS_TESTS, models._DETAIL_TESTS),
+        coverage=(models._SERVER_RUN_RESULTS_TESTS, *models._DETAIL_TESTS),
         changes=("observational-reads",),
     ),
     models._http(
         "GET /api/commits",
         "Commit rows recorded for the plan's sessions.",
-        coverage=(models._SERVER_RUN_RESULTS_TESTS, models._DETAIL_TESTS),
+        coverage=(models._SERVER_RUN_RESULTS_TESTS, *models._DETAIL_TESTS),
     ),
     models._http(
         "GET /api/progress",
         "Progress-journal entries parsed from the plan directory.",
-        coverage=(models._SERVER_RUN_RESULTS_TESTS, models._DETAIL_TESTS),
+        coverage=(models._SERVER_RUN_RESULTS_TESTS, *models._DETAIL_TESTS),
     ),
     models._http(
         "GET /api/final-review",
         "final-review.md and final-review.json for a completed plan.",
-        coverage=(models._SERVER_RUN_RESULTS_TESTS, models._DETAIL_TESTS),
+        coverage=(models._SERVER_RUN_RESULTS_TESTS, *models._DETAIL_TESTS),
     ),
     models._http(
         "GET /api/questions",
@@ -157,7 +157,7 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         coverage=(
             models._SERVER_QUESTIONS_TESTS,
             "scripts:tests/test_asl_reply_flows_e2e_live_resolution.py",
-            models._DETAIL_TESTS,
+            *models._DETAIL_TESTS,
         ),
         changes=("observational-reads",),
     ),

@@ -73,6 +73,8 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         regression_coverage=(
             "scripts:tests/test_asl_agent_mux_contract.py",
             "scripts:tests/test_asl_agent_mux_projection.py",
+            "scripts:tests/test_asl_agent_mux_projection_state.py",
+            "scripts:tests/test_asl_agent_mux_projection_hooks.py",
             models._TRANSPORT_TESTS,
         ),
     ),

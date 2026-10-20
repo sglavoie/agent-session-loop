@@ -32,7 +32,7 @@ from agent_session_loop import (
 )
 
 from .support import write_plan
-from .test_asl_turn_dispositions import FakeRunContext
+from .support_asl_turn_dispositions import FakeRunContext
 
 SESSION_ID = "1"
 

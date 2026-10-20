@@ -106,15 +106,15 @@ INTENTIONAL_CHANGES: tuple[IntentionalChange, ...] = (
             # The detail half. These hold the four routes that still reclaimed
             # after the catalog work -- state, verification, questions and the
             # recovery card -- to the target.
-            "scripts:tests/test_workbench_details.py"
+            "scripts:tests/test_workbench_details_routes.py"
             "::test_state_read_leaves_a_reclaimable_lock_alone",
-            "scripts:tests/test_workbench_details.py"
+            "scripts:tests/test_workbench_details_routes.py"
             "::test_verification_read_leaves_a_reclaimable_lock_alone",
-            "scripts:tests/test_workbench_details.py"
+            "scripts:tests/test_workbench_details_routes.py"
             "::test_recovery_read_leaves_a_reclaimable_lock_alone",
-            "scripts:tests/test_workbench_details.py"
+            "scripts:tests/test_workbench_details_routes.py"
             "::test_questions_read_leaves_a_reclaimable_lock_alone",
-            "scripts:tests/test_workbench_details.py"
+            "scripts:tests/test_workbench_details_routes.py"
             "::test_every_detail_read_leaves_the_whole_state_tree_unchanged",
         ),
         capability_keys=(

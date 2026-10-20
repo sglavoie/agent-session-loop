@@ -45,6 +45,8 @@ from agent_session_loop import (
     commit_settlement,
     run_loop,
     run_reporting,
+    run_reporting_output,
+    run_reporting_status,
     runner,
     turn_execution_protocols,
 )
@@ -100,10 +102,14 @@ class RunReportingBoundaryTests(unittest.TestCase):
     """``run_reporting`` is runner-free and writes nothing durable."""
 
     def setUp(self) -> None:
-        self.source = Path(run_reporting.__file__ or "").read_text(encoding="utf-8")
+        self.source = "\n".join(
+            Path(module.__file__ or "").read_text(encoding="utf-8")
+            for module in (run_reporting, run_reporting_output, run_reporting_status)
+        )
 
     def test_run_reporting_does_not_import_the_runner(self) -> None:
-        assert_no_runner_import(self, run_reporting)
+        for module in (run_reporting, run_reporting_output, run_reporting_status):
+            assert_no_runner_import(self, module)
 
     def test_the_module_writes_no_durable_record(self) -> None:
         # Every other surface in a run leaves a trace behind. This one's whole
@@ -125,8 +131,11 @@ class StderrOwnershipTests(unittest.TestCase):
     """One handle on ``sys.stderr``, and every collaborator writes through it."""
 
     def test_only_the_coordinator_resolves_sys_stderr(self) -> None:
-        source = Path(run_reporting.__file__ or "").read_text(encoding="utf-8")
-        self.assertEqual({"_StderrOutputCoordinator"}, _stderr_owners(source))
+        owners: set[str] = set()
+        for module in (run_reporting, run_reporting_output, run_reporting_status):
+            source = Path(module.__file__ or "").read_text(encoding="utf-8")
+            owners.update(_stderr_owners(source))
+        self.assertEqual({"_StderrOutputCoordinator"}, owners)
 
     def test_the_run_keeps_no_second_live_output_writer(self) -> None:
         for module in (runner, run_loop):
@@ -140,7 +149,7 @@ class StderrOwnershipTests(unittest.TestCase):
         # unserialized writer is exactly what tears a line.
         source = run_loop_view.assembled_source()
         self.assertIn("stderr=output.stream", source)
-        reporting_source = Path(run_reporting.__file__ or "").read_text(
+        reporting_source = Path(run_reporting_output.__file__ or "").read_text(
             encoding="utf-8"
         )
         self.assertIn("out=self._output.stream", reporting_source)
