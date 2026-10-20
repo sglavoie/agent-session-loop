@@ -122,7 +122,7 @@ class MultiRepositoryBaselineTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                baseline,
+                baseline_evidence,
                 "_registered_repository_fingerprint",
                 return_value=("same-digest", True),
             ):
@@ -132,7 +132,7 @@ class MultiRepositoryBaselineTests(unittest.TestCase):
                 )
             with (
                 mock.patch.object(
-                    baseline,
+                    baseline_evidence,
                     "_registered_repository_fingerprint",
                     return_value=("same-digest", False),
                 ),

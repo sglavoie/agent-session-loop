@@ -13,7 +13,7 @@ from typing import Any
 from agent_session_loop import (
     commit_groups,
     commit_settlement,
-    turn_settlement,
+    turn_settlement_session_commit,
 )
 from agent_session_loop import verification_models as verification_module
 from tests.support import (
@@ -154,9 +154,9 @@ class UnregisteredCommitTargetTests(unittest.TestCase):
         # Matched structurally rather than by substring: qualifying the callee
         # with its owning module made the line long enough for the formatter to
         # wrap the argument, and a text match reads that as a behaviour change.
-        # The per-session commit moved to `turn_settlement` in Session 36; the
+        # The per-session commit moved to `turn_settlement_session_commit`; the
         # selection it reads is the claim, not the file it is read in.
-        tree = ast.parse(inspect.getsource(turn_settlement.settle_turn))
+        tree = ast.parse(inspect.getsource(turn_settlement_session_commit))
 
         def names_the_context(node: ast.expr) -> bool:
             # The verification context is reached through the run context now,

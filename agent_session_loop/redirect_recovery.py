@@ -68,762 +68,93 @@ gets two contradictory outcomes.
 
 from __future__ import annotations
 
-import os
-from collections.abc import Sequence
-from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Literal
-
-from . import (
-    clock,
-    conversations,
-    redirect_store_delivery,
-    redirect_store_journal,
-    redirect_store_models,
-    redirect_store_requests,
-    redirect_store_vocab,
-    state,
-    state_locks,
+from .redirect_recovery_evidence import (
+    BLOCKED_FOREIGN_OWNER as BLOCKED_FOREIGN_OWNER,
 )
-
-# ---------------------------------------------------------------------------
-# Status vocabulary
-# ---------------------------------------------------------------------------
-
-OperationStatus = Literal[
-    "submitted",
-    "unanswered",
-    "accepted",
-    "delivered",
-    "acknowledged",
-    "rejected",
-    "expired",
-    "uncertain",
-]
-
-#: Persisted, unanswered, and a live run still owns the plan: the ordinary
-#: in-flight case, not a recovery concern.
-STATUS_SUBMITTED: OperationStatus = "submitted"
-#: Persisted and unanswered, but the run that could have answered it is gone.
-STATUS_UNANSWERED: OperationStatus = "unanswered"
-#: A runner undertook to act on it and no worker was ever launched holding it.
-#: Covers a request never carried and one carried into a prompt that never ran,
-#: because they owe the operator the same thing.
-STATUS_ACCEPTED: OperationStatus = "accepted"
-#: An attempt launched a worker with it; no receipt. Kept in the vocabulary and
-#: deliberately never produced: that shape is reported as :data:`STATUS_UNCERTAIN`,
-#: since knowing a process was started is not knowing a model read anything.
-STATUS_DELIVERED: OperationStatus = "delivered"
-#: A worker running the carrying attempt receipted it.
-STATUS_ACKNOWLEDGED: OperationStatus = "acknowledged"
-#: Settled without being acted on.
-STATUS_REJECTED: OperationStatus = "rejected"
-#: Its acceptance window closed.
-STATUS_EXPIRED: OperationStatus = "expired"
-#: The durable evidence does not determine an answer. Reported, never guessed.
-STATUS_UNCERTAIN: OperationStatus = "uncertain"
-
-OPERATION_STATUSES: tuple[OperationStatus, ...] = (
-    STATUS_SUBMITTED,
-    STATUS_UNANSWERED,
-    STATUS_ACCEPTED,
-    STATUS_DELIVERED,
-    STATUS_ACKNOWLEDGED,
-    STATUS_REJECTED,
-    STATUS_EXPIRED,
-    STATUS_UNCERTAIN,
+from .redirect_recovery_evidence import (
+    BLOCKED_JOURNAL_UNREADABLE as BLOCKED_JOURNAL_UNREADABLE,
 )
-
-#: Statuses naming a correction nothing is going to act on unless something
-#: picks it up. Kept as its own set because "unfinished" is the question a
-#: recovering run asks, and it is not the same as "not terminal".
-UNFINISHED_STATUSES: frozenset[OperationStatus] = frozenset(
-    {STATUS_UNANSWERED, STATUS_ACCEPTED}
+from .redirect_recovery_evidence import (
+    BLOCKED_LIVE_OWNER as BLOCKED_LIVE_OWNER,
 )
-
-OwnerLiveness = Literal["live", "gone", "unknown"]
-
-#: A run holds this plan's lock and the lock reads as active.
-OWNER_LIVE: OwnerLiveness = "live"
-#: No lock, or a lock this host has proven dead.
-OWNER_GONE: OwnerLiveness = "gone"
-#: A lock whose owner this host cannot evaluate -- another machine's.
-OWNER_UNKNOWN: OwnerLiveness = "unknown"
-
-#: Reasons :func:`reconcile_startup` declines to touch the journal. Stable
-#: strings: the run loop puts them in an event and the workbench reads them.
-BLOCKED_FOREIGN_OWNER = "foreign-lock-owner"
-BLOCKED_LIVE_OWNER = "live-lock-owner"
-BLOCKED_JOURNAL_UNREADABLE = "redirect-journal-unreadable"
-
-
-# ---------------------------------------------------------------------------
-# Evidence
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class OwnerEvidence:
-    """Who, if anyone, is still answerable for this plan's redirects.
-
-    Derived from the lock alone. No signal is sent, no process table is read,
-    and no endpoint is opened: this object exists to be safe to build from a
-    read-only command, and every cheaper-looking probe has a side effect on the
-    thing it probes.
-    """
-
-    liveness: OwnerLiveness
-    detail: str
-    pid: int | None = None
-    run_id: str | None = None
-    redirect_endpoint: str | None = None
-
-    @property
-    def answerable(self) -> bool:
-        """Whether some process may still act on a correction in this journal.
-
-        ``unknown`` counts as answerable. A lock belonging to another host may
-        name a perfectly healthy run, and treating what we cannot evaluate as
-        dead is how two runners end up reconciling the same journal.
-        """
-        return self.liveness in (OWNER_LIVE, OWNER_UNKNOWN)
-
-    def to_payload(self) -> dict[str, Any]:
-        return {
-            "liveness": self.liveness,
-            "detail": self.detail,
-            "pid": self.pid,
-            "run_id": self.run_id,
-            "redirect_endpoint": self.redirect_endpoint,
-        }
-
-
-def inspect_owner(
-    plan_dir: str | Path,
-    *,
-    state_dir: str | Path | None = None,
-) -> OwnerEvidence:
-    """Classify the plan's current redirect owner without changing anything.
-
-    ``state.inspect_lock_info`` rather than ``read_lock_info``: the reclaiming
-    read deletes a lock this host has proven dead, which is right for a run
-    about to write and wrong for a question about what happened.
-    """
-    try:
-        lock = state_locks.inspect_lock_info(plan_dir, state_dir)
-    except (OSError, ValueError) as error:
-        # An unreadable lock is not an absent one. Failing closed here keeps a
-        # transient stat error from being read as "nobody owns this plan".
-        return OwnerEvidence(liveness=OWNER_UNKNOWN, detail=f"lock-unreadable: {error}")
-    if lock is None:
-        return OwnerEvidence(liveness=OWNER_GONE, detail="no-lock")
-    if lock.foreign_host:
-        return OwnerEvidence(
-            liveness=OWNER_UNKNOWN,
-            detail="foreign-host",
-            pid=lock.pid,
-            run_id=_lock_run_id(lock),
-            redirect_endpoint=lock.redirect_endpoint,
-        )
-    return OwnerEvidence(
-        liveness=OWNER_LIVE if lock.active else OWNER_GONE,
-        detail=lock.reason,
-        pid=lock.pid,
-        run_id=_lock_run_id(lock),
-        redirect_endpoint=lock.redirect_endpoint,
-    )
-
-
-def _lock_run_id(lock: state.LockInfo) -> str | None:
-    raw = lock.raw.get("run_id")
-    return raw if isinstance(raw, str) and raw else None
-
-
-@dataclass(frozen=True)
-class ConversationEvidence:
-    """What the conversation ledger can still say about this plan.
-
-    Redirect recovery needs one fact from session 1's ledger and no more:
-    whether a conversation can be selected at all. An untrustworthy ledger --
-    one with a line nothing could attribute -- already forces
-    ``conversation-recovery-required`` before a turn runs, so a correction this
-    module would otherwise hand to that turn has nowhere to land yet. Reporting
-    it here is what keeps the two recoveries from contradicting each other.
-    """
-
-    readable: bool
-    trustworthy: bool
-    records: int = 0
-    unreadable_lines: int = 0
-    detail: str | None = None
-
-    @property
-    def usable(self) -> bool:
-        return self.readable and self.trustworthy
-
-    def to_payload(self) -> dict[str, Any]:
-        return {
-            "readable": self.readable,
-            "trustworthy": self.trustworthy,
-            "records": self.records,
-            "unreadable_lines": self.unreadable_lines,
-            "detail": self.detail,
-        }
-
-
-def inspect_conversations(
-    plan_dir: str | Path,
-    *,
-    state_dir: str | Path | None = None,
-) -> ConversationEvidence:
-    """Read the ledger's health, never its contents, and never write to it."""
-    plan_state = state.plan_state_dir(plan_dir, state_dir)
-    try:
-        ledger = conversations.read_conversations(plan_state)
-    except (conversations.ConversationError, OSError) as error:
-        return ConversationEvidence(
-            readable=False, trustworthy=False, detail=str(error)
-        )
-    return ConversationEvidence(
-        readable=True,
-        trustworthy=ledger.trustworthy,
-        records=len(ledger.records),
-        unreadable_lines=len(ledger.rejected),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Status projection
-# ---------------------------------------------------------------------------
-
-
-def operation_status(
-    request: redirect_store_models.RedirectRequest,
-    *,
-    owner: OwnerEvidence,
-    now: datetime | None = None,
-) -> OperationStatus:
-    """Project one request's status from durable evidence alone.
-
-    A pure function of the request, the lock classification, and the clock. It
-    reads nothing, so the same inputs always give the same answer and a caller
-    can hold several of these side by side without the earlier ones going stale
-    underneath it.
-
-    The distinction this exists for is ``submitted`` against ``unanswered``.
-    They are the same journal state; what separates them is whether any process
-    is still in a position to answer. An operator looking at ``submitted`` is
-    waiting; an operator looking at ``unanswered`` is looking at a correction
-    that will never be answered unless something picks it up.
-    """
-    moment = clock.utc_now() if now is None else now
-    if request.state == redirect_store_vocab.STATE_REJECTED:
-        return STATUS_REJECTED
-    if request.state == redirect_store_vocab.STATE_EXPIRED:
-        return STATUS_EXPIRED
-    if request.accepted:
-        if request.acknowledged:
-            return STATUS_ACKNOWLEDGED
-        if request.delivered:
-            # Launched and unreceipted. Not a state to be resolved by looking
-            # harder at this journal: what is unknown is what a worker read,
-            # and the journal records only what was handed to it. A version-1
-            # carry arrives here too, and for the stronger reason: its writer
-            # recorded the carry only after the launch, so the journal cannot
-            # even say whether the prompt went out, let alone what was read.
-            return STATUS_UNCERTAIN
-        if request.launch_ambiguous:
-            # The carrying attempt declared the prompt about to go out and never
-            # said what happened -- or wrote at a version that had no way to
-            # declare it. The unknown here is one step earlier than above: not
-            # what a worker read, but whether one was ever handed anything. It
-            # lands in the same bucket because the only safe answers are the
-            # same two, and both belong to an operator.
-            return STATUS_UNCERTAIN
-        # A carry with no launch reads as ``accepted`` alongside one that was
-        # never carried at all, and the collapse is deliberate. Both say a
-        # runner undertook to act and no process ever ran holding the words, so
-        # both are owed to the next attempt; keeping them apart here would put a
-        # correction nothing saw into the one bucket recovery refuses to touch.
-        return STATUS_ACCEPTED
-    if request.is_expired_at(moment):
-        # Past its window but not yet settled as such. Reported as expired
-        # because that is what the next writer will record, and reporting it as
-        # open would invite an operator to wait for an answer already refused.
-        return STATUS_EXPIRED
-    return STATUS_SUBMITTED if owner.answerable else STATUS_UNANSWERED
-
-
-@dataclass(frozen=True)
-class OperationOutcome:
-    """One request as recovery understands it: identity, status, and evidence."""
-
-    operation_id: str
-    status: OperationStatus
-    target: redirect_store_models.RedirectTarget
-    journal_state: str
-    feedback_digest: str
-    feedback_bytes: int
-    created_at: str
-    expires_at: str
-    continuation: redirect_store_models.RedirectTarget | None = None
-    continuation_recovered: bool = False
-    reason: str | None = None
-
-    def to_payload(self) -> dict[str, Any]:
-        return {
-            "operation_id": self.operation_id,
-            "status": self.status,
-            "target": self.target.to_payload(),
-            "journal_state": self.journal_state,
-            # Digest and byte count, exactly as the journal reports them. The
-            # operator's words stay behind ``redirect_store_journal.read_feedback``.
-            "feedback_digest": self.feedback_digest,
-            "feedback_bytes": self.feedback_bytes,
-            "created_at": self.created_at,
-            "expires_at": self.expires_at,
-            "continuation": (
-                self.continuation.to_payload()
-                if self.continuation is not None
-                else None
-            ),
-            "continuation_recovered": self.continuation_recovered,
-            "reason": self.reason,
-        }
-
-
-def _outcome(
-    request: redirect_store_models.RedirectRequest,
-    status: OperationStatus,
-) -> OperationOutcome:
-    return OperationOutcome(
-        operation_id=request.operation_id,
-        status=status,
-        target=request.target,
-        journal_state=request.state,
-        feedback_digest=request.feedback_digest,
-        feedback_bytes=request.feedback_bytes,
-        created_at=request.created_at,
-        expires_at=request.expires_at,
-        continuation=request.continuation,
-        continuation_recovered=request.continuation_recovered,
-        reason=request.reason,
-    )
-
-
-@dataclass(frozen=True)
-class RecoveryReport:
-    """Everything a read of this plan's redirect state can establish.
-
-    ``complete`` is the honesty flag. A torn tail or a line replay could not
-    attribute means some record is not in this answer, and a caller that treats
-    a partial projection as exhaustive is the caller that decides a correction
-    never existed.
-    """
-
-    plan_dir: str
-    journal_path: str
-    owner: OwnerEvidence
-    conversations: ConversationEvidence
-    operations: tuple[OperationOutcome, ...] = ()
-    torn_tail: bool = False
-    unreadable_lines: int = 0
-    checked_at: str = ""
-
-    @property
-    def complete(self) -> bool:
-        return not self.torn_tail and not self.unreadable_lines
-
-    def with_status(self, *statuses: OperationStatus) -> tuple[OperationOutcome, ...]:
-        wanted = frozenset(statuses)
-        return tuple(item for item in self.operations if item.status in wanted)
-
-    def operation_ids(self, *statuses: OperationStatus) -> tuple[str, ...]:
-        return tuple(item.operation_id for item in self.with_status(*statuses))
-
-    @property
-    def unfinished(self) -> tuple[OperationOutcome, ...]:
-        """Corrections nothing is answering, oldest first."""
-        return self.with_status(*sorted(UNFINISHED_STATUSES))
-
-    @property
-    def uncertain(self) -> tuple[OperationOutcome, ...]:
-        """Corrections whose fate the journal cannot settle, oldest first.
-
-        Delivered to an attempt that never receipted them, or bound into a
-        prompt an attempt declared it was about to send and never accounted for.
-        """
-        return self.with_status(STATUS_UNCERTAIN)
-
-    def to_payload(self) -> dict[str, Any]:
-        return {
-            "plan_dir": self.plan_dir,
-            "journal_path": self.journal_path,
-            "owner": self.owner.to_payload(),
-            "conversations": self.conversations.to_payload(),
-            "operations": [item.to_payload() for item in self.operations],
-            "torn_tail": self.torn_tail,
-            "unreadable_lines": self.unreadable_lines,
-            "complete": self.complete,
-            "checked_at": self.checked_at,
-        }
-
-
-def inspect_plan_recovery(
-    plan_dir: str | Path,
-    *,
-    state_dir: str | Path | None = None,
-    now: datetime | None = None,
-) -> RecoveryReport:
-    """Report this plan's redirect state without writing or starting anything.
-
-    The read every operator-facing surface should use. It appends no journal
-    line, settles nothing, opens no redirect endpoint, sends no wakeup, and
-    never reclaims the lock it classifies -- so asking the question twice gives
-    the same answer, and asking it at all changes nothing about the run it is
-    asked about.
-    """
-    moment = clock.utc_now() if now is None else now
-    owner = inspect_owner(plan_dir, state_dir=state_dir)
-    ledger = inspect_conversations(plan_dir, state_dir=state_dir)
-    view = redirect_store_journal.read_journal(plan_dir, state_dir=state_dir)
-    return RecoveryReport(
-        plan_dir=str(plan_dir),
-        journal_path=str(view.journal_path),
-        owner=owner,
-        conversations=ledger,
-        operations=tuple(
-            _outcome(request, operation_status(request, owner=owner, now=moment))
-            for request in view.requests
-        ),
-        torn_tail=view.torn_tail,
-        unreadable_lines=len(view.rejected),
-        checked_at=clock.isoformat(moment),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Startup reconciliation
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class StrandedCorrection:
-    """One unfinished correction and the session a future attempt could carry it into.
-
-    The session travels with the id rather than beside it in a parallel list:
-    the two are read together every time, and a report that could disagree with
-    itself about which session an id belongs to would deliver a correction to
-    the wrong worker.
-    """
-
-    operation_id: str
-    session_id: str
-
-    def to_payload(self) -> dict[str, Any]:
-        return {"operation_id": self.operation_id, "session_id": self.session_id}
-
-
-@dataclass(frozen=True)
-class ReconciliationReport:
-    """What a starting run did, or declined to do, about a crash's leftovers."""
-
-    plan_dir: str
-    run_id: str
-    reconciled: bool
-    blocked_reason: str | None = None
-    expired: tuple[str, ...] = ()
-    released: tuple[str, ...] = ()
-    settled: tuple[str, ...] = ()
-    stranded: tuple[StrandedCorrection, ...] = ()
-    recoverable: tuple[StrandedCorrection, ...] = ()
-    uncertain: tuple[StrandedCorrection, ...] = ()
-    torn_tail: bool = False
-    unreadable_lines: int = 0
-    owner: OwnerEvidence | None = None
-    conversations: ConversationEvidence | None = None
-
-    @property
-    def blocked(self) -> bool:
-        return self.blocked_reason is not None
-
-    def recoverable_for(self, session_id: str) -> tuple[str, ...]:
-        """The ids a new attempt of ``session_id`` may carry, oldest first."""
-        return tuple(
-            item.operation_id
-            for item in self.recoverable
-            if item.session_id == session_id
-        )
-
-    def uncertain_for(self, session_id: str) -> tuple[str, ...]:
-        """The ids delivered to an attempt of ``session_id`` that nobody receipted."""
-        return tuple(
-            item.operation_id
-            for item in self.uncertain
-            if item.session_id == session_id
-        )
-
-    def to_payload(self) -> dict[str, Any]:
-        return {
-            "plan_dir": self.plan_dir,
-            "run_id": self.run_id,
-            "reconciled": self.reconciled,
-            "blocked": self.blocked,
-            "blocked_reason": self.blocked_reason,
-            "expired": list(self.expired),
-            "released": list(self.released),
-            "settled": list(self.settled),
-            "stranded": [item.to_payload() for item in self.stranded],
-            "recoverable": [item.to_payload() for item in self.recoverable],
-            "uncertain": [item.to_payload() for item in self.uncertain],
-            "torn_tail": self.torn_tail,
-            "unreadable_lines": self.unreadable_lines,
-            "owner": None if self.owner is None else self.owner.to_payload(),
-            "conversations": (
-                None if self.conversations is None else self.conversations.to_payload()
-            ),
-        }
-
-
-def _blocked(
-    plan_dir: str | Path,
-    run_id: str,
-    reason: str,
-    owner: OwnerEvidence | None = None,
-) -> ReconciliationReport:
-    return ReconciliationReport(
-        plan_dir=str(plan_dir),
-        run_id=run_id,
-        reconciled=False,
-        blocked_reason=reason,
-        owner=owner,
-    )
-
-
-def reconcile_startup(
-    plan_dir: str | Path,
-    *,
-    run_id: str,
-    pending_session_ids: Sequence[str] = (),
-    state_dir: str | Path | None = None,
-    owner_pid: int | None = None,
-    now: datetime | None = None,
-) -> ReconciliationReport:
-    """Settle what a crash stranded, and say what this run may pick up.
-
-    Called once by a starting run, under that run's own lock and before the
-    first turn is selected. Four things happen and nothing else does:
-
-    - every request past its window is expired in the journal, so the refusal
-      survives this process too;
-    - every correction a dead run bound into a prompt but never got as far as
-      declaring it about to leave the process is released. That window -- prompt
-      finalized, ``launching`` not yet written -- is the one place a carry
-      proves nothing about what anybody saw *and* the journal can prove it,
-      and leaving the carry standing would let a crash inside it retire the
-      operator's words to a turn that never ran. Releasing is safe precisely
-      because ``launching`` is written on the far side of it: a correction that
-      may already have gone out is not touched here. A carry written before
-      that line existed has no far side -- a version-1 one replays as delivered,
-      a version-2 one as launch-ambiguous -- so this step passes both by, and an
-      upgraded plan reports its predecessor's carries as uncertain rather than
-      replaying words that may already have been in front of a worker;
-    - every *unanswered* request of a dead run whose session this plan is not
-      going to run again is settled ``rejected``/``run-ended``. That reason is
-      written exactly here: it means the process that owed the operator an
-      answer ended without giving one, which is a different fact from the
-      deadline passing and deserves a different word. One the dead run had
-      already *accepted* is reported as ``stranded`` instead, because its answer
-      is written and first terminal wins: the journal has no transition for
-      "accepted, and then nobody was left to deliver it", and inventing one
-      would overwrite the runner's own decision after the fact;
-    - everything still unfinished whose session *is* pending is reported as
-      recoverable, and every request a launched worker never receipted -- or
-      whose launch window a dead run left open -- is reported as uncertain.
-      Neither is acted on here. Recovery happens when the session is actually
-      selected, because only then does a continuation attempt exist to carry a
-      correction into.
-
-    ``pending_session_ids`` is supplied by the caller rather than read from the
-    plan: this module has no business deciding what a plan is going to run, and
-    the run loop already holds that snapshot. An empty sequence therefore means
-    "no session remains", which settles every stranded correction -- correct for
-    a finished plan and the reason the caller must pass the real list.
-
-    The refusals come first and write nothing. A plan owned by a live process
-    other than this one, or by a host we cannot evaluate, is left entirely
-    alone: a second reconciler settling what the first is still answering is how
-    one correction acquires two outcomes.
-    """
-    moment = clock.utc_now() if now is None else now
-    owner = inspect_owner(plan_dir, state_dir=state_dir)
-    if owner.liveness == OWNER_UNKNOWN:
-        return _blocked(plan_dir, run_id, BLOCKED_FOREIGN_OWNER, owner)
-    if owner.liveness == OWNER_LIVE and owner.pid != _resolved_pid(owner_pid):
-        return _blocked(plan_dir, run_id, BLOCKED_LIVE_OWNER, owner)
-
-    try:
-        expired = redirect_store_requests.expire_due_requests(
-            plan_dir, state_dir=state_dir, now=moment
-        )
-    except redirect_store_models.RedirectStoreError:
-        # An unreadable or unwritable journal stops reconciliation rather than
-        # being worked around. Every answer below is a claim about what the
-        # journal says, and a journal that cannot be read supports none of them.
-        return _blocked(plan_dir, run_id, BLOCKED_JOURNAL_UNREADABLE, owner)
-
-    ledger = inspect_conversations(plan_dir, state_dir=state_dir)
-    view = redirect_store_journal.read_journal(plan_dir, state_dir=state_dir)
-    released = _release_unlaunched_carries(plan_dir, view, run_id, state_dir, moment)
-    if released:
-        # The releases changed what the journal says about these requests, and
-        # every answer below is read off the view. Re-reading is cheaper than
-        # reasoning about which of the two states each branch wanted.
-        view = redirect_store_journal.read_journal(plan_dir, state_dir=state_dir)
-    live_sessions = frozenset(pending_session_ids)
-
-    settled: list[str] = []
-    stranded: list[StrandedCorrection] = []
-    recoverable: list[StrandedCorrection] = []
-    for request in view.strandable_by(run_id):
-        where = StrandedCorrection(
-            operation_id=request.operation_id,
-            session_id=request.target.session_id,
-        )
-        if request.target.session_id in live_sessions:
-            recoverable.append(where)
-            continue
-        if request.terminal:
-            # Accepted, and the session it was accepted for will not run again.
-            # Settling it would be a second terminal record over the first.
-            stranded.append(where)
-            continue
-        try:
-            redirect_store_requests.reject_request(
-                plan_dir,
-                request.operation_id,
-                reason=redirect_store_vocab.REASON_RUN_ENDED,
-                state_dir=state_dir,
-                now=moment,
-            )
-        except redirect_store_models.RedirectStoreError:
-            # Settled by someone else between the read and here, or a journal
-            # that just filled. Either way the request is not this run's to
-            # report as settled, and nothing is lost by saying less.
-            stranded.append(where)
-            continue
-        settled.append(request.operation_id)
-
-    uncertain = tuple(
-        StrandedCorrection(
-            operation_id=request.operation_id,
-            session_id=request.target.session_id,
-        )
-        for request in view.requests
-        if request.target.run_id != run_id
-        and request.accepted
-        and not request.acknowledged
-        and (request.delivered or request.launch_ambiguous)
-    )
-    return ReconciliationReport(
-        plan_dir=str(plan_dir),
-        run_id=run_id,
-        reconciled=True,
-        expired=tuple(request.operation_id for request in expired),
-        released=released,
-        settled=tuple(settled),
-        stranded=tuple(stranded),
-        recoverable=tuple(recoverable),
-        uncertain=uncertain,
-        torn_tail=view.torn_tail,
-        unreadable_lines=len(view.rejected),
-        owner=owner,
-        conversations=ledger,
-    )
-
-
-def _release_unlaunched_carries(
-    plan_dir: str | Path,
-    view: redirect_store_models.RedirectJournalView,
-    run_id: str,
-    state_dir: str | Path | None,
-    moment: datetime,
-) -> tuple[str, ...]:
-    """Hand back every carry a dead run provably never sent, oldest first.
-
-    "Provably" is the whole of it. A carry the dead run had already declared it
-    was about to submit is skipped, because the release would rest on a silence
-    that has two readings and this module picks neither.
-
-    Restricted to *other* runs on purpose. A carry belonging to this run at
-    startup is impossible -- the run id is minted for this process -- and a rule
-    that did not say so would become a live run releasing its own in-flight
-    prompt the first time reconciliation was called from anywhere else.
-
-    A refusal is swallowed rather than raised or reported: the request is simply
-    left carried, which is the state it was already in, and the caller's job of
-    settling a crash's leftovers should not fail over one line it could not
-    append.
-    """
-    released: list[str] = []
-    for request in view.requests:
-        if request.target.run_id == run_id or not request.accepted:
-            continue
-        carried_into = request.continuation
-        if carried_into is None or request.reached_a_worker:
-            continue
-        if request.launch_ambiguous:
-            # The dead run declared this prompt about to go out and then went
-            # silent. Handing the carry back here would be this module deciding
-            # the words never left that process, which is exactly what it has no
-            # evidence for. Left carried, and reported as uncertain below.
-            continue
-        try:
-            redirect_store_delivery.release_request(
-                plan_dir,
-                request.operation_id,
-                continuation=carried_into,
-                state_dir=state_dir,
-                now=moment,
-            )
-        except redirect_store_models.RedirectStoreError:
-            continue
-        released.append(request.operation_id)
-    return tuple(released)
-
-
-def _resolved_pid(owner_pid: int | None) -> int:
-    return os.getpid() if owner_pid is None else owner_pid
-
-
-# ---------------------------------------------------------------------------
-# Handing recovered corrections to a continuation
-# ---------------------------------------------------------------------------
-
-
-def recoverable_operation_ids(
-    report: ReconciliationReport,
-    session_id: str,
-) -> tuple[str, ...]:
-    """The ids an attempt of ``session_id`` may carry across the crash.
-
-    Gated on the conversation ledger being usable. An untrustworthy ledger means
-    no conversation can be selected yet, so the turn this would deliver into is
-    not going to exist; handing corrections to it would mark them delivered to
-    a prompt that was never built. Reporting nothing leaves them recoverable for
-    the run that starts after the ledger is repaired, which is the outcome that
-    loses nothing.
-
-    The uncertain ids are never here, and there is no flag that adds them. Their
-    delivery is already written, so the journal would refuse a second one; and
-    the question they raise -- did a model read this before the machine stopped
-    -- is not one the journal answers. An operator who decides it did not says
-    so by submitting the correction again, which produces a new request with its
-    own acceptance and its own words, chosen knowing what happened.
-    """
-    if report.blocked or not report.reconciled:
-        return ()
-    if report.conversations is not None and not report.conversations.usable:
-        return ()
-    return report.recoverable_for(session_id)
+from .redirect_recovery_evidence import (
+    OPERATION_STATUSES as OPERATION_STATUSES,
+)
+from .redirect_recovery_evidence import (
+    OWNER_GONE as OWNER_GONE,
+)
+from .redirect_recovery_evidence import (
+    OWNER_LIVE as OWNER_LIVE,
+)
+from .redirect_recovery_evidence import (
+    OWNER_UNKNOWN as OWNER_UNKNOWN,
+)
+from .redirect_recovery_evidence import (
+    STATUS_ACCEPTED as STATUS_ACCEPTED,
+)
+from .redirect_recovery_evidence import (
+    STATUS_ACKNOWLEDGED as STATUS_ACKNOWLEDGED,
+)
+from .redirect_recovery_evidence import (
+    STATUS_DELIVERED as STATUS_DELIVERED,
+)
+from .redirect_recovery_evidence import (
+    STATUS_EXPIRED as STATUS_EXPIRED,
+)
+from .redirect_recovery_evidence import (
+    STATUS_REJECTED as STATUS_REJECTED,
+)
+from .redirect_recovery_evidence import (
+    STATUS_SUBMITTED as STATUS_SUBMITTED,
+)
+from .redirect_recovery_evidence import (
+    STATUS_UNANSWERED as STATUS_UNANSWERED,
+)
+from .redirect_recovery_evidence import (
+    STATUS_UNCERTAIN as STATUS_UNCERTAIN,
+)
+from .redirect_recovery_evidence import (
+    UNFINISHED_STATUSES as UNFINISHED_STATUSES,
+)
+from .redirect_recovery_evidence import (
+    ConversationEvidence as ConversationEvidence,
+)
+from .redirect_recovery_evidence import (
+    OperationStatus as OperationStatus,
+)
+from .redirect_recovery_evidence import (
+    OwnerEvidence as OwnerEvidence,
+)
+from .redirect_recovery_evidence import (
+    OwnerLiveness as OwnerLiveness,
+)
+from .redirect_recovery_evidence import (
+    inspect_conversations as inspect_conversations,
+)
+from .redirect_recovery_evidence import (
+    inspect_owner as inspect_owner,
+)
+from .redirect_recovery_reconcile import (
+    ReconciliationReport as ReconciliationReport,
+)
+from .redirect_recovery_reconcile import (
+    StrandedCorrection as StrandedCorrection,
+)
+from .redirect_recovery_reconcile import (
+    reconcile_startup as reconcile_startup,
+)
+from .redirect_recovery_reconcile import (
+    recoverable_operation_ids as recoverable_operation_ids,
+)
+from .redirect_recovery_report import (
+    OperationOutcome as OperationOutcome,
+)
+from .redirect_recovery_report import (
+    RecoveryReport as RecoveryReport,
+)
+from .redirect_recovery_report import (
+    inspect_plan_recovery as inspect_plan_recovery,
+)
+from .redirect_recovery_report import (
+    operation_status as operation_status,
+)

@@ -19,6 +19,8 @@ from unittest import mock
 from agent_session_loop import (
     baseline,
     baseline_cache,
+    baseline_evidence,
+    baseline_run,
     contracts,
     plans_content_hash,
     plans_errors,

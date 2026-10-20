@@ -343,7 +343,7 @@ class BaselineTotalBudgetTests(unittest.TestCase):
                 seen_timeouts.append(check.timeout_seconds)
                 return self._pass_result(check, 4.0)
 
-            with mock.patch.object(baseline, "run_check", fake_run_check):
+            with mock.patch.object(baseline_run, "run_check", fake_run_check):
                 result = baseline.run_baseline(plan_dir, repo_root, total_timeout=10.0)
 
             # First check gets the full remaining budget (10s), the second
@@ -370,7 +370,7 @@ class BaselineTotalBudgetTests(unittest.TestCase):
             def fake_run_check(check, *, repo_root):
                 return self._pass_result(check, 6.0)
 
-            with mock.patch.object(baseline, "run_check", fake_run_check):
+            with mock.patch.object(baseline_run, "run_check", fake_run_check):
                 result = baseline.run_baseline(plan_dir, repo_root, total_timeout=5.0)
 
             outcome = result.outcomes[0]
@@ -404,7 +404,7 @@ class BaselineTotalBudgetTests(unittest.TestCase):
             def fake_run_check(check, *, repo_root):
                 return self._pass_result(check, 5.0)
 
-            with mock.patch.object(baseline, "run_check", fake_run_check):
+            with mock.patch.object(baseline_run, "run_check", fake_run_check):
                 result = baseline.run_baseline(plan_dir, repo_root, total_timeout=5.0)
 
             skipped = result.outcomes[1]

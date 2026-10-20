@@ -80,175 +80,42 @@ Three invariants survive the move:
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import threading
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any
 
 from . import (
     clock,
-    commit_settlement,
     continuation_guards,
     conversation_resume,
     durability,
     events,
-    guards,
     handoff_correction,
     handoff_guards,
     plans_errors,
     plans_models,
     plans_payloads,
-    plans_snapshot,
     plans_status_tables,
     readiness_gate,
     review,
     review_cycle,
-    run_commit,
     run_control,
     run_coordination_control_drain,
     run_inputs,
-    run_persistence,
-    run_reporting,
-    run_selection,
     session_verification,
     state,
     turn_execution_commit,
     turn_execution_executor,
-    verification_models,
+    turn_settlement_session_commit,
+    turn_settlement_status,
 )
-from .run_errors import RunError
-
-# ---------------------------------------------------------------------------
-# Collaborator seams
-# ---------------------------------------------------------------------------
-
-
-class RunContext(Protocol):
-    """One locked run's own state, as the settlement pass needs it.
-
-    Declared structurally rather than imported so this module never depends on
-    ``run_loop``, which owns the dataclass. Only the members this pass
-    reaches are named: the run payload and event log every record lands in, the
-    persistence seam that serializes them, the progress reporter the commit
-    group writes through, the plan cache a refusal re-reads the plan from, the
-    verification context and commit machinery the per-session commit needs, and
-    the two ways a turn ends the run.
-
-    ``completed_count`` and ``review_appended`` are declared mutable because
-    this is the boundary that advances them: the counter is what ``--max``
-    reads, and clearing the review flag is how a cycle that materialized repair
-    children tells the loop another review is owed once they finish.
-    """
-
-    @property
-    def run_id(self) -> str: ...
-
-    @property
-    def run_dir(self) -> Path: ...
-
-    @property
-    def event_path(self) -> Path: ...
-
-    @property
-    def payload(self) -> dict[str, Any]: ...
-
-    @property
-    def persistence(self) -> run_persistence._RunPersistence: ...
-
-    @property
-    def progress(self) -> run_reporting._ProgressReporter: ...
-
-    @property
-    def guard_controller(self) -> guards.GuardController: ...
-
-    @property
-    def plan_cache(self) -> plans_snapshot.PlanSnapshotCache: ...
-
-    @property
-    def session_attempts(self) -> continuation_guards.SessionAttempts: ...
-
-    @property
-    def verification_context(self) -> verification_models.VerificationContext: ...
-
-    @property
-    def commit_generation(self) -> run_commit._CommitGeneration: ...
-
-    @property
-    def control_payload(self) -> dict[str, Any]: ...
-
-    @property
-    def seen_external_command_ids(self) -> set[str]: ...
-
-    completed_count: int
-    review_appended: bool
-
-    def record_final_snapshot(self, snapshot: plans_models.PlanSnapshot) -> None: ...
-
-    def pause(
-        self,
-        *,
-        reason: str,
-        message: str,
-        details: dict[str, Any] | None,
-    ) -> None: ...
-
-
-class SoftFailCommit(Protocol):
-    """Absorb a commit failure and keep the run going.
-
-    The runner keeps the implementation because the owed-group settlement at
-    the top of the loop shares it with the per-session commit here, and because
-    the retry budget it spends lives on the run context rather than on this
-    boundary. It never raises: a commit that cannot be made is a record and a
-    warning, not an ending.
-    """
-
-    def __call__(
-        self,
-        *,
-        scope: str,
-        session_id: str | None,
-        group: Mapping[str, Any] | None,
-        commit: Mapping[str, Any] | None,
-        error: str | None,
-        message: str,
-    ) -> None: ...
-
-
-# ---------------------------------------------------------------------------
-# What the loop does next
-# ---------------------------------------------------------------------------
-
-#: The three moves a settlement pass can hand back. ``proceed`` is the pass
-#: falling through to the loop's own control tail, ``retry`` is the loop's
-#: `continue`, and ``stop`` is its `break`. Each constant is annotated with its
-#: own literal rather than the union so a comparison against it narrows at the
-#: call site.
-SettlementAction = Literal["proceed", "retry", "stop"]
-ACTION_PROCEED: Literal["proceed"] = "proceed"
-ACTION_RETRY: Literal["retry"] = "retry"
-ACTION_STOP: Literal["stop"] = "stop"
-
-
-@dataclasses.dataclass(frozen=True)
-class TurnSettlement:
-    """What one settled turn leaves the loop holding.
-
-    ``snapshot`` is the plan image the pass ended on, and it travels back on
-    every action: a refusal hands back the image the loop already had, a retry
-    hands back the one the retry was decided against, and a completed turn
-    hands back the published one.
-
-    ``turn_record`` is the published turn, and only :data:`ACTION_PROCEED`
-    carries it: it is what the loop's control tail attributes its drain and its
-    stop to, and no other action reaches that tail.
-    """
-
-    action: SettlementAction
-    snapshot: plans_models.PlanSnapshot
-    turn_record: Mapping[str, Any] | None
+from .turn_settlement_types import ACTION_PROCEED, ACTION_RETRY, ACTION_STOP
+from .turn_settlement_types import RunContext as RunContext
+from .turn_settlement_types import SettlementAction as SettlementAction
+from .turn_settlement_types import SoftFailCommit as SoftFailCommit
+from .turn_settlement_types import TurnSettlement as TurnSettlement
 
 
 def settle_turn(
@@ -283,128 +150,21 @@ def settle_turn(
     soft_fail_commit: SoftFailCommit,
 ) -> TurnSettlement:
     """Judge, record and publish one turn that changed a session's status."""
-    expected_change = (
-        plans_payloads.session_status_change_payload(
-            session_id,
-            before="pending",
-            after="complete",
-        ),
+    refusal = turn_settlement_status.validate_status_change(
+        ctx,
+        before=before,
+        after=after,
+        snapshot=snapshot,
+        session_id=session_id,
+        session_label=session_label,
+        session_details=session_details,
+        turn_payload=turn_payload,
+        paths=paths,
+        plan_artifacts_before=plan_artifacts_before,
+        plan_artifacts_written_by_runner=plan_artifacts_written_by_runner,
     )
-    status_changes = plans_payloads.status_changes(before, after)
-
-    def _adjudicate_plan_artifacts_after_pause() -> None:
-        # A status refusal ends the turn before the plan artifact guard's
-        # ordinary slot below, but the packet question is a different one and a
-        # turn that fails both has to report both (ASI-119). Mirror the
-        # post-turn guards: adjudicate only, record beside the pause already
-        # taken, never revert a second time or displace its reason.
-        handoff_guards._enforce_plan_artifact_guard(
-            event_path=ctx.event_path,
-            payload=ctx.payload,
-            persistence=ctx.persistence,
-            before=before,
-            after=after,
-            digests_before=plan_artifacts_before,
-            runner_written=plan_artifacts_written_by_runner,
-            session_id=session_id,
-            session_label=session_label,
-            session_details=session_details,
-            turn_payload=turn_payload,
-            paths=paths,
-            plan_cache=ctx.plan_cache,
-            append_handoff_note=handoff_correction._append_handoff_note,
-            reinspect=session_verification._reinspect_after_revert,
-            adjudicate_only=True,
-        )
-
-    if not status_changes:
-        with ctx.persistence.lock:
-            ctx.payload["expected_status_changes"] = list(expected_change)
-            ctx.payload["observed_status_changes"] = []
-            ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(after)
-        turn_execution_commit.record_turn_rejected(
-            event_path=ctx.event_path,
-            payload=ctx.payload,
-            persistence=ctx.persistence,
-            turn_payload=turn_payload,
-            session_id=session_id,
-            guard="status-change",
-            reason="no-status-change",
-            detail={
-                "expected_status_changes": list(expected_change),
-                "observed_status_changes": [],
-            },
-        )
-        ctx.pause(
-            reason="no-status-change",
-            message=f"{session_label} did not change status",
-            details={
-                **session_details,
-                "expected_status_changes": list(expected_change),
-                "observed_status_changes": [],
-            },
-        )
-        _adjudicate_plan_artifacts_after_pause()
-        return TurnSettlement(ACTION_STOP, snapshot, None)
-    if len(status_changes) > 1:
-        with ctx.persistence.lock:
-            ctx.payload["expected_status_changes"] = list(expected_change)
-            ctx.payload["observed_status_changes"] = list(status_changes)
-            ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(after)
-        turn_execution_commit.record_turn_rejected(
-            event_path=ctx.event_path,
-            payload=ctx.payload,
-            persistence=ctx.persistence,
-            turn_payload=turn_payload,
-            session_id=session_id,
-            guard="status-change",
-            reason="multiple-status-changes",
-            detail={
-                "expected_status_changes": list(expected_change),
-                "observed_status_changes": list(status_changes),
-            },
-        )
-        ctx.pause(
-            reason="multiple-status-changes",
-            message="more than one session status changed during one harness turn",
-            details={
-                **session_details,
-                "expected_status_changes": list(expected_change),
-                "observed_status_changes": list(status_changes),
-            },
-        )
-        _adjudicate_plan_artifacts_after_pause()
-        return TurnSettlement(ACTION_STOP, snapshot, None)
-    if status_changes != expected_change:
-        with ctx.persistence.lock:
-            ctx.payload["expected_status_changes"] = list(expected_change)
-            ctx.payload["observed_status_changes"] = list(status_changes)
-            ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(after)
-        turn_execution_commit.record_turn_rejected(
-            event_path=ctx.event_path,
-            payload=ctx.payload,
-            persistence=ctx.persistence,
-            turn_payload=turn_payload,
-            session_id=session_id,
-            guard="status-change",
-            reason="unexpected-status-change",
-            detail={
-                "expected_status_changes": list(expected_change),
-                "observed_status_changes": list(status_changes),
-            },
-        )
-        ctx.pause(
-            reason="unexpected-status-change",
-            message="the changed session status did not match the expected "
-            "pending completion",
-            details={
-                **session_details,
-                "expected_status_changes": list(expected_change),
-                "observed_status_changes": list(status_changes),
-            },
-        )
-        _adjudicate_plan_artifacts_after_pause()
-        return TurnSettlement(ACTION_STOP, snapshot, None)
+    if refusal is not None:
+        return refusal
 
     # The turn survived every result branch, so nothing terminated it
     # early and the comparison above was deferred to here. Behind the
@@ -590,93 +350,16 @@ def settle_turn(
         ctx.payload, after.plan_dir, ctx.persistence
     )
 
-    repair_owned_commit = is_repair_session and commit_mode is None
-    if not is_review_session and (
-        commit_mode == run_selection.COMMIT_MODE_PER_SESSION or repair_owned_commit
-    ):
-        session_targets: list[dict[str, Any]] = []
-        try:
-            session_targets = (
-                commit_settlement._registered_session_commit_targets(
-                    ctx.verification_context,
-                    turn_payload.get("workspace_write_guard", {}),
-                )
-                if ctx.verification_context.workspace is not None
-                else commit_settlement._dirty_commit_targets(ctx.verification_context)
-            )
-            if repair_owned_commit:
-                session_targets = [
-                    target
-                    for target in session_targets
-                    if not commit_settlement._commit_target_is_clean(target)
-                ]
-            if session_targets or not repair_owned_commit:
-                commit_group, failed_commit = commit_settlement._run_commit_group(
-                    event_path=ctx.event_path,
-                    payload=ctx.payload,
-                    progress=ctx.progress,
-                    verification_context=ctx.verification_context,
-                    run_dir=ctx.run_dir,
-                    run_id=ctx.run_id,
-                    session_id=session_id,
-                    targets=session_targets,
-                    generation=ctx.commit_generation,
-                    persistence=ctx.persistence,
-                )
-            else:
-                commit_group = None
-                failed_commit = None
-        except RunError as error:
-            commit_group = None
-            failed_commit = None
-            commit_error = str(error)
-        else:
-            commit_error = None
-        if repair_owned_commit:
-            with ctx.persistence.lock:
-                turn_payload["repair_commit"] = {
-                    "mode": run_selection.REPAIR_COMMIT_MODE_PER_CHILD,
-                    "result": (
-                        "no-changes"
-                        if not session_targets
-                        else (
-                            "failed"
-                            if failed_commit is not None or commit_error is not None
-                            else "committed"
-                        )
-                    ),
-                    "commit_group": commit_group,
-                }
-                durability.write_json_file(paths["result"], turn_payload)
-        if failed_commit is not None or commit_error is not None:
-            # The turn itself stands: it executed, it verified, and the
-            # session it completed is still complete. Only the commit
-            # of its changes failed, so the failure is recorded on the
-            # turn and on the run, and the turn goes on to be committed
-            # to the plan. Recording a `turn_rejected` here instead
-            # would say a guard refused a turn the very next call
-            # accepts.
-            with ctx.persistence.lock:
-                turn_payload["session_commit"] = {
-                    "guard": (
-                        "repair-session-commit"
-                        if repair_owned_commit
-                        else "session-commit"
-                    ),
-                    "reason": "commit-failed",
-                    "error": commit_error,
-                    "commit_group": commit_group,
-                    "commit": failed_commit,
-                }
-                durability.write_json_file(paths["result"], turn_payload)
-            soft_fail_commit(
-                scope="session",
-                session_id=session_id,
-                group=commit_group,
-                commit=failed_commit,
-                error=commit_error,
-                message=(f"auto-commit failed after session {session_id} completed"),
-            )
+    turn_settlement_session_commit.commit_session_if_owed(
+        ctx,
+        session_id=session_id,
+        turn_payload=turn_payload,
+        paths=paths,
+        is_review_session=is_review_session,
+        is_repair_session=is_repair_session,
+        commit_mode=commit_mode,
+        soft_fail_commit=soft_fail_commit,
+    )
 
     try:
         commit = turn_executor.commit(
