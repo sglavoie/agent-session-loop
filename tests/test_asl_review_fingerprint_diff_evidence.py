@@ -8,6 +8,7 @@ from unittest import mock
 
 from agent_session_loop import (
     review_guard,
+    review_guard_git,
 )
 from tests.review_fingerprint_base import ReviewFingerprintBase
 
@@ -230,7 +231,7 @@ class ReviewFingerprintDiffEvidenceTests(ReviewFingerprintBase):
 
     def test_a_named_path_git_renders_no_patch_for_fails_closed(self) -> None:
         self._write("README.md", "mutated\n")
-        real_run_git = review_guard._run_git
+        real_run_git = review_guard_git._run_git
 
         def fake_run_git(cwd, args):
             result = real_run_git(cwd, args)
@@ -240,7 +241,7 @@ class ReviewFingerprintDiffEvidenceTests(ReviewFingerprintBase):
                 )
             return result
 
-        with mock.patch.object(review_guard, "_run_git", fake_run_git):
+        with mock.patch.object(review_guard_git, "_run_git", fake_run_git):
             fingerprint = self._fingerprint()
 
         # A named path with no patch carries no content, so pairing short would

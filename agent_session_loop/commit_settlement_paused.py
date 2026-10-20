@@ -82,7 +82,7 @@ def _commit_target_residue(target: Mapping[str, Any]) -> dict[str, Any] | None:
     try:
         if _commit_target_is_clean(target):
             return None
-        status = review_guard._run_git(
+        status = review_guard_git._run_git(
             Path(str(target["root"])),
             ["status", "--porcelain", "-z", "--untracked-files=all"],
         )

@@ -11,6 +11,7 @@ from agent_session_loop import (
     commit_groups,
     commit_settlement,
     review_guard,
+    review_guard_git,
     run_selection,
     runner,
 )
@@ -293,7 +294,7 @@ class PausedRetainedWorkTests(PausedRetainedWorkCase):
                 raise runner.RunError("could not inspect git status: fatal: unreadable")
             return real_run_git(cwd, args)
 
-        with mock.patch.object(review_guard, "_run_git", side_effect=blinded):
+        with mock.patch.object(review_guard_git, "_run_git", side_effect=blinded):
             record, _turn_payload = self._settle(
                 self.registered,
                 guard=self._guard(added_paths=("worked.txt",)),
@@ -329,7 +330,7 @@ class PausedRetainedWorkTests(PausedRetainedWorkCase):
                 raise runner.RunError("could not inspect git status: fatal: unreadable")
             return real_run_git(cwd, args)
 
-        with mock.patch.object(review_guard, "_run_git", side_effect=blinded):
+        with mock.patch.object(review_guard_git, "_run_git", side_effect=blinded):
             record, _turn_payload = self._settle(
                 self.registered,
                 guard=self._guard(added_paths=("worked.txt",)),

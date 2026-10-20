@@ -183,7 +183,7 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
             "PendingAuditCatchupTests.test_processing_twice_publishes_one_audit",
             "tests.test_asl_assurance_lifecycle_catchup:"
             "PendingAuditCatchupTests.test_a_run_that_predates_auditing_is_reported_never_audited",
-            "tests.test_asl_retention:"
+            "tests.test_asl_retention_pinning:"
             "AssurancePinningTests.test_open_issue_pins_an_otherwise_reclaimable_run",
             "tests.test_asl_acceptance_ledger:"
             "PreFeatureCompatibilityTests."

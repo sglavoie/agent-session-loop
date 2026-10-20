@@ -181,6 +181,7 @@ from . import (
     events,
     pause_policy,
     review_guard,
+    review_guard_git,
     run_commit,
     run_commit_paused,
     run_persistence,

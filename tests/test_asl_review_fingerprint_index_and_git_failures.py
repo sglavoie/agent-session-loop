@@ -9,6 +9,7 @@ from unittest import mock
 
 from agent_session_loop import (
     review_guard,
+    review_guard_git,
     runner,
 )
 from tests.review_fingerprint_base import ReviewFingerprintBase
@@ -106,7 +107,7 @@ class ReviewFingerprintIndexAndGitFailureTests(ReviewFingerprintBase):
                         )
                     return real_run_git(cwd, args)
 
-                with mock.patch.object(review_guard, "_run_git", fake_run_git):
+                with mock.patch.object(review_guard_git, "_run_git", fake_run_git):
                     fingerprint = self._fingerprint()
 
                 detail = review_guard._review_guard_unavailable_detail(fingerprint)
@@ -156,7 +157,7 @@ class ReviewFingerprintIndexAndGitFailureTests(ReviewFingerprintBase):
                 )
             return real_run_git(cwd, args)
 
-        with mock.patch.object(review_guard, "_run_git", fake_run_git):
+        with mock.patch.object(review_guard_git, "_run_git", fake_run_git):
             fingerprint = self._fingerprint()
 
         detail = review_guard._review_guard_unavailable_detail(fingerprint)
@@ -168,7 +169,7 @@ class ReviewFingerprintIndexAndGitFailureTests(ReviewFingerprintBase):
         def fake_run_git(cwd, args):
             raise runner.RunError("git executable not found on PATH")
 
-        with mock.patch.object(review_guard, "_run_git", fake_run_git):
+        with mock.patch.object(review_guard_git, "_run_git", fake_run_git):
             fingerprint = self._fingerprint()
 
         detail = review_guard._review_guard_unavailable_detail(fingerprint)

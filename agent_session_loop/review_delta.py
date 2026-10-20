@@ -76,6 +76,7 @@ from . import (
     review,
     review_continuation,
     review_guard,
+    review_guard_git,
     review_session_body,
     run_persistence,
     verification_models,
@@ -326,12 +327,12 @@ def _compute_review_delta_context(
         return degraded, "dirty-base-evidence-missing"
 
     try:
-        resolved = review_guard._run_git(
+        resolved = review_guard_git._run_git(
             cwd, ["rev-parse", "--verify", f"{base}^{{commit}}"]
         )
         if resolved.returncode != 0:
             return degraded, "base-unresolvable"
-        ancestor = review_guard._run_git(
+        ancestor = review_guard_git._run_git(
             cwd, ["merge-base", "--is-ancestor", base, "HEAD"]
         )
         if ancestor.returncode != 0:
@@ -341,12 +342,12 @@ def _compute_review_delta_context(
         # Both probes are pinned to repository-wide, root-relative, rename-free
         # output; see :data:`review_session_body._DELTA_DIFF_FLAGS` for what
         # each flag rules out.
-        names = review_guard._run_git(
+        names = review_guard_git._run_git(
             cwd, ["diff", "--name-only", *review_session_body._DELTA_DIFF_FLAGS, base]
         )
         if names.returncode != 0:
             return degraded, "base-diff-failed"
-        index_names = review_guard._run_git(
+        index_names = review_guard_git._run_git(
             cwd,
             [
                 "diff",
@@ -366,7 +367,7 @@ def _compute_review_delta_context(
         # evidence ("did anything move"), not the scope ("which code changed and
         # must be reread"). A failed scan degrades to full scope rather than
         # narrowing against a file list that is missing those paths.
-        untracked = review_guard._run_git(
+        untracked = review_guard_git._run_git(
             cwd,
             [
                 "ls-files",
@@ -384,7 +385,7 @@ def _compute_review_delta_context(
         # Every flagged path therefore joins the scope wholesale: the same
         # blindness that hides the repair also makes it impossible to tell
         # which flagged entries moved.
-        index_flags = review_guard._run_git(
+        index_flags = review_guard_git._run_git(
             cwd, ["ls-files", "-v", "--full-name", "--", ":(top)"]
         )
         if index_flags.returncode != 0:
@@ -464,19 +465,19 @@ def _compute_registered_review_delta_context(
         else:
             return degraded, f"dirty-base-evidence-missing:{repository.alias}"
         try:
-            resolved = review_guard._run_git(
+            resolved = review_guard_git._run_git(
                 repository.root,
                 ["rev-parse", "--verify", f"{base}^{{commit}}"],
             )
-            ancestor = review_guard._run_git(
+            ancestor = review_guard_git._run_git(
                 repository.root,
                 ["merge-base", "--is-ancestor", base, "HEAD"],
             )
-            names = review_guard._run_git(
+            names = review_guard_git._run_git(
                 repository.root,
                 ["diff", "--name-only", *review_session_body._DELTA_DIFF_FLAGS, base],
             )
-            index_names = review_guard._run_git(
+            index_names = review_guard_git._run_git(
                 repository.root,
                 [
                     "diff",
@@ -486,7 +487,7 @@ def _compute_registered_review_delta_context(
                     base,
                 ],
             )
-            untracked = review_guard._run_git(
+            untracked = review_guard_git._run_git(
                 repository.root,
                 [
                     "ls-files",
@@ -497,7 +498,7 @@ def _compute_registered_review_delta_context(
                     ":(top)",
                 ],
             )
-            index_flags = review_guard._run_git(
+            index_flags = review_guard_git._run_git(
                 repository.root,
                 ["ls-files", "-v", "--full-name", "--", ":(top)"],
             )

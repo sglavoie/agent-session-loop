@@ -29,7 +29,17 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_session_loop import plans_snapshot, review_guard, verification_models
+from agent_session_loop import (
+    plans_snapshot,
+    review_guard,
+    review_guard_commit,
+    review_guard_config,
+    review_guard_fingerprint,
+    review_guard_git,
+    review_guard_repair,
+    review_guard_retained,
+    verification_models,
+)
 from agent_session_loop.run_errors import RunError
 from tests.support import assert_no_runner_import, init_git_repo, write_plan
 
@@ -47,11 +57,26 @@ def _unused_workspace_evidence(**_kwargs: Any) -> dict[str, Any]:
 class ReviewGuardBoundaryTests(unittest.TestCase):
     """``review_guard`` is runner-free, writes nothing, and owns the git shell."""
 
+    MODULES = (
+        review_guard,
+        review_guard_git,
+        review_guard_retained,
+        review_guard_repair,
+        review_guard_config,
+        review_guard_fingerprint,
+        review_guard_commit,
+    )
+
     def setUp(self) -> None:
-        self.source = Path(review_guard.__file__ or "").read_text(encoding="utf-8")
+        self.sources = {
+            module.__name__: Path(module.__file__ or "").read_text(encoding="utf-8")
+            for module in self.MODULES
+        }
+        self.source = "\n".join(self.sources.values())
 
     def test_review_guard_does_not_import_the_runner(self) -> None:
-        assert_no_runner_import(self, review_guard)
+        for module in self.MODULES:
+            assert_no_runner_import(self, module)
 
     def test_the_module_writes_no_durable_record(self) -> None:
         # Every function here is a projection of the filesystem, a parsed
@@ -66,6 +91,12 @@ class ReviewGuardBoundaryTests(unittest.TestCase):
         # executable and an OS failure into `RunError`; a direct
         # `subprocess.run` would be a caller that can still meet `OSError`.
         self.assertEqual(0, self.source.count("subprocess.run("))
+        self.assertEqual(
+            2,
+            self.sources[review_guard_git.__name__].count(
+                "run_git_or_raise(cwd, args, error=RunError"
+            ),
+        )
         self.assertEqual(
             2, self.source.count("run_git_or_raise(cwd, args, error=RunError")
         )
@@ -134,7 +165,7 @@ class GitShellTests(unittest.TestCase):
 
     def test_a_missing_git_executable_becomes_a_run_error(self) -> None:
         with mock.patch.object(
-            review_guard.subprocess, "run", side_effect=FileNotFoundError("git")
+            review_guard_git.subprocess, "run", side_effect=FileNotFoundError("git")
         ):
             with self.assertRaisesRegex(RunError, "git executable not found on PATH"):
                 review_guard._run_git(self.repo, ["status"])
@@ -143,7 +174,7 @@ class GitShellTests(unittest.TestCase):
 
     def test_an_os_failure_names_the_argv_it_failed_on(self) -> None:
         with mock.patch.object(
-            review_guard.subprocess, "run", side_effect=OSError("too many files")
+            review_guard_git.subprocess, "run", side_effect=OSError("too many files")
         ):
             with self.assertRaisesRegex(
                 RunError, "could not run git status --porcelain: too many files"

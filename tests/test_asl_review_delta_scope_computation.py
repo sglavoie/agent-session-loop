@@ -8,7 +8,7 @@ from unittest import mock
 from agent_session_loop import (
     events,
     review,
-    review_guard,
+    review_guard_git,
     review_session_body,
 )
 from tests.review_delta_scope_base import ReviewDeltaScopeBase
@@ -452,7 +452,7 @@ class ReviewDeltaScopeComputationTests(ReviewDeltaScopeBase):
         base = self._commit("src/base.py", "base\n")
         self._record_repair_cycle(repo_head=base)
         self._commit("src/repair.py", "repaired\n")
-        real_run_git = review_guard._run_git
+        real_run_git = review_guard_git._run_git
 
         for prefix, reason in (
             (("diff", "--name-only"), "base-diff-failed"),
@@ -467,7 +467,7 @@ class ReviewDeltaScopeComputationTests(ReviewDeltaScopeBase):
                         return subprocess.CompletedProcess(args, 128, "", "boom")
                     return real_run_git(cwd, args)
 
-                with mock.patch.object(review_guard, "_run_git", fail_one):
+                with mock.patch.object(review_guard_git, "_run_git", fail_one):
                     delta, fallback_reason = self._compute()
 
                 self.assertEqual(reason, fallback_reason)
