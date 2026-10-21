@@ -39,7 +39,7 @@ spark blocks at ``run_selection``, the review output path at
 snapshot projection at ``plans_payloads``, the note lines at
 ``run_reporting``, the audit status line at ``supervisor_audit``, the assurance
 report lines at ``assurance_report``, the bounded repository rows at
-``workspaces``, and the interactive-help attachment at ``task_packet``.
+``workspaces``, and the interactive-help attachment at ``task_packet_help``.
 
 Invariants that survive the move:
 
@@ -93,7 +93,7 @@ from . import (
     run_selection,
     state,
     supervisor_audit,
-    task_packet,
+    task_packet_help,
     workspaces,
 )
 
@@ -440,7 +440,7 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
 
 
 def _emit_run_payload(args: argparse.Namespace, payload: dict[str, Any]) -> None:
-    task_packet._attach_interactive_help(args, payload)
+    task_packet_help._attach_interactive_help(args, payload)
     try:
         if args.json:
             responses.print_json(payload)

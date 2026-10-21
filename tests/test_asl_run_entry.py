@@ -55,6 +55,9 @@ from agent_session_loop import (
     cli,
     events,
     run_entry,
+    run_entry_admission,
+    run_entry_resume,
+    run_entry_resume_command,
     run_flags,
     run_loop,
     runner,
@@ -68,16 +71,16 @@ from tests.support import assert_no_runner_import, called_names, write_plan
 #: rescue a stale patch target fails here rather than in review. `run_from_args`
 #: is deliberately absent: its *body* moved, its name did not.
 MOVED_SYMBOLS = (
-    "_RESUME_OVERLAY_EXCLUDED_DESTS",
-    "_resume_overlay_dests",
-    "_RESUME_OVERLAY_DESTS",
-    "_ResumeUnavailable",
-    "_resume_run_tokens",
-    "_explicit_resume_dests",
-    "_reconstruct_resume_command",
-    "_reconstructed_audit_flags",
-    "_load_resume_state",
-    "_apply_resume_config",
+    (run_entry_resume, "_RESUME_OVERLAY_EXCLUDED_DESTS"),
+    (run_entry_resume, "_resume_overlay_dests"),
+    (run_entry_resume, "_RESUME_OVERLAY_DESTS"),
+    (run_entry_resume, "_ResumeUnavailable"),
+    (run_entry_resume, "_resume_run_tokens"),
+    (run_entry_resume, "_explicit_resume_dests"),
+    (run_entry_resume_command, "_reconstruct_resume_command"),
+    (run_entry_resume_command, "_reconstructed_audit_flags"),
+    (run_entry_resume, "_load_resume_state"),
+    (run_entry_resume, "_apply_resume_config"),
 )
 
 #: Every call that would outlive the process. This boundary publishes exactly
@@ -174,21 +177,36 @@ class ExtractionContractTests(unittest.TestCase):
     """The module is runner-free, aliased nowhere, and publishes only the lock."""
 
     def test_the_module_never_imports_the_runner(self) -> None:
-        assert_no_runner_import(self, run_entry)
+        for module in (
+            run_entry,
+            run_entry_admission,
+            run_entry_resume,
+            run_entry_resume_command,
+        ):
+            with self.subTest(module=module.__name__):
+                assert_no_runner_import(self, module)
 
     def test_every_moved_symbol_lives_here_and_nowhere_in_the_runner(self) -> None:
-        for name in MOVED_SYMBOLS:
+        for module, name in MOVED_SYMBOLS:
             with self.subTest(name=name):
-                self.assertTrue(hasattr(run_entry, name))
+                self.assertTrue(hasattr(module, name))
                 self.assertFalse(hasattr(runner, name))
 
     def test_the_boundary_writes_nothing_durable_of_its_own(self) -> None:
-        tree = ast.parse(Path(run_entry.__file__).read_text(encoding="utf-8"))
-        for node in tree.body:
-            if not isinstance(node, ast.FunctionDef | ast.ClassDef):
-                continue
-            with self.subTest(symbol=node.name):
-                self.assertEqual(frozenset(), called_names(node) & DURABLE_WRITE_NAMES)
+        for module in (
+            run_entry,
+            run_entry_admission,
+            run_entry_resume,
+            run_entry_resume_command,
+        ):
+            tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+            for node in tree.body:
+                if not isinstance(node, ast.FunctionDef | ast.ClassDef):
+                    continue
+                with self.subTest(module=module.__name__, symbol=node.name):
+                    self.assertEqual(
+                        frozenset(), called_names(node) & DURABLE_WRITE_NAMES
+                    )
 
     def test_the_lock_is_taken_once_and_always_released(self) -> None:
         source = inspect.getsource(run_entry.run_from_args)
@@ -302,24 +320,26 @@ class ResumeOverlayTests(unittest.TestCase):
             {"run_config": {"external_write_root": ["/old/trial"]}}
         )
         tokens = fixture.tokens("--resume")
-        args = run_entry._apply_resume_config(_parse(tokens), tokens[1:])
+        args = run_entry_resume._apply_resume_config(_parse(tokens), tokens[1:])
         self.assertEqual(["/old/trial"], args.external_write_root)
         self.assertEqual(["/old/trial"], args._restored_external_write_roots)
         tokens = fixture.tokens("--resume", "--external-write-root", "/new/trial")
-        args = run_entry._apply_resume_config(_parse(tokens), tokens[1:])
+        args = run_entry_resume._apply_resume_config(_parse(tokens), tokens[1:])
         self.assertEqual(["/new/trial"], args.external_write_root)
         self.assertEqual([], args._restored_external_write_roots)
 
     def test_the_overlay_dests_are_derived_from_the_flag_spec(self) -> None:
         expected: list[str] = []
+        excluded = run_entry_resume._RESUME_OVERLAY_EXCLUDED_DESTS
         for flag in run_flags.RUN_FLAG_SPEC:
-            if flag.positional or flag.dest in run_entry._RESUME_OVERLAY_EXCLUDED_DESTS:
+            if flag.positional or flag.dest in excluded:
                 continue
             if flag.dest not in expected:
                 expected.append(flag.dest)
-        self.assertEqual(tuple(expected), run_entry._RESUME_OVERLAY_DESTS)
+        self.assertEqual(tuple(expected), run_entry_resume._RESUME_OVERLAY_DESTS)
         self.assertEqual(
-            run_entry._resume_overlay_dests(), run_entry._RESUME_OVERLAY_DESTS
+            run_entry_resume._resume_overlay_dests(),
+            run_entry_resume._RESUME_OVERLAY_DESTS,
         )
 
     def test_a_persisted_flag_is_restored_and_an_explicit_one_wins(self) -> None:
@@ -328,7 +348,7 @@ class ResumeOverlayTests(unittest.TestCase):
             {"run_config": {"note": "from-state", "timeout": 4242}}
         )
         tokens = fixture.tokens("--resume", "--note", "from-argv")
-        args = run_entry._apply_resume_config(_parse(tokens), tokens[1:])
+        args = run_entry_resume._apply_resume_config(_parse(tokens), tokens[1:])
         self.assertEqual("from-argv", args.note)
         self.assertEqual(4242, args.timeout)
 
@@ -337,7 +357,7 @@ class ResumeOverlayTests(unittest.TestCase):
         fixture.write_state_payload({"run_config": {}})
         tokens = fixture.tokens("--resume")
         default = _parse(fixture.tokens()).note
-        args = run_entry._apply_resume_config(_parse(tokens), tokens[1:])
+        args = run_entry_resume._apply_resume_config(_parse(tokens), tokens[1:])
         # Skipped silently rather than refused, which is exactly why
         # `run_payloads._run_config_payload` has to seed every overlay dest.
         self.assertEqual(default, args.note)
@@ -353,12 +373,12 @@ class ResumeOverlayTests(unittest.TestCase):
         fixture = _EntryFixture(self, ("pending",))
         fixture.write_state_payload({"run_config": {"fresh_conversation": True}})
         tokens = fixture.tokens("--resume")
-        args = run_entry._apply_resume_config(_parse(tokens), tokens[1:])
+        args = run_entry_resume._apply_resume_config(_parse(tokens), tokens[1:])
         self.assertFalse(args.fresh_conversation)
-        self.assertNotIn("fresh_conversation", run_entry._RESUME_OVERLAY_DESTS)
+        self.assertNotIn("fresh_conversation", run_entry_resume._RESUME_OVERLAY_DESTS)
 
     def test_the_deprecated_cap_alias_marks_the_canonical_dest_explicit(self) -> None:
-        explicit = run_entry._explicit_resume_dests(
+        explicit = run_entry_resume._explicit_resume_dests(
             ["run", "plan-dir", "--max-review-fix-plans", "9"]
         )
         self.assertIn("max_review_fix_plans", explicit)
@@ -367,36 +387,35 @@ class ResumeOverlayTests(unittest.TestCase):
     def test_the_run_subcommand_name_is_stripped_from_the_tokens(self) -> None:
         self.assertEqual(
             ["plan-dir", "--json"],
-            run_entry._resume_run_tokens(["run", "plan-dir", "--json"]),
+            run_entry_resume._resume_run_tokens(["run", "plan-dir", "--json"]),
         )
-        self.assertEqual(["plan-dir"], run_entry._resume_run_tokens(["plan-dir"]))
+        self.assertEqual(
+            ["plan-dir"], run_entry_resume._resume_run_tokens(["plan-dir"])
+        )
 
     def test_state_that_cannot_be_read_or_parsed_reads_as_absent(self) -> None:
         fixture = _EntryFixture(self, ("pending",))
-        self.assertIsNone(
-            run_entry._load_resume_state(str(fixture.plan_dir), str(fixture.state_dir))
-        )
+        plan_dir, state_dir = str(fixture.plan_dir), str(fixture.state_dir)
+        self.assertIsNone(run_entry_resume._load_resume_state(plan_dir, state_dir))
         path = fixture.write_state_payload({})
         path.write_text("{not json", encoding="utf-8")
-        self.assertIsNone(
-            run_entry._load_resume_state(str(fixture.plan_dir), str(fixture.state_dir))
-        )
+        self.assertIsNone(run_entry_resume._load_resume_state(plan_dir, state_dir))
 
     def test_a_resume_with_no_usable_config_hands_back_a_runnable_command(
         self,
     ) -> None:
         fixture = _EntryFixture(self, ("pending",))
         tokens = fixture.tokens("--resume")
-        with self.assertRaises(run_entry._ResumeUnavailable) as caught:
-            run_entry._apply_resume_config(_parse(tokens), tokens[1:])
+        with self.assertRaises(run_entry_resume._ResumeUnavailable) as caught:
+            run_entry_resume._apply_resume_config(_parse(tokens), tokens[1:])
         self.assertIn("asl run", caught.exception.command)
         self.assertIn(str(fixture.plan_dir), caught.exception.command)
 
         # State that predates `run_config` refuses too, but reconstructs from
         # the top-level fields the state document has always written.
         fixture.write_state_payload({"harness": "codex", "effort": "high"})
-        with self.assertRaises(run_entry._ResumeUnavailable) as legacy:
-            run_entry._apply_resume_config(_parse(tokens), tokens[1:])
+        with self.assertRaises(run_entry_resume._ResumeUnavailable) as legacy:
+            run_entry_resume._apply_resume_config(_parse(tokens), tokens[1:])
         self.assertIn("--harness codex", legacy.exception.command)
         self.assertIn("--effort high", legacy.exception.command)
 

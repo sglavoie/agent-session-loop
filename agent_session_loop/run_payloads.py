@@ -120,6 +120,7 @@ from . import (
     state,
     supervisor_audit,
     task_packet,
+    task_packet_lookups,
     turn_execution_artifacts,
     verification_models,
 )
@@ -422,10 +423,10 @@ def _dry_run_payload(
                 if is_review_session
                 else plans_payloads.SESSION_KIND_IMPLEMENTATION
             ),
-            "predecessor_id": task_packet._predecessor_session_id(
+            "predecessor_id": task_packet_lookups._predecessor_session_id(
                 snapshot, next_pending.id
             ),
-            "has_expansion": task_packet._session_has_expansion(
+            "has_expansion": task_packet_lookups._session_has_expansion(
                 snapshot.plan_dir, next_pending.id
             ),
             "has_progress": (

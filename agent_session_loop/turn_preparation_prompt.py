@@ -19,6 +19,7 @@ from . import (
     run_prompts,
     run_selection,
     task_packet,
+    task_packet_lookups,
     turn_execution_argv,
     workspaces,
 )
@@ -59,8 +60,12 @@ def collect_packet_inputs(
         )
     return PacketInputs(
         worker_mode=task_packet._worker_mode(),
-        predecessor_id=task_packet._predecessor_session_id(snapshot, session_id),
-        has_expansion=task_packet._session_has_expansion(snapshot.plan_dir, session_id),
+        predecessor_id=task_packet_lookups._predecessor_session_id(
+            snapshot, session_id
+        ),
+        has_expansion=task_packet_lookups._session_has_expansion(
+            snapshot.plan_dir, session_id
+        ),
         has_progress=(snapshot.plan_dir / plans_progress.PROGRESS_FILE_NAME).is_file(),
         repair_references=repair_references,
         pending_guidance=run_selection._pending_guidance_snapshot(
@@ -199,7 +204,7 @@ def prepare_turn_prompt(
             ).render()
         prompt_kind = "resolution"
         reply_source = None
-        resolution_source = task_packet._resolution_source_metadata(resolution)
+        resolution_source = task_packet_lookups._resolution_source_metadata(resolution)
         persisted_prompt = turn_execution_argv.resolution_argv_placeholder(
             resolution.action,
             resolution_source["note_length"],

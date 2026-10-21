@@ -37,7 +37,7 @@ from agent_session_loop import (
     pause_policy,
     plans_files,
     preflight_runtime_hints,
-    run_entry,
+    run_entry_resume,
     run_flags,
     turn_execution_executor,
     workbench_recovery_models,

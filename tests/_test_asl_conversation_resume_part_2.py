@@ -127,8 +127,10 @@ class AuthorizationContainmentTests(unittest.TestCase):
         self.assertIs(flag.cli_default, False)
 
     def test_resume_does_not_rehydrate_the_authorization(self) -> None:
-        self.assertIn("fresh_conversation", run_entry._RESUME_OVERLAY_EXCLUDED_DESTS)
-        self.assertNotIn("fresh_conversation", run_entry._resume_overlay_dests())
+        self.assertIn(
+            "fresh_conversation", run_entry_resume._RESUME_OVERLAY_EXCLUDED_DESTS
+        )
+        self.assertNotIn("fresh_conversation", run_entry_resume._resume_overlay_dests())
 
     def test_the_supervisor_does_not_replay_the_authorization_to_a_child(self) -> None:
         autopilot = _load_autopilot()

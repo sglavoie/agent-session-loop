@@ -10,7 +10,7 @@ from agent_session_loop import (
     mailbox_vocabulary,
     qna,
     run_prompts,
-    task_packet,
+    task_packet_lookups,
     turn_execution_argv,
 )
 
@@ -404,7 +404,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
             resolution_seq=4,
         )
 
-        source = task_packet._resolution_source_metadata(pending)
+        source = task_packet_lookups._resolution_source_metadata(pending)
 
         self.assertEqual("continue", source["action"])
         self.assertEqual(len(hostile_note), source["note_length"])

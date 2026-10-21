@@ -12,7 +12,7 @@ from agent_session_loop import (
     harnesses,
     mailbox_cli_notify,
     mailbox_cli_outbox,
-    run_entry,
+    run_entry_resume,
     supervisor_guide,
 )
 
@@ -87,7 +87,7 @@ class ParserDefaultsAndSupervisorGuideTests(unittest.TestCase):
 
         self.assertFalse(default_args.no_mailbox)
         self.assertTrue(disabled_args.no_mailbox)
-        self.assertIn("no_mailbox", run_entry._RESUME_OVERLAY_DESTS)
+        self.assertIn("no_mailbox", run_entry_resume._RESUME_OVERLAY_DESTS)
 
     def test_notify_and_outbox_include_parser_contract(self) -> None:
         parser = cli.build_parser()

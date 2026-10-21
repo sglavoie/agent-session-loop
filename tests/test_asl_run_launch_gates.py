@@ -28,7 +28,7 @@ from agent_session_loop import (
     preflight_models,
     readiness_gate,
     review_guard,
-    run_entry,
+    run_entry_resume,
     run_inputs,
     runner,
     session_overview,
@@ -115,7 +115,7 @@ class RunFlagValidationTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            restored = run_entry._apply_resume_config(
+            restored = run_entry_resume._apply_resume_config(
                 argparse.Namespace(
                     plan_dir=str(plan_dir),
                     state_dir=str(state_root),

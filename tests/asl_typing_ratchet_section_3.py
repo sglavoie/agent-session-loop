@@ -30,8 +30,12 @@ REQUIRED_CHECKED_MODULES = frozenset(
         "agent_session_loop.workbench_registry_coerce",
         "agent_session_loop.workbench_registry_models",
         "agent_session_loop.workbench_summary",
+        "agent_session_loop.workbench_summary_active",
+        "agent_session_loop.workbench_summary_context",
         "agent_session_loop.workbench_summary_helpers",
         "agent_session_loop.workbench_summary_model",
+        "agent_session_loop.workbench_summary_paused",
+        "agent_session_loop.workbench_summary_settled",
     }
 )
 

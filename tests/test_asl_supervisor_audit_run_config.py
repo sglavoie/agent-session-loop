@@ -12,7 +12,8 @@ from pathlib import Path
 
 from agent_session_loop import (
     events,
-    run_entry,
+    run_entry_resume,
+    run_entry_resume_command,
     run_flags,
     run_payloads,
     state,
@@ -438,7 +439,7 @@ class AuditRunConfigPersistenceTests(unittest.TestCase):
                 str(tmp_dir / "state"),
             ]
 
-            args = run_entry._apply_resume_config(parse(tokens), tokens[1:])
+            args = run_entry_resume._apply_resume_config(parse(tokens), tokens[1:])
 
             self.assertEqual("claude", args.audit_harness)
             self.assertEqual("claude-opus-4", args.audit_harness_model)
@@ -468,7 +469,7 @@ class AuditRunConfigPersistenceTests(unittest.TestCase):
                 "120",
             ]
 
-            args = run_entry._apply_resume_config(parse(tokens), tokens[1:])
+            args = run_entry_resume._apply_resume_config(parse(tokens), tokens[1:])
 
             self.assertFalse(args.supervisor_audit)
             self.assertEqual(120, args.audit_timeout)
@@ -490,7 +491,7 @@ class AuditRunConfigPersistenceTests(unittest.TestCase):
             eligible=True,
         )
 
-        command = run_entry._reconstruct_resume_command(
+        command = run_entry_resume_command._reconstruct_resume_command(
             "/tmp/plan", None, {"assurance": summary.to_dict()}
         )
 
@@ -508,7 +509,7 @@ class AuditRunConfigPersistenceTests(unittest.TestCase):
             eligible=True,
         )
 
-        command = run_entry._reconstruct_resume_command(
+        command = run_entry_resume_command._reconstruct_resume_command(
             "/tmp/plan", None, {"assurance": summary.to_dict()}
         )
 
@@ -528,7 +529,7 @@ class AuditRunConfigPersistenceTests(unittest.TestCase):
             eligible=True,
         )
 
-        command = run_entry._reconstruct_resume_command(
+        command = run_entry_resume_command._reconstruct_resume_command(
             "/tmp/plan",
             None,
             {"review_harness": "claude", "assurance": summary.to_dict()},

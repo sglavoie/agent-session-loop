@@ -54,7 +54,7 @@ from agent_session_loop import (
     overseer_decisions,
     overseer_resume,
     pause_policy,
-    run_entry,
+    run_entry_resume,
     workbench_registry_models,
 )
 from tests import support_asl_overseer_resume as fixtures
@@ -124,7 +124,7 @@ class LaunchRestoration(fixtures._ResumeCase):
         restored = set(overseer_resume.PROFILE_FIELDS) | set(
             overseer_resume.LIMIT_FIELDS
         )
-        self.assertTrue(restored <= set(run_entry._RESUME_OVERLAY_DESTS))
+        self.assertTrue(restored <= set(run_entry_resume._RESUME_OVERLAY_DESTS))
 
     def test_the_launch_is_rebuilt_from_the_runs_own_metadata(self) -> None:
         context = overseer_resume.recover_launch_context(

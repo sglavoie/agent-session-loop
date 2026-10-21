@@ -14,7 +14,7 @@ from agent_session_loop import (
     qna,
     state,
     state_payloads,
-    task_packet,
+    task_packet_help,
 )
 from tests import support_asl_pause_ux as fixtures
 from tests.support import (
@@ -98,29 +98,29 @@ class ArtifactSafetyAndPauseUxTests(fixtures.ArtifactSafetyAndPauseUxCase):
     def test_questions_command_text_includes_state_dir_when_provided(self) -> None:
         self.assertEqual(
             "asl questions /tmp/plan",
-            task_packet._questions_command_text("/tmp/plan", None),
+            task_packet_help._questions_command_text("/tmp/plan", None),
         )
         self.assertEqual(
             "asl questions /tmp/plan --state-dir /tmp/state",
-            task_packet._questions_command_text("/tmp/plan", "/tmp/state"),
+            task_packet_help._questions_command_text("/tmp/plan", "/tmp/state"),
         )
 
     def test_reply_command_text_includes_state_dir_when_provided(self) -> None:
         self.assertEqual(
             "asl run /tmp/plan --resume --reply TEXT",
-            task_packet._reply_command_text("/tmp/plan", None),
+            task_packet_help._reply_command_text("/tmp/plan", None),
         )
         self.assertEqual(
             "asl run /tmp/plan --resume --state-dir /tmp/state --reply TEXT",
-            task_packet._reply_command_text("/tmp/plan", "/tmp/state"),
+            task_packet_help._reply_command_text("/tmp/plan", "/tmp/state"),
         )
 
     def test_interactive_help_commands_shell_quote_dynamic_paths(self) -> None:
-        questions = task_packet._questions_command_text(
+        questions = task_packet_help._questions_command_text(
             "/tmp/plan dir",
             "/tmp/state dir",
         )
-        reply = task_packet._reply_command_text(
+        reply = task_packet_help._reply_command_text(
             "/tmp/plan dir",
             "/tmp/state dir",
         )
@@ -167,16 +167,16 @@ class ArtifactSafetyAndPauseUxTests(fixtures.ArtifactSafetyAndPauseUxCase):
                 "plan_dir": str(plan_dir),
             }
 
-            task_packet._attach_interactive_help(args, payload)
+            task_packet_help._attach_interactive_help(args, payload)
 
             help_payload = payload["interactive_help"]
             self.assertIsInstance(help_payload, dict)
             self.assertEqual(
-                task_packet._questions_command_text(str(plan_dir), str(state_dir)),
+                task_packet_help._questions_command_text(str(plan_dir), str(state_dir)),
                 help_payload["questions_command"],
             )
             self.assertEqual(
-                task_packet._reply_command_text(str(plan_dir), str(state_dir)),
+                task_packet_help._reply_command_text(str(plan_dir), str(state_dir)),
                 help_payload["reply_command"],
             )
             self.assertEqual("1", help_payload["session_id"])
@@ -205,7 +205,7 @@ class ArtifactSafetyAndPauseUxTests(fixtures.ArtifactSafetyAndPauseUxCase):
                 "plan_dir": str(plan_dir),
             }
 
-            task_packet._attach_interactive_help(args, payload)
+            task_packet_help._attach_interactive_help(args, payload)
 
             self.assertNotIn("interactive_help", payload)
 
@@ -218,7 +218,7 @@ class ArtifactSafetyAndPauseUxTests(fixtures.ArtifactSafetyAndPauseUxCase):
                 "plan_dir": str(plan_dir),
             }
 
-            task_packet._attach_interactive_help(args, payload)
+            task_packet_help._attach_interactive_help(args, payload)
 
             self.assertNotIn("interactive_help", payload)
 
@@ -314,7 +314,7 @@ class ArtifactSafetyAndPauseUxTests(fixtures.ArtifactSafetyAndPauseUxCase):
                 "plan_dir": str(plan_dir),
             }
 
-            task_packet._attach_interactive_help(args, payload)
+            task_packet_help._attach_interactive_help(args, payload)
 
             help_payload = payload["interactive_help"]
             self.assertTrue(help_payload["recovery_required"])

@@ -94,6 +94,7 @@ from . import (
     run_selection,
     state,
     task_packet,
+    task_packet_lookups,
     verification_models,
     workspaces,
 )
@@ -217,10 +218,10 @@ def doctor_from_args(args: argparse.Namespace) -> int:
                 )
                 else plans_payloads.SESSION_KIND_IMPLEMENTATION
             ),
-            predecessor_id=task_packet._predecessor_session_id(
+            predecessor_id=task_packet_lookups._predecessor_session_id(
                 snapshot, snapshot.next_pending.id
             ),
-            has_expansion=task_packet._session_has_expansion(
+            has_expansion=task_packet_lookups._session_has_expansion(
                 snapshot.plan_dir, snapshot.next_pending.id
             ),
             has_progress=(

@@ -52,6 +52,13 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 "tests/asl_execution_timing_*.py" = ["F401", "F403", "F405"]
 "tests/asl_turn_finalization_*.py" = ["F401", "F403", "F405"]
 "tests/asl_turn_execution_*.py" = ["F401", "F403", "F405"]
+"tests/asl_redirect_supervision_*.py" = ["F401", "F403", "F405"]
+"tests/asl_run_inputs_*.py" = ["F401", "F403", "F405"]
+"tests/asl_run_loop_*.py" = ["F401", "F403", "F405"]
+"tests/asl_write_guards_*.py" = ["F401", "F403", "F405"]
+"tests/asl_overseer_isolation_*.py" = ["F401", "F403", "F405"]
+"tests/asl_commit_groups_*.py" = ["F401", "F403", "F405"]
+"tests/workbench_interactions_*.py" = ["F401", "F403", "F405"]
 "tests/asl_tail_*.py" = ["F401", "F403", "F405"]
 "tests/asl_live_redirect_*.py" = ["F401", "F403", "F405"]
 "tests/asl_overseer_checkpoint_groups_*.py" = ["E501", "F401", "F403", "F405"]
@@ -75,6 +82,13 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 "tests/test_asl_tail.py" = ["F401"]
 "tests/test_asl_turn_finalization.py" = ["F401"]
 "tests/test_asl_turn_execution.py" = ["F401"]
+"tests/test_asl_redirect_supervision.py" = ["F401"]
+"tests/test_asl_run_inputs.py" = ["F401"]
+"tests/test_asl_run_loop.py" = ["F401"]
+"tests/test_asl_write_guards.py" = ["F401"]
+"tests/test_asl_overseer_isolation.py" = ["F401"]
+"tests/test_asl_commit_groups.py" = ["F401"]
+"tests/test_workbench_interactions.py" = ["F401"]
 # Static ``__all__`` declarations make split-module vocabularies visible to
 # mypy.  Keep those one-line declarations readable as a single contract.
 "agent_session_loop/execution_timing_models.py" = ["E501"]
@@ -651,6 +665,9 @@ module = [
     "agent_session_loop.run_coordination_wait_state",
     "agent_session_loop.run_doctor",
     "agent_session_loop.run_entry",
+    "agent_session_loop.run_entry_admission",
+    "agent_session_loop.run_entry_resume",
+    "agent_session_loop.run_entry_resume_command",
     "agent_session_loop.run_errors",
     "agent_session_loop.run_flags",
     "agent_session_loop.run_inputs",
@@ -760,6 +777,11 @@ module = [
     "agent_session_loop.tail_models",
     "agent_session_loop.tail_records",
     "agent_session_loop.task_packet",
+    "agent_session_loop.task_packet_build",
+    "agent_session_loop.task_packet_help",
+    "agent_session_loop.task_packet_lookups",
+    "agent_session_loop.task_packet_model",
+    "agent_session_loop.task_packet_render",
     "agent_session_loop.transitions",
     "agent_session_loop.turn_baselines",
     "agent_session_loop.turn_disposition_failures",
@@ -1054,8 +1076,12 @@ module = [
     "agent_session_loop.workbench_registry_coerce",
     "agent_session_loop.workbench_registry_models",
     "agent_session_loop.workbench_summary",
+    "agent_session_loop.workbench_summary_active",
+    "agent_session_loop.workbench_summary_context",
     "agent_session_loop.workbench_summary_helpers",
     "agent_session_loop.workbench_summary_model",
+    "agent_session_loop.workbench_summary_paused",
+    "agent_session_loop.workbench_summary_settled",
     "agent_session_loop.workspace_evidence_guard",
     "agent_session_loop.workspace_evidence_scope_repair",
     "asl_workbench.remote_read_cache",

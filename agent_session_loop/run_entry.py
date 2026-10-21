@@ -9,21 +9,18 @@ code. It is the package's public entry: ``cli.py`` reaches it by the string
 delegating shim by name, so the name and the signature are a contract, not an
 implementation detail.
 
-Two halves live here.
+Two halves, in three modules.
 
-* **Resume rehydration.** ``asl run --resume`` restores the flags of the plan's
-  last run instead of asking the operator to retype them.
-  :func:`_load_resume_state` reads the persisted ``state.json``,
-  :func:`_apply_resume_config` overlays its ``run_config`` block onto the
-  namespace for every dest in :data:`_RESUME_OVERLAY_DESTS`, and
-  :func:`_explicit_resume_dests` decides which flags the operator passed *this*
-  time so those win. When no usable config exists,
-  :class:`_ResumeUnavailable` carries a best-effort ``asl run`` command that
-  :func:`_reconstruct_resume_command` and :func:`_reconstructed_audit_flags`
-  rebuild from the top-level fields the state document has always written, so
-  the refusal hands the operator something to run rather than only a reason.
+* **Resume rehydration** lives in ``run_entry_resume``: ``asl run --resume``
+  restores the flags of the plan's last run instead of asking the operator to
+  retype them, and explicit flags win. When no usable config exists,
+  ``_ResumeUnavailable`` carries a best-effort ``asl run`` command built by
+  ``run_entry_resume_command`` from the top-level fields the state document has
+  always written. This module imports ``_apply_resume_config`` and
+  ``_ResumeUnavailable`` and applies them first.
 * **The admission sequence.** :func:`run_from_args` is the ordered gate a run
-  passes before the loop exists: validate the flags, resolve the reply, inspect
+  passes before the loop exists: validate the flags, resolve the reply (the long
+  refusals live in ``run_entry_admission``), inspect
   the plan, resolve the workspace and the repository intent, mint the run id,
   open the wakeup endpoint, take the lock, check for a contending run under
   that claim, and only then call the locked run. Every refusal on that path
@@ -81,12 +78,7 @@ Invariants that survive the move:
 from __future__ import annotations
 
 import argparse
-import json
-import shlex
-import sys
 import threading
-from collections.abc import Mapping
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -98,20 +90,18 @@ from . import (
     harnesses,
     plans_errors,
     plans_snapshot,
-    preflight_auto_repair,
-    repository_registration,
     review_guard,
     run_contention,
-    run_flags,
+    run_entry_admission,
     run_inputs,
     run_outcome,
     run_prompts,
     state,
     state_locks,
-    supervisor_audit,
     turn_execution_constants,
     verification_models,
 )
+from .run_entry_resume import _apply_resume_config, _ResumeUnavailable
 from .run_errors import RunError
 
 
@@ -141,236 +131,6 @@ class LockedRun(Protocol):
         wakeup: threading.Event | None,
         redirect_wakeup: threading.Event | None,
     ) -> tuple[int, dict[str, Any]]: ...
-
-
-# Flag dests rehydrated from a persisted ``run_config`` by ``asl run --resume``.
-# Derived from ``RUN_FLAG_SPEC`` so new ordinary run flags join the overlay
-# automatically. Exclusions are flags that are positional, helper-owned, or
-# persisted under a different key (``state_dir_override``) / canonical alias.
-#
-# ``fresh_conversation`` is excluded for a stronger reason than the others, and
-# the exclusion is load-bearing rather than tidy: it is a one-use authorization
-# to discard an agent's accumulated conversation, granted for the one turn that
-# needs it. An overlaid flag is replayed on every later ``--resume``, so leaving
-# it in would turn a single deliberate "start over" into a standing licence to
-# start over — silently, on runs the operator never re-authorized. Its
-# counterpart at the other replay surface is
-# ``asl_autopilot._CHILD_RUN_ARG_SKIP_DESTS``; both have to hold for the
-# authorization to stay single-use, and ``run_payloads._run_config_payload``
-# completes the containment by persisting no key for it at all.
-_RESUME_OVERLAY_EXCLUDED_DESTS = frozenset(
-    {
-        "dry_run",
-        "fresh_conversation",
-        "json",
-        "max_review_fix_plans",
-        "plan_dir",
-        "reply",
-        "reply_stdin",
-        "resume",
-        "state_dir",
-    }
-)
-
-
-def _resume_overlay_dests() -> tuple[str, ...]:
-    seen: set[str] = set()
-    dests: list[str] = []
-    for flag in run_flags.RUN_FLAG_SPEC:
-        if (
-            flag.positional
-            or flag.dest in _RESUME_OVERLAY_EXCLUDED_DESTS
-            or flag.dest in seen
-        ):
-            continue
-        seen.add(flag.dest)
-        dests.append(flag.dest)
-    return tuple(dests)
-
-
-_RESUME_OVERLAY_DESTS = _resume_overlay_dests()
-
-
-class _ResumeUnavailable(Exception):
-    """Raised when ``--resume`` cannot rehydrate flags from persisted state.
-
-    Carries a best-effort ``asl run`` command reconstructed from whatever fields
-    the state file does persist, so the operator can re-run with explicit flags.
-    """
-
-    def __init__(self, message: str, *, command: str) -> None:
-        super().__init__(message)
-        self.command = command
-
-
-def _resume_run_tokens(run_argv: list[str] | None) -> list[str]:
-    """Return the ``run`` subcommand's argv tokens, minus the subcommand name."""
-    tokens = list(sys.argv[1:] if run_argv is None else run_argv)
-    if tokens and tokens[0] == "run":
-        tokens = tokens[1:]
-    return tokens
-
-
-def _explicit_resume_dests(run_argv: list[str] | None) -> set[str]:
-    """Return the flag dests the operator passed explicitly on this resume.
-
-    Re-parsing with ``mode="resume"`` (``argparse.SUPPRESS`` defaults) leaves
-    only operator-supplied flags on the namespace, so ``vars()`` names exactly
-    the flags whose values must win over the persisted ``run_config``.
-    """
-    parser = argparse.ArgumentParser(prog="asl run", add_help=False)
-    run_flags.add_run_arguments(parser, mode="resume")
-    try:
-        namespace, _unknown = parser.parse_known_args(_resume_run_tokens(run_argv))
-    except SystemExit:
-        return set()
-    explicit = set(vars(namespace))
-    # The deprecated alias shares intent with the canonical flag; treat passing
-    # either as an explicit cap so the persisted value never clobbers it.
-    if "max_review_fix_plans" in explicit:
-        explicit.add("max_review_fix_cycles")
-    return explicit
-
-
-def _reconstruct_resume_command(
-    plan_dir: str,
-    state_dir_override: str | None,
-    payload: dict[str, Any],
-) -> str:
-    """Best-effort ``asl run`` command from top-level persisted state fields.
-
-    Used only when ``run_config`` is absent (legacy or missing state): it re-emits
-    the flags recoverable from the fields ``run_payloads._initial_payload`` has
-    always written at the top level, so the operator can resume manually with
-    explicit flags.
-    """
-    argv = ["asl", "run", str(plan_dir)]
-    if state_dir_override:
-        argv += ["--state-dir", str(state_dir_override)]
-    cwd = payload.get("cwd")
-    if cwd:
-        argv += ["--cwd", str(cwd)]
-    harness = payload.get("harness")
-    if harness:
-        argv += ["--harness", str(harness)]
-    review_harness = payload.get("review_harness")
-    if review_harness:
-        argv += ["--review-harness", str(review_harness)]
-    model = payload.get("model")
-    if model:
-        argv += ["--harness-model", str(model)]
-    effort = payload.get("effort")
-    if effort:
-        argv += ["--effort", str(effort)]
-    commit_mode = payload.get("commit_mode")
-    if commit_mode == "per-session":
-        argv.append("--commit-per-session")
-    elif commit_mode == "end":
-        argv.append("--commit-at-end")
-    max_pending = payload.get("max_pending_sessions")
-    if isinstance(max_pending, int):
-        argv += ["--max-pending-sessions", str(max_pending)]
-    note = payload.get("note")
-    if note:
-        argv += ["--note", str(note)]
-    if payload.get("allow_not_loop_ready") is True:
-        argv.append("--allow-not-loop-ready")
-    argv += _reconstructed_audit_flags(payload.get("assurance"))
-    return shlex.join(argv)
-
-
-def _reconstructed_audit_flags(assurance: Any) -> list[str]:
-    """Recover the audit flags from the assurance object state persisted.
-
-    An inherited role needs no ``--audit-harness``: rebuilding ``--review-harness``
-    reproduces it. Its resolved model is re-stated explicitly, which yields the
-    same effective role because an explicit audit model wins over an inherited one.
-    """
-    if not isinstance(assurance, Mapping):
-        return []
-    argv: list[str] = []
-    if assurance.get("state") == "skipped" and (
-        assurance.get("reason") == supervisor_audit.REASON_OPTED_OUT
-    ):
-        return ["--no-supervisor-audit"]
-    role = assurance.get("role")
-    if not isinstance(role, Mapping):
-        return argv
-    if role.get("source") == "explicit" and role.get("harness"):
-        argv += ["--audit-harness", str(role["harness"])]
-    if role.get("model"):
-        argv += ["--audit-harness-model", str(role["model"])]
-    if role.get("effort"):
-        argv += ["--audit-effort", str(role["effort"])]
-    timeout = role.get("timeout_seconds")
-    if (
-        isinstance(timeout, (int, float))
-        and int(timeout) != supervisor_audit.DEFAULT_AUDIT_TIMEOUT_SECONDS
-    ):
-        argv += ["--audit-timeout", str(int(timeout))]
-    return argv
-
-
-def _load_resume_state(
-    plan_dir: str,
-    state_dir_arg: str | None,
-) -> dict[str, Any] | None:
-    """Best-effort read of a plan's persisted ``state.json`` payload."""
-    plan_state = state.plan_state_dir(plan_dir, state_dir_arg)
-    state_path = plan_state / events.STATE_FILE_NAME
-    try:
-        raw = state_path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError, ValueError:
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _apply_resume_config(
-    args: argparse.Namespace,
-    run_argv: list[str] | None,
-) -> argparse.Namespace:
-    """Overlay a persisted ``run_config`` onto ``args`` for ``asl run --resume``.
-
-    Explicitly-passed flags win; every other flag is restored from the
-    ``run_config`` the plan's last run persisted. Raises :class:`_ResumeUnavailable`
-    when no usable config exists so the caller can emit a structured
-    ``resume-unavailable`` error.
-    """
-    state_dir_arg = getattr(args, "state_dir", None)
-    payload = _load_resume_state(args.plan_dir, state_dir_arg)
-    if payload is None:
-        raise _ResumeUnavailable(
-            "no runner state found for this plan; run it once so its "
-            "run_config is persisted before resuming",
-            command=_reconstruct_resume_command(args.plan_dir, state_dir_arg, {}),
-        )
-    run_config = payload.get("run_config")
-    if not isinstance(run_config, dict):
-        raise _ResumeUnavailable(
-            "runner state predates run_config persistence; re-run with "
-            "explicit flags instead of --resume",
-            command=_reconstruct_resume_command(args.plan_dir, state_dir_arg, payload),
-        )
-    explicit = _explicit_resume_dests(run_argv)
-    args._restored_external_write_roots = (
-        run_config.get("external_write_root", [])
-        if "external_write_root" not in explicit
-        else []
-    )
-    args._resume_workspace_config = {
-        "workspace_root": run_config.get("workspace_root"),
-        "registry_digest": run_config.get("registry_digest"),
-        "repositories": run_config.get("repositories"),
-    }
-    for dest in _RESUME_OVERLAY_DESTS:
-        if dest in explicit or dest not in run_config:
-            continue
-        setattr(args, dest, run_config[dest])
-    return args
 
 
 def run_from_args(
@@ -440,43 +200,10 @@ def run_from_args(
         run_outcome._emit_run_payload(args, payload)
         return 1
 
-    reply_text = getattr(args, "reply", None)
-    reply_via_stdin = bool(getattr(args, "reply_stdin", False))
-    reply_origin = run_prompts.REPLY_ORIGIN_ARGV
-    if reply_via_stdin:
-        if reply_text is not None:
-            payload = run_outcome._error_payload(
-                args,
-                reason="conflicting-reply",
-                message="--reply and --reply-stdin are mutually exclusive",
-                paused=False,
-                cwd=cwd,
-            )
-            run_outcome._emit_run_payload(args, payload)
-            return 1
-        try:
-            reply_text = run_prompts.read_reply_from_stdin()
-        except OSError as error:
-            payload = run_outcome._error_payload(
-                args,
-                reason="reply-read-error",
-                message=str(error),
-                paused=False,
-                cwd=cwd,
-            )
-            run_outcome._emit_run_payload(args, payload)
-            return 1
-        reply_origin = run_prompts.REPLY_ORIGIN_STDIN
-    if reply_text is not None and not reply_text.strip():
-        flag = "--reply-stdin" if reply_via_stdin else "--reply"
-        payload = run_outcome._error_payload(
-            args,
-            reason="empty-reply",
-            message=f"{flag} requires non-whitespace content",
-            paused=False,
-            cwd=cwd,
-        )
-        run_outcome._emit_run_payload(args, payload)
+    reply_text, reply_origin, reply_refused = run_entry_admission.resolve_reply(
+        args, cwd
+    )
+    if reply_refused:
         return 1
 
     try:
@@ -520,43 +247,9 @@ def run_from_args(
         state_dir_arg=args.state_dir,
     )
     if intent_report is not None:
-        registration, registration_error = run_inputs._apply_repository_registry(
-            initial_snapshot,
-            cwd=verification_context.root,
+        run_entry_admission.emit_repository_intent_refusal(
+            args, initial_snapshot, verification_context, intent_report
         )
-        payload = run_outcome._error_payload(
-            args,
-            reason=events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
-            message=run_inputs._repository_intent_message(
-                intent_report, registration=registration
-            ),
-            paused=True,
-            cwd=verification_context.root,
-            snapshot=initial_snapshot,
-        )
-        details: dict[str, Any] = {"repository_intent": intent_report}
-        if registration is not None:
-            details["repository_registration"] = repository_registration.result_payload(
-                registration
-            )
-            if registration.status == "applied":
-                details["auto_repairs"] = [
-                    asdict(
-                        preflight_auto_repair.AutoRepair(
-                            action="repository-registry",
-                            category="repository-registry-required",
-                            path=str(initial_snapshot.plan_dir),
-                            entries_written=len(registration.files),
-                            completed_session_ids=(),
-                            journal_replaced=False,
-                        )
-                    )
-                ]
-        if registration_error is not None:
-            details["repository_registration_error"] = registration_error
-        payload["details"] = details
-        payload["pause_details"] = dict(details)
-        run_outcome._emit_run_payload(args, payload)
         return 1
 
     run_id = clock.utc_run_id()
