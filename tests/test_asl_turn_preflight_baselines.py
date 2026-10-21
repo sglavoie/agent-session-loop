@@ -12,7 +12,7 @@ from agent_session_loop import (
     plans_session_scope,
     repository_evidence,
     review_guard,
-    turn_preflight,
+    turn_baselines,
     workspace_evidence,
 )
 
@@ -209,7 +209,7 @@ class WorkspaceBaselineTests(PreflightTestCase):
             reads=("app", "docs"), writes=("app",)
         )
 
-    def capture(self, **overrides: Any) -> turn_preflight.TurnBaselines:
+    def capture(self, **overrides: Any) -> turn_baselines.TurnBaselines:
         snapshot = overrides.pop("snapshot", None) or self.snapshot()
         return self.baselines(
             snapshot,

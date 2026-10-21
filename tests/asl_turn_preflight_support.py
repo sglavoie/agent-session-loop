@@ -18,7 +18,7 @@ from agent_session_loop import (
     plans_payloads,
     plans_session_scope,
     plans_snapshot,
-    turn_preflight,
+    turn_baselines,
     turn_preparation,
 )
 
@@ -35,7 +35,7 @@ ENTRY_POINTS = (
     "turn_preflight.retained_scope_restored",
     "turn_preflight.resolve_retained_scope_repair",
     "turn_preflight.build_active_turn",
-    "turn_preflight.capture_turn_baselines",
+    "turn_baselines.capture_turn_baselines",
 )
 
 
@@ -199,8 +199,8 @@ class PreflightTestCase(unittest.TestCase):
         retained_scope_repair: dict[str, Any] | None = None,
         regenerated_write_scope: dict[str, Any] | None = None,
         authorized_external_roots: tuple[Path, ...] = (),
-    ) -> turn_preflight.TurnBaselines:
-        return turn_preflight.capture_turn_baselines(
+    ) -> turn_baselines.TurnBaselines:
+        return turn_baselines.capture_turn_baselines(
             self.ctx,
             snapshot=snapshot,
             state_dir_arg=None,

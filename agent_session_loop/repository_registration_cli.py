@@ -121,7 +121,7 @@ def _register_plan_dir_from_args(args: Any) -> int:
         print(result.detail)
         return 0
     print(f"Workspace root: {result.workspace_root}")
-    for line in repository_scope.registry_table_lines(result.repositories):
+    for line in repository_scope_registry.registry_table_lines(result.repositories):
         print(line)
     print("Changed files:")
     for path in result.files:
@@ -218,6 +218,6 @@ def _register_source_plan_from_args(args: Any) -> int:
         print(result.detail)
         return 0
     print(f"Workspace root: {result.workspace_root}")
-    for line in repository_scope.registry_table_lines(result.repositories):
+    for line in repository_scope_registry.registry_table_lines(result.repositories):
         print(line)
     return 0

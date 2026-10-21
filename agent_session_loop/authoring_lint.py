@@ -9,6 +9,8 @@ from typing import Any
 from . import (
     repository_intent,
     repository_scope,
+    repository_scope_payload,
+    repository_scope_targets,
 )
 from .authoring_parse import (
     _iter_structural_lines,
@@ -232,10 +234,12 @@ def plan_footprint_payload(
         plan = parse_plan_document(text)
     except PlanError:
         return None
-    targets_by_session: dict[str, tuple[repository_scope.PathTarget, ...]] = {}
+    targets_by_session: dict[str, tuple[repository_scope_targets.PathTarget, ...]] = {}
     for session in plan.sessions:
         session_id = session.session_id.value
-        targets = list(repository_scope.extract_path_targets("\n".join(session.lines)))
+        targets = list(
+            repository_scope_targets.extract_path_targets("\n".join(session.lines))
+        )
         targets.extend(_contract_file_targets(contracts_by_id, session_id))
         targets_by_session[session_id] = tuple(targets)
     footprint = repository_scope.resolve_footprint(
@@ -243,7 +247,7 @@ def plan_footprint_payload(
         cwd,
         provenance_roots=repository_intent.provenance_exempt_roots(source_path),
     )
-    return repository_scope.footprint_payload(
+    return repository_scope_payload.footprint_payload(
         targets_by_session, footprint, registry_present=plan.registry is not None
     )
 

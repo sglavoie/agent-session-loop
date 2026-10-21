@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from . import repository_scope
+from . import repository_scope, repository_scope_targets
 from .workspaces import (
     bounded_repository_rows,
     canonicalize_filesystem_path,
@@ -177,10 +177,10 @@ def candidates_from_text(text: str) -> tuple[IntentCandidate, ...]:
     """Extract absolute and inline-backtick locations from plan prose.
 
     Fenced blocks hold illustrative snippets, so both scans skip them for the
-    same reason :func:`repository_scope.extract_path_targets` does.
+    same reason :func:`repository_scope_targets.extract_path_targets` does.
     """
     candidates: list[IntentCandidate] = []
-    for target in repository_scope.extract_path_targets(text):
+    for target in repository_scope_targets.extract_path_targets(text):
         if target.confidence != "hard" or target.kind != "prose":
             continue
         candidates.append(
@@ -243,7 +243,7 @@ def candidates_from_checks(
 ) -> tuple[IntentCandidate, ...]:
     """Extract ``path`` and ``cwd`` locations from parsed contract checks."""
     candidates: list[IntentCandidate] = []
-    for target in repository_scope.targets_from_checks(checks, line=line):
+    for target in repository_scope_targets.targets_from_checks(checks, line=line):
         surface: SourceSurface = (
             "contract-cwd" if target.kind == "contract-cwd" else "contract-path"
         )

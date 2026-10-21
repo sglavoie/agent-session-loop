@@ -9,6 +9,8 @@ from typing import Any
 from . import (
     repository_intent,
     repository_scope,
+    repository_scope_payload,
+    repository_scope_targets,
     workspaces,
 )
 from .contracts import (
@@ -67,12 +69,12 @@ def _check_path_references(
 def _footprint_targets_by_session(
     contracts_by_session: dict[str, CompletionContract],
     snapshot: PlanSnapshot | None,
-) -> dict[str, tuple[repository_scope.PathTarget, ...]]:
+) -> dict[str, tuple[repository_scope_targets.PathTarget, ...]]:
     """Collect contract and prose path evidence, keyed by session id."""
-    targets: dict[str, list[repository_scope.PathTarget]] = {}
+    targets: dict[str, list[repository_scope_targets.PathTarget]] = {}
     for session_id, contract in contracts_by_session.items():
         targets.setdefault(session_id, []).extend(
-            repository_scope.targets_from_checks(contract.verify.checks)
+            repository_scope_targets.targets_from_checks(contract.verify.checks)
         )
     if snapshot is not None:
         for status in snapshot.sessions:
@@ -80,7 +82,7 @@ def _footprint_targets_by_session(
             if text is None:
                 continue
             targets.setdefault(status.session.id, []).extend(
-                repository_scope.extract_path_targets(text)
+                repository_scope_targets.extract_path_targets(text)
             )
     return {
         session_id: tuple(session_targets)
@@ -110,7 +112,7 @@ def plan_repository_footprint(
         plan_dir=canonical_dir,
         provenance_roots=plan_provenance_exempt_roots(canonical_dir),
     )
-    payload = repository_scope.footprint_payload(
+    payload = repository_scope_payload.footprint_payload(
         targets_by_session, footprint, registry_present=False
     )
     return footprint, payload

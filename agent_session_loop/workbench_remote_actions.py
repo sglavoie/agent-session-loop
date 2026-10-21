@@ -14,7 +14,7 @@ What is genuinely different about arriving over a link, and what this module
 therefore adds:
 
 * **A key, never a path.** A submission names a ``plan_key``, and
-  :class:`~agent_session_loop.workbench_remote_reads.PlanIndex` is the only
+  :class:`~agent_session_loop.workbench_remote_reads_index.PlanIndex` is the only
   thing that turns one into a directory. The set of plans the wire can act on is
   exactly the set this Mac already publishes, which is not a property a path
   argument could ever have.
@@ -91,7 +91,7 @@ from .workbench_remote_actions_journal import MutationRefused as MutationRefused
 from .workbench_remote_actions_journal import _from_action as _from_action
 from .workbench_remote_actions_journal import _journalled as _journalled
 from .workbench_remote_actions_journal import _require_body as _require_body
-from .workbench_remote_reads import PlanIndex
+from .workbench_remote_reads_index import PlanIndex
 
 __all__ = [
     "AslMutationPerformer",

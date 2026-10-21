@@ -7,7 +7,14 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from asl_workbench import actions as workbench_action_rules
-from asl_workbench import catalog, freshness, observation, overview
+from asl_workbench import (
+    catalog,
+    freshness,
+    observation,
+    overview_filters,
+    overview_selection,
+    overview_vocabulary,
+)
 from asl_workbench import controls as portable_controls
 from asl_workbench import details as detail_rules
 from asl_workbench.details import Window
@@ -441,7 +448,7 @@ class _LocalProviderOperations:
 # explicit surface preserves the runtime facade and gives the type checker the
 # same view of those names.
 # fmt: off
-__all__ = ("threading", "time", "Callable", "Mapping", "Sequence", "Path", "Any", "Protocol", "workbench_action_rules", "catalog", "freshness", "observation", "overview", "portable_controls", "detail_rules", "Window", "MODE_LOCAL", "Call", "HttpRefusal", "Response", "invalid_request", "unavailable_from", "HTTP_OPERATIONS", "OperationError", "intervention", "plans_files", "redirect_admission", "redirect_cli", "redirect_store_vocab", "state", "workbench_actions", "workbench_archive", "workbench_catalog", "workbench_controls", "workbench_details", "workbench_history", "workbench_launch", "workbench_registry", "workbench_registry_models", "workbench_summary_model", "_JSONDict", "MAX_LAUNCH_RECEIPTS", "MAX_LAUNCH_ID_CHARS", "LocalConfig", "LaunchBook", "_REFUSAL_STATUS", "_INTERVENTION_REQUEST_REASONS", "_intervention_status", "_refusal_status", "_ARCHIVE_BLOCKING_STATES", "sort_summaries_oldest_first", "_augment_archivable", "_augment_catalog_labels", "_queue_rows", "_plan_labels", "_history_newest_first", "_history_record", "_augment_catalog_keys", "_coerce_optional_str", "_coerce_optional_int", "_coerce_max_review_fix_cycles", "_coerce_optional_bool", "_coerce_commit_mode", "coerce_profile_payload", "_LocalProviderOperations")
+__all__ = ("threading", "time", "Callable", "Mapping", "Sequence", "Path", "Any", "Protocol", "workbench_action_rules", "catalog", "freshness", "observation", "overview_filters", "overview_selection", "overview_vocabulary", "portable_controls", "detail_rules", "Window", "MODE_LOCAL", "Call", "HttpRefusal", "Response", "invalid_request", "unavailable_from", "HTTP_OPERATIONS", "OperationError", "intervention", "plans_files", "redirect_admission", "redirect_cli", "redirect_store_vocab", "state", "workbench_actions", "workbench_archive", "workbench_catalog", "workbench_controls", "workbench_details", "workbench_history", "workbench_launch", "workbench_registry", "workbench_registry_models", "workbench_summary_model", "_JSONDict", "MAX_LAUNCH_RECEIPTS", "MAX_LAUNCH_ID_CHARS", "LocalConfig", "LaunchBook", "_REFUSAL_STATUS", "_INTERVENTION_REQUEST_REASONS", "_intervention_status", "_refusal_status", "_ARCHIVE_BLOCKING_STATES", "sort_summaries_oldest_first", "_augment_archivable", "_augment_catalog_labels", "_queue_rows", "_plan_labels", "_history_newest_first", "_history_record", "_augment_catalog_keys", "_coerce_optional_str", "_coerce_optional_int", "_coerce_max_review_fix_cycles", "_coerce_optional_bool", "_coerce_commit_mode", "coerce_profile_payload", "_LocalProviderOperations")
 # fmt: on
 
 

@@ -6,7 +6,7 @@ import json
 import unittest
 from typing import Any
 
-from agent_session_loop import workbench_remote_reads
+from agent_session_loop import workbench_remote_reads_payload
 from asl_workbench import catalog, details, remote_reads
 from asl_workbench.transport import (
     KIND_DETAIL,
@@ -166,7 +166,7 @@ class PrivacyTests(fixtures.ResponderTestCase):
                     self.assertNotIn(needle, rendered)
 
     def test_the_scrubber_drops_a_path_column_nobody_declared(self) -> None:
-        scrubbed = workbench_remote_reads._scrub(
+        scrubbed = workbench_remote_reads_payload._scrub(
             {
                 "plan_dir": "/Users/somebody/plans/x",
                 "events_path": "/Users/somebody/state/events.jsonl",

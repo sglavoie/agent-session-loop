@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from asl_workbench import overview
+from asl_workbench import overview_vocabulary
 from tests import workbench_support
 from tests.workbench_overview_support import (
     LARGE_CATALOG_SIZE,
@@ -100,7 +100,7 @@ class LargeCatalogTests(unittest.TestCase):
         body = self.queue()
         self.assertEqual(self.total, body["catalog_total"])
         self.assertEqual(self.total, body["catalog_matched"])
-        self.assertEqual(overview.DEFAULT_PAGE_LIMIT, len(body["plans"]))
+        self.assertEqual(overview_vocabulary.DEFAULT_PAGE_LIMIT, len(body["plans"]))
         self.assertTrue(body["truncated"])
 
     def test_counts_cover_the_catalog_rather_than_the_page(self) -> None:
@@ -206,12 +206,12 @@ class RetainedObservationTests(unittest.TestCase):
     ) -> None:
         rows = {str(row["plan_key"]): row for row in self.queue()["plans"]}
         self.assertEqual(
-            overview.OBSERVATION_CURRENT,
+            overview_vocabulary.OBSERVATION_CURRENT,
             rows[self.corpus.plan_keys["alpha"]]["observation_status"],
         )
         for name in ("bravo", "charlie"):
             self.assertEqual(
-                overview.OBSERVATION_UNCONFIRMED,
+                overview_vocabulary.OBSERVATION_UNCONFIRMED,
                 rows[self.corpus.plan_keys[name]]["observation_status"],
                 f"{name} was presented as live",
             )
@@ -236,10 +236,13 @@ class RetainedObservationTests(unittest.TestCase):
         # standing on the plans it describes, so there is no row it could say
         # anything else about. It says it anyway, so a front end never has to
         # ask which provider answered before deciding whether to warn.
-        self.assertEqual(overview.OBSERVATION_CURRENT, body.get("observation_status"))
+        self.assertEqual(
+            overview_vocabulary.OBSERVATION_CURRENT, body.get("observation_status")
+        )
         for row in body["plans"]:
             self.assertEqual(
-                overview.OBSERVATION_CURRENT, overview.observation_status(row)
+                overview_vocabulary.OBSERVATION_CURRENT,
+                overview_vocabulary.observation_status(row),
             )
         self.assertEqual("complete", body.get("catalog_completeness"))
 

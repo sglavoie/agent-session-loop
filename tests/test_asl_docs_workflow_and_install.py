@@ -14,6 +14,8 @@ from unittest import mock
 from agent_session_loop import (
     assurance_report,
     install_verify,
+    install_verify_common,
+    install_verify_smoke,
     startup_context,
 )
 from tests.asl_docs_support import read_repo_text
@@ -239,7 +241,7 @@ class InstallVerificationTests(unittest.TestCase):
             for path in (REPO_ROOT / "skills").iterdir()
             if path.is_dir() and (path / "SKILL.md").exists()
         ]
-        for install_dir in install_verify.SKILL_INSTALL_DIRS:
+        for install_dir in install_verify_common.SKILL_INSTALL_DIRS:
             install_root = home / install_dir
             install_root.mkdir(parents=True)
             for skill_dir in skill_dirs:
@@ -339,8 +341,8 @@ class InstallVerificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             home.mkdir()
-            with mock.patch.object(install_verify.subprocess, "run", _fake_run):
-                install_verify._check_status_smoke(
+            with mock.patch.object(install_verify_smoke.subprocess, "run", _fake_run):
+                install_verify_smoke._check_status_smoke(
                     active_asl="/usr/bin/true",
                     home=home,
                     path_env="/usr/bin",

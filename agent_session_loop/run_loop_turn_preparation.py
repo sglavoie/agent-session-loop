@@ -16,6 +16,7 @@ from . import (
     run_commit,
     run_selection,
     state,
+    turn_baselines,
     turn_execution_artifacts,
     turn_execution_constants,
     turn_execution_executor,
@@ -212,7 +213,7 @@ def _prepare_turn_prompt(frame: RunFrame) -> RunResult | LoopSignal | None:
 
     with frame.run_control_lock:
         frame.ctx.run_control_context = dict(frame.active_turn)
-    baselines = turn_preflight.capture_turn_baselines(
+    baselines = turn_baselines.capture_turn_baselines(
         frame.ctx,
         snapshot=frame.before,
         state_dir_arg=frame.args.state_dir,

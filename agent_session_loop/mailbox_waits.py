@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from .mailbox import _read_locked, _write_locked_records, read_mailbox
-from .mailbox_append_record import _append_record, _normalize_append_record
+from .mailbox_append_normalize import _normalize_append_record
+from .mailbox_append_record import _append_record
 from .mailbox_constants import (
     ERROR_MAILBOX_WRITE,
     MAILBOX_CLOSURE_RESERVE_BYTES,

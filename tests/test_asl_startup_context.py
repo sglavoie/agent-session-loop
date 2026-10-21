@@ -8,7 +8,12 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from agent_session_loop import install_verify, startup_context
+from agent_session_loop import (
+    install_verify,
+    install_verify_common,
+    install_verify_skills,
+    startup_context,
+)
 from tests.support import REPO_ROOT
 
 CODEX_DEFAULTS = "\n".join(
@@ -387,7 +392,7 @@ class InstalledStartupContextTests(unittest.TestCase):
             for path in (REPO_ROOT / "skills").iterdir()
             if path.is_dir() and (path / "SKILL.md").exists()
         ]
-        for install_dir in install_verify.SKILL_INSTALL_DIRS:
+        for install_dir in install_verify_common.SKILL_INSTALL_DIRS:
             install_root = home / install_dir
             install_root.mkdir(parents=True)
             for skill_dir in skill_dirs:
@@ -605,7 +610,7 @@ class InstalledStartupContextTests(unittest.TestCase):
             installed.unlink()
             installed.mkdir()
             (installed / "SKILL.md").write_text(
-                install_verify.ASL_SKILL_REQUIRED_TEXT, encoding="utf-8"
+                install_verify_skills.ASL_SKILL_REQUIRED_TEXT, encoding="utf-8"
             )
             reference = installed / "references/supervisor-context.md"
             reference.parent.mkdir(parents=True)

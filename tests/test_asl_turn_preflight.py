@@ -39,6 +39,7 @@ from agent_session_loop import (
     clock,
     run_loop_context,
     run_prompts,
+    turn_baselines,
     turn_preflight,
     workspace_evidence,
 )
@@ -59,11 +60,18 @@ class PreflightBoundaryTests(unittest.TestCase):
     """The boundary's own shape, independent of any turn it prepares."""
 
     def module_source(self) -> ast.Module:
-        source = Path(turn_preflight.__file__).read_text(encoding="utf-8")
-        return ast.parse(source)
+        modules = [
+            ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+            for module in (turn_preflight, turn_baselines)
+        ]
+        return ast.Module(
+            body=[statement for module in modules for statement in module.body],
+            type_ignores=[],
+        )
 
     def test_turn_preflight_does_not_import_the_runner(self) -> None:
         assert_no_runner_import(self, turn_preflight)
+        assert_no_runner_import(self, turn_baselines)
 
     def test_every_pause_is_followed_by_the_return_that_carries_it(self) -> None:
         # The branches this replaced ended in `break`. Here the `break` is the
@@ -117,7 +125,7 @@ class PreflightBoundaryTests(unittest.TestCase):
         )
 
     def test_every_result_is_frozen(self) -> None:
-        for record in (turn_preflight.ActiveTurn, turn_preflight.TurnBaselines):
+        for record in (turn_preflight.ActiveTurn, turn_baselines.TurnBaselines):
             with self.subTest(record=record.__name__):
                 self.assertTrue(record.__dataclass_params__.frozen)
 
@@ -151,7 +159,9 @@ class RunLoopDelegationTests(unittest.TestCase):
             ast.unparse(node.func)
             for node in ast.walk(ast.parse(self.loop_source()))
             if isinstance(node, ast.Call)
-            and ast.unparse(node.func).startswith("turn_preflight.")
+            and ast.unparse(node.func).startswith(
+                ("turn_preflight.", "turn_baselines.")
+            )
         }
         self.assertEqual(set(ENTRY_POINTS), calls)
 

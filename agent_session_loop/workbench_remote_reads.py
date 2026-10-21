@@ -13,7 +13,8 @@ Three translations happen here and nowhere else:
   far end has never been told where anything lives and cannot be: a request
   that could name a directory would be a request that could name
   ``/etc/shadow``, and no containment rule applied afterwards would make that
-  safe. :class:`PlanIndex` resolves the key against a real discovery pass, so
+  safe. :class:`~.workbench_remote_reads_index.PlanIndex` resolves the key against a
+  real discovery pass, so
   the only directories reachable from the wire are the ones this Mac's own
   discovery already publishes.
 
@@ -21,10 +22,11 @@ Three translations happen here and nowhere else:
   :mod:`agent_session_loop.workbench_details` answer a browser on this machine,
   so every one of them carries absolute paths -- ``plan_dir``, ``path``,
   ``state_path``, ``events_path``. :data:`asl_workbench.transport.DETAIL_SHAPE`
-  has nowhere to put them, and :func:`_scrub` takes them out before anything is
-  handed back. The Pi renders what a plan *says*; where it sits on somebody's
-  laptop is not part of that, and a filesystem layout that has crossed a
-  network is a filesystem layout that has been disclosed.
+  has nowhere to put them, and
+  :func:`~.workbench_remote_reads_payload._scrub` takes them out before
+  anything is handed back. The Pi renders what a plan *says*; where it sits on
+  somebody's laptop is not part of that, and a filesystem layout that has
+  crossed a network is a filesystem layout that has been disclosed.
 
 * **A failure becomes a reason.** ``DetailError`` carries an HTTP status here
   because the local surface is HTTP. A remote read has no status line, so the
@@ -41,19 +43,13 @@ the readers rather than a promise made at this layer.
 
 from __future__ import annotations
 
-import json
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
 from asl_workbench import catalog as portable_catalog
 from asl_workbench import details
 from asl_workbench.details import REASON_NOT_FOUND, DetailError, Window
-from asl_workbench.observation import (
-    COMPLETENESS_COMPLETE,
-    COMPLETENESS_PARTIAL,
-)
 from asl_workbench.transport import (
     DETAIL_REFUSAL_REASONS,
     MAX_DETAIL_BYTES,
@@ -62,330 +58,22 @@ from asl_workbench.transport import (
 
 from . import (
     workbench_archive,
-    workbench_catalog,
     workbench_details,
     workbench_registry,
     workbench_registry_models,
 )
-
-__all__ = [
-    "MAX_ENTRY_BUDGET_BYTES",
-    "OBJECT_DETAILS",
-    "PLAN_INDEX_TTL_SECONDS",
-    "ROW_DETAILS",
-    "TEXT_DETAILS",
-    "AslDetailResponder",
-    "PlanIndex",
-    "detail_payload",
-]
-
-
-# --------------------------------------------------------------------------
-# Bounds
-# --------------------------------------------------------------------------
-
-#: How long a resolved ``plan_key`` table is trusted before the corpus is
-#: walked again. A miss refreshes immediately whatever this says, so the window
-#: only decides how long a *stale hit* can last -- a plan archived a minute ago
-#: answers from its old directory and reports ``not-found`` when the read lands,
-#: which is the same answer a cockpit would have got a moment later anyway.
-PLAN_INDEX_TTL_SECONDS = 30.0
-
-#: The byte budget for the rows of one answer, measured on the encoded form.
-#: Below :data:`asl_workbench.transport.MAX_DETAIL_BYTES` on purpose: that bound
-#: governs ``content`` alone, and a frame also has to carry the envelope, the
-#: target and the pagination around it.
-MAX_ENTRY_BUDGET_BYTES = MAX_DETAIL_BYTES - 8 * 1024
-
-#: Detail kinds whose payload is one object. Their answer carries a single
-#: entry, because "the state file, scrubbed" is one thing and splitting it into
-#: rows would invent a structure the reader does not have.
-OBJECT_DETAILS: tuple[str, ...] = (
-    "plan",
-    "artifacts",
-    "state",
-    "verification",
-    "result",
-    "questions",
-    "recovery",
+from .workbench_remote_reads_index import PlanIndex
+from .workbench_remote_reads_payload import (
+    ROW_DETAILS,
+    TEXT_DETAILS,
+    _fit_rows,
+    _fit_text,
+    _Material,
+    _scrub,
+    detail_payload,
 )
 
-#: Detail kinds whose payload is a sequence, and the key each keeps it under.
-#: These are the reads that page: their rows become ``entries`` and their
-#: cursor becomes ``next_offset``.
-ROW_DETAILS: Mapping[str, str] = {
-    "events": "events",
-    "commits": "commits",
-    "progress": "entries",
-}
-
-#: Detail kinds whose payload is bounded text. These carry ``content``, and
-#: their window arithmetic becomes ``offset``/``next_offset``/``total``.
-TEXT_DETAILS: tuple[str, ...] = ("logs", "last-message", "final-review")
-
-#: Keys never sent. Every one of them holds a path on this machine, and
-#: :data:`asl_workbench.transport.DETAIL_SHAPE` has no field for a path -- the
-#: far end addresses a plan by key and an artifact by name, both of the way
-#: through.
-PRIVATE_KEYS: frozenset[str] = frozenset(
-    {
-        "plan_dir",
-        "path",
-        "cwd",
-        "root",
-        "state_dir",
-        "state_root",
-        "workspace_root",
-        "worktree",
-        "repo_path",
-        # Not a path field, but a derived blob that concatenates one. The
-        # catalog builds it so a local browser can filter on anything it can
-        # see, and the plan directory is one of the things it can see. It is
-        # also of no use to a remote reader, which filters against the catalog
-        # this connector already publishes.
-        "searchable_text",
-    }
-)
-
-#: Key suffixes dropped for the same reason, so an artifact table gaining a new
-#: ``*_path`` column does not quietly start publishing one.
-PRIVATE_KEY_SUFFIXES: tuple[str, ...] = ("_path", "_dir", "_root")
-
-
-# --------------------------------------------------------------------------
-# Resolving a key to a directory
-# --------------------------------------------------------------------------
-
-
-class PlanIndex:
-    """``plan_key`` to plan directory, from this Mac's own discovery.
-
-    The gate between a remote request and a local filesystem. A key that no
-    discovery pass produced resolves to nothing, so the set of directories the
-    wire can reach is exactly the set this Mac already publishes in its catalog
-    -- not a superset of it, and never a path the far end composed.
-    """
-
-    def __init__(
-        self,
-        *,
-        state_dir: str | Path | None = None,
-        plan_roots: Iterable[str | Path] = (),
-        include_default_dirs: bool = True,
-        ttl_seconds: float = PLAN_INDEX_TTL_SECONDS,
-    ) -> None:
-        self.state_dir = state_dir
-        self.plan_roots = tuple(plan_roots)
-        self.include_default_dirs = include_default_dirs
-        self._ttl = float(ttl_seconds)
-        self._plans: dict[str, Path] = {}
-        self._scanned_at: float | None = None
-
-    @property
-    def size(self) -> int:
-        """How many plans the last pass indexed."""
-        return len(self._plans)
-
-    def refresh(self, now: float) -> int:
-        """Walk the corpus and rebuild the table. Returns how many plans."""
-        scan = workbench_catalog.scan(
-            state_dir=self.state_dir,
-            plan_roots=self.plan_roots,
-            include_default_dirs=self.include_default_dirs,
-        )
-        rebuilt: dict[str, Path] = {}
-        for summary in scan.summaries:
-            plan_dir = str(summary.plan_dir)
-            try:
-                rebuilt[portable_catalog.plan_key(plan_dir)] = Path(plan_dir)
-            except portable_catalog.CatalogError:
-                continue
-        self._plans = rebuilt
-        self._scanned_at = now
-        return len(rebuilt)
-
-    def resolve(self, plan_key: object, *, now: float) -> Path:
-        """The directory one key names, or a refusal saying it names none.
-
-        A miss always costs a fresh pass before it is believed: a plan created
-        since the last walk is a plan an operator is most likely to be asking
-        about, and answering ``not-found`` from a stale table would be answering
-        about the corpus as it was rather than as it is.
-        """
-        if not isinstance(plan_key, str) or not plan_key:
-            raise DetailError(
-                details.REASON_INVALID_REQUEST, "a detail read needs a plan_key"
-            )
-        if self._stale(now):
-            self.refresh(now)
-        found = self._plans.get(plan_key)
-        if found is None:
-            self.refresh(now)
-            found = self._plans.get(plan_key)
-        if found is None:
-            raise DetailError(
-                details.REASON_NOT_FOUND, "no plan on this connector has that key"
-            )
-        return found
-
-    def items(self, *, now: float) -> list[tuple[str, Path]]:
-        """Every indexed plan as ``(plan_key, directory)``, refreshed if stale.
-
-        For the caller that has to visit the whole corpus rather than resolve
-        one key -- settling what a restart left open is the case -- and it walks
-        the same table a read resolves against, so it can never reach a
-        directory the wire could not have named.
-        """
-        if self._stale(now):
-            self.refresh(now)
-        return sorted(self._plans.items())
-
-    def _stale(self, now: float) -> bool:
-        return self._scanned_at is None or now - self._scanned_at >= self._ttl
-
-
-# --------------------------------------------------------------------------
-# Projection
-# --------------------------------------------------------------------------
-
-
-def _scrub(value: Any) -> Any:
-    """One payload with every local path taken out, recursively.
-
-    Applied to whatever a reader returns rather than to a list of known fields,
-    so a reader that grows a path column does not need this module edited to
-    stop publishing it. The default is to drop, which is the direction a
-    privacy rule has to fail in.
-    """
-    if isinstance(value, Mapping):
-        return {
-            key: _scrub(item)
-            for key, item in value.items()
-            if not _private_key(str(key))
-        }
-    if isinstance(value, (list, tuple)):
-        return [_scrub(item) for item in value]
-    return value
-
-
-def _private_key(key: str) -> bool:
-    return key in PRIVATE_KEYS or key.endswith(PRIVATE_KEY_SUFFIXES)
-
-
-def _encoded_size(value: Any) -> int:
-    """How many bytes one row costs on the wire, near enough to bound by."""
-    try:
-        return len(json.dumps(value, default=str).encode("utf-8"))
-    except TypeError, ValueError:
-        return MAX_ENTRY_BUDGET_BYTES
-
-
-def _fit_rows(rows: Sequence[Any], *, offset: int) -> tuple[list[Any], int | None]:
-    """As many rows as the budget allows, and the cursor for the rest.
-
-    A bound on the *encoded* size rather than on the count, because a hundred
-    ordinary events and a hundred events carrying stack traces are not the same
-    frame. Trimming moves the cursor back, so the caller's next page starts
-    exactly where this one stopped and nothing is skipped.
-    """
-    kept: list[Any] = []
-    spent = 0
-    for row in rows[:MAX_DETAIL_ENTRIES]:
-        cost = _encoded_size(row)
-        if kept and spent + cost > MAX_ENTRY_BUDGET_BYTES:
-            return kept, offset + len(kept)
-        kept.append(row)
-        spent += cost
-    if len(rows) > len(kept):
-        return kept, offset + len(kept)
-    return kept, None
-
-
-def _fit_text(text: str) -> tuple[str, bool]:
-    """Text cut to what one detail frame may carry, and whether it was cut.
-
-    Cut on a character boundary, from the front: the readers hand back a window
-    that already starts where the caller asked, so what has to go is the tail.
-    """
-    if not text:
-        return "", False
-    encoded = text.encode("utf-8", "surrogatepass")
-    if len(encoded) <= MAX_DETAIL_BYTES:
-        return text, False
-    trimmed = encoded[:MAX_DETAIL_BYTES].decode("utf-8", "ignore")
-    return trimmed, True
-
-
-@dataclass
-class _Material:
-    """What one read found, before it is dressed as a transport payload."""
-
-    entries: list[Any] | None = None
-    content: str | None = None
-    offset: int | None = None
-    next_offset: int | None = None
-    total: int | None = None
-    truncated: bool = False
-    artifact: str | None = None
-    stream: str | None = None
-    run_id: str | None = None
-    warnings: list[str] = field(default_factory=list)
-
-    @property
-    def complete(self) -> str:
-        """Whether this answer is the whole thing.
-
-        ``partial`` for anything cut -- by a page, by a window, or by the frame
-        budget -- because a caller that cannot tell a complete artifact from a
-        trimmed one will read the trimmed one as the end of the file.
-        """
-        cut = self.next_offset is not None or self.truncated or bool(self.warnings)
-        return COMPLETENESS_PARTIAL if cut else COMPLETENESS_COMPLETE
-
-
-def detail_payload(
-    *,
-    detail: str,
-    target: Mapping[str, Any],
-    material: _Material,
-    observed_at: float,
-) -> dict[str, Any]:
-    """One :data:`DETAIL_SHAPE` payload, carrying only what it actually has.
-
-    Absent is not the same as empty here: a field omitted was not applicable,
-    and a field present and empty is a fact about the artifact. The transport
-    refuses ``content_bytes`` without ``content`` and ``entry_count`` without
-    ``entries`` for the same reason.
-    """
-    payload: dict[str, Any] = {
-        "detail": detail,
-        "target": dict(target),
-        "observed_at": observed_at,
-        "complete": material.complete,
-    }
-    if material.content is not None:
-        payload["content"] = material.content
-        payload["content_bytes"] = len(
-            material.content.encode("utf-8", "surrogatepass")
-        )
-        payload["encoding"] = "utf-8"
-    if material.entries is not None:
-        payload["entries"] = material.entries
-        payload["entry_count"] = len(material.entries)
-    for name in ("offset", "next_offset", "total", "artifact", "stream"):
-        value = getattr(material, name)
-        if value is not None:
-            payload[name] = value
-    if material.truncated:
-        payload["truncated"] = True
-    if material.warnings:
-        payload["warnings"] = material.warnings[:4]
-    return payload
-
-
-# --------------------------------------------------------------------------
-# The responder
-# --------------------------------------------------------------------------
+__all__ = ["AslDetailResponder"]
 
 
 class AslDetailResponder:

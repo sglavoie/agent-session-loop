@@ -16,7 +16,7 @@ from unittest import mock
 
 from agent_session_loop import (
     mailbox,
-    mailbox_append_record,
+    mailbox_append_normalize,
     mailbox_appenders,
     mailbox_constants,
     mailbox_cursors,
@@ -334,7 +334,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
 
             with (
                 mock.patch.object(
-                    mailbox_append_record, "_new_id", return_value=message_id
+                    mailbox_append_normalize, "_new_id", return_value=message_id
                 ),
                 mock.patch.object(mailbox_validation, "_utc_now", return_value=now),
             ):
@@ -372,7 +372,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
 
             with (
                 mock.patch.object(
-                    mailbox_append_record, "_new_id", return_value=reply_id
+                    mailbox_append_normalize, "_new_id", return_value=reply_id
                 ),
                 mock.patch.object(mailbox_validation, "_utc_now", return_value=now),
             ):
@@ -412,7 +412,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
 
             with (
                 mock.patch.object(
-                    mailbox_append_record, "_new_id", return_value=resolution_id
+                    mailbox_append_normalize, "_new_id", return_value=resolution_id
                 ),
                 mock.patch.object(mailbox_validation, "_utc_now", return_value=now),
             ):

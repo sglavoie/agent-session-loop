@@ -51,6 +51,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 "asl_workbench/operations*.py" = ["E501", "F401", "F403", "F405"]
 "tests/asl_execution_timing_*.py" = ["F401", "F403", "F405"]
 "tests/asl_turn_finalization_*.py" = ["F401", "F403", "F405"]
+"tests/asl_turn_execution_*.py" = ["F401", "F403", "F405"]
 "tests/asl_tail_*.py" = ["F401", "F403", "F405"]
 "tests/asl_live_redirect_*.py" = ["F401", "F403", "F405"]
 "tests/asl_overseer_checkpoint_groups_*.py" = ["E501", "F401", "F403", "F405"]
@@ -73,6 +74,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 "tests/test_asl_execution_timing.py" = ["F401"]
 "tests/test_asl_tail.py" = ["F401"]
 "tests/test_asl_turn_finalization.py" = ["F401"]
+"tests/test_asl_turn_execution.py" = ["F401"]
 # Static ``__all__`` declarations make split-module vocabularies visible to
 # mypy.  Keep those one-line declarations readable as a single contract.
 "agent_session_loop/execution_timing_models.py" = ["E501"]
@@ -345,6 +347,11 @@ module = [
     "agent_session_loop.harness_types",
     "agent_session_loop.harnesses",
     "agent_session_loop.install_verify",
+    "agent_session_loop.install_verify_agent_mux",
+    "agent_session_loop.install_verify_common",
+    "agent_session_loop.install_verify_maintenance",
+    "agent_session_loop.install_verify_skills",
+    "agent_session_loop.install_verify_smoke",
     "agent_session_loop.intervention",
     "agent_session_loop.intervention_facts",
     "agent_session_loop.literals",
@@ -353,6 +360,8 @@ module = [
     "agent_session_loop.live_verification_run",
     "agent_session_loop.live_verification_state",
     "agent_session_loop.mailbox",
+    "agent_session_loop.mailbox_append_checks",
+    "agent_session_loop.mailbox_append_normalize",
     "agent_session_loop.mailbox_append_record",
     "agent_session_loop.mailbox_appenders",
     "agent_session_loop.mailbox_cli_agent_mux",
@@ -577,6 +586,9 @@ module = [
     "agent_session_loop.repository_registration_models",
     "agent_session_loop.repository_registration_rendering",
     "agent_session_loop.repository_scope",
+    "agent_session_loop.repository_scope_payload",
+    "agent_session_loop.repository_scope_registry",
+    "agent_session_loop.repository_scope_targets",
     "agent_session_loop.responses",
     "agent_session_loop.restore_diagnosis",
     "agent_session_loop.retention",
@@ -749,6 +761,7 @@ module = [
     "agent_session_loop.tail_records",
     "agent_session_loop.task_packet",
     "agent_session_loop.transitions",
+    "agent_session_loop.turn_baselines",
     "agent_session_loop.turn_disposition_failures",
     "agent_session_loop.turn_disposition_mailbox",
     "agent_session_loop.turn_disposition_models",
@@ -816,6 +829,8 @@ module = [
     "agent_session_loop.workbench_remote_actions_journal",
     "agent_session_loop.workbench_remote_actions_recovery",
     "agent_session_loop.workbench_remote_reads",
+    "agent_session_loop.workbench_remote_reads_index",
+    "agent_session_loop.workbench_remote_reads_payload",
     "agent_session_loop.workbench_server",
     "agent_session_loop.workbench_workspace",
     "agent_session_loop.workspace_evidence",
@@ -912,7 +927,9 @@ module = [
     "asl_workbench.operations_reconciliation",
     "asl_workbench.operations_records",
     "asl_workbench.operations_vocab",
-    "asl_workbench.overview",
+    "asl_workbench.overview_filters",
+    "asl_workbench.overview_selection",
+    "asl_workbench.overview_vocabulary",
     "asl_workbench.remote_actions",
     "asl_workbench.remote_actions_models",
     "asl_workbench.remote_actions_queue",

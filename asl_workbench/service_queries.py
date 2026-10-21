@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from . import overview
+from . import overview_filters
 from .freshness import aggregate_completeness, aggregate_freshness
 from .http import (
     COMMAND_NAME,
@@ -99,7 +99,7 @@ class ServiceQueries(ServiceState):
         catalog this page is a part of.
         """
         now = self._clock()
-        filters = overview.parse_filters(call, default_limit=DEFAULT_READ_LIMIT)
+        filters = overview_filters.parse_filters(call, default_limit=DEFAULT_READ_LIMIT)
         connector_id = call.optional_query("connector_id")
         include_absent = call.optional_query("include_absent") == "1"
         narrowing: dict[str, Any] = {
@@ -122,7 +122,9 @@ class ServiceQueries(ServiceState):
         # three is derived from ``entries``, because a page cannot say how
         # large the set it came from was.
         matched = self._store.catalog_matched(states=filters.states, **narrowing)
-        counts = overview.counts_from_states(self._store.catalog_states(**narrowing))
+        counts = overview_filters.counts_from_states(
+            self._store.catalog_states(**narrowing)
+        )
         statuses = self._store.connector_statuses(now=now)
         totals = self._store.counts(now=now)
         catalog_completeness = aggregate_completeness(
@@ -170,7 +172,7 @@ class ServiceQueries(ServiceState):
         different project than the plan list above it.
         """
         now = self._clock()
-        filters = overview.parse_filters(call, default_limit=DEFAULT_READ_LIMIT)
+        filters = overview_filters.parse_filters(call, default_limit=DEFAULT_READ_LIMIT)
         entries = self._store.history(
             now=now,
             project=filters.project,

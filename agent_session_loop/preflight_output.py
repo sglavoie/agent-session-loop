@@ -8,7 +8,7 @@ from typing import Any
 
 from . import (
     repository_intent,
-    repository_scope,
+    repository_scope_payload,
     workspaces,
 )
 from .plans_models import ReadinessMetadata
@@ -124,7 +124,7 @@ def _preflight_payload_fields(
 def _repository_footprint_payload(report: PreflightReport) -> dict[str, Any] | None:
     if report.repository_footprint is None:
         return None
-    return repository_scope.footprint_payload(
+    return repository_scope_payload.footprint_payload(
         _footprint_targets_by_session(report.contracts_by_session, report.snapshot),
         report.repository_footprint,
         registry_present=report.repository_registry is not None,

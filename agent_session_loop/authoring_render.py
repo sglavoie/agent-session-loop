@@ -11,7 +11,7 @@ from . import (
     plans_handoff,
     plans_progress,
     plans_session_scope,
-    repository_scope,
+    repository_scope_targets,
 )
 from .authoring_source_models import _fence_delimiter, _trim_body
 from .plans_errors import PlanError
@@ -61,8 +61,8 @@ EMPTY_CONTEXT_TEMPLATE = (
 
 #: Contract check keys that hold a path, paired with the target kind each one
 #: becomes. Spelled out so the kind stays the ``TargetKind`` literal
-#: :class:`repository_scope.PathTarget` declares rather than a bare ``str``.
-_CONTRACT_PATH_FIELDS: tuple[tuple[str, repository_scope.TargetKind], ...] = (
+#: :class:`repository_scope_targets.PathTarget` declares rather than a bare ``str``.
+_CONTRACT_PATH_FIELDS: tuple[tuple[str, repository_scope_targets.TargetKind], ...] = (
     ("path", "contract-path"),
     ("cwd", "contract-cwd"),
 )
@@ -70,7 +70,7 @@ _CONTRACT_PATH_FIELDS: tuple[tuple[str, repository_scope.TargetKind], ...] = (
 
 def _contract_file_targets(
     contracts_by_id: Any, session_id: str
-) -> list[repository_scope.PathTarget]:
+) -> list[repository_scope_targets.PathTarget]:
     if not isinstance(contracts_by_id, dict):
         return []
     contract = contracts_by_id.get(session_id)
@@ -82,7 +82,7 @@ def _contract_file_targets(
     )
     if not isinstance(checks, list):
         return []
-    targets: list[repository_scope.PathTarget] = []
+    targets: list[repository_scope_targets.PathTarget] = []
     for check in checks:
         if not isinstance(check, dict):
             continue
@@ -90,7 +90,7 @@ def _contract_file_targets(
             value = check.get(field_name)
             if isinstance(value, str) and value:
                 targets.append(
-                    repository_scope.PathTarget(
+                    repository_scope_targets.PathTarget(
                         value=value, kind=kind, line=0, confidence="hard"
                     )
                 )

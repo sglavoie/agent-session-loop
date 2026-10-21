@@ -184,7 +184,7 @@ def _derive(
     bound_root: Path,
 ) -> RegistrationPlan | RegistrationResult:
     """Turn a registry-required intent into the migration it implies."""
-    workspace_root = repository_scope.suggest_workspace_root(intent.git_roots)
+    workspace_root = repository_scope_registry.suggest_workspace_root(intent.git_roots)
     if workspace_root is None:
         return _refused(
             "workspace-root",
@@ -194,7 +194,7 @@ def _derive(
             ),
         )
     try:
-        suggestions = repository_scope.suggest_repositories(
+        suggestions = repository_scope_registry.suggest_repositories(
             workspace_root, intent.git_roots
         )
     except WorkspaceError as error:
@@ -210,7 +210,9 @@ def _derive(
             workspace_root=workspace_root,
         )
     try:
-        registry = repository_scope.suggest_registry(workspace_root, intent.git_roots)
+        registry = repository_scope_registry.suggest_registry(
+            workspace_root, intent.git_roots
+        )
     except WorkspaceError as error:
         return _refused(
             "workspace-root", detail=str(error), workspace_root=workspace_root
@@ -237,7 +239,7 @@ def _derive(
             contracts[session_id] = rewritten
         scopes[session_id] = _session_scope(
             writes,
-            prose=repository_scope.extract_path_targets(session.text),
+            prose=repository_scope_targets.extract_path_targets(session.text),
             session_id=session_id,
             bound_root=bound_root,
             alias_by_root=alias_by_root,

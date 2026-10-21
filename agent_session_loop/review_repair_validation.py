@@ -18,6 +18,7 @@ from . import (
     preflight_models,
     progress_repair,
     repository_scope,
+    repository_scope_targets,
     review,
     state,
     verification_models,
@@ -195,11 +196,11 @@ def _strip_self_lock_findings(
 
 def _child_footprint_targets(
     group_plan: repair_models.RepairGroupPlan,
-) -> tuple[repository_scope.PathTarget, ...]:
+) -> tuple[repository_scope_targets.PathTarget, ...]:
     """Collect the path evidence a rendered child carries, contract included."""
     return (
-        *repository_scope.targets_from_contract(group_plan.contract),
-        *repository_scope.extract_path_targets(group_plan.rendered_text),
+        *repository_scope_targets.targets_from_contract(group_plan.contract),
+        *repository_scope_targets.extract_path_targets(group_plan.rendered_text),
     )
 
 

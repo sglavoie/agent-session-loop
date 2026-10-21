@@ -204,7 +204,7 @@ def _render_lines(lines: list[str], original: str) -> str:
 def _session_scope(
     writes: Mapping[str, None],
     *,
-    prose: tuple[repository_scope.PathTarget, ...],
+    prose: tuple[repository_scope_targets.PathTarget, ...],
     session_id: str,
     bound_root: Path,
     alias_by_root: Mapping[Path, str],
@@ -215,7 +215,7 @@ def _session_scope(
     A contract target is a location the session must produce, so it is the
     only evidence strong enough to widen the authoritative write scope.
     """
-    suggestion = repository_scope.suggest_scopes(
+    suggestion = repository_scope_registry.suggest_scopes(
         {session_id: prose}, root=bound_root, alias_by_root=alias_by_root
     )[session_id]
     reads = dict.fromkeys((*writes, *suggestion.reads))

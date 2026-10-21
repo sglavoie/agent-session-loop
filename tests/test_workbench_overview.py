@@ -6,7 +6,7 @@ import re
 import unittest
 
 from asl_workbench import history as portable_history
-from asl_workbench import overview
+from asl_workbench import overview_filters, overview_selection, overview_vocabulary
 from tests import workbench_support
 from tests.workbench_overview_support import (
     OVERVIEW_JS,
@@ -36,13 +36,14 @@ class SharedVocabularyTests(unittest.TestCase):
 
     def test_primary_states_are_the_same_list_in_the_same_order(self) -> None:
         self.assertEqual(
-            list(overview.PRIMARY_STATES), _js_array("PRIMARY_STATES", self.source)
+            list(overview_vocabulary.PRIMARY_STATES),
+            _js_array("PRIMARY_STATES", self.source),
         )
 
     def test_every_filter_chip_covers_the_same_states_in_both_copies(self) -> None:
         published = _js_object("FILTER_GROUPS", self.source)
-        self.assertEqual(sorted(overview.FILTER_GROUPS), sorted(published))
-        for name, states in overview.FILTER_GROUPS.items():
+        self.assertEqual(sorted(overview_vocabulary.FILTER_GROUPS), sorted(published))
+        for name, states in overview_vocabulary.FILTER_GROUPS.items():
             self.assertEqual(
                 list(states),
                 published[name],
@@ -51,7 +52,7 @@ class SharedVocabularyTests(unittest.TestCase):
 
     def test_sort_modes_match_and_every_mode_has_a_label(self) -> None:
         modes = _js_array("SORT_MODES", self.source)
-        self.assertEqual(list(overview.SORT_MODES), modes)
+        self.assertEqual(list(overview_vocabulary.SORT_MODES), modes)
         labels = re.search(
             r"export const SORT_MODE_LABELS\s*=\s*\{(.*?)\n\};", self.source, re.S
         )
@@ -64,7 +65,7 @@ class SharedVocabularyTests(unittest.TestCase):
         self,
     ) -> None:
         sections = _js_array("OVERVIEW_SECTIONS", self.source)
-        self.assertEqual(list(overview.OVERVIEW_SECTIONS), sections)
+        self.assertEqual(list(overview_vocabulary.OVERVIEW_SECTIONS), sections)
         for name in ("SECTION_LABELS", "SECTION_EMPTY_TEXT"):
             block = re.search(
                 r"export const " + name + r"\s*=\s*\{(.*?)\n\};", self.source, re.S
@@ -76,14 +77,15 @@ class SharedVocabularyTests(unittest.TestCase):
 
     def test_the_ungrouped_project_heading_is_one_string(self) -> None:
         self.assertEqual(
-            overview.UNGROUPED_PROJECT, _js_string("UNGROUPED_PROJECT", self.source)
+            overview_vocabulary.UNGROUPED_PROJECT,
+            _js_string("UNGROUPED_PROJECT", self.source),
         )
 
     def test_the_observation_vocabulary_matches_and_every_word_reads(self) -> None:
         for name, value in (
-            ("OBSERVATION_CURRENT", overview.OBSERVATION_CURRENT),
-            ("OBSERVATION_UNCONFIRMED", overview.OBSERVATION_UNCONFIRMED),
-            ("OBSERVATION_ABSENT", overview.OBSERVATION_ABSENT),
+            ("OBSERVATION_CURRENT", overview_vocabulary.OBSERVATION_CURRENT),
+            ("OBSERVATION_UNCONFIRMED", overview_vocabulary.OBSERVATION_UNCONFIRMED),
+            ("OBSERVATION_ABSENT", overview_vocabulary.OBSERVATION_ABSENT),
         ):
             self.assertEqual(value, _js_string(name, self.source))
         labels = re.search(
@@ -95,18 +97,18 @@ class SharedVocabularyTests(unittest.TestCase):
         self.assertEqual(
             sorted(
                 (
-                    overview.OBSERVATION_CURRENT,
-                    overview.OBSERVATION_UNCONFIRMED,
-                    overview.OBSERVATION_ABSENT,
+                    overview_vocabulary.OBSERVATION_CURRENT,
+                    overview_vocabulary.OBSERVATION_UNCONFIRMED,
+                    overview_vocabulary.OBSERVATION_ABSENT,
                 )
             ),
             sorted(named),
         )
 
     def test_the_inactive_work_window_is_eight_hours_on_both_sides(self) -> None:
-        self.assertEqual(8 * 60 * 60, overview.ACTIVE_WINDOW_SECONDS)
+        self.assertEqual(8 * 60 * 60, overview_vocabulary.ACTIVE_WINDOW_SECONDS)
         self.assertEqual(
-            float(overview.ACTIVE_WINDOW_SECONDS),
+            float(overview_vocabulary.ACTIVE_WINDOW_SECONDS),
             _js_number("ACTIVE_WINDOW_SECONDS", self.source),
         )
 
@@ -115,8 +117,8 @@ class SharedVocabularyTests(unittest.TestCase):
     ) -> None:
         for name in ("QUEUE_PAGE_LIMIT", "HISTORY_PAGE_LIMIT"):
             asked = _js_number(name, self.source)
-            self.assertEqual(float(overview.DEFAULT_PAGE_LIMIT), asked, name)
-            self.assertLessEqual(asked, float(overview.MAX_PAGE_LIMIT), name)
+            self.assertEqual(float(overview_vocabulary.DEFAULT_PAGE_LIMIT), asked, name)
+            self.assertLessEqual(asked, float(overview_vocabulary.MAX_PAGE_LIMIT), name)
 
     def test_history_outcomes_match_the_importer_that_produces_them(self) -> None:
         self.assertEqual(
@@ -130,7 +132,7 @@ class SharedVocabularyTests(unittest.TestCase):
         self.assertIsNotNone(match, "overview.js has no ACTIVE_STATES")
         assert match is not None
         self.assertEqual(
-            sorted(overview.ACTIVE_STATES),
+            sorted(overview_vocabulary.ACTIVE_STATES),
             sorted(re.findall(r'"([^"]*)"', match.group(1))),
         )
 
@@ -146,7 +148,7 @@ class SharedVocabularyTests(unittest.TestCase):
 
     def test_the_sections_are_the_same_six_in_the_same_render_order(self) -> None:
         source = OVERVIEW_JS.read_text(encoding="utf-8")
-        for section in overview.OVERVIEW_SECTIONS:
+        for section in overview_vocabulary.OVERVIEW_SECTIONS:
             self.assertIn(
                 section,
                 _js_array("OVERVIEW_SECTIONS", self.source),
@@ -154,7 +156,10 @@ class SharedVocabularyTests(unittest.TestCase):
             )
         # The windowed section is the one the toggle moves rows out of, and
         # `sectionFor` has to reach it only through `recentlyActive`.
-        self.assertEqual({overview.SECTION_RECENT}, set(overview.WINDOWED_SECTIONS))
+        self.assertEqual(
+            {overview_vocabulary.SECTION_RECENT},
+            set(overview_vocabulary.WINDOWED_SECTIONS),
+        )
         self.assertIn("recentlyActive(plan, nowSeconds)) return SECTION_RECENT", source)
 
 
@@ -165,10 +170,10 @@ class InactiveWorkWindowTests(unittest.TestCase):
         self.now = 1_800_000_000.0
 
     def test_a_running_row_is_current_however_old_its_last_movement(self) -> None:
-        for state in sorted(overview.ACTIVE_STATES):
+        for state in sorted(overview_vocabulary.ACTIVE_STATES):
             row = _row(primary_state=state, last_activity_at=self.now - 400_000)
             self.assertTrue(
-                overview.recently_active(row, now=self.now),
+                overview_selection.recently_active(row, now=self.now),
                 f"{state} was aged out by the clock",
             )
 
@@ -176,21 +181,24 @@ class InactiveWorkWindowTests(unittest.TestCase):
         # The window's question is "has this gone quiet", and a plan that has
         # never been run has not gone quiet. Filing it with the inactive runs
         # would hide the newest plan on the machine behind a toggle.
-        self.assertTrue(overview.recently_active(_row(), now=self.now))
+        self.assertTrue(overview_selection.recently_active(_row(), now=self.now))
 
     def test_the_boundary_is_inclusive_and_the_far_side_is_not(self) -> None:
-        window = overview.ACTIVE_WINDOW_SECONDS
+        window = overview_vocabulary.ACTIVE_WINDOW_SECONDS
         edge = _row(last_activity_at=self.now - window)
         past = _row(last_activity_at=self.now - window - 1)
-        self.assertTrue(overview.recently_active(edge, now=self.now))
-        self.assertFalse(overview.recently_active(past, now=self.now))
+        self.assertTrue(overview_selection.recently_active(edge, now=self.now))
+        self.assertFalse(overview_selection.recently_active(past, now=self.now))
 
     def test_both_publications_of_a_moment_are_read_the_same_way(self) -> None:
-        moment = self.now - 2 * overview.ACTIVE_WINDOW_SECONDS
+        moment = self.now - 2 * overview_vocabulary.ACTIVE_WINDOW_SECONDS
         as_epoch = _row(last_activity_at=moment)
         as_iso = _row(last_activity_at=workbench_support.shell_iso(moment))
-        self.assertEqual(overview.activity_at(as_epoch), overview.activity_at(as_iso))
-        self.assertFalse(overview.recently_active(as_iso, now=self.now))
+        self.assertEqual(
+            overview_selection.activity_at(as_epoch),
+            overview_selection.activity_at(as_iso),
+        )
+        self.assertFalse(overview_selection.recently_active(as_iso, now=self.now))
 
     def test_a_number_of_seconds_spelled_as_text_is_still_a_moment(self) -> None:
         # Not a courtesy to sloppy callers: the Pi's catalog_entry column for
@@ -198,26 +206,26 @@ class InactiveWorkWindowTests(unittest.TestCase):
         # of SQLite as "1789466400.0". A reader that only knew ISO-8601 and
         # numbers would call the row never-moved and hand a plan that has been
         # quiet for thirty hours back to the top of the queue.
-        moment = self.now - 2 * overview.ACTIVE_WINDOW_SECONDS
+        moment = self.now - 2 * overview_vocabulary.ACTIVE_WINDOW_SECONDS
         as_text = _row(last_activity_at=str(moment))
-        self.assertEqual(moment, overview.activity_at(as_text))
-        self.assertFalse(overview.recently_active(as_text, now=self.now))
+        self.assertEqual(moment, overview_selection.activity_at(as_text))
+        self.assertFalse(overview_selection.recently_active(as_text, now=self.now))
 
     def test_a_quiet_row_falls_back_to_when_it_was_last_observed(self) -> None:
         # The Pi's rows carry no activity of their own until one is published,
         # and "when I last saw this" is the only honest stand-in. It has to be
         # read, or every retained row would count as never-moved and current.
         row = _row(last_observed_at=self.now - 400_000)
-        self.assertEqual(self.now - 400_000, overview.activity_at(row))
-        self.assertFalse(overview.recently_active(row, now=self.now))
+        self.assertEqual(self.now - 400_000, overview_selection.activity_at(row))
+        self.assertFalse(overview_selection.recently_active(row, now=self.now))
 
 
 class PlanNameTests(unittest.TestCase):
     """What a row is called, read the one way both modes can answer."""
 
     def test_each_mode_is_read_under_the_name_it_publishes(self) -> None:
-        self.assertEqual("Pi", overview.plan_label({"display_label": "Pi"}))
-        self.assertEqual("Mac", overview.plan_label({"label": "Mac"}))
+        self.assertEqual("Pi", overview_vocabulary.plan_label({"display_label": "Pi"}))
+        self.assertEqual("Mac", overview_vocabulary.plan_label({"label": "Mac"}))
 
     def test_a_row_with_no_explicit_label_is_named_by_its_title(self) -> None:
         # The Mac publishes `label: null` for a plan nobody renamed, so this is
@@ -225,7 +233,7 @@ class PlanNameTests(unittest.TestCase):
         # make `sort=label` order the entire local queue under one empty
         # string, which reads as "the sort did nothing".
         row = {"label": None, "display_label": None, "title": "Charlie"}
-        self.assertEqual("Charlie", overview.plan_label(row))
+        self.assertEqual("Charlie", overview_vocabulary.plan_label(row))
 
     def test_label_sort_orders_local_style_rows_by_their_titles(self) -> None:
         rows = [
@@ -233,11 +241,11 @@ class PlanNameTests(unittest.TestCase):
         ]
         self.assertEqual(
             ["Alpha", "Bravo", "Charlie"],
-            [row["title"] for row in overview.sorted_rows(rows, "label")],
+            [row["title"] for row in overview_selection.sorted_rows(rows, "label")],
         )
 
     def test_a_row_naming_nothing_is_empty_rather_than_invented(self) -> None:
-        self.assertEqual("", overview.plan_label({"plan_key": "abc"}))
+        self.assertEqual("", overview_vocabulary.plan_label({"plan_key": "abc"}))
 
 
 class ProjectMembershipTests(unittest.TestCase):
@@ -250,28 +258,31 @@ class ProjectMembershipTests(unittest.TestCase):
         # Publication order, not sorted: the registry's order is the order the
         # operator wrote, and re-sorting it here would put a plan's incidental
         # second project ahead of the one it was registered under.
-        self.assertEqual(("scripts", "notes"), overview.project_names(row))
+        self.assertEqual(("scripts", "notes"), overview_vocabulary.project_names(row))
         # One heading, not two rows: the plan is one plan with one archive
         # button, and splitting it would offer the operator two of them.
-        self.assertEqual("scripts + notes", overview.project_group(row))
+        self.assertEqual("scripts + notes", overview_vocabulary.project_group(row))
 
     def test_membership_matches_on_any_one_project(self) -> None:
         row = _row(projects=["scripts", "notes"])
         for name in ("scripts", "notes"):
-            filters = overview.QueueFilters(project=name)
+            filters = overview_filters.QueueFilters(project=name)
             self.assertTrue(
-                overview.matches(row, filters, states=True),
+                overview_filters.matches(row, filters, states=True),
                 f"a plan in {name} was not found by it",
             )
         self.assertFalse(
-            overview.matches(
-                row, overview.QueueFilters(project="elsewhere"), states=True
+            overview_filters.matches(
+                row, overview_filters.QueueFilters(project="elsewhere"), states=True
             )
         )
 
     def test_a_plan_with_no_project_is_headed_rather_than_dropped(self) -> None:
         row = _row(projects=[])
-        self.assertEqual(overview.UNGROUPED_PROJECT, overview.project_group(row))
+        self.assertEqual(
+            overview_vocabulary.UNGROUPED_PROJECT,
+            overview_vocabulary.project_group(row),
+        )
 
     def test_the_project_facet_names_every_project_once(self) -> None:
         rows = [
@@ -279,7 +290,7 @@ class ProjectMembershipTests(unittest.TestCase):
             _row(plan_key="b", projects=["scripts"]),
             _row(plan_key="c", projects=[]),
         ]
-        self.assertEqual(("notes", "scripts"), overview.facet_projects(rows))
+        self.assertEqual(("notes", "scripts"), overview_selection.facet_projects(rows))
 
 
 if __name__ == "__main__":

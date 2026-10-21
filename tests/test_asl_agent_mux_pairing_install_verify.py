@@ -12,6 +12,8 @@ from typing import Any
 from agent_session_loop import (
     agent_mux_projection,
     install_verify,
+    install_verify_agent_mux,
+    install_verify_common,
 )
 
 
@@ -27,16 +29,16 @@ class InstallVerifyAgentMuxTests(unittest.TestCase):
         def _fake_doctor(path_env: Any, home: Any) -> tuple[str, Any]:
             return "/usr/bin/amx", report
 
-        original = install_verify._amx_doctor
-        install_verify._amx_doctor = _fake_doctor
-        self.addCleanup(setattr, install_verify, "_amx_doctor", original)
-        return install_verify._check_agent_mux(
+        original = install_verify_agent_mux._amx_doctor
+        install_verify_agent_mux._amx_doctor = _fake_doctor
+        self.addCleanup(setattr, install_verify_agent_mux, "_amx_doctor", original)
+        return install_verify_agent_mux._check_agent_mux(
             path_env=None, home=self.tmp_path, active_asl=active_asl
         )
 
     def test_missing_amx_is_a_passing_advisory(self) -> None:
         """ASL must install and verify cleanly with no cockpit present."""
-        checks = install_verify._check_agent_mux(
+        checks = install_verify_agent_mux._check_agent_mux(
             path_env=str(self.tmp_path), home=self.tmp_path, active_asl=None
         )
         self.assertEqual(len(checks), 1)
@@ -170,7 +172,7 @@ class InstallVerifyPromotionTests(unittest.TestCase):
             self.addCleanup(setattr, install_verify, name, original)
         install_verify._check_asl_path = lambda *_: (
             "/usr/bin/asl",
-            install_verify._success("asl-path", "ok"),
+            install_verify_common.success("asl-path", "ok"),
         )
         for name in (
             "_check_skill_links",
@@ -179,11 +181,11 @@ class InstallVerifyPromotionTests(unittest.TestCase):
             "_check_asl_skill",
         ):
             setattr(install_verify, name, lambda *_a, **_k: [])
-        install_verify._check_status_smoke = lambda **_: install_verify._success(
+        install_verify._check_status_smoke = lambda **_: install_verify_common.success(
             "status-smoke", "ok"
         )
         install_verify._check_agent_mux = lambda **_: [
-            install_verify._advisory("agent-mux-bridge", "no bridge")
+            install_verify_common.advisory("agent-mux-bridge", "no bridge")
         ]
 
     def test_advisory_failure_does_not_fail_verification_by_default(self) -> None:

@@ -172,7 +172,7 @@ class WorkbenchStaticQueueViewTests(support_static.WorkbenchStaticCase):
         import inspect
         import re
 
-        from asl_workbench import overview
+        from asl_workbench import overview_filters
 
         source = (workbench_server.STATIC_DIR / "modules" / "queue.js").read_text(
             encoding="utf-8"
@@ -182,7 +182,7 @@ class WorkbenchStaticQueueViewTests(support_static.WorkbenchStaticCase):
         read = set(
             re.findall(
                 r'(?:optional_query|non_negative_int|bounded_int)\(\s*"([^"]+)"',
-                inspect.getsource(overview.parse_filters),
+                inspect.getsource(overview_filters.parse_filters),
             )
         )
         self.assertIn("filter", sent)

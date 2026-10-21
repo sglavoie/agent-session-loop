@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from asl_workbench import catalog as workbench_catalog
-from asl_workbench import observation, overview
+from asl_workbench import observation, overview_selection, overview_vocabulary
 from tests import workbench_support
 from tests.workbench_overview_support import (
     _request,
@@ -102,17 +102,20 @@ class OverviewParityTests(unittest.TestCase):
                 # Mac -- standing on the plans it is describing -- says it once
                 # for the whole answer. One reader absorbs the difference.
                 self.assertEqual(
-                    overview.OBSERVATION_CURRENT, overview.observation_status(row)
+                    overview_vocabulary.OBSERVATION_CURRENT,
+                    overview_vocabulary.observation_status(row),
                 )
 
     def test_the_local_mode_says_current_once_for_the_whole_answer(self) -> None:
         body = self.queue(self.deployments.local)
-        self.assertEqual(overview.OBSERVATION_CURRENT, body.get("observation_status"))
+        self.assertEqual(
+            overview_vocabulary.OBSERVATION_CURRENT, body.get("observation_status")
+        )
 
     def test_the_remote_mode_marks_each_row_it_still_confirms(self) -> None:
         for row in self.queue(self.deployments.remote)["plans"]:
             self.assertEqual(
-                overview.OBSERVATION_CURRENT, row.get("observation_status")
+                overview_vocabulary.OBSERVATION_CURRENT, row.get("observation_status")
             )
 
     def test_the_quiet_plan_falls_outside_the_window_in_both_modes(self) -> None:
@@ -122,7 +125,7 @@ class OverviewParityTests(unittest.TestCase):
             row = self.rows_by_key(body)[key]
             now = float(body["observed_at"])
             self.assertFalse(
-                overview.recently_active(row, now=now),
+                overview_selection.recently_active(row, now=now),
                 f"{deployment.mode} still calls charlie current work",
             )
             # And it is still in the page: the window moves a row, it never
@@ -144,11 +147,11 @@ class OverviewParityTests(unittest.TestCase):
         self.assertNotEqual(spellings["local"], spellings["remote"])
         for mode, published in spellings.items():
             self.assertIsInstance(published, str, mode)
-            self.assertIsNotNone(overview._activity_epoch(published), mode)
+            self.assertIsNotNone(overview_selection._activity_epoch(published), mode)
         # Named rather than implied: this one is a number wearing a string.
         self.assertEqual(
             float(spellings["remote"]),
-            overview._activity_epoch(spellings["remote"]),
+            overview_selection._activity_epoch(spellings["remote"]),
         )
 
     def test_the_other_plans_stay_current_work_in_both_modes(self) -> None:
@@ -159,7 +162,7 @@ class OverviewParityTests(unittest.TestCase):
             for name in ("alpha", "bravo"):
                 key = self.deployments.corpus.plan_keys[name]
                 self.assertTrue(
-                    overview.recently_active(rows[key], now=now),
+                    overview_selection.recently_active(rows[key], now=now),
                     f"{deployment.mode} aged out {name}",
                 )
 
@@ -277,7 +280,7 @@ class OverviewParityTests(unittest.TestCase):
             # Read through the shared accessor: the Mac publishes `label` and
             # the Pi publishes `display_label`, and the history pane has to be
             # able to say which plan an ending belongs to in either mode.
-            self.assertEqual({overview.plan_label(charlie)}, labels)
+            self.assertEqual({overview_vocabulary.plan_label(charlie)}, labels)
 
     def test_the_finished_run_the_queue_names_is_the_newest_ending(self) -> None:
         # The queue's `run_key` is a link target; history's is the same string

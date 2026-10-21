@@ -28,6 +28,8 @@ from . import (
     preflight_footprint,
     repository_intent,
     repository_scope,
+    repository_scope_registry,
+    repository_scope_targets,
     responses,
     state_locks,
 )

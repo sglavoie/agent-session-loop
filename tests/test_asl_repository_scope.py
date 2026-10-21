@@ -6,7 +6,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import contracts, repository_scope
+from agent_session_loop import (
+    contracts,
+    repository_scope,
+    repository_scope_payload,
+    repository_scope_registry,
+    repository_scope_targets,
+)
 from agent_session_loop.workspaces import (
     WorkspaceError,
     canonicalize_filesystem_path,
@@ -18,7 +24,7 @@ from tests.support import (
 )
 
 
-def _values(targets: tuple[repository_scope.PathTarget, ...]) -> list[str]:
+def _values(targets: tuple[repository_scope_targets.PathTarget, ...]) -> list[str]:
     return [target.value for target in targets]
 
 
@@ -28,14 +34,14 @@ class ExtractPathTargetsTests(unittest.TestCase):
             "Edit /Users/dev/work/repoA/src/main.py and ~/scripts/tool.py.\n"
             "Also touch src/main.py somewhere.\n"
         )
-        targets = repository_scope.extract_path_targets(text)
+        targets = repository_scope_targets.extract_path_targets(text)
         by_confidence = {target.value: target.confidence for target in targets}
         self.assertEqual("hard", by_confidence["/Users/dev/work/repoA/src/main.py"])
         self.assertEqual("hard", by_confidence["~/scripts/tool.py"])
         self.assertEqual("soft", by_confidence["src/main.py"])
 
     def test_trailing_sentence_punctuation_is_not_part_of_the_path(self) -> None:
-        targets = repository_scope.extract_path_targets(
+        targets = repository_scope_targets.extract_path_targets(
             "It lives at /Users/dev/work/repoA/src/main.py.\n"
         )
         self.assertEqual(["/Users/dev/work/repoA/src/main.py"], _values(targets))
@@ -44,29 +50,29 @@ class ExtractPathTargetsTests(unittest.TestCase):
         text = (
             "Prose mentions nothing.\n```bash\ncd /Users/dev/work/repoB && make\n```\n"
         )
-        self.assertEqual((), repository_scope.extract_path_targets(text))
+        self.assertEqual((), repository_scope_targets.extract_path_targets(text))
 
     def test_inline_backticks_are_still_evidence(self) -> None:
-        targets = repository_scope.extract_path_targets(
+        targets = repository_scope_targets.extract_path_targets(
             "Update `/Users/dev/work/repoA/src/main.py` today.\n"
         )
         self.assertEqual(["/Users/dev/work/repoA/src/main.py"], _values(targets))
 
     def test_qualified_handoff_entries_are_hard_targets(self) -> None:
-        targets = repository_scope.extract_path_targets("- Kiln:src/app.ts\n")
+        targets = repository_scope_targets.extract_path_targets("- Kiln:src/app.ts\n")
         self.assertEqual(["Kiln:src/app.ts"], _values(targets))
         self.assertEqual("handoff", targets[0].kind)
         self.assertEqual("hard", targets[0].confidence)
 
     def test_urls_are_not_mistaken_for_handoff_entries(self) -> None:
-        targets = repository_scope.extract_path_targets(
+        targets = repository_scope_targets.extract_path_targets(
             "See https://example.com/docs/guide for details.\n"
         )
         self.assertNotIn("handoff", [target.kind for target in targets])
 
     def test_bare_root_level_tokens_are_not_paths(self) -> None:
         self.assertEqual(
-            (), repository_scope.extract_path_targets("Mount /opt today.\n")
+            (), repository_scope_targets.extract_path_targets("Mount /opt today.\n")
         )
 
     def test_contract_checks_become_hard_targets(self) -> None:
@@ -80,7 +86,7 @@ class ExtractPathTargetsTests(unittest.TestCase):
             ),
             contracts.CommandCheck(name="d", argv=("true",), timeout_seconds=1.0),
         )
-        targets = repository_scope.targets_from_checks(checks)
+        targets = repository_scope_targets.targets_from_checks(checks)
         self.assertEqual(
             ["src/created.py", "/absolute/elsewhere.py", "pkg"], _values(targets)
         )
@@ -107,7 +113,7 @@ class ResolveFootprintTests(unittest.TestCase):
 
     def _footprint(self, text: str, root: Path) -> repository_scope.RepositoryFootprint:
         return repository_scope.resolve_footprint(
-            repository_scope.extract_path_targets(text), root
+            repository_scope_targets.extract_path_targets(text), root
         )
 
     def test_single_repository_plan_does_not_require_a_registry(self) -> None:
@@ -165,7 +171,7 @@ class ResolveFootprintTests(unittest.TestCase):
     def test_absolute_target_inside_the_root_stays_clean(self) -> None:
         footprint = repository_scope.resolve_footprint(
             (
-                repository_scope.PathTarget(
+                repository_scope_targets.PathTarget(
                     value=str(self.first / "src" / "main.py"),
                     kind="contract-path",
                     line=0,
@@ -238,7 +244,7 @@ class SuggestionTests(unittest.TestCase):
         roots = tuple(self.repositories.values())
         self.assertEqual(
             canonicalize_filesystem_path(self.workspace),
-            repository_scope.suggest_workspace_root(roots),
+            repository_scope_registry.suggest_workspace_root(roots),
         )
 
     def test_nested_repositories_have_no_suggested_workspace_root(self) -> None:
@@ -246,11 +252,11 @@ class SuggestionTests(unittest.TestCase):
         inner = outer / "vendor"
         init_multi_repo_workspace(inner, (("X", "inner", "git@host:x/y.git"),))
         self.assertIsNone(
-            repository_scope.suggest_workspace_root((outer, inner / "inner"))
+            repository_scope_registry.suggest_workspace_root((outer, inner / "inner"))
         )
 
     def test_registry_is_built_from_real_paths_and_origins(self) -> None:
-        registry = repository_scope.suggest_registry(
+        registry = repository_scope_registry.suggest_registry(
             self.workspace, tuple(self.repositories.values())
         )
         self.assertEqual(
@@ -262,14 +268,14 @@ class SuggestionTests(unittest.TestCase):
         )
         self.assertEqual(
             ["| Alias | Path | Origin |", "| --- | --- | --- |"],
-            list(repository_scope.registry_table_lines(registry))[:2],
+            list(repository_scope_registry.registry_table_lines(registry))[:2],
         )
 
     def test_a_repository_without_an_origin_still_yields_a_row(self) -> None:
         local = self.workspace / "local_only"
         init_git_repo(local)
 
-        suggestions = repository_scope.suggest_repositories(
+        suggestions = repository_scope_registry.suggest_repositories(
             self.workspace, (self.repositories["SVC"], local)
         )
 
@@ -277,11 +283,11 @@ class SuggestionTests(unittest.TestCase):
         self.assertIsNone(by_alias["local_only"])
         self.assertIn(
             f"| local_only | local_only | "
-            f"{repository_scope.UNKNOWN_ORIGIN_PLACEHOLDER} |",
-            repository_scope.registry_table_lines(suggestions),
+            f"{repository_scope_registry.UNKNOWN_ORIGIN_PLACEHOLDER} |",
+            repository_scope_registry.registry_table_lines(suggestions),
         )
         with self.assertRaises(WorkspaceError):
-            repository_scope.suggest_registry(
+            repository_scope_registry.suggest_registry(
                 self.workspace, (self.repositories["SVC"], local)
             )
 
@@ -291,7 +297,7 @@ class SuggestionTests(unittest.TestCase):
         for repository in (first, second):
             init_git_repo(repository)
         targets = tuple(
-            repository_scope.PathTarget(
+            repository_scope_targets.PathTarget(
                 value=str(repository / "README.md"),
                 kind="contract-path",
                 line=0,
@@ -301,7 +307,7 @@ class SuggestionTests(unittest.TestCase):
         )
         footprint = repository_scope.resolve_footprint(targets, self.workspace)
 
-        payload = repository_scope.footprint_payload(
+        payload = repository_scope_payload.footprint_payload(
             {"1": targets}, footprint, registry_present=False
         )
 
@@ -316,7 +322,7 @@ class SuggestionTests(unittest.TestCase):
         loose = Path(self._temp.name) / "loose.txt"
         loose.write_text("x\n", encoding="utf-8")
         targets = tuple(
-            repository_scope.PathTarget(
+            repository_scope_targets.PathTarget(
                 value=str(value),
                 kind="contract-path",
                 line=0,
@@ -330,7 +336,7 @@ class SuggestionTests(unittest.TestCase):
         )
         footprint = repository_scope.resolve_footprint(targets, self.workspace)
 
-        payload = repository_scope.footprint_payload(
+        payload = repository_scope_payload.footprint_payload(
             {"1": targets}, footprint, registry_present=False
         )
 
@@ -342,14 +348,16 @@ class SuggestionTests(unittest.TestCase):
         stray = Path(self._temp.name) / "stray"
         init_multi_repo_workspace(stray, (("Y", "loose", "git@host:y/z.git"),))
         with self.assertRaises(WorkspaceError):
-            repository_scope.suggest_registry(self.workspace, (stray / "loose",))
+            repository_scope_registry.suggest_registry(
+                self.workspace, (stray / "loose",)
+            )
 
     def test_aliases_are_deduplicated_deterministically(self) -> None:
         nested = self.workspace / "vendor"
         init_multi_repo_workspace(
             nested, (("Z", "tundra_svc", "git@host:z/dup.git"),)
         )
-        registry = repository_scope.suggest_registry(
+        registry = repository_scope_registry.suggest_registry(
             self.workspace,
             (self.repositories["SVC"], nested / "tundra_svc"),
         )
@@ -363,26 +371,28 @@ class SuggestionTests(unittest.TestCase):
         second = self.repositories["OAK"]
         (first / "src").mkdir()
         (first / "src" / "main.py").write_text("x\n", encoding="utf-8")
-        registry = repository_scope.suggest_registry(self.workspace, (first, second))
+        registry = repository_scope_registry.suggest_registry(
+            self.workspace, (first, second)
+        )
         alias_by_root = {
             canonicalize_filesystem_path(self.workspace / entry.path): entry.alias
             for entry in registry
         }
         targets = (
-            repository_scope.PathTarget(
+            repository_scope_targets.PathTarget(
                 value=str(first / "src" / "main.py"),
                 kind="contract-path",
                 line=0,
                 confidence="hard",
             ),
-            repository_scope.PathTarget(
+            repository_scope_targets.PathTarget(
                 value=str(second / "README.md"),
                 kind="prose",
                 line=4,
                 confidence="hard",
             ),
         )
-        scopes = repository_scope.suggest_scopes(
+        scopes = repository_scope_registry.suggest_scopes(
             {"1": targets}, root=self.workspace, alias_by_root=alias_by_root
         )
         self.assertEqual(("tundra_svc", "tundra_OAK"), scopes["1"].reads)

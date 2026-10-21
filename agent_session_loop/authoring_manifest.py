@@ -9,7 +9,7 @@ from . import (
     plans_models,
     plans_registry,
     plans_status_tables,
-    repository_scope,
+    repository_scope_registry,
 )
 from .authoring_render import previous_session_reference_line
 from .plans_errors import PlanError
@@ -56,7 +56,7 @@ def render_manifest_sessions_table(sessions: tuple[ManifestSession, ...]) -> str
 
 def render_repository_registry_table(registry: RepositoryRegistry) -> str:
     """Render the authoritative ordered repository registry as Markdown."""
-    return "\n".join(repository_scope.registry_table_lines(registry)) + "\n"
+    return "\n".join(repository_scope_registry.registry_table_lines(registry)) + "\n"
 
 
 @dataclass(frozen=True)
