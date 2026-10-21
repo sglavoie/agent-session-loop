@@ -17,7 +17,7 @@ from . import (
     handoff_guards,
     plans_errors,
     plans_models,
-    readiness_gate,
+    readiness_gate_reopen,
     repository_evidence,
     review_delta,
     review_session_body,
@@ -204,7 +204,7 @@ def append_review_session(
     # than the one the startup gate saw. A reused pending review
     # session was already authorized when it was created, so only
     # a fresh append is re-gated.
-    if review_created and not readiness_gate._regate_reopened_plan(
+    if review_created and not readiness_gate_reopen._regate_reopened_plan(
         event_path=ctx.event_path,
         payload=ctx.payload,
         persistence=ctx.persistence,

@@ -59,6 +59,13 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 "tests/asl_overseer_isolation_*.py" = ["F401", "F403", "F405"]
 "tests/asl_commit_groups_*.py" = ["F401", "F403", "F405"]
 "tests/workbench_interactions_*.py" = ["F401", "F403", "F405"]
+"tests/asl_review_cycle_*.py" = ["F401", "F403", "F405"]
+"tests/asl_review_transitions_*.py" = ["F401", "F403", "F405"]
+"tests/asl_overseer_history_*.py" = ["F401", "F403", "F405"]
+"tests/asl_startup_context_*.py" = ["F401", "F403", "F405"]
+"tests/asl_workbench_launch_*.py" = ["F401", "F403", "F405"]
+"tests/asl_supervisor_audit_checks_settlement_*.py" = ["F401", "F403", "F405"]
+"tests/harness_integration_base_*.py" = ["F401", "F403", "F405"]
 "tests/asl_tail_*.py" = ["F401", "F403", "F405"]
 "tests/asl_live_redirect_*.py" = ["F401", "F403", "F405"]
 "tests/asl_overseer_checkpoint_groups_*.py" = ["E501", "F401", "F403", "F405"]
@@ -89,6 +96,13 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 "tests/test_asl_overseer_isolation.py" = ["F401"]
 "tests/test_asl_commit_groups.py" = ["F401"]
 "tests/test_workbench_interactions.py" = ["F401"]
+"tests/test_asl_review_cycle.py" = ["F401"]
+"tests/test_asl_review_transitions.py" = ["F401"]
+"tests/test_asl_overseer_history.py" = ["F401"]
+"tests/test_asl_startup_context.py" = ["F401"]
+"tests/test_asl_workbench_launch.py" = ["F401"]
+"tests/test_asl_supervisor_audit_checks_settlement.py" = ["F401"]
+"tests/harness_integration_base.py" = ["F401"]
 # Static ``__all__`` declarations make split-module vocabularies visible to
 # mypy.  Keep those one-line declarations readable as a single contract.
 "agent_session_loop/execution_timing_models.py" = ["E501"]
@@ -554,6 +568,8 @@ module = [
     "agent_session_loop.qna_render",
     "agent_session_loop.qna_values",
     "agent_session_loop.readiness_gate",
+    "agent_session_loop.readiness_gate_reopen",
+    "agent_session_loop.readiness_gate_repair",
     "agent_session_loop.redirect_ack",
     "agent_session_loop.redirect_ack_annotate",
     "agent_session_loop.redirect_ack_attempt",
@@ -651,6 +667,8 @@ module = [
     "agent_session_loop.run_completion_types",
     "agent_session_loop.run_contention",
     "agent_session_loop.run_control",
+    "agent_session_loop.run_control_models",
+    "agent_session_loop.run_control_state",
     "agent_session_loop.run_coordination_constants",
     "agent_session_loop.run_coordination_control",
     "agent_session_loop.run_coordination_control_drain",
@@ -989,6 +1007,9 @@ module = [
     "asl_workbench.transport_shapes",
     "asl_workbench.transport_vocabulary",
     "asl_workbench.uplink",
+    "asl_workbench.uplink_bodies",
+    "asl_workbench.uplink_flow",
+    "asl_workbench.uplink_support",
     # The portable package starts life on this table rather than working
     # all, and its payloads cross a process boundary to a Pi, which is the
     # rules: it may not import the runner because it may not import ASL at

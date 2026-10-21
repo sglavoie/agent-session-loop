@@ -42,12 +42,16 @@ from agent_session_loop import (
     preflight,
     preflight_models,
     readiness_gate,
+    readiness_gate_reopen,
+    readiness_gate_repair,
     run_persistence,
     run_termination,
     runner,
     state,
 )
 from tests.support import assert_no_runner_import, write_plan
+
+_GATE_MODULES = (readiness_gate, readiness_gate_reopen, readiness_gate_repair)
 
 #: The symbols this module took from the runner. The program's no-alias rule
 #: says the runner keeps none of them behind, so a re-export added later to
@@ -107,10 +111,14 @@ class ReadinessGateBoundaryTests(unittest.TestCase):
 
     @property
     def source(self) -> str:
-        return Path(readiness_gate.__file__ or "").read_text(encoding="utf-8")
+        return "\n".join(
+            Path(module.__file__ or "").read_text(encoding="utf-8")
+            for module in _GATE_MODULES
+        )
 
     def test_the_module_does_not_import_the_runner(self) -> None:
-        assert_no_runner_import(self, readiness_gate)
+        for module in _GATE_MODULES:
+            assert_no_runner_import(self, module)
 
     def test_the_only_file_it_opens_is_the_manifest_through_plans(self) -> None:
         # The gate reads a lot and writes one thing. Every payload record it
@@ -128,7 +136,7 @@ class ReadinessGateBoundaryTests(unittest.TestCase):
         for name in MOVED_SYMBOLS:
             with self.subTest(name=name):
                 self.assertFalse(hasattr(runner, name))
-                self.assertTrue(hasattr(readiness_gate, name))
+                self.assertTrue(any(hasattr(module, name) for module in _GATE_MODULES))
 
     def test_the_published_readiness_writer_replaced_its_private_name(self) -> None:
         for old, new in RENAMED_SYMBOLS.items():
@@ -280,7 +288,7 @@ class GateOrderingTests(unittest.TestCase):
         )
 
         self.assertEqual((), readiness_gate._non_bypassable_blockers(report))
-        self.assertEqual(1, len(readiness_gate._readiness_gate_blockers(report)))
+        self.assertEqual(1, len(readiness_gate_repair._readiness_gate_blockers(report)))
 
     def test_the_gate_payload_dedupes_repair_hints_by_check_id(self) -> None:
         report = self._report(
@@ -345,7 +353,7 @@ class OwnLockTests(unittest.TestCase):
             )
         )
 
-        stripped = readiness_gate._strip_own_lock_findings(
+        stripped = readiness_gate_repair._strip_own_lock_findings(
             report, lock_info=self._lock_info(lock_path, os.getpid())
         )
 
@@ -366,7 +374,7 @@ class OwnLockTests(unittest.TestCase):
             )
         )
 
-        stripped = readiness_gate._strip_own_lock_findings(
+        stripped = readiness_gate_repair._strip_own_lock_findings(
             report, lock_info=self._lock_info(lock_path, os.getpid() + 1)
         )
 
@@ -381,7 +389,7 @@ class OwnLockTests(unittest.TestCase):
             )
         )
 
-        stripped = readiness_gate._strip_own_lock_findings(
+        stripped = readiness_gate_repair._strip_own_lock_findings(
             report, lock_info=self._lock_info(Path("/state/run.lock"), None)
         )
 
@@ -496,7 +504,7 @@ class ReopenedPlanGateTests(unittest.TestCase):
         return plans_snapshot.inspect_plan(self.plan_dir)
 
     def test_a_plan_within_budget_is_authorized(self) -> None:
-        gate = readiness_gate._reopened_plan_gate_payload(
+        gate = readiness_gate_reopen._reopened_plan_gate_payload(
             self._snapshot(("complete", "pending")),
             max_pending_sessions=1,
             repair_session_ids=[],
@@ -507,7 +515,7 @@ class ReopenedPlanGateTests(unittest.TestCase):
         self.assertEqual(2, gate["total_sessions"])
 
     def test_growth_past_the_budget_is_refused(self) -> None:
-        gate = readiness_gate._reopened_plan_gate_payload(
+        gate = readiness_gate_reopen._reopened_plan_gate_payload(
             self._snapshot(("pending", "pending", "pending")),
             max_pending_sessions=1,
             repair_session_ids=["2.1", "2.2"],
@@ -520,10 +528,10 @@ class ReopenedPlanGateTests(unittest.TestCase):
     def test_the_trigger_tells_an_audit_which_growth_asked(self) -> None:
         snapshot = self._snapshot(("complete", "pending"))
 
-        repairs = readiness_gate._reopened_plan_gate_payload(
+        repairs = readiness_gate_reopen._reopened_plan_gate_payload(
             snapshot, max_pending_sessions=1, repair_session_ids=["2.1"]
         )
-        appended = readiness_gate._reopened_plan_gate_payload(
+        appended = readiness_gate_reopen._reopened_plan_gate_payload(
             snapshot,
             max_pending_sessions=1,
             repair_session_ids=[],

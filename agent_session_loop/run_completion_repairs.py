@@ -17,7 +17,7 @@ from . import (
     plans_errors,
     plans_models,
     plans_payloads,
-    readiness_gate,
+    readiness_gate_reopen,
     review_continuation,
     review_cycle,
     review_repair,
@@ -252,7 +252,7 @@ def reopen_review_repairs(
         )
         return CompletionOutcome.stop(snapshot)
 
-    if not readiness_gate._regate_reopened_plan(
+    if not readiness_gate_reopen._regate_reopened_plan(
         event_path=ctx.event_path,
         payload=ctx.payload,
         persistence=ctx.persistence,

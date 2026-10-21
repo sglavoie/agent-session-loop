@@ -10,6 +10,7 @@ from . import (
     plans_session_scope,
     preflight,
     readiness_gate,
+    readiness_gate_repair,
     review_continuation,
     review_cycle,
     review_guard,
@@ -208,7 +209,7 @@ def _pass_readiness_gate(frame: RunFrame) -> RunResult | None:
         "state_dir": frame.args.state_dir,
         "max_pending_sessions": max_pending_sessions,
     }
-    resume_report = readiness_gate._reduced_preflight_report(
+    resume_report = readiness_gate_repair._reduced_preflight_report(
         frame.snapshot.plan_dir,
         snapshot=frame.snapshot,
         lock_info=frame.lock_info,
@@ -226,7 +227,7 @@ def _pass_readiness_gate(frame: RunFrame) -> RunResult | None:
             },
         )
     else:
-        frame.preflight_report = readiness_gate._strip_own_lock_findings(
+        frame.preflight_report = readiness_gate_repair._strip_own_lock_findings(
             preflight.run_preflight(frame.snapshot.plan_dir, **preflight_kwargs),
             lock_info=frame.lock_info,
         )
@@ -322,7 +323,7 @@ def _pass_readiness_gate(frame: RunFrame) -> RunResult | None:
         and not review_only_complete_start
     ):
         frame.preflight_report, frame.repair_payload = (
-            readiness_gate._repair_readiness_gate(
+            readiness_gate_repair._repair_readiness_gate(
                 frame.preflight_report,
                 plan_dir=frame.snapshot.plan_dir,
                 lock_info=frame.lock_info,

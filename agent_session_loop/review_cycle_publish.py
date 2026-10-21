@@ -16,6 +16,7 @@ from . import (
     plans_payloads,
     plans_snapshot,
     readiness_gate,
+    readiness_gate_reopen,
     run_persistence,
     run_termination,
 )
@@ -52,7 +53,7 @@ def _regate_and_continue(
             persistence=persistence,
         )
         return "paused", materialized
-    if not readiness_gate._regate_reopened_plan(
+    if not readiness_gate_reopen._regate_reopened_plan(
         event_path=event_path,
         payload=payload,
         persistence=persistence,

@@ -165,7 +165,7 @@ def _strip_self_lock_findings(
 
     Materialization runs the preflight gate while holding the plan lock, so the
     lock we hold would otherwise register as an ``env-lock`` blocker. Mirrors
-    ``readiness_gate._strip_own_lock_findings``.
+    ``readiness_gate_repair._strip_own_lock_findings``.
     """
     if lock_info is None:
         return report

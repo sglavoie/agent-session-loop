@@ -12,7 +12,7 @@ from agent_session_loop import (
     plans_progress,
     plans_snapshot,
     progress_repair,
-    readiness_gate,
+    readiness_gate_reopen,
     review,
     review_continuation,
     review_repair,
@@ -223,7 +223,7 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
         ]
         self._write_plan(findings, session_one_contract=contract_one)
 
-        authorized = readiness_gate._reopened_plan_gate_payload(
+        authorized = readiness_gate_reopen._reopened_plan_gate_payload(
             plans_snapshot.inspect_plan(self.plan_dir),
             max_pending_sessions=1,
             repair_session_ids=[],
@@ -240,7 +240,7 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
         repair_session_ids = [child.session_id.value for child in result.children]
         self.assertEqual(["2.1", "2.2"], repair_session_ids)
 
-        regated = readiness_gate._reopened_plan_gate_payload(
+        regated = readiness_gate_reopen._reopened_plan_gate_payload(
             plans_snapshot.inspect_plan(self.plan_dir),
             max_pending_sessions=1,
             repair_session_ids=repair_session_ids,
@@ -260,10 +260,10 @@ class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.Tes
         self._write_plan([self._finding("F1", "runner")])
         snapshot = plans_snapshot.inspect_plan(self.plan_dir)
 
-        repairs = readiness_gate._reopened_plan_gate_payload(
+        repairs = readiness_gate_reopen._reopened_plan_gate_payload(
             snapshot, max_pending_sessions=1, repair_session_ids=["2.1"]
         )
-        review_append = readiness_gate._reopened_plan_gate_payload(
+        review_append = readiness_gate_reopen._reopened_plan_gate_payload(
             snapshot,
             max_pending_sessions=1,
             repair_session_ids=[],
