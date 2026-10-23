@@ -4,14 +4,15 @@ Agent Session Loop (`asl`): run split agent session plans one session at a
 time — prepare, preflight, run, supervise, review, and inspect them — plus the
 portable ASL Workbench and the shared planning and supervision skills.
 
-Extracted from the `~/scripts` dotfiles repository with its history. The
-dotfiles repository keeps the harness context files and the non-ASL skills;
-this one owns everything ASL.
+> **Status:** a personal tool, published as-is under the [MIT License](LICENSE).
+> It is built around the author's own setup (macOS, the Claude Code, Codex and
+> Copilot CLIs). Issues and pull requests are not monitored; fork freely.
 
 ## Setup
 
 ```bash
-cd ~/1_dev_projects/sglavoie_agent-session-loop
+git clone https://github.com/sglavoie/agent-session-loop.git
+cd agent-session-loop
 just all
 ```
 
@@ -21,6 +22,8 @@ just all
   `bin/.local/bin/`
 - every directory under `skills/` into `~/.claude/skills`,
   `~/.claude-personal/skills`, `~/.codex/skills` and `~/.copilot/skills`
+  (each directory is created if it does not exist; `~/.claude-personal` is a
+  second Claude Code profile, used via `CLAUDE_CONFIG_DIR`)
 
 Each is an absolute symlink into this checkout, replaced atomically, so a
 running companion, bridge or supervisor that execs `asl` mid-install never
@@ -63,9 +66,9 @@ just test-all
 just reliability-stress
 ```
 
-Stdlib `unittest` only. The GitHub workflows are disabled on purpose: tests and
-lint run locally. See [Testing in the ASL guide](docs/asl-guide.md#testing) for
-what each recipe covers.
+Stdlib `unittest` only. CI (`.github/workflows/`) runs a portable Linux lane
+and the full suite on macOS. See [Testing in the ASL guide](docs/asl-guide.md#testing)
+for what each recipe covers.
 
 ### Linting
 
@@ -83,3 +86,7 @@ Python code (config in `pyproject.toml`).
 - `git`, `just`
 - `ruff`, `mypy`, `shellcheck` for `just lint`
 - The harness CLIs ASL launches (`claude`, `codex`, `copilot`) for real runs
+
+## License
+
+[MIT](LICENSE)

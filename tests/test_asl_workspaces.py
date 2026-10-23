@@ -200,9 +200,7 @@ class RepositoryRegistryTests(unittest.TestCase):
 
     def test_registry_digest_uses_canonical_origin_identity(self) -> None:
         ssh = _registry((DEFAULT_MULTI_REPO_SPECS[0],))
-        https = _registry(
-            (("SVC", "tundra_svc", "https://github.com/tundra/SVC"),)
-        )
+        https = _registry((("SVC", "tundra_svc", "https://github.com/tundra/SVC"),))
         self.assertEqual(ssh.digest, https.digest)
 
     def test_registry_rejects_case_collisions_duplicates_and_overlap(self) -> None:

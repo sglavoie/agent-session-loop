@@ -1,10 +1,9 @@
 # Repository guide
 
 - Agent Session Loop (`agent_session_loop/`, the `asl` CLI), its portable
-  Workbench (`asl_workbench/`), and the ASL skills (`skills/`). Extracted from
-  the `~/scripts` dotfiles repo with history; that repo still owns the harness
-  context files (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, ...) and the
-  non-ASL skills.
+  Workbench (`asl_workbench/`), and the ASL skills (`skills/`). The harness
+  context files (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, ...) live outside
+  this repository.
 - `just all` (alias of `just install`) runs `install.py`, which links
   `~/.local/bin/{asl,agent-session-loop}` and every `skills/<name>` into the
   four harness skill directories as absolute symlinks into this checkout, each
@@ -14,8 +13,8 @@
   `just sync-skills` after any change there: it re-links the skills and runs
   `agent_session_loop/startup_context.py`, which re-renders the marked ASL
   startup card in `~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`,
-  `~/.claude-personal/CLAUDE.md` (stow links into `~/scripts`, so the write is
-  a diff to commit there) and in `skills/asl/references/supervisor-context.md`.
+  `~/.claude-personal/CLAUDE.md` and in
+  `skills/asl/references/supervisor-context.md`.
   Never hand-edit inside `<!-- ASL_CONTEXT_START ... -->`;
   `just check-startup-context` reports a stale block without rewriting it.
 - `just test-fast` / `just test-all` run the shard driver `tests/run_suite.py`. A

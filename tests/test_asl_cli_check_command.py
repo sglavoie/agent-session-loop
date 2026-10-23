@@ -142,9 +142,7 @@ class SplitCheckCommandTests(SplitCliHelpers, unittest.TestCase):
             first_session = (output_dir / "session-1.md").read_text(encoding="utf-8")
             second_session = (output_dir / "session-2.md").read_text(encoding="utf-8")
             self.assertIn("## Repositories", manifest)
-            self.assertIn(
-                "| SVC | tundra_svc | github.com/tundra/SVC |", manifest
-            )
+            self.assertIn("| SVC | tundra_svc | github.com/tundra/SVC |", manifest)
             self.assertNotIn("## Repositories", context)
             self.assertNotIn("| Alias | Path | Origin |", context)
             self.assertEqual(1, first_session.count("**Reads repositories**: SVC, OAK"))

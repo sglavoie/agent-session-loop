@@ -354,9 +354,7 @@ class SuggestionTests(unittest.TestCase):
 
     def test_aliases_are_deduplicated_deterministically(self) -> None:
         nested = self.workspace / "vendor"
-        init_multi_repo_workspace(
-            nested, (("Z", "tundra_svc", "git@host:z/dup.git"),)
-        )
+        init_multi_repo_workspace(nested, (("Z", "tundra_svc", "git@host:z/dup.git"),))
         registry = repository_scope_registry.suggest_registry(
             self.workspace,
             (self.repositories["SVC"], nested / "tundra_svc"),
