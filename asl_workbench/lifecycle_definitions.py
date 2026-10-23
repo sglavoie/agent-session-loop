@@ -113,7 +113,7 @@ def definition(
                 "RunAtLoad": True,
                 "KeepAlive": True,
                 "ThrottleInterval": 10,
-                "ExitTimeOut": 30,
+                "ExitTimeOut": common.CONNECTOR_EXIT_TIMEOUT_SECONDS,
                 "Umask": SHARED_MODE_BITS,
                 "AbandonProcessGroup": True,
                 "StandardOutPath": "/dev/null",

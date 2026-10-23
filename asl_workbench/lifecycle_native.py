@@ -117,6 +117,7 @@ class NativeManager:
                         self.domain + "/" + common.LABEL,
                     ]
                 )
+                common.await_unloaded(self.status)
             return
         common.command(["systemctl", "--user", "stop", common.UNIT])
 

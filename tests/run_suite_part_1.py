@@ -239,6 +239,7 @@ FAST_MODULES = (
     "tests.test_workbench_integrations_publisher",
     "tests.test_asl_startup_context",
     "tests.test_asl_install_links",
+    "tests.test_workbench_lifecycle_native",
     "tests.test_asl_agent_mux_projection",
     "tests.test_asl_agent_mux_projection_state",
     "tests.test_asl_agent_mux_projection_hooks",

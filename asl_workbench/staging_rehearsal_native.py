@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from . import lifecycle_common
+
 # ruff: noqa: F401, F403, F405
 from .staging_rehearsal_models import *
 
@@ -405,6 +407,7 @@ class StagingNativeManager(lifecycle.NativeManager):
                 lifecycle.command(
                     ["/bin/launchctl", "bootout", self.domain + "/" + self.label]
                 )
+                lifecycle_common.await_unloaded(self.status)
             return
         lifecycle.command(["systemctl", "--user", "stop", self.unit])
 

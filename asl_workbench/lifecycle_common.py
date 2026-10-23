@@ -6,6 +6,8 @@ import os
 import re
 import stat
 import subprocess
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from .compatibility import PACKAGE_NAME
@@ -43,6 +45,14 @@ MAX_MEMBERS = 256
 
 #: How long any one host command may take.
 COMMAND_TIMEOUT_SECONDS = 45
+
+
+#: The launch agent's ``ExitTimeOut``: how long launchd waits for the connector
+#: to exit before it kills it.
+CONNECTOR_EXIT_TIMEOUT_SECONDS = 30
+
+#: How long a stop waits for launchd to let go of the job, past that timeout.
+UNLOAD_WAIT_SECONDS = CONNECTOR_EXIT_TIMEOUT_SECONDS + 10
 
 
 #: What may be in an artifact. The package's own Python, and the browser assets
@@ -198,3 +208,26 @@ def service_environment(role: str, *, asl: str | None = None) -> dict[str, str]:
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONUNBUFFERED": "1",
     }
+
+
+def await_unloaded(
+    loaded: Callable[[], bool],
+    *,
+    timeout: float = UNLOAD_WAIT_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    """Return once ``loaded()`` is false, or refuse once ``timeout`` passes.
+
+    ``launchctl bootout`` returns while launchd is still waiting for the job to
+    exit, and a ``bootstrap`` of the same label in that window fails with an
+    I/O error. A stop that does not wait therefore turns every upgrade into an
+    outage the transaction then has to undo.
+    """
+    deadline = monotonic() + timeout
+    while loaded():
+        if monotonic() >= deadline:
+            raise LifecycleError(
+                f"native service was still loaded {timeout:.0f}s after it was stopped"
+            )
+        sleep(0.25)

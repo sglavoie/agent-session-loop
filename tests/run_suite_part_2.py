@@ -126,6 +126,7 @@ PORTABLE_MODULES = (
     "tests.test_asl_harness_compatibility_live_acceptance",
     "tests.test_asl_startup_context",
     "tests.test_asl_install_links",
+    "tests.test_workbench_lifecycle_native",
     "tests.test_asl_overseer_cli_invocation",
     "tests.test_asl_overseer_cli_evidence",
     "tests.test_asl_overseer_cli_human_dependency",
