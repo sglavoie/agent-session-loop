@@ -7,6 +7,10 @@ globals().update(
 )
 from .test_asl_overseer_watch_shared import *
 from .asl_overseer_watch_section_1 import *
+
+# A star import skips private names; the helpers shared across sections
+# are named explicitly.
+from .asl_overseer_watch_section_1 import _Fleet
 from .asl_overseer_watch_section_2 import *
 
 

@@ -7,6 +7,10 @@ globals().update(
 )
 from .test_asl_bridge_projection_shared import *
 from .asl_bridge_projection_section_1 import *
+
+# A star import skips private names; the helpers shared across sections
+# are named explicitly.
+from .asl_bridge_projection_section_1 import _Corpus, _request
 from .asl_bridge_projection_section_2 import *
 
 

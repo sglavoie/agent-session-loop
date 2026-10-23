@@ -8,6 +8,10 @@ globals().update(
 from .test_asl_bridge_projection_shared import *
 from .asl_bridge_projection_section_1 import *
 
+# A star import skips private names; the helpers shared across sections
+# are named explicitly.
+from .asl_bridge_projection_section_1 import _Corpus
+
 
 class RunsProjectionTests(unittest.TestCase):
     def test_snapshot_excludes_ready_recent_and_complete_plans(self) -> None:

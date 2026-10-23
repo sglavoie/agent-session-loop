@@ -336,7 +336,7 @@ class GuardedOperationTests(_OverseerCase):
         adapter = self._registry().adapter("commit")
 
         self.assertIsNotNone(adapter)
-        self.assertEqual(overseer_checkpoint_groups.__name__, type(adapter).__module__)
+        self.assertIs(overseer_checkpoint_groups.GroupAdapter, type(adapter))
 
     def test_the_mail_and_resume_operations_come_from_their_own_modules(self) -> None:
         registry = self._registry()

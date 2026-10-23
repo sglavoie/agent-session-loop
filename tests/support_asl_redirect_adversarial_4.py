@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from agent_session_loop import conversation_resume_plan
+
 from .support_asl_redirect_adversarial_base import (
     PATIENCE,
     SESSION_ID,
@@ -124,7 +126,7 @@ class MissingHistoryTests(ContinuationTestBase):
         # and a caller that read an empty intent as "nothing pending" would be
         # reading the wrong surface.
         with mock.patch.object(
-            conversation_resume,
+            conversation_resume_plan,
             "_harness_capability",
             return_value=conversations.HarnessCapability(
                 harness="codex",

@@ -64,8 +64,20 @@ def _run_shard(name: str, command: list[str]) -> dict[str, Any]:
     }
 
 
-def _discovered_package_modules() -> set[str]:
-    """Every module broad discovery finds at least one test in.
+def _test_ids(suite: Any) -> set[str]:
+    ids: set[str] = set()
+    pending: list[Any] = [suite]
+    while pending:
+        case = pending.pop()
+        if isinstance(case, unittest.TestSuite):
+            pending.extend(case)
+            continue
+        ids.add(case.id())
+    return ids
+
+
+def _discovered_test_ids() -> set[str]:
+    """Every test broad discovery finds.
 
     The registration ratchet used to compare test *counts* -- discovery's total
     against the sum of what the shards reported running. A count is only a proxy
@@ -76,21 +88,33 @@ def _discovered_package_modules() -> set[str]:
     installed program rather than this source tree, so the proxy failed the
     suite for a legitimately unavailable dependency.
 
-    Module names answer the actual question directly.
+    Module names were the next proxy, and they broke once suites were split: a
+    ``test_*`` module that star-imports its ``*_cases_*`` or ``*_section_*``
+    helpers runs classes whose ``__module__`` is the helper, so the module a
+    test is defined in and the module a shard runs stopped being the same name.
+    Test ids answer the actual question -- does some shard run this test -- and
+    are the same whichever module a class is reached through.
     """
-    loader = unittest.defaultTestLoader
+    loader = unittest.TestLoader()
     suite = loader.discover(str(REPO_ROOT / "tests"), top_level_dir=str(REPO_ROOT))
     if loader.errors:
         raise SystemExit("test discovery failed:\n" + "\n".join(loader.errors))
-    modules: set[str] = set()
-    pending: list[Any] = [suite]
-    while pending:
-        case = pending.pop()
-        if isinstance(case, unittest.TestSuite):
-            pending.extend(case)
-            continue
-        modules.add(type(case).__module__)
-    return modules
+    return _test_ids(suite)
+
+
+def _registered_test_ids(modules: set[str]) -> dict[str, set[str]]:
+    """The test ids each registered module runs, keyed by module name."""
+    loader = unittest.TestLoader()
+    registered = {name: _test_ids(loader.loadTestsFromName(name)) for name in modules}
+    if loader.errors:
+        raise SystemExit(
+            "loading run_suite modules failed:\n" + "\n".join(loader.errors)
+        )
+    return registered
+
+
+def _defining_modules(ids: set[str]) -> list[str]:
+    return sorted({test_id.rsplit(".", 2)[0] for test_id in ids})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -153,16 +177,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if not fast_only:
         registered = set(FAST_MODULES) | set(INTEGRATION_MODULES)
-        discovered = _discovered_package_modules()
-        unregistered = sorted(discovered - registered)
+        discovered = _discovered_test_ids()
+        registered_ids = _registered_test_ids(registered)
+        unregistered = discovered - set().union(*registered_ids.values())
         if unregistered:
             print(
                 "\nFAIL: discovery finds tests in "
-                f"{', '.join(unregistered)}; a test module is missing from "
-                "run_suite lists"
+                f"{', '.join(_defining_modules(unregistered))} that no run_suite "
+                "module runs; a test module is missing from run_suite lists"
             )
             return 1
-        undiscovered = sorted(registered - discovered)
+        undiscovered = sorted(
+            name for name, ids in registered_ids.items() if not ids & discovered
+        )
         if undiscovered:
             print(
                 f"\nFAIL: run_suite lists {', '.join(undiscovered)} but broad "

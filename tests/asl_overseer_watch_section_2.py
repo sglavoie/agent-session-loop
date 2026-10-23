@@ -8,6 +8,10 @@ globals().update(
 from .test_asl_overseer_watch_shared import *
 from .asl_overseer_watch_section_1 import *
 
+# A star import skips private names; the helpers shared across sections
+# are named explicitly.
+from .asl_overseer_watch_section_1 import _Fleet, _enrolled, _reasons
+
 
 class NewlyStartedRunTests(unittest.TestCase):
     """The invocation watches while invoked, not a snapshot taken when it began."""

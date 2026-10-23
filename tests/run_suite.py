@@ -10,7 +10,8 @@ from .run_suite_part_2 import (
     SCRIPT_SUITES,
 )
 from .run_suite_part_3 import (
-    _discovered_package_modules,
+    _discovered_test_ids,
+    _registered_test_ids,
     _modules_for,
     _RAN_PATTERN,
     _run_shard,
