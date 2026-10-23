@@ -283,10 +283,10 @@ class InstallVerificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             fake_bin = self._install_fake_home_links(home)
-            folded = home / ".claude/skills/gitsummary"
+            folded = home / ".claude/skills/plan-ideal"
             folded.unlink()
             folded.mkdir()
-            (folded / "SKILL.md").symlink_to(REPO_ROOT / "skills/gitsummary/SKILL.md")
+            (folded / "SKILL.md").symlink_to(REPO_ROOT / "skills/plan-ideal/SKILL.md")
 
             payload = install_verify.verify_install(
                 repo_root=REPO_ROOT,

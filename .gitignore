@@ -1,0 +1,23 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.bak
+
+**/cache/
+
+# Python tooling caches and the local virtualenv
+.venv/
+.mypy_cache/
+.ruff_cache/
+
+# CodeGraph generates this index locally; it is machine-specific and rebuildable
+.codegraph/
+
+# Stray review artifacts an agent turn writes into the checkout. Tracking them
+# made every rewrite a diff the supervisor audit's read-only mutation guard
+# reports as a workspace mutation.
+skills/final-review.json
+skills/final-review.md
+
+# The repo has no [project] table, so uv only ever writes an empty stub lock
+uv.lock

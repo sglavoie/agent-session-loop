@@ -8,6 +8,12 @@ before it decides whether to load the whole skill. Every command comes from
 Each managed file keeps its own content and receives one marked block. The
 start marker carries a digest of the block body, so a stale block is detectable
 without rewriting the file (``--check``).
+
+The context files belong to the operator's dotfiles, not to this checkout, so
+they are addressed by their installed path under a home directory. Where a
+dotfiles stow package links them into ``$HOME`` the write lands in that
+package's tracked file, which is the change the dotfiles repository then
+commits. The bundled reference is the one file this checkout owns.
 """
 
 from __future__ import annotations
@@ -66,21 +72,16 @@ RENDER_ENV: Mapping[str, str] = {}
 
 @dataclass(frozen=True)
 class ContextTarget:
-    """One startup-context file managed in a stow package."""
+    """One startup-context file, addressed relative to a home directory."""
 
-    package_path: str
     installed_path: str
     harness: str
 
 
 CONTEXT_TARGETS: tuple[ContextTarget, ...] = (
-    ContextTarget("codex/.codex/AGENTS.md", ".codex/AGENTS.md", "codex"),
-    ContextTarget("claude/.claude/CLAUDE.md", ".claude/CLAUDE.md", "claude"),
-    ContextTarget(
-        "claude/.claude-personal/CLAUDE.md",
-        ".claude-personal/CLAUDE.md",
-        "claude",
-    ),
+    ContextTarget(".codex/AGENTS.md", "codex"),
+    ContextTarget(".claude/CLAUDE.md", "claude"),
+    ContextTarget(".claude-personal/CLAUDE.md", "claude"),
 )
 
 
@@ -336,12 +337,6 @@ def render_reference() -> str:
     return "\n".join(lines) + "\n"
 
 
-def _desired_text(root: Path, target: ContextTarget) -> str:
-    path = root / target.package_path
-    current = path.read_text(encoding="utf-8") if path.is_file() else ""
-    return apply_block(current, render_block(target.harness))
-
-
 def _file_record(path: Path, root: Path, current: str, desired: str) -> dict[str, Any]:
     return {
         "path": str(path.relative_to(root)),
@@ -352,17 +347,24 @@ def _file_record(path: Path, root: Path, current: str, desired: str) -> dict[str
 def sync(
     repo_root: str | Path | None = None,
     *,
+    home: str | Path | None = None,
     check: bool = False,
+    reference_only: bool = False,
 ) -> dict[str, Any]:
-    """Render every managed startup-context file, or report stale ones."""
+    """Render every managed startup-context file, or report stale ones.
+
+    ``reference_only`` limits the pass to the bundled reference, which is what
+    a machine with no harness installed (CI) can judge.
+    """
     root = Path(repo_root).resolve() if repo_root is not None else _repo_root()
+    home_root = Path(home).expanduser() if home is not None else Path.home()
     files: list[dict[str, Any]] = []
 
-    for target in CONTEXT_TARGETS:
-        path = root / target.package_path
+    for target in () if reference_only else CONTEXT_TARGETS:
+        path = home_root / target.installed_path
         current = path.read_text(encoding="utf-8") if path.is_file() else ""
-        desired = _desired_text(root, target)
-        files.append(_file_record(path, root, current, desired))
+        desired = apply_block(current, render_block(target.harness))
+        files.append(_file_record(path, home_root, current, desired))
         if not check and current != desired:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(desired, encoding="utf-8")
@@ -380,6 +382,7 @@ def sync(
         "ok": not (check and stale),
         "command": COMMAND_NAME,
         "repo_root": str(root),
+        "home": str(home_root),
         "checked": check,
         "files": files,
         "stale": stale,
@@ -396,6 +399,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Checkout root to render into (default: inferred from this module)",
     )
     parser.add_argument(
+        "--home",
+        help="Home directory whose harness context files are rendered (default: $HOME)",
+    )
+    parser.add_argument(
+        "--reference-only",
+        action="store_true",
+        help="Render or check only the bundled skill reference",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="Report stale generated blocks without rewriting any file",
@@ -410,7 +422,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    payload = sync(args.repo_root, check=args.check)
+    payload = sync(
+        args.repo_root,
+        home=args.home,
+        check=args.check,
+        reference_only=args.reference_only,
+    )
     if args.json:
         print(json.dumps(payload, sort_keys=True))
     elif args.check:

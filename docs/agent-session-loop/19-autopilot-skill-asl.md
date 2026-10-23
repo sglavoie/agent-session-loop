@@ -50,19 +50,20 @@ every other leaf has its own — instead of claiming the group lists leaves only
 
 ### Install and sync
 
-The skill ships in the repository's top-level `skills/asl/` and is stowed into
-every harness skill directory the same way as the other shared skills. Run
-`just sync-skills` (or `just all`) to refresh the harness package links, then
+The skill ships in the repository's top-level `skills/asl/` and `install.py`
+links it into every harness skill directory alongside the other ASL skills. Run
+`just sync-skills` (or `just all`) to refresh those links, then
 `just verify-asl-install` to confirm the active `asl` wrapper and the installed
-skill links resolve to this checkout. See [Shared AI Skills](../../README.md#shared-ai-skills).
+skill links resolve to this checkout. See [Setup](../../README.md#setup).
 
 `just sync-skills` also renders the always-loaded ASL startup card, which is
 how a fresh Codex or Claude session learns the supervisor route without loading
 the whole skill. `agent_session_loop/startup_context.py` builds the card from
 `supervisor_guide.guide_payload`, so the card cannot drift from
-`asl supervisor-guide`, and maintains it as one marked block in
-`codex/.codex/AGENTS.md`, `claude/.claude/CLAUDE.md`,
-`claude/.claude-personal/CLAUDE.md`, and the generated skill reference
+`asl supervisor-guide`, and maintains it as one marked block in the installed
+`~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`,
+`~/.claude-personal/CLAUDE.md` (owned by the dotfiles repository, which stows
+them into `$HOME`), and the generated skill reference
 `skills/asl/references/supervisor-context.md`. Everything outside the markers
 is preserved byte for byte. The start marker carries a digest of the block
 body: `python3 -m agent_session_loop.startup_context --check` (also

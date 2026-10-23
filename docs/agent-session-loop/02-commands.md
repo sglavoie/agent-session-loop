@@ -222,7 +222,7 @@ reading "could not look" as "nothing to do".
 
 The overseer's contracts are shared with a program released on its own schedule,
 so the version that matters is the one the two *installed* programs agree on.
-`just overseer-integration asl_root=/path/to/scripts`, in the Agent Mux
+`just overseer-integration asl_root=/path/to/agent-session-loop`, in the Agent Mux
 checkout, is the gate for that: it drives these leaves against the `amx` in
 `~/.local/bin` and the `asl` on `PATH`, in a throwaway world the suite builds
 and deletes — its own repositories, state root, `config.toml`, profile home and

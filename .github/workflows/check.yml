@@ -30,18 +30,15 @@ jobs:
       - name: Install Python tooling
         run: python3 -m pip install --upgrade "ruff==0.16.0" "mypy==2.3.0"
 
-      # `just lint` is deliberately not used here. Its `lint-shell` half runs
-      # `./lint.sh`, whose executable-file sweep uses BSD `find -perm +111`,
-      # which GNU find rejects outright. Shell linting is therefore a macOS-lane
-      # check; the Python static gate is portable and runs on both.
+      # ShellCheck ships with the Ubuntu runner image.
       - name: Lint and type-check
-        run: just lint-py
+        run: just lint
 
       - name: Portable test suite
         run: just test-portable
 
       - name: Startup context is not stale
-        run: just check-startup-context
+        run: python3 -m agent_session_loop.startup_context --check --reference-only
 
       # No model is used and no provider is contacted: the only subprocess this
       # builds is `<harness> --version`. On a runner with no harness installed

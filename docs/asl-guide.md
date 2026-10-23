@@ -328,14 +328,14 @@ unavailable and stays read-only until ASL catches up.
 For an ordinary reinstall of the same revisions, that is the whole procedure:
 
 ```bash
-just all                  # stow the packages and reload the launch agents
+just all                  # link the wrappers and skills, render the startup card
 just verify-asl-install   # active wrappers and skills resolve to this checkout
 ```
 
 Cutting an actual release runs Agent Mux's gate, which drives both repositories:
 
 ```bash
-just paired-release-gate asl_root=~/scripts signing_key=~/.ssh/amx_release
+just paired-release-gate asl_root=~/1_dev_projects/sglavoie_agent-session-loop signing_key=~/.ssh/amx_release
 ```
 
 It requires both working trees to be clean, hashes ASL's wrapper and a digest

@@ -41,10 +41,10 @@ have. `asl maintenance install` writes
 `~/Library/LaunchAgents/com.sglavoie.asl-maintenance.plist` and bootstraps it
 into the calling user's GUI domain; `asl maintenance uninstall` boots it out and
 deletes the definition, removing nothing from the state corpus. The plist is
-written by the command rather than stowed from `launchagents/` on purpose: the
-repo's `just load-agents` bootstraps every plist in that package, so shipping
-one there would give the label two owners and let a `just all` silently re-load
-a job the operator had deliberately uninstalled. The rendered job runs
+written by the command rather than stowed from the dotfiles repository's
+`launchagents/` on purpose: its `just load-agents` bootstraps every plist in that
+package, so shipping one there would give the label two owners and let a
+`just all` silently re-load a job the operator had deliberately uninstalled. The rendered job runs
 `asl maintenance run --apply --max-runtime-seconds 900 --json` once a day at
 03:30 with `RunAtLoad` false, `ProcessType` `Background`, and `LowPriorityIO`,
 and appends its own output to `maintenance.log` under the state root. The
