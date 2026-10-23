@@ -35,6 +35,8 @@
 - Skill and README prose is test-gated by `tests/test_asl_docs_*.py`; read its
   assertions before rewording either. `agent_session_loop/AGENTS.md` still
   governs ASL behavior changes.
+- The repo is indexed by CodeGraph (`.codegraph/`, gitignored). Prefer
+  `codegraph explore "<symbols or question>"` over grep.
 - Planning front door: `plan-iterate`, then `asl prepare` / `asl preflight` (with
   `plan-preflight-iterate` for repairs), then the split, then the `asl` skill to
   supervise `asl run`. This moves preflight defects to before the run instead of
