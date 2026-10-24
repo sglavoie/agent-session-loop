@@ -78,7 +78,11 @@ class ReviewDeltaBoundaryTests(unittest.TestCase):
         # never sees a half-written session.
         self.assertEqual(set(), _call_receivers(self.source, "write_text"))
         self.assertEqual(1, self.source.count("durability."))
-        self.assertIn("durability.replace_text(session.path, rescoped)", self.source)
+        self.assertIn(
+            "durability.replace_text(session.path, rescoped, sync_file=True, "
+            "sync_parent=True)",
+            self.source,
+        )
         for reach in ("open(", "mkdir(", "unlink("):
             self.assertNotIn(reach, self.source, msg=reach)
 

@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import io
+import threading
+import types
 import unittest
 from datetime import timedelta
 from pathlib import Path
+from typing import Any, cast
+from unittest import mock
 
 from agent_session_loop import (
     mailbox_constants,
     run_coordination_reply_state,
     run_coordination_wait_models,
     run_coordination_wait_record,
+    run_loop_terminal,
 )
 from agent_session_loop import run_coordination_constants as wait_budgets
 from tests import support_asl_run_coordination as fixtures
@@ -65,6 +71,88 @@ class ReplyStatePreserverTests(fixtures.CoordinationTestCase):
         preserver.restore_if_unconsumed()
 
         self.assertFalse(missing.exists())
+
+    def test_an_unconsumed_attempt_without_side_effects_is_rolled_back(
+        self,
+    ) -> None:
+        preserver = self.preserver()
+        self.state_path.write_text(
+            '{"commit_groups": [], "during": true}\n', encoding="utf-8"
+        )
+        with self.event_path.open("a", encoding="utf-8") as handle:
+            handle.write('{"name": "run_started", "payload": {}}\n')
+
+        self.assertIsNone(preserver.restore_if_unconsumed())
+
+        self.assertEqual(
+            self.state_path.read_text(encoding="utf-8"), '{"before": true}\n'
+        )
+        self.assertEqual(
+            self.event_path.read_text(encoding="utf-8"), '{"event": "before"}\n'
+        )
+
+    def test_a_commit_before_consumption_keeps_the_ledger(self) -> None:
+        # Settling an owed group can commit before the reply is consumed. The
+        # events naming that commit are the only record of it, so rolling them
+        # back would leave the ledger disagreeing with Git.
+        preserver = self.preserver()
+        during_state = '{"commit_groups": [{"group_id": "g1"}], "during": true}\n'
+        self.state_path.write_text(during_state, encoding="utf-8")
+        with self.event_path.open("a", encoding="utf-8") as handle:
+            handle.write('{"name": "commit_finished", "payload": {}}\n')
+        during_events = self.event_path.read_text(encoding="utf-8")
+
+        skipped = preserver.restore_if_unconsumed()
+
+        assert skipped is not None
+        self.assertEqual("side-effect-before-consumption", skipped["reason"])
+        self.assertEqual(
+            ["commit_finished", "state.commit_groups"], skipped["evidence"]
+        )
+        self.assertEqual(self.state_path.read_text(encoding="utf-8"), during_state)
+        self.assertEqual(self.event_path.read_text(encoding="utf-8"), during_events)
+
+    def test_a_ledger_entry_carried_over_unchanged_is_not_a_side_effect(
+        self,
+    ) -> None:
+        carried = '{"commit_failures": [{"session_id": "1"}]}\n'
+        self.state_path.write_text(carried, encoding="utf-8")
+        preserver = self.preserver()
+        self.state_path.write_text(
+            '{"commit_failures": [{"session_id": "1"}], "during": true}\n',
+            encoding="utf-8",
+        )
+
+        self.assertIsNone(preserver.restore_if_unconsumed())
+        self.assertEqual(self.state_path.read_text(encoding="utf-8"), carried)
+
+    def test_the_run_payload_and_stderr_say_why_the_rollback_was_skipped(
+        self,
+    ) -> None:
+        preserver = self.preserver()
+        with self.event_path.open("a", encoding="utf-8") as handle:
+            handle.write('{"name": "commit_started", "payload": {}}\n')
+        written: list[dict[str, object]] = []
+        ctx = types.SimpleNamespace(
+            reply_state_preserver=preserver,
+            persistence=types.SimpleNamespace(
+                lock=threading.Lock(), write_state=written.append
+            ),
+        )
+        payload: dict[str, object] = {"status": "paused"}
+
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            code, result = run_loop_terminal._finish_run_locked(
+                cast(Any, ctx), 3, payload
+            )
+
+        self.assertEqual(3, code)
+        skipped = cast(
+            dict[str, Any], result[run_coordination_reply_state.ROLLBACK_SKIPPED_KEY]
+        )
+        self.assertEqual(["commit_started"], skipped["evidence"])
+        self.assertEqual([payload], written)
+        self.assertIn("kept rather than rolled back", stderr.getvalue())
 
     def test_a_disabled_preserver_captures_and_restores_nothing(self) -> None:
         preserver = self.preserver(enabled=False)

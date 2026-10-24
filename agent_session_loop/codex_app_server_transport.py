@@ -65,6 +65,10 @@ class AppServerTransport:
         self._write_lock = threading.Lock()
         self._decoder = _LineDecoder()
         self._pending: dict[int, _Pending] = {}
+        # Requests this client stopped waiting for. The app-server may still
+        # answer one late, and that answer is the end of an exchange already
+        # settled as a timeout rather than a message nobody sent.
+        self._abandoned: set[int] = set()
         self._next_id = 0
 
         self._thread_id: str | None = None
@@ -305,7 +309,8 @@ class AppServerTransport:
                 raise AppServerError(f"app-server exited before answering {method}")
             if time.monotonic() >= deadline:
                 with self._state_lock:
-                    self._pending.pop(request_id, None)
+                    if self._pending.pop(request_id, None) is not None:
+                        self._abandoned.add(request_id)
                 raise AppServerError(f"{method} timed out")
         if pending.rejection is not None:
             raise _RequestRejected(

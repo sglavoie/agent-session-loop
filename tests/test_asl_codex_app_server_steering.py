@@ -79,6 +79,27 @@ class SteeringTests(unittest.TestCase):
         self.assertEqual(guidance_delivery.REASON_TRANSPORT_UNAVAILABLE, outcome.reason)
         self.assertEqual("turn/steer timed out", outcome.detail)
 
+    def test_a_late_answer_to_a_timed_out_steer_is_not_a_protocol_error(
+        self,
+    ) -> None:
+        process = fixtures._FakeProcess(fixtures.scripted_responder(answer_steer=False))
+        session = fixtures.start_session(process, steer_timeout=0.2)
+        outcome = session.steer(fixtures.guidance_request())
+        self.assertEqual("turn/steer timed out", outcome.detail)
+
+        session.feed(
+            fixtures._line(
+                {
+                    "id": process.request_id("turn/steer"),
+                    "result": {"turnId": "turn-1"},
+                }
+            )
+        )
+
+        # The deferral already reported the timeout; the answer that ends it
+        # must not turn a completed turn into a failed one.
+        self.assertIsNone(session.protocol_error)
+
     def test_a_steer_before_a_turn_exists_defers_with_no_active_turn(self) -> None:
         process = fixtures._FakeProcess(fixtures.scripted_responder(answer_steer=False))
         session = codex_app_server.CodexAppServerSession(

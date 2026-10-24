@@ -6,7 +6,7 @@ import contextlib
 import fcntl
 import json
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from . import harnesses, run_control
@@ -62,6 +62,40 @@ def _read_and_truncate(queue_path: Path) -> str | None:
             fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
     return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def requeue_lines(queue_path: Path, lines: Sequence[str]) -> None:
+    """Put drained lines back at the head of the queue, ahead of newer appends.
+
+    The drain truncates before anything is applied, so a consumer that fails
+    partway through a batch calls this with the lines it never reached; without
+    it those commands would be gone although their producers were told they
+    were queued. They go back in front of whatever was appended since, under the
+    same exclusive lock producers take, so queue order is preserved.
+    """
+    if not lines:
+        return
+    restored = "".join(line if line.endswith("\n") else f"{line}\n" for line in lines)
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(queue_path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        data = memoryview(restored.encode("utf-8") + b"".join(chunks))
+        while data:
+            data = data[os.write(fd, data) :]
+        os.fsync(fd)
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def drain_queue(
@@ -246,6 +280,7 @@ def drain_queue(
                 protect_paths=guard_parsed.protect_paths,
                 guard_id=guard_parsed.guard_id,
                 expected_run_id=guard_parsed.expected_run_id,
+                raw=raw_line,
             )
         )
         seen.add(cmd_id)

@@ -7,6 +7,8 @@ re-exported here, so this module remains the public entry point.
 
 from __future__ import annotations
 
+import codecs
+import os
 import select
 import sys
 import termios
@@ -277,6 +279,11 @@ class RunControlListener:
         return None
 
     def _listen(self) -> None:
+        # Read the descriptor directly rather than through ``self._stdin``: a
+        # buffered ``read(1)`` pulls every pending byte into Python's buffer and
+        # returns one character, after which ``select`` reports nothing left,
+        # so the rest of a paste would wait for the next keypress.
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
         while not self._stop.is_set():
             fd = self._fd
             if fd is None:
@@ -288,17 +295,18 @@ class RunControlListener:
             if not readable:
                 continue
             try:
-                raw_key = self._stdin.read(1)
+                chunk = os.read(fd, 1024)
             except OSError, ValueError:
                 return
-            if not raw_key:
-                continue
-            if isinstance(raw_key, bytes):
-                key = raw_key.decode("utf-8", errors="ignore")
-            else:
-                key = raw_key
-            if key:
-                self.handle_key(key[0])
+            if not chunk:
+                # End of input stays readable forever; looping on it would spin.
+                return
+            text = decoder.decode(chunk)
+            # An escape sequence (an arrow key, say) arrives as one read; its
+            # tail can contain digits that would otherwise select a harness.
+            text = text.split("\x1b", 1)[0]
+            for key in text:
+                self.handle_key(key)
 
     def _emit_line(self, message: str) -> None:
         print(f"[{self._timestamp()}] {message}", file=self._stderr, flush=True)

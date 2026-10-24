@@ -4,11 +4,13 @@ Split from tests/test_asl_control.py."""
 
 from __future__ import annotations
 
+import io
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
@@ -339,6 +341,53 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
             result2.rejected[0].reason,
         )
         self.assertFalse(rc_state2.stop_after_current)
+
+    def test_a_failed_record_puts_the_unreached_commands_back(self) -> None:
+        for command_id in ("first", "second", "third"):
+            control_queue.append_command(
+                self.plan_dir,
+                control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+                state_dir=self.state_dir,
+                command_id=command_id,
+            )
+        real_observed = run_coordination_control.record_control_command_observed
+        calls = 0
+
+        def fail_on_second(**kwargs: Any) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("disk full")
+            real_observed(**kwargs)
+
+        seen: set[str] = set()
+        with (
+            mock.patch.object(
+                run_coordination_control,
+                "record_control_command_observed",
+                side_effect=fail_on_second,
+            ),
+            self.assertRaises(OSError),
+        ):
+            self.drain(run_control.RunControlState(current_harness="codex"), seen)
+
+        # The command that raised is not replayed, since how far it got is
+        # unknown; the one after it was never reached and must still be queued.
+        self.assertEqual({"first", "second"}, seen)
+        result, _ = self.drain(
+            run_control.RunControlState(current_harness="codex"), seen
+        )
+        self.assertEqual(("third",), result.consumed_ids)
+
+    def test_rejected_lines_are_reported_on_stderr(self) -> None:
+        queue_path = control_queue.queue_path_for_plan(self.plan_dir, self.state_dir)
+        queue_path.parent.mkdir(parents=True, exist_ok=True)
+        queue_path.write_text("not json\n", encoding="utf-8")
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            result, _ = self.drain(run_control.RunControlState(current_harness="codex"))
+        self.assertEqual(1, len(result.rejected))
+        self.assertIn("ignored control queue line 1", stderr.getvalue())
+        self.assertIn(control_queue.REJECT_INVALID_JSON, stderr.getvalue())
 
     def queue_abort(
         self,

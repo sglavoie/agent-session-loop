@@ -171,24 +171,73 @@ class RunsChangedEventTests(unittest.TestCase):
         self.assertEqual(0, session.seq)
 
 
+def _frames_from(data: bytes, *, read_size: int | None = None) -> list[Any]:
+    """Every item a frame reader yields for ``data``, an oversize as the class.
+
+    ``read_size`` caps each read, the way a pipe hands a long write over in
+    pieces, so a frame split across reads is exercised as well as a whole one.
+    """
+    stream = io.BytesIO(data)
+
+    def read(size: int) -> bytes:
+        return stream.read(size if read_size is None else min(size, read_size))
+
+    frames = bridge_server._FrameReader(read)
+    items: list[Any] = []
+    while True:
+        while not frames.pending():
+            frames.fill()
+        try:
+            frame = frames.next_frame()
+        except bridge_server._FrameTooLarge:
+            items.append(bridge_server._FrameTooLarge)
+            continue
+        if frame is None:
+            return items
+        items.append(frame)
+
+
 class FrameBoundTests(unittest.TestCase):
     def test_oversize_inbound_frame_is_rejected_and_the_line_is_drained(self) -> None:
         oversize = b"x" * (bridge_protocol.MAX_FRAME_BYTES + 10) + b"\n"
-        reader = io.BytesIO(oversize + b'{"type":"request"}\n')
 
-        with self.assertRaises(bridge_server._FrameTooLarge):
-            bridge_server.read_frame(reader)
-
-        self.assertEqual(b'{"type":"request"}', bridge_server.read_frame(reader))
+        self.assertEqual(
+            [bridge_server._FrameTooLarge, b'{"type":"request"}'],
+            _frames_from(oversize + b'{"type":"request"}\n'),
+        )
 
     def test_frame_of_exactly_the_ceiling_is_accepted(self) -> None:
         payload = b"y" * bridge_protocol.MAX_FRAME_BYTES
-        reader = io.BytesIO(payload + b"\n")
 
-        self.assertEqual(payload, bridge_server.read_frame(reader))
+        self.assertEqual([payload], _frames_from(payload + b"\n"))
+        self.assertEqual([payload], _frames_from(payload + b"\n", read_size=4096))
+
+    def test_one_byte_over_the_ceiling_is_rejected_across_reads(self) -> None:
+        payload = b"z" * (bridge_protocol.MAX_FRAME_BYTES + 1)
+
+        self.assertEqual(
+            [bridge_server._FrameTooLarge, b"{}"],
+            _frames_from(payload + b"\n{}\n", read_size=4096),
+        )
 
     def test_end_of_stream_reads_as_none(self) -> None:
-        self.assertIsNone(bridge_server.read_frame(io.BytesIO(b"")))
+        self.assertEqual([], _frames_from(b""))
+
+    def test_an_unterminated_last_frame_is_still_delivered_at_end_of_stream(
+        self,
+    ) -> None:
+        self.assertEqual([b"{}", b'{"a":1}'], _frames_from(b'{}\n{"a":1}'))
+
+    def test_one_read_holding_several_frames_queues_every_one(self) -> None:
+        frames = bridge_server._FrameReader(io.BytesIO(b"{}\n[]\n").read)
+
+        frames.fill()
+
+        self.assertEqual(b"{}", frames.next_frame())
+        # The second frame is answerable without another read: this is what
+        # keeps the serve loop from waiting on a select that cannot see it.
+        self.assertTrue(frames.pending())
+        self.assertEqual(b"[]", frames.next_frame())
 
     def test_per_field_bounds_keep_corrupt_state_inside_the_frame(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

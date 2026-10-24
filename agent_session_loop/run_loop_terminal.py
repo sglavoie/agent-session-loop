@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -13,6 +14,7 @@ from . import (
     plans_session_scope,
     readiness_gate,
     run_coordination_control,
+    run_coordination_reply_state,
     run_prompts,
     run_termination,
 )
@@ -24,7 +26,18 @@ def _finish_run_locked(
     exit_code: int,
     result_payload: dict[str, Any],
 ) -> tuple[int, dict[str, Any]]:
-    ctx.reply_state_preserver.restore_if_unconsumed()
+    skipped = ctx.reply_state_preserver.restore_if_unconsumed()
+    if skipped is not None:
+        # The ledger was kept because it describes a real commit; say so where
+        # both the operator and a supervisor reading the payload will see it.
+        print(
+            f"asl: {skipped['message']} ({', '.join(skipped['evidence'])})",
+            file=sys.stderr,
+            flush=True,
+        )
+        with ctx.persistence.lock:
+            result_payload[run_coordination_reply_state.ROLLBACK_SKIPPED_KEY] = skipped
+            ctx.persistence.write_state(result_payload)
     return exit_code, result_payload
 
 

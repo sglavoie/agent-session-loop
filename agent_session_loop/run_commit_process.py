@@ -96,6 +96,40 @@ def _sweep_commit_descendants(
     )
 
 
+def _terminate_commit_group(
+    process: subprocess.Popen,
+) -> tuple[str, str, dict[str, Any] | None]:
+    """Kill the commit's process group, drain it, reap it, then sweep.
+
+    Returns whatever the child had already written and the sweep outcome. The
+    order is the module invariant: snapshot while the child is alive, kill the
+    group, drain under its own bound, reap, and only then sweep.
+    """
+    prior_snapshot = _snapshot_commit_descendants(process.pid)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        # The group is already empty, or the child left it for one of its
+        # own; the direct child is still reachable either way.
+        with contextlib.suppress(OSError):
+            process.kill()
+    try:
+        stdout, stderr = process.communicate(timeout=_COMMIT_DRAIN_SECONDS)
+    except subprocess.TimeoutExpired:
+        # The streams are held open by something that outlived the kill;
+        # abandon them, but still reap the signalled child so the sweep
+        # below sees its pid free rather than treating the group as a
+        # stranger's.
+        stdout, stderr = "", ""
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                with contextlib.suppress(OSError):
+                    pipe.close()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=_COMMIT_DRAIN_SECONDS)
+    return stdout, stderr, _sweep_commit_descendants(process, prior_snapshot)
+
+
 def _run_bounded_asl_commit(
     argv: Sequence[str],
     *,
@@ -138,34 +172,20 @@ def _run_bounded_asl_commit(
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        prior_snapshot = _snapshot_commit_descendants(process.pid)
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except OSError:
-            # The group is already empty, or the child left it for one of its
-            # own; the direct child is still reachable either way.
-            with contextlib.suppress(OSError):
-                process.kill()
-        try:
-            stdout, stderr = process.communicate(timeout=_COMMIT_DRAIN_SECONDS)
-        except subprocess.TimeoutExpired:
-            # The streams are held open by something that outlived the kill;
-            # abandon them, but still reap the signalled child so the sweep
-            # below sees its pid free rather than treating the group as a
-            # stranger's.
-            stdout, stderr = "", ""
-            for pipe in (process.stdout, process.stderr):
-                if pipe is not None:
-                    with contextlib.suppress(OSError):
-                        pipe.close()
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                process.wait(timeout=_COMMIT_DRAIN_SECONDS)
-        sweep = _sweep_commit_descendants(process, prior_snapshot)
+        stdout, stderr, sweep = _terminate_commit_group(process)
         stderr = (
             f"{stderr}\nasl commit exceeded its {timeout}s bound and was "
             "terminated with its process group"
         ).lstrip()
         return subprocess.CompletedProcess(list(argv), 124, stdout, stderr), True, sweep
+    except BaseException:
+        # An interrupt (or any other escape) must not orphan the commit: it runs
+        # in a session of its own, so the terminal's SIGINT never reached it,
+        # and left alone it could still commit after the run reported itself
+        # interrupted and released the plan lock.
+        with contextlib.suppress(Exception):
+            _terminate_commit_group(process)
+        raise
     return (
         subprocess.CompletedProcess(list(argv), process.returncode, stdout, stderr),
         False,

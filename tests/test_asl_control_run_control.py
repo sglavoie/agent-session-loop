@@ -5,6 +5,8 @@ Split from tests/test_asl_control.py."""
 from __future__ import annotations
 
 import argparse
+import os
+import threading
 import unittest
 from unittest import mock
 
@@ -405,6 +407,31 @@ class RunControlTests(unittest.TestCase):
             ],
             stderr.getvalue().splitlines(),
         )
+
+    def test_listener_handles_every_key_in_one_read_and_stops_at_eof(self) -> None:
+        # A paste (or two quick presses) arrives as one read; every key in it
+        # must be handled now rather than once more input happens to arrive.
+        # Digits inside an escape sequence must not select a harness, and end of
+        # input ends the listener instead of spinning on a readable descriptor.
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        listener = run_control.RunControlListener(
+            enabled=False,
+            state=run_control.RunControlState(current_harness="codex"),
+            stderr=TTYText(),
+            poll_interval=0.01,
+            timestamp=lambda: "2026-06-11 12:00:00",
+        )
+        handled: list[str] = []
+        listener._fd = read_fd
+        with mock.patch.object(listener, "handle_key", side_effect=handled.append):
+            os.write(write_fd, b"pt\x1b[1;5A")
+            os.close(write_fd)
+            thread = threading.Thread(target=listener._listen, daemon=True)
+            thread.start()
+            thread.join(timeout=5)
+        self.assertFalse(thread.is_alive(), "the listener kept running after EOF")
+        self.assertEqual(["p", "t"], handled)
 
     def test_run_control_status_callback_does_not_record_action(self) -> None:
         state = run_control.RunControlState()

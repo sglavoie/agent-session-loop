@@ -196,6 +196,12 @@ class FramingAndCorrelationTests(unittest.TestCase):
         session.feed(fixtures._line({"id": "req-1", "method": "approval/request"}))
 
         self.assertIn("unroutable", str(session.protocol_error))
+        # Still answered, or an app-server waiting on it holds the turn open
+        # until the harness timeout.
+        reply = process.requests[-1]
+        self.assertEqual("req-1", reply["id"])
+        self.assertNotIn("method", reply)
+        self.assertEqual(-32601, reply["error"]["code"])
 
     def test_text_that_is_not_protocol_passes_through_to_the_log(self) -> None:
         process = fixtures._FakeProcess(fixtures.scripted_responder())

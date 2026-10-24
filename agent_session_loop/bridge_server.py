@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import errno
+import os
 import select
 import sys
 import time
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, BinaryIO, TextIO
@@ -29,21 +31,94 @@ class _FrameTooLarge(Exception):
     """One inbound line exceeded the frame ceiling and has been drained."""
 
 
-def read_frame(reader: BinaryIO, *, limit: int = MAX_FRAME_BYTES) -> bytes | None:
-    """Read one bounded NDJSON frame, or ``None`` at end of stream.
+_READ_CHUNK_BYTES = 65536
 
-    Reads ``limit + 2`` so a frame of exactly ``limit`` payload bytes plus its
-    newline is accepted and anything longer is provably over budget without
-    ever buffering it.
+
+class _FrameReader:
+    """Split an inbound byte stream into bounded NDJSON frames.
+
+    The serve loop waits on the descriptor with ``select``, which only knows
+    about bytes the kernel still holds. A ``BufferedReader`` can pull several
+    frames into user space with one ``readline``, after which ``select`` reports
+    nothing to read and the frames behind the first sit unanswered until the
+    client happens to write again. Owning the buffer here is what lets the loop
+    ask whether a frame is already waiting before it blocks, and a partial frame
+    no longer holds the loop inside ``readline`` either.
+
+    A line of more than ``limit`` payload bytes is never buffered whole: once
+    the unterminated tail outgrows the ceiling it is dropped and the rest of
+    the line is discarded as it arrives, surfacing as one ``_FrameTooLarge``.
     """
-    chunk = reader.readline(limit + 2)
-    if not chunk:
-        return None
-    if len(chunk) > limit + 1:
-        while chunk and not chunk.endswith(b"\n"):
-            chunk = reader.readline(limit + 2)
-        raise _FrameTooLarge
-    return chunk.rstrip(b"\r\n")
+
+    _OVERSIZE = object()
+    _END = object()
+
+    def __init__(
+        self, read: Callable[[int], bytes], *, limit: int = MAX_FRAME_BYTES
+    ) -> None:
+        self._read = read
+        self._limit = limit
+        self._partial = bytearray()
+        self._discarding = False
+        self._items: deque[object] = deque()
+        self._ended = False
+
+    def pending(self) -> bool:
+        """Whether a frame, an oversize report, or the end is already queued."""
+        return bool(self._items)
+
+    def fill(self) -> None:
+        """Do one read from the stream and queue every frame it completes."""
+        if self._ended:
+            return
+        data = self._read(_READ_CHUNK_BYTES)
+        if not data:
+            self._ended = True
+            if self._discarding:
+                self._items.append(self._OVERSIZE)
+            elif self._partial:
+                self._items.append(bytes(self._partial).rstrip(b"\r\n"))
+            self._partial.clear()
+            self._items.append(self._END)
+            return
+        start = 0
+        while start < len(data):
+            newline = data.find(b"\n", start)
+            if self._discarding:
+                if newline < 0:
+                    return
+                self._discarding = False
+                self._items.append(self._OVERSIZE)
+                start = newline + 1
+                continue
+            if newline < 0:
+                self._partial += data[start:]
+                break
+            self._partial += data[start : newline + 1]
+            start = newline + 1
+            line = bytes(self._partial)
+            self._partial.clear()
+            if len(line) > self._limit + 1:
+                self._items.append(self._OVERSIZE)
+            else:
+                self._items.append(line.rstrip(b"\r\n"))
+        if len(self._partial) > self._limit + 1:
+            self._partial.clear()
+            self._discarding = True
+
+    def next_frame(self) -> bytes | None:
+        """Pop the next queued frame, or ``None`` once the stream has ended.
+
+        Call only while ``pending()`` is true.
+        """
+        item = self._items[0]
+        if item is self._END:
+            return None
+        self._items.popleft()
+        if item is self._OVERSIZE:
+            raise _FrameTooLarge
+        assert isinstance(item, bytes)
+        return item
 
 
 def serve_stdio(
@@ -84,6 +159,8 @@ def serve_stdio(
         projection_cadence=worker.cadence,
     )
 
+    frames = _FrameReader(lambda size: os.read(reader.fileno(), size))
+
     def emit(payload: Mapping[str, Any]) -> bool:
         frame = encode_frame(payload)
         if len(frame) > MAX_FRAME_BYTES:
@@ -111,14 +188,20 @@ def serve_stdio(
         worker.start()
 
         while True:
-            timeout = session.select_timeout()
-            try:
-                ready, _, _ = select.select([reader], [], [], timeout)
-            except OSError, ValueError:
-                return 0
-            if ready:
+            if not frames.pending():
+                timeout = session.select_timeout()
                 try:
-                    raw = read_frame(reader)
+                    ready, _, _ = select.select([reader], [], [], timeout)
+                except OSError, ValueError:
+                    return 0
+                if ready:
+                    try:
+                        frames.fill()
+                    except OSError:
+                        return 0
+            if frames.pending():
+                try:
+                    raw = frames.next_frame()
                 except _FrameTooLarge:
                     if not emit(
                         _error_response(
@@ -132,8 +215,6 @@ def serve_stdio(
                     ):
                         return 0
                     continue
-                except OSError:
-                    return 0
                 if raw is None:
                     return 0
                 if raw:

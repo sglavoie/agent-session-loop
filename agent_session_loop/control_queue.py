@@ -36,6 +36,9 @@ from .control_queue_drain import (
 from .control_queue_drain import (
     drain_queue as drain_queue,
 )
+from .control_queue_drain import (
+    requeue_lines as requeue_lines,
+)
 from .control_queue_fields import (
     _abort_fields as _abort_fields,
 )
@@ -295,6 +298,9 @@ def append_command(
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         os.write(fd, line.encode("utf-8"))
+        # The caller is told the command is queued once this returns, so the
+        # line has to survive a crash from here on.
+        os.fsync(fd)
     finally:
         with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)

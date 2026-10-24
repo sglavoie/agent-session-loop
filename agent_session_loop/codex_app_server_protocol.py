@@ -23,6 +23,10 @@ from .codex_app_server_types import (
     _SubmissionRefused,
 )
 
+#: JSON-RPC's "method not found", the answer to a request this client never
+#: advertised it could serve.
+_METHOD_NOT_FOUND = -32601
+
 
 class AppServerProtocol(AppServerTransport):
     """Decode app-server output and establish the required thread and turn."""
@@ -70,10 +74,13 @@ class AppServerProtocol(AppServerTransport):
                 # A server-to-client *request* (an approval prompt, say):
                 # a method and an id together. Every turn runs with
                 # `approvalPolicy: never`, so one arriving means the access
-                # profile is not the one that was asked for.
+                # profile is not the one that was asked for. It is still
+                # answered: an app-server waits on its request, and leaving it
+                # unanswered would hold the turn until the harness timeout.
                 self._note_protocol_error(
                     f"unroutable app-server request: {message['method']!r}"
                 )
+                self._refuse_request(message["id"], str(message["method"]))
                 return ""
             return self._handle_notification(
                 str(message["method"]),
@@ -85,6 +92,12 @@ class AppServerProtocol(AppServerTransport):
             return ""
         with self._state_lock:
             pending = self._pending.pop(raw_id, None)
+            abandoned = pending is None and raw_id in self._abandoned
+            self._abandoned.discard(raw_id)
+        if abandoned:
+            # The late answer to a request that already timed out. The timeout
+            # was reported to its caller; this is not a second failure.
+            return ""
         if pending is None:
             self._note_protocol_error(f"response to unknown request id {raw_id}")
             return ""
@@ -97,6 +110,20 @@ class AppServerProtocol(AppServerTransport):
             return ""
         pending.resolve(result=message.get("result"))
         return ""
+
+    def _refuse_request(self, request_id: object, method: str) -> None:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": _METHOD_NOT_FOUND,
+                "message": f"agent-session-loop does not implement {method}",
+            },
+        }
+        # A closed stdin means the session is already ending, and the
+        # protocol error recorded above is what reports it.
+        with contextlib.suppress(AppServerError):
+            self._write(payload)
 
     def _handle_notification(self, method: str, params: Mapping[str, Any]) -> str:
         if method in _WORK_NOTIFICATIONS or method.startswith("item/"):

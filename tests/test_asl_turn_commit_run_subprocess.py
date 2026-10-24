@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import os
 import signal
+import subprocess
 import sys
 import time
 import unittest
@@ -153,6 +154,57 @@ class TurnCommitSubprocessTests(TurnCommitRunCase):
             wait_for_process_exit(child_pid),
             "a commit-subprocess descendant outlived the outer backstop",
         )
+
+    def test_an_interrupted_commit_takes_its_process_group_down(self) -> None:
+        # The commit runs in a session of its own, so the terminal's SIGINT
+        # never reaches it. An interrupt that escapes `communicate` therefore
+        # has to kill the group itself, or the commit could still land after the
+        # run reported itself interrupted and released the plan lock.
+        pid_path = self.tmp_path / "interrupted-child.pid"
+        stub = [
+            sys.executable,
+            "-c",
+            "import subprocess, sys, time;"
+            "child = subprocess.Popen([sys.executable, '-c',"
+            " 'import time; time.sleep(600)']);"
+            f"open({str(pid_path)!r}, 'w').write(str(child.pid));"
+            "time.sleep(600)",
+        ]
+        real_communicate = subprocess.Popen.communicate
+        calls = 0
+
+        def interrupt_first_wait(
+            process: subprocess.Popen, *args: Any, **kwargs: Any
+        ) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                deadline = time.monotonic() + 30
+                while not pid_path.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                raise KeyboardInterrupt
+            return real_communicate(process, *args, **kwargs)
+
+        try:
+            with (
+                mock.patch.object(
+                    subprocess.Popen,
+                    "communicate",
+                    autospec=True,
+                    side_effect=interrupt_first_wait,
+                ),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                run_commit_process._run_bounded_asl_commit(
+                    stub, cwd=self.tmp_path, timeout=600
+                )
+            child_pid = int(pid_path.read_text(encoding="utf-8").strip())
+            self.assertFalse(
+                wait_for_process_exit(child_pid),
+                "an interrupted commit left its process group running",
+            )
+        finally:
+            self._reap_recorded_pids(pid_path)
 
     def test_outer_commit_timeout_kills_detached_descendants(self) -> None:
         # The real nested harness starts a session of its own, so a group kill

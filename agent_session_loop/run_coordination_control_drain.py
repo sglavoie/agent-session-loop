@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import sys
 import threading
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
@@ -203,74 +204,134 @@ def drain_external_control_queue(
             queue_path=control_queue.queue_path_for_plan(plan_dir, state_dir_arg)
         )
 
-    for command in result.accepted:
-        seen_ids.add(command.id)
-        with run_control_lock:
-            run_coordination_control.record_control_command_observed(
-                event_path=event_path,
+    for rejection in result.rejected:
+        detail = f": {rejection.detail}" if rejection.detail else ""
+        print(
+            f"asl: ignored control queue line {rejection.line_number} "
+            f"({rejection.reason}{detail})",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    pending = list(result.accepted)
+    try:
+        while pending:
+            _apply_drained_command(
+                pending.pop(0),
+                plan_dir=plan_dir,
+                state_dir_arg=state_dir_arg,
+                control_state=control_state,
+                seen_ids=seen_ids,
                 payload=payload,
+                event_path=event_path,
                 control_payload=control_payload,
-                command=command,
                 context=context,
                 persistence=persistence,
+                run_control_lock=run_control_lock,
+                abort=abort,
+                mailbox_enabled=mailbox_enabled,
+                finalization=finalization,
+                guard_controller=guard_controller,
             )
-            if command.command in control_queue.GUARD_COMMAND_NAMES:
-                run_coordination_control.apply_guard_command(
-                    command,
-                    controller=guard_controller,
-                    event_path=event_path,
-                    payload=payload,
-                    control_payload=control_payload,
-                    context=context,
-                    persistence=persistence,
+    except BaseException:
+        # The queue was truncated before anything was applied, so the commands
+        # this drain never reached would otherwise be lost although their
+        # producers were told they were queued. The one that raised is not put
+        # back: how far it got is unknown, and the error surfaces regardless.
+        if result.queue_path is not None:
+            with contextlib.suppress(OSError):
+                control_queue.requeue_lines(
+                    result.queue_path, [command.raw for command in pending]
                 )
-                continue
-            action = run_coordination_control.apply_external_control_command(
-                command, control_state
-            )
-            if action is None:
-                continue
-            aborting = action.action == "abort-requested"
-            finalization_abort = aborting and finalization and abort is not None
-            if aborting and abort is not None:
-                # Armed before the action is recorded so the requested event and
-                # the `control` payload already carry the deadline the turn is
-                # counting down to.
-                arm_requested_abort(
-                    action,
-                    abort=abort,
-                    plan_dir=plan_dir,
-                    state_dir_arg=state_dir_arg,
-                    control_payload=control_payload,
-                    mailbox_enabled=mailbox_enabled,
-                    finalization=finalization,
-                )
-            run_coordination_control.record_run_control_action(
-                event_path=event_path,
-                payload=payload,
-                control_payload=control_payload,
-                action=action,
-                context=context,
-                persistence=persistence,
-                event_action=(
-                    events.RUN_CONTROL_ACTION_FINALIZATION_ABORT_HONORED
-                    if finalization_abort
-                    else None
-                ),
-                message=(
-                    "abort observed while finalizing: cancelling the terminal audit"
-                    if finalization_abort
-                    else None
-                ),
-            )
-            if aborting and abort is None:
-                degrade_abort_to_stop_after_current(
-                    action,
-                    control_state=control_state,
-                    payload=payload,
-                    event_path=event_path,
-                    control_payload=control_payload,
-                    context=context,
-                    persistence=persistence,
-                )
+        raise
     return result
+
+
+def _apply_drained_command(
+    command: control_queue.ControlCommand,
+    *,
+    plan_dir: Path,
+    state_dir_arg: str | None,
+    control_state: run_control.RunControlState,
+    seen_ids: set[str],
+    payload: dict[str, Any],
+    event_path: Path,
+    control_payload: dict[str, Any],
+    context: Mapping[str, Any] | None,
+    persistence: run_coordination_seams.CoordinationPersistence,
+    run_control_lock: AbstractContextManager[Any],
+    abort: harnesses.AbortSignal | None,
+    mailbox_enabled: bool,
+    finalization: bool,
+    guard_controller: guards.GuardController | None,
+) -> None:
+    """Record and apply one accepted command from a drain."""
+    seen_ids.add(command.id)
+    with run_control_lock:
+        run_coordination_control.record_control_command_observed(
+            event_path=event_path,
+            payload=payload,
+            control_payload=control_payload,
+            command=command,
+            context=context,
+            persistence=persistence,
+        )
+        if command.command in control_queue.GUARD_COMMAND_NAMES:
+            run_coordination_control.apply_guard_command(
+                command,
+                controller=guard_controller,
+                event_path=event_path,
+                payload=payload,
+                control_payload=control_payload,
+                context=context,
+                persistence=persistence,
+            )
+            return
+        action = run_coordination_control.apply_external_control_command(
+            command, control_state
+        )
+        if action is None:
+            return
+        aborting = action.action == "abort-requested"
+        finalization_abort = aborting and finalization and abort is not None
+        if aborting and abort is not None:
+            # Armed before the action is recorded so the requested event and
+            # the `control` payload already carry the deadline the turn is
+            # counting down to.
+            arm_requested_abort(
+                action,
+                abort=abort,
+                plan_dir=plan_dir,
+                state_dir_arg=state_dir_arg,
+                control_payload=control_payload,
+                mailbox_enabled=mailbox_enabled,
+                finalization=finalization,
+            )
+        run_coordination_control.record_run_control_action(
+            event_path=event_path,
+            payload=payload,
+            control_payload=control_payload,
+            action=action,
+            context=context,
+            persistence=persistence,
+            event_action=(
+                events.RUN_CONTROL_ACTION_FINALIZATION_ABORT_HONORED
+                if finalization_abort
+                else None
+            ),
+            message=(
+                "abort observed while finalizing: cancelling the terminal audit"
+                if finalization_abort
+                else None
+            ),
+        )
+        if aborting and abort is None:
+            degrade_abort_to_stop_after_current(
+                action,
+                control_state=control_state,
+                payload=payload,
+                event_path=event_path,
+                control_payload=control_payload,
+                context=context,
+                persistence=persistence,
+            )

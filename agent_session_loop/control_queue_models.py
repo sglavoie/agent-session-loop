@@ -127,6 +127,10 @@ class ControlCommand:
     #: The run the operator saw when they queued a guard mutation. A command
     #: that outlives that run is refused rather than applied to its successor.
     expected_run_id: str | None = None
+    #: The queue line exactly as it was read, so a drain that fails partway can
+    #: put the commands it never reached back on the queue unchanged. Empty for
+    #: a command built by ``append_command``, which has no line to return.
+    raw: str = field(default="", compare=False, repr=False)
 
     def to_payload(self) -> dict[str, Any]:
         return {

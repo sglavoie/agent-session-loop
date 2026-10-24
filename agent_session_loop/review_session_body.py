@@ -61,13 +61,15 @@ rather than through the runner's alias names.
 
 from __future__ import annotations
 
+import contextlib
 import shlex
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from . import (
-    durability,
+    authoring_manifest,
+    authoring_transaction,
     plans_discovery,
     plans_errors,
     plans_files,
@@ -79,6 +81,10 @@ from . import (
     review_session_contract,
     workspaces,
 )
+
+#: Title a generated review session carries in its heading and manifest row.
+GENERATED_REVIEW_TITLE = "Final Review"
+MANIFEST_FILENAME = "manifest.md"
 
 # Scope of a generated review session. ``full`` is the fail-open default: any
 # re-review that cannot prove a narrower scope reads everything again.
@@ -327,7 +333,7 @@ def build_generated_review_session_body(
         repository_aliases=repository_aliases,
     )
     scope_lines = _delta_review_scope_lines(delta) if delta is not None else []
-    header_lines = [f"# {session_id.display_label}: Final Review", ""]
+    header_lines = [f"# {session_id.display_label}: {GENERATED_REVIEW_TITLE}", ""]
     repository_lines: list[str] = []
     if workspace is not None:
         scope = plans_session_scope.SessionScope(
@@ -573,5 +579,44 @@ def ensure_generated_review_session(
         review_bases=review_bases,
     )
     target_path = canonical_dir / session_id.filename
-    durability.replace_text(target_path, body)
+    # The session file and the manifest rows that list it are published as one
+    # journaled transaction, the way repair children are: a durable
+    # ``review-session-created`` event names the file next, and a crash between
+    # the two writes must not leave a session the manifest does not count.
+    transaction = authoring_transaction.PlanTransaction(canonical_dir)
+    transaction.stage(session_id.filename, body)
+    manifest_text = _grown_manifest_text(canonical_dir, session_id)
+    if manifest_text is not None:
+        transaction.stage(MANIFEST_FILENAME, manifest_text)
+    transaction.commit()
     return plans_models.SessionFile(session_id=session_id, path=target_path), True
+
+
+def _grown_manifest_text(
+    plan_dir: Path, session_id: plans_session_ids.SessionId
+) -> str | None:
+    """The manifest with a row and a count for one appended review session.
+
+    Mirrors repair materialization: a manifest with no session-status table
+    keeps its tables and only has ``**Sessions**: N`` refreshed, and ``None``
+    means there is nothing to change (no manifest, or no line that moved).
+    """
+    manifest_path = plan_dir / MANIFEST_FILENAME
+    try:
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    grown = manifest_text
+    with contextlib.suppress(plans_errors.PlanError):
+        grown = authoring_manifest.add_manifest_session_row(
+            grown,
+            authoring_manifest.ManifestSession(
+                session_id=session_id,
+                title=GENERATED_REVIEW_TITLE,
+                status="pending",
+            ),
+        )
+    grown = authoring_manifest.replace_manifest_sessions_count(
+        grown, len(plans_discovery.discover_session_files(plan_dir)) + 1
+    )
+    return grown if grown != manifest_text else None

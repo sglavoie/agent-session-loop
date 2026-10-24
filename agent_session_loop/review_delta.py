@@ -594,7 +594,7 @@ def _refresh_pending_review_scope(
     rescoped = review_session_body.rescoped_review_session_body(text, delta)
     if rescoped is None or rescoped == text:
         return False
-    durability.replace_text(session.path, rescoped)
+    durability.replace_text(session.path, rescoped, sync_file=True, sync_parent=True)
     persistence.append_event(
         event_path,
         events.REVIEW_SCOPE_EVENT,

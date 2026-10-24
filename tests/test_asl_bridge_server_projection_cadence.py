@@ -9,6 +9,7 @@ import json
 import os
 import threading
 import unittest
+from collections.abc import Callable
 from typing import Any
 from unittest import mock
 
@@ -70,15 +71,22 @@ class _ColdWalkScript:
     is a loop running beside a held walk rather than one that got lucky on
     timing. The first two scans deliver a frame, advancing the clock by half
     the timeout the way a frame arriving early cuts a wait short; the rest wait
-    the timeout out.
+    the timeout out. ``feed`` runs on each delivering scan so the frame really
+    arrives then, instead of every frame being framed by the first read.
     """
 
     def __init__(
-        self, clock: list[float], builder: _HeldBuilder, *, scans: int
+        self,
+        clock: list[float],
+        builder: _HeldBuilder,
+        *,
+        scans: int,
+        feed: Callable[[], None] = lambda: None,
     ) -> None:
         self.clock = clock
         self.builder = builder
         self.scans = scans
+        self.feed = feed
         self.timeouts: list[float] = []
 
     def select(
@@ -91,6 +99,7 @@ class _ColdWalkScript:
             self.builder.await_entry()
         self.timeouts.append(timeout)
         if len(self.timeouts) <= 2:
+            self.feed()
             self.clock[0] += timeout / 2
             return list(rlist), [], []
         self.clock[0] += timeout
@@ -351,16 +360,18 @@ class BridgeProjectionCadenceTests(unittest.TestCase):
         # Released only after the loop has returned, so every frame below was
         # framed while the first walk was still held.
         self.addCleanup(builder.let_through, 4)
-        script = _ColdWalkScript(clock, builder, scans=3)
         read_fd, write_fd = os.pipe()
-        os.write(
-            write_fd,
-            _request("r1", "runs.snapshot")
-            + b"\n"
-            + _request("r2", "runs.snapshot")
-            + b"\n",
+        self.addCleanup(os.close, write_fd)
+        arrivals = [
+            _request("r1", "runs.snapshot") + b"\n",
+            _request("r2", "runs.snapshot") + b"\n",
+        ]
+        script = _ColdWalkScript(
+            clock,
+            builder,
+            scans=3,
+            feed=lambda: os.write(write_fd, arrivals.pop(0)) and None,
         )
-        os.close(write_fd)
         writer = io.StringIO()
 
         with (

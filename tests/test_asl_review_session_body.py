@@ -8,7 +8,8 @@ rather than the seam:
 
 * the module does not import the runner, and needs nothing from it;
 * it owns exactly one durable write — the review session file
-  ``ensure_generated_review_session`` appends — and no other; and
+  ``ensure_generated_review_session`` appends, published with the manifest
+  rows that count it — and no other; and
 * the scope section it renders is fail-open, so a delta it cannot prove
   produces prose that tells the reviewer to read everything, never a
   narrow-looking section with nothing in it.
@@ -44,20 +45,67 @@ class ReviewSessionBodyBoundaryTests(unittest.TestCase):
     def test_review_session_body_does_not_import_the_runner(self) -> None:
         assert_no_runner_import(self, review_session_body)
 
-    def test_the_only_durable_write_is_the_review_session_file(self) -> None:
+    def test_the_only_durable_write_is_the_review_session_publication(
+        self,
+    ) -> None:
         source = Path(review_session_body.__file__).read_text(encoding="utf-8")
 
         # Unlike the contract, prompt, and packet modules, this one does write:
         # a review session that is not on disk is not a session the loop can
         # select. That write is `ensure_generated_review_session`'s whole
-        # point, so it is pinned to one call rather than forbidden. It is an
-        # atomic replace, because `find_pending_generated_review_session` may
-        # read the file the moment it exists and must never see half of it.
+        # point, so it is pinned to one journaled plan transaction — the
+        # session file and the manifest rows that count it — rather than
+        # forbidden. `find_pending_generated_review_session` may read the file
+        # the moment it exists, and the transaction never shows half of it.
         self.assertEqual(0, source.count("write_text("))
-        self.assertEqual(1, source.count("durability.replace_text("))
-        self.assertIn("    durability.replace_text(target_path, body)", source)
+        self.assertEqual(0, source.count("durability."))
+        self.assertEqual(1, source.count("transaction.commit()"))
+        self.assertEqual(1, source.count("authoring_transaction.PlanTransaction("))
         for writer in ("open(", "mkdir(", "unlink("):
             self.assertNotIn(writer, source, msg=writer)
+
+    def test_an_appended_review_is_listed_and_counted_in_the_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            (plan_dir / "session-1.md").write_text(
+                "# Session 1\n\n- **Status**: complete\n", encoding="utf-8"
+            )
+            (plan_dir / "manifest.md").write_text(
+                "# Plan\n\n**Sessions**: 1\n\n## Sessions\n\n"
+                "| Session | Title | Status |\n| --- | --- | --- |\n"
+                "| [1](session-1.md) | First | complete |\n",
+                encoding="utf-8",
+            )
+
+            created, appended = review_session_body.ensure_generated_review_session(
+                plan_dir, review_harness="claude"
+            )
+
+            self.assertTrue(appended)
+            self.assertTrue(created.path.is_file())
+            manifest = (plan_dir / "manifest.md").read_text(encoding="utf-8")
+            self.assertIn("**Sessions**: 2", manifest)
+            self.assertIn(created.path.name, manifest)
+            self.assertIn(review_session_body.GENERATED_REVIEW_TITLE, manifest)
+
+    def test_a_manifest_without_a_status_table_still_gets_its_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            (plan_dir / "session-1.md").write_text(
+                "# Session 1\n\n- **Status**: complete\n", encoding="utf-8"
+            )
+            (plan_dir / "manifest.md").write_text(
+                "# Plan\n\n**Sessions**: 1\n", encoding="utf-8"
+            )
+
+            review_session_body.ensure_generated_review_session(
+                plan_dir, review_harness="claude"
+            )
+
+            self.assertEqual(
+                "# Plan\n\n**Sessions**: 2\n",
+                (plan_dir / "manifest.md").read_text(encoding="utf-8"),
+            )
 
     def test_reuse_never_reauthors_a_pending_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

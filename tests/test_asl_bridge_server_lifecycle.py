@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -82,15 +83,23 @@ class _LoopScript:
     Standing in for ``select`` is what makes the timeout the loop actually
     passes observable; nothing else in the process reports it. A scan that
     finds the reader ready advances the clock by half the timeout, the way a
-    real frame arriving early cuts a wait short.
+    real frame arriving early cuts a wait short. ``feed`` runs on each ready
+    scan, so a test can make that frame actually arrive then rather than having
+    written every frame up front, where one read would frame them all.
     """
 
     def __init__(
-        self, clock: list[float], *, ready_scans: set[int], scans: int
+        self,
+        clock: list[float],
+        *,
+        ready_scans: set[int],
+        scans: int,
+        feed: Callable[[], None] = lambda: None,
     ) -> None:
         self.clock = clock
         self.ready_scans = ready_scans
         self.scans = scans
+        self.feed = feed
         self.timeouts: list[float] = []
 
     def select(
@@ -101,6 +110,7 @@ class _LoopScript:
             raise OSError("the script has run out of scans")
         self.timeouts.append(timeout)
         if len(self.timeouts) in self.ready_scans:
+            self.feed()
             self.clock[0] += timeout / 2
             return list(rlist), [], []
         self.clock[0] += timeout
@@ -207,16 +217,18 @@ class BridgeProjectionFailureBackoffTests(unittest.TestCase):
     def test_the_event_loop_keeps_answering_between_failed_projections(self) -> None:
         clock = [0.0]
         projector = _FailingProjector()
-        script = _LoopScript(clock, ready_scans={1, 3}, scans=5)
         read_fd, write_fd = os.pipe()
-        os.write(
-            write_fd,
-            _request("r1", "runs.snapshot")
-            + b"\n"
-            + _request("r2", "runs.snapshot")
-            + b"\n",
+        self.addCleanup(os.close, write_fd)
+        arrivals = [
+            _request("r1", "runs.snapshot") + b"\n",
+            _request("r2", "runs.snapshot") + b"\n",
+        ]
+        script = _LoopScript(
+            clock,
+            ready_scans={1, 3},
+            scans=5,
+            feed=lambda: os.write(write_fd, arrivals.pop(0)) and None,
         )
-        os.close(write_fd)
         writer = io.StringIO()
 
         with (
@@ -250,6 +262,52 @@ class BridgeProjectionFailureBackoffTests(unittest.TestCase):
         self.assertEqual(
             ["d1", "d1"], [frame["result"]["digest"] for frame in frames[1:]]
         )
+
+
+class BridgePipelinedFrameTests(unittest.TestCase):
+    """Frames written back to back are each answered without more input.
+
+    One read can frame several requests at once, and ``select`` reports only
+    what the kernel still holds, so the loop must answer what it has already
+    framed before it waits. The client here keeps its end open and writes
+    nothing further: a server that waited on ``select`` for the second frame
+    would never answer it.
+    """
+
+    def test_a_second_buffered_frame_is_answered_while_the_client_stays_open(
+        self,
+    ) -> None:
+        read_fd, write_fd = os.pipe()
+        writer = _LineWriter()
+
+        def serve() -> None:
+            with os.fdopen(read_fd, "rb") as reader:
+                bridge_server.serve_stdio(
+                    reader=reader,
+                    writer=writer,
+                    diagnostics=io.StringIO(),
+                    include_default_dirs=False,
+                    poll_interval=3600.0,
+                )
+
+        server = threading.Thread(target=serve, name="serve-stdio", daemon=True)
+        server.start()
+        try:
+            writer.wait_for('"type":"hello"', WAIT)
+            os.write(
+                write_fd,
+                _request("p1", "runs.snapshot")
+                + b"\n"
+                + _request("p2", "runs.snapshot")
+                + b"\n",
+            )
+
+            writer.wait_for('"id":"p1"', WAIT)
+            writer.wait_for('"id":"p2"', WAIT)
+        finally:
+            os.close(write_fd)
+            server.join(WAIT)
+        self.assertFalse(server.is_alive())
 
 
 class BridgeWorkbenchLifecycleTests(unittest.TestCase):
