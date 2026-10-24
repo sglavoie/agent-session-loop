@@ -325,6 +325,74 @@ class StaleLockReclamationTests(unittest.TestCase):
         state_locks.release_lock(self.plan_dir, self.state_dir)
         self.assertFalse(self.lock_path.exists())
 
+    def test_release_leaves_a_lock_that_names_another_process(self) -> None:
+        # `asl unlock --force` and a fresh `asl run` leave the new runner's lock
+        # at this path; the forced-out process's teardown must not delete it.
+        state_locks.acquire_lock(self.plan_dir, self.state_dir)
+        state_locks.unlock_plan(self.plan_dir, self.state_dir, force=True)
+        successor = os.getppid()
+        self.write_lock(pid=successor, hostname=socket.gethostname())
+        replacement = self.lock_path.read_bytes()
+
+        buffer = io.StringIO()
+        with redirect_stderr(buffer):
+            state_locks.release_lock(self.plan_dir, self.state_dir)
+
+        self.assertEqual(replacement, self.lock_path.read_bytes())
+        self.assertIn(f"belongs to pid {successor}", buffer.getvalue())
+
+        # A lock this process does own is still removed.
+        self.lock_path.unlink()
+        state_locks.acquire_lock(self.plan_dir, self.state_dir)
+        state_locks.release_lock(self.plan_dir, self.state_dir)
+        self.assertFalse(self.lock_path.exists())
+
+    def test_a_lock_that_is_not_utf8_reads_as_invalid(self) -> None:
+        self.lock_path.write_bytes(b"\xff\xfe{")
+
+        lock_info = state_locks.inspect_lock_info(self.plan_dir, self.state_dir)
+
+        self.assertIsNotNone(lock_info)
+        assert lock_info is not None
+        self.assertTrue(lock_info.stale)
+        self.assertTrue(lock_info.reason.startswith("invalid lock file:"))
+
+    def test_an_unopenable_mutex_is_reported_as_such_not_as_contention(
+        self,
+    ) -> None:
+        real_open = os.open
+        mutex_path = self.lock_path.parent / state_locks.LOCK_MUTEX_FILE_NAME
+
+        def refuse_the_mutex(path, *args, **kwargs):
+            if Path(path) == mutex_path:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_open(path, *args, **kwargs)
+
+        self.write_lock(pid=self.DEAD_PID, hostname=socket.gethostname())
+        with mock.patch.object(state_locks.os, "open", side_effect=refuse_the_mutex):
+            started = time.monotonic()
+            with self.assertRaises(state.StateError) as acquired:
+                state_locks.acquire_lock(self.plan_dir, self.state_dir)
+            with self.assertRaises(state.StateError) as unlocked:
+                state_locks.unlock_plan(self.plan_dir, self.state_dir, force=True)
+            buffer = io.StringIO()
+            with redirect_stderr(buffer):
+                state_locks.release_lock(self.plan_dir, self.state_dir)
+            waited = time.monotonic() - started
+
+        for message in (
+            str(acquired.exception),
+            str(unlocked.exception),
+            buffer.getvalue(),
+        ):
+            with self.subTest(message=message):
+                self.assertIn("could not open the lock mutex", message)
+                self.assertIn("Permission denied", message)
+                self.assertNotIn("another process is mutating", message)
+        # Not contention, so nothing waited out the mutex bound.
+        self.assertLess(waited, state_locks.LOCK_MUTEX_WAIT_SECONDS)
+        self.assertTrue(self.lock_path.exists())
+
     def test_every_lock_mutation_path_branches_on_the_mutex_claim(self) -> None:
         tree = ast.parse(inspect.getsource(state_locks))
         mutators = {

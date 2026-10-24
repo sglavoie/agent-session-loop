@@ -7,6 +7,7 @@ subprocess."""
 from __future__ import annotations
 
 import contextlib
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -285,8 +286,7 @@ class LiveTurn:
                     self._heartbeat_interval,
                     now,
                 )
-                heartbeat = self._record_heartbeat()
-                self._progress.heartbeat(heartbeat)
+                self._guarded_tick("heartbeat", self._heartbeat_tick)
 
             if self._stop.is_set() or next_poll is None:
                 continue
@@ -301,7 +301,43 @@ class LiveTurn:
                 # Never hold ``self._lock`` while polling. The callback owns
                 # any serialization its mutation domain requires.
                 assert self._poll_callback is not None
-                self._poll_callback()
+                self._guarded_tick("poll", self._poll_callback)
+
+    def _heartbeat_tick(self) -> None:
+        heartbeat = self._record_heartbeat()
+        self._progress.heartbeat(heartbeat)
+
+    def _guarded_tick(self, step: str, tick: Callable[[], None]) -> None:
+        """Run one periodic step without letting its failure end the loop.
+
+        This thread is the only thing applying stop/pause commands and
+        sampling for hangs during the turn, so one transient ``OSError`` from a
+        state write, an event append or a queue drain must cost one tick, not
+        the rest of the turn. The failure is recorded on the active turn, where
+        the next successful write persists it, and announced on stderr once.
+        """
+        try:
+            tick()
+        except Exception as error:  # noqa: BLE001 - the loop must outlive a tick
+            with self._lock:
+                previous = self._active_turn.get("heartbeat_degraded")
+                failures = 1 + (
+                    int(previous.get("failures", 0))
+                    if isinstance(previous, dict)
+                    else 0
+                )
+                self._active_turn["heartbeat_degraded"] = {
+                    "failures": failures,
+                    "last_step": step,
+                    "last_error": f"{type(error).__name__}: {error}",
+                    "last_failed_at": clock.isoformat(clock.utc_now()),
+                }
+            if failures == 1:
+                print(
+                    f"agent-session-loop: turn {step} step failed and will be "
+                    f"retried next interval: {type(error).__name__}: {error}",
+                    file=sys.stderr,
+                )
 
     @staticmethod
     def _advance_deadline(

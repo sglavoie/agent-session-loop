@@ -41,6 +41,10 @@ LOCK_MUTEX_WAIT_SECONDS = 5.0
 LOCK_MUTEX_POLL_SECONDS = 0.01
 
 
+class LockMutexOpenError(StateError):
+    """The lock mutex sidecar could not be opened, as opposed to contended."""
+
+
 @contextmanager
 def _plan_lock_mutex(
     lock_path: Path, *, wait_seconds: float | None = None
@@ -55,34 +59,38 @@ def _plan_lock_mutex(
     taken within ``wait_seconds`` so each caller picks its own degradation;
     ``None`` reads :data:`LOCK_MUTEX_WAIT_SECONDS` at call time, so a test can
     observe a contended claim without holding the real bound.
+
+    Raises :class:`LockMutexOpenError` when the sidecar cannot be opened at all
+    (``EACCES``, ``EROFS``, ``ENOSPC``, a missing state directory). That is not
+    contention, and reporting it as "another process is mutating this plan's
+    lock" would send the operator looking for a process that does not exist.
     """
     mutex_path = lock_path.parent / LOCK_MUTEX_FILE_NAME
     bound = LOCK_MUTEX_WAIT_SECONDS if wait_seconds is None else wait_seconds
-    fd: int | None = None
     held = False
     try:
         fd = os.open(mutex_path, os.O_RDWR | os.O_CREAT, 0o644)
-    except OSError:
-        fd = None
-    if fd is not None:
-        deadline = time.monotonic() + max(bound, 0.0)
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                held = True
+    except OSError as error:
+        raise LockMutexOpenError(
+            f"could not open the lock mutex at {mutex_path}: {error}"
+        ) from error
+    deadline = time.monotonic() + max(bound, 0.0)
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held = True
+            break
+        except OSError:
+            if time.monotonic() >= deadline:
                 break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(LOCK_MUTEX_POLL_SECONDS)
+            time.sleep(LOCK_MUTEX_POLL_SECONDS)
     try:
         yield held
     finally:
-        if fd is not None:
-            if held:
-                with suppress(OSError):
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+        if held:
+            with suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _lock_mutex_unavailable(lock_path: Path) -> str:
@@ -109,16 +117,19 @@ def _reclaim_dead_local_lock(lock_path: Path, expected_raw: dict[str, Any]) -> N
     out or removing it unserialized.
     """
     reclaimed = False
-    with _plan_lock_mutex(lock_path) as held:
-        if held and _read_json_object_safe(lock_path) == expected_raw:
-            pid = _coerce_pid(expected_raw.get("pid"))
-            if pid is not None and not state.is_pid_running(pid):
-                try:
-                    lock_path.unlink()
-                except OSError:
-                    pass
-                else:
-                    reclaimed = True
+    try:
+        with _plan_lock_mutex(lock_path) as held:
+            if held and _read_json_object_safe(lock_path) == expected_raw:
+                pid = _coerce_pid(expected_raw.get("pid"))
+                if pid is not None and not state.is_pid_running(pid):
+                    try:
+                        lock_path.unlink()
+                    except OSError:
+                        pass
+                    else:
+                        reclaimed = True
+    except LockMutexOpenError:
+        return
     if reclaimed:
         print(
             f"agent-session-loop: reclaimed stale lock at {lock_path} "
@@ -135,7 +146,9 @@ def _read_lock_path(
 
     try:
         raw = json.loads(lock_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, ValueError) as error:
+        # ValueError covers both JSONDecodeError and the UnicodeDecodeError
+        # that bytes which are not UTF-8 raise before any JSON is parsed.
         return LockInfo(
             path=lock_path,
             pid=None,
@@ -351,21 +364,65 @@ def release_lock(plan_dir: str | Path, state_dir: str | Path | None = None) -> N
     runs in teardown, where raising would replace a finished run's result with
     an error, and the lock left behind names a pid on this host — the next read
     reclaims it once this process exits.
+
+    The same reasoning applies with the mutex held: after `asl unlock --force`
+    and a fresh `asl run`, the file at this path is the new runner's lock, and
+    deleting it would leave that run unguarded. Only a lock naming this
+    process is removed. A pid plus this host is a sufficient identity here
+    without the recorded ``process_start``: this process is alive, so no other
+    process on this host can be wearing its pid.
     """
     lock_path = lock_path_for_plan(plan_dir, state_dir)
-    with _plan_lock_mutex(lock_path) as held:
-        if not held:
+    try:
+        with _plan_lock_mutex(lock_path) as held:
+            if not held:
+                print(
+                    f"agent-session-loop: left the lock at {lock_path} in place — "
+                    f"{_lock_mutex_unavailable(lock_path)}. The next read reclaims "
+                    "it once this process exits.",
+                    file=sys.stderr,
+                )
+                return
+            if not lock_path.exists():
+                return
+            raw = _read_json_object_safe(lock_path)
+            if not _lock_names_this_process(raw):
+                owner = raw.get("pid") if raw is not None else None
+                print(
+                    f"agent-session-loop: left the lock at {lock_path} in place — "
+                    f"it belongs to pid {owner}, not this process "
+                    f"(pid {os.getpid()})",
+                    file=sys.stderr,
+                )
+                return
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                return
+    except LockMutexOpenError as error:
+        if lock_path.exists():
             print(
-                f"agent-session-loop: left the lock at {lock_path} in place — "
-                f"{_lock_mutex_unavailable(lock_path)}. The next read reclaims "
-                "it once this process exits.",
+                f"agent-session-loop: left the lock at {lock_path} in place — {error}",
                 file=sys.stderr,
             )
-            return
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            return
+
+
+def _lock_names_this_process(raw: dict[str, Any] | None) -> bool:
+    if raw is None or _coerce_pid(raw.get("pid")) != os.getpid():
+        return False
+    hostname = _nonempty_str(raw.get("hostname"))
+    return hostname is None or hostname == socket.gethostname()
+
+
+def _no_lock_result(lock_path: Path) -> UnlockResult:
+    return UnlockResult(
+        path=lock_path,
+        had_lock=False,
+        removed=False,
+        was_active=False,
+        was_stale=False,
+        message=f"no lock present at {lock_path}",
+    )
 
 
 def unlock_plan(
@@ -377,34 +434,34 @@ def unlock_plan(
     canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
     lock_path = lock_path_for_plan(canonical_plan_dir, state_dir)
 
-    with _plan_lock_mutex(lock_path) as held:
-        # `reclaim=False` under the mutex: the removal below is this call's own
-        # job and its report has to describe the lock it actually removed.
-        lock_info = _read_lock_path(lock_path, canonical_plan_dir, reclaim=False)
+    try:
+        with _plan_lock_mutex(lock_path) as held:
+            # `reclaim=False` under the mutex: the removal below is this call's
+            # own job and its report has to describe the lock it actually
+            # removed.
+            lock_info = _read_lock_path(lock_path, canonical_plan_dir, reclaim=False)
 
-        if lock_info is None:
-            # Nothing to serialize, and a plan that never ran has no state
-            # directory to hold the sidecar in the first place.
-            return UnlockResult(
-                path=lock_path,
-                had_lock=False,
-                removed=False,
-                was_active=False,
-                was_stale=False,
-                message=f"no lock present at {lock_path}",
-            )
+            if lock_info is None:
+                return _no_lock_result(lock_path)
 
-        if not held:
-            raise _lock_mutex_error(lock_path)
+            if not held:
+                raise _lock_mutex_error(lock_path)
 
-        if lock_info.active and not force:
-            raise StateError(
-                f"active lock held by pid {lock_info.pid} at {lock_path}; use --force "
-                f"to remove it"
-            )
+            if lock_info.active and not force:
+                raise StateError(
+                    f"active lock held by pid {lock_info.pid} at {lock_path}; use "
+                    f"--force to remove it"
+                )
 
-        with suppress(FileNotFoundError):
-            lock_path.unlink()
+            with suppress(FileNotFoundError):
+                lock_path.unlink()
+    except LockMutexOpenError:
+        # A plan that never ran has no state directory to hold the sidecar in
+        # the first place, and nothing to unlock. With a lock present, the
+        # operator needs the real reason the mutex is unusable.
+        if not lock_path.exists():
+            return _no_lock_result(lock_path)
+        raise
 
     state_label = "active" if lock_info.active else "stale"
     return UnlockResult(

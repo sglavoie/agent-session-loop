@@ -277,6 +277,77 @@ class ControlSignalTests(unittest.TestCase):
         self.assertEqual(LIVE_WAKEUP, self.notify())
         self.assertTrue(woken.wait(timeout=5.0))
 
+    def test_a_refused_second_run_leaves_the_live_runs_endpoints_serving(
+        self,
+    ) -> None:
+        # `asl run` opens its endpoints before it tries the lock, so a second
+        # starter has its own FIFOs by the time it is refused. With one shared
+        # name it replaced the owner's nodes, then unlinked them on exit, and
+        # the owner's lock went on naming paths nobody read.
+        plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
+        woken = threading.Event()
+        urgent = threading.Event()
+        with (
+            control_signal.open_wakeup_endpoint(plan_state, woken) as wakeup,
+            control_signal.open_redirect_endpoint(plan_state, urgent) as redirect,
+        ):
+            if wakeup is None or redirect is None:
+                self.skipTest("this filesystem cannot host a wakeup FIFO")
+            state_locks.acquire_lock(
+                self.plan_dir,
+                self.state_dir,
+                wakeup_endpoint=wakeup,
+                redirect_endpoint=redirect,
+            )
+            self.addCleanup(state_locks.release_lock, self.plan_dir, self.state_dir)
+
+            with (
+                control_signal.open_wakeup_endpoint(
+                    plan_state, threading.Event()
+                ) as rival_wakeup,
+                control_signal.open_redirect_endpoint(
+                    plan_state, threading.Event()
+                ) as rival_redirect,
+            ):
+                self.assertNotIn(rival_wakeup, (None, wakeup))
+                self.assertNotIn(rival_redirect, (None, redirect))
+                with self.assertRaises(state.StateError) as refused:
+                    state_locks.acquire_lock(
+                        self.plan_dir,
+                        self.state_dir,
+                        wakeup_endpoint=rival_wakeup,
+                        redirect_endpoint=rival_redirect,
+                    )
+                self.assertIn("plan is locked by pid", str(refused.exception))
+
+            self.assertEqual(LIVE_WAKEUP, control_signal._deliver_wakeup(wakeup))
+            self.assertTrue(woken.wait(timeout=5.0))
+            self.assertEqual(LIVE_WAKEUP, self.notify())
+            self.assertEqual(
+                LIVE_WAKEUP,
+                control_signal.notify_redirect(self.plan_dir, state_dir=self.state_dir),
+            )
+            self.assertTrue(urgent.wait(timeout=5.0))
+
+    def test_an_abandoned_endpoint_is_swept_and_a_live_one_kept(self) -> None:
+        plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        # What a run killed hard leaves behind: a published name, no reader.
+        abandoned = plan_state / "control-wakeup.1-deadbeef.fifo"
+        os.mkfifo(abandoned, 0o600)
+        live_event = threading.Event()
+        with control_signal.open_wakeup_endpoint(plan_state, live_event) as live:
+            if live is None:
+                self.skipTest("this filesystem cannot host a wakeup FIFO")
+            self.assertFalse(abandoned.exists())
+            with control_signal.open_wakeup_endpoint(
+                plan_state, threading.Event()
+            ) as other:
+                self.assertIsNotNone(other)
+                self.assertTrue(live.exists())
+            self.assertEqual(LIVE_WAKEUP, control_signal._deliver_wakeup(live))
+            self.assertTrue(live_event.wait(timeout=5.0))
+
     ENDPOINT_CHILD_SCRIPT = """
 import os
 import pathlib

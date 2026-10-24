@@ -191,7 +191,9 @@ def _runner_state_payload(
             "waiting_for_reply_status": None,
             "abandoned": None,
         }
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, ValueError) as error:
+        # ValueError rather than JSONDecodeError: bytes that are not UTF-8
+        # raise UnicodeDecodeError before any JSON is parsed.
         return {
             "present": True,
             "path": str(state_path),

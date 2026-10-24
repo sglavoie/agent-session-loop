@@ -22,6 +22,11 @@ delivery means rather than how delivery works:
   checkpoint, and a checkpoint is exactly what an urgent correction cannot wait
   for.
 
+Each run serves its own uniquely named FIFO for each endpoint
+(``control-wakeup.<pid>-<token>.fifo`` and the redirect equivalent) and records
+the name in its lock. The endpoints open before the lock is taken, so a shared
+name would let a starter that is about to be refused replace a live run's FIFO.
+
 Both are served identically. A wakeup is a byte written to a FIFO the runner
 creates and reads, and that
 choice is what makes misdelivery survivable, and it is the whole design:
@@ -59,6 +64,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
+import secrets
 import selectors
 import stat
 import threading
@@ -93,13 +99,30 @@ class NotifyResult:
 
 
 def endpoint_path_for_state_dir(state_dir: str | Path) -> Path:
-    """Path of the wakeup FIFO for a run whose state lives in ``state_dir``."""
+    """Base path of the wakeup FIFOs for runs whose state lives in ``state_dir``.
+
+    Each run serves a uniquely named sibling of this path (see
+    :func:`_run_endpoint_path`); the lock records which one.
+    """
     return Path(state_dir) / ENDPOINT_FILENAME
 
 
 def redirect_endpoint_path_for_state_dir(state_dir: str | Path) -> Path:
-    """Path of the urgent redirect FIFO for a run's ``state_dir``."""
+    """Base path of the urgent redirect FIFOs for a run's ``state_dir``."""
     return Path(state_dir) / REDIRECT_ENDPOINT_FILENAME
+
+
+def _run_endpoint_path(base: Path) -> Path:
+    """A name for one run's endpoint that no other run can be serving.
+
+    The endpoint opens before the lock is acquired, so a starter that is about
+    to be refused has already made its FIFO. A shared name would let that
+    starter replace the live owner's node and then unlink it on the way out,
+    leaving the owner's lock naming a path nobody reads. Producers never derive
+    this name — they read it from the lock — so uniqueness costs nothing.
+    """
+    stem = base.name.removesuffix(".fifo")
+    return base.with_name(f"{stem}.{os.getpid()}-{secrets.token_hex(6)}.fifo")
 
 
 @contextlib.contextmanager
@@ -155,11 +178,13 @@ def open_redirect_endpoint(
 
 @contextlib.contextmanager
 def _serve_endpoint(
-    path: Path,
+    base: Path,
     event: threading.Event,
     thread_name: str,
 ) -> Iterator[Path | None]:
-    """Create, serve, and tear down one wakeup FIFO."""
+    """Create, serve, and tear down one wakeup FIFO named after ``base``."""
+    _sweep_abandoned_endpoints(base)
+    path = _run_endpoint_path(base)
     try:
         read_fd = _create_endpoint(path)
     except OSError:
@@ -203,21 +228,62 @@ def _serve_endpoint(
 def _create_endpoint(path: Path) -> int:
     """Make a fresh FIFO at ``path`` and return a non-blocking read descriptor.
 
-    Any existing node is removed first. It can only be a previous run's
-    leftover — this runner holds the plan mutex — and reusing one would adopt
-    whatever mode and readers it came with.
+    The FIFO is made under a dot-prefixed staging name and renamed into place
+    only once its read end is open, so every node bearing an endpoint name has
+    had a reader since it appeared. That is what lets
+    :func:`_sweep_abandoned_endpoints` treat a reader-less endpoint as proof
+    its owner is gone. Nothing existing is ever removed here: ``path`` is
+    unique to this run, and ``mkfifo`` refusing an existing node is the guard
+    against ever adopting another run's endpoint.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    _unlink_quietly(path)
-    os.mkfifo(path, 0o600)
+    staging = path.with_name(f".{path.name}.staging")
+    os.mkfifo(staging, 0o600)
     try:
         # O_NONBLOCK matters on the read side: opening a FIFO for reading
         # blocks until a writer arrives, and this runs before any producer
         # exists.
-        return os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        read_fd = os.open(staging, os.O_RDONLY | os.O_NONBLOCK)
     except OSError:
-        _unlink_quietly(path)
+        _unlink_quietly(staging)
         raise
+    try:
+        os.rename(staging, path)
+    except OSError:
+        os.close(read_fd)
+        _unlink_quietly(staging)
+        raise
+    return read_fd
+
+
+def _sweep_abandoned_endpoints(base: Path) -> None:
+    """Remove endpoints for ``base`` whose reader is gone.
+
+    A run killed hard leaves its uniquely named FIFO behind. An endpoint name
+    is only ever published with its read end open (see
+    :func:`_create_endpoint`), so ``ENXIO`` on a non-blocking write open means
+    the owner is gone for good and the node can be removed without touching a
+    live run's endpoint. The legacy shared name is swept on the same terms.
+    Best-effort: a leftover node costs nothing but a directory entry.
+    """
+    stem = base.name.removesuffix(".fifo")
+    try:
+        candidates = [
+            *base.parent.glob(f"{stem}.*.fifo"),
+            *([base] if base.exists() else []),
+        ]
+    except OSError:
+        return
+    for candidate in candidates:
+        try:
+            if not stat.S_ISFIFO(os.lstat(candidate).st_mode):
+                continue
+            probe = os.open(candidate, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError as error:
+            if error.errno == errno.ENXIO:
+                _unlink_quietly(candidate)
+            continue
+        os.close(probe)
 
 
 def _serve_wakeups(read_fd: int, stop_fd: int, event: threading.Event) -> None:

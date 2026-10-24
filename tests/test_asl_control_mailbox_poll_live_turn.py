@@ -5,11 +5,13 @@ Split from tests/test_asl_control.py."""
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stderr
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
@@ -340,6 +342,59 @@ class LiveTurnSchedulerTests(unittest.TestCase):
         self.assertEqual(5.0, poll_times[0])
         self.assertTrue(all(poll_observed_unlocked))
         self.assertEqual(2, progress.heartbeat.call_count)
+
+    def test_a_failing_tick_never_ends_the_heartbeat_loop(self) -> None:
+        # One OSError from a state write or a queue drain used to kill this
+        # daemon thread, and with it stop/pause handling and hang sampling for
+        # the rest of the turn.
+        clock = self.Clock()
+        progress = mock.Mock()
+        poll_times: list[float] = []
+
+        def poll() -> None:
+            poll_times.append(clock.now)
+            if len(poll_times) == 1:
+                raise OSError(28, "No space left on device")
+
+        live_turn = run_commit._LiveTurn(
+            payload={},
+            event_path=Path("/tmp/events.jsonl"),
+            progress=progress,
+            active_turn=self.active_turn(),
+            heartbeat_interval=30.0,
+            poll_callback=poll,
+            poll_interval=10.0,
+            monotonic=clock.monotonic,
+            wait=clock.wait,
+        )
+        heartbeat_times: list[float] = []
+
+        def record_heartbeat() -> dict[str, float]:
+            heartbeat_times.append(clock.now)
+            if len(heartbeat_times) == 1:
+                raise OSError(5, "Input/output error")
+            if len(heartbeat_times) == 3:
+                live_turn._stop.set()
+            return {"at": clock.now}
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                live_turn, "_record_heartbeat", side_effect=record_heartbeat
+            ),
+            redirect_stderr(stderr),
+        ):
+            live_turn._heartbeat_loop()
+
+        self.assertEqual([30.0, 60.0, 90.0], heartbeat_times)
+        self.assertEqual([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0], poll_times)
+        self.assertEqual(2, progress.heartbeat.call_count)
+        degraded = live_turn._active_turn["heartbeat_degraded"]
+        self.assertEqual(2, degraded["failures"])
+        self.assertEqual("heartbeat", degraded["last_step"])
+        self.assertIn("Input/output error", degraded["last_error"])
+        # Announced once, not once per failing tick.
+        self.assertEqual(1, stderr.getvalue().count("step failed"))
 
     def test_finish_waits_for_overlapping_poll_before_clearing_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

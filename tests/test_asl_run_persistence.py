@@ -401,6 +401,24 @@ class PausedWorkCommitProjectionTests(unittest.TestCase):
         self.assertEqual("verify-failed", projection["reason"])
 
 
+class UnreadableStateProjectionTests(unittest.TestCase):
+    """A ``state.json`` that cannot be decoded projects as an error, not a crash."""
+
+    def test_state_that_is_not_utf8_reports_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / events.STATE_FILE_NAME
+            # UnicodeDecodeError is raised before any JSON is parsed, so a
+            # handler for JSONDecodeError alone let it escape as a traceback.
+            state_path.write_bytes(b"\xff\xfe{")
+
+            projection = state_payloads._runner_state_payload(
+                state_path, lock_info=None
+            )
+
+        self.assertTrue(projection["present"])
+        self.assertIn("utf-8", projection["error"])
+
+
 class RunFinishedEventPayloadTests(unittest.TestCase):
     """The terminal event references the run rather than duplicating it."""
 

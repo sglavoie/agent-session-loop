@@ -405,6 +405,14 @@ There is no window in which the recorded address comes to mean a different
 process, because a PID is never the address. A producer therefore authenticates
 nothing: it reads the lock for the endpoint path and writes to it.
 
+Each run serves its own uniquely named FIFO
+(`control-wakeup.<pid>-<token>.fifo`) and never removes an existing node to
+make it. The endpoint opens before the lock is acquired, so with a shared name
+a second `asl run` that is about to be refused would replace the live run's
+FIFO and unlink it on the way out. A starter instead sweeps only the endpoints
+whose read end is gone — a write-only open fails with `ENXIO` — so a run that
+was killed hard does not leave its FIFO behind for good.
+
 Writing to a FIFO nobody reads cannot act on any process. The producer opens it
 `O_WRONLY | O_NONBLOCK`, which fails with `ENXIO` when there is no reader, so an
 endpoint left behind by a runner that died reports `endpoint-closed` and the
@@ -426,8 +434,8 @@ cannot host a FIFO, simply carries no `wakeup_endpoint`: that run reports
 `no-endpoint` to producers and applies control commands at its ordinary poll.
 
 A redirect — a correction aimed at the turn that is running *right now* — uses
-a second, dedicated endpoint rather than this one. `redirect-wakeup.fifo` is
-created beside `control-wakeup.fifo`, opened for reading before the same
+a second, dedicated endpoint rather than this one. A `redirect-wakeup.<pid>-<token>.fifo`
+is created beside the control FIFO on the same terms, opened for reading before the same
 `lock.json` is published, and recorded there as `redirect_endpoint`; the lock
 payload moved to `version: 4` to carry it, and like `wakeup_endpoint` the field
 is informational — no reader validates it. The separation is deliberate and it
