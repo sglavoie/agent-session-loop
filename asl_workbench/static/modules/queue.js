@@ -92,11 +92,22 @@ export function queueQuery(offset = 0) {
 }
 
 export async function refresh() {
-  if (state.fetchInFlight) return;
+  if (state.fetchInFlight) {
+    // A filter, a search, a sort or a route change asks a different question
+    // than the read already on the wire. Dropping it would leave the queue
+    // answering the old one until the next poll, so it is run once that read
+    // settles instead.
+    state.refreshPending = true;
+    return;
+  }
   state.fetchInFlight = true;
+  state.refreshPending = false;
   setRefreshStatus("loading", "refreshing…");
   try {
     const body = await apiRequest(queueQuery());
+    // Superseded while it was on the wire: the follow-up read draws instead,
+    // so the operator never sees the old filter's rows flash back.
+    if (state.refreshPending) return;
     if (!body || body.ok !== true) {
       const reason = body && body.reason ? body.reason : "unknown";
       setRefreshStatus("error", "error: " + reason);
@@ -112,10 +123,15 @@ export async function refresh() {
     // the work an operator is actually watching.
     refreshHistory();
   } catch (err) {
+    if (state.refreshPending) return;
     setRefreshStatus("error", "error: " + describeError(err));
     markQueueStale(describeError(err));
   } finally {
     state.fetchInFlight = false;
+    if (state.refreshPending) {
+      state.refreshPending = false;
+      refresh();
+    }
   }
 }
 

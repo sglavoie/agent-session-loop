@@ -563,6 +563,28 @@ for (const deployment of DEPLOYMENTS) {
         "detail",
       );
       expect(new URL(page.url()).hash).toBe(detailHash(alpha));
+      // The view that replaced the queue is announced by its heading, rather
+      // than leaving the keyboard on a link the phone layout just hid.
+      await expect
+        .poll(async () => page.evaluate(() => document.activeElement.id))
+        .toBe("wb-detail-label");
+    });
+
+    test("a row itself selects its plan from the keyboard", async ({ page }) => {
+      await openQueue(page, deployment);
+      const plans = await catalog(page);
+      const bravo = rowFor(plans, "bravo");
+      const row = page.locator(
+        `.wb-row[data-plan-dir="${addressOf(bravo).value}"]`,
+      );
+      await row.focus();
+      await page.keyboard.press("Enter");
+      await expect(row).toHaveAttribute("data-selected", "true");
+      // Selecting is not navigating: the queue stays the route.
+      await expect(page.locator("#wb-shell")).not.toHaveAttribute(
+        "data-route",
+        "detail",
+      );
     });
   });
 }

@@ -48,10 +48,12 @@ REQUEST_QUEUE_SIZE = 64
 #: stranger reads should not name the interpreter running behind it.
 SERVER_VERSION = "ASLWorkbench/1"
 
-#: Seconds a connection may sit silent mid-request or between keep-alive
-#: requests before its thread gives it up. Every request is one small frame
-#: from a browser or a connector on a short poll, so a peer that stops sending
-#: is gone rather than slow, and without a bound each one holds a thread.
+#: Seconds a connection may sit silent mid-request before its thread gives it
+#: up. The handler speaks HTTP/1.0, so every connection carries one request and
+#: closes; the bound is for a peer that opens a socket and then stops sending.
+#: Every request is one small frame from a browser or a connector on a short
+#: poll, so that peer is gone rather than slow, and without a bound each one
+#: holds a thread.
 REQUEST_TIMEOUT_SECONDS = 30.0
 
 
@@ -110,6 +112,12 @@ class ApplicationRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self._serve("GET")
 
+    def do_HEAD(self) -> None:
+        # HEAD is a safe method: the shell and its assets answer it as GET does,
+        # an API route answers 405, and `_write` drops the body either way.
+        # Without this entry point the stdlib answers 501 on its own.
+        self._serve("HEAD")
+
     def do_POST(self) -> None:
         self._serve("POST")
 
@@ -156,17 +164,18 @@ class ApplicationRequestHandler(http.server.BaseHTTPRequestHandler):
         request line back, so a malformed request line becomes a reflected
         copy of whatever was sent. Nothing this server answers with should be
         chosen by the client, so the body is the envelope and the text is
-        fixed.
+        fixed per status.
         """
         del message, explain
         self.close_connection = True
+        reason, error = _STDLIB_REFUSALS.get(code, _STDLIB_REFUSAL_DEFAULT)
         self._write(
             Response.json(
                 code,
                 error_payload(
                     COMMAND_NAME,
-                    reason="invalid-request",
-                    error="the request could not be understood",
+                    reason=reason,
+                    error=error,
                     paused=False,
                 ),
                 close=True,
@@ -207,6 +216,20 @@ class ApplicationRequestHandler(http.server.BaseHTTPRequestHandler):
         server = self.server
         assert isinstance(server, ApplicationServer)
         return server.application
+
+
+#: What each refusal the stdlib raises before the application sees a request
+#: says, keyed by status. The text is fixed so nothing the client sent is
+#: echoed back; anything unlisted reads as a malformed request.
+_STDLIB_REFUSAL_DEFAULT = ("invalid-request", "the request could not be understood")
+_STDLIB_REFUSALS: dict[int, tuple[str, str]] = {
+    400: _STDLIB_REFUSAL_DEFAULT,
+    408: ("request-timeout", "the request was not received in time"),
+    414: ("uri-too-long", "the request line is too long"),
+    431: ("headers-too-large", "the request headers are too large"),
+    501: ("not-implemented", "the request method is not supported"),
+    505: ("http-version-not-supported", "the HTTP version is not supported"),
+}
 
 
 def _declares_body(request: Request) -> bool:

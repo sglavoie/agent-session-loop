@@ -289,7 +289,7 @@
           &larr; queue
         </button>
         <div class="wb-detail__head-text">
-          <h1 class="wb-detail__label" id="wb-detail-label">(loading)</h1>
+          <h1 class="wb-detail__label" id="wb-detail-label" tabindex="-1">(loading)</h1>
           <p class="wb-detail__path" id="wb-detail-path"></p>
           <p class="wb-detail__path" id="wb-detail-workspace"></p>
           <p class="wb-detail__meta">
@@ -595,7 +595,13 @@
 
       <section class="wb-panel" id="wb-controls-panel">
         <h2 class="wb-panel__title">Controls</h2>
-        <div id="wb-controls-feedback" class="wb-controls__feedback" hidden></div>
+        <div
+          id="wb-controls-feedback"
+          class="wb-controls__feedback"
+          role="status"
+          aria-live="polite"
+          hidden
+        ></div>
         <div class="wb-controls" id="wb-controls">
           <button
             class="wb-button wb-button--primary"
@@ -1213,7 +1219,7 @@
     </template>
 
     <template id="wb-row-template">
-      <article class="wb-row" data-plan-dir="">
+      <article class="wb-row" data-plan-dir="" tabindex="0">
         <header class="wb-row__head">
           <label class="wb-row__cleanup" data-field="cleanup-select" hidden>
             <input type="checkbox" aria-label="select plan for cleanup" />

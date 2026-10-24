@@ -37,7 +37,7 @@ for entry in (str(REPO_ROOT), str(TESTS_ROOT)):
 # Playwright, not collected by the test runner, so neither the packages nor the
 # shared test helpers are importable until those two directories are on the
 # path.
-from workbench_support import start_shell_deployments  # noqa: E402
+from tests.workbench_support import start_shell_deployments  # noqa: E402
 
 MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "scenarios.json").read_text(encoding="utf-8")

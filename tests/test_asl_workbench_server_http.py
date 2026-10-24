@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import urllib.parse
 
+from agent_session_loop import workbench_server
 from tests.asl_workbench_server_support import (
     WorkbenchServerTestCase,
 )
@@ -167,3 +169,51 @@ class WorkbenchServerHTTPTests(WorkbenchServerTestCase):
         server = self._start_server()
         _, _, headers = _http_request(f"{self._base_url(server)}/api/health")
         self.assertEqual("no-store", headers.get("Cache-Control"))
+
+    def _raw_exchange(
+        self, server: workbench_server.WorkbenchHTTPServer, request_line: bytes
+    ) -> tuple[int, dict[str, str], bytes]:
+        """Send one request line verbatim, past what ``http.client`` validates."""
+        with socket.create_connection(
+            (server.bound_host, server.bound_port), timeout=10
+        ) as sock:
+            sock.sendall(request_line + b"\r\nHost: 127.0.0.1\r\n\r\n")
+            chunks: list[bytes] = []
+            while chunk := sock.recv(65536):
+                chunks.append(chunk)
+        head, _, body = b"".join(chunks).partition(b"\r\n\r\n")
+        lines = head.decode("iso-8859-1").split("\r\n")
+        headers: dict[str, str] = {}
+        for line in lines[1:]:
+            name, _, value = line.partition(":")
+            headers[name.strip().lower()] = value.strip()
+        return int(lines[0].split()[1]), headers, body
+
+    def test_head_on_the_shell_answers_like_get_without_a_body(self) -> None:
+        server = self._start_server()
+        status, headers, body = self._raw_exchange(server, b"HEAD / HTTP/1.0")
+        self.assertEqual(200, status)
+        self.assertEqual(b"", body)
+        self.assertIn("text/html", headers.get("content-type", ""))
+
+    def test_head_on_an_api_route_is_method_not_allowed_rather_than_501(
+        self,
+    ) -> None:
+        server = self._start_server()
+        status, _, body = self._raw_exchange(server, b"HEAD /api/health HTTP/1.0")
+        self.assertEqual(405, status)
+        self.assertEqual(b"", body)
+
+    def test_a_stdlib_refusal_names_its_own_status(self) -> None:
+        server = self._start_server()
+        status, _, body = self._raw_exchange(server, b"BREW / HTTP/1.0")
+        self.assertEqual(501, status)
+        payload = json.loads(body)
+        self.assertEqual("not-implemented", payload["reason"])
+        self.assertNotIn("BREW", payload["error"])
+
+    def test_a_nul_in_a_static_path_is_a_refusal_rather_than_a_crash(self) -> None:
+        server = self._start_server()
+        status, _, body = self._raw_exchange(server, b"GET /static/app\x00.js HTTP/1.0")
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-request", json.loads(body)["reason"])

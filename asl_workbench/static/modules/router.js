@@ -297,10 +297,42 @@ function replaceHash(hash) {
     window.location.hash = hash;
     return;
   }
-  applyRoute();
+  // The same destination, made addressable by a queue read rather than by the
+  // operator: nothing they did should move the keyboard.
+  quietRoute = true;
+  try {
+    applyRoute();
+  } finally {
+    quietRoute = false;
+  }
+}
+
+/* Whether a route has been applied yet, and whether the one being applied was
+ * the shell's own doing. Neither the first route of a page load nor a rewrite
+ * a poll caused is a navigation, so neither takes focus from wherever it is. */
+let routedOnce = false;
+let quietRoute = false;
+
+/**
+ * Give the keyboard to the plan heading after navigating to a plan.
+ *
+ * Without it focus stays on the queue link or button that was pressed, which
+ * on a phone is now hidden, and a screen reader announces nothing about the
+ * view that replaced it.
+ */
+function focusDetailHeading() {
+  const heading = document.getElementById("wb-detail-label");
+  if (!heading || typeof heading.focus !== "function") return;
+  try {
+    heading.focus({ preventScroll: true });
+  } catch (err) {
+    heading.focus();
+  }
 }
 
 export function applyRoute() {
+  const navigated = routedOnce && !quietRoute;
+  routedOnce = true;
   const next = parseHashRoute();
   // Before anything renders: a link's filters are part of what it addresses,
   // and the queue fetch below sends them to the server rather than applying
@@ -351,6 +383,12 @@ export function applyRoute() {
     const address = addressOfRoute(next);
     setSelectedPlan(address ? address.value : null);
     syncSelectedPlanView();
+    // A route that names a panel to focus (the reply box, the correction
+    // box) hands the keyboard there once the plan loads; only a plain open
+    // of the plan takes it to the heading.
+    if (navigated && addressChanged && !next.focus && !next.questionId) {
+      focusDetailHeading();
+    }
     // `refreshDetail` deliberately narrows a question-bound route to the
     // exact question read. No plan panels or queue data are allowed to redraw
     // this notification screen once its run key has resolved.

@@ -251,6 +251,83 @@ class ShellSourceTests(unittest.TestCase):
                         )
 
 
+def _relative_luminance(hex_color: str) -> float:
+    channels = [int(hex_color.lstrip("#")[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    linear = [
+        c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels
+    ]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(foreground: str, background: str) -> float:
+    lighter, darker = sorted(
+        (_relative_luminance(foreground), _relative_luminance(background)),
+        reverse=True,
+    )
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+class ShellAccessibilityTests(unittest.TestCase):
+    """What the stylesheet and markup promise a keyboard and a reader."""
+
+    def setUp(self) -> None:
+        self.css = (STATIC_ROOT / "styles.css").read_text(encoding="utf-8")
+        self.index = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+
+    def light_tokens(self) -> dict[str, str]:
+        block = re.search(
+            r"@media \(prefers-color-scheme: light\) \{\s*:root \{(.*?)\}",
+            self.css,
+            re.DOTALL,
+        )
+        assert block is not None
+        return dict(re.findall(r"(--wb-[\w-]+):\s*(#[0-9a-fA-F]{6})\s*;", block[1]))
+
+    def test_theme_tokens_are_declared_once(self) -> None:
+        # Two declarations meant the first was dead weight that read as truth.
+        self.assertEqual(1, len(re.findall(r"^:root \{", self.css, re.MULTILINE)))
+        self.assertEqual(1, self.css.count("@media (prefers-color-scheme: light)"))
+
+    def test_light_mode_text_tokens_meet_aa_on_the_page_background(self) -> None:
+        tokens = self.light_tokens()
+        for name in ("--wb-text", "--wb-text-dim", "--wb-text-faint", "--wb-warning"):
+            with self.subTest(token=name):
+                self.assertGreaterEqual(_contrast(tokens[name], tokens["--wb-bg"]), 4.5)
+
+    def test_no_rule_targets_the_retired_recovery_primary_card(self) -> None:
+        self.assertNotIn("wb-recovery__primary", self.css)
+
+    def test_the_controls_feedback_is_announced(self) -> None:
+        tag = re.search(r'<div\s+id="wb-controls-feedback"[^>]*>', self.index)
+        assert tag is not None
+        self.assertIn('role="status"', tag[0])
+        self.assertIn('aria-live="polite"', tag[0])
+
+    def test_a_queue_row_and_the_plan_heading_take_focus(self) -> None:
+        self.assertRegex(self.index, r'<article class="wb-row"[^>]*tabindex="0"')
+        self.assertRegex(self.index, r'id="wb-detail-label"[^>]*tabindex="-1"')
+        preview = (MODULES_ROOT / "preview.js").read_text(encoding="utf-8")
+        self.assertIn('row.addEventListener("keydown"', preview)
+
+
+class ShellRequestSourceTests(unittest.TestCase):
+    """Request behaviour that lives in the shell's own modules."""
+
+    def test_a_refresh_asked_for_mid_read_is_run_afterwards(self) -> None:
+        # Dropping it left the queue answering the previous filter's question.
+        source = (MODULES_ROOT / "queue.js").read_text(encoding="utf-8")
+        self.assertNotIn("if (state.fetchInFlight) return;", source)
+        self.assertIn("state.refreshPending = true", source)
+
+    def test_a_launch_names_its_operation_id_as_the_launch_id_too(self) -> None:
+        # The local launch and resume routes read `launch_id`; without it a
+        # retried launch was a second launch to the Mac.
+        source = (MODULES_ROOT / "operations.js").read_text(encoding="utf-8")
+        self.assertIn('const LAUNCH_ID_PATHS = ["/api/launch", "/api/reply"];', source)
+        self.assertIn("next.launch_id = operationId;", source)
+        self.assertIn("retryableReceipt(spec.action, planId)", source)
+
+
 class ShellDeploymentTestCase(unittest.TestCase):
     """Both deployments, over one corpus, started once for the class."""
 

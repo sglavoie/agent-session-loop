@@ -171,13 +171,14 @@ for (const deployment of DEPLOYMENTS) {
       const launch = page.locator("#wb-control-launch");
       // Disabled in both modes, for two different reasons -- which is the
       // whole point of separating them. The Pi does not spawn runs at all; the
-      // laptop does, but not while this plan's run is still in flight.
+      // laptop does, but not while this plan's run is paused on a reply that
+      // would resume it.
       await expect(launch).toBeDisabled();
       const reason = await launch.getAttribute("data-disabled-reason");
       expect(reason, "a disabled control must explain itself").toBeTruthy();
       if (byOperation.launch.available) {
         expect(reason).toBe(
-          "a run is already in flight for this plan; stop it before launching another",
+          "the run is paused waiting for a reply; answering it resumes the run",
         );
       } else {
         // Word for word what clicking it would have answered. Anything else
@@ -720,6 +721,33 @@ for (const deployment of DEPLOYMENTS) {
         ),
       ).toBeVisible();
       await expect(panel).toContainText("retrying reuses this id");
+    });
+
+    test("a retry of an unanswered submission resends the same id", async ({
+      page,
+    }) => {
+      // The feedback promises that retrying reuses the id. Each click builds a
+      // fresh body, so the promise only holds if the outstanding receipt lends
+      // its id to the second attempt.
+      await openDetail(page, deployment, "charlie");
+      const sent = [];
+      await page.route("**/api/unlock", (route) => {
+        sent.push(route.request().postDataJSON());
+        return route.abort();
+      });
+      page.on("dialog", (dialog) => dialog.accept());
+      const unlock = page.locator("#wb-control-unlock");
+      await unlock.click();
+      await expect.poll(() => sent.length).toBe(1);
+      const receipt = await receiptFor(page, "unlock");
+      await expect(page.locator("#wb-controls-feedback")).toContainText(
+        "retrying reuses operation id " + receipt.operation_id,
+      );
+      await expect(unlock).toBeEnabled();
+      await unlock.click();
+      await expect.poll(() => sent.length).toBe(2);
+      expect(sent[0].operation_id).toBe(receipt.operation_id);
+      expect(sent[1].operation_id).toBe(receipt.operation_id);
     });
 
     test("an open operation is dismissible without being claimed as done", async ({

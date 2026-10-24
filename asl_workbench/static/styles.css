@@ -1,15 +1,15 @@
 :root {
   color-scheme: dark light;
-  --wb-bg: #0e1014;
-  --wb-bg-elev: #161a22;
-  --wb-bg-row: #1b2030;
-  --wb-bg-row-alt: #181d2b;
-  --wb-border: #2a3043;
-  --wb-text: #d6dae3;
-  --wb-text-dim: #8c93a3;
-  --wb-text-faint: #5e6477;
-  --wb-accent: #6c9ef7;
-  --wb-accent-soft: rgba(108, 158, 247, 0.18);
+  --wb-bg: #0b1220;
+  --wb-bg-elev: #121d2d;
+  --wb-bg-row: #172438;
+  --wb-bg-row-alt: #172438;
+  --wb-border: #2b3b51;
+  --wb-text: #edf3fa;
+  --wb-text-dim: #aebed0;
+  --wb-text-faint: #8195ad;
+  --wb-accent: #70c8ee;
+  --wb-accent-soft: rgba(112, 200, 238, 0.14);
   --wb-warning: #f7b86c;
   --wb-warning-soft: rgba(247, 184, 108, 0.16);
   --wb-danger: #f06c6c;
@@ -22,18 +22,18 @@
 
 @media (prefers-color-scheme: light) {
   :root {
-    --wb-bg: #f4f5f8;
-    --wb-bg-elev: #ffffff;
-    --wb-bg-row: #ffffff;
-    --wb-bg-row-alt: #f0f2f6;
-    --wb-border: #d6dae3;
-    --wb-text: #1c2230;
-    --wb-text-dim: #5b6273;
-    --wb-text-faint: #8c93a3;
-    --wb-accent: #2864d1;
-    --wb-accent-soft: rgba(40, 100, 209, 0.12);
-    --wb-warning: #b86b1c;
-    --wb-warning-soft: rgba(184, 107, 28, 0.14);
+    --wb-bg: #f1f5f9;
+    --wb-bg-elev: #fff;
+    --wb-bg-row: #fff;
+    --wb-bg-row-alt: #fff;
+    --wb-border: #cfdae5;
+    --wb-text: #172638;
+    --wb-text-dim: #4d6073;
+    --wb-text-faint: #56697d;
+    --wb-accent: #126a95;
+    --wb-accent-soft: rgba(18, 106, 149, 0.1);
+    --wb-warning: #8f5312;
+    --wb-warning-soft: rgba(143, 83, 18, 0.14);
     --wb-danger: #c4382f;
     --wb-danger-soft: rgba(196, 56, 47, 0.14);
     --wb-success: #1e7a4d;
@@ -954,8 +954,7 @@ a.wb-button {
   gap: 6px;
 }
 
-.wb-recovery__action-card,
-.wb-recovery__primary {
+.wb-recovery__action-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
@@ -981,16 +980,14 @@ a.wb-button {
   display: none;
 }
 
-.wb-recovery__action-title,
-.wb-recovery__primary-title {
+.wb-recovery__action-title {
   margin: 0;
   font-size: 12px;
   font-weight: 600;
   color: var(--wb-text);
 }
 
-.wb-recovery__action-description,
-.wb-recovery__primary-description {
+.wb-recovery__action-description {
   margin: 2px 0 0;
   font-size: 12px;
   color: var(--wb-text-dim);
@@ -1111,8 +1108,7 @@ a.wb-button {
 }
 
 @media (max-width: 720px) {
-  .wb-recovery__action-card,
-  .wb-recovery__primary {
+  .wb-recovery__action-card {
     grid-template-columns: 1fr;
   }
 
@@ -2548,34 +2544,6 @@ a.wb-button {
 }
 
 /* Workbench surface: clear hierarchy for queue review and archive work. */
-:root {
-  --wb-bg: #0b1220;
-  --wb-bg-elev: #121d2d;
-  --wb-bg-row: #172438;
-  --wb-bg-row-alt: #172438;
-  --wb-border: #2b3b51;
-  --wb-text: #edf3fa;
-  --wb-text-dim: #aebed0;
-  --wb-text-faint: #8195ad;
-  --wb-accent: #70c8ee;
-  --wb-accent-soft: rgba(112, 200, 238, 0.14);
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    --wb-bg: #f1f5f9;
-    --wb-bg-elev: #fff;
-    --wb-bg-row: #fff;
-    --wb-bg-row-alt: #fff;
-    --wb-border: #cfdae5;
-    --wb-text: #172638;
-    --wb-text-dim: #4d6073;
-    --wb-text-faint: #687d92;
-    --wb-accent: #126a95;
-    --wb-accent-soft: rgba(18, 106, 149, 0.1);
-  }
-}
-
 html, body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 14px;

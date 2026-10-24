@@ -33,6 +33,7 @@ import {
   apiRequest,
   describeAnswer,
   describeError,
+  mintOperationId,
   submit,
 } from "./api.js";
 import {
@@ -469,6 +470,63 @@ export function receiptIsOpen(receipt) {
   );
 }
 
+/**
+ * Whether a retry of this receipt's action would resend its id.
+ *
+ * An unanswered submission always is: nobody knows whether it arrived, and a
+ * fresh id would make a second request out of what may be the first one. A
+ * recorded one is only while the service still reports it outstanding. This
+ * tab never learns when a recorded control was carried out, so reusing its id
+ * after that would turn the next deliberate stop into a replay of the old one.
+ */
+export function receiptIsRetryable(receipt) {
+  if (!receiptIsOpen(receipt)) return false;
+  if (receipt.outcome === OUTCOME_UNREACHABLE) return true;
+  const outstanding = state.detailOutstanding;
+  return !!(
+    outstanding &&
+    typeof outstanding === "object" &&
+    outstanding.operation_id === receipt.operation_id
+  );
+}
+
+/** The newest receipt a retry of one action on one plan must reuse. */
+export function retryableReceipt(name, planId) {
+  const plan = String(planId || "");
+  const entries = readReceipts().reverse();
+  return (
+    entries.find(
+      (entry) =>
+        entry.action === name && entry.plan === plan && receiptIsRetryable(entry)
+    ) || null
+  );
+}
+
+/* What each id this page submitted asked for, so a click that changed the
+ * request -- another harness, another archive selection -- is not mistaken for
+ * a retry of the last one. Memory only, like every other draft: after a reload
+ * nothing is known about the body, and the receipt's id is reused as promised. */
+const submittedBodies = new Map();
+
+function bodyFingerprint(body) {
+  const copy = Object.assign({}, body);
+  delete copy.operation_id;
+  delete copy.launch_id;
+  try {
+    return JSON.stringify(copy);
+  } catch (err) {
+    return null;
+  }
+}
+
+function rememberSubmittedBody(operationId, fingerprint) {
+  submittedBodies.delete(operationId);
+  submittedBodies.set(operationId, fingerprint);
+  while (submittedBodies.size > OPERATION_RECEIPT_LIMIT) {
+    submittedBodies.delete(submittedBodies.keys().next().value);
+  }
+}
+
 /** The sentence one receipt earns, in the words its outcome allows. */
 export function describeReceipt(receipt) {
   if (!receipt) return "";
@@ -481,7 +539,8 @@ export function describeReceipt(receipt) {
   if (receipt.outcome === OUTCOME_PENDING) {
     return (
       what +
-      " was recorded and has not been confirmed as run; retrying reuses this id"
+      " was recorded and has not been confirmed as run" +
+      (receiptIsRetryable(receipt) ? "; retrying reuses this id" : "")
     );
   }
   if (receipt.outcome === OUTCOME_REFUSED) {
@@ -588,6 +647,41 @@ function serverReceiptRow(operation) {
 // The one mutation path
 // ---------------------------------------------------------------------------
 
+/* The routes whose local handler reads its idempotency key as `launch_id`, the
+ * name `/api/launch` and `/api/reply` documented before every mutation carried
+ * an `operation_id`. Both names carry the same id, so a resend is recognised
+ * as one by whichever provider answers. */
+const LAUNCH_ID_PATHS = ["/api/launch", "/api/reply"];
+
+/**
+ * The body a submission sends, with the identity a retry has to share.
+ *
+ * Callers build a fresh body on every click, so without this every retry the
+ * feedback promised would reuse an id was a new id and, to the far side, a
+ * second request. An id the caller chose itself (the reply composer keeps its
+ * own) wins; otherwise the outstanding receipt for this action on this plan
+ * lends its id to the same request, and only when there is none is a new one
+ * minted.
+ */
+function bodyWithIdentity(spec, planId) {
+  const body = spec.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  const fingerprint = bodyFingerprint(body);
+  let operationId = body.operation_id || (spec.options && spec.options.operationId);
+  if (!operationId) {
+    const receipt = retryableReceipt(spec.action, planId);
+    const known = receipt ? submittedBodies.get(receipt.operation_id) : undefined;
+    const sameRequest = known === undefined || known === fingerprint;
+    operationId = receipt && sameRequest ? receipt.operation_id : mintOperationId();
+  }
+  rememberSubmittedBody(operationId, fingerprint);
+  const next = Object.assign({}, body, { operation_id: operationId });
+  if (LAUNCH_ID_PATHS.indexOf(spec.path) !== -1 && !next.launch_id) {
+    next.launch_id = operationId;
+  }
+  return next;
+}
+
 /** Which feedback tone an answer earns. Pending is its own, deliberately. */
 export function answerKind(answer) {
   if (!answer) return "error";
@@ -621,9 +715,10 @@ export async function runMutation(spec) {
   }
   const restoreFocus = captureFocus();
   applyActionAvailability();
+  const planId = spec.planId || routePlanId() || "";
   let answer = null;
   try {
-    answer = await submit(spec.path, spec.body, spec.options);
+    answer = await submit(spec.path, bodyWithIdentity(spec, planId), spec.options);
   } catch (err) {
     // `submit` classifies rather than throws, so reaching here means something
     // below it broke. Reported as no-answer, which is what it is.
@@ -646,7 +741,7 @@ export async function runMutation(spec) {
     rememberReceipt({
       operation_id: identity,
       action: name,
-      plan: spec.planId || routePlanId(),
+      plan: planId,
       outcome: answer.outcome,
       status: answer.operation.status,
       reason: answer.reason,

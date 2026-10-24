@@ -103,7 +103,9 @@ class StaticBundle:
         root = self.root.resolve()
         try:
             candidate = (root / relative).resolve()
-        except OSError as error:
+        except (OSError, ValueError) as error:
+            # ValueError is what a NUL byte in the path raises; it is the
+            # client's malformed path, not this server's failure.
             raise auth.invalid_request(
                 f"invalid static path: {error}", path=relative
             ) from error

@@ -71,6 +71,8 @@ export const state = {
   rowsByPlan: new Map(),
   refreshTimer: null,
   fetchInFlight: false,
+  // A queue refresh asked for while one was in flight, run when it settles.
+  refreshPending: false,
   lastQueueMeta: null,
   // Both historic link formats land here: `planDir` is the Mac's address,
   // `planKey` the Pi's, and `runKey` is an unresolved Companion notification

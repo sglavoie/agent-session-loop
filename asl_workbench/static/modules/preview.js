@@ -536,6 +536,15 @@ export function buildRow(planDir) {
     if (target.closest('[data-field="cleanup-select"]')) return;
     selectPlanFromRow(planDir);
   });
+  row.addEventListener("keydown", (event) => {
+    // The keyboard twin of the click above, for the row itself only: the
+    // label link, the action button and the checkbox inside it already answer
+    // Enter and Space as themselves.
+    if (event.target !== row) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    selectPlanFromRow(planDir);
+  });
   const cleanupBox = row.querySelector(
     '[data-field="cleanup-select"] input'
   );
