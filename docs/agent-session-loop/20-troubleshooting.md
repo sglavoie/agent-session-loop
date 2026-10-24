@@ -79,7 +79,7 @@ confuse this publication lock with the separately managed runner lock.
 ### Long verification after `session N/N finished`
 
 The runner emits `session N/N finished` as soon as a harness turn writes a
-`- **Status**: complete` handoff and the per-turn turn artifacts are flushed.
+`- **Status**: complete` handoff and the per-turn artifacts are flushed.
 The independent post-turn verification gate then runs the session's
 `## Completion Contract` `### Verify` recipe, which can take longer than the
 harness turn itself (full unit suites, integration commands, large

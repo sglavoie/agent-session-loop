@@ -44,7 +44,9 @@ def _check_asl_path(
 ) -> tuple[str | None, dict[str, Any]]:
     active_asl = shutil.which("asl", path=path_env)
     if active_asl is None:
-        return None, failure("asl-path", "asl was not found on PATH")
+        return None, failure(
+            "asl-path", "asl was not found on PATH (is ~/.local/bin on PATH?)"
+        )
 
     active_path = Path(active_asl)
     resolved = active_path.resolve()

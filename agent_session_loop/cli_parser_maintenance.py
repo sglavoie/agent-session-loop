@@ -26,10 +26,13 @@ def _add_storage_commands(
         ),
     )
     compact_state_parser.add_argument(
-        "plan_dir", help="Split plan directory whose state to compact"
+        "plan_dir",
+        metavar="PLAN_DIR",
+        help="Split plan directory whose state to compact",
     )
     compact_state_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     compact_state_parser.add_argument(
@@ -55,11 +58,13 @@ def _add_storage_commands(
     )
     gc_parser.add_argument(
         "plan_dir",
+        metavar="PLAN_DIR",
         nargs="?",
         help="Split plan directory to sweep (default: every plan in the state root)",
     )
     gc_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     gc_parser.add_argument(
@@ -129,6 +134,7 @@ def _add_maintenance_commands(
     )
     maintenance_install_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     maintenance_install_parser.add_argument(
@@ -184,6 +190,7 @@ def _add_maintenance_commands(
     )
     maintenance_run_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     maintenance_run_mode = maintenance_run_parser.add_mutually_exclusive_group()
@@ -244,6 +251,7 @@ def _add_maintenance_commands(
     )
     maintenance_status_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     maintenance_status_parser.add_argument(
@@ -276,6 +284,7 @@ def _add_maintenance_commands(
     )
     maintenance_uninstall_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     maintenance_uninstall_parser.add_argument(
@@ -305,7 +314,9 @@ def _add_state_commands(
         ),
     )
     migrate_state_parser.add_argument(
-        "plan_dir", help="Current (new) plan directory whose state to restore"
+        "plan_dir",
+        metavar="PLAN_DIR",
+        help="Current (new) plan directory whose state to restore",
     )
     migrate_state_parser.add_argument(
         "--from",
@@ -317,6 +328,7 @@ def _add_state_commands(
     )
     migrate_state_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     migrate_state_parser.add_argument(
@@ -370,6 +382,7 @@ def _add_state_commands(
     )
     metrics_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     metrics_parser.add_argument(

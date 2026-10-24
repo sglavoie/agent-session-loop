@@ -37,7 +37,7 @@ than as a walk through one happy path:
   that are the only thing that can select it;
 * the module owns no loop statement, because the loop is not its to break;
 * the redirected branch is dispatched from the same table, and is argued in
-  ``tests/test_asl_redirect_continuation.py`` alongside the gate whose
+  the ``tests/test_asl_redirect_continuation_*.py`` modules alongside the gate whose
   acceptance is the only thing that can select it;
 * the runner's own body reaches these entry points and no longer performs any
   of the branch work itself."""

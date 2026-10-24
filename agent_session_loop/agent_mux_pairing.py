@@ -446,9 +446,11 @@ def pairing_from_args(args: argparse.Namespace) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Report the AgentMux pairing survey for one ASL state root.",
+        description="Report the Agent Mux pairing survey for one ASL state root.",
     )
-    parser.add_argument("--state-dir", help="Override operational state directory")
+    parser.add_argument(
+        "--state-dir", metavar="DIR", help="Override operational state directory"
+    )
     parser.add_argument(
         "--migrate",
         action="store_true",

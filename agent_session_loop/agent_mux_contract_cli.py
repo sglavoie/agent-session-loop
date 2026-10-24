@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m agent_session_loop.agent_mux_contract",
         description=(
-            "Check the ASL-owned AgentMux compatibility corpus, or regenerate "
+            "Check the ASL-owned Agent Mux compatibility corpus, or regenerate "
             "its derived manifest from the schema and fixture bytes."
         ),
     )

@@ -210,8 +210,33 @@ class WrapperInterpreterTests(unittest.TestCase):
 
     def test_entry_points_parse_under_an_old_interpreter(self) -> None:
         # The guard can only report the version if the file reaches it.
-        for path in (self.WRAPPER, REPO_ROOT / "agent_session_loop/__main__.py"):
+        for path in (
+            self.WRAPPER,
+            REPO_ROOT / "install.py",
+            REPO_ROOT / "agent_session_loop/__init__.py",
+            REPO_ROOT / "agent_session_loop/__main__.py",
+        ):
             ast.parse(path.read_text(encoding="utf-8"), feature_version=(3, 9))
+
+    def test_package_import_on_old_interpreter_gets_a_readable_error(self) -> None:
+        # ``install.py`` and the ``python -m agent_session_loop.<module>``
+        # recipes reach the package without the wrapper, so the initializer
+        # must refuse on its own.
+        script = (
+            "import runpy, sys\n"
+            "sys.version_info = (3, 12, 0, 'final', 0)\n"
+            f"runpy.run_path({str(REPO_ROOT / 'agent_session_loop/__init__.py')!r})\n"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("asl requires Python 3.14+; found 3.12 at", result.stderr)
 
     def test_old_interpreter_gets_a_readable_error(self) -> None:
         script = (

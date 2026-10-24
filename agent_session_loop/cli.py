@@ -10,7 +10,7 @@ import importlib
 import sys
 from collections.abc import Callable, Sequence
 
-from . import cli_trace
+from . import __version__, cli_trace
 from .cli_defaults import _INTERRUPTED_EXIT, program_name
 from .cli_parser_assurance import _add_assurance_commands
 from .cli_parser_control import _add_control_commands
@@ -48,6 +48,9 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     parser = _AgentSessionLoopArgumentParser(
         prog=prog,
         description="Run split agent session plans one session at a time.",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

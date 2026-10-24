@@ -98,7 +98,7 @@ EVIDENCE_DIGEST_PREFIX = "asl-overseer-evidence-v1"
 #: AgentMux's classification of a whole conversation, restated here for the same
 #: reason the prompt markers are: this module's import surface is four ASL
 #: modules and the vocabulary is published by another repository. The spellings
-#: are ``transcript.SessionClass`` in ``sglavoie_agentmux``, and
+#: are ``transcript.SessionClass`` in the Agent Mux repository, and
 #: ``amx overseer history`` normalizes anything it cannot classify to
 #: ``unknown`` before answering -- so an empty or unrecognized value reaching
 #: here is an older or unexpected answer, and is treated as unattributable.

@@ -20,7 +20,7 @@ STATIC_URL_PREFIX = "/static/"
 
 
 #: The one copy of the front end. Both deployments serve *this* directory --
-#: the loopback server on a laptop and the Pi over Tailscale -- because a
+#: the loopback server on a laptop and the remote host over a tailnet -- because a
 #: second copy is a second thing to keep in step, and the only way to be sure
 #: the two modes run the same shell is for there to be nothing to keep in
 #: step. The entry is a native ES module; `modules/` holds the rest.

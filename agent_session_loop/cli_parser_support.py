@@ -198,6 +198,7 @@ def _add_plan_reference_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     parser.add_argument(

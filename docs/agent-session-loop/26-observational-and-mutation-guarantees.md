@@ -248,8 +248,8 @@ missing from its shard lists. Individual modules run directly, for example
 runs `PORTABLE_MODULES`, the subset of `FAST_MODULES` that spawns no external
 process at all — no `git`, no shell script, no launchd domain, no harness
 executable, no Kitty. Membership is that mechanical rule rather than a judgement
-call, and the list is hand-curated, so `tests/test_asl_docs_*.py` pins it as a
-strict subset of `FAST_MODULES`: a module renamed or dropped from the fast lane
+call, and a module opts in by hand with `ASL_TEST_PORTABLE = True`, so
+`tests/run_suite.py` derives it as a strict subset of `FAST_MODULES`: a module renamed or dropped from the fast lane
 cannot keep the portable lane green by running a name `unittest` would refuse to
 import. This is the lane the Linux CI job gates on. Everything that needs the
 real tools — the Git-backed repository evidence, the shell helpers, the launchd
@@ -302,7 +302,8 @@ that reached for a naive local clock reads differently under each. The third lis
 is the crash, race, and cancellation scenarios — the fault groups of
 `tests/test_asl_redirect_adversarial.py` alongside the escalation-timing, blocked
 transport, live termination, and serialization groups of
-`tests/test_asl_redirect_control.py` and `tests/test_asl_redirect_continuation.py`.
+`tests/test_asl_redirect_control.py` and the `tests/test_asl_redirect_continuation_*.py`
+modules.
 
 That third list is separate because contention is the only condition under which
 most of its claims can fail at all: a kill that has to land on a deadline, a latch
@@ -319,8 +320,8 @@ test, because each fault crosses several of them: slow storage, a blocked pipe, 
 completion race, concurrent feedback, a stale process identity, partial
 multi-repository work, a review repair, a stopped supervisor, missing history, and
 an expired submission. Three of its groups drive real child processes and are
-POSIX-only, which is why it is registered in `FAST_MODULES` and not in
-`PORTABLE_MODULES`. Two of its claims are worth naming here because each reads
+POSIX-only, which is why it runs in the fast lane but does not declare
+`ASL_TEST_PORTABLE`. Two of its claims are worth naming here because each reads
 like a defect until the ordering is spelled out. An acceptance whose journal
 append stalls past the escalation deadline must force-stop nothing and report its
 decision window skipped, then force-stop the worker once the append lands — the

@@ -61,10 +61,13 @@ def _add_run_inspection_commands(
         ),
     )
     questions_parser.add_argument(
-        "plan_dir", help="Split plan directory whose paused run to inspect"
+        "plan_dir",
+        metavar="PLAN_DIR",
+        help="Split plan directory whose paused run to inspect",
     )
     questions_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     questions_parser.add_argument(
@@ -83,10 +86,13 @@ def _add_run_inspection_commands(
         ),
     )
     review_verdict_parser.add_argument(
-        "plan_dir", help="Split plan directory whose review verdict to inspect"
+        "plan_dir",
+        metavar="PLAN_DIR",
+        help="Split plan directory whose review verdict to inspect",
     )
     review_verdict_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     review_verdict_parser.add_argument(
@@ -110,6 +116,7 @@ def _add_run_inspection_commands(
     )
     status_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     status_parser.add_argument(
@@ -123,9 +130,12 @@ def _add_run_inspection_commands(
         "tail",
         help="Show and follow live run events and harness logs by session ID.",
     )
-    tail_parser.add_argument("plan_dir", help="Split plan directory to tail")
+    tail_parser.add_argument(
+        "plan_dir", metavar="PLAN_DIR", help="Split plan directory to tail"
+    )
     tail_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     tail_parser.add_argument(
@@ -166,6 +176,7 @@ def _add_run_inspection_commands(
     )
     sessions_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     sessions_parser.add_argument(
@@ -229,7 +240,9 @@ def _add_check_commands(
         "verify",
         help="Execute a session's completion contract Verify recipe.",
     )
-    verify_parser.add_argument("plan_dir", help="Split plan directory to inspect")
+    verify_parser.add_argument(
+        "plan_dir", metavar="PLAN_DIR", help="Split plan directory to inspect"
+    )
     verify_parser.add_argument(
         "--session",
         required=True,
@@ -266,7 +279,7 @@ def _add_check_commands(
         ),
     )
     contract_check_parser.add_argument(
-        "plan_dir", help="Split plan directory to inspect"
+        "plan_dir", metavar="PLAN_DIR", help="Split plan directory to inspect"
     )
     contract_check_parser.add_argument(
         "--session",
@@ -288,13 +301,14 @@ def _add_check_commands(
         "--agent-mux",
         action="store_true",
         help=(
-            "Also report the ASL-owned AgentMux compatibility contract: "
+            "Also report the ASL-owned Agent Mux compatibility contract: "
             "component schema versions, digests, contract-set id, state root, "
             "and fixture validation"
         ),
     )
     contract_check_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory (reported by --agent-mux)",
     )
     contract_check_parser.add_argument(
@@ -347,7 +361,9 @@ def _add_check_commands(
         ),
     )
     baseline_parser.add_argument(
-        "plan_dir", help="Split plan directory whose baseline checks to run"
+        "plan_dir",
+        metavar="PLAN_DIR",
+        help="Split plan directory whose baseline checks to run",
     )
     baseline_parser.add_argument(
         "--cwd",

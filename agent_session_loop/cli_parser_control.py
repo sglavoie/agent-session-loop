@@ -267,7 +267,7 @@ def _add_control_commands(
         "--operation-id",
         dest="operation_id",
         default=None,
-        metavar="ID",
+        metavar="OPERATION_ID",
         help=(
             "Reuse an identifier from an earlier uncertain submission; the "
             "same id with the same text is the same request, never a second one"
@@ -306,11 +306,20 @@ def _add_control_commands(
         help="Record an explicit decision about an uncertain submission.",
     )
     _add_plan_reference_args(resolve_redirect_parser)
-    resolve_redirect_parser.add_argument("--operation-id", required=True)
     resolve_redirect_parser.add_argument(
-        "--outcome", choices=("submitted", "not-submitted"), required=True
+        "--operation-id",
+        required=True,
+        help="Operation ID of the uncertain correction to resolve",
     )
-    resolve_redirect_parser.add_argument("--reason", required=True)
+    resolve_redirect_parser.add_argument(
+        "--outcome",
+        choices=("submitted", "not-submitted"),
+        required=True,
+        help="Whether the correction reached the worker",
+    )
+    resolve_redirect_parser.add_argument(
+        "--reason", required=True, help="Operator reason recorded with the decision"
+    )
     resolve_redirect_parser.set_defaults(
         handler_ref="redirect_cli:control_resolve_redirect_from_args"
     )
@@ -325,7 +334,7 @@ def _add_control_commands(
         dest="redirect_id",
         action="append",
         default=None,
-        metavar="ID",
+        metavar="OPERATION_ID",
         help=(
             "Operation to report, repeatable "
             "(default: every operation the journal holds)"

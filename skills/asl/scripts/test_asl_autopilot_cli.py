@@ -141,11 +141,11 @@ class ParseCommandTest(unittest.TestCase):
     def test_env_assignments_are_captured_and_tilde_expanded(self) -> None:
         home = os.path.expanduser("~")
         result = autopilot.parse_command(
-            "CLAUDE_CONFIG_DIR=~/.claude-personal asl run /tmp/plan"
+            "CLAUDE_CONFIG_DIR=~/.claude-work asl run /tmp/plan"
         )
         self.assertTrue(result["ok"])
         self.assertEqual(
-            result["env"], {"CLAUDE_CONFIG_DIR": os.path.join(home, ".claude-personal")}
+            result["env"], {"CLAUDE_CONFIG_DIR": os.path.join(home, ".claude-work")}
         )
         # The executable and subcommand are found after the env assignment.
         self.assertEqual(result["executable"], "asl")
@@ -318,13 +318,13 @@ class ParseCommandTest(unittest.TestCase):
 
     def test_review_guard_exclude_round_trips_repeated_values(self) -> None:
         result = autopilot.parse_command(
-            "asl run /tmp/plan --review-guard-exclude claude/.claude-personal "
+            "asl run /tmp/plan --review-guard-exclude claude/.claude-work "
             "--review-guard-exclude notes"
         )
         self.assertTrue(result["ok"], result)
         args = result["run_args"]
         self.assertEqual(
-            ["claude/.claude-personal", "notes"],
+            ["claude/.claude-work", "notes"],
             [
                 args[index + 1]
                 for index, token in enumerate(args)

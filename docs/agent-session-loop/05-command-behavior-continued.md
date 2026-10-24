@@ -244,8 +244,9 @@ whose bytes moved, and a review turn can write both the attributes file and the
 config. Gitignored files are left out of the untracked evidence by default: the
 repository's ignore rules are the operator's existing declaration of what is not
 the code under review, and the paths they name churn on their own during a
-review turn — byte-compiled output, test and lint caches, and the harness's own
-stowed settings, which commit `bf421f9` gitignored for exactly that reason.
+review turn — byte-compiled output, test and lint caches, and settings files
+the harness rewrites mid-turn, which are commonly gitignored for exactly that
+reason.
 `--review-guard-include-ignored` below restores the strict scan for a repository
 whose ignored tree is expected to stay still. Deferring to those rules would
 otherwise let a turn write the rule that blinds the guard, so every untracked
@@ -321,7 +322,7 @@ is expected to stay still. It is off by default because the ignored tree here
 churns on its own every review turn — the full suite rewrites `__pycache__`
 trees and the test and lint tooling caches beside them, and the Claude harness
 rewrites its own
-stowed `settings.json` — so a strict default discards a 5–17 minute review turn
+`settings.json` — so a strict default discards a 5–17 minute review turn
 on evidence that names no code. The flag takes no value and is persisted in
 `run_config`, so `--resume` keeps it, and it is reported as `include_ignored` on
 every guard record, so a `review-mutated-worktree` pause says which mode

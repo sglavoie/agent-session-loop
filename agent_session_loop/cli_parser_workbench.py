@@ -118,6 +118,7 @@ def _add_workbench_commands(
     )
     workbench_pin_parser.add_argument(
         "plan_dir",
+        metavar="PLAN_DIR",
         help="Plan directory to pin (must exist on disk)",
     )
     workbench_pin_parser.add_argument(
@@ -143,6 +144,7 @@ def _add_workbench_commands(
     )
     workbench_unpin_parser.add_argument(
         "plan_dir",
+        metavar="PLAN_DIR",
         help="Plan directory to unpin",
     )
     workbench_unpin_parser.set_defaults(

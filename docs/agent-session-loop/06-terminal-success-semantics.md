@@ -298,12 +298,12 @@ step the ratchet fails without rather than a convention. A future extraction
 adds its module to the Boundary table in `pyproject.toml` and to
 `REQUIRED_RATCHETED_MODULES`; a module that is mypy-clean but not linter-clean
 goes to the Checked table and `REQUIRED_CHECKED_MODULES` instead. Those two
-registrations are the whole ratchet step: `FAST_MODULES` and
-`INTEGRATION_MODULES` in `tests/run_suite.py` are shard lists of *test*
-modules, not package modules, so a package module never belongs in either. If
-the extraction also brings a new `tests/test_*.py` module, that test module is
-what gets added to `FAST_MODULES`, or to `INTEGRATION_MODULES` when it spawns
-external processes or is otherwise too slow for the fast lane.
+registrations are the whole ratchet step: the test lanes in
+`tests/run_suite.py` are derived from *test* modules, not package modules, so a
+package module never belongs in one. A new `tests/test_*.py` module the
+extraction brings joins the fast lane by default, or declares
+`ASL_TEST_LANE = "integration"` when it spawns external processes or is
+otherwise too slow for it.
 
 Optional post-run assurance stays advisory and never blocks. A run whose audit
 landed `unavailable` or `partial` keeps the success it earned and carries an

@@ -263,6 +263,7 @@ def _add_plan_authoring_commands(
     )
     prepare_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         default=None,
         help="Override operational state directory",
     )
@@ -282,7 +283,9 @@ def _add_plan_authoring_commands(
         ),
     )
     expand_ingest_parser.add_argument(
-        "plan_dir", help="Split plan directory to ingest validator output into"
+        "plan_dir",
+        metavar="PLAN_DIR",
+        help="Split plan directory to ingest validator output into",
     )
     expand_ingest_parser.add_argument(
         "--batch-file",
@@ -308,6 +311,7 @@ def _add_plan_authoring_commands(
     )
     register_repositories_parser.add_argument(
         "plan_dir",
+        metavar="PLAN_DIR",
         nargs="?",
         default=None,
         help="Split plan directory to migrate in place",
@@ -352,6 +356,7 @@ def _add_plan_authoring_commands(
     )
     register_repositories_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         default=None,
         help="Override operational state directory",
     )
@@ -368,7 +373,9 @@ def _add_plan_authoring_commands(
         "preflight",
         help="Check that a split plan directory is loop-ready.",
     )
-    preflight_parser.add_argument("plan_dir", help="Split plan directory to inspect")
+    preflight_parser.add_argument(
+        "plan_dir", metavar="PLAN_DIR", help="Split plan directory to inspect"
+    )
     preflight_parser.add_argument(
         "--cwd",
         default=None,
@@ -401,6 +408,7 @@ def _add_plan_authoring_commands(
     )
     preflight_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         default=None,
         help="Override operational state directory",
     )

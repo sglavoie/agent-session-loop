@@ -131,14 +131,39 @@ def _add_workspace_recovery_commands(
         "acknowledge-external-changes",
         help="Preview or acknowledge independent changes and checkpoint retained work.",
     )
-    external_parser.add_argument("plan_dir")
-    external_parser.add_argument("--session", required=True)
-    external_parser.add_argument("--repository", action="append", required=True)
-    external_parser.add_argument("--state-dir")
-    external_parser.add_argument("--json", action="store_true")
-    external_parser.add_argument("--accept", metavar="DIGEST")
-    external_parser.add_argument("--reason")
-    external_parser.add_argument("--checkpoint-retained", action="store_true")
+    external_parser.add_argument(
+        "plan_dir", metavar="PLAN_DIR", help="Split plan directory"
+    )
+    external_parser.add_argument("--session", required=True, help="Pending session ID")
+    external_parser.add_argument(
+        "--repository",
+        action="append",
+        required=True,
+        metavar="ALIAS",
+        help="Repository alias whose independent changes to review, repeatable",
+    )
+    external_parser.add_argument(
+        "--state-dir", metavar="DIR", help="Override operational state directory"
+    )
+    external_parser.add_argument(
+        "--json", action="store_true", help="Print JSON (also the default)"
+    )
+    external_parser.add_argument(
+        "--accept",
+        metavar="DIGEST",
+        help="Accept the exact evidence digest returned by a reviewed preview",
+    )
+    external_parser.add_argument(
+        "--reason", help="Explicit operator reason for acknowledging these changes"
+    )
+    external_parser.add_argument(
+        "--checkpoint-retained",
+        action="store_true",
+        help=(
+            "Commit the retained work the preview names as checkpoints "
+            "(required when it lists any)"
+        ),
+    )
     external_parser.set_defaults(
         handler_ref="scope_recovery:acknowledge_external_changes_from_args"
     )
@@ -147,12 +172,14 @@ def _add_workspace_recovery_commands(
         "accept-ref-updates",
         help="Preview or explicitly accept a paused session's remote-ref-only changes.",
     )
-    accept_refs_parser.add_argument("plan_dir", help="Split plan directory")
+    accept_refs_parser.add_argument(
+        "plan_dir", metavar="PLAN_DIR", help="Split plan directory"
+    )
     accept_refs_parser.add_argument(
         "--session", required=True, help="Pending session ID"
     )
     accept_refs_parser.add_argument(
-        "--state-dir", help="Override operational state directory"
+        "--state-dir", metavar="DIR", help="Override operational state directory"
     )
     accept_refs_parser.add_argument(
         "--json", action="store_true", help="Print JSON (also the default)"
@@ -173,9 +200,12 @@ def _add_workspace_recovery_commands(
         "unlock",
         help="Remove an operational lock for a plan directory.",
     )
-    unlock_parser.add_argument("plan_dir", help="Split plan directory to unlock")
+    unlock_parser.add_argument(
+        "plan_dir", metavar="PLAN_DIR", help="Split plan directory to unlock"
+    )
     unlock_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     unlock_parser.add_argument(
@@ -199,11 +229,13 @@ def _add_progress_commands(
         "backfill-progress",
         help=(
             "Reconstruct progress.md from completed session handoffs "
-            "(timestamps approximated from session file mtimes)"
+            "(timestamps approximated from session file mtimes)."
         ),
     )
     backfill_parser.add_argument(
-        "plan_dir", help="Split plan directory whose progress journal to rebuild"
+        "plan_dir",
+        metavar="PLAN_DIR",
+        help="Split plan directory whose progress journal to rebuild",
     )
     backfill_parser.add_argument(
         "--force",
@@ -222,7 +254,9 @@ def _add_progress_commands(
         help="Print, JSON-dump, or follow the runner-managed progress journal.",
     )
     progress_parser.add_argument(
-        "plan_dir", help="Split plan directory whose progress journal to inspect"
+        "plan_dir",
+        metavar="PLAN_DIR",
+        help="Split plan directory whose progress journal to inspect",
     )
     progress_parser.add_argument(
         "--tail",
@@ -245,6 +279,7 @@ def _add_progress_commands(
     )
     plans_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     plans_parser.add_argument(

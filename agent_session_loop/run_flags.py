@@ -45,6 +45,7 @@ class RunFlag:
     cli_default: Any = None
     help: str = ""
     mutex_group: str | None = None
+    metavar: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
     RunFlag(
         dest="plan_dir",
         positional=True,
+        metavar="PLAN_DIR",
         help="Split plan directory to execute",
     ),
     RunFlag(
@@ -299,6 +301,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
     RunFlag(
         dest="state_dir",
         option_strings=("--state-dir",),
+        metavar="DIR",
         help="Override operational state directory",
     ),
     RunFlag(
@@ -439,7 +442,7 @@ def _add_flag(container: Any, flag: RunFlag, mode: str) -> None:
         # Positionals are always required; a default is meaningless and the
         # help is only rendered for the CLI parser (the supervisor parser is
         # built with add_help=False).
-        container.add_argument(flag.dest, help=flag.help or None)
+        container.add_argument(flag.dest, metavar=flag.metavar, help=flag.help or None)
         return
 
     kwargs: dict[str, Any] = {
@@ -454,6 +457,8 @@ def _add_flag(container: Any, flag: RunFlag, mode: str) -> None:
         kwargs["type"] = flag.type
     if flag.choices is not None:
         kwargs["choices"] = flag.choices
+    if flag.metavar is not None:
+        kwargs["metavar"] = flag.metavar
     if flag.help:
         kwargs["help"] = flag.help
     container.add_argument(*flag.option_strings, **kwargs)

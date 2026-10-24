@@ -28,7 +28,7 @@ def _add_overseer_commands(
             "Report the fleet as ASL's own discovery sees it: every plan under "
             "the state root, its run, its lifecycle, whether it is eligible and "
             "the reasons it is not. Discovery only -- no run's content is read, "
-            "so AgentMux is not consulted and a plan listed as eligible here may "
+            "so Agent Mux is not consulted and a plan listed as eligible here may "
             "still be refused the moment `asl overseer watch` asks about it. "
             "Exits nonzero when the view is partial, so a caller cannot read "
             "'nothing to do' out of 'could not look'."
@@ -55,6 +55,7 @@ def _add_overseer_commands(
     )
     overseer_scan_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     overseer_scan_parser.add_argument(
@@ -66,9 +67,9 @@ def _add_overseer_commands(
 
     overseer_watch_parser = overseer_sub.add_parser(
         "watch",
-        help="Enrol the runs AgentMux authorizes and hold a watch lease on each.",
+        help="Enroll the runs Agent Mux authorizes and hold a watch lease on each.",
         description=(
-            "Sweep the fleet, ask AgentMux about each plan in scope, and take a "
+            "Sweep the fleet, ask Agent Mux about each plan in scope, and take a "
             "lease on the ones it authorizes. One sweep by default; "
             "`--for-seconds` keeps sweeping until the deadline, which is how "
             "runs that start mid-invocation and pauses that become eligible "
@@ -135,10 +136,11 @@ def _add_overseer_commands(
         "--timeout",
         type=float,
         default=10.0,
-        help="Seconds to wait for each AgentMux authorization (default 10)",
+        help="Seconds to wait for each Agent Mux authorization (default 10)",
     )
     overseer_watch_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     overseer_watch_parser.add_argument(
@@ -152,7 +154,7 @@ def _add_overseer_commands(
         "inspect",
         help="Open an incident and capture a bounded packet of a run's context.",
         description=(
-            "Ask AgentMux for context access, then capture what the host needs "
+            "Ask Agent Mux for context access, then capture what the host needs "
             "to reason about one run: the pending questions, the run's own "
             "summary of itself, and what could not be read. The packet is a "
             "summary, not a transcript. `--expand` widens exactly one named "
@@ -164,7 +166,9 @@ def _add_overseer_commands(
             "action refusal instead of an action aimed at a state that is gone."
         ),
     )
-    overseer_inspect_parser.add_argument("plan_dir", help="Plan directory to inspect")
+    overseer_inspect_parser.add_argument(
+        "plan_dir", metavar="PLAN_DIR", help="Plan directory to inspect"
+    )
     overseer_inspect_parser.add_argument(
         "--kind",
         default="question_pending",
@@ -205,10 +209,11 @@ def _add_overseer_commands(
         "--timeout",
         type=float,
         default=10.0,
-        help="Seconds to wait for the AgentMux authorization (default 10)",
+        help="Seconds to wait for the Agent Mux authorization (default 10)",
     )
     overseer_inspect_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     overseer_inspect_parser.add_argument(
@@ -239,7 +244,9 @@ def _add_overseer_commands(
             "is no timeout and no default answer: silence is not consent."
         ),
     )
-    overseer_decide_parser.add_argument("plan_dir", help="Plan directory in question")
+    overseer_decide_parser.add_argument(
+        "plan_dir", metavar="PLAN_DIR", help="Plan directory in question"
+    )
     overseer_decide_parser.add_argument(
         "--operation",
         default="reply",
@@ -316,10 +323,11 @@ def _add_overseer_commands(
         "--timeout",
         type=float,
         default=10.0,
-        help="Seconds to wait for the AgentMux authorization (default 10)",
+        help="Seconds to wait for the Agent Mux authorization (default 10)",
     )
     overseer_decide_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     overseer_decide_parser.add_argument(
@@ -354,7 +362,9 @@ def _add_overseer_commands(
             "Application-code repairs belong to a worker, not here."
         ),
     )
-    overseer_act_parser.add_argument("plan_dir", help="Plan directory to act on")
+    overseer_act_parser.add_argument(
+        "plan_dir", metavar="PLAN_DIR", help="Plan directory to act on"
+    )
     overseer_act_parser.add_argument(
         "--watcher-id",
         required=True,
@@ -466,10 +476,11 @@ def _add_overseer_commands(
         "--timeout",
         type=float,
         default=10.0,
-        help="Seconds to wait for each AgentMux authorization (default 10)",
+        help="Seconds to wait for each Agent Mux authorization (default 10)",
     )
     overseer_act_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     overseer_act_parser.add_argument(
@@ -492,16 +503,17 @@ def _add_overseer_commands(
         ),
     )
     overseer_reconcile_parser.add_argument(
-        "plan_dir", help="Plan directory to reconcile"
+        "plan_dir", metavar="PLAN_DIR", help="Plan directory to reconcile"
     )
     overseer_reconcile_parser.add_argument(
         "--timeout",
         type=float,
         default=10.0,
-        help="Seconds to wait for each AgentMux authorization (default 10)",
+        help="Seconds to wait for each Agent Mux authorization (default 10)",
     )
     overseer_reconcile_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     overseer_reconcile_parser.add_argument(

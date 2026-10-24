@@ -111,7 +111,7 @@ Python code (config in `pyproject.toml`).
   and the portable lane also run on Linux (CI checks that), where
   `asl maintenance install` reports that no launchd job is possible. The
   portable Workbench service targets a Linux host under a systemd user unit.
-- Python 3.14+ (`asl_workbench` stays importable on 3.13 for the Pi)
+- Python 3.14+ (`asl_workbench` stays importable on 3.13 for its remote host)
 - `git`, `just`
 - `ruff`, `mypy`, `shellcheck` for `just lint`
 - At least one harness CLI for real runs: `claude` (Claude Code), `codex` or

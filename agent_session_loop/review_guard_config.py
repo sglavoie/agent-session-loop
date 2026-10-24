@@ -10,9 +10,9 @@ from . import plans_models, plans_payloads, verification_models
 from .run_errors import RunError
 
 # Repo-relative paths the review mutation guard ignores, on top of any
-# ``--review-guard-exclude`` values. Stow packages whose files the harness
-# rewrites mid-turn (its own settings, caches) would otherwise revert a
-# complete review turn.
+# ``--review-guard-exclude`` values. Tracked files the harness rewrites
+# mid-turn (its own settings, caches) would otherwise revert a complete review
+# turn.
 REVIEW_GUARD_EXCLUDE_ENV_VAR = "ASL_REVIEW_GUARD_EXCLUDE"
 
 

@@ -41,6 +41,7 @@ def _add_bridge_commands(
     )
     bridge_serve_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     bridge_serve_parser.add_argument(
@@ -81,6 +82,7 @@ def _add_agent_mux_commands(
     )
     pairing_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     pairing_parser.add_argument(
@@ -137,6 +139,7 @@ def _add_diagnostics_commands(
     )
     diagnostics_export_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     diagnostics_export_parser.add_argument(

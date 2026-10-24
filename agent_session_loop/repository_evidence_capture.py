@@ -124,11 +124,11 @@ def _capture_review_repo_fingerprint(
     repository's ignore rules are the operator's existing declaration of what is
     not the code under review, and the caches they name (byte-compiled output,
     test and lint caches, harness-rewritten settings) churn on their own during
-    a review turn (commit ``bf421f9`` gitignored the harness's own stowed
-    settings for exactly that reason). ``include_ignored`` — the run flag
-    ``--review-guard-include-ignored`` — restores the strict scan for a
-    repository whose ignored tree is expected to stay still, and is off by
-    default so the strict behavior is opt-in everywhere, direct calls included.
+    a review turn, which is exactly why they are gitignored.
+    ``include_ignored`` — the run flag ``--review-guard-include-ignored`` —
+    restores the strict scan for a repository whose ignored tree is expected to
+    stay still, and is off by default so the strict behavior is opt-in
+    everywhere, direct calls included.
 
     Deferring to those rules would otherwise let a turn write the rule that
     blinds the guard, so ``worktree_ignore`` fingerprints every untracked
@@ -240,9 +240,9 @@ def _capture_review_repo_fingerprint(
         # ``:(top)`` pathspec is what widens the scan itself past that
         # subdirectory. ``--exclude-standard`` defers to git's ignore rules,
         # which are the operator's existing declaration of what is not the code
-        # under review: commit bf421f9 gitignored the harness's own stowed
-        # settings precisely because it rewrites them mid-turn, so a scan that
-        # ignored that declaration would revert essentially every review turn.
+        # under review: harness settings are commonly gitignored precisely
+        # because the harness rewrites them mid-turn, so a scan that ignored
+        # that declaration would revert essentially every review turn.
         untracked_argv = [
             "ls-files",
             "--others",

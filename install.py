@@ -174,8 +174,25 @@ def main(argv: list[str] | None = None) -> int:
     for change in changes:
         print(change)
     if not changes:
-        print("install: links already point at this checkout")
+        if discovery.found or not args.skills_only:
+            print("install: links already point at this checkout")
+        else:
+            print("install: nothing to link")
+    if not args.skills_only:
+        _warn_if_wrapper_dir_off_path(args.home / WRAPPER_DIR)
     return 0
+
+
+def _warn_if_wrapper_dir_off_path(wrapper_dir: Path) -> None:
+    """Say so when the linked ``asl`` is not reachable by name."""
+    entries = os.environ.get("PATH", "").split(os.pathsep)
+    resolved = {Path(entry).expanduser().resolve() for entry in entries if entry}
+    if wrapper_dir.resolve() not in resolved:
+        print(
+            f"install: {wrapper_dir} is not on PATH, so `asl` will not be "
+            f'found; add it with export PATH="{wrapper_dir}:$PATH"',
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

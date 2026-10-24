@@ -100,14 +100,16 @@ def export_from_args(args: argparse.Namespace) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Write ASL's sanitized AgentMux diagnostics export.",
+        description="Write ASL's sanitized Agent Mux diagnostics export.",
     )
     parser.add_argument(
         "--agent-mux",
         action="store_true",
-        help="Export the AgentMux correlation profile",
+        help="Export the Agent Mux correlation profile",
     )
-    parser.add_argument("--state-dir", help="Override operational state directory")
+    parser.add_argument(
+        "--state-dir", metavar="DIR", help="Override operational state directory"
+    )
     parser.add_argument("--run-id", help="Limit the export to one run ID")
     parser.add_argument("--plan-dir", help="Limit the export to one plan directory")
     parser.add_argument("--output", help="Write the export to PATH instead of stdout")

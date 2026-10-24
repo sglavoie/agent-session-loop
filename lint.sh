@@ -14,11 +14,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Colors
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# Colors, only when stdout is a terminal and NO_COLOR is unset, so CI logs and
+# redirected output stay plain text.
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    GREEN='\033[0;32m'
+    RED='\033[0;31m'
+    BLUE='\033[0;34m'
+    NC='\033[0m'
+else
+    GREEN=''
+    RED=''
+    BLUE=''
+    NC=''
+fi
 
 info() { echo -e "${BLUE}i $1${NC}"; }
 pass() { echo -e "${GREEN}ok $1${NC}"; }

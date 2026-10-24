@@ -50,6 +50,7 @@ def _add_assurance_commands(
     )
     assurance_list_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     assurance_list_parser.add_argument(
@@ -72,6 +73,7 @@ def _add_assurance_commands(
     )
     assurance_show_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     assurance_show_parser.add_argument(
@@ -104,6 +106,7 @@ def _add_assurance_commands(
         )
         disposition_parser.add_argument(
             "--state-dir",
+            metavar="DIR",
             help="Override operational state directory",
         )
         disposition_parser.add_argument(
@@ -142,6 +145,7 @@ def _add_assurance_commands(
     )
     assurance_merge_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     assurance_merge_parser.add_argument(
@@ -199,6 +203,7 @@ def _add_assurance_commands(
     )
     assurance_closeout_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     assurance_closeout_parser.add_argument(
@@ -236,7 +241,7 @@ def _add_assurance_commands(
     )
     assurance_pending_parser.add_argument(
         "--audit-harness",
-        metavar="NAME",
+        metavar="HARNESS",
         help="Audit harness to use instead of the one the dead run recorded",
     )
     assurance_pending_parser.add_argument(
@@ -246,7 +251,7 @@ def _add_assurance_commands(
     )
     assurance_pending_parser.add_argument(
         "--audit-effort",
-        metavar="LEVEL",
+        metavar="EFFORT",
         help="Audit reasoning effort to use instead of the recorded one",
     )
     assurance_pending_parser.add_argument(
@@ -258,6 +263,7 @@ def _add_assurance_commands(
     )
     assurance_pending_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     assurance_pending_parser.add_argument(
@@ -281,7 +287,7 @@ def _add_assurance_commands(
     assurance_plan_parser.add_argument(
         "--harness",
         required=True,
-        metavar="NAME",
+        metavar="HARNESS",
         help="Harness that drafts the proposal, run read-only",
     )
     assurance_plan_parser.add_argument(
@@ -297,7 +303,7 @@ def _add_assurance_commands(
     )
     assurance_plan_parser.add_argument(
         "--effort",
-        metavar="LEVEL",
+        metavar="EFFORT",
         help="Reasoning effort for the drafting turn",
     )
     assurance_plan_parser.add_argument(
@@ -309,6 +315,7 @@ def _add_assurance_commands(
     )
     assurance_plan_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     assurance_plan_parser.add_argument(
@@ -336,6 +343,7 @@ def _add_assurance_commands(
     )
     assurance_reconcile_parser.add_argument(
         "--state-dir",
+        metavar="DIR",
         help="Override operational state directory",
     )
     assurance_reconcile_parser.add_argument(

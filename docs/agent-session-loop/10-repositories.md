@@ -42,10 +42,10 @@ have. `asl maintenance install` writes
 `ASL_LAUNCHD_LABEL_PREFIX`, default `com.sglavoie`) and bootstraps it
 into the calling user's GUI domain; `asl maintenance uninstall` boots it out and
 deletes the definition, removing nothing from the state corpus. The plist is
-written by the command rather than stowed from the dotfiles repository's
-`launchagents/` on purpose: that repository's own `just load-agents` recipe (not
-one in this checkout) bootstraps every plist in that package, so shipping one
-there would give the label two owners and let its `just all` silently re-load a job the operator had deliberately uninstalled. The rendered job runs
+written by the command rather than shipped as a file for a separate tool to
+load on purpose: a recipe that bootstraps every plist in a directory would give
+the label two owners and could silently re-load a job the operator had
+deliberately uninstalled. The rendered job runs
 `asl maintenance run --apply --max-runtime-seconds 900 --json` once a day at
 03:30 with `RunAtLoad` false, `ProcessType` `Background`, and `LowPriorityIO`,
 and appends its own output to `maintenance.log` under the state root. The

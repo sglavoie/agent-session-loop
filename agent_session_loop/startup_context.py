@@ -9,11 +9,11 @@ Each managed file keeps its own content and receives one marked block. The
 start marker carries a digest of the block body, so a stale block is detectable
 without rewriting the file (``--check``).
 
-The context files belong to the operator's dotfiles, not to this checkout, so
-they are addressed by their installed path under a home directory. Where a
-dotfiles stow package links them into ``$HOME`` the write lands in that
-package's tracked file, which is the change the dotfiles repository then
-commits. The bundled reference is the one file this checkout owns.
+The context files belong to the operator, not to this checkout, so they are
+addressed by their installed path under a home directory. Where such a file is
+a symlink into another repository the write lands in that repository's tracked
+file, which is the change that repository then commits. The bundled reference
+is the one file this checkout owns.
 
 Only harness roots that already exist are rendered into (``~/.claude``,
 ``~/.codex``, plus any Claude profile named by ``$CLAUDE_CONFIG_DIR`` or

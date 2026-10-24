@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 #: Extra Claude Code configuration roots, ``os.pathsep``-separated. A second
-#: Claude profile (``CLAUDE_CONFIG_DIR=~/.claude-personal``) is managed only
+#: Claude profile (``CLAUDE_CONFIG_DIR=~/.claude-work``) is managed only
 #: when it is named here or in ``CLAUDE_CONFIG_DIR`` and the directory exists.
 CLAUDE_CONFIG_DIRS_ENV = "ASL_CLAUDE_CONFIG_DIRS"
 

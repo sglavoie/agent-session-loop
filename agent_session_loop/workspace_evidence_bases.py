@@ -43,7 +43,7 @@ Durable records this boundary writes: exactly one.
 :func:`_regenerated_repair_child_write_scope` rewrites a materialized repair
 child's ``session-<id>.md`` in place to widen its persisted write scope. Nothing
 else here opens a path for writing; every other function reads and returns a
-payload for its caller to persist, and ``tests/test_asl_workspace_evidence.py``
+payload for its caller to persist, and ``tests/test_asl_workspace_evidence_boundary.py``
 pins that as a one-entry map rather than a prohibition, so a second writer
 appearing in this module is a test failure rather than a review catch.
 
