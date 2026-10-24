@@ -26,6 +26,7 @@ outright.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import http.server
 import signal
 import socketserver
@@ -46,6 +47,12 @@ REQUEST_QUEUE_SIZE = 64
 #: What this server calls itself. No version of anything else: the header a
 #: stranger reads should not name the interpreter running behind it.
 SERVER_VERSION = "ASLWorkbench/1"
+
+#: Seconds a connection may sit silent mid-request or between keep-alive
+#: requests before its thread gives it up. Every request is one small frame
+#: from a browser or a connector on a short poll, so a peer that stops sending
+#: is gone rather than slow, and without a bound each one holds a thread.
+REQUEST_TIMEOUT_SECONDS = 30.0
 
 
 class ApplicationServer(http.server.ThreadingHTTPServer):
@@ -90,6 +97,7 @@ class ApplicationRequestHandler(http.server.BaseHTTPRequestHandler):
 
     server_version = SERVER_VERSION
     sys_version = ""
+    timeout = REQUEST_TIMEOUT_SECONDS
 
     def log_message(self, format: str, *args: Any) -> None:
         # Silence the default per-request access log. On the Mac the console
@@ -106,6 +114,7 @@ class ApplicationRequestHandler(http.server.BaseHTTPRequestHandler):
         self._serve("POST")
 
     def _serve(self, method: str) -> None:
+        self._body_read = False
         request = Request.build(
             method,
             self.path,
@@ -115,11 +124,25 @@ class ApplicationRequestHandler(http.server.BaseHTTPRequestHandler):
             self.headers.items(),
             read=self._read_exactly,
         )
-        self._write(self.application().handle(request))
+        response = self.application().handle(request)
+        if not self._body_read and _declares_body(request):
+            # Refused (or answered) before the body was read: authentication,
+            # role, origin and availability all decide first. Whatever the
+            # client sent after the headers would be parsed as the next request
+            # line, so the connection ends with this answer instead.
+            response = dataclasses.replace(response, close=True)
+        self._write(response)
 
     def _read_exactly(self, length: int) -> bytes:
         """Read the body the application already decided may exist."""
-        return self.rfile.read(length)
+        self._body_read = True
+        try:
+            return self.rfile.read(length)
+        except OSError:
+            # A timeout or a reset mid-body leaves the stream at an unknown
+            # offset, so nothing after it on this connection can be framed.
+            self.close_connection = True
+            raise
 
     def send_error(
         self,
@@ -184,6 +207,14 @@ class ApplicationRequestHandler(http.server.BaseHTTPRequestHandler):
         server = self.server
         assert isinstance(server, ApplicationServer)
         return server.application
+
+
+def _declares_body(request: Request) -> bool:
+    """Whether bytes may follow this request's headers on the connection."""
+    if request.header("transfer-encoding"):
+        return True
+    length = (request.header("content-length") or "").strip()
+    return length not in ("", "0")
 
 
 def install_shutdown_handlers(

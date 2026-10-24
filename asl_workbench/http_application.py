@@ -132,6 +132,7 @@ class Application:
     # -- The pipeline -------------------------------------------------------
 
     def _handle(self, request: messages.Request) -> messages.Response:
+        self._check_host(request)
         if request.method in constants.SAFE_METHODS and self.static is not None:
             if request.path == "/":
                 return self.static.index(request)
@@ -151,6 +152,20 @@ class Application:
         body = self._read_body(request, route)
         return self.provider.invoke(
             calls.Call(route=route, request=request, principal=principal, body=body)
+        )
+
+    def _check_host(self, request: messages.Request) -> None:
+        """Refuse a request addressed to some other name that resolved here.
+
+        Before routing, because the shell and its assets are reads too and a
+        rebound page that could load them could read the API next.
+        """
+        if not self.policy.require_local_host:
+            return
+        if policy_module.is_local_host(request.host):
+            return
+        raise auth.HttpRefusal(
+            403, "forbidden", "request Host does not name this machine"
         )
 
     def _route(self, request: messages.Request) -> routes.Route:

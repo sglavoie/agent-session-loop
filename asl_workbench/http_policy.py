@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass
 
 from . import http_constants as constants
@@ -49,6 +50,14 @@ class RequestPolicy:
     #: instead of ``forbidden``. On a public surface the existence of an
     #: owner-only route is itself worth not confirming.
     conceal_forbidden: bool = False
+    #: Whether the request's ``Host`` must name this machine. The loopback
+    #: reads are token-free because nothing off the machine can reach the
+    #: socket, and DNS rebinding is how a page off the machine reaches it
+    #: anyway: the attacker's own hostname, re-resolved to 127.0.0.1, makes
+    #: their page same-origin with this server. A rebound request still
+    #: carries that hostname in ``Host``, which is what this refuses. The
+    #: private network is reached by its own published name, so it does not.
+    require_local_host: bool = False
 
     def origins(self, host: str) -> frozenset[str]:
         """Every Origin this mode accepts for a mutation, given the request Host."""
@@ -56,6 +65,29 @@ class RequestPolicy:
         if host:
             accepted.add(f"http://{host}")
         return frozenset(accepted)
+
+
+def is_local_host(host: str) -> bool:
+    """Whether a ``Host`` header could only have been written for this machine.
+
+    ``localhost`` (and its subdomains, which browsers resolve to loopback
+    themselves) and any IP literal pass: no page can rebind an address, only a
+    name. An absent header passes too, because every browser sends one and the
+    callers that omit it are not pages.
+    """
+    name = host.strip()
+    if name.startswith("["):
+        name = name[1:].partition("]")[0]
+    elif name.count(":") == 1:
+        name = name.partition(":")[0]
+    name = name.rstrip(".").lower()
+    if not name or name == "localhost" or name.endswith(".localhost"):
+        return True
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return True
 
 
 #: Loopback. The bearer token minted at startup is the proof, so there is no
@@ -67,6 +99,7 @@ LOCAL_POLICY = RequestPolicy(
     require_origin=False,
     disclose_internal_errors=True,
     conceal_forbidden=False,
+    require_local_host=True,
 )
 
 

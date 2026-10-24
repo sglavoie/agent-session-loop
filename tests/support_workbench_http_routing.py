@@ -440,6 +440,45 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(remote_response.status, 404)
         self.assertEqual(document(remote_response)["reason"], "not-found")
 
+    def test_loopback_refuses_a_host_some_other_name_resolved_to(self) -> None:
+        """DNS rebinding: a page's own name re-pointed at 127.0.0.1.
+
+        The rebound request is same-origin as far as the browser knows, so the
+        token-free loopback reads would answer it. The ``Host`` it carries is
+        the one thing the attacker cannot rewrite.
+        """
+        local = application()
+        for host in ("evil.example", "evil.example:4321", "127.0.0.1.nip.io"):
+            with self.subTest(host=host):
+                response = local.handle(
+                    build("GET", "/api/queue", headers={"Host": host})
+                )
+                self.assertEqual(response.status, 403)
+                self.assertEqual(
+                    document(response)["error"],
+                    "request Host does not name this machine",
+                )
+        for host in (
+            "127.0.0.1:4321",
+            "localhost:4321",
+            "LOCALHOST",
+            "app.localhost:4321",
+            "[::1]:4321",
+            "192.168.1.20:4321",
+            "",
+        ):
+            with self.subTest(host=host):
+                response = local.handle(
+                    build("GET", "/api/queue", headers={"Host": host})
+                )
+                self.assertEqual(response.status, 200)
+
+    def test_the_private_network_is_reached_by_its_published_name(self) -> None:
+        response = self.remote().handle(
+            build("GET", "/api/queue", headers={"Host": "workbench.tail.ts.net"})
+        )
+        self.assertEqual(response.status, 200)
+
     def test_a_caller_who_proved_a_role_is_told_which_role_is_required(self) -> None:
         """Concealment stops at the callers it was protecting the route from.
 

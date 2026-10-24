@@ -4,6 +4,7 @@ Split from tests/test_asl_workbench_server.py."""
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.parse
 
@@ -74,6 +75,43 @@ class WorkbenchServerHTTPTests(WorkbenchServerTestCase):
         )
         self.assertEqual(401, status)
         self.assertEqual("unauthorized", body["reason"])
+
+    def test_rebound_host_is_refused_before_any_read(self) -> None:
+        server = self._start_server()
+        connection = http.client.HTTPConnection(
+            server.bound_host, server.bound_port, timeout=10
+        )
+        self.addCleanup(connection.close)
+        connection.request("GET", "/api/plans", headers={"Host": "evil.example"})
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        self.assertEqual(403, response.status)
+        self.assertEqual("forbidden", body["reason"])
+
+    def test_refusal_before_the_body_is_read_ends_the_connection(self) -> None:
+        """An unread body must not become the next request on a keep-alive link.
+
+        The 401 is decided from the headers alone, so the JSON after them is
+        still on the socket. Keeping the connection would hand it to the next
+        request's parser.
+        """
+        server = self._start_server()
+        connection = http.client.HTTPConnection(
+            server.bound_host, server.bound_port, timeout=10
+        )
+        self.addCleanup(connection.close)
+        payload = json.dumps({"plan_dir": str(self.canonical_plan_dir)})
+        connection.request(
+            "POST",
+            "/api/registry/pin",
+            body=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        response.read()
+        self.assertEqual(401, response.status)
+        self.assertEqual("close", response.getheader("Connection"))
+        self.assertTrue(response.will_close)
 
     def test_post_with_malformed_json_returns_400(self) -> None:
         server = self._start_server()
