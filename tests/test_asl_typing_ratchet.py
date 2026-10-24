@@ -14,10 +14,10 @@ globals().update(
 )
 from .test_asl_typing_ratchet_shared import *
 from .support_base import load_section_tests
-from . import asl_typing_ratchet_section_1 as _asl_typing_ratchet_section_1
-from . import asl_typing_ratchet_section_2 as _asl_typing_ratchet_section_2
-from . import asl_typing_ratchet_section_3 as _asl_typing_ratchet_section_3
-from . import asl_typing_ratchet_section_4 as _asl_typing_ratchet_section_4
+from . import asl_typing_ratchet_section_codes as _asl_typing_ratchet_section_1
+from . import asl_typing_ratchet_section_modules as _asl_typing_ratchet_section_2
+from . import asl_typing_ratchet_section_tables as _asl_typing_ratchet_section_3
+from . import asl_typing_ratchet_section_suppressions as _asl_typing_ratchet_section_4
 
 _PARTS = (
     _asl_typing_ratchet_section_1,
@@ -48,8 +48,8 @@ del _part
 #: shared names are copied in, so the shared module's own marker cannot
 #: shadow it.
 ASL_TEST_SHARDS = (
-    "tests.asl_typing_ratchet_section_3",
-    "tests.asl_typing_ratchet_section_4",
+    "tests.asl_typing_ratchet_section_tables",
+    "tests.asl_typing_ratchet_section_suppressions",
 )
 ASL_TEST_PORTABLE = True
 

@@ -4,23 +4,23 @@ from __future__ import annotations
 
 import unittest
 
-from .support_asl_claude_stream_1 import (
-    GuidanceSpoolTests,
-    StreamSessionPromptTests,
-)
-from .support_asl_claude_stream_2 import (
-    StreamSessionInterruptTests,
-    StreamSessionSteerTests,
-)
-from .support_asl_claude_stream_3 import (
-    StreamOutputProcessorTests,
-    StreamSessionContinuityTests,
-)
-from .support_asl_claude_stream_4 import (
+from .support_asl_claude_stream_adapter import (
     ClaudeAdapterTransportTests,
     CopilotSteerRefusalTests,
     GuidanceHookScriptTests,
     NextTurnDeliveryOwnershipTests,
+)
+from .support_asl_claude_stream_continuity import (
+    StreamOutputProcessorTests,
+    StreamSessionContinuityTests,
+)
+from .support_asl_claude_stream_prompt import (
+    GuidanceSpoolTests,
+    StreamSessionPromptTests,
+)
+from .support_asl_claude_stream_steer import (
+    StreamSessionInterruptTests,
+    StreamSessionSteerTests,
 )
 
 for _test_case in (

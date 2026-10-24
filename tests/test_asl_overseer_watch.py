@@ -14,9 +14,9 @@ globals().update(
 )
 from .test_asl_overseer_watch_shared import *
 from .support_base import load_section_tests
-from . import asl_overseer_watch_section_1 as _asl_overseer_watch_section_1
-from . import asl_overseer_watch_section_2 as _asl_overseer_watch_section_2
-from . import asl_overseer_watch_section_3 as _asl_overseer_watch_section_3
+from . import asl_overseer_watch_section_enrollment as _asl_overseer_watch_section_1
+from . import asl_overseer_watch_section_fleet as _asl_overseer_watch_section_2
+from . import asl_overseer_watch_section_leases as _asl_overseer_watch_section_3
 
 _PARTS = (
     _asl_overseer_watch_section_1,
@@ -46,9 +46,9 @@ del _part
 #: shared names are copied in, so the shared module's own marker cannot
 #: shadow it.
 ASL_TEST_SHARDS = (
-    "tests.asl_overseer_watch_section_1",
-    "tests.asl_overseer_watch_section_2",
-    "tests.asl_overseer_watch_section_3",
+    "tests.asl_overseer_watch_section_enrollment",
+    "tests.asl_overseer_watch_section_fleet",
+    "tests.asl_overseer_watch_section_leases",
 )
 ASL_TEST_PORTABLE = True
 

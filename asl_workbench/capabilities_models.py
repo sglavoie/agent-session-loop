@@ -234,7 +234,7 @@ _CONTROL_TESTS = (
     "scripts:tests/test_workbench_controls_corrections.py",
     "scripts:tests/test_workbench_controls_parity.py",
 )
-_CONTROL_CLI_TESTS = "scripts:tests/test_asl_control_cli_1.py"
+_CONTROL_CLI_TESTS = "scripts:tests/test_asl_control_cli_enqueue.py"
 _STORE_TESTS = "scripts:tests/test_workbench_store_ingestion.py"
 _TRANSPORT_TESTS = "scripts:tests/test_workbench_transport_contract.py"
 _CONNECTOR_TESTS = "scripts:tests/test_workbench_connector_delivery.py"

@@ -14,9 +14,9 @@ globals().update(
 )
 from .test_asl_baseline_shared import *
 from .support_base import load_section_tests
-from . import asl_baseline_section_1 as _asl_baseline_section_1
-from . import asl_baseline_section_2 as _asl_baseline_section_2
-from . import asl_baseline_section_3 as _asl_baseline_section_3
+from . import asl_baseline_section_contract as _asl_baseline_section_1
+from . import asl_baseline_section_cache as _asl_baseline_section_2
+from . import asl_baseline_section_cli as _asl_baseline_section_3
 
 _PARTS = (
     _asl_baseline_section_1,
@@ -46,9 +46,9 @@ del _part
 #: shared names are copied in, so the shared module's own marker cannot
 #: shadow it.
 ASL_TEST_SHARDS = (
-    "tests.asl_baseline_section_1",
-    "tests.asl_baseline_section_2",
-    "tests.asl_baseline_section_3",
+    "tests.asl_baseline_section_contract",
+    "tests.asl_baseline_section_cache",
+    "tests.asl_baseline_section_cli",
 )
 
 

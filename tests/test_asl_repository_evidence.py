@@ -4,21 +4,21 @@ from __future__ import annotations
 
 import unittest
 
-from .support_asl_repository_evidence_1 import (
+from .support_asl_repository_evidence_external_writes import (
+    ExternalWriteEvidenceTests,
+)
+from .support_asl_repository_evidence_inventory import (
     RepositoryEvidenceParityTests,
     WorkspaceInventoryTests,
 )
-from .support_asl_repository_evidence_2 import (
+from .support_asl_repository_evidence_snapshots import (
     RegisteredSnapshotTests,
 )
-from .support_asl_repository_evidence_3 import (
-    WorkspaceWriteGuardClassificationTests,
-)
-from .support_asl_repository_evidence_4 import (
+from .support_asl_repository_evidence_unobserved import (
     LegacyUnobservedRepositoryTests,
 )
-from .support_asl_repository_evidence_5 import (
-    ExternalWriteEvidenceTests,
+from .support_asl_repository_evidence_write_guard import (
+    WorkspaceWriteGuardClassificationTests,
 )
 
 for _test_case in (

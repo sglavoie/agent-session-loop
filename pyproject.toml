@@ -155,7 +155,7 @@ ignore_missing_imports = true
 # `resplit_*` script modules and 67 test files carry `# mypy: ignore-errors`,
 # so no code applies to them whichever table lists them. That set, and the
 # codes each file suppresses, is pinned by
-# `tests/asl_typing_ratchet_section_4.py` and may only shrink.
+# `tests/asl_typing_ratchet_section_suppressions.py` and may only shrink.
 disable_error_code = [
     "arg-type",
     "union-attr",

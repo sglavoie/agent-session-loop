@@ -2,10 +2,10 @@
 # ruff: noqa: F401, I001
 """Discovery facade for focused test_asl_harness_lifecycle test groups."""
 
-from ._test_asl_harness_lifecycle_part_1 import *  # noqa: F403
-from ._test_asl_harness_lifecycle_part_2 import *  # noqa: F403
-from ._test_asl_harness_lifecycle_part_3 import *  # noqa: F403
-from ._test_asl_harness_lifecycle_part_4 import *  # noqa: F403
+from ._test_asl_harness_lifecycle_turn_state import *  # noqa: F403
+from ._test_asl_harness_lifecycle_cancellation import *  # noqa: F403
+from ._test_asl_harness_lifecycle_continuity import *  # noqa: F403
+from ._test_asl_harness_lifecycle_capabilities import *  # noqa: F403
 from ._test_asl_harness_lifecycle_support import (
     _FakePipe,
     _FakeProcess,

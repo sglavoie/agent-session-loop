@@ -4,20 +4,20 @@ from __future__ import annotations
 
 import unittest
 
-from .support_workbench_http_1 import (
-    EnvelopeTests,
-    PipelineTests,
-    PolicyTests,
-    RouteTableTests,
+from .support_workbench_http_remote import (
+    RemoteProviderTests,
 )
-from .support_workbench_http_2 import (
+from .support_workbench_http_requests import (
     AuthenticatorTests,
     CallTests,
     ContainerAccessTests,
     StaticTests,
 )
-from .support_workbench_http_3 import (
-    RemoteProviderTests,
+from .support_workbench_http_routing import (
+    EnvelopeTests,
+    PipelineTests,
+    PolicyTests,
+    RouteTableTests,
 )
 
 ASL_TEST_PORTABLE = True
