@@ -25,6 +25,8 @@ from tests.support import (
 )
 from tests.workbench_support import WorkbenchAPIFixture
 
+ASL_TEST_LANE = "integration"
+
 
 class LaunchRouteTests(WorkbenchAPIFixture, unittest.TestCase):
     """The two spawning routes admit through the journal."""

@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F401, F403
 
 from .scope_recovery_cli import *
 from .scope_recovery_common import *

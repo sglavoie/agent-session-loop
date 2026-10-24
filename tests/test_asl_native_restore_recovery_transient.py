@@ -25,6 +25,8 @@ from tests.support_asl_native_restore_recovery import (
     UNRELATED_NO_SUCH_ERROR,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class TransientRestoreFailureRunTests(fixtures._NativeRestoreRun):
     """The same whole loop, when the provider was merely having a bad minute.

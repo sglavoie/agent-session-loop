@@ -80,6 +80,7 @@ class UplinkState:
 
     store: WorkbenchStore
     clock: Callable[[], float]
+    monotonic: Callable[[], float]
     connector_id: str
     target_id: str
     capabilities: frozenset[str]
@@ -93,6 +94,7 @@ class UplinkState:
     _settled: dict[str, ReadAnswer]
     _bodies: dict[str, _HeldBody]
     _last_upload_at: float | None
+    _last_upload_mono: float | None
     _reads_asked: count[int]
     _epoch: str
 

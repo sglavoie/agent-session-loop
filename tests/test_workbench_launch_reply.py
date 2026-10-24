@@ -1,9 +1,15 @@
 # mypy: disable-error-code="attr-defined,name-defined"
-# ruff: noqa: F401, F403, F405, F822, I001
+# ruff: noqa: F403, F405, I001
 """Portable launch/reply interpretation and reconciliation tests."""
 
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403, F405
 from tests.workbench_launch_reply_support import *
+
+
+# Integration because the claim is that two surfaces are one path: half of
+# it drives the shared action directly and half drives a live workbench
+# server, and the point is that both land in the same journal.
+ASL_TEST_LANE = "integration"
 
 
 class PortableInterpretationTests(unittest.TestCase):

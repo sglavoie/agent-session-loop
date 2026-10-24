@@ -17,6 +17,8 @@ from .support_asl_worker_verification import (
     evaluate,
 )
 
+ASL_TEST_LANE = "integration"
+
 # --------------------------------------------------------------------------
 # Evidence validation
 # --------------------------------------------------------------------------

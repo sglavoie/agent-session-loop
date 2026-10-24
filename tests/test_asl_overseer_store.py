@@ -53,6 +53,8 @@ from tests.asl_overseer_store_support import (
 )
 from tests.support import assert_no_runner_import
 
+ASL_TEST_PORTABLE = True
+
 
 class LedgerLocationTests(_LedgerCase):
     """Where the database lives, and what must not notice it."""

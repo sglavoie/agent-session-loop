@@ -19,6 +19,8 @@ from agent_session_loop import (
 from .support import write_plan
 from .support_asl_turn_settlement import _REAL_PLAN_ARTIFACT_GUARD, SettlementTestCase
 
+ASL_TEST_PORTABLE = True
+
 
 class StatusRefusalArtifactAdjudicationTests(SettlementTestCase):
     """A status refusal still answers the packet question (ASI-119).

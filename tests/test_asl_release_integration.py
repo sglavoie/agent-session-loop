@@ -58,6 +58,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 #: Hang guard for an ``agent_session_loop run`` subprocess, matching the sibling
 #: loop-test modules. Not a performance assertion: these runs share a machine
 #: with the rest of the sharded suite.

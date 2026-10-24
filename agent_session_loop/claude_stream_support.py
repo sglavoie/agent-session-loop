@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, F821, F822, I001
+# ruff: noqa: F401
 """Bidirectional stream-JSON transport for the Claude CLI.
 
 ``claude --print`` used to be a one-shot process: the prompt went on argv, the

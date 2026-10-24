@@ -14,6 +14,8 @@ from agent_session_loop import (
 
 from .support_asl_turn_settlement import SESSION_ID, SettlementTestCase
 
+ASL_TEST_PORTABLE = True
+
 
 class ReviewVerdictTests(SettlementTestCase):
     """The verdict gate, and the stop request that must be seen before it."""

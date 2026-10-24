@@ -190,7 +190,12 @@ def _wait_for_turn_exit(
         abort_deadline = abort.expires_at(now)
         abort_due = abort_deadline is not None and now >= abort_deadline
         timeout_due = timeout_deadline is not None and now >= timeout_deadline
-        if abort_due and timeout_due:
+        if (
+            abort_deadline is not None
+            and timeout_deadline is not None
+            and abort_due
+            and timeout_due
+        ):
             return "timeout" if timeout_deadline <= abort_deadline else "abort"
         if abort_due:
             return "abort"

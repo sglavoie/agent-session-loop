@@ -71,9 +71,13 @@ class AuthoritativeLaneDocsTests(unittest.TestCase):
         the budget phase -- where a deadline pinned against an injected clock
         would be read with a stopwatch and reported as a CLI regression.
         """
-        recipe = self.justfile.split("\nreliability-stress ", 1)[1].split(
-            "\n# Run shell linter", 1
-        )[0]
+        self.assertIn(
+            "scripts/reliability-stress.sh",
+            self.justfile.split("\nreliability-stress ", 1)[1].split("\n\n", 1)[0],
+        )
+        recipe = (REPO_ROOT / "scripts" / "reliability-stress.sh").read_text(
+            encoding="utf-8"
+        )
         names = recipe.split("fault_scenarios=(", 1)[1].split(")", 1)[0].split()
         self.assertIn("tests.test_asl_redirect_adversarial.SlowStorageTests", names)
         defined: dict[str, set[str]] = {}
@@ -137,10 +141,10 @@ class AuthoritativeLaneDocsTests(unittest.TestCase):
     def test_the_portable_lane_is_a_subset_of_the_fast_lane(self) -> None:
         """A renamed or deleted module cannot survive as a silent skip.
 
-        The portable list is hand-curated -- membership is "spawns no external
-        process" -- so nothing recomputes it. Without this, a module dropped
-        from ``FAST_MODULES`` would keep the Linux lane green by running a
-        stale name that ``unittest`` would refuse to import.
+        Portability is declared by hand -- ``ASL_TEST_PORTABLE = True`` means
+        "spawns no external process" -- so nothing recomputes it. Without this,
+        a module moved out of ``FAST_MODULES`` would keep the Linux lane green
+        by running a name the fast lane no longer vouches for.
         """
         stray = set(run_suite.PORTABLE_MODULES) - set(run_suite.FAST_MODULES)
 

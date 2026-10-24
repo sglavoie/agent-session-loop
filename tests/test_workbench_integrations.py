@@ -1,9 +1,12 @@
 # mypy: disable-error-code="attr-defined,name-defined"
-# ruff: noqa: F401, F403, F405, F822, I001
+# ruff: noqa: F403, F405, I001
 """Workbench deployment integration tests."""
 
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403, F405
 from tests.workbench_integrations_support import *
+
+
+ASL_TEST_PORTABLE = True
 
 
 class IntegrationCase(unittest.TestCase):

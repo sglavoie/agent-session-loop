@@ -6,7 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from . import plans_errors, plans_handoff, plans_models, plans_progress, run_termination
+from . import (
+    durability,
+    plans_errors,
+    plans_handoff,
+    plans_models,
+    plans_progress,
+    run_termination,
+)
 
 # ---------------------------------------------------------------------------
 # Collaborator seams
@@ -194,5 +201,5 @@ def _revert_session_status_to_pending(
         note=failure_note,
     )
     suffix = "\n" if text.endswith("\n") else ""
-    path.write_text("\n".join(lines) + suffix, encoding="utf-8")
+    durability.replace_text(path, "\n".join(lines) + suffix)
     return SessionRevert(path=path, from_status=from_status)

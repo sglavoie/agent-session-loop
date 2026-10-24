@@ -31,6 +31,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ArtifactSafetyAndPauseUxTests(fixtures.ArtifactSafetyAndPauseUxCase):
     def test_waiting_state_helpers_have_no_pause_side_effects(self) -> None:

@@ -1,5 +1,5 @@
 # mypy: disable-error-code="name-defined,attr-defined,no-redef"
-# ruff: noqa: E402, F401, F403, F405, I001
+# ruff: noqa: F401
 """Shared final-review artifact contract for the runner and the autopilot.
 
 This module is the single source of truth for the review verdict grammar and

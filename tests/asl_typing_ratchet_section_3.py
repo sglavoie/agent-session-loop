@@ -1,11 +1,12 @@
 # mypy: disable-error-code="name-defined,attr-defined,no-redef"
-# ruff: noqa: E402, F401, F403, F405, I001
+# ruff: noqa: E402, F403, F405, I001
 from . import test_asl_typing_ratchet_shared as _shared
 
 globals().update(
     {name: value for name, value in vars(_shared).items() if not name.startswith("__")}
 )
 from .test_asl_typing_ratchet_shared import *
+from .support_base import load_section_tests
 from .asl_typing_ratchet_section_1 import *
 from .asl_typing_ratchet_section_2 import *
 
@@ -97,6 +98,28 @@ def ratcheted_override(table: str) -> dict[str, Any]:
             f"{anchor} (the {table} table), found {len(matching)}"
         )
     return matching[0]
+
+
+def scripts_override() -> dict[str, Any]:
+    """The override table for the skill scripts, found by its anchor."""
+    matching = [
+        override
+        for override in enabling_overrides()
+        if SCRIPTS_TABLE_ANCHOR in override.get("module", [])
+    ]
+    if len(matching) != 1:
+        raise AssertionError(
+            f"expected exactly one enable_error_code override table listing "
+            f"{SCRIPTS_TABLE_ANCHOR} (the scripts table), found {len(matching)}"
+        )
+    return matching[0]
+
+
+def script_modules() -> frozenset[str]:
+    """Every skill script, by the bare file stem mypy names it with."""
+    return frozenset(
+        path.stem for root in SCRIPT_ROOTS for path in sorted(root.glob("*.py"))
+    )
 
 
 def module_path(dotted: str) -> Path:
@@ -288,6 +311,7 @@ class RatchetedModuleListTests(unittest.TestCase):
         down: the linter would skip it and no floor set would guard it.
         """
         resolved = [ratcheted_override(table) for table in REQUIRED_MODULES]
+        resolved.append(scripts_override())
 
         self.assertEqual(len(enabling_overrides()), len(resolved))
 
@@ -339,13 +363,23 @@ class RatchetedModuleListTests(unittest.TestCase):
                     f"otherwise to {CHECKED_TABLE}",
                 )
 
-    def test_every_listed_module_re_enables_all_three_codes(self) -> None:
+    def test_every_listed_module_re_enables_every_ratcheted_code(self) -> None:
         for table in REQUIRED_MODULES:
             override = ratcheted_override(table)
             with self.subTest(table=table):
                 self.assertEqual(
                     set(override["enable_error_code"]), set(RATCHETED_CODES)
                 )
+
+    def test_the_package_tables_re_enable_every_baseline_error_code(self) -> None:
+        """Product code is clean under every code the baseline still hides.
+
+        The baseline stays for ``tests/``. Only ``annotation-unchecked`` may
+        stay off, because it silences notes rather than errors.
+        """
+        self.assertLessEqual(
+            BASELINE_DISABLED_CODES - {"annotation-unchecked"}, RATCHETED_CODES
+        )
 
     def test_every_listed_module_exists(self) -> None:
         for table in REQUIRED_MODULES:
@@ -418,17 +452,4 @@ def load_tests(
     loader: unittest.TestLoader, tests: unittest.TestSuite, pattern: str | None
 ) -> unittest.TestSuite:
     """Load only test cases defined in this focused section."""
-    suite = unittest.TestSuite()
-    cases = sorted(
-        (
-            value
-            for value in globals().values()
-            if isinstance(value, type)
-            and issubclass(value, unittest.TestCase)
-            and value.__module__ == __name__
-        ),
-        key=lambda case: case.__name__,
-    )
-    for case in cases:
-        suite.addTests(loader.loadTestsFromTestCase(case))
-    return suite
+    return load_section_tests(loader, __name__)

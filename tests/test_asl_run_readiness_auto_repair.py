@@ -18,6 +18,8 @@ from tests.support import (
 )
 from tests.support_asl_run_readiness import RunReadinessGateFixture
 
+ASL_TEST_LANE = "integration"
+
 
 class RunReadinessAutoRepairTests(RunReadinessGateFixture):
     """Auto-repair of progress and readiness findings, and baseline evidence gating."""

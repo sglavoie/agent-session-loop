@@ -17,6 +17,8 @@ from tests.asl_overseer_discovery_support import (
     _repositories,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class LifecycleAndOwnershipTests(unittest.TestCase):
     """Timestamps, pause state, and who holds the lock."""

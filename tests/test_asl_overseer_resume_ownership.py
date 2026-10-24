@@ -19,6 +19,8 @@ from tests.support import (
 )
 from tests.support_asl_overseer_resume import HOST
 
+ASL_TEST_PORTABLE = True
+
 
 class SurvivingWorkers(fixtures._ResumeCase):
     """A lost supervisor is not proof the worker died."""

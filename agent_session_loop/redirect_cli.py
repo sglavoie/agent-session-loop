@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403
 
 from .redirect_cli_projection import *
 from .redirect_cli_recovery import *

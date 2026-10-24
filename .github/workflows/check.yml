@@ -12,20 +12,26 @@ on:
 # it runs the complete suite on the platform the ASL/AgentMux pair is developed,
 # installed, and released against. Nothing the Linux lane skips is left
 # unchecked; it is checked on macOS instead.
+# Third-party actions are pinned to commit SHAs (the tag they resolved from is
+# in the trailing comment) and the Linux runner to an explicit image, so a moved
+# tag or a runner-image migration cannot change what a commit is checked with.
 jobs:
   linux-portable:
     name: Linux (portable)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
+          # The tool pins live in this file, so it is the cache key.
+          cache: pip
+          cache-dependency-path: .github/workflows/check.yml
 
       - name: Install just
-        uses: extractions/setup-just@v4
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
 
       - name: Install Python tooling
         run: python3 -m pip install --upgrade "ruff==0.16.0" "mypy==2.3.0"
@@ -53,15 +59,18 @@ jobs:
     name: macOS (full)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
+          # The tool pins live in this file, so it is the cache key.
+          cache: pip
+          cache-dependency-path: .github/workflows/check.yml
 
       - name: Install just
-        uses: extractions/setup-just@v4
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
 
       - name: Install Python tooling
         run: python3 -m pip install --upgrade "ruff==0.16.0" "mypy==2.3.0"

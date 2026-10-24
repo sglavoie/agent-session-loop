@@ -32,6 +32,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class MailboxWaitEvidenceTests(rfs.ReplyResumeFlowCase):
     """Lease evidence on wait exits and suspend re-anchoring."""

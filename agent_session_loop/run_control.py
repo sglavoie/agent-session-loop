@@ -212,7 +212,7 @@ class RunControlListener:
                 self._thread = thread
                 self._stop.clear()
                 thread.start()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 self._restore_terminal_locked()
                 self._fd = None
                 self._original_settings = None
@@ -265,13 +265,13 @@ class RunControlListener:
             return action
         if key in HARNESS_SELECTION_KEYS:
             harness = HARNESS_SELECTION_KEYS[key]
-            action = self.state.select_harness(harness)
-            if action is None:
+            selection = self.state.select_harness(harness)
+            if selection is None:
                 self._emit_line(_format_harness_already_selected_line(harness))
                 return None
-            self._emit_line(_format_harness_selection_line(action))
-            self._notify_action(action)
-            return action
+            self._emit_line(_format_harness_selection_line(selection))
+            self._notify_action(selection)
+            return selection
         if key == HELP_KEY:
             self._emit_line(self.state.help_text())
         return None

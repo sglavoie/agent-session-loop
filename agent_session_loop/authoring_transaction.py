@@ -269,7 +269,7 @@ class PlanTransaction:
                 _silent_unlink(path)
             else:
                 try:
-                    path.write_bytes(original)
+                    durability.replace_bytes(path, original)
                 except OSError:
                     succeeded = False
         for tmp_path in temp_paths:

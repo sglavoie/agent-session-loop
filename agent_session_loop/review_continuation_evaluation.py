@@ -373,9 +373,9 @@ def evaluate_review_continuation(
         )
 
     if not planning.ok or planning.reason != review_repair.REVIEW_REPAIR_REASON_OK:
-        error = planning.error
+        artifact_error = planning.error
         if planning.reason == review_repair.REVIEW_REPAIR_REASON_NO_FINDINGS:
-            error = (
+            artifact_error = (
                 "the completed findings review no longer has repair findings; "
                 "a manually changed all-clear artifact cannot finalize it"
             )
@@ -392,7 +392,7 @@ def evaluate_review_continuation(
                 if planning.reason == review_repair.REVIEW_REPAIR_REASON_NO_FINDINGS
                 else resume.artifact_valid
             ),
-            artifact_error=error,
+            artifact_error=artifact_error,
         )
 
     if selected_cap is None or selected_cap < minimum_cap:

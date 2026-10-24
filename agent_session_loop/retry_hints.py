@@ -73,8 +73,8 @@ def resolve_retry_at(value: object, *, now: datetime | None = None) -> datetime 
     if _ISO_RE.match(hint):
         text = hint[:-1] + "+00:00" if hint[-1] in "Zz" else hint
         try:
-            parsed = datetime.fromisoformat(text)
-            return parsed.astimezone() if parsed.tzinfo is None else parsed
+            stamp = datetime.fromisoformat(text)
+            return stamp.astimezone() if stamp.tzinfo is None else stamp
         except ValueError, OverflowError, OSError:
             return None
 

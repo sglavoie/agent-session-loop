@@ -15,6 +15,8 @@ from tests.support import (
     git_stdout,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class MultiRepositoryEndToEndQATests(MultiRepositoryEndToEndBase):
     """Core lifecycle and dirty-workspace matrix for four repositories."""

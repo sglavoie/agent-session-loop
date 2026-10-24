@@ -23,6 +23,8 @@ from tests.support_asl_overseer_decisions import (
     RUN,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class SupervisionProvenanceTests(unittest.TestCase):
     """The mailbox records no author, so nothing in it is a user instruction."""

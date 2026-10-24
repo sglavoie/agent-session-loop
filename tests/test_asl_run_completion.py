@@ -58,6 +58,8 @@ from tests import support_asl_run_loop_view as run_loop_view
 
 from .support import assert_no_runner_import, write_plan
 
+ASL_TEST_PORTABLE = True
+
 RUN_ID = "run-completion-1"
 
 

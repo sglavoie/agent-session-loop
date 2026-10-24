@@ -36,7 +36,6 @@ from tests.support_workbench_remote_actions import (
     NOW,
     REPLY_TEXT,
     TARGET_ID,
-    HeldWorker,
     LinkChannel,
     SettlingPerformer,
     StubBodySource,
@@ -48,6 +47,9 @@ from tests.support_workbench_remote_actions import (
     reply_body,
     submission,
 )
+from tests.support_workbench_remote_reads import HeldWorker
+
+ASL_TEST_PORTABLE = True
 
 
 class LaneTests(unittest.TestCase):

@@ -14,6 +14,8 @@ from tests.support import (
     _http_request,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchServerRegistryTests(WorkbenchServerTestCase):
     """Registry pin and unpin endpoints."""

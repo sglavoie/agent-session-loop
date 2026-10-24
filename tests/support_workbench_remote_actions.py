@@ -39,6 +39,7 @@ from tests.support import (
     _write_state_payload,
     write_plan,
 )
+from tests.support_workbench_remote_reads import inline, iso
 
 #: A fixed moment. Every window in this module is relative to it, so nothing
 #: here depends on how long the suite takes to run.
@@ -60,13 +61,6 @@ BRIDGE_TOKEN = "freshness-token-1"
 REPLY_REF = "reply-ref-1"
 ACTION_TOKEN = "redeem-token-1"
 REPLY_TEXT = "carry on, but check the lock first"
-
-
-def iso(offset: float) -> str:
-    """An ASL timestamp ``offset`` seconds from :data:`NOW`."""
-    from datetime import UTC, datetime
-
-    return datetime.fromtimestamp(NOW + offset, tz=UTC).isoformat()
 
 
 # -- Doubles ----------------------------------------------------------------
@@ -195,30 +189,6 @@ class SettlingPerformer(StubPerformer):
     ) -> remote_actions.MutationResult:
         self.reconciliations.append(request.operation_id)
         return remote_actions.MutationResult(status=OPERATION_CONSUMED)
-
-
-def inline(attempt: Any) -> None:
-    """Run one worker pass on the calling thread."""
-    attempt()
-    return None
-
-
-class HeldWorker:
-    """A worker that keeps passes pending until released."""
-
-    def __init__(self) -> None:
-        self.pending: list[Any] = []
-
-    def __call__(self, attempt: Any) -> None:
-        self.pending.append(attempt)
-        return None
-
-    def release(self) -> int:
-        released = len(self.pending)
-        for attempt in self.pending:
-            attempt()
-        self.pending.clear()
-        return released
 
 
 # -- Payload fixtures -------------------------------------------------------

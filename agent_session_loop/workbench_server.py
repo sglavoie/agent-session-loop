@@ -91,6 +91,7 @@ from asl_workbench.server import (
 )
 
 from . import responses, workbench_local
+from .cli_defaults import program_name
 from .workbench_local import LaunchBook, LocalProvider
 
 TOKEN_BYTES = 32
@@ -331,7 +332,7 @@ def workbench_serve_from_args(
             )
         else:
             print(
-                f"agent-session-loop workbench serve: {error}",
+                f"{program_name()} workbench serve: {error}",
                 file=sys.stderr,
             )
         return 1

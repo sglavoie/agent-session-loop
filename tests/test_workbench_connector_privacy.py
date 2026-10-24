@@ -36,6 +36,8 @@ from tests.workbench_connector_support import (
     tree_digest,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class ObservationIsReadOnlyTests(CorpusTestCase):
     """Describing this corpus does not change it."""
@@ -215,9 +217,7 @@ class PageAndCapTests(CorpusTestCase):
         )
 
         with mock.patch.object(bridge_projection, "project_row", side_effect=rows):
-            kept, failed, truncated = self.make_source()._runs(  # noqa: SLF001
-                scan
-            )
+            kept, failed, truncated = self.make_source()._runs(scan)
 
         self.assertEqual(0, failed)
         self.assertTrue(truncated)

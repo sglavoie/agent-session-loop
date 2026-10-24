@@ -12,7 +12,7 @@ from agent_session_loop import (
     mailbox_constants,
     mailbox_rendering,
 )
-from tests.asl_docs_support import ASL_GUIDE, read_repo_text
+from tests.asl_docs_support import ASL_GUIDE, ASL_SKILL_MID_RUN_CONTROLS, read_repo_text
 
 #: The ASL operator guide moved out of the repository README; it carries the
 #: operator-facing summary these tests used to read from `README.md`.
@@ -114,6 +114,7 @@ class GuidanceAndErrorDocsTests(unittest.TestCase):
             "agent_session_loop/README.md",
             "docs/agent-session-loop.md",
             "skills/asl/SKILL.md",
+            ASL_SKILL_MID_RUN_CONTROLS,
         ):
             normalized = " ".join(self._read(path).split())
             self.assertNotIn(
@@ -123,12 +124,13 @@ class GuidanceAndErrorDocsTests(unittest.TestCase):
             )
 
     def test_asl_skill_steer_route_waits_for_a_delivery_verdict(self) -> None:
-        normalized = " ".join(self._read("skills/asl/SKILL.md").split())
-
+        # The quick reference keeps the route; the delivery verdicts live in
+        # the on-demand mid-run controls reference.
         self.assertIn(
             "asl inbox guidance PLAN_DIR --text GUIDANCE_TEXT --wait-delivered --json",
-            normalized,
+            " ".join(self._read("skills/asl/SKILL.md").split()),
         )
+        normalized = " ".join(self._read(ASL_SKILL_MID_RUN_CONTROLS).split())
         for marker in (
             "Always pass `--wait-delivered`",
             "Guidance delivered live to <harness>",

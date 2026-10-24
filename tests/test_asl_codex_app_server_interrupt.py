@@ -13,6 +13,8 @@ from agent_session_loop import (
 )
 from tests import support_asl_codex_app_server as fixtures
 
+ASL_TEST_LANE = "integration"
+
 
 class InterruptTests(unittest.TestCase):
     """Stopping a turn is a thing said to the conversation, not just a kill."""

@@ -30,5 +30,7 @@ from .asl_review_transitions_cases_models import (
     ReviewVerdictRetryHistoryTests,
 )
 
+ASL_TEST_PORTABLE = True
+
 if __name__ == "__main__":
     unittest.main()

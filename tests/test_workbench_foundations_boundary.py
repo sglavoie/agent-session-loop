@@ -39,6 +39,8 @@ from tests.workbench_foundations_support import (
     RUFF_PORTABLE_TARGET,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class PortableBoundaryTests(unittest.TestCase):
     """The portable package stays loadable on the Pi and free of ASL."""

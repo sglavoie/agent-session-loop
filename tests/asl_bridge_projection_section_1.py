@@ -1,11 +1,13 @@
 # mypy: disable-error-code="name-defined,attr-defined,no-redef"
 # ruff: noqa: E402, F401, F403, F405, I001
 from . import test_asl_bridge_projection_shared as _shared
+from tests.asl_bridge_server_support import _request
 
 globals().update(
     {name: value for name, value in vars(_shared).items() if not name.startswith("__")}
 )
 from .test_asl_bridge_projection_shared import *
+from .support_base import load_section_tests
 
 QUESTION_BODY = "Should we drop the v1 column before the backfill lands?"
 PAUSE_MESSAGE = "Awaiting confirmation on the v1 column"
@@ -162,17 +164,6 @@ class _Corpus:
         return plan_dir
 
 
-def _request(request_id: str, method: str, **params: Any) -> bytes:
-    payload: dict[str, Any] = {
-        "type": "request",
-        "protocol": bridge_protocol.PROTOCOL_VERSION,
-        "id": request_id,
-        "method": method,
-        "params": params,
-    }
-    return json.dumps(payload).encode("utf-8")
-
-
 class BridgeHelloTests(unittest.TestCase):
     def test_hello_declares_protocol_version_and_ordered_capabilities(self) -> None:
         payload = bridge_session.hello_payload()
@@ -215,17 +206,4 @@ def load_tests(
     loader: unittest.TestLoader, tests: unittest.TestSuite, pattern: str | None
 ) -> unittest.TestSuite:
     """Load only test cases defined in this focused section."""
-    suite = unittest.TestSuite()
-    cases = sorted(
-        (
-            value
-            for value in globals().values()
-            if isinstance(value, type)
-            and issubclass(value, unittest.TestCase)
-            and value.__module__ == __name__
-        ),
-        key=lambda case: case.__name__,
-    )
-    for case in cases:
-        suite.addTests(loader.loadTestsFromTestCase(case))
-    return suite
+    return load_section_tests(loader, __name__)

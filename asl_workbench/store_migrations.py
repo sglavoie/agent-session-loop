@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 from collections.abc import Callable, Mapping
@@ -282,10 +283,11 @@ def migrate(connection: sqlite3.Connection, *, created_at: float = 0.0) -> int:
             hook = _MIGRATION_HOOKS.get(version)
             if hook is not None:
                 hook(connection, created_at)
+            connection.execute("COMMIT")
         except BaseException:
-            connection.execute("ROLLBACK")
+            with contextlib.suppress(sqlite3.Error):
+                connection.execute("ROLLBACK")
             raise
-        connection.execute("COMMIT")
         current = version
     return current
 

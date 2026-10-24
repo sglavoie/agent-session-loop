@@ -9,6 +9,8 @@ from tests.support import (
     _http_request_raw,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchStaticShellTests(support_static.WorkbenchStaticCase):
     """Cover the HTML shell, detail view, recovery center and safe confirmations."""

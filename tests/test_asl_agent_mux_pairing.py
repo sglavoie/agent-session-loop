@@ -21,6 +21,8 @@ from agent_session_loop import (
 )
 from tests.asl_agent_mux_pairing_support import CURRENT, PairingTestBase
 
+ASL_TEST_PORTABLE = True
+
 
 class ResolvedExecutableTests(unittest.TestCase):
     """The path pairing hands to Agent Mux to persist."""

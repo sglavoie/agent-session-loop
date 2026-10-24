@@ -16,6 +16,8 @@ from tests.review_repair_support import (
     _SimulatedCrash,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewRepairPublicationWindowTests(PublicationWindowFixtures, unittest.TestCase):
     """Materialize repair children through the crash-safe publication window."""

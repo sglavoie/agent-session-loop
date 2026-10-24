@@ -24,6 +24,8 @@ from tests.support_workbench_fullstack import (
 )
 from tests.support_workbench_fullstack_case import FullStackCase
 
+ASL_TEST_LANE = "integration"
+
 # ---------------------------------------------------------------------------
 # A mutation is settled once
 # ---------------------------------------------------------------------------

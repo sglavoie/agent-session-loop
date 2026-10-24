@@ -296,8 +296,8 @@ def collect_assurance_metrics(
     rework_minutes = 0.0
     reporting_rework = 0
     for run_id in sorted(closeout_runs):
-        audit = inbox.run(run_id)
-        closeout = audit.closeout if audit is not None else None
+        closeout_audit = inbox.run(run_id)
+        closeout = closeout_audit.closeout if closeout_audit is not None else None
         if closeout is None:
             continue
         by_outcome[closeout.outcome] = by_outcome.get(closeout.outcome, 0) + 1

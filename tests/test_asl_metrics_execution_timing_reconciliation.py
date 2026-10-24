@@ -26,6 +26,8 @@ from tests.asl_metrics_support import (
 )
 from tests.support import write_plan_with_ids
 
+ASL_TEST_PORTABLE = True
+
 
 class ExecutionTimingReconciliationTests(TimingSectionBase):
     def _replayed_check_finish(

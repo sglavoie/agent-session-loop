@@ -23,6 +23,8 @@ from unittest import mock
 
 from agent_session_loop import cli, cli_trace, config
 
+ASL_TEST_PORTABLE = True
+
 ALLOWED_START_FIELDS = frozenset(
     {
         "schema_version",

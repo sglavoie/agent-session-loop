@@ -42,6 +42,8 @@ from tests.support_workbench_remote_actions import (
     submit_body,
 )
 
+ASL_TEST_PORTABLE = True
+
 # --------------------------------------------------------------------------
 # Reading a submission
 # --------------------------------------------------------------------------

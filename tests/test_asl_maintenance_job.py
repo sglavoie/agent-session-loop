@@ -326,5 +326,23 @@ class CommandTests(MaintenanceTestBase):
         self.assertEqual(payload["command"], "maintenance install")
 
 
+class LaunchdLabelPrefixTests(unittest.TestCase):
+    def test_default_prefix_is_the_one_installed_jobs_carry(self) -> None:
+        self.assertEqual(maintenance_policy.launchd_label_prefix({}), "com.sglavoie")
+
+    def test_environment_overrides_the_prefix(self) -> None:
+        prefix = maintenance_policy.launchd_label_prefix(
+            {"ASL_LAUNCHD_LABEL_PREFIX": " org.example. "}
+        )
+
+        self.assertEqual(prefix, "org.example")
+
+    def test_job_label_is_built_from_the_prefix(self) -> None:
+        self.assertEqual(
+            maintenance_policy.JOB_LABEL,
+            maintenance_policy.launchd_label_prefix() + ".asl-maintenance",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

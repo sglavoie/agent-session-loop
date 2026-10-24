@@ -24,6 +24,8 @@ from .support_asl_turn_dispositions import (
     DispositionTestCase,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class NonzeroExitTests(DispositionTestCase):
     """A failed harness exit, and the one retry it can earn."""

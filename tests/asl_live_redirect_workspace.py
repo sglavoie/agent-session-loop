@@ -151,7 +151,7 @@ class _LiveTurn:
             return False
         try:
             answered = bool(transport.interrupt())
-        except Exception:  # noqa: BLE001 - a refused interrupt is an observation
+        except Exception:
             answered = False
         self.native_interrupt = answered
         return answered
@@ -182,7 +182,7 @@ class _LiveTurn:
             def observe() -> None:
                 try:
                     watch(self)
-                except Exception as error:  # noqa: BLE001 - never wedge the turn
+                except Exception as error:
                     print(f"  watcher failed: {type(error).__name__}: {error}")
 
             watcher = threading.Thread(

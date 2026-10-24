@@ -42,6 +42,8 @@ from tests.workbench_support import (
     SHELL_OWNER_IDENTITY,
 )
 
+ASL_TEST_LANE = "integration"
+
 # ---------------------------------------------------------------------------
 # Storage can fail
 # ---------------------------------------------------------------------------

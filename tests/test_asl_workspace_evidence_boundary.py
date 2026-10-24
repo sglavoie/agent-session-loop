@@ -23,6 +23,8 @@ from agent_session_loop import (
 from tests.asl_workspace_evidence_support import _workspace
 from tests.support import assert_no_runner_import, called_names
 
+ASL_TEST_PORTABLE = True
+
 #: The symbols this module took from the runner, plus the ones authored here
 #: since. The program's no-alias rule says the runner keeps none of them, so a
 #: re-export added later to rescue a stale patch target fails here rather than
@@ -59,6 +61,7 @@ DURABLE_WRITE_NAMES = frozenset(
         "mkdir",
         "rename",
         "replace",
+        "replace_text",
         "rmdir",
         "touch",
         "unlink",
@@ -76,7 +79,7 @@ DURABLE_WRITE_NAMES = frozenset(
 #: instead of a review catch: everything else in this boundary reads a payload
 #: and returns a verdict for its caller to persist.
 DURABLE_WRITES: dict[str, frozenset[str]] = {
-    "_regenerated_repair_child_write_scope": frozenset({"write_text"}),
+    "_regenerated_repair_child_write_scope": frozenset({"replace_text"}),
 }
 
 

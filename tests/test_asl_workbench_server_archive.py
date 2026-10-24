@@ -22,6 +22,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchServerArchiveTests(WorkbenchServerTestCase):
     """Plan delete, archive, restore, and archive settings endpoints."""

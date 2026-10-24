@@ -1,9 +1,18 @@
-#!/opt/homebrew/bin/python3
+#!/usr/bin/env python3
 """Repository wrapper for agent_session_loop.cli."""
 
-from __future__ import annotations
-
+# Everything above the version guard must still parse on an old interpreter, so
+# that `asl` on a stale `python3` prints why it cannot run instead of a
+# SyntaxError from deep inside the package.
 import sys
+
+if sys.version_info < (3, 14):  # noqa: UP036 - the guard exists for old Pythons
+    sys.stderr.write(
+        f"asl requires Python 3.14+; found "
+        f"{sys.version_info[0]}.{sys.version_info[1]} at {sys.executable}\n"
+    )
+    raise SystemExit(2)
+
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]

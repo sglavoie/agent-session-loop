@@ -30,7 +30,7 @@ class ControlCliTestsPart2(ControlCliTestsBase):
         self.assertEqual(1, exit_code)
         self.assertEqual("", stdout.getvalue())
         self.assertIn(
-            "agent-session-loop control select-harness: unsupported harness",
+            "asl control select-harness: unsupported harness",
             stderr.getvalue(),
         )
 
@@ -96,7 +96,7 @@ class ControlCliTestsPart2(ControlCliTestsBase):
         lines = stderr.getvalue().splitlines()
         self.assertEqual(1, len(lines))
         self.assertIn(
-            "agent-session-loop control stop-after-current: cannot write control queue",
+            "asl control stop-after-current: cannot write control queue",
             lines[0],
         )
         self.assertIn("check that the state directory is writable", lines[0])

@@ -25,6 +25,11 @@ from .support_workbench_migration import (
     companion_service_configuration,
 )
 
+# Half of it is pure translation, but the rollback half installs two real
+# releases and starts them, because "the data a release is handed is the
+# data it ran on" cannot be proven against a switch that was faked.
+ASL_TEST_LANE = "integration"
+
 # ---------------------------------------------------------------------------
 # The translations, with no prefix in sight
 

@@ -4,17 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 from agent_session_loop import plans_files, session_overview
+from tests.support_base import write_json as _write_json
 
 DEAD_PID = 4_242_424
-
-
-def _write_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
 
 def _make_plan_state_dir(
@@ -161,8 +156,3 @@ def _build_args(
         verbose=verbose,
         json=json_output,
     )
-
-
-def _force_pid_alive(pid: int) -> bool:
-    """Treat only the current process as alive so dead PIDs are deterministic."""
-    return pid == os.getpid()

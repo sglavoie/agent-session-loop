@@ -15,6 +15,8 @@ from agent_session_loop import (
     workspace_evidence,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class SessionExpansionEvidenceTests(unittest.TestCase):
     def setUp(self) -> None:

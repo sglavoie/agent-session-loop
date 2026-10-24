@@ -5,10 +5,8 @@ from .asl_startup_context_support import *
 class StartupContextRendererTests(unittest.TestCase):
     def build_repo(self, temp_dir: str) -> Path:
         repo_root = Path(temp_dir) / "repo"
-        for target in startup_context.CONTEXT_TARGETS:
-            (repo_root / target.installed_path).parent.mkdir(
-                parents=True, exist_ok=True
-            )
+        for root in HARNESS_ROOT_DIRS:
+            (repo_root / root).mkdir(parents=True)
         codex = repo_root / ".codex/AGENTS.md"
         codex.write_text(CODEX_DEFAULTS, encoding="utf-8")
         (repo_root / ".claude/CLAUDE.md").write_text(CLAUDE_DEFAULTS, encoding="utf-8")
@@ -18,12 +16,12 @@ class StartupContextRendererTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = self.build_repo(temp_dir)
 
-            first = startup_context.sync(repo_root, home=repo_root)
+            first = startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
             snapshot = {
                 record["path"]: (repo_root / record["path"]).read_bytes()
                 for record in first["files"]
             }
-            second = startup_context.sync(repo_root, home=repo_root)
+            second = startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
 
             self.assertEqual(second["written"], [])
             for path, content in snapshot.items():
@@ -33,7 +31,7 @@ class StartupContextRendererTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = self.build_repo(temp_dir)
 
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
 
             codex = (repo_root / ".codex/AGENTS.md").read_text(encoding="utf-8")
             claude = (repo_root / ".claude/CLAUDE.md").read_text(encoding="utf-8")
@@ -48,7 +46,7 @@ class StartupContextRendererTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = self.build_repo(temp_dir)
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
             codex = repo_root / ".codex/AGENTS.md"
             stale = codex.read_text(encoding="utf-8").replace(
                 "- status: `asl status PLAN_DIR --json`",
@@ -56,7 +54,7 @@ class StartupContextRendererTests(unittest.TestCase):
             )
             codex.write_text(stale, encoding="utf-8")
 
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
 
             rendered = codex.read_text(encoding="utf-8")
             self.assertEqual(rendered.count(startup_context.END_MARKER), 1)
@@ -66,7 +64,7 @@ class StartupContextRendererTests(unittest.TestCase):
     def test_malformed_start_marker_is_replaced_not_duplicated(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = self.build_repo(temp_dir)
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
             codex = repo_root / ".codex/AGENTS.md"
             codex.write_text(
                 codex.read_text(encoding="utf-8").replace(
@@ -76,7 +74,7 @@ class StartupContextRendererTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
 
             rendered = codex.read_text(encoding="utf-8")
             self.assertEqual(
@@ -90,7 +88,7 @@ class StartupContextRendererTests(unittest.TestCase):
     def test_duplicate_blocks_collapse_into_one(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = self.build_repo(temp_dir)
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
             codex = repo_root / ".codex/AGENTS.md"
             block = startup_context.render_block("codex")
             codex.write_text(
@@ -101,7 +99,7 @@ class StartupContextRendererTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            payload = startup_context.sync(repo_root, home=repo_root)
+            payload = startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
 
             self.assertIn(".codex/AGENTS.md", payload["written"])
             rendered = codex.read_text(encoding="utf-8")
@@ -114,7 +112,7 @@ class StartupContextRendererTests(unittest.TestCase):
     def test_orphaned_start_marker_replaces_the_stale_card_body(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = self.build_repo(temp_dir)
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
             codex = repo_root / ".codex/AGENTS.md"
             orphaned = (
                 codex.read_text(encoding="utf-8")
@@ -126,7 +124,7 @@ class StartupContextRendererTests(unittest.TestCase):
             )
             codex.write_text(orphaned + "\n## My Notes\n\nKeep me.\n", encoding="utf-8")
 
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
 
             rendered = codex.read_text(encoding="utf-8")
             self.assertEqual(
@@ -143,7 +141,7 @@ class StartupContextRendererTests(unittest.TestCase):
     def test_orphaned_start_marker_with_corrupted_heading_is_repaired(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = self.build_repo(temp_dir)
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
             codex = repo_root / ".codex/AGENTS.md"
             orphaned = (
                 codex.read_text(encoding="utf-8")
@@ -156,7 +154,7 @@ class StartupContextRendererTests(unittest.TestCase):
             )
             codex.write_text(orphaned + "\n## My Notes\n\nKeep me.\n", encoding="utf-8")
 
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
 
             rendered = codex.read_text(encoding="utf-8")
             self.assertEqual(
@@ -171,7 +169,7 @@ class StartupContextRendererTests(unittest.TestCase):
     def test_orphaned_start_marker_with_missing_heading_is_repaired(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = self.build_repo(temp_dir)
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
             codex = repo_root / ".codex/AGENTS.md"
             orphaned = (
                 codex.read_text(encoding="utf-8")
@@ -184,7 +182,7 @@ class StartupContextRendererTests(unittest.TestCase):
             )
             codex.write_text(orphaned + "\n## My Notes\n\nKeep me.\n", encoding="utf-8")
 
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
 
             rendered = codex.read_text(encoding="utf-8")
             self.assertEqual(
@@ -198,7 +196,7 @@ class StartupContextRendererTests(unittest.TestCase):
     def test_unrelated_trailing_bytes_including_blank_lines_are_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = self.build_repo(temp_dir)
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
             codex = repo_root / ".codex/AGENTS.md"
             suffix = "\nTrailing note.\n\n\n"
             codex.write_text(
@@ -210,7 +208,7 @@ class StartupContextRendererTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
 
             block = startup_context.render_block("codex")
             self.assertEqual(
@@ -221,7 +219,7 @@ class StartupContextRendererTests(unittest.TestCase):
     def test_blank_only_eof_suffix_is_preserved_byte_for_byte(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = self.build_repo(temp_dir)
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
             codex = repo_root / ".codex/AGENTS.md"
             corrupted = codex.read_text(encoding="utf-8").replace(
                 "- Route: `asl supervisor-guide`",
@@ -229,7 +227,7 @@ class StartupContextRendererTests(unittest.TestCase):
             )
             codex.write_text(corrupted.rstrip("\n") + "\n\n\n", encoding="utf-8")
 
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
 
             self.assertEqual(
                 codex.read_text(encoding="utf-8"),
@@ -242,7 +240,7 @@ class StartupContextRendererTests(unittest.TestCase):
     def test_corrupted_body_under_the_original_marker_is_restored(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = self.build_repo(temp_dir)
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
             codex = repo_root / ".codex/AGENTS.md"
             corrupted = codex.read_text(encoding="utf-8").replace(
                 "- Route: `asl supervisor-guide`",
@@ -251,9 +249,11 @@ class StartupContextRendererTests(unittest.TestCase):
             codex.write_text(corrupted, encoding="utf-8")
 
             self.assertFalse(
-                startup_context.sync(repo_root, home=repo_root, check=True)["ok"]
+                startup_context.sync(
+                    repo_root, home=repo_root, env=HARNESS_ENV, check=True
+                )["ok"]
             )
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
 
             rendered = codex.read_text(encoding="utf-8")
             self.assertEqual(
@@ -267,7 +267,7 @@ class StartupContextRendererTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = self.build_repo(temp_dir)
 
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
 
             personal = (repo_root / ".claude-personal/CLAUDE.md").read_text(
                 encoding="utf-8"
@@ -282,7 +282,7 @@ class StartupContextRendererTests(unittest.TestCase):
             personal = repo_root / ".claude-personal/CLAUDE.md"
             personal.write_text("# Personal\n\nAlways answer in French.\n", "utf-8")
 
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
 
             rendered = personal.read_text(encoding="utf-8")
             self.assertTrue(rendered.startswith("# Personal\n"), rendered)
@@ -292,14 +292,16 @@ class StartupContextRendererTests(unittest.TestCase):
     def test_check_reports_stale_output_without_rewriting_it(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = self.build_repo(temp_dir)
-            startup_context.sync(repo_root, home=repo_root)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
             codex = repo_root / ".codex/AGENTS.md"
             stale = codex.read_text(encoding="utf-8").replace(
                 "## ASL Supervision", "## Outdated Heading"
             )
             codex.write_text(stale, encoding="utf-8")
 
-            payload = startup_context.sync(repo_root, home=repo_root, check=True)
+            payload = startup_context.sync(
+                repo_root, home=repo_root, env=HARNESS_ENV, check=True
+            )
 
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["stale"], [".codex/AGENTS.md"])
@@ -312,9 +314,49 @@ class StartupContextRendererTests(unittest.TestCase):
         self.assertTrue(payload["ok"], payload["stale"])
 
     def test_card_stays_under_the_always_loaded_line_ceiling(self) -> None:
-        for target in startup_context.CONTEXT_TARGETS:
-            block = startup_context.render_block(target.harness)
-            self.assertLessEqual(len(block.splitlines()), 20, target.installed_path)
+        for harness in startup_context.CONTEXT_HARNESSES:
+            block = startup_context.render_block(harness)
+            self.assertLessEqual(len(block.splitlines()), 20, harness)
+
+    def test_absent_harness_roots_are_skipped_and_never_created(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir) / "home"
+            (home / ".codex").mkdir(parents=True)
+
+            payload = startup_context.sync(REPO_ROOT, home=home, check=True, env={})
+            written = startup_context.sync(REPO_ROOT, home=home, env={})
+
+            self.assertEqual(
+                [record["path"] for record in payload["files"]][:1],
+                [".codex/AGENTS.md"],
+            )
+            self.assertIn(".codex/AGENTS.md", written["written"])
+            self.assertFalse((home / ".claude").exists())
+            self.assertFalse((home / ".claude-personal").exists())
+            self.assertEqual(
+                [root["path"] for root in payload["harness_roots"]["found"]],
+                [".codex"],
+            )
+            self.assertIn(
+                {"path": "~/.claude", "reason": "not present"},
+                payload["harness_roots"]["skipped"],
+            )
+
+    def test_extra_claude_roots_come_from_the_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir) / "home"
+            (home / ".claude-work").mkdir(parents=True)
+
+            startup_context.sync(
+                REPO_ROOT,
+                home=home,
+                env={"CLAUDE_CONFIG_DIR": str(home / ".claude-work")},
+            )
+
+            self.assertEqual(
+                (home / ".claude-work/CLAUDE.md").read_text(encoding="utf-8"),
+                startup_context.render_block("claude") + "\n",
+            )
 
     def test_card_commands_come_from_the_supervisor_guide(self) -> None:
         block = startup_context.render_block("claude")

@@ -22,6 +22,8 @@ from asl_workbench.transport import (
 )
 from tests import support_workbench_remote_reads as fixtures
 
+ASL_TEST_PORTABLE = True
+
 
 class LaneTests(unittest.TestCase):
     """Detail traffic beside the cycle, never inside it and never above it."""

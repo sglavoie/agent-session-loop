@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F403, F405, I001
 """Bidirectional stream-JSON transport for the Claude CLI."""
 
 from .claude_stream_support import *

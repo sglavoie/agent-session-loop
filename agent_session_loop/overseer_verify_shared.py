@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F401
 """The overseer's verify: run a check the plan already declared, and no other.
 
 Every other operation in the scope moves words or commits. This one runs a

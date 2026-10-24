@@ -20,6 +20,7 @@ from . import (
     tail_models,
     tail_records,
 )
+from .cli_defaults import program_name
 from .tail_control_messages import (
     _ABORT_TERMINAL_ACTIONS,
     _abort_details,
@@ -353,7 +354,7 @@ class TailFollower:
     def _run_thread(self, follow_loop: _TailFollowLoop) -> None:
         try:
             follow_loop.run()
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001
             self._thread_error = error
         finally:
             self._done_event.set()
@@ -479,6 +480,6 @@ def tail_from_args(args: argparse.Namespace) -> int:
             follow=not args.no_follow,
         )
     except (plans_errors.PlanError, tail_models.TailError, OSError) as error:
-        print(f"agent-session-loop tail: {error}", file=sys.stderr)
+        print(f"{program_name()} tail: {error}", file=sys.stderr)
         return 1
     return 0

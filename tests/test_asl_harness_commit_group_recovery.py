@@ -24,6 +24,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class PausedGroupCommitRecoveryTests(FakeHarnessIntegrationBase):
     #: The registered workspace the settlement regressions run in. Two

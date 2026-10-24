@@ -1,5 +1,6 @@
 from .asl_run_inputs_support import *
 from .asl_run_inputs_support import _args, _RecordingResolver
+from .support_base import isolated_home
 
 
 class RunInputsBoundaryTests(unittest.TestCase):
@@ -47,6 +48,11 @@ class RunInputsBoundaryTests(unittest.TestCase):
 
 class RunAdmissionTests(unittest.TestCase):
     """``_validate_run_inputs`` refuses in a fixed order, for stated reasons."""
+
+    def setUp(self) -> None:
+        # The home directory is one of the refused external roots; refuse one
+        # this test owns rather than reading the developer's.
+        isolated_home(self)
 
     def test_external_roots_are_explicit_canonical_directories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

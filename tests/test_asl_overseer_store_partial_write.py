@@ -19,6 +19,8 @@ from tests.asl_overseer_store_support import (
     _LedgerCase,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class PartialWriteTests(_LedgerCase):
     """A write that fails partway leaves nothing behind."""
@@ -108,6 +110,38 @@ class PartialWriteTests(_LedgerCase):
         view = self.ledger.read_evidence(plan_dir=PLAN, grant=grant)
         self.assertEqual(len(view.records), 1)
         self.assertEqual(view.withheld, 0)
+
+    def test_a_failed_commit_rolls_back_and_frees_the_connection(self) -> None:
+        """A COMMIT that fails must not leave the transaction open: every later
+        ``BEGIN IMMEDIATE`` on the connection would then refuse."""
+        self.ledger.note_policy(config_fingerprint=FINGERPRINT)
+        flaky = self._make_flaky(fail_on="COMMIT")
+        with self.assertRaises(sqlite3.OperationalError):
+            self.ledger.note_policy(config_fingerprint=NEXT_FINGERPRINT)
+
+        self.assertFalse(flaky._connection.in_transaction)
+        self.assertEqual(self.ledger.current_epoch().config_fingerprint, FINGERPRINT)
+        self.ledger.note_policy(config_fingerprint=NEXT_FINGERPRINT)
+        self.assertEqual(
+            self.ledger.current_epoch().config_fingerprint, NEXT_FINGERPRINT
+        )
+
+    def test_a_rollback_that_cannot_run_does_not_mask_the_failure(self) -> None:
+        self.ledger.note_policy(config_fingerprint=FINGERPRINT)
+        real = self.ledger._connection
+
+        class _NoRollback(_FlakyConnection):
+            def execute(self, sql, parameters=()):
+                if sql.strip() == "ROLLBACK":
+                    self._connection.execute(sql, parameters)
+                    raise sqlite3.OperationalError("no transaction is active")
+                return super().execute(sql, parameters)
+
+        self.ledger._connection = _NoRollback(real, fail_on="INSERT INTO policy_epoch")
+        self.addCleanup(setattr, self.ledger, "_connection", real)
+        with self.assertRaises(sqlite3.OperationalError) as raised:
+            self.ledger.note_policy(config_fingerprint=NEXT_FINGERPRINT)
+        self.assertEqual("disk I/O error", str(raised.exception))
 
 
 class RevocationTests(_LedgerCase):

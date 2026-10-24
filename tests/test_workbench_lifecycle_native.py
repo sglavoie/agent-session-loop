@@ -9,6 +9,8 @@ from unittest import mock
 from asl_workbench import lifecycle_common as common
 from asl_workbench import lifecycle_native
 
+ASL_TEST_PORTABLE = True
+
 
 class _Clock:
     def __init__(self) -> None:

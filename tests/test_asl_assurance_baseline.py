@@ -13,6 +13,8 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+ASL_TEST_PORTABLE = True
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "assurance_baseline"
 MATRIX_PATH = FIXTURE_DIR / "coverage_matrix.json"

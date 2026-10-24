@@ -52,6 +52,8 @@ from tests.support_workbench_remote_actions import (
     iso,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class PerformerTests(PerformerTestCase):
     """Every method reaches the code the browser's own route reaches."""

@@ -8,6 +8,7 @@ from dataclasses import asdict
 from typing import Any
 
 from . import plans_errors, plans_session_ids, responses
+from .cli_defaults import program_name
 from .contracts import CompletionContract, read_completion_contract
 from .plans_session_ids import SessionId
 from .verification_models import (
@@ -216,7 +217,7 @@ def _emit_verify_error(
             )
         )
     else:
-        print(f"agent-session-loop verify: {error}", file=sys.stderr)
+        print(f"{program_name()} verify: {error}", file=sys.stderr)
 
 
 def verify_from_args(args: argparse.Namespace) -> int:

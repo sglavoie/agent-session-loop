@@ -33,7 +33,7 @@ def _is_exact_worktree_root(repository: Path) -> bool:
     """Report whether Git calls `repository` its own worktree root."""
     try:
         result = evidence_git._run_git(repository, ["rev-parse", "--show-toplevel"])
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
     if result.returncode != 0:
         return False

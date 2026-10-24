@@ -37,6 +37,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class RunVerificationInterruptTests(unittest.TestCase):
     """Direct ``run_locked`` invocation tests covering KeyboardInterrupt

@@ -20,6 +20,8 @@ from .support_workbench_http_3 import (
     RemoteProviderTests,
 )
 
+ASL_TEST_PORTABLE = True
+
 for _test_case in (
     EnvelopeTests,
     RouteTableTests,

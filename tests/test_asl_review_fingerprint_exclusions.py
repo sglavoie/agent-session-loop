@@ -12,6 +12,8 @@ from tests.support import (
     git_stdout,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewFingerprintExclusionTests(ReviewFingerprintBase):
     """Fingerprint exclusions, nested working directories, and ignored files."""

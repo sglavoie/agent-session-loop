@@ -173,10 +173,7 @@ def _external_path_digest(path: Path) -> dict[str, Any]:
         count = 0
         try:
             with os.scandir(path) as entries:
-                rows = sorted(
-                    (entry.name, entry)
-                    for entry in entries  # noqa: C414
-                )
+                rows = sorted((entry.name, entry) for entry in entries)
             for name, entry in rows:
                 count += 1
                 if count > EXTERNAL_WRITE_MANIFEST_MAX_ENTRIES:

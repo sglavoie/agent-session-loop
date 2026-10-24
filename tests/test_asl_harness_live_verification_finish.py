@@ -29,6 +29,8 @@ from tests.support import (
     write_process_tree_scripts,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class LiveVerificationFinishTests(FakeHarnessIntegrationBase):
     def test_live_verification_finish_drops_late_check_callbacks(self) -> None:

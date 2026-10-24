@@ -29,6 +29,8 @@ from agent_session_loop import (
 )
 from tests import support_asl_codex_app_server as fixtures
 
+ASL_TEST_LANE = "integration"
+
 
 class HandshakeTests(unittest.TestCase):
     """What the client says before a turn exists, and what it refuses to say."""

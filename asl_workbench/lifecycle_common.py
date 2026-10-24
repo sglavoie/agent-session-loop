@@ -12,12 +12,17 @@ from pathlib import Path
 
 from .compatibility import PACKAGE_NAME
 from .installation import (
+    LAUNCHD_LABEL_PREFIX_VARIABLE,
     InstallationError,
+    site_environment,
+    site_setting,
 )
 
 #: The native identifiers. Owned names, not descriptions: they are how an
-#: already-installed launch agent and unit are recognised.
-LABEL = "com.sglavoie.asl-companion"
+#: already-installed launch agent and unit are recognised. The label's
+#: reverse-DNS prefix comes from ``$ASL_LAUNCHD_LABEL_PREFIX``; its default is
+#: the prefix already-installed agents carry.
+LABEL = site_setting(LAUNCHD_LABEL_PREFIX_VARIABLE) + ".asl-companion"
 
 
 UNIT = "asl-companion.service"
@@ -174,7 +179,7 @@ def python_check(python: str) -> tuple[int, ...]:
     ``sqlite3`` is imported by the probe because an interpreter without it
     would fail at the first observation rather than here.
     """
-    from .compatibility import (  # noqa: PLC0415 - kept beside the check it feeds
+    from .compatibility import (
         MAXIMUM_PYTHON_SERIES,
         MINIMUM_PYTHON_VERSION,
     )
@@ -197,7 +202,11 @@ def service_environment(role: str, *, asl: str | None = None) -> dict[str, str]:
 
     No inherited environment: a service manager starts these from a session
     nobody chose, and a ``PATH`` or a ``PYTHON*`` variable picked up from it is
-    how a release runs against an interpreter it was never checked with.
+    how a release runs against an interpreter it was never checked with. The
+    one inheritance is the site overrides the installing shell set
+    (:func:`~asl_workbench.installation.site_environment`), because they name
+    the deployment's own hosts and the service would otherwise rebuild its
+    site from placeholders.
     """
     paths = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
     if role == ROLE_CONNECTOR and asl:
@@ -207,6 +216,7 @@ def service_environment(role: str, *, asl: str | None = None) -> dict[str, str]:
         "PATH": ":".join(paths),
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONUNBUFFERED": "1",
+        **site_environment(),
     }
 
 

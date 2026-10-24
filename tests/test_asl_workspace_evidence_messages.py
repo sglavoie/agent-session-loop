@@ -13,6 +13,8 @@ from agent_session_loop import (
 )
 from tests.asl_workspace_evidence_support import _workspace
 
+ASL_TEST_PORTABLE = True
+
 
 class WorkspaceUnavailableSummaryTests(unittest.TestCase):
     def test_a_repository_is_named_by_its_alias_and_failing_node(self) -> None:

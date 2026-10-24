@@ -14,6 +14,8 @@ from tests.support import REPO_ROOT
 
 from .support_asl_worker_verification import FIXTURE_DIR, evaluate
 
+ASL_TEST_LANE = "integration"
+
 # --------------------------------------------------------------------------
 # The fixture repository and its scenarios
 # --------------------------------------------------------------------------

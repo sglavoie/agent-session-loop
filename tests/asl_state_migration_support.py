@@ -6,7 +6,6 @@ path hash after a move, and the ``migrate-state`` command that relocates them.
 
 from __future__ import annotations
 
-# ruff: noqa: F401
 import io
 import json
 import os

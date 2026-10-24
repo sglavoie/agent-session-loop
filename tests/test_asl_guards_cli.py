@@ -21,6 +21,8 @@ from agent_session_loop import (
 )
 from tests.support import _write_lock_file, _write_state_payload, write_plan
 
+ASL_TEST_LANE = "integration"
+
 
 class GuardCliTests(unittest.TestCase):
     """The operator surface: refuses without a run, waits for enforcement."""

@@ -1,4 +1,3 @@
-# ruff: noqa: F401
 """Prove the deployment gate refuses what it claims to refuse.
 
 ``tests/workbench_acceptance.py`` is the one module in this tree whose verdict

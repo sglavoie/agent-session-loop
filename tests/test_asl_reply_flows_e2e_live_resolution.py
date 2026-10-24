@@ -21,6 +21,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class EndToEndLiveResolutionTests(rfs.EndToEndReplyResumeCase):
     """Subprocess coverage for pauses and live mailbox resolutions."""

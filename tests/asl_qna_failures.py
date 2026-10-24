@@ -1,6 +1,7 @@
 # ruff: noqa: F403, F405, I001
 from .asl_qna_context_support import _QnAContextFixture
 from .test_asl_qna_shared import *
+from .support_base import load_section_tests
 
 
 class QnAFailureTests(_QnAContextFixture):
@@ -177,17 +178,4 @@ def load_tests(
     loader: unittest.TestLoader, tests: unittest.TestSuite, pattern: str | None
 ) -> unittest.TestSuite:
     """Load only test cases defined in this focused section."""
-    suite = unittest.TestSuite()
-    cases = sorted(
-        (
-            value
-            for value in globals().values()
-            if isinstance(value, type)
-            and issubclass(value, unittest.TestCase)
-            and value.__module__ == __name__
-        ),
-        key=lambda case: case.__name__,
-    )
-    for case in cases:
-        suite.addTests(loader.loadTestsFromTestCase(case))
-    return suite
+    return load_section_tests(loader, __name__)

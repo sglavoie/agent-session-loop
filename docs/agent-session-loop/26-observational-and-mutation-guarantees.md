@@ -223,13 +223,18 @@ just test-fast
 just test-portable
 just test-all
 just lint
-python3 /Users/dev/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/session-resplit
 just sync-skills
 python3 -m py_compile agent_session_loop/*.py bin/.local/bin/agent-session-loop bin/.local/bin/asl
-just build-ccl
 just all
 just verify-asl-install
 ```
+
+A changed skill's frontmatter can additionally be checked with whatever
+skill validator your harness ships (for example a skill-creator
+`quick_validate.py` pointed at `skills/<name>`). When the change also touches
+the Agent Mux client, rebuild it from the
+[Agent Mux](https://github.com/sglavoie/agentmux) checkout with that
+repository's `just build-ccl`; it is not a recipe here.
 
 The test suite is organized as subsystem modules (`tests/test_asl_*.py`,
 stdlib `unittest` only) sharing fixtures through `tests/support.py`.
@@ -330,7 +335,8 @@ The bridge's cross-language contract is checked from both sides.
 `tests/fixtures/agent_mux_contract/` still describes what
 the `agent_session_loop.bridge_*` modules produce and that the manifest digests match the
 files beside them. The other half runs in the client repository: after copying
-the corpus across unchanged, `just asl-integration` in Agent Mux launches the
+the corpus across unchanged, `just asl-integration`, run in the Agent Mux
+checkout (it is an Agent Mux recipe, not one here), launches the
 installed `asl bridge serve --stdio --protocol 2` against a throwaway plan and
 state root and checks the hello, the contract-set ID against the vendored
 corpus, the method and mutation lists against the manifest, the handshake and
@@ -339,8 +345,9 @@ Workbench URL shape, and a clean exit. That recipe is opt-in there and fails
 rather than skips when ASL is missing or incompatible, so an unrun check is
 never mistaken for a passing one.
 
-Releases of the pair are gated from the client side by
-`just paired-release-gate asl_root=… signing_key=…`, which runs this
+Releases of the pair are gated from the client side by Agent Mux's
+`just paired-release-gate asl_root=… signing_key=…`, run in the Agent Mux
+checkout, which runs this
 repository's `just test-all`, `just lint`, `just reliability-stress`,
 `just all`, and `just verify-asl-install` alongside Agent Mux's own gates,
 compares `tests/fixtures/agent_mux_contract/` against the vendored copy byte

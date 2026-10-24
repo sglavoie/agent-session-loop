@@ -1,16 +1,11 @@
 # Agent Session Loop
 
-For a paused review whose retained changes consist only of existing remote-ref
-updates, `asl accept-ref-updates PLAN_DIR --session SESSION_ID --json` previews
-the evidence. After explicit operator approval, repeat it with `--accept DIGEST
---reason 'Operator approved these ref updates'` using the preview's exact
-`evidence_digest`. Acceptance requires unchanged reviewed evidence, no active
-runner, complete registered repository snapshots, clean current worktrees, and
-refs still at the recorded values. It records the operator decision without
-changing session scope or completing the review. Resume with the original
-`asl run` command; ordinary readiness and write guards still apply. Source,
-local branch, tag, topology, and unavailable-evidence failures are ineligible.
-See [the recovery contract](../agent_session_loop/README.md#accepting-remote-ref-updates-after-a-paused-review).
+Agent Session Loop (`asl`) runs a split agent session plan one session at a
+time: it prepares and preflights the plan, drives a coding-agent harness
+(Codex, Claude, or Copilot) through each session, verifies and optionally
+commits the result, and pauses with a structured reason whenever a human or a
+supervising agent has to decide something. This file is the index of the full
+reference; the [operator guide](asl-guide.md) is the shorter tour.
 
 `agent-session-loop` repeatedly invokes an agent harness against a split
 session plan directory. The default short executable alias is `asl`. Each
@@ -44,16 +39,16 @@ The full reference is split into the files below, in reading order. Section anch
 
 - [Setup](agent-session-loop/01-setup.md)
 - [Commands](agent-session-loop/02-commands.md)
-- [Live Mailbox and Future-Turn Model Control](agent-session-loop/03-live-mailbox-and-future-turn-model-contr.md)
+- [Live Mailbox and Future-Turn Model Control](agent-session-loop/03-live-mailbox-and-future-turn-model-control.md)
 - [Live reply wait and fallback](agent-session-loop/04-live-reply-wait-and-fallback.md)
 - [Command Behavior (continued)](agent-session-loop/05-command-behavior-continued.md)
 - [Terminal success semantics](agent-session-loop/06-terminal-success-semantics.md)
-- [Terminal success semantics (continued)](agent-session-loop/07-terminal-success-semantics-continued.md)
-- [Terminal success semantics (continued)](agent-session-loop/08-terminal-success-semantics-continued.md)
+- [Review repair cycles, preflight, and run controls](agent-session-loop/07-review-cycles-preflight-and-run-controls.md)
+- [Redirect delivery and recovery](agent-session-loop/08-redirect-delivery-and-recovery.md)
 - [Run-scoped guards](agent-session-loop/09-run-scoped-guards.md)
 - [Repositories](agent-session-loop/10-repositories.md)
-- [Session 01](agent-session-loop/11-session-01.md)
-- [Assurance in metrics, retention, and consumers](agent-session-loop/12-assurance-in-metrics-retention-and-consu.md)
+- [Plan preparation, metrics, replies, and the assurance ledger](agent-session-loop/11-prepare-metrics-replies-and-assurance.md)
+- [Assurance in metrics, retention, and consumers](agent-session-loop/12-assurance-in-metrics-retention-and-consumers.md)
 - [Harness Commands](agent-session-loop/13-harness-commands.md)
 - [Safety Modes](agent-session-loop/14-safety-modes.md)
 - [Conversation continuity](agent-session-loop/15-conversation-continuity.md)

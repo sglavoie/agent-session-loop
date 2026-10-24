@@ -125,7 +125,7 @@ def remove_worktree(
         # Verify this registration, including when a failed add never created
         # it. Never prune unrelated worktrees as a side effect of audit cleanup.
         remaining = linked_worktrees(root, _run_git_fn=_run_git_fn)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
     finally:
         evidence_git._GIT_RUNNER.reset(token)

@@ -20,6 +20,8 @@ from tests.support_asl_overseer_decisions import (
     RUN,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class ScopeTests(unittest.TestCase):
     """Coverage is one rule, and an empty field is never a wildcard on a target."""

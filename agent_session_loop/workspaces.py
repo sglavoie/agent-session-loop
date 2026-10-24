@@ -11,12 +11,13 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import unicodedata
 import urllib.parse
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
+
+from . import git_subprocess
 
 REPOSITORY_ALIAS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 REGISTRY_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -398,15 +399,11 @@ class WorkspaceBinding:
 
 def _git_stdout(root: Path, *args: str) -> str:
     try:
-        completed = subprocess.run(
-            ["git", "-C", str(root), *args],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        completed = git_subprocess.run_git(root, args)
     except FileNotFoundError as error:
         raise WorkspaceError("git executable not found on PATH") from error
     except OSError as error:
+        # A timeout included: git_subprocess.GitTimeoutError is an OSError.
         raise WorkspaceError("could not inspect repository with Git") from error
     if completed.returncode != 0:
         raise WorkspaceError("Git repository inspection failed")

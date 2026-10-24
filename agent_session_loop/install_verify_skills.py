@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from . import startup_context
-from .install_verify_common import SKILL_INSTALL_DIRS, failure, success
+from .install_verify_common import HarnessRoot, failure, success
 
 ASL_SKILL_REQUIRED_TEXT = (
     "Read `references/supervisor-context.md` in this skill directory before"
@@ -37,10 +38,24 @@ def _expected_skill_dirs(repo_root: Path) -> list[Path]:
     )
 
 
-def _check_skill_links(repo_root: Path, home: Path) -> list[dict[str, Any]]:
-    checks: list[dict[str, Any]] = []
-    for install_dir in SKILL_INSTALL_DIRS:
-        install_root = home / install_dir
+def _check_harness_roots(home: Path, roots: Sequence[HarnessRoot]) -> dict[str, Any]:
+    """Report which harness roots verification covers, failing when none exist."""
+    if not roots:
+        return failure(
+            "harness-roots",
+            f"no harness root (~/.claude, ~/.codex, ~/.copilot, $CLAUDE_CONFIG_DIR "
+            f"or $ASL_CLAUDE_CONFIG_DIRS) exists under {home}",
+        )
+    names = ", ".join(f"~/{root.relative} ({root.harness})" for root in roots)
+    return success("harness-roots", f"verifying {names}")
+
+
+def _check_skill_links(
+    repo_root: Path, home: Path, roots: Sequence[HarnessRoot]
+) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = [_check_harness_roots(home, roots)]
+    for root in roots:
+        install_root = home / root.skills_dir
         for skill_dir in _expected_skill_dirs(repo_root):
             installed = install_root / skill_dir.name
             expected = skill_dir.resolve()
@@ -84,10 +99,12 @@ def _check_skill_links(repo_root: Path, home: Path) -> list[dict[str, Any]]:
     return checks
 
 
-def _check_session_run_content(home: Path) -> list[dict[str, Any]]:
+def _check_session_run_content(
+    home: Path, roots: Sequence[HarnessRoot]
+) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
-    for install_dir in SKILL_INSTALL_DIRS:
-        skill_path = home / install_dir / "session-run" / "SKILL.md"
+    for root in roots:
+        skill_path = home / root.skills_dir / "session-run" / "SKILL.md"
         try:
             text = skill_path.read_text(encoding="utf-8")
         except OSError as error:
@@ -129,9 +146,11 @@ def _check_session_run_content(home: Path) -> list[dict[str, Any]]:
     return checks
 
 
-def _check_startup_context(home: Path) -> list[dict[str, Any]]:
+def _check_startup_context(
+    home: Path, roots: Sequence[HarnessRoot]
+) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
-    for target in startup_context.CONTEXT_TARGETS:
+    for target in startup_context.context_targets(roots):
         path = home / target.installed_path
         try:
             text = path.read_text(encoding="utf-8")
@@ -154,11 +173,13 @@ def _check_startup_context(home: Path) -> list[dict[str, Any]]:
     return checks
 
 
-def _check_asl_skill(repo_root: Path, home: Path) -> list[dict[str, Any]]:
+def _check_asl_skill(
+    repo_root: Path, home: Path, roots: Sequence[HarnessRoot]
+) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     expected_helper = (repo_root / "skills" / ASL_HELPER_RELATIVE_PATH).resolve()
-    for install_dir in SKILL_INSTALL_DIRS:
-        install_root = home / install_dir
+    for root in roots:
+        install_root = home / root.skills_dir
 
         skill_path = install_root / "asl/SKILL.md"
         try:

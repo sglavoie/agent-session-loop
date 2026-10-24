@@ -71,9 +71,7 @@ def table_counts(database: Path) -> dict[str, int]:
             ]
             return {
                 name: int(
-                    connection.execute(
-                        f'SELECT count(*) FROM "{name}"'  # noqa: S608 - from sqlite_master
-                    ).fetchone()[0]
+                    connection.execute(f'SELECT count(*) FROM "{name}"').fetchone()[0]
                 )
                 for name in names
             }

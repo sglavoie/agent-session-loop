@@ -29,6 +29,92 @@ from tests.support import (
 #: operator-facing summary these tests used to read from `README.md`.
 
 
+#: Markdown whose `asl ...` code spans and blocks must name real commands.
+_CLI_DOC_ROOTS = ("README.md", "agent_session_loop/README.md", "docs", "skills")
+#: `(file, snippet)` pairs knowingly exempt from the invocation scan.
+_CLI_DOC_ALLOWLIST: frozenset[tuple[str, str]] = frozenset()
+_FENCE = re.compile(r"^\s*(```|~~~)")
+_INLINE_CODE = re.compile(r"(`+)(.+?)\1")
+#: An `asl` at command position: the start of the snippet, or after a pipe,
+#: `&&`, or `$(`, optionally behind a `$ ` prompt and `NAME=value` prefixes.
+_ASL_INVOCATION = re.compile(
+    r"(?:^|\||&&|\$\()\s*(?:\$\s+)?(?:[A-Z_][A-Z0-9_]*=\S+\s+)*asl\s+(.*)$"
+)
+_WORD = re.compile(r"[a-z][a-z0-9-]*")
+_LONG_FLAG = re.compile(r"--[a-z][a-z0-9-]*")
+
+
+def _cli_surface() -> dict[tuple[str, ...], set[str]]:
+    """Map every command path of `build_parser()` to its long flags."""
+    surface: dict[tuple[str, ...], set[str]] = {}
+
+    def walk(parser: argparse.ArgumentParser, path: tuple[str, ...]) -> None:
+        flags: set[str] = set()
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for name, child in action.choices.items():
+                    walk(child, (*path, name))
+            else:
+                flags.update(o for o in action.option_strings if o.startswith("--"))
+        surface[path] = flags
+
+    walk(cli.build_parser(), ())
+    return surface
+
+
+def _code_snippets(text: str) -> list[tuple[int, str]]:
+    """Return `(line, code)` for fenced-block lines and inline code spans."""
+    snippets: list[tuple[int, str]] = []
+    in_fence = False
+    for number, line in enumerate(text.splitlines(), 1):
+        if _FENCE.match(line):
+            in_fence = not in_fence
+        elif in_fence:
+            snippets.append((number, line))
+        else:
+            snippets.extend((number, m.group(2)) for m in _INLINE_CODE.finditer(line))
+    return snippets
+
+
+def _invocation_errors(
+    snippet: str, surface: dict[tuple[str, ...], set[str]]
+) -> list[str]:
+    """Validate each `asl <command> [<sub>] [--flag]` invocation in `snippet`.
+
+    Placeholders (`PLAN_DIR`, `<plan-dir>`, `...`) are positional words the
+    scan never treats as commands; quoting, pipes, and comments end the
+    invocation so a wrapper's own flags are not charged to `asl`.
+    """
+    errors: list[str] = []
+    for match in _ASL_INVOCATION.finditer(snippet):
+        words = re.split(r"[|;&)'\"`#]", match.group(1), maxsplit=1)[0].split()
+        path: tuple[str, ...] = ()
+        index = 0
+        while index < len(words) and (*path, words[index]) in surface:
+            path = (*path, words[index])
+            index += 1
+        if not path:
+            if words and _WORD.fullmatch(words[0]):
+                errors.append(f"unknown command `asl {words[0]}`")
+            continue
+        has_children = any(
+            len(key) == len(path) + 1 and key[: len(path)] == path for key in surface
+        )
+        if has_children and index < len(words) and _WORD.fullmatch(words[index]):
+            errors.append(f"unknown subcommand `asl {' '.join(path)} {words[index]}`")
+            continue
+        # A group-level mention (`asl control --wait`) may name any flag its
+        # leaves accept.
+        allowed = {"--help"}.union(
+            *(flags for key, flags in surface.items() if key[: len(path)] == path)
+        )
+        for word in words[index:]:
+            flag = word.split("=", 1)[0]
+            if _LONG_FLAG.fullmatch(flag) and flag not in allowed:
+                errors.append(f"`asl {' '.join(path)}` has no `{flag}`")
+    return errors
+
+
 class AuthoritativeCliDocsTests(unittest.TestCase):
     docs: str
 
@@ -68,6 +154,58 @@ class AuthoritativeCliDocsTests(unittest.TestCase):
             "--inline-stdin) [--cwd ROOT] [--output PATH] "
             "[--state-dir DIR] [--json]",
             self.docs,
+        )
+
+    def test_documented_asl_invocations_exist_in_the_parser(self) -> None:
+        surface = _cli_surface()
+        files: list[str] = []
+        for root in _CLI_DOC_ROOTS:
+            path = REPO_ROOT / root
+            if path.is_dir():
+                files.extend(
+                    str(md.relative_to(REPO_ROOT)) for md in sorted(path.rglob("*.md"))
+                )
+            else:
+                files.append(root)
+        self.assertGreater(len(files), 20)
+        failures: list[str] = []
+        scanned = 0
+        for relative in files:
+            text = (REPO_ROOT / relative).read_text(encoding="utf-8")
+            for number, snippet in _code_snippets(text):
+                if (relative, snippet.strip()) in _CLI_DOC_ALLOWLIST:
+                    continue
+                scanned += "asl " in snippet
+                failures.extend(
+                    f"{relative}:{number}: {error}"
+                    for error in _invocation_errors(snippet, surface)
+                )
+        self.assertGreater(scanned, 200, "the invocation scan found almost nothing")
+        self.assertEqual(failures, [], "\n".join(failures))
+
+    def test_invocation_scan_flags_unknown_commands_and_flags(self) -> None:
+        surface = _cli_surface()
+        self.assertEqual(_invocation_errors("asl status PLAN_DIR --json", surface), [])
+        self.assertEqual(
+            _invocation_errors("asl control --wait", surface), [], "group-level flag"
+        )
+        self.assertEqual(
+            _invocation_errors(
+                "helper --command 'asl run PLAN_DIR' --supervision-id X", surface
+            ),
+            [],
+        )
+        self.assertEqual(
+            _invocation_errors("asl verify-install", surface),
+            ["unknown command `asl verify-install`"],
+        )
+        self.assertEqual(
+            _invocation_errors("asl tail PLAN_DIR --follow", surface),
+            ["`asl tail` has no `--follow`"],
+        )
+        self.assertEqual(
+            _invocation_errors("asl control stop PLAN_DIR", surface),
+            ["unknown subcommand `asl control stop`"],
         )
 
     def test_registry_migration_follow_up_order_is_documented(self) -> None:

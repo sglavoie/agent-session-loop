@@ -315,7 +315,7 @@ class AppServerProtocol(AppServerTransport):
             return
         try:
             sink(thread_id)
-        except Exception as error:  # noqa: BLE001 - any failure is a refusal
+        except Exception as error:
             raise _ConversationNotRecorded(
                 str(error) or type(error).__name__
             ) from error
@@ -327,7 +327,7 @@ class AppServerProtocol(AppServerTransport):
             return
         try:
             gate()
-        except Exception as error:  # noqa: BLE001 - any failure is a refusal
+        except Exception as error:
             raise _SubmissionRefused(str(error) or type(error).__name__) from error
 
     def _note_submission_in_flight(self) -> None:

@@ -23,6 +23,8 @@ from tests.workbench_staging_support import (
     complete_journal,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class JournalRefusals(TemporaryCase):
     """A report is what was observed, or it is not a report."""

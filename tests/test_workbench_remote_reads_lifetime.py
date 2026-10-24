@@ -13,6 +13,8 @@ from asl_workbench.transport import (
 )
 from tests import support_workbench_remote_reads as fixtures
 
+ASL_TEST_PORTABLE = True
+
 
 class DeadlineTests(unittest.TestCase):
     """One slow read is one slow read."""

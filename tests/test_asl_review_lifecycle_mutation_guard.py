@@ -21,6 +21,8 @@ from tests.support import (
     write_completed_review_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class RunReviewMutationGuardTests(MutatingFakeClaudeMixin):
     """Review mutation guard exclusions and ignored-file handling in full runs."""

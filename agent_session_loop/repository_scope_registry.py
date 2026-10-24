@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import git_subprocess
 from .repository_scope import nearest_git_root, resolve_target
 from .repository_scope_targets import PathTarget
 from .workspaces import (
@@ -141,14 +141,9 @@ def _unique_alias(repo_root: Path, used: set[str]) -> str:
 
 def _origin_of(repo_root: Path) -> str | None:
     try:
-        completed = subprocess.run(
-            ["git", "-C", str(repo_root), "remote", "get-url", "origin"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+        completed = git_subprocess.run_git(repo_root, ["remote", "get-url", "origin"])
     except OSError:
+        # A missing git, or one that timed out (GitTimeoutError): no origin.
         return None
     if completed.returncode != 0:
         return None

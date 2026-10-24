@@ -46,6 +46,8 @@ from tests import support_asl_run_loop_view as run_loop_view
 from .support import assert_no_runner_import
 from .support_asl_turn_preparation import ENTRY_POINTS, PreparationTestCase
 
+ASL_TEST_PORTABLE = True
+
 
 class PreparationBoundaryTests(unittest.TestCase):
     """The boundary's own shape, independent of any session it prepares."""

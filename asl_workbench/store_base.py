@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Self
 
@@ -95,7 +95,7 @@ class StoreBase:
         return self._policy
 
     # -- transactions ----------------------------------------------------
-    @contextmanager
+    @contextlib.contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
         """One all-or-nothing unit of work, with the write lock taken up front.
 
@@ -109,12 +109,18 @@ class StoreBase:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 yield self._connection
+                # Inside the try: a COMMIT that fails (SQLITE_BUSY, a full
+                # disk) leaves the transaction open, and every later
+                # ``BEGIN IMMEDIATE`` on this connection would then refuse.
+                self._connection.execute("COMMIT")
             except BaseException:
-                self._connection.execute("ROLLBACK")
+                # A rollback that cannot run ("no transaction is active" after
+                # SQLite already aborted it) must not mask the original error.
+                with contextlib.suppress(sqlite3.Error):
+                    self._connection.execute("ROLLBACK")
                 raise
-            self._connection.execute("COMMIT")
 
-    @contextmanager
+    @contextlib.contextmanager
     def reading(self) -> Iterator[sqlite3.Connection]:
         """The connection, held against concurrent writers, for reads only."""
         with self._lock:

@@ -26,6 +26,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class LegacyImplementationGuardTests(unittest.TestCase):
     def setUp(self) -> None:

@@ -11,7 +11,7 @@ from agent_session_loop import (
     run_coordination_constants,
     state_payloads,
 )
-from tests.asl_docs_support import ASL_GUIDE, read_repo_text
+from tests.asl_docs_support import ASL_GUIDE, read_asl_skill_bundle, read_repo_text
 
 #: The ASL operator guide moved out of the repository README; it carries the
 #: operator-facing summary these tests used to read from `README.md`.
@@ -311,7 +311,9 @@ class LiveContractDocsTests(unittest.TestCase):
 
     def test_guide_and_autopilot_skill_match_live_contract(self) -> None:
         guide = self._read(ASL_GUIDE)
-        skill = self._read("skills/asl/SKILL.md")
+        # The live-mailbox contract spans the skill and its on-demand
+        # references (question closure, helper watcher and lease, controls).
+        skill = read_asl_skill_bundle()
 
         for marker in (
             "### Live ASL supervision",

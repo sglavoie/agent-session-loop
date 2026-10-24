@@ -64,6 +64,14 @@ def _build_git_template() -> Path:
                 capture_output=True,
                 check=True,
             )
+        # `git init` seeds a dozen inert `*.sample` hooks and a `description`
+        # nothing reads. They were over half the files every copy creates, and
+        # creating a file is what each `init_git_repo` call pays for, so the
+        # template drops them. The empty `hooks/` directory stays: tests
+        # install real hooks into it.
+        for sample in (repo_dir / ".git" / "hooks").glob("*.sample"):
+            sample.unlink()
+        (repo_dir / ".git" / "description").unlink(missing_ok=True)
         (repo_dir / "README.md").write_text("test repo\n", encoding="utf-8")
         for args in (["add", "README.md"], ["commit", "-m", "Initial commit"]):
             subprocess.run(

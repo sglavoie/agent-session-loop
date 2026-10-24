@@ -51,6 +51,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_PORTABLE = True
+
 #: The symbols this module took from the runner. The program's no-alias rule
 #: says the runner keeps none of them behind, so a re-export added later to
 #: rescue a stale patch target fails here rather than in review.

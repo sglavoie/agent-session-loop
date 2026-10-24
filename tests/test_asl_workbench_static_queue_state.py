@@ -13,6 +13,8 @@ from tests.support import (
     _http_request_raw,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchStaticQueueStateTests(support_static.WorkbenchStaticCase):
     """Cover how the queue reads, sorts and presents run state."""

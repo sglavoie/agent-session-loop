@@ -81,7 +81,7 @@ def _launch_detached(
         try:
             os.setsid()
             grandchild_pid = os.fork()
-        except BaseException:
+        except BaseException:  # noqa: BLE001
             # The parent sees EOF with no pid and reports a failed launch.
             os._exit(1)
         if grandchild_pid != 0:
@@ -96,7 +96,7 @@ def _launch_detached(
             os.close(write_fd)
             _redirect_detached_streams(stdout_path, stderr_path)
             exit_code = child()
-        except BaseException:
+        except BaseException:  # noqa: BLE001
             traceback.print_exc()
         finally:
             with contextlib.suppress(BaseException):

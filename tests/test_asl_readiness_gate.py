@@ -27,7 +27,6 @@ exists to force.
 
 from __future__ import annotations
 
-import ast
 import inspect
 import tempfile
 import unittest
@@ -50,6 +49,9 @@ from agent_session_loop import (
     state,
 )
 from tests.support import assert_no_runner_import, write_plan
+from tests.support_base import durable_write_receivers as _durable_write_receivers
+
+ASL_TEST_PORTABLE = True
 
 _GATE_MODULES = (readiness_gate, readiness_gate_reopen, readiness_gate_repair)
 
@@ -80,19 +82,6 @@ MOVED_SYMBOLS = (
 #: names: a private name here would be a name every terminal path reaches
 #: around.
 RENAMED_SYMBOLS = {"_write_readiness_state": "write_readiness_state"}
-
-
-def _durable_write_receivers(source: str) -> set[str]:
-    """Every receiver of a ``write_state`` or ``append_event`` call, as source."""
-    tree = ast.parse(source)
-    receivers: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            continue
-        if node.func.attr not in {"write_state", "append_event"}:
-            continue
-        receivers.add(ast.unparse(node.func.value))
-    return receivers
 
 
 class _RecordingPersistence(run_persistence._RunPersistence):

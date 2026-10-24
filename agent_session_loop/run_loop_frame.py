@@ -31,6 +31,10 @@ class RunFrame:
     phase hands to a later one, and each is typed where it is built.
     """
 
+    #: Declared (never assigned here) because a method assigns it: mypy would
+    #: otherwise type the slot from ``disarm_exception_guard``'s ``None``.
+    pending_exception_guard: dict[str, Any] | None
+
     def __init__(self, **values: Any) -> None:
         self.__dict__.update(values)
 

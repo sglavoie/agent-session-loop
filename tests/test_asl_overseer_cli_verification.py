@@ -25,6 +25,8 @@ from tests.asl_overseer_cli_support import ACTION, PLAN_SESSION, REGISTERED_ORIG
 
 from .support import write_multi_repo_plan
 
+ASL_TEST_PORTABLE = True
+
 
 class VerificationOperationTests(_OverseerCase):
     """That `verify` runs a plan's own check, and refuses anything else.

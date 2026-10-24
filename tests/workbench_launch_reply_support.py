@@ -1,5 +1,5 @@
 # mypy: disable-error-code="attr-defined,name-defined"
-# ruff: noqa: F401, F403, F405, F822, I001
+# ruff: noqa: F401
 """One path for a launch, a reply, and a paused resume, whoever asked.
 
 Session 6's claim is that the local Workbench and the connector now *do the

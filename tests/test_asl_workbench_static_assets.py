@@ -14,6 +14,8 @@ from tests.support import (
     _http_request_raw,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchStaticServingTests(support_static.WorkbenchStaticCase):
     """Cover the bundled frontend's asset serving, MIME types and path safety."""

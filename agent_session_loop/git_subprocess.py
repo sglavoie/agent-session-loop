@@ -20,6 +20,13 @@ reports a missing directory as git's own non-zero exit, while ``chdir=True``
 spawns git *in* ``cwd`` and a missing directory raises before git runs. Each
 caller keeps the shape it had.
 
+Every invocation is bounded by ``timeout`` (:data:`GIT_TIMEOUT_SECONDS` unless
+the caller passes its own, or ``None`` for none). A git that outlives it -- a
+hung credential helper, a wedged network mount, a hook that never returns --
+is killed and reported as :class:`GitTimeoutError`, an :class:`OSError`, so it
+takes exactly the path a git that could not be spawned takes in each of the
+three shapes above rather than hanging the run that asked.
+
 This module imports nothing from the package, so any module may depend on it.
 It holds no test override either: :mod:`agent_session_loop.repository_evidence`
 layers its own context-variable seam over :func:`run_git_or_raise`.
@@ -27,13 +34,32 @@ layers its own context-variable seam over :func:`run_git_or_raise`.
 
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Literal, overload
 
-__all__ = ["run_git", "run_git_or_raise", "run_git_reporting"]
+__all__ = [
+    "GIT_TIMEOUT_SECONDS",
+    "GitTimeoutError",
+    "run_git",
+    "run_git_or_raise",
+    "run_git_reporting",
+]
+
+#: The default ceiling on one git invocation. Generous on purpose: it exists to
+#: turn a git that will never return into an error, not to police a slow one.
+GIT_TIMEOUT_SECONDS = 300.0
+
+
+class GitTimeoutError(OSError):
+    """A git invocation ran past its timeout and was killed.
+
+    An :class:`OSError` (``errno.ETIMEDOUT``) so every caller that already
+    treats "git could not be run" as a handled outcome handles this one too.
+    """
 
 
 def _argv(cwd: Path | str, args: Sequence[str], *, chdir: bool) -> list[str]:
@@ -51,6 +77,7 @@ def run_git(
     chdir: bool = False,
     stdin_text: str | None = None,
     env: Mapping[str, str] | None = None,
+    timeout: float | None = GIT_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]: ...
 
 
@@ -62,6 +89,7 @@ def run_git(
     decode: Literal[False],
     chdir: bool = False,
     env: Mapping[str, str] | None = None,
+    timeout: float | None = GIT_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[bytes]: ...
 
 
@@ -73,22 +101,31 @@ def run_git(
     chdir: bool = False,
     stdin_text: str | None = None,
     env: Mapping[str, str] | None = None,
+    timeout: float | None = GIT_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     """Run ``git`` once with captured output; a failed spawn propagates.
 
     ``decode=False`` keeps stdout and stderr as bytes, because text mode
     translates ``\\r\\n`` and a lone ``\\r`` to ``\\n``. ``env`` overlays the
-    ambient environment rather than replacing it.
+    ambient environment rather than replacing it. A git still running after
+    ``timeout`` seconds is killed and raises :class:`GitTimeoutError`.
     """
-    return subprocess.run(
-        _argv(cwd, args, chdir=chdir),
-        cwd=cwd if chdir else None,
-        text=decode,
-        input=stdin_text,
-        capture_output=True,
-        check=False,
-        env=None if env is None else {**os.environ, **env},
-    )
+    try:
+        return subprocess.run(
+            _argv(cwd, args, chdir=chdir),
+            cwd=cwd if chdir else None,
+            text=decode,
+            input=stdin_text,
+            capture_output=True,
+            check=False,
+            env=None if env is None else {**os.environ, **env},
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitTimeoutError(
+            errno.ETIMEDOUT,
+            f"git {' '.join(args)} did not finish within {timeout:g}s",
+        ) from exc
 
 
 @overload
@@ -98,6 +135,7 @@ def run_git_or_raise(
     *,
     error: Callable[[str], Exception],
     decode: Literal[True] = True,
+    timeout: float | None = GIT_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]: ...
 
 
@@ -108,6 +146,7 @@ def run_git_or_raise(
     *,
     error: Callable[[str], Exception],
     decode: Literal[False],
+    timeout: float | None = GIT_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[bytes]: ...
 
 
@@ -117,12 +156,13 @@ def run_git_or_raise(
     *,
     error: Callable[[str], Exception],
     decode: bool = True,
+    timeout: float | None = GIT_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
-    """Run ``git -C cwd``; a failed spawn raises ``error(message)`` instead."""
+    """Run ``git -C cwd``; a failed spawn or a timeout raises ``error(message)``."""
     try:
         if decode:
-            return run_git(cwd, args)
-        return run_git(cwd, args, decode=False)
+            return run_git(cwd, args, timeout=timeout)
+        return run_git(cwd, args, decode=False, timeout=timeout)
     except FileNotFoundError as exc:
         raise error("git executable not found on PATH") from exc
     except OSError as exc:
@@ -136,14 +176,18 @@ def run_git_reporting(
     stdin_text: str | None = None,
     env: Mapping[str, str] | None = None,
     missing_returncode: int = 127,
+    timeout: float | None = GIT_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``git`` in ``cwd``; a failed spawn becomes a non-zero result.
 
     A missing executable (or directory) reports ``missing_returncode``, any
-    other :class:`OSError` reports ``1``; stderr carries the error text.
+    other :class:`OSError` -- a timeout included -- reports ``1``; stderr
+    carries the error text.
     """
     try:
-        return run_git(cwd, args, chdir=True, stdin_text=stdin_text, env=env)
+        return run_git(
+            cwd, args, chdir=True, stdin_text=stdin_text, env=env, timeout=timeout
+        )
     except FileNotFoundError as exc:
         return subprocess.CompletedProcess(
             ["git", *args], missing_returncode, stdout="", stderr=str(exc)

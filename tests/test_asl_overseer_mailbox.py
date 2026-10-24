@@ -17,6 +17,8 @@ from tests.asl_overseer_mailbox_support import (
     _stale_first_read,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class DerivedIdentity(_MailboxCase):
     """The id is a function of the row, so a retry cannot become a message."""

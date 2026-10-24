@@ -17,6 +17,8 @@ from tests import support_asl_overseer_e2e as fixtures
 from tests.support_asl_overseer_e2e import setUpModule as setUpModule
 from tests.support_asl_overseer_e2e import tearDownModule as tearDownModule
 
+ASL_TEST_LANE = "integration"
+
 
 class HistoricalReplayTests(assertions._WorldCase):
     """The reviewed incident shapes, replayed through the whole loop."""

@@ -25,6 +25,8 @@ from .asl_bridge_server_support import (
     _Corpus,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class BridgeReplyTests(unittest.TestCase):
     def test_reply_consumes_an_in_turn_input_wait_question(self) -> None:

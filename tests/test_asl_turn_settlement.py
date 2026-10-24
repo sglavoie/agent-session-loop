@@ -50,6 +50,8 @@ from tests import support_asl_run_loop_view as run_loop_view
 from .support import assert_no_runner_import, write_plan
 from .support_asl_turn_settlement import ENTRY_POINTS, MOVED_CALLS, SettlementTestCase
 
+ASL_TEST_PORTABLE = True
+
 
 class BoundaryTests(unittest.TestCase):
     """The dependency runs one way, and the loop stays the loop's."""

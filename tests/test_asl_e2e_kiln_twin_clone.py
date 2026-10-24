@@ -37,6 +37,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class KilnTwinCloneRegressionTests(unittest.TestCase):
     """The original failure: a legacy plan reaching a same-origin sibling.

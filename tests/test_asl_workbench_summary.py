@@ -32,6 +32,8 @@ from tests.support import (
     write_review_cycle_event,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class WorkbenchSummaryTests(fixtures.WorkbenchSummaryCase):
     def test_registered_summary_exposes_workspace_and_ordered_repositories(

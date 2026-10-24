@@ -35,6 +35,8 @@ from tests.workbench_connector_support import (
     make_connector,
 )
 
+ASL_TEST_PORTABLE = True
+
 # -- Bounded retry ----------------------------------------------------------
 
 

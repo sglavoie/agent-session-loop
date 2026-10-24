@@ -125,7 +125,7 @@ class ReviewResume:
     repair_scope_gaps: tuple[Mapping[str, Any], ...] | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        payload = {
+        payload: dict[str, Any] = {
             "source_cycle": self.source_cycle,
             "review_session_id": self.review_session_id,
             "source_disposition": self.source_disposition,

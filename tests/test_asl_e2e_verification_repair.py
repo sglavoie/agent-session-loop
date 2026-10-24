@@ -34,6 +34,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class VerificationRepairLoopTests(unittest.TestCase):
     """Packet mode + fingerprint-aware verification repair (Session 10).

@@ -11,6 +11,7 @@ from . import assurance_ledger as ledger
 from . import assurance_projection as projection
 from . import responses
 from .assurance_models_primitives import AssuranceError, issue_id_number
+from .cli_defaults import program_name
 
 """Operator surface over the assurance inbox.
 
@@ -153,7 +154,7 @@ def _print_error(
             )
         )
         return 1
-    message = f"agent-session-loop {text_label}: {error}"
+    message = f"{program_name()} {text_label}: {error}"
     if hint is not None:
         message = f"{message}; {hint}"
     print(message, file=sys.stderr)
@@ -245,11 +246,11 @@ def _print_warnings(fields: dict[str, Any]) -> None:
             )
         detail = warning["detail"]
         body = head if detail is None else f"{head}: {detail}"
-        print(f"agent-session-loop assurance: warning: {body}", file=sys.stderr)
+        print(f"{program_name()} assurance: warning: {body}", file=sys.stderr)
     omitted = fields["warnings_omitted"]
     if omitted:
         print(
-            f"agent-session-loop assurance: warning: {omitted} further "
+            f"{program_name()} assurance: warning: {omitted} further "
             "unreadable ledger record(s) not shown",
             file=sys.stderr,
         )

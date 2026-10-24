@@ -19,4 +19,6 @@ from .asl_turn_execution_cases_boundary import (
 from .asl_turn_execution_cases_endings import TurnExecutorEndingTests
 from .asl_turn_execution_cases_preview import PostResultTerminationPreviewTests
 
+ASL_TEST_PORTABLE = True
+
 __all__ = [name for name in globals() if name.endswith("Tests")]

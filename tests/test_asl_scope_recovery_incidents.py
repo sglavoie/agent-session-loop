@@ -1,9 +1,9 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F403, F405
 """Recovery journal and external-change commitment tests."""
 
 from __future__ import annotations
 
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403, F405
 from tests.asl_scope_recovery_test_support import *
 
 

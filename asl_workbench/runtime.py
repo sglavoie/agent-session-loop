@@ -259,9 +259,16 @@ def run(
                     clock=time.time,
                     publisher=publisher,
                 )
+                # Wall time stamps what is stored and sent; the link's silence
+                # and a read's wait are durations, measured on the monotonic
+                # clock so the NTP step a Pi without an RTC takes after boot
+                # cannot expire them. The incident engine and the provider stay
+                # on wall time: every moment they compare against is a stored
+                # or connector-reported wall timestamp.
                 uplink = Uplink(
                     store,
                     clock=time.time,
+                    monotonic=time.monotonic,
                     connector_id=connector_id,
                     target_id=site.target_id,
                 )
@@ -338,6 +345,9 @@ def run(
                     # notice it.
                     while worker.is_alive():
                         worker.join(POLL_SECONDS)
+                        # The moment stamps what the sweep settles; how long
+                        # the link has been quiet is the uplink's own
+                        # monotonic measurement.
                         uplink.sweep(time.time())
                 finally:
                     try:

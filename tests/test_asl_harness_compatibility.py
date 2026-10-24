@@ -32,6 +32,8 @@ from tests.asl_harness_compatibility_support import (
     _write_fake_cli,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class VersionParsingTests(unittest.TestCase):
     def test_parses_each_vendor_version_sentence(self) -> None:

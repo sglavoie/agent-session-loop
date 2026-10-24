@@ -139,7 +139,7 @@ def _invoke_run(
         if observed_status_probe is not None:
             try:
                 escalation_status = observed_status_probe()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 escalation_status = None
         marker = {
             "ok": False,
@@ -208,7 +208,7 @@ def _invoke_run(
             if tailer is not None:
                 try:
                     snapshot, events_stale = tailer.snapshot()
-                except Exception:
+                except Exception:  # noqa: BLE001
                     # Disable the tailer for the rest of the chunk and fall back
                     # to the subprocess probe seam on this and later ticks.
                     tailer = None
@@ -238,7 +238,7 @@ def _invoke_run(
             if message is None and observed_status_probe is not None:
                 try:
                     snapshot = _status_snapshot(observed_status_probe())
-                except Exception:
+                except Exception:  # noqa: BLE001
                     snapshot = {"state": "unknown"}
                 tick_snapshot = snapshot
                 message = _format_heartbeat(

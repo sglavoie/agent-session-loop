@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403, F405
 
 from .migration_backup import *
 from .migration_operation import *

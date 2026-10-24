@@ -1,5 +1,5 @@
 # mypy: disable-error-code="name-defined,attr-defined,no-redef"
-# ruff: noqa: E402, F401, F403, F405, I001
+# ruff: noqa: E402, F403, F405, I001
 from . import review_shared as _shared
 
 globals().update(
@@ -8,6 +8,7 @@ globals().update(
 from .review_shared import *
 from .review_part_1 import *
 from .review_part_2 import *
+from .cli_defaults import program_name
 
 
 def review_verdict_payload(
@@ -99,7 +100,7 @@ def review_verdict_from_args(args: argparse.Namespace) -> int:
             )
         else:
             print(
-                f"agent-session-loop review-verdict: {error}",
+                f"{program_name()} review-verdict: {error}",
                 file=sys.stderr,
             )
         return 1

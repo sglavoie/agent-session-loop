@@ -23,6 +23,8 @@ from .support_asl_turn_dispositions import (
     fake_message,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class RunnerPauseTests(DispositionTestCase):
     """A worker's own pause, and the answer that can undo it."""

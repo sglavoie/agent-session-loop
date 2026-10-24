@@ -1,5 +1,5 @@
 # mypy: disable-error-code="attr-defined,name-defined"
-# ruff: noqa: F401, F403, F405, F822, I001
+# ruff: noqa: F401
 """The copilot ACP transport: the protocol client and the adapter seam.
 
 Two levels, because the two failure families live in different places. The

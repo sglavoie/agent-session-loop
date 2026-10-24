@@ -1,9 +1,9 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F403, F405
 """Incident epoch, record, resolution, and retirement persistence."""
 
 from __future__ import annotations
 
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403, F405
 from .incidents_models import *
 
 

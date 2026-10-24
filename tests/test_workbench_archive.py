@@ -40,6 +40,11 @@ from .support import (
 )
 from .workbench_archive_support import NOW, ArchiveFixture, _iso
 
+# Integration: "browsing never deletes" is a claim about what a real GET
+# does to a real archive tree, so it is asserted against a live server
+# reading real entries rather than against a stub listing.
+ASL_TEST_LANE = "integration"
+
 
 class PortableArchiveRulesTests(unittest.TestCase):
     """The rules both halves share, proven without ASL in the room."""

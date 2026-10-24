@@ -16,6 +16,8 @@ from tests.support import (
     _structured_review_finding,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class RunReviewHarnessPairTests(RunReviewHarnessLifecycleBase):
     """Cross-harness review runs and persisted review verdicts."""

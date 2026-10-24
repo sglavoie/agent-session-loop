@@ -24,6 +24,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class GeneratedReviewReplayTests(unittest.TestCase):
     """Replay generated review sessions."""

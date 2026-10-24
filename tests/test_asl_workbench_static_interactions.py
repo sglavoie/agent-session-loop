@@ -15,6 +15,8 @@ from tests.support import (
     _http_request_raw,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchStaticInteractionTests(support_static.WorkbenchStaticCase):
     """Cover search, row actions, focus handling and constant mirrors."""

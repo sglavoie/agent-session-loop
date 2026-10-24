@@ -18,6 +18,7 @@ from . import (
     responses,
     state,
 )
+from .cli_defaults import program_name
 from .contracts import (
     CommandCheck,
     FileExistsCheck,
@@ -278,7 +279,7 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
                 )
             )
         else:
-            print(f"agent-session-loop contract-check: {error}", file=sys.stderr)
+            print(f"{program_name()} contract-check: {error}", file=sys.stderr)
         return 1
 
     try:
@@ -360,16 +361,16 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
 
     if issues:
         reason = CONTRACT_CHECK_EXIT_REASON_ISSUES
-        error = f"{len(issues)} of {len(rows)} contract check(s) have issues"
+        failure_message = f"{len(issues)} of {len(rows)} contract check(s) have issues"
     else:
         reason = CONTRACT_CHECK_EXIT_REASON_CONTRACT_SET_ISSUES
-        error = "the AgentMux compatibility contract set is inconsistent"
+        failure_message = "the AgentMux compatibility contract set is inconsistent"
     if want_json:
         responses.print_json(
             responses.error_payload(
                 "contract-check",
                 reason=reason,
-                error=error,
+                error=failure_message,
                 paused=False,
                 **{**common_fields, **result_fields},
             )
@@ -393,7 +394,7 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
                 f"{row['detail']}"
             )
         _print_agent_mux_block(result_fields.get("agent_mux"))
-        print(f"contract-check: {error}", file=sys.stderr)
+        print(f"contract-check: {failure_message}", file=sys.stderr)
     return 1
 
 

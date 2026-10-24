@@ -39,7 +39,7 @@ def _handle_run_crash(frame: RunFrame, error: BaseException) -> RunResult | None
         if frame.after is None:
             try:
                 frame.after = frame.ctx.plan_cache.get_fresh(frame.snapshot.plan_dir)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 frame.after = None
         frame.turn_payload = guard_context.get("turn_payload")
         if not isinstance(frame.turn_payload, dict):
@@ -122,7 +122,7 @@ def _handle_run_crash(frame: RunFrame, error: BaseException) -> RunResult | None
                     ),
                     turn_started_ns=guard_context.get("turn_started_ns"),
                 )
-        except Exception as guard_error:
+        except Exception as guard_error:  # noqa: BLE001
             error.add_note(
                 "post-turn workspace write guard failed while handling "
                 f"the exception: {guard_error}"
@@ -167,7 +167,7 @@ def _handle_run_crash(frame: RunFrame, error: BaseException) -> RunResult | None
                 ),
                 adjudicate_only=True,
             )
-        except Exception as guard_error:
+        except Exception as guard_error:  # noqa: BLE001
             error.add_note(
                 "post-turn protected-path guard failed while handling "
                 f"the exception: {guard_error}"

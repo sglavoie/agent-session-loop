@@ -22,6 +22,8 @@ from .workbench_history_cases_reads import (
     IncrementalReadTests,
 )
 
+ASL_TEST_PORTABLE = True
+
 __all__ = [
     "VocabularyTests",
     "ClassificationTests",

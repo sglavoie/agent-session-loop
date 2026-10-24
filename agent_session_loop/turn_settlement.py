@@ -274,7 +274,7 @@ def settle_turn(
         progress_appended = handoff_guards._append_progress_entry(
             after, session_id, completed_at
         )
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
         progress_appended = False
         progress_error = str(error)
         ctx.persistence.append_event(

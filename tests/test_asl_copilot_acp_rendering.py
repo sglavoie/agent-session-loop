@@ -1,9 +1,12 @@
 # mypy: disable-error-code="attr-defined,name-defined"
-# ruff: noqa: F401, F403, F405, F822, I001
+# ruff: noqa: F403, F405, I001
 """ACP rendering, framing, submission, and shutdown tests."""
 
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403, F405
 from tests.asl_copilot_acp_support import *
+
+
+ASL_TEST_LANE = "integration"
 
 
 class UpdateRenderingTests(unittest.TestCase):
@@ -239,4 +242,4 @@ class ShutdownTests(unittest.TestCase):
         session.shutdown()
 
         with self.assertRaises(copilot_acp.AcpError):
-            session._request("initialize", {})  # noqa: SLF001 - the closed path
+            session._request("initialize", {})

@@ -38,6 +38,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
     """A failed review turn still has to answer for what it did to the worktree.

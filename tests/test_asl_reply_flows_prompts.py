@@ -15,6 +15,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReplyPromptFlowTests(rfs.ReplyResumeFlowCase):
     """Reply validation, dry-run prompts, and first-turn reply events."""

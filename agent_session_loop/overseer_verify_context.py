@@ -1,9 +1,9 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F403, F405
 """Build and prove the verification context recorded for an overseer action."""
 
 from __future__ import annotations
 
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403, F405
 from .overseer_verify_shared import *
 
 

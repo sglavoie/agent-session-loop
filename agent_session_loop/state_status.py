@@ -19,6 +19,7 @@ from . import (
     plans_snapshot,
     responses,
 )
+from .cli_defaults import program_name
 from .state import (
     RUNS_DIR_NAME,
     AmbiguousPlanError,
@@ -287,7 +288,7 @@ def status_from_args(args: argparse.Namespace) -> int:
             )
         else:
             print(
-                f"agent-session-loop status: {error}; "
+                f"{program_name()} status: {error}; "
                 "pass a full plan directory path to disambiguate",
                 file=sys.stderr,
             )
@@ -309,7 +310,7 @@ def status_from_args(args: argparse.Namespace) -> int:
                 )
             )
         else:
-            print(f"agent-session-loop status: {error}", file=sys.stderr)
+            print(f"{program_name()} status: {error}", file=sys.stderr)
         return 1
 
     if args.json:

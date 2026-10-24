@@ -20,6 +20,8 @@ from agent_session_loop import (
 from tests import support_asl_guards as fixtures
 from tests.asl_docs_support import read_asl_reference
 
+ASL_TEST_LANE = "integration"
+
 
 class GuardPreToolHookTests(unittest.TestCase):
     """The early lane: a denial the worker is told about, before it runs.

@@ -155,7 +155,7 @@ def run_locked(
                 continue
             if outcome is not None:
                 return outcome
-    except BaseException as error:
+    except BaseException as error:  # noqa: BLE001
         _handle_run_crash(frame, error)
     # The one call site, at the point every one of the loop's breaks converges
     # on, so the settlement keeps the ordering it depends on.

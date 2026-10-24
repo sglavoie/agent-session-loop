@@ -15,6 +15,8 @@ from tests.support import (
     git_stdout,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewFingerprintIgnoreSourceTests(ReviewFingerprintBase):
     """Fingerprint evidence from gitignore files and ``info/exclude``."""

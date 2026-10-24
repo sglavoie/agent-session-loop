@@ -18,6 +18,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewCycleReopenTests(RepairCycleFixtures, unittest.TestCase):
     """Re-review reopened children against corrected fingerprints."""

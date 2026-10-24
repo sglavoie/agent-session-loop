@@ -16,6 +16,8 @@ from agent_session_loop import (
 
 from .support_asl_turn_preparation import PreparationTestCase
 
+ASL_TEST_PORTABLE = True
+
 
 class TurnPromptTests(PreparationTestCase):
     """One of three prompt shapes, then the gate that judges what it reaches."""

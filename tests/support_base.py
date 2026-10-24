@@ -6,6 +6,7 @@ tests/test_asl_*.py subsystem modules.
 
 from __future__ import annotations
 
+import argparse
 import ast
 import atexit
 import errno
@@ -172,3 +173,129 @@ def patched_env(**updates: str | None):
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+
+def isolated_home(case: unittest.TestCase) -> Path:
+    """Point ``HOME`` at a fresh temporary directory for the rest of ``case``.
+
+    ``Path.home()`` and ``~`` expansion both read ``HOME``, so a test that
+    reasons about the home directory gets one it owns and never touches the
+    developer's real one.
+    """
+    home = Path(tempfile.mkdtemp(prefix="asl-test-home-"))
+    case.addCleanup(shutil.rmtree, home, ignore_errors=True)
+    patcher = mock.patch.dict(os.environ, {"HOME": str(home)})
+    patcher.start()
+    case.addCleanup(patcher.stop)
+    return home
+
+
+def load_section_tests(
+    loader: unittest.TestLoader, *modules: ModuleType | str
+) -> unittest.TestSuite:
+    """The test cases each of ``modules`` defines itself, in class-name order.
+
+    The ``load_tests`` body every focused section and its facade share. A
+    section star-imports its shared fixtures and a facade copies every
+    section's names into each of them, so a module's namespace holds test
+    classes it does not own; only the ones whose ``__module__`` is the module
+    itself are loaded, so each test runs under the section that defines it.
+    """
+    suite = unittest.TestSuite()
+    for module in modules:
+        namespace = sys.modules[module] if isinstance(module, str) else module
+        cases = sorted(
+            (
+                value
+                for value in vars(namespace).values()
+                if isinstance(value, type)
+                and issubclass(value, unittest.TestCase)
+                and value.__module__ == namespace.__name__
+            ),
+            key=lambda case: case.__name__,
+        )
+        for case in cases:
+            suite.addTests(loader.loadTestsFromTestCase(case))
+    return suite
+
+
+def write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+
+def force_pid_alive(pid: int) -> bool:
+    """Treat only the current process as alive so dead PIDs are deterministic."""
+    return pid == os.getpid()
+
+
+def parse_cli_args(tokens: list[str]) -> argparse.Namespace:
+    """Parse ``tokens`` with the real ``asl`` argument parser."""
+    from agent_session_loop import cli
+
+    return cli.build_parser().parse_args(tokens)
+
+
+def call_receivers(source: str, *attributes: str) -> set[str]:
+    """Every receiver of a call to one of ``attributes``, as source text."""
+    receivers: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in attributes:
+            continue
+        receivers.add(ast.unparse(node.func.value))
+    return receivers
+
+
+def durable_write_receivers(source: str) -> set[str]:
+    """Every receiver of a ``write_state`` or ``append_event`` call, as source."""
+    return call_receivers(source, "write_state", "append_event")
+
+
+def stderr_owners(source: str) -> set[str]:
+    """The top-level definitions in ``source`` that name ``sys.stderr``."""
+    owners: set[str] = set()
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            continue
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.Attribute)
+                and inner.attr == "stderr"
+                and isinstance(inner.value, ast.Name)
+                and inner.value.id == "sys"
+            ):
+                owners.add(node.name)
+                break
+    return owners
+
+
+class RaisingStream(io.StringIO):
+    """A sink that behaves like a pipe whose reader has gone away."""
+
+    def __init__(self, error: BaseException) -> None:
+        super().__init__()
+        self._error = error
+
+    def write(self, text: str) -> int:
+        raise self._error
+
+    def flush(self) -> None:
+        raise self._error
+
+
+class ManualClock:
+    """A monotonic clock the test advances by hand."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self._lock = threading.Lock()
+        self._value = start
+
+    def __call__(self) -> float:
+        with self._lock:
+            return self._value
+
+    def advance(self, delta: float) -> None:
+        with self._lock:
+            self._value += delta

@@ -19,6 +19,8 @@ from tests.harness_integration_support import (
     OBSERVED_SOCKET_CLOSURE,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class HarnessTransportClassificationTests(unittest.TestCase):
     """Transport failures the classifier retries, and the ones it survives."""

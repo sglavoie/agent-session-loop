@@ -72,7 +72,7 @@ class SuperviseRunTransportBackoffTest(unittest.TestCase):
                 {"ok": True, "paused": False, "reason": "all-complete"},
             ]
         )
-        sleeps = []
+        sleeps: list[float] = []
         result = self._supervise(status, run, sleeps)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "complete")
@@ -86,7 +86,7 @@ class SuperviseRunTransportBackoffTest(unittest.TestCase):
         # and classification.
         status = _StatusScript([_status_payload(1)])
         run = _RunScript([self._transport_pause(retry_at="2026-07-10T06:00:00Z")])
-        sleeps = []
+        sleeps: list[float] = []
         result = self._supervise(status, run, sleeps, max_retries=2)
         self.assertFalse(result["ok"], result)
         self.assertEqual(result["reason"], "paused")
@@ -120,7 +120,7 @@ class SuperviseRunTransportBackoffTest(unittest.TestCase):
                 {"ok": True, "paused": False, "reason": "all-complete"},
             ]
         )
-        sleeps = []
+        sleeps: list[float] = []
         result = self._supervise(status, run, sleeps)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "complete")
@@ -191,7 +191,7 @@ class SuperviseRunUserRequiredHarnessTest(unittest.TestCase):
         }
 
     def test_quota_exhaustion_is_user_required_and_launches_once(self) -> None:
-        sleeps = []
+        sleeps: list[float] = []
         result, run = self._supervise(
             self._harness_pause("quota-exhausted", retry_at="2026-07-10T06:00:00Z"),
             sleeps=sleeps,

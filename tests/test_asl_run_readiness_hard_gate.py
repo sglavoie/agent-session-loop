@@ -19,6 +19,8 @@ from tests.support import (
 )
 from tests.support_asl_run_readiness import RunReadinessGateFixture
 
+ASL_TEST_LANE = "integration"
+
 
 class RunReadinessHardGateTests(RunReadinessGateFixture):
     """The hard gate refuses unsafe plans and redirects before a harness launches."""

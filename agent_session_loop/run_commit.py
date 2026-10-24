@@ -343,7 +343,7 @@ def _run_asl_commit(
         clean_after: bool | None = review_guard._git_status_is_clean(canonical_cwd)
     except RunError as error:
         clean_after = None
-        status_error = str(error)
+        status_error: str | None = str(error)
     else:
         status_error = None
     status_result = _commit_status_result(

@@ -247,7 +247,7 @@ class ConcurrentPublicationTests(ProjectionTestCase):
                 result = self.publish(_publication())
                 with lock:
                     created.append(result.created)
-            except BaseException as error:  # noqa: BLE001 - reported below
+            except BaseException as error:
                 with lock:
                     failures.append(error)
 
@@ -341,7 +341,7 @@ class ConcurrentPublicationTests(ProjectionTestCase):
                         artifacts=_artifacts(_worker_digest(index)),
                     )
                 )
-            except BaseException as error:  # noqa: BLE001 - reported below
+            except BaseException as error:
                 with lock:
                     failures.append(error)
 

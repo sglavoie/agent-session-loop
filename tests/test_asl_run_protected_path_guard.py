@@ -37,6 +37,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ProtectedPathGuardRunTests(unittest.TestCase):
     """End-to-end: a frozen path decides whether a finished turn is published.

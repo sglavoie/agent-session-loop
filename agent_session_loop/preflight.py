@@ -352,12 +352,12 @@ def run_unhashed_state_checks(
                     path=str(canonical_dir / "manifest.md"),
                 ),
             )
-    else:
-        resolved_registry = repository_registry
-    if resolved_registry is not None and not isinstance(
-        resolved_registry,
+    elif repository_registry is None or isinstance(
+        repository_registry,
         workspaces.RepositoryRegistry,
     ):
+        resolved_registry = repository_registry
+    else:
         raise TypeError("repository_registry must be a RepositoryRegistry or None")
     workspace_findings: tuple[PreflightFinding, ...] = ()
     verification_context = context

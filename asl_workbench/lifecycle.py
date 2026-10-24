@@ -41,7 +41,8 @@ Everything else is one mechanism:
   operator launched through it, and stopping the service must take its own
   threads with it.
 
-The native identifiers -- ``com.sglavoie.asl-companion`` and
+The native identifiers -- ``com.sglavoie.asl-companion`` (the prefix is
+``$ASL_LAUNCHD_LABEL_PREFIX``, defaulting to ``com.sglavoie``) and
 ``asl-companion.service`` -- are deliberately unchanged. They name resources an
 already-deployed host owns; renaming them would orphan a launch agent and a
 unit file that are running right now.

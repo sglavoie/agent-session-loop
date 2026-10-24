@@ -248,7 +248,7 @@ class MailboxWatcherProjectionTest(MailboxWatcherBase):
         self.assertTrue(watcher.establish(now=0.0))
         final = '{"ok": true, "paused": false, "reason": "all-complete"}'
         popen = _DeadlinePopen(clock, final)
-        progress = []
+        progress: list[str] = []
 
         payload = autopilot._supervision_session._invoke_run(
             {
@@ -329,7 +329,7 @@ class MailboxWatcherProjectionTest(MailboxWatcherBase):
             supervisor_id="00000000-0000-0000-0000-000000000099",
         )
         self.assertTrue(watcher.establish(now=0.0))
-        progress = []
+        progress: list[str] = []
 
         payload = autopilot._supervision_session._invoke_run(
             {

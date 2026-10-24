@@ -19,6 +19,10 @@ from agent_session_loop import (
 )
 from tests.asl_docs_support import (
     ASL_GUIDE,
+    ASL_SKILL,
+    ASL_SKILL_QUESTIONS_AND_PAUSES,
+    ASL_SKILL_QUOTA_AND_HANGS,
+    ASL_SKILL_REVIEW_FINDINGS,
     autopilot_module_sources,
     read_asl_reference,
 )
@@ -54,7 +58,8 @@ class AuthoritativePauseMetricsDocsTests(unittest.TestCase):
         assert spec.loader is not None
         spec.loader.exec_module(autopilot)
 
-        skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(encoding="utf-8")
+        # The asl skill's pause policy lives in its on-demand pause reference.
+        skill = (REPO_ROOT / ASL_SKILL_QUESTIONS_AND_PAUSES).read_text(encoding="utf-8")
         surfaces = (self.docs, skill)
         recoverable_copy = "The helper auto-retries recoverable same-session pauses"
         for surface in surfaces:
@@ -84,11 +89,11 @@ class AuthoritativePauseMetricsDocsTests(unittest.TestCase):
         moves between `reply` and `inspect` without the docs moving with it
         leaves an operator reading instructions the code no longer follows.
         """
-        skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(encoding="utf-8")
+        skill = (REPO_ROOT / ASL_SKILL_QUESTIONS_AND_PAUSES).read_text(encoding="utf-8")
         marker = "Three kinds of pause are `inspect`"
         for name, surface in (
             ("docs/agent-session-loop.md", self.docs),
-            ("skills/asl/SKILL.md", skill),
+            (ASL_SKILL_QUESTIONS_AND_PAUSES, skill),
         ):
             with self.subTest(surface=name):
                 self.assertIn(marker, surface, f"{name} never enumerates the set")
@@ -112,11 +117,11 @@ class AuthoritativePauseMetricsDocsTests(unittest.TestCase):
                     )
 
     def test_pause_policy_version_matches_the_documented_revision(self) -> None:
-        skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(encoding="utf-8")
+        skill = (REPO_ROOT / ASL_SKILL_QUESTIONS_AND_PAUSES).read_text(encoding="utf-8")
         expected = f"`policy_version: {pause_policy.POLICY_VERSION}`"
         for name, surface in (
             ("docs/agent-session-loop.md", self.docs),
-            ("skills/asl/SKILL.md", skill),
+            (ASL_SKILL_QUESTIONS_AND_PAUSES, skill),
         ):
             with self.subTest(surface=name):
                 self.assertIn(expected, surface)
@@ -142,9 +147,14 @@ class AuthoritativePauseMetricsDocsTests(unittest.TestCase):
             turn_execution_constants.HANG_REASON_ZERO_CPU, autopilot.HANG_CLASS_ZERO_CPU
         )
 
-        skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(encoding="utf-8")
+        # `SKILL.md` names the stop and points at the hang procedure, which
+        # lives in the on-demand quota-and-hangs reference.
+        core = (REPO_ROOT / ASL_SKILL).read_text(encoding="utf-8")
+        self.assertIn("reason: worker_hung", core)
+        self.assertIn("references/quota-and-hangs.md", core)
+        skill = (REPO_ROOT / ASL_SKILL_QUOTA_AND_HANGS).read_text(encoding="utf-8")
         surfaces = {
-            "skills/asl/SKILL.md": skill,
+            ASL_SKILL_QUOTA_AND_HANGS: skill,
             "skills/asl/scripts/asl_autopilot*.py": autopilot_module_sources(),
         }
         for name, text in surfaces.items():
@@ -235,8 +245,9 @@ class AuthoritativePauseMetricsDocsTests(unittest.TestCase):
             "README.md": (REPO_ROOT / "README.md").read_text(encoding="utf-8"),
             ASL_GUIDE: self.guide,
             "docs/agent-session-loop.md": self.docs,
-            "skills/asl/SKILL.md": (
-                REPO_ROOT / "skills" / "asl" / "SKILL.md"
+            ASL_SKILL: (REPO_ROOT / ASL_SKILL).read_text(encoding="utf-8"),
+            ASL_SKILL_REVIEW_FINDINGS: (
+                REPO_ROOT / ASL_SKILL_REVIEW_FINDINGS
             ).read_text(encoding="utf-8"),
             "skills/asl/scripts/asl_autopilot*.py": autopilot_module_sources(),
             "agent_session_loop/workbench_launch.py": (
@@ -254,7 +265,11 @@ class AuthoritativePauseMetricsDocsTests(unittest.TestCase):
                 self.assertNotIn(phrase, text, f"{name} restores {phrase!r}")
         self.assertIn(
             "Do **not** draft, split, or expand a\nfollow-up fix plan",
-            surfaces["skills/asl/SKILL.md"],
+            surfaces[ASL_SKILL_REVIEW_FINDINGS],
+        )
+        self.assertIn(
+            "Do **not** draft, split, or expand a follow-up fix plan",
+            " ".join(surfaces[ASL_SKILL].split()),
         )
 
     def test_state_schema_docs_match_authoritative_versions(self) -> None:

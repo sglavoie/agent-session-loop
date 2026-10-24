@@ -23,6 +23,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
     """_LiveTurn + fake sampler end-to-end persistence of hang suspicion."""

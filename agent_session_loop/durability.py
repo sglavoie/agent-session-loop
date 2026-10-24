@@ -44,13 +44,27 @@ def fullsync(fd: int) -> None:
 
 
 def write_text(path: Path, text: str) -> None:
-    """Write ``text`` to ``path``, creating the parent directory first."""
+    """Atomically replace ``path`` with ``text``, creating the parent first.
+
+    A reader -- including one that trusts ``last-message.txt`` for a pause
+    signal -- sees the previous file or the complete new one, never a
+    truncated or half-written one. Like :func:`write_json_file` without
+    ``durable``, this is an atomic replace without the fullsync barriers.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    replace_text(path, text)
 
 
 def append_text(path: Path, text: str) -> None:
-    """Append ``text`` to ``path``, creating the parent directory first."""
+    """Append ``text`` to ``path``, creating the parent directory first.
+
+    This is the one writer here that is *not* an atomic replace, and it adds no
+    barrier: it carries a harness's live output stream, where a follower reads
+    each chunk as it lands. The stream is provisional -- the turn's final
+    :func:`write_text` replaces the whole log atomically -- so a crash
+    mid-append can at worst leave a torn tail on a log that is about to be
+    rewritten, or on the log of a turn that never finished.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(text)

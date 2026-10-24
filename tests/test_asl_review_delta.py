@@ -28,7 +28,6 @@ it could not prove anything about.
 
 from __future__ import annotations
 
-import ast
 import inspect
 import unittest
 from pathlib import Path
@@ -41,6 +40,7 @@ from agent_session_loop import (
 from tests.support import (
     assert_no_runner_import,
 )
+from tests.support_base import call_receivers as _call_receivers
 
 #: The symbols this module took from the runner. The program's no-alias rule
 #: says the runner keeps none of them behind, so a re-export added later to
@@ -60,18 +60,6 @@ MOVED_SYMBOLS = (
 )
 
 
-def _call_receivers(source: str, *attributes: str) -> set[str]:
-    """Every receiver of a call to one of ``attributes``, as source text."""
-    receivers: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            continue
-        if node.func.attr not in attributes:
-            continue
-        receivers.add(ast.unparse(node.func.value))
-    return receivers
-
-
 class ReviewDeltaBoundaryTests(unittest.TestCase):
     """The structural contract of the boundary itself."""
 
@@ -86,9 +74,12 @@ class ReviewDeltaBoundaryTests(unittest.TestCase):
         # Scoping is a read-heavy boundary with exactly one durable rewrite:
         # the `## Delta Review Scope` section of a pending review session. Any
         # other file this module learned to open would be a record nobody else
-        # in the run can see.
-        self.assertEqual({"session.path"}, _call_receivers(self.source, "write_text"))
-        for reach in ("open(", "mkdir(", "unlink(", "durability."):
+        # in the run can see. The rewrite is an atomic replace, so a reader
+        # never sees a half-written session.
+        self.assertEqual(set(), _call_receivers(self.source, "write_text"))
+        self.assertEqual(1, self.source.count("durability."))
+        self.assertIn("durability.replace_text(session.path, rescoped)", self.source)
+        for reach in ("open(", "mkdir(", "unlink("):
             self.assertNotIn(reach, self.source, msg=reach)
 
     def test_every_event_write_goes_through_a_persistence_handle(self) -> None:

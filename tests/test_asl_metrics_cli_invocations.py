@@ -18,6 +18,8 @@ from tests.asl_metrics_support import (
     _trace_record,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class CliInvocationMetricsTests(unittest.TestCase):
     def setUp(self) -> None:

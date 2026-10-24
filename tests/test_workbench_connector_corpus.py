@@ -21,6 +21,8 @@ from tests.workbench_connector_support import (
     make_connector,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class CorpusDeliveryTests(CorpusTestCase):
     """A real corpus reaches a real store, accurately."""

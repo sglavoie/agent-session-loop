@@ -31,11 +31,14 @@ from typing import Any
 from . import (
     artifacts,
     events,
+    plans_errors,
     plans_files,
+    plans_snapshot,
     run_persistence,
     state,
     turn_execution_constants,
 )
+from .cli_defaults import program_name
 
 # Subdirectory (relative to a turn artifact directory) where failed-command
 # gzip artifacts live, matching the runner-managed verification convention.
@@ -368,12 +371,18 @@ def _print_report(report: CompactionReport) -> None:
 def compact_state_from_args(args: argparse.Namespace) -> int:
     """CLI handler for ``asl compact-state``."""
     try:
+        plans_snapshot.require_plan_directory(args.plan_dir)
         report = compact_plan_state(
             args.plan_dir,
             state_dir=getattr(args, "state_dir", None),
             apply=args.apply,
         )
-    except (OSError, ValueError, artifacts.ArtifactError) as error:
+    except (
+        OSError,
+        ValueError,
+        artifacts.ArtifactError,
+        plans_errors.PlanError,
+    ) as error:
         if getattr(args, "json", False):
             print(
                 json.dumps(
@@ -386,7 +395,7 @@ def compact_state_from_args(args: argparse.Namespace) -> int:
                 )
             )
         else:
-            print(f"compact-state failed: {error}", file=sys.stderr)
+            print(f"{program_name()} compact-state: {error}", file=sys.stderr)
         return 1
 
     if getattr(args, "json", False):

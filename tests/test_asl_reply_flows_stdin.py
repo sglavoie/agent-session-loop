@@ -20,6 +20,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class RunReplyStdinFlowTests(unittest.TestCase):
     """`--reply-stdin` should match `--reply TEXT` except for argv exposure."""

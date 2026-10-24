@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from . import (
+    durability,
     events,
     plans_errors,
     plans_models,
@@ -593,7 +594,7 @@ def _refresh_pending_review_scope(
     rescoped = review_session_body.rescoped_review_session_body(text, delta)
     if rescoped is None or rescoped == text:
         return False
-    session.path.write_text(rescoped, encoding="utf-8")
+    durability.replace_text(session.path, rescoped)
     persistence.append_event(
         event_path,
         events.REVIEW_SCOPE_EVENT,

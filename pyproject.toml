@@ -34,23 +34,27 @@ extend-include = ["bin/.local/bin/agent-session-loop"]
 "tests/workbench_cutover.py" = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+# BLE001 makes every blind `except Exception`/`BaseException` in product code
+# carry a `# noqa: BLE001` next to the reason it must not narrow; RUF100 keeps
+# suppressions honest by failing on any that no longer suppress anything.
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "BLE001", "RUF100"]
 
 # Focused extraction modules intentionally share a narrow internal namespace.
 # Their facades retain the former public module surface, so static star-import
 # diagnostics and intentional namespace-forwarding imports are not useful at
 # those compatibility boundaries.
 [tool.ruff.lint.per-file-ignores]
+# Tests catch BaseException in worker threads to re-raise it on the main one.
+"tests/**/*.py" = ["BLE001"]
 "agent_session_loop/execution_timing*.py" = ["F401", "F403", "F405"]
-"agent_session_loop/diagnostics_export*.py" = ["E501", "F401", "F403", "F405"]
-"agent_session_loop/session_overview*.py" = ["E501", "F401", "F403", "F405"]
-"agent_session_loop/workbench_local*.py" = ["F401", "F403", "F405"]
+"agent_session_loop/diagnostics_export*.py" = ["E501", "F403", "F405"]
+"agent_session_loop/session_overview*.py" = ["E501", "F403", "F405"]
+"agent_session_loop/workbench_local*.py" = ["F403", "F405"]
 "agent_session_loop/supervisor_audit_agent*.py" = ["F401", "F403", "F405"]
-"asl_workbench/integration*.py" = ["F401", "F403", "F405"]
-"asl_workbench/integrations.py" = ["F401", "F403", "F405"]
-"asl_workbench/operations*.py" = ["E501", "F401", "F403", "F405"]
-"tests/asl_execution_timing_*.py" = ["F401", "F403", "F405"]
-"tests/asl_turn_finalization_*.py" = ["F401", "F403", "F405"]
+"asl_workbench/integration*.py" = ["F403", "F405"]
+"asl_workbench/operations*.py" = ["E501", "F403", "F405"]
+"tests/asl_execution_timing_*.py" = ["F403", "F405"]
+"tests/asl_turn_finalization_*.py" = ["F403", "F405"]
 "tests/asl_turn_execution_*.py" = ["F401", "F403", "F405"]
 "tests/asl_redirect_supervision_*.py" = ["F401", "F403", "F405"]
 "tests/asl_run_inputs_*.py" = ["F401", "F403", "F405"]
@@ -58,33 +62,31 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 "tests/asl_write_guards_*.py" = ["F401", "F403", "F405"]
 "tests/asl_overseer_isolation_*.py" = ["F401", "F403", "F405"]
 "tests/asl_commit_groups_*.py" = ["F401", "F403", "F405"]
-"tests/workbench_interactions_*.py" = ["F401", "F403", "F405"]
+"tests/workbench_interactions_*.py" = ["F403", "F405"]
 "tests/asl_review_cycle_*.py" = ["F401", "F403", "F405"]
 "tests/asl_review_transitions_*.py" = ["F401", "F403", "F405"]
 "tests/asl_overseer_history_*.py" = ["F401", "F403", "F405"]
 "tests/asl_startup_context_*.py" = ["F401", "F403", "F405"]
 "tests/asl_workbench_launch_*.py" = ["F401", "F403", "F405"]
 "tests/asl_supervisor_audit_checks_settlement_*.py" = ["F401", "F403", "F405"]
-"tests/harness_integration_base_*.py" = ["F401", "F403", "F405"]
 "tests/asl_tail_*.py" = ["F401", "F403", "F405"]
 "tests/asl_live_redirect_*.py" = ["F401", "F403", "F405"]
-"tests/asl_overseer_checkpoint_groups_*.py" = ["E501", "F401", "F403", "F405"]
-"tests/asl_redirect_cli_*.py" = ["E501", "F401", "F403", "F405"]
-"tests/asl_repository_registration_*.py" = ["E501", "F401", "F403", "F405"]
-"tests/test_asl_overseer_checkpoint_groups.py" = ["F401", "F403", "F405"]
-"tests/test_asl_redirect_cli.py" = ["F401", "F403", "F405"]
-"tests/test_asl_repository_registration.py" = ["F401", "F403", "F405"]
-"tests/support.py" = ["F401", "F403", "F405"]
-"tests/support_base.py" = ["F401", "F403", "F405"]
-"tests/support_plans.py" = ["F401", "F403", "F405"]
-"tests/support_git.py" = ["F401", "F403", "F405"]
-"tests/support_processes.py" = ["F401", "F403", "F405"]
-"tests/support_review.py" = ["F401", "F403", "F405"]
-"tests/support_workbench.py" = ["F401", "F403", "F405"]
-"tests/support_prepare.py" = ["F401", "F403", "F405"]
-"tests/workbench_acceptance*.py" = ["E501", "F401", "F403", "F405"]
-"tests/workbench_cutover*.py" = ["E501", "F401", "F403", "F405"]
-"tests/workbench_support*.py" = ["E501", "F401", "F403", "F405"]
+"tests/asl_overseer_checkpoint_groups_*.py" = ["E501", "F403", "F405"]
+"tests/asl_redirect_cli_*.py" = ["E501", "F403", "F405"]
+"tests/asl_repository_registration_*.py" = ["E501", "F403", "F405"]
+"tests/test_asl_overseer_checkpoint_groups.py" = ["F403"]
+"tests/test_asl_redirect_cli.py" = ["F403"]
+"tests/test_asl_repository_registration.py" = ["F403"]
+"tests/support_base.py" = ["F401"]
+"tests/support_plans.py" = ["F403", "F405"]
+"tests/support_git.py" = ["F403", "F405"]
+"tests/support_processes.py" = ["F403", "F405"]
+"tests/support_review.py" = ["F403", "F405"]
+"tests/support_workbench.py" = ["F403", "F405"]
+"tests/support_prepare.py" = ["F403", "F405"]
+"tests/workbench_acceptance*.py" = ["E501", "F403", "F405"]
+"tests/workbench_cutover*.py" = ["E501", "F403", "F405"]
+"tests/workbench_support*.py" = ["E501", "F403", "F405"]
 "tests/test_asl_execution_timing.py" = ["F401"]
 "tests/test_asl_tail.py" = ["F401"]
 "tests/test_asl_turn_finalization.py" = ["F401"]
@@ -102,7 +104,6 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 "tests/test_asl_startup_context.py" = ["F401"]
 "tests/test_asl_workbench_launch.py" = ["F401"]
 "tests/test_asl_supervisor_audit_checks_settlement.py" = ["F401"]
-"tests/harness_integration_base.py" = ["F401"]
 # Static ``__all__`` declarations make split-module vocabularies visible to
 # mypy.  Keep those one-line declarations readable as a single contract.
 "agent_session_loop/execution_timing_models.py" = ["E501"]
@@ -133,15 +134,28 @@ files = [
 # checked; only the runtime copies are excluded.
 exclude = "^tests/fixtures/asl_worker_verification/cache/"
 ignore_missing_imports = true
-# Retained checks are the correctness classes: name-defined, attr-defined,
-# call-arg, return-value and func-returns-value are all clean in the code and
-# must stay that way. The codes below are suppressed repository-wide because
-# clearing them needs generic-parameter and container-element annotations
-# across a 125-file untyped tree, not defect fixes. Counts are the findings
-# each code hid when it was added (mypy 2.3.0): arg-type 410, union-attr 389,
-# index 368, assignment 27, var-annotated 18, misc 18, call-overload 9,
-# operator 4, override 1. The last entry silences 9 notes, not errors: mypy
-# does not check untyped function bodies, so the advice is inapplicable here.
+# The codes below are suppressed repository-wide, and the list may only shrink.
+# Product code no longer needs any of them: every module in
+# `agent_session_loop` and `asl_workbench` is on one of the two package tables
+# below, which re-enable all nine error codes, and the skill scripts sit on a
+# third table that re-enables six. What the list still covers is `tests/` (as
+# of mypy 2.3.1, with every code enabled: arg-type 644, union-attr 551,
+# index 522, misc 64, var-annotated 18, assignment 13, call-overload 10,
+# operator 3) and the skill scripts' arg-type/union-attr/index (38): container
+# and optional annotations across untyped test code rather than defect fixes.
+# The last entry silences notes, not errors: mypy does not check untyped
+# function bodies, so the advice is inapplicable here.
+#
+# Not every file is checked, though: 163 files suppress mypy
+# inline, almost all of them part modules of the split-module pattern, which
+# share one namespace through `globals().update(...)` and star imports that
+# mypy cannot follow. 34 package modules and 39 test modules carry
+# `# mypy: disable-error-code="name-defined,attr-defined,..."`; 18 package
+# modules (`commit_settlement*`, `copilot_acp*`, `guards*`), the five
+# `resplit_*` script modules and 67 test files carry `# mypy: ignore-errors`,
+# so no code applies to them whichever table lists them. That set, and the
+# codes each file suppresses, is pinned by
+# `tests/asl_typing_ratchet_section_4.py` and may only shrink.
 disable_error_code = [
     "arg-type",
     "union-attr",
@@ -155,15 +169,16 @@ disable_error_code = [
     "annotation-unchecked",
 ]
 
-# Two override tables re-enable the three codes the repository-wide baseline
-# still hides, under two different contracts. Both name the paths where an
-# argument of the wrong type, an attribute read off an optional, or an index
-# into something that is not a mapping would corrupt a durable record — a turn,
-# a transition, a mailbox wait, a control command, a projection payload —
-# rather than raise at the call site. Nothing in either table is a suppression,
-# so the baseline above only ever shrinks. `enable_error_code`, not a shorter
-# `disable_error_code`: a per-module disable list is unioned with the global
-# one, so re-enabling is the only way back in.
+# Three override tables re-enable what the repository-wide baseline hides,
+# under three contracts. The package tables re-enable all nine error codes: the
+# paths where an argument of the wrong type, an attribute read off an optional,
+# an index into something that is not a mapping, or a variable rebound to a
+# different type would corrupt a durable record — a turn, a transition, a
+# mailbox wait, a control command, a projection payload — rather than raise at
+# the call site. Nothing in any table is a suppression, so the baseline above
+# only ever shrinks. `enable_error_code`, not a shorter `disable_error_code`: a
+# per-module disable list is unioned with the global one, so re-enabling is the
+# only way back in.
 #
 # **Boundary** (below) — mypy codes *and* the AST linter in
 # `tests/test_asl_typing_ratchet.py`: annotated public signatures,
@@ -176,17 +191,23 @@ disable_error_code = [
 # three unchanged — so the strongest available contract is the honest one for
 # it, not a downgrade justified by its size.
 #
-# **Checked** (the table after it) — the same three mypy codes and nothing
+# **Checked** (the table after it) — the same nine mypy codes and nothing
 # else. It is where a module lands when it is clean under mypy but cannot meet
 # the extraction rules.
+#
+# **Scripts** (the last table) — the skill scripts under `skills/*/scripts`,
+# which are not a package: mypy names each by its bare file stem. They are
+# clean under every code except arg-type, union-attr and index, so the table
+# re-enables the other six.
 #
 # The tables carry no name key of their own — mypy rejects one as an
 # unrecognized option — so the ratchet names each by an anchor module only that
 # table may list. `tests/test_asl_typing_ratchet.py` enforces every half of
-# this: the global list may only shrink, neither table may add a suppression,
-# each table has a floor set it may only grow past, and every module in the
-# package is on exactly one of the two — that last check walks the package
-# tree, so a new module joins a table or fails the ratchet.
+# this: the global list may only shrink, no table may add a suppression, each
+# package table has a floor set it may only grow past, every module in the
+# package is on exactly one of the two package tables, and every skill script
+# is on the scripts table — those last checks walk the trees, so a new module
+# joins a table or fails the ratchet.
 [[tool.mypy.overrides]]
 module = [
     "agent_session_loop",
@@ -1010,23 +1031,24 @@ module = [
     "asl_workbench.uplink_bodies",
     "asl_workbench.uplink_flow",
     "asl_workbench.uplink_support",
-    # The portable package starts life on this table rather than working
-    # all, and its payloads cross a process boundary to a Pi, which is the
-    # rules: it may not import the runner because it may not import ASL at
-    # strongest reason to name what they hold.
-    # towards it. Its boundary rules and the extraction rules are the same
 ]
 enable_error_code = [
     "arg-type",
     "union-attr",
     "index",
+    "assignment",
+    "var-annotated",
+    "misc",
+    "call-overload",
+    "operator",
+    "override",
 ]
 
-# Checked: the three codes, no linter. Seeded with the two package modules that
+# Checked: the nine codes, no linter. Seeded with the two package modules that
 # import the runner — `compact_state` reads and rewrites a run's own state, and
 # `workbench` drives runs — so the one-way dependency the Boundary table
 # enforces is not something either of them could ever satisfy. Both are already
-# clean under the three codes.
+# clean under the nine codes.
 # The `workbench_recovery_*` modules joined when the Recovery Center cards moved
 # out of `workbench`: they carry that code's two inline `arg-type` ignores,
 # which the Boundary linter forbids, so they keep the contract it had inside
@@ -1112,4 +1134,87 @@ enable_error_code = [
     "arg-type",
     "union-attr",
     "index",
+    "assignment",
+    "var-annotated",
+    "misc",
+    "call-overload",
+    "operator",
+    "override",
+]
+
+# Scripts: the six codes the skill scripts are clean under. Each script is named
+# by its bare file stem, because `skills/*/scripts` has no `__init__.py`; the
+# hyphenated entry points are valid names here although they cannot be
+# imported.
+[[tool.mypy.overrides]]
+module = [
+    "asl-autopilot",
+    "asl_autopilot",
+    "asl_autopilot_attach_context",
+    "asl_autopilot_attach_step",
+    "asl_autopilot_cli_parser",
+    "asl_autopilot_command_parse",
+    "asl_autopilot_constants",
+    "asl_autopilot_detach",
+    "asl_autopilot_events_tailer",
+    "asl_autopilot_hang",
+    "asl_autopilot_heartbeat",
+    "asl_autopilot_invoke",
+    "asl_autopilot_launch_policy",
+    "asl_autopilot_lock_state",
+    "asl_autopilot_mailbox_watcher",
+    "asl_autopilot_pause",
+    "asl_autopilot_pause_step",
+    "asl_autopilot_quota",
+    "asl_autopilot_records",
+    "asl_autopilot_status",
+    "asl_autopilot_summary",
+    "asl_autopilot_supervise",
+    "asl_autopilot_supervision_session",
+    "asl_autopilot_termination",
+    "asl_autopilot_test_bases",
+    "asl_autopilot_test_fakes",
+    "asl_autopilot_test_payloads",
+    "asl_autopilot_test_support",
+    "resplit-session",
+    "resplit_contracts",
+    "resplit_execution",
+    "resplit_parsing",
+    "resplit_render",
+    "resplit_shared",
+    "resplit_test_support",
+    "test_asl_autopilot_attached_mailbox_watcher",
+    "test_asl_autopilot_cli",
+    "test_asl_autopilot_detach",
+    "test_asl_autopilot_events_tailer_hang",
+    "test_asl_autopilot_fake_asl",
+    "test_asl_autopilot_hang_escalation",
+    "test_asl_autopilot_heartbeat_and_tailer",
+    "test_asl_autopilot_mailbox_watcher_lease",
+    "test_asl_autopilot_mailbox_watcher_projection",
+    "test_asl_autopilot_quota_wait",
+    "test_asl_autopilot_review_guidance",
+    "test_asl_autopilot_review_verdict",
+    "test_asl_autopilot_run_parse",
+    "test_asl_autopilot_supervise_mailbox_lease",
+    "test_asl_autopilot_supervise_pause_retry",
+    "test_asl_autopilot_supervise_resume_budget",
+    "test_asl_autopilot_supervise_review_launch",
+    "test_asl_autopilot_supervise_stop_control",
+    "test_asl_autopilot_supervise_transport_and_attach",
+    "test_asl_autopilot_supervision_end_records",
+    "test_asl_autopilot_supervision_end_signals",
+    "test_asl_autopilot_supervision_end_terminal_write",
+    "test_asl_autopilot_worker_hung_reporting",
+    "test_resplit_session",
+    "test_resplit_session_contracts",
+    "test_resplit_session_validation",
+]
+enable_error_code = [
+    "assignment",
+    "var-annotated",
+    "misc",
+    "call-overload",
+    "operator",
+    "override",
 ]

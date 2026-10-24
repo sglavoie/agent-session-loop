@@ -5,7 +5,11 @@ from __future__ import annotations
 import unittest
 
 from agent_session_loop import mailbox_cli_constants
-from tests.asl_docs_support import read_repo_text
+from tests.asl_docs_support import (
+    ASL_SKILL_QUOTA_AND_HANGS,
+    read_asl_skill_bundle,
+    read_repo_text,
+)
 
 #: The ASL operator guide moved out of the repository README; it carries the
 #: operator-facing summary these tests used to read from `README.md`.
@@ -18,7 +22,9 @@ class SupervisionDocsTests(unittest.TestCase):
     def test_asl_skill_ends_wait_loop_on_terminal_supervision_record(
         self,
     ) -> None:
-        skill = self._read("skills/asl/SKILL.md")
+        # Token details live in `references/supervise-tokens.md`; the skill as a
+        # whole (SKILL.md plus its references) must still carry them.
+        skill = read_asl_skill_bundle()
         normalized = " ".join(skill.split())
 
         for marker in (
@@ -100,7 +106,9 @@ class SupervisionDocsTests(unittest.TestCase):
         )
 
     def test_asl_skill_documents_the_lost_token(self) -> None:
-        skill = self._read("skills/asl/SKILL.md")
+        # Token details live in `references/supervise-tokens.md`; the skill as a
+        # whole (SKILL.md plus its references) must still carry them.
+        skill = read_asl_skill_bundle()
         normalized = " ".join(skill.split())
 
         for marker in (
@@ -280,7 +288,9 @@ class SupervisionDocsTests(unittest.TestCase):
     ) -> None:
         docs = self._read("docs/agent-session-loop.md")
         readme = self._read("agent_session_loop/README.md")
-        skill = self._read("skills/asl/SKILL.md")
+        # Token details live in `references/supervise-tokens.md`; the skill as a
+        # whole (SKILL.md plus its references) must still carry them.
+        skill = read_asl_skill_bundle()
         normalized_docs = " ".join(docs.split())
         normalized_readme = " ".join(readme.split())
         normalized_skill = " ".join(skill.split())
@@ -320,15 +330,20 @@ class SupervisionDocsTests(unittest.TestCase):
             "quiescent",
             "a `worker_hung` stop leaves that child alive holding the plan lock",
             "Check `asl status <plan-dir> --json` before treating the plan as idle",
-            "Its terminal `supervision-end` record therefore marks the end of "
-            "supervision only: that live child can still publish mailbox "
-            "questions and notices after the record lands",
         ):
             self.assertIn(
                 marker,
                 normalized_skill,
                 msg=f"asl skill omits supervision-lifetime marker: {marker!r}",
             )
+        # The `worker_hung` procedure lives in the on-demand hang reference.
+        hangs = " ".join(self._read(ASL_SKILL_QUOTA_AND_HANGS).split())
+        self.assertIn(
+            "Its terminal `supervision-end` record therefore marks the end of "
+            "supervision only: that live child can still publish mailbox "
+            "questions and notices after the record lands",
+            hangs,
+        )
 
 
 if __name__ == "__main__":

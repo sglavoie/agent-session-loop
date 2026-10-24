@@ -25,6 +25,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ModelControlTests(FakeHarnessIntegrationBase):
     def test_harness_selection_does_not_carry_explicit_model_and_effort(self) -> None:

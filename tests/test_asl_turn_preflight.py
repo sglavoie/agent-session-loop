@@ -55,6 +55,8 @@ from .asl_turn_preflight_support import (
 )
 from .support import assert_no_runner_import
 
+ASL_TEST_PORTABLE = True
+
 
 class PreflightBoundaryTests(unittest.TestCase):
     """The boundary's own shape, independent of any turn it prepares."""

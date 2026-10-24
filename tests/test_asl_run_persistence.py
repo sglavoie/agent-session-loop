@@ -48,6 +48,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 def _identified_payload(**overrides: Any) -> dict[str, Any]:
     """A payload carrying the identity the projection contract requires."""

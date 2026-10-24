@@ -35,6 +35,8 @@ from .asl_bridge_server_support import (
     _request,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class _FailingProjector:
     """Publishes one projection and then fails every walk after it.

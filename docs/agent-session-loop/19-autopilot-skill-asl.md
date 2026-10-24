@@ -60,10 +60,10 @@ skill links resolve to this checkout. See [Setup](../../README.md#setup).
 how a fresh Codex or Claude session learns the supervisor route without loading
 the whole skill. `agent_session_loop/startup_context.py` builds the card from
 `supervisor_guide.guide_payload`, so the card cannot drift from
-`asl supervisor-guide`, and maintains it as one marked block in the installed
-`~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`,
-`~/.claude-personal/CLAUDE.md` (owned by the dotfiles repository, which stows
-them into `$HOME`), and the generated skill reference
+`asl supervisor-guide`, and maintains it as one marked block in the context file of every harness root
+that exists (`~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`, and the `CLAUDE.md`
+of any extra profile named by `CLAUDE_CONFIG_DIR` or `ASL_CLAUDE_CONFIG_DIRS`),
+and in the generated skill reference
 `skills/asl/references/supervisor-context.md`. Everything outside the markers
 is preserved byte for byte. The start marker carries a digest of the block
 body: `python3 -m agent_session_loop.startup_context --check` (also

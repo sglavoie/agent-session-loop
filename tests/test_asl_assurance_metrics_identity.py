@@ -18,6 +18,8 @@ from tests.asl_assurance_metrics_support import (
     _publication,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class IdentityMetricsTests(AssuranceReportTestCase):
     def observe_unbound(self, **overrides) -> None:

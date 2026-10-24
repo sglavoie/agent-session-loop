@@ -26,6 +26,8 @@ from tests.asl_metrics_support import (
     _write_turn_result,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class MetricsCliTests(unittest.TestCase):
     def setUp(self) -> None:

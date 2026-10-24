@@ -25,6 +25,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class EndToEndQATests(EndToEndQABase):
     """Legacy repair lifecycle, preflight signals, and JSON contract stability."""

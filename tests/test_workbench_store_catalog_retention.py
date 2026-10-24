@@ -22,6 +22,8 @@ from tests.support_workbench_store import (
     run_row,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class CatalogTests(StoreCase):
     """Catalog storage is separate from run history, and pages honestly."""

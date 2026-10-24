@@ -371,7 +371,7 @@ def start(
             "origin": origin(source),
         }
         root = trace_root(state_dir)
-    except Exception:
+    except Exception:  # noqa: BLE001
         # Same fail-open contract as `_write`: never let tracing setup decide
         # whether a command runs.
         return Invocation()

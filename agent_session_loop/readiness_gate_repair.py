@@ -234,12 +234,12 @@ def _repair_readiness_gate(
             and report.readiness.state == "complete"
         ):
             target_state = "complete"
-        success, error = write_readiness_state(plan_dir, target_state)
+        success, write_error = write_readiness_state(plan_dir, target_state)
         if not success:
             errors.append(
                 {
                     "category": "manifest-readiness",
-                    "error": error or "readiness write failed",
+                    "error": write_error or "readiness write failed",
                 }
             )
         else:

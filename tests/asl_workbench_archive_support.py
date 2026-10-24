@@ -4,7 +4,6 @@ Split from tests/test_agent_session_loop.py."""
 
 from __future__ import annotations
 
-# ruff: noqa: F401
 import json
 import os
 import tempfile

@@ -9,9 +9,9 @@ from .plans_errors import (
     PlanError,
 )
 from .plans_files import (
+    _atomic_write_text,
     _is_file,
     _raise_read_error,
-    _write_text,
     canonicalize_path,
 )
 from .plans_models import (
@@ -229,5 +229,5 @@ def write_readiness_metadata(plan_dir: str | Path, metadata: ReadinessMetadata) 
     updated = replace_readiness_metadata_in_text(original, metadata)
     if updated == original:
         return False
-    _write_text(manifest_path, updated)
+    _atomic_write_text(manifest_path, updated)
     return True

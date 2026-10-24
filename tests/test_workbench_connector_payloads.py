@@ -46,6 +46,8 @@ from tests.workbench_connector_support import (
     wire_row,
 )
 
+ASL_TEST_PORTABLE = True
+
 # -- Payload mapping --------------------------------------------------------
 
 

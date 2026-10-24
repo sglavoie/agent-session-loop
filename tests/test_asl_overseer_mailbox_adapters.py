@@ -22,6 +22,8 @@ from tests.asl_overseer_mailbox_support import (
     _MailboxCase,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class Adapters(_MailboxCase):
     """The two adapters, behind the dispatcher's interface."""

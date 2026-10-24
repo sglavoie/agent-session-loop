@@ -186,7 +186,8 @@ def _open_run_state(frame: RunFrame) -> RunResult | None:
         frame.orphan_candidates = state_abandonment.orphaned_state_candidates(
             frame.snapshot, frame.args.state_dir
         )
-    except Exception:  # pragma: no cover - defensive; scan is best-effort
+    # Defensive; the scan is best-effort.
+    except Exception:  # noqa: BLE001  # pragma: no cover
         frame.orphan_candidates = []
 
     frame.reply_context = None

@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 
 from agent_session_loop import mailbox_constants, run_coordination_constants
-from tests.asl_docs_support import ASL_GUIDE, read_repo_text
+from tests.asl_docs_support import ASL_GUIDE, ASL_SKILL_HELPER_INTERNALS, read_repo_text
 
 #: The ASL operator guide moved out of the repository README; it carries the
 #: operator-facing summary these tests used to read from `README.md`.
@@ -308,7 +308,8 @@ class MailboxProtocolDocsTests(unittest.TestCase):
 
     def test_docs_and_skill_describe_lease_heartbeat_vs_takeover(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
-        skill = self._read("skills/asl/SKILL.md")
+        # The asl skill's lease heartbeat rules live in its helper reference.
+        skill = self._read(ASL_SKILL_HELPER_INTERNALS)
         normalized_docs = " ".join(docs.split())
         normalized_skill = " ".join(skill.split())
 

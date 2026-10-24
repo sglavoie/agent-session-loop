@@ -208,12 +208,12 @@ def _build_events_tailer(
         return None
     try:
         status = status_probe()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     events_path = _events_path_from_status(status)
     if not events_path:
         return None
     try:
         return _EventsTailer(events_path, clock=clock, stall_threshold=stall_threshold)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None

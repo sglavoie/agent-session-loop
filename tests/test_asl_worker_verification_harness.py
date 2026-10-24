@@ -11,6 +11,8 @@ from typing import Any
 
 from .support_asl_worker_verification import FAKE_WORKER, TempRootMixin, evaluate
 
+ASL_TEST_LANE = "integration"
+
 # --------------------------------------------------------------------------
 # One real run, driven by a fake harness
 # --------------------------------------------------------------------------

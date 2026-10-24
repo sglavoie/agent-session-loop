@@ -1,9 +1,9 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F403, F405
 """CLI entry points for the deployed staging rehearsal."""
 
 from __future__ import annotations
 
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403, F405
 from .staging_rehearsal_models import *
 from .staging_rehearsal_native import *
 
@@ -100,7 +100,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"restarted": args.role}, sort_keys=True))
         return 0
     if args.action == "migrate":
-        from asl_workbench.migration import Migration  # noqa: PLC0415
+        from asl_workbench.migration import Migration
 
         check_prefix_isolated(args.prefix)
         migration = Migration(args.prefix, target_id=args.target_id, site=site)

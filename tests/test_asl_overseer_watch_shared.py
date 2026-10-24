@@ -1,5 +1,5 @@
 # mypy: disable-error-code="name-defined,attr-defined,no-redef"
-# ruff: noqa: E402, F401, F403, F405, I001
+# ruff: noqa: F401, I001
 """The invoked watcher: what it takes on, what it leaves alone, and who owns it.
 
 Six claims, and none of them is provable by reading ``overseer_watch``.
@@ -69,6 +69,10 @@ from agent_session_loop import (
 )
 
 from .support import assert_no_runner_import
+
+
+#: Not a shard of its own: shared helpers for the facade's sections.
+ASL_TEST_SHARDS: tuple[str, ...] = ()
 
 #: The fixed moment every fake clock starts from. Far enough from any real
 #: "now" that a test accidentally reading the wall clock fails loudly.

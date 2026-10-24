@@ -30,6 +30,8 @@ from .asl_redirect_continuation_support import (
 )
 from .asl_redirect_run_support import _RedirectedRun
 
+ASL_TEST_PORTABLE = True
+
 
 class RedirectedRunTests(_RedirectedRun):
     """A fake worker, corrected mid-turn, resuming with what it was told.

@@ -79,11 +79,13 @@ class LedgerCore:
         self._connection.execute("BEGIN IMMEDIATE")
         try:
             yield self._connection
+            # Inside the try: a failed COMMIT leaves the transaction open, and
+            # every later ``BEGIN IMMEDIATE`` on this connection would refuse.
+            self._connection.execute("COMMIT")
         except BaseException:
             with contextlib.suppress(sqlite3.Error):
                 self._connection.execute("ROLLBACK")
             raise
-        self._connection.execute("COMMIT")
 
     # -- policy epoch ------------------------------------------------------
 

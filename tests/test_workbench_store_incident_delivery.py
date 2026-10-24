@@ -24,6 +24,8 @@ from tests.support_workbench_store import (
     run_row,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class IncidentDeliveryTests(IncidentCase):
     """Persisted before it is attempted, and uncertainty recorded as uncertainty."""

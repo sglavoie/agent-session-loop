@@ -33,6 +33,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ExhaustedMailboxFlowTests(rfs.ReplyResumeFlowCase):
     """Rebase thresholds, change tokens, and exhausted mailbox handling."""

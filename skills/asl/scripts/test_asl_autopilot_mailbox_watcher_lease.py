@@ -221,7 +221,7 @@ class MailboxWatcherLeaseTest(MailboxWatcherBase):
         self.assertIsNotNone(watcher)
         assert watcher is not None
         self.assertTrue(watcher.establish(now=0.0))
-        progress = []
+        progress: list[str] = []
 
         self.assertEqual(
             autopilot._poll_mailbox_watcher(
@@ -287,7 +287,7 @@ class MailboxWatcherLeaseTest(MailboxWatcherBase):
         )
         self.assertIsNotNone(watcher)
         assert watcher is not None
-        progress = []
+        progress: list[str] = []
 
         self.assertTrue(watcher.establish(now=0.0))
         self.assertTrue(watcher.enabled)
@@ -345,7 +345,7 @@ class MailboxWatcherLeaseTest(MailboxWatcherBase):
         )
         self.assertIsNotNone(watcher)
         assert watcher is not None
-        progress = []
+        progress: list[str] = []
 
         self.assertTrue(watcher.establish(now=0.0))
         for now in (5.0, 30.0, 60.0):
@@ -376,14 +376,21 @@ class MailboxWatcherLeaseTest(MailboxWatcherBase):
 
 class AutopilotMailboxPolicyTest(unittest.TestCase):
     def test_skill_distinguishes_notices_replies_and_resolutions(self) -> None:
-        skill_path = os.path.realpath(
-            os.path.join(os.path.dirname(MODULE_PATH), "..", "SKILL.md")
-        )
-        with open(skill_path, encoding="utf-8") as handle:
-            text = handle.read()
+        skill_dir = os.path.realpath(os.path.join(os.path.dirname(MODULE_PATH), ".."))
 
-        self.assertIn("NOTICE id=... preview=...", text)
-        self.assertIn("notices` array", text)
+        def read(*parts: str) -> str:
+            with open(os.path.join(skill_dir, *parts), encoding="utf-8") as handle:
+                return handle.read()
+
+        # SKILL.md keeps the short notice and closure rules; the watcher's
+        # record format and each closure in full live in on-demand references.
+        skill = read("SKILL.md")
+        self.assertIn("A `NOTICE id=...` record is nonblocking", skill)
+        self.assertIn("references/questions-and-pauses.md", skill)
+        watcher = read("references", "helper-internals.md")
+        self.assertIn("NOTICE id=... preview=...", watcher)
+        self.assertIn("notices` array", watcher)
+        text = read("references", "questions-and-pauses.md")
         self.assertIn("Resolve `continue` autonomously only", text)
         self.assertIn("Send a factual reply only", text)
         self.assertIn("Relay ambiguous decisions to the user", text)

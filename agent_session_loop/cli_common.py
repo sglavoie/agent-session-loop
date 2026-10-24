@@ -22,6 +22,7 @@ from . import (
     state_plan_refs,
     state_status,
 )
+from .cli_defaults import program_name
 
 
 @dataclass(frozen=True)
@@ -84,7 +85,7 @@ def print_error(
             )
         )
         return
-    message = f"agent-session-loop {text_label}: {error}"
+    message = f"{program_name()} {text_label}: {error}"
     if hint is not None:
         message = f"{message}; {hint}"
     print(message, file=sys.stderr)

@@ -12,7 +12,11 @@ from agent_session_loop import (
     run_coordination_control,
     turn_execution_constants,
 )
-from tests.asl_docs_support import read_repo_text
+from tests.asl_docs_support import (
+    ASL_SKILL,
+    ASL_SKILL_MID_RUN_CONTROLS,
+    read_repo_text,
+)
 
 #: The ASL operator guide moved out of the repository README; it carries the
 #: operator-facing summary these tests used to read from `README.md`.
@@ -148,7 +152,7 @@ class ControlAndAbortDocsTests(unittest.TestCase):
         )
 
     def test_asl_skill_registers_abort_beside_stop_after_current(self) -> None:
-        skill = self._read("skills/asl/SKILL.md")
+        skill = self._read(ASL_SKILL_MID_RUN_CONTROLS)
         normalized = " ".join(skill.split())
 
         self.assertIn(
@@ -177,7 +181,7 @@ class ControlAndAbortDocsTests(unittest.TestCase):
             )
 
     def test_asl_skill_requires_wait_and_reports_its_timeout(self) -> None:
-        skill = self._read("skills/asl/SKILL.md")
+        skill = self._read(ASL_SKILL_MID_RUN_CONTROLS)
         normalized = " ".join(skill.split())
 
         for marker in (
@@ -201,13 +205,19 @@ class ControlAndAbortDocsTests(unittest.TestCase):
             )
 
     def test_asl_skill_reports_the_abort_early_stop(self) -> None:
-        skill = self._read("skills/asl/SKILL.md")
+        # `SKILL.md` keeps a short `stop_kind` rule in its report step; the full
+        # abort reporting contract lives in the mid-run controls reference.
+        core = " ".join(self._read(ASL_SKILL).split())
+        self.assertIn("`stop_kind` names which request produced that stop", core)
+        self.assertIn("so it is *not* counted in `completed`", core)
+        skill = self._read(ASL_SKILL_MID_RUN_CONTROLS)
         normalized = " ".join(skill.split())
 
-        self.assertNotIn(
-            "honored an out-of-band `asl control stop-after-current` request",
-            normalized,
-        )
+        for surface in (core, normalized):
+            self.assertNotIn(
+                "honored an out-of-band `asl control stop-after-current` request",
+                surface,
+            )
         for marker in (
             "`stop_kind` names which request produced that stop.",
             "`abort` means `asl control abort` ended the turn that was in flight",
@@ -228,7 +238,7 @@ class ControlAndAbortDocsTests(unittest.TestCase):
         # run; docs and skill have to say all three or a supervisor will report
         # a stop that never happened.
         control_docs = " ".join(self._control_docs().split())
-        skill = " ".join(self._read("skills/asl/SKILL.md").split())
+        skill = " ".join(self._read(ASL_SKILL_MID_RUN_CONTROLS).split())
 
         for marker in (
             "**Killed at the deadline.** The turn was still running when the "

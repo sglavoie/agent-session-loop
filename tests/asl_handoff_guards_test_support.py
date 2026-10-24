@@ -1,4 +1,3 @@
-# ruff: noqa: F401, F403, F405, I001
 """What a turn's completion claim has to survive, asserted at the boundary.
 
 The behavioural coverage of the guards themselves already lives where it always
@@ -99,6 +98,7 @@ DURABLE_WRITE_NAMES = frozenset(
         "mkdir",
         "record_turn_rejected",
         "replace",
+        "replace_text",
         "unlink",
         "write_bytes",
         "write_json_file",
@@ -114,7 +114,7 @@ DURABLE_WRITE_NAMES = frozenset(
 #: or the journal append learning to rewrite a session file.
 DURABLE_WRITES: dict[str, frozenset[str]] = {
     "_append_progress_entry": frozenset({"append_progress_entry"}),
-    "_revert_session_status_to_pending": frozenset({"write_text"}),
+    "_revert_session_status_to_pending": frozenset({"replace_text"}),
     "_enforce_mailbox_completion_guard": frozenset(
         {"write_json_file", "record_turn_rejected", "_pause_run"}
     ),

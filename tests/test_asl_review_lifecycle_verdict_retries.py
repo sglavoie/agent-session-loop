@@ -17,6 +17,8 @@ from tests.support import (
     _structured_review_finding,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class RunReviewVerdictRetryTests(MutatingFakeClaudeMixin):
     """Review verdict retries and ``stop after current`` handling."""

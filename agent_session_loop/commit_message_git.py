@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import commit_message_diff as diff
 from . import commit_message_models as models
-from .git_subprocess import run_git_reporting
+from .git_subprocess import GIT_TIMEOUT_SECONDS, run_git_reporting
 
 # ---------------------------------------------------------------------------
 # Git surface
@@ -23,6 +23,7 @@ def _git(
     *,
     stdin_text: str | None = None,
     env: Mapping[str, str] | None = None,
+    timeout: float | None = GIT_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
     """Run git without raising, mirroring the runner's subprocess pattern.
 
@@ -31,7 +32,7 @@ def _git(
     stripping the credentials, locale, and git configuration every other call
     inherits.
     """
-    return run_git_reporting(cwd, args, stdin_text=stdin_text, env=env)
+    return run_git_reporting(cwd, args, stdin_text=stdin_text, env=env, timeout=timeout)
 
 
 def find_git_root(start: Path) -> Path | None:
@@ -291,12 +292,16 @@ def commit_staged(
     argv = ["commit", "-F", "-"]
     if not verify:
         argv.append("--no-verify")
+    # A verified commit runs the repository's own hooks, which may run a whole
+    # test suite: that is the repository's budget to set, not git's, so only
+    # the hook-free commit keeps the default ceiling.
+    timeout = None if verify else GIT_TIMEOUT_SECONDS
     if not pathspec:
-        return _git(cwd, argv, stdin_text=message)
+        return _git(cwd, argv, stdin_text=message, timeout=timeout)
     with tempfile.TemporaryDirectory(prefix="asl-commit-index-") as scratch:
         env = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
         _build_scoped_index(cwd, pathspec, env)
-        return _git(cwd, argv, stdin_text=message, env=env)
+        return _git(cwd, argv, stdin_text=message, env=env, timeout=timeout)
 
 
 def pathspec_snapshot(cwd: Path, pathspec: Sequence[str]) -> str:

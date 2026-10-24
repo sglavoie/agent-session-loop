@@ -27,6 +27,8 @@ from tests.workbench_controls_support import (
     ControlsTestCase,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class SurfaceParityTests(ControlsTestCase):
     """The browser and the connector reach the same queue and the same journal."""

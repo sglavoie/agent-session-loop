@@ -113,7 +113,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
             "severity",
             {
                 field.name
-                for field in dataclasses.fields(supervisor_audit_models._Verdict)  # noqa: SLF001
+                for field in dataclasses.fields(supervisor_audit_models._Verdict)
             },
         )
 

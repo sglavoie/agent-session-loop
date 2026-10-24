@@ -18,6 +18,8 @@ from tests.support_asl_overseer_decisions import (
     RUN,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class HoldAndResumeTests(unittest.TestCase):
     """The session's first fixture: "commit then resume" against a hold."""

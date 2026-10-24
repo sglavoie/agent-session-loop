@@ -17,6 +17,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewCycleCapTests(RepairCycleFixtures, unittest.TestCase):
     """Stop review cycles at caps and reopen completed reviews."""

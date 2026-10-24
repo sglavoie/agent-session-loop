@@ -12,4 +12,6 @@ from .asl_commit_groups_cases_settlement import (
     DurableLedgerTests,
 )
 
+ASL_TEST_PORTABLE = True
+
 __all__ = [name for name in globals() if name.endswith("Tests")]

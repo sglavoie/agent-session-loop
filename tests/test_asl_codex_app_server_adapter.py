@@ -22,6 +22,8 @@ from agent_session_loop import (
 )
 from tests import support_asl_codex_app_server as fixtures
 
+ASL_TEST_LANE = "integration"
+
 
 class AdapterTransportTests(unittest.TestCase):
     """The adapter against a real app-server process on a real pipe."""

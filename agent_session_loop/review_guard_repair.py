@@ -57,7 +57,7 @@ def _repair_commit_preflight(
     }
     workspace = verification_context.workspace
     if workspace is None:
-        selected = [(None, ".", cwd)]
+        selected: list[tuple[str | None, str, Path]] = [(None, ".", cwd)]
     else:
         if session_scope is None or not session_scope.writes:
             message = "generated repair child declares no writable repository"

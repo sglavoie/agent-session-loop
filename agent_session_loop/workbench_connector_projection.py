@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, F821, F822, I001
+# ruff: noqa: F401
 """The Mac provider behind ``asl workbench connect``.
 
 :mod:`asl_workbench.connector_runtime` decides *when* a connector publishes and *what*

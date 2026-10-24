@@ -25,6 +25,8 @@ from tests.support import (
     write_plan_with_ids,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewCycleBaselineTests(RepairCycleFixtures, unittest.TestCase):
     """Recover post-reopen baselines and count legacy cycle events."""

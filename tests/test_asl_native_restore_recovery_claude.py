@@ -14,6 +14,8 @@ from tests import support_asl_native_restore_recovery as fixtures
 from tests.support_asl_native_restore_recovery import THREAD_ID
 from tests.test_asl_harness_lifecycle import _FakePipe, _FakeProcess, _TurnTestCase
 
+ASL_TEST_LANE = "integration"
+
 
 class ClaudeRestoreRefusalTests(_TurnTestCase):
     """A claude turn whose ``--resume`` the CLI would not honour.

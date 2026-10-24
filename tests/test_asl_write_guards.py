@@ -31,4 +31,6 @@ from .asl_write_guards_cases_repair import (
     RegenerateStaleRepairChildScopesTests,
 )
 
+ASL_TEST_PORTABLE = True
+
 __all__ = [name for name in globals() if name.endswith("Tests")]

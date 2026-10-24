@@ -55,4 +55,6 @@ from .asl_run_loop_cases_boundary import (
 )
 from .asl_run_loop_cases_gate import PausedRetainedWorkGateTests
 
+ASL_TEST_PORTABLE = True
+
 __all__ = [name for name in globals() if name.endswith("Tests")]

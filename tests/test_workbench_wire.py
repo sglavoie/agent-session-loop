@@ -78,6 +78,12 @@ from tests.workbench_support import (
     shell_iso,
 )
 
+# Integration: it is nothing but real moving parts -- a listening service,
+# a connector loop in its own thread, a real clock, and bounded waits for
+# frames to cross a socket. The lane that runs on a frozen clock cannot
+# hold it.
+ASL_TEST_LANE = "integration"
+
 #: The two ends, named the way the transport requires. The target id is an
 #: authority because that is what
 #: :attr:`~asl_workbench.integrations.IntegrationSite.target_id` derives.

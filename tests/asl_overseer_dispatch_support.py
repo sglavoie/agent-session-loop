@@ -1,4 +1,3 @@
-# ruff: noqa: F401
 """Focused tests for the guarded action dispatcher.
 
 Seven properties, and every one of them is a refusal, because a dispatcher that

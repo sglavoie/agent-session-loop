@@ -67,6 +67,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    durability,
     plans_discovery,
     plans_errors,
     plans_files,
@@ -572,5 +573,5 @@ def ensure_generated_review_session(
         review_bases=review_bases,
     )
     target_path = canonical_dir / session_id.filename
-    target_path.write_text(body, encoding="utf-8")
+    durability.replace_text(target_path, body)
     return plans_models.SessionFile(session_id=session_id, path=target_path), True

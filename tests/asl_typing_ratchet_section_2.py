@@ -1,11 +1,12 @@
 # mypy: disable-error-code="name-defined,attr-defined,no-redef"
-# ruff: noqa: E402, F401, F403, F405, I001
+# ruff: noqa: E402, F403, F405, I001
 from . import test_asl_typing_ratchet_shared as _shared
 
 globals().update(
     {name: value for name, value in vars(_shared).items() if not name.startswith("__")}
 )
 from .test_asl_typing_ratchet_shared import *
+from .support_base import load_section_tests
 from .asl_typing_ratchet_section_1 import *
 
 REQUIRED_RATCHETED_MODULES = frozenset(
@@ -549,7 +550,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
 )
 
 #: The floor for the Checked table, same rule as the set above: clean under all
-#: three codes, but held off the Boundary table by the linter rather than by
+#: nine codes, but held off the Boundary table by the linter rather than by
 #: mypy. Seeded with the two package modules that import the runner, which is a
 #: rule neither of them could ever satisfy.
 
@@ -558,17 +559,4 @@ def load_tests(
     loader: unittest.TestLoader, tests: unittest.TestSuite, pattern: str | None
 ) -> unittest.TestSuite:
     """Load only test cases defined in this focused section."""
-    suite = unittest.TestSuite()
-    cases = sorted(
-        (
-            value
-            for value in globals().values()
-            if isinstance(value, type)
-            and issubclass(value, unittest.TestCase)
-            and value.__module__ == __name__
-        ),
-        key=lambda case: case.__name__,
-    )
-    for case in cases:
-        suite.addTests(loader.loadTestsFromTestCase(case))
-    return suite
+    return load_section_tests(loader, __name__)

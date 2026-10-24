@@ -17,6 +17,8 @@ from tests.support import (
 
 from .support_workbench_details import _reclaimable_lock, _tree_fingerprint
 
+ASL_TEST_LANE = "integration"
+
 
 class DetailSearchTests(unittest.TestCase):
     """Search reads the private half, online, and retains nothing."""

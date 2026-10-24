@@ -116,7 +116,7 @@ appears alongside a `Lock: stale (...)` entry, clear the lock with
 `asl unlock ... --force --json` only after confirming no other runner is
 genuinely active.
 
-Left alone, such a run never gets a terminal record, so `asl tail --follow` and
+Left alone, such a run never gets a terminal record, so a following `asl tail` (it follows by default) and
 anything else waiting on `run_finished` waits forever. Both `asl status` and a
 stale-lock takeover inside `asl run` therefore reconstruct that ending once
 death is *proven*: the lock's pid is gone and its recorded `hostname` matches
@@ -197,6 +197,20 @@ To inspect the journal without opening the file, use
 `asl progress PLAN_DIR [--tail] [--json]`: it prints the runner-managed
 journal, follows it live with `--tail`, and emits parsed entries with
 `--json`.
+
+### Accepting remote-ref updates after a paused review
+
+For a paused review whose retained changes consist only of existing remote-ref
+updates, `asl accept-ref-updates PLAN_DIR --session SESSION_ID --json` previews
+the evidence. After explicit operator approval, repeat it with `--accept DIGEST
+--reason 'Operator approved these ref updates'` using the preview's exact
+`evidence_digest`. Acceptance requires unchanged reviewed evidence, no active
+runner, complete registered repository snapshots, clean current worktrees, and
+refs still at the recorded values. It records the operator decision without
+changing session scope or completing the review. Resume with the original
+`asl run` command; ordinary readiness and write guards still apply. Source,
+local branch, tag, topology, and unavailable-evidence failures are ineligible.
+See [the recovery contract](../../agent_session_loop/README.md#accepting-remote-ref-updates-after-a-paused-review).
 
 ### Interactive Q&A resume
 

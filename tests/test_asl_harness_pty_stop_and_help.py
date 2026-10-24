@@ -18,6 +18,8 @@ from tests.support import (
     wait_until,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class PtyStopAndHelpTests(PtyRunHarnessBase):
     def test_text_run_pty_p_stops_after_current_session(self) -> None:

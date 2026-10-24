@@ -29,6 +29,8 @@ from .support_asl_agent_mux_projection import (
     _turn,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class ContractIdentityTests(unittest.TestCase):
     """The pinned constants still describe the corpus AgentMux will implement."""

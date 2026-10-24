@@ -19,6 +19,8 @@ from .workbench_transport_contract_cases_roundtrip import (
     ValidExchangesRoundTrip,
 )
 
+ASL_TEST_PORTABLE = True
+
 __all__ = [
     "ValidExchangesRoundTrip",
     "ObservationsReachTheStoreUntranslated",

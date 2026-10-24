@@ -11,6 +11,7 @@ from typing import Any
 
 from . import plans_metadata, repository_intent, responses
 from .authoring_transaction import PlanTransaction
+from .cli_defaults import program_name
 from .plans_errors import PlanError
 from .plans_files import canonicalize_path
 from .prepare_corrections import CorrectionOutcome, _apply_one_correction
@@ -173,7 +174,7 @@ def expand_ingest_from_args(args: Any) -> int:
                 )
             )
         else:
-            print(f"agent-session-loop expand-ingest: {error}", file=sys.stderr)
+            print(f"{program_name()} expand-ingest: {error}", file=sys.stderr)
         return 1
 
     try:

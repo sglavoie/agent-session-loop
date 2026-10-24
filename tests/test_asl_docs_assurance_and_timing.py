@@ -14,7 +14,11 @@ from agent_session_loop import (
     state_assurance_pending,
     supervisor_audit_agent,
 )
-from tests.asl_docs_support import ASL_GUIDE, read_asl_reference
+from tests.asl_docs_support import (
+    ASL_GUIDE,
+    ASL_SKILL_SUPERVISOR_AUDIT,
+    read_asl_reference,
+)
 from tests.support import (
     REPO_ROOT,
 )
@@ -160,6 +164,18 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
         self.assertIn("reports assurance and never drives it", self.asl_skill)
         for flag in ("--supervisor-audit", "--audit-harness", "--audit-timeout"):
             self.assertIn(flag, self.asl_skill)
+        # The full field list and prohibitions live in the on-demand reference.
+        audit = (REPO_ROOT / ASL_SKILL_SUPERVISOR_AUDIT).read_text(encoding="utf-8")
+        self.assertIn("This skill reports assurance and never drives it", audit)
+        for flag in (
+            "--supervisor-audit",
+            "--no-supervisor-audit",
+            "--audit-harness",
+            "--audit-harness-model",
+            "--audit-effort",
+            "--audit-timeout",
+        ):
+            self.assertIn(flag, audit)
 
     def test_assurance_docs_define_the_repaired_evidence_semantics(self) -> None:
         for phrase in (

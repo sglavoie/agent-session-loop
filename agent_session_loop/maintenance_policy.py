@@ -8,6 +8,7 @@ for the rules that govern how they are used.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -47,7 +48,21 @@ LOG_BODY_NAMES = ("stdout.log", "stderr.log", "last-message.txt")
 BODY_LEDGER_SUFFIX = ".body.json"
 BODY_LEDGER_SCHEMA_VERSION = 1
 
-JOB_LABEL = "com.sglavoie.asl-maintenance"
+#: Reverse-DNS prefix of the maintenance job's launchd label. The default is
+#: the prefix an already-installed job carries, so leaving the variable unset
+#: never orphans it; changing it means uninstalling the old job first.
+LAUNCHD_LABEL_PREFIX_ENV = "ASL_LAUNCHD_LABEL_PREFIX"
+DEFAULT_LAUNCHD_LABEL_PREFIX = "com.sglavoie"
+
+
+def launchd_label_prefix(environ: Mapping[str, str] | None = None) -> str:
+    """Return ``$ASL_LAUNCHD_LABEL_PREFIX`` without a trailing dot, or the default."""
+    source = os.environ if environ is None else environ
+    value = source.get(LAUNCHD_LABEL_PREFIX_ENV, "").strip().rstrip(".")
+    return value or DEFAULT_LAUNCHD_LABEL_PREFIX
+
+
+JOB_LABEL = f"{launchd_label_prefix()}.asl-maintenance"
 DEFAULT_HOUR = 3
 DEFAULT_MINUTE = 30
 LAUNCH_AGENTS_RELATIVE_DIR = "Library/LaunchAgents"

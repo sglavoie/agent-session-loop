@@ -29,6 +29,8 @@ from tests import support
 from tests import test_asl_lost_submission_response as lost_tests
 from tests.asl_redirect_run_support import _RedirectedRun
 
+ASL_TEST_LANE = "integration"
+
 
 class _LivePredecessor(_RedirectedRun):
     def _controller_factory(self):

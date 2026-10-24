@@ -17,6 +17,8 @@ from tests.support import (
     _write_state_payload,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class WorkbenchRecoveryTests(fixtures.WorkbenchRecoveryCase):
     def test_verify_failed_recovery_maps_every_failure_reason_to_runtime_hint(

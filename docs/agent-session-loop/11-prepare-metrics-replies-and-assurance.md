@@ -150,7 +150,7 @@ and renders its byte totals the same way so the two commands compare directly.
 Metrics also reports an `execution_timing` section — a text
 `Execution timing` block and an additive JSON object — that answers where the
 runs finishing inside the window spent their wall clock. It is rendered from
-[the execution timing collector](12-assurance-in-metrics-retention-and-consu.md#execution-timing-accounting), which is a pure
+[the execution timing collector](12-assurance-in-metrics-retention-and-consumers.md#execution-timing-accounting), which is a pure
 function of the event records and turn results this command already read: the
 section adds no scan of its own. Its window is a whole-run window rather than a
 per-record one. A run belongs to it by its **finish** time and then contributes

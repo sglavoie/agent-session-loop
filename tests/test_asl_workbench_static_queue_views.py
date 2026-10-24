@@ -13,6 +13,8 @@ from tests.support import (
     _http_request_raw,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchStaticQueueViewTests(support_static.WorkbenchStaticCase):
     """Cover the queue's views, filters and responsive layout rules."""

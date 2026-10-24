@@ -27,6 +27,8 @@ from tests.workbench_controls_support import (
     ControlsTestCase,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class CorrectionTests(ControlsTestCase):
     """What one correction establishes, and what it refuses to guess."""

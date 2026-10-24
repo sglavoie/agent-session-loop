@@ -13,13 +13,10 @@ from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import plans_files, run_contention, session_overview, state
+from tests.support_base import force_pid_alive as _force_pid_alive
+from tests.support_base import write_json as _write_json
 
 DEAD_PID = 4_242_424
-
-
-def _write_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
 
 def _make_lock(
@@ -74,11 +71,6 @@ def _foreign_lock(roots: tuple[str, ...] | None) -> dict[str, object]:
     lock["version"] = 2
     lock["repositories"] = sorted(roots)
     return lock
-
-
-def _force_pid_alive(pid: int) -> bool:
-    """Treat only the current process as alive so dead PIDs are deterministic."""
-    return pid == os.getpid()
 
 
 class DetectConflictsTests(unittest.TestCase):

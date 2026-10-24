@@ -13,6 +13,8 @@ from agent_session_loop import (
 )
 from tests.asl_agent_mux_pairing_support import CURRENT, PairingTestBase
 
+ASL_TEST_PORTABLE = True
+
 
 class PairingRefusalTests(PairingTestBase):
     """A live run whose state predates the projection refuses the whole pairing."""

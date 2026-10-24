@@ -1,9 +1,9 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F403, F405
 """Translate fresh snapshots and imported history into incident state."""
 
 from __future__ import annotations
 
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403, F405
 from .incidents_models import *
 from .incidents_persistence import epoch, plan_epoch, record, resolve
 

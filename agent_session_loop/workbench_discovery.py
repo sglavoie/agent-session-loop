@@ -181,10 +181,10 @@ def discover_plans(
             ):
                 record(plan_dir, "plan-root")
 
-    for index, raw_root in enumerate(plan_roots):
-        canonical = _canonical_plan_dir(str(raw_root))
+    for index, explicit_root in enumerate(plan_roots):
+        canonical = _canonical_plan_dir(str(explicit_root))
         if canonical is None:
-            warnings.append(f"plan_root[{index}]: invalid path {raw_root!r}")
+            warnings.append(f"plan_root[{index}]: invalid path {explicit_root!r}")
             continue
         for plan_dir in _scan_plan_root(
             Path(canonical), warnings=warnings, context=f"plan_root[{index}]"
@@ -216,7 +216,7 @@ def discover_plans(
             sorted(accumulator[canonical], key=lambda src: source_order[src])
         )
         plan_path = Path(canonical)
-        pin = pin_lookup.get(canonical)
+        plan_pin = pin_lookup.get(canonical)
         try:
             exists = plan_path.is_dir()
         except OSError:
@@ -225,8 +225,8 @@ def discover_plans(
             DiscoveredPlan(
                 plan_dir=plan_path,
                 sources=sources,
-                label=pin.label if pin is not None else None,
-                profile=pin.profile if pin is not None else None,
+                label=plan_pin.label if plan_pin is not None else None,
+                profile=plan_pin.profile if plan_pin is not None else None,
                 exists=exists,
             )
         )

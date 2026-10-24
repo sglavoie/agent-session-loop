@@ -8,6 +8,8 @@ from typing import Any
 from asl_workbench import remote_reads
 from tests import support_workbench_remote_reads as fixtures
 
+ASL_TEST_PORTABLE = True
+
 
 class PagingTests(unittest.TestCase):
     """The cursor the Mac sent is the cursor the next read uses."""

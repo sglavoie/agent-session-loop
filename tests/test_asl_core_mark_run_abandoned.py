@@ -4,6 +4,8 @@ Split from tests/test_asl_core.py."""
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import socket
@@ -600,3 +602,49 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.assertEqual(state_abandonment.ABANDONED_REASON, persisted["reason"])
         self.assertNotIn("assurance_pending", persisted)
         self.assertEqual(1, len(read_jsonl(self.events_path)))
+
+    def test_an_unwritable_terminal_state_declines_and_says_so(self) -> None:
+        self.write_unfinished_state(run_id="run-unwritable")
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                state_abandonment.artifacts,
+                "atomic_write_bytes",
+                side_effect=PermissionError(13, "Permission denied"),
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertFalse(
+                state_abandonment.mark_run_abandoned(
+                    self.plan_state, lock_info=None, trigger="test"
+                )
+            )
+
+        message = stderr.getvalue()
+        self.assertIn("could not record the abandoned run", message)
+        self.assertIn("PermissionError", message)
+        self.assertNotIn("Traceback", message)
+        self.assertIsNone(self.persisted_state()["run_finished_at"])
+
+    def test_a_defect_still_fails_open_but_is_reported_with_its_traceback(
+        self,
+    ) -> None:
+        self.write_unfinished_state(run_id="run-defect")
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                state_abandonment,
+                "_write_assurance_pending_record",
+                side_effect=KeyError("a bug"),
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertFalse(
+                state_abandonment.mark_run_abandoned(
+                    self.plan_state, lock_info=None, trigger="test"
+                )
+            )
+
+        message = stderr.getvalue()
+        self.assertIn("unexpected error: KeyError", message)
+        self.assertIn("Traceback", message)

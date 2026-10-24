@@ -267,7 +267,8 @@ class ConnectorState:
         self._recovered = True
         try:
             settled = self._performer.recover(now=now)
-        except Exception as error:  # a performer is arbitrary provider code
+        # A performer is arbitrary provider code.
+        except Exception as error:  # noqa: BLE001
             self._mutation_fault = f"{type(error).__name__}: {error}"[:MAX_LABEL_CHARS]
             return 0
         for payload in settled:

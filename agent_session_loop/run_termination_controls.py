@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F401, F403, F405
 """Honor abort and stop controls after a turn has reached a safe boundary."""
 
 from __future__ import annotations

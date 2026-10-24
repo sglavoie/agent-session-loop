@@ -160,7 +160,7 @@ def _capture_review_repo_fingerprint(
     root_argv = ["rev-parse", "--show-toplevel"]
     try:
         repo_root_result = evidence_git._run_git(cwd_path, root_argv)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
         return evidence_git._ReviewGuardUnavailable(
             "git-unrunnable", root_argv, error=error
         ).fingerprint

@@ -22,6 +22,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class AgentMuxWaitNotificationTests(unittest.TestCase):
     """Wait lifecycle delivery payloads, preview bounds, and fail-open behavior."""

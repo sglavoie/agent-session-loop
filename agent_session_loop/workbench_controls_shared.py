@@ -1,5 +1,5 @@
 # mypy: disable-error-code="name-defined,attr-defined,no-redef"
-# ruff: noqa: E402, F401, F403, F405, I001
+# ruff: noqa: F401
 """One path for every run control and every correction, whoever asked.
 
 The browser and the AgentMux bridge had each grown a full copy of this. Two

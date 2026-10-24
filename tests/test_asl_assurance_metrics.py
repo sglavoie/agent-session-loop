@@ -25,6 +25,8 @@ from tests.asl_assurance_metrics_support import (
     _publication,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class CoverageMetricsTests(AssuranceReportTestCase):
     def test_empty_ledger_reports_zeroes_and_stays_available(self) -> None:

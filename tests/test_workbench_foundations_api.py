@@ -26,6 +26,8 @@ from asl_workbench import changes
 from tests.support import _http_request, _http_request_raw, write_plan
 from tests.workbench_support import WorkbenchAPIFixture, recording_server_factory
 
+ASL_TEST_LANE = "integration"
+
 
 class LocalAPICharacterizationTests(WorkbenchAPIFixture, unittest.TestCase):
     """Today's local API behavior, captured before anything is extracted."""

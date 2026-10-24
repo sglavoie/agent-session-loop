@@ -10,4 +10,6 @@ from .asl_execution_timing_cases_reconciliation import ReconciliationTests
 from .asl_execution_timing_cases_reporting import PurityTests, TrustSeparationTests
 from .asl_execution_timing_cases_window import MissingEvidenceTests, WindowTests
 
+ASL_TEST_PORTABLE = True
+
 __all__ = [name for name in globals() if name.endswith("Tests")]

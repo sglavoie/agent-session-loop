@@ -30,6 +30,8 @@ from tests.support import (
 )
 from tests.support_asl_overseer_resume import MOMENT
 
+ASL_TEST_PORTABLE = True
+
 
 class LaunchIsolationTests(unittest.TestCase):
     """The narrowed lock authorization survives the process boundary.

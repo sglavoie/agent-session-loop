@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import io
 import json
 import os
@@ -43,6 +44,8 @@ from tests.support import (
     patched_env,
     write_plan,
 )
+
+ASL_TEST_LANE = "integration"
 
 
 class SparkFlagTests(unittest.TestCase):
@@ -305,6 +308,74 @@ class SparkRoutingTests(unittest.TestCase):
                 self.assertNotEqual(run_selection.SPARK_MODEL, model)
                 self.assertEqual("baseline", route["decision"])
                 self.assertEqual(cause, route["suppression_cause"])
+
+
+_SILENT_APP_SERVER = """#!{python}
+import subprocess, sys
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+with open({pid_path!r}, "w") as handle:
+    handle.write(str(child.pid))
+sys.stdin.read()
+import time
+time.sleep(60)
+"""
+
+
+class SparkProbeLifecycleTests(unittest.TestCase):
+    """The probe leaves no process and no open pipe behind."""
+
+    def test_a_silent_app_server_and_its_children_are_ended(self) -> None:
+        import gc
+        import signal
+        import sys
+        import time
+        import warnings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_path = Path(tmp) / "grandchild.pid"
+            script = Path(tmp) / "codex"
+            script.write_text(
+                _SILENT_APP_SERVER.format(
+                    python=sys.executable, pid_path=str(pid_path)
+                ),
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", ResourceWarning)
+                status = spark_status.read_status(executable=str(script), timeout=1.0)
+                gc.collect()
+
+            self.assertEqual("rate-limit-read-timeout", status.reason)
+            self.assertEqual(
+                [],
+                [w for w in caught if issubclass(w.category, ResourceWarning)],
+            )
+            grandchild = int(pid_path.read_text(encoding="utf-8"))
+            self.addCleanup(self._reap_stray, grandchild, signal.SIGKILL)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and self._alive(grandchild):
+                time.sleep(0.05)
+            self.assertFalse(
+                self._alive(grandchild),
+                "the app-server's own child was left running",
+            )
+
+    @staticmethod
+    def _alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    @staticmethod
+    def _reap_stray(pid: int, signum: int) -> None:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signum)
 
 
 class ModelAvailabilityTests(unittest.TestCase):

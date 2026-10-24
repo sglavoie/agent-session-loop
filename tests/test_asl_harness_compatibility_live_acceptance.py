@@ -27,6 +27,8 @@ from tests.asl_harness_compatibility_support import (
     _write_fake_cli,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class LiveAcceptanceOptInTests(unittest.TestCase):
     """`tests/asl_live_redirect_acceptance.py` must be inert until paid for.

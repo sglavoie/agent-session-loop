@@ -13,6 +13,7 @@ from . import (
     plans_readiness,
     responses,
 )
+from .cli_defaults import program_name
 from .workbench_discovery import discover_plans
 from .workbench_registry import load_registry
 from .workbench_registry_models import WorkbenchError
@@ -45,7 +46,7 @@ def workbench_registry_from_args(args: Any) -> int:
             )
         else:
             print(
-                f"agent-session-loop workbench registry: {error}",
+                f"{program_name()} workbench registry: {error}",
                 file=sys.stderr,
             )
         return 1
@@ -92,7 +93,7 @@ def _plans_error(args: Any, *, reason: str, error: str) -> int:
             )
         )
     else:
-        print(f"agent-session-loop plans: {error}", file=sys.stderr)
+        print(f"{program_name()} plans: {error}", file=sys.stderr)
     return 1
 
 

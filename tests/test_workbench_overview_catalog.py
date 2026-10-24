@@ -17,6 +17,8 @@ from tests.workbench_support import (
     SHELL_FROZEN_NOW,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class LargeCatalogTests(unittest.TestCase):
     """Above one page, in the mode that has to answer from a database."""

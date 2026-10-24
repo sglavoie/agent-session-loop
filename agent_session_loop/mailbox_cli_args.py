@@ -45,7 +45,7 @@ def body_from_args(
         return None
     if from_stdin:
         try:
-            body = cli_common.read_stdin_text()
+            body: str | None = cli_common.read_stdin_text()
         except (OSError, TypeError, UnicodeError, ValueError) as error:
             cli_common.print_error(
                 args,

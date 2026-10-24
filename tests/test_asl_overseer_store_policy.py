@@ -20,6 +20,8 @@ from tests.asl_overseer_store_support import (
     _LedgerCase,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class UnavailablePolicyTests(_LedgerCase):
     """A decision that could not be obtained confers nothing."""

@@ -278,15 +278,14 @@ def _rewrite_contract(
     # "the session's sole write repository" means for the next check.
     sole_write = next(iter(writes)) if len(writes) == 1 else None
     for index, command in unlocated:
-        alias = _argv_alias(
+        inferred = _argv_alias(
             command.argv,
             bound_root=bound_root,
             alias_by_root=alias_by_root,
             git_root_cache=git_root_cache,
         )
-        if alias is None:
-            alias = sole_write
-        if alias is None:
+        command_alias = inferred if inferred is not None else sole_write
+        if command_alias is None:
             return _refused(
                 "command-check-repo",
                 detail=(
@@ -296,8 +295,8 @@ def _rewrite_contract(
                     "writes no single repository"
                 ),
             )
-        writes[alias] = None
-        checks[index] = replace(command, repo=alias)
+        writes[command_alias] = None
+        checks[index] = replace(command, repo=command_alias)
 
     return replace(
         contract,

@@ -28,7 +28,10 @@ import unittest
 from typing import Any
 
 from agent_session_loop import overseer_discovery, overseer_policy_client, plans_files
+from tests.asl_overseer_history_support import _CannedAmx
 from tests.support import assert_no_runner_import
+
+ASL_TEST_PORTABLE = True
 
 PLAN = "/state/agent-session-loop/plan-abc"
 AMX = "/usr/local/bin/amx"
@@ -80,32 +83,6 @@ def _payload(
             ],
         },
     }
-
-
-class _CannedAmx:
-    """A ``run_command`` seam that replays one canned answer and records the argv."""
-
-    def __init__(
-        self,
-        *,
-        stdout: str = "",
-        returncode: int = 0,
-        raises: BaseException | None = None,
-    ) -> None:
-        self.stdout = stdout
-        self.returncode = returncode
-        self.raises = raises
-        self.calls: list[list[str]] = []
-
-    def __call__(
-        self, argv: list[str], **kwargs: Any
-    ) -> subprocess.CompletedProcess[str]:
-        self.calls.append(list(argv))
-        if self.raises is not None:
-            raise self.raises
-        return subprocess.CompletedProcess(
-            args=argv, returncode=self.returncode, stdout=self.stdout, stderr=""
-        )
 
 
 def _authorize(

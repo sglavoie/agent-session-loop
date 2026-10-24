@@ -2,13 +2,25 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+ASL_TEST_PORTABLE = True
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: The harness roots a stock machine with every harness installed carries.
+DEFAULT_SKILL_DIRS = (".claude/skills", ".codex/skills", ".copilot/skills")
+
+#: An environment that names no extra Claude root, so an ambient
+#: ``CLAUDE_CONFIG_DIR`` on the developer's machine cannot leak in.
+NO_EXTRA_ROOTS: dict[str, str] = {}
 
 _spec = importlib.util.spec_from_file_location("asl_install", REPO_ROOT / "install.py")
 assert _spec is not None and _spec.loader is not None
@@ -31,9 +43,16 @@ class InstallLinksTests(unittest.TestCase):
             (self.repo / "skills" / name).mkdir(parents=True)
             (self.repo / "skills" / name / "SKILL.md").write_text("x\n")
         (self.repo / "skills/references").mkdir()
+        for root in (".claude", ".codex", ".copilot"):
+            (self.home / root).mkdir(parents=True)
 
-    def install(self, **kwargs: bool) -> list[str]:
-        return install_links.install(self.home, self.repo, **kwargs)
+    def install(self, env: dict[str, str] | None = None, **kwargs: bool) -> list[str]:
+        return install_links.install(
+            self.home,
+            self.repo,
+            env=NO_EXTRA_ROOTS if env is None else env,
+            **kwargs,
+        )
 
     def test_links_wrappers_and_every_skill_into_each_harness(self) -> None:
         self.install()
@@ -43,7 +62,7 @@ class InstallLinksTests(unittest.TestCase):
             self.assertEqual(
                 os.readlink(link), os.fspath(self.repo / "bin/.local/bin" / name)
             )
-        for install_dir in install_links.SKILL_INSTALL_DIRS:
+        for install_dir in DEFAULT_SKILL_DIRS:
             for name in ("asl", "session-run", "references"):
                 link = self.home / install_dir / name
                 self.assertEqual(
@@ -59,7 +78,7 @@ class InstallLinksTests(unittest.TestCase):
         other = self.root / "other/skills/asl"
         other.mkdir(parents=True)
         link = self.home / ".claude/skills/asl"
-        link.parent.mkdir(parents=True)
+        link.parent.mkdir()
         link.symlink_to(other)
 
         changes = self.install()
@@ -85,12 +104,12 @@ class InstallLinksTests(unittest.TestCase):
 
         self.install()
 
-        for install_dir in install_links.SKILL_INSTALL_DIRS:
+        for install_dir in DEFAULT_SKILL_DIRS:
             self.assertFalse((self.home / install_dir / "session-run").is_symlink())
 
     def test_leaves_unrelated_links_alone(self) -> None:
         unrelated = self.home / ".claude/skills/bn"
-        unrelated.parent.mkdir(parents=True)
+        unrelated.parent.mkdir()
         unrelated.symlink_to(self.root / "dotfiles/skills/bn")
 
         self.install()
@@ -115,7 +134,102 @@ class InstallLinksTests(unittest.TestCase):
         changes = self.install(dry_run=True)
 
         self.assertTrue(changes)
-        self.assertFalse(self.home.exists())
+        self.assertFalse((self.home / ".local").exists())
+        for install_dir in DEFAULT_SKILL_DIRS:
+            self.assertFalse((self.home / install_dir).exists())
+
+    def test_absent_harness_roots_are_skipped_and_never_created(self) -> None:
+        (self.home / ".copilot").rmdir()
+        (self.home / ".codex").rmdir()
+
+        changes = self.install()
+
+        self.assertTrue((self.home / ".claude/skills/asl").is_symlink())
+        self.assertFalse((self.home / ".codex").exists())
+        self.assertFalse((self.home / ".copilot").exists())
+        self.assertFalse((self.home / ".claude-personal").exists())
+        self.assertFalse(any(".codex" in change for change in changes))
+
+    def test_claude_profiles_join_through_the_environment(self) -> None:
+        (self.home / ".claude-personal").mkdir()
+        (self.home / ".claude-work").mkdir()
+        env = {
+            "CLAUDE_CONFIG_DIR": str(self.home / ".claude-personal"),
+            "ASL_CLAUDE_CONFIG_DIRS": os.pathsep.join(
+                ["~/.claude-work", "~/.claude-absent", "~/.claude-personal"]
+            ),
+        }
+
+        self.install(env=env)
+
+        for root in (".claude-personal", ".claude-work"):
+            link = self.home / root / "skills/asl"
+            self.assertEqual(os.readlink(link), os.fspath(self.repo / "skills/asl"))
+        self.assertFalse((self.home / ".claude-absent").exists())
+        discovery = install_links.discover_harness_roots(self.home, env)
+        self.assertEqual(
+            [root.relative for root in discovery.found],
+            [".claude", ".claude-personal", ".claude-work", ".codex", ".copilot"],
+        )
+        self.assertIn(("~/.claude-absent", "not present"), discovery.skipped)
+        self.assertIn("~/.claude-work (claude)", discovery.note())
+
+    def test_a_root_outside_home_is_skipped(self) -> None:
+        outside = self.root / "elsewhere/.claude-personal"
+        outside.mkdir(parents=True)
+        env = {"CLAUDE_CONFIG_DIR": str(outside)}
+
+        discovery = install_links.discover_harness_roots(self.home, env)
+        self.install(env=env)
+
+        self.assertEqual(
+            [root.relative for root in discovery.found],
+            [".claude", ".codex", ".copilot"],
+        )
+        self.assertEqual(discovery.skipped[0][0], str(outside))
+        self.assertFalse((outside / "skills").exists())
+
+    def test_prune_leaves_unmanaged_roots_alone(self) -> None:
+        stale = self.home / ".claude-personal/skills/gone"
+        stale.parent.mkdir(parents=True)
+        stale.symlink_to(self.repo / "skills/gone")
+
+        self.install()
+
+        self.assertTrue(stale.is_symlink())
+        self.assertFalse((self.home / ".claude-personal/skills/asl").exists())
+
+
+class WrapperInterpreterTests(unittest.TestCase):
+    WRAPPER = REPO_ROOT / "bin/.local/bin/agent-session-loop"
+
+    def test_wrapper_finds_python_on_path(self) -> None:
+        first_line = self.WRAPPER.read_text(encoding="utf-8").splitlines()[0]
+
+        self.assertEqual(first_line, "#!/usr/bin/env python3")
+
+    def test_entry_points_parse_under_an_old_interpreter(self) -> None:
+        # The guard can only report the version if the file reaches it.
+        for path in (self.WRAPPER, REPO_ROOT / "agent_session_loop/__main__.py"):
+            ast.parse(path.read_text(encoding="utf-8"), feature_version=(3, 9))
+
+    def test_old_interpreter_gets_a_readable_error(self) -> None:
+        script = (
+            "import runpy, sys\n"
+            "sys.version_info = (3, 12, 0, 'final', 0)\n"
+            f"runpy.run_path({str(self.WRAPPER)!r}, run_name='__main__')\n"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("asl requires Python 3.14+; found 3.12 at", result.stderr)
+        self.assertIn(sys.executable, result.stderr)
 
 
 if __name__ == "__main__":

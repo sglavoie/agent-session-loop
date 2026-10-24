@@ -16,6 +16,8 @@ from agent_session_loop import (
 )
 from tests.review_lifecycle_base import RunReviewHarnessLifecycleBase
 
+ASL_TEST_LANE = "integration"
+
 
 class RunReviewFinalReviewPauseTests(RunReviewHarnessLifecycleBase):
     """Pauses caused by a failed review turn or an invalid final review file."""

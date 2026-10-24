@@ -44,6 +44,10 @@ from .workbench_lifecycle_support import (
     stub_package,
 )
 
+# Integration for the plainest reason: git, `plutil`, the installed `asl`
+# executable, and a service release that is genuinely started and stopped.
+ASL_TEST_LANE = "integration"
+
 
 class RuntimePolicyTests(unittest.TestCase):
     def test_installed_runtime_uses_the_documented_two_minute_phone_alert(self) -> None:
@@ -200,7 +204,14 @@ class DefinitionTest(unittest.TestCase):
         # Renaming either would orphan a launch agent and a unit that are
         # running right now, which is an outage dressed as a rename.
         self.assertEqual(lifecycle.UNIT, "asl-companion.service")
-        self.assertEqual(lifecycle.LABEL, "com.sglavoie.asl-companion")
+        self.assertEqual(
+            lifecycle.LABEL,
+            (
+                os.environ.get("ASL_LAUNCHD_LABEL_PREFIX", "").strip().rstrip(".")
+                or "com.sglavoie"
+            )
+            + ".asl-companion",
+        )
 
     def test_the_unit_stops_the_whole_control_group(self) -> None:
         self.assertIn("KillMode=control-group", self.unit())

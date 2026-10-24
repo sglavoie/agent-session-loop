@@ -30,6 +30,7 @@ from . import (
     responses,
     tail,
 )
+from .cli_defaults import program_name
 
 DEFAULT_POLL_INTERVAL_SECONDS = tail.POLL_INTERVAL_SECONDS
 
@@ -58,7 +59,7 @@ def backfill_progress_from_args(args: argparse.Namespace) -> int:
         entries = progress_repair.build_backfill_entries(snapshot)
     except plans_errors.PlanError as error:
         print(
-            f"agent-session-loop backfill-progress: {error}",
+            f"{program_name()} backfill-progress: {error}",
             file=sys.stderr,
         )
         return 1
@@ -72,7 +73,7 @@ def backfill_progress_from_args(args: argparse.Namespace) -> int:
 
     if progress_file.exists() and not force:
         print(
-            "agent-session-loop backfill-progress: "
+            f"{program_name()} backfill-progress: "
             f"{progress_file} already exists; pass --force to overwrite",
             file=sys.stderr,
         )
@@ -84,13 +85,13 @@ def backfill_progress_from_args(args: argparse.Namespace) -> int:
         )
     except (plans_errors.PlanError, OSError) as error:
         print(
-            f"agent-session-loop backfill-progress: {error}",
+            f"{program_name()} backfill-progress: {error}",
             file=sys.stderr,
         )
         return 1
 
     print(
-        f"agent-session-loop backfill-progress: wrote {result.entries_written} "
+        f"{program_name()} backfill-progress: wrote {result.entries_written} "
         f"entries to {result.path}"
     )
     return 0
@@ -172,13 +173,13 @@ def progress_from_args(args: argparse.Namespace) -> int:
             sys.stdout.write(progress_file.read_text(encoding="utf-8"))
         except OSError as error:
             print(
-                f"agent-session-loop progress: cannot read {progress_file}: {error}",
+                f"{program_name()} progress: cannot read {progress_file}: {error}",
                 file=sys.stderr,
             )
             return 1
     elif not follow:
         print(
-            f"agent-session-loop progress: {progress_file} does not exist "
+            f"{program_name()} progress: {progress_file} does not exist "
             "(run `asl backfill-progress` to reconstruct from session handoffs)",
             file=sys.stderr,
         )

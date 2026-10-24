@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import re
 import unittest
+from pathlib import Path
 
 from agent_session_loop import (
     overseer_decisions,
     prepare_models,
 )
-from tests.asl_docs_support import read_asl_reference
+from tests.asl_docs_support import (
+    ASL_SKILL,
+    ASL_SKILL_ON_DEMAND_REFERENCES,
+    read_asl_reference,
+    read_asl_skill_bundle,
+)
 from tests.support import (
     REPO_ROOT,
 )
@@ -160,6 +167,9 @@ class SkillContractDocsTests(unittest.TestCase):
                 "asl": "skills/asl/SKILL.md",
             }.items()
         }
+        # The registered-workspace failures and combined review moved to the
+        # asl skill's on-demand references; the skill as a whole must keep them.
+        surfaces["asl"] = read_asl_skill_bundle()
 
         self.assertIn('put `"repo": "Alias"` on every check', surfaces["split"])
         self.assertIn("`Alias:path`", surfaces["split"])
@@ -277,6 +287,28 @@ class SkillContractDocsTests(unittest.TestCase):
         self.assertIn("`external` lists the escaping targets", docs)
         self.assertIn("belongs to no Git worktree", readme)
         self.assertIn("an escaping target that belongs to no Git worktree", readme)
+
+    def test_asl_skill_points_at_every_on_demand_reference(self) -> None:
+        # `SKILL.md` loads on every invocation, so the rarely needed procedures
+        # live in references it names; a reference nothing points at is one
+        # no supervisor will ever read, and a dangling pointer is worse.
+        skill_path = REPO_ROOT / ASL_SKILL
+        skill = skill_path.read_text(encoding="utf-8")
+        for reference in ASL_SKILL_ON_DEMAND_REFERENCES:
+            relative = str(Path(reference).relative_to(Path(ASL_SKILL).parent))
+            with self.subTest(reference=reference):
+                self.assertTrue((REPO_ROOT / reference).is_file())
+                self.assertIn(f"`{relative}`", skill)
+                text = (REPO_ROOT / reference).read_text(encoding="utf-8")
+                self.assertIn("`../SKILL.md`", text)
+        mentioned = set(re.findall(r"`(references/[a-z0-9-]+\.md)`", skill))
+        for relative in mentioned:
+            self.assertTrue(
+                (skill_path.parent / relative).is_file(),
+                f"{ASL_SKILL} points at missing {relative}",
+            )
+        # Ratchet: the always-loaded skill stays lean.
+        self.assertLessEqual(len(skill.splitlines()), 300)
 
 
 if __name__ == "__main__":

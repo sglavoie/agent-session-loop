@@ -19,6 +19,8 @@ from tests import support_asl_overseer_e2e as fixtures
 from tests.support_asl_overseer_e2e import setUpModule as setUpModule
 from tests.support_asl_overseer_e2e import tearDownModule as tearDownModule
 
+ASL_TEST_LANE = "integration"
+
 
 class FaultQualificationTests(assertions._WorldCase):
     """Each injected fault becomes a refusal that names itself, and nothing else.

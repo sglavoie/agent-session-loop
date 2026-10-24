@@ -26,6 +26,8 @@ from tests.workbench_connector_support import (
     cycle_with,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class _FakeResponse:
     def __init__(self, status: int, body: bytes) -> None:

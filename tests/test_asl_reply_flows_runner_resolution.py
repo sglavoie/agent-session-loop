@@ -38,6 +38,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class RunnerResolutionFlowTests(rfs.ReplyResumeFlowCase):
     """Continue/pause resolutions owned by the runner or the worker."""

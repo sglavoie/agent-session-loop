@@ -23,6 +23,8 @@ from agent_session_loop import (
 from agent_session_loop import run_coordination_constants as wait_budgets
 from tests import support_asl_pause_ux as fixtures
 
+ASL_TEST_LANE = "integration"
+
 
 class ArtifactSafetyAndPauseUxTests(fixtures.ArtifactSafetyAndPauseUxCase):
     def test_mailbox_question_identity_is_stable_uuid5_per_turn(self) -> None:

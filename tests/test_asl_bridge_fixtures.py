@@ -31,6 +31,8 @@ from agent_session_loop import (
     intervention,
 )
 
+ASL_TEST_PORTABLE = True
+
 # The identifier the checked-in documents carry in place of the live one.
 PLACEHOLDER_CONTRACT_SET_ID = "asl-amx-1.0000000000000000"
 

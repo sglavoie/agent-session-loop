@@ -19,6 +19,8 @@ from .support_asl_agent_mux_projection import (
     _emitted_hook_payloads,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class HookIdentityTests(unittest.TestCase):
     """Schema-2 hook payloads come from the same canonical types."""

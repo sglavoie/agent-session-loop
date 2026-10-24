@@ -30,6 +30,8 @@ from .support import (
 )
 from .workbench_archive_support import ArchiveFixture
 
+ASL_TEST_LANE = "integration"
+
 
 class SurfaceParityTests(ArchiveFixture):
     """The HTTP routes and the CLI are renderings of the one service."""

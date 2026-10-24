@@ -30,6 +30,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class RevertSnapshotCacheIntegrationTests(unittest.TestCase):
     """A status revert must leave the run-owned snapshot cache usable.

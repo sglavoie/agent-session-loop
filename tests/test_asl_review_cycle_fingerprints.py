@@ -17,6 +17,8 @@ from tests.support import (
     _structured_review_finding,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewCycleFingerprintTests(RepairCycleFixtures, unittest.TestCase):
     """Fingerprint review findings and resolve cap inputs."""

@@ -1,4 +1,3 @@
-# ruff: noqa: F401, F403, F405, I001
 """``asl diagnostics export --agent-mux`` tests.
 
 The export exists so AgentMux never parses ``state.json``, ``events.jsonl`` or

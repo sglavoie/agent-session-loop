@@ -1,4 +1,3 @@
-# ruff: noqa: F401, F403, F405, I001
 """Append-only assurance ledger, issue-ID allocation, and index-cache tests."""
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ from agent_session_loop import (
     state,
 )
 from agent_session_loop.assurance_ledger import LedgerError
+from tests.asl_assurance_models_support import _finding
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -59,21 +59,6 @@ observation = inbox.IssueObservation(
 record = ledger.append_issue_observation(observation, state_dir=state_dir)
 sys.stdout.write(record.issue_id)
 """
-
-
-def _finding(**overrides) -> assurance_models_findings.Finding:
-    payload = {
-        "category": "lifecycle",
-        "component": "agent_session_loop/runner.py",
-        "invariant_key": "retry.budget-respected",
-        "lane": "lifecycle-retry-resume",
-        "severity": "high",
-        "summary": "A retry ran after the budget was exhausted.",
-        "recommendation": "Clamp the retry counter before relaunching.",
-        "evidence": ("events.jsonl",),
-    }
-    payload.update(overrides)
-    return assurance_models_findings.Finding(**payload)
 
 
 def _observation(**overrides) -> assurance_models_inbox.IssueObservation:

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from .cli_defaults import (
     _CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS,
@@ -20,6 +21,11 @@ _WORKBENCH_SERVE_CHILD_DESTS = {
     "open": "_workbench_serve_open",
     "json": "_workbench_serve_json",
 }
+
+
+#: The namespace type ``parse_args`` fills and returns, matching the overloads
+#: ``argparse.ArgumentParser.parse_args`` declares.
+_NamespaceT = TypeVar("_NamespaceT")
 
 
 def _workbench_dest(name: str, *, child_parser: bool) -> str:
@@ -58,13 +64,64 @@ def _normalize_workbench_serve_args(args: argparse.Namespace) -> argparse.Namesp
     return args
 
 
+if TYPE_CHECKING:
+    _SubParsersBase = argparse._SubParsersAction["_AgentSessionLoopArgumentParser"]
+else:  # the runtime class is not subscriptable
+    _SubParsersBase = argparse._SubParsersAction
+
+
+class _DescribedSubParsersAction(_SubParsersBase):
+    """Subparser registry that gives every leaf a ``--help`` summary.
+
+    ``help=`` only labels a subcommand in its parent's listing; argparse leaves
+    the subcommand's own ``--help`` without a summary unless ``description=``
+    is passed too. Defaulting the description to the help text here means a
+    new ``add_parser`` call gets a summary without repeating itself, while an
+    explicit, longer ``description=`` still wins.
+    """
+
+    def add_parser(self, name: str, **kwargs: Any) -> _AgentSessionLoopArgumentParser:
+        help_text = kwargs.get("help")
+        if (
+            kwargs.get("description") is None
+            and isinstance(help_text, str)
+            and help_text != argparse.SUPPRESS
+        ):
+            # Choice help is %-expanded in the parent listing; descriptions
+            # are printed verbatim, so undo the escaping.
+            kwargs["description"] = help_text.replace("%%", "%")
+        return super().add_parser(name, **kwargs)
+
+
 class _AgentSessionLoopArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Nested ``add_subparsers`` calls build children of this same class,
+        # so every level inherits the described-subparser registry.
+        self.register("action", "parsers", _DescribedSubParsersAction)
+
+    @overload
+    def parse_args(
+        self, args: Iterable[str] | None = None, namespace: None = None
+    ) -> argparse.Namespace: ...
+
+    @overload
+    def parse_args(
+        self, args: Iterable[str] | None, namespace: _NamespaceT
+    ) -> _NamespaceT: ...
+
+    @overload
+    def parse_args(self, *, namespace: _NamespaceT) -> _NamespaceT: ...
+
     def parse_args(
         self,
-        args: Sequence[str] | None = None,
-        namespace: argparse.Namespace | None = None,
-    ) -> argparse.Namespace:
-        parsed = super().parse_args(args, namespace)
+        args: Iterable[str] | None = None,
+        namespace: Any | None = None,
+    ) -> Any:
+        # Materialize once: ``args`` is read twice below, and an iterator
+        # would reach the provenance record already exhausted.
+        argv = None if args is None else list(args)
+        parsed = super().parse_args(argv, namespace)
         parsed = _normalize_workbench_serve_args(parsed)
         # Record the exact tokens that produced this namespace so lazy handler
         # dispatch (e.g. `runner.run_from_args`) can detect which flags were
@@ -72,7 +129,7 @@ class _AgentSessionLoopArgumentParser(argparse.ArgumentParser):
         # `sys.argv`. This keeps `--resume` explicit-flag provenance correct
         # through `cli.main(argv)` and direct resolved-handler dispatch.
         if not hasattr(parsed, "_run_argv"):
-            parsed._run_argv = list(sys.argv[1:] if args is None else args)
+            parsed._run_argv = list(sys.argv[1:] if argv is None else argv)
         return parsed
 
 

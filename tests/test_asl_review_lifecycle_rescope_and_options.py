@@ -28,6 +28,8 @@ from tests.support import (
     write_completed_review_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class RunReviewRescopeAndOptionTests(RunReviewHarnessLifecycleBase):
     """Review rescoping, v1 refresh, harness availability, and CLI options."""

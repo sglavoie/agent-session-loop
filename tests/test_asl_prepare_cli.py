@@ -524,7 +524,7 @@ class PrepareCliTests(unittest.TestCase):
         self.assertIn("--harness-model gpt-5", stdout)
         self.assertIn("--review-harness claude", stdout)
         self.assertIn("--review-harness-model claude-opus-4", stdout)
-        self.assertIn("agent-session-loop prepare:", stderr)
+        self.assertIn("asl prepare:", stderr)
         # The failed preparation directory is preserved as draft.
         plan_dirs = list(self.base_dir.iterdir())
         self.assertEqual(1, len(plan_dirs))

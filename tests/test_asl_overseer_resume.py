@@ -63,6 +63,8 @@ from tests.support import (
 )
 from tests.support_asl_overseer_resume import ALIAS, ENVIRONMENTAL_PAUSE
 
+ASL_TEST_PORTABLE = True
+
 
 class ClosedVocabulary(fixtures._ResumeCase):
     """The refusal words are a consumer contract, not a set of strings."""

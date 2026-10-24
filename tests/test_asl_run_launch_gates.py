@@ -46,6 +46,8 @@ from tests.support import (
     write_multi_repo_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class RunFlagValidationTests(unittest.TestCase):
     autopilot: ModuleType

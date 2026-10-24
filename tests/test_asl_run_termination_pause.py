@@ -25,6 +25,8 @@ from tests.support import (
     write_multi_repo_plan,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class PauseWriteTests(_TerminationCase):
     """The pause block, its policy, and the event that publishes it."""

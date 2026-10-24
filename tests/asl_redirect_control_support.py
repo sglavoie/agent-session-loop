@@ -8,26 +8,11 @@ from agent_session_loop import (
     process_tree,
     redirect_control,
 )
+from tests.support_base import ManualClock as _Clock
 
 # Real-process cases wait on other threads; every wait is bounded so a broken
 # controller fails the assertion rather than hanging the suite.
 PATIENCE = 10.0
-
-
-class _Clock:
-    """A monotonic clock the test advances by hand."""
-
-    def __init__(self, start: float = 1000.0) -> None:
-        self._lock = threading.Lock()
-        self._value = start
-
-    def __call__(self) -> float:
-        with self._lock:
-            return self._value
-
-    def advance(self, delta: float) -> None:
-        with self._lock:
-            self._value += delta
 
 
 class _FakeCancellation:

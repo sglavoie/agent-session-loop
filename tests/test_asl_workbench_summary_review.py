@@ -29,6 +29,8 @@ from tests.support import (
     write_review_cycle_event,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class WorkbenchSummaryTests(fixtures.WorkbenchSummaryCase):
     def test_corrected_malformed_review_becomes_rerunnable(self) -> None:

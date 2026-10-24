@@ -38,7 +38,7 @@ def settle_end_commit(
     except RunError as error:
         commit_group = None
         failed_commit = None
-        commit_error = str(error)
+        commit_error: str | None = str(error)
     else:
         commit_error = None
     if failed_commit is not None or commit_error is not None:

@@ -14,6 +14,8 @@ from agent_session_loop import (
     verification_transitions,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class VerificationFingerprintTests(unittest.TestCase):
     def _details(self, **overrides: Any) -> dict[str, Any]:

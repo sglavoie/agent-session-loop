@@ -26,6 +26,8 @@ from .asl_redirect_continuation_support import (
     target,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class PendingRedirectTests(unittest.TestCase):
     """What survives the turn, and what deliberately does not."""

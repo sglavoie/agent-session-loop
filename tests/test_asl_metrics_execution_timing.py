@@ -16,6 +16,8 @@ from tests.asl_metrics_support import (
     _timing_turn,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class ExecutionTimingMetricsSectionTests(TimingSectionBase):
     def test_an_empty_corpus_reports_the_section_with_nothing_measured(self) -> None:

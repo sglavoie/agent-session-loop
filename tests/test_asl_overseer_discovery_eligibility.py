@@ -15,6 +15,8 @@ from tests.asl_overseer_discovery_support import (
 
 from .support import _WORKBENCH_DEAD_PID
 
+ASL_TEST_PORTABLE = True
+
 
 class EligibilityTests(unittest.TestCase):
     """Eligible means askable, and every refusal is nameable."""

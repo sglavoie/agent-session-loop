@@ -17,10 +17,13 @@ and not a ``--resume`` that rehydrates flags from disk. The leak surfaces have
 one test each, because each covers a replay the others cannot.
 """
 
-from ._test_asl_conversation_resume_part_1 import *  # noqa: F401, F403
-from ._test_asl_conversation_resume_part_2 import *  # noqa: F401, F403
-from ._test_asl_conversation_resume_part_3 import *  # noqa: F401, F403
-from ._test_asl_conversation_resume_support import *  # noqa: F401, F403
+from ._test_asl_conversation_resume_part_1 import *  # noqa: F403
+from ._test_asl_conversation_resume_part_2 import *  # noqa: F403
+from ._test_asl_conversation_resume_part_3 import *  # noqa: F403
+from ._test_asl_conversation_resume_support import *  # noqa: F403
+
+
+ASL_TEST_PORTABLE = True
 
 
 if __name__ == "__main__":

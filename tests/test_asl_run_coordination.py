@@ -218,7 +218,7 @@ class WaitStateStoreTests(fixtures.CoordinationTestCase):
                 store.record_lease_activity(
                     question_id="question-1", updated_at=f"2026-01-0{index + 1}Z"
                 )
-            except BaseException as error:  # noqa: BLE001 - reported, not swallowed
+            except BaseException as error:
                 failures.append(error)
 
         def finish() -> None:
@@ -230,7 +230,7 @@ class WaitStateStoreTests(fixtures.CoordinationTestCase):
                         pending_outbox=0,
                     )
                 )
-            except BaseException as error:  # noqa: BLE001 - reported, not swallowed
+            except BaseException as error:
                 failures.append(error)
 
         threads = [threading.Thread(target=probe, args=(index,)) for index in range(8)]

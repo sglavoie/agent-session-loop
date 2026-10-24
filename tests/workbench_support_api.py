@@ -75,8 +75,8 @@ class SurfaceReadError(Exception):
 
 
 def _subparser_choices(parser: argparse.ArgumentParser) -> dict[str, Any]:
-    for action in parser._actions:  # noqa: SLF001 - argparse exposes no public API
-        if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
             return dict(action.choices)
     return {}
 

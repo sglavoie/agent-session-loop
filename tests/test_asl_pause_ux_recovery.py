@@ -32,6 +32,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ArtifactSafetyAndPauseUxTests(fixtures.ArtifactSafetyAndPauseUxCase):
     def test_worker_self_pause_inside_abort_grace_window_is_not_a_kill(

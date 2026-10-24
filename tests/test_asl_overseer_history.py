@@ -28,15 +28,17 @@ path, directory, or project of the conversation it hid is rejected outright
 rather than parsed past, and the answer carrying it yields nothing.
 """
 
-from .asl_overseer_history_cases_mismatch import (  # noqa: F401
+from .asl_overseer_history_cases_mismatch import (
     HistoryMalformedAnswerTests,
     HistoryMismatchTests,
 )
-from .asl_overseer_history_cases_request import (  # noqa: F401
+from .asl_overseer_history_cases_request import (
     HistoryAnswerTests,
     HistoryRequestTests,
     HistoryUnavailableTests,
 )
+
+ASL_TEST_PORTABLE = True
 
 if __name__ == "__main__":
     import unittest

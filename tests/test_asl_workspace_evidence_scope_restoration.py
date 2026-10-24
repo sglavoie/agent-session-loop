@@ -18,6 +18,8 @@ from agent_session_loop import (
 )
 from tests.asl_workspace_evidence_support import _workspace
 
+ASL_TEST_PORTABLE = True
+
 
 class WorkspaceScopeRestorationTests(unittest.TestCase):
     def setUp(self) -> None:

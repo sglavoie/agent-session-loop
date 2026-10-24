@@ -16,6 +16,7 @@ from agent_session_loop import (
 )
 from agent_session_loop import assurance_projection as projection
 from agent_session_loop.assurance_projection import AuditPublication
+from tests.asl_assurance_models_support import _finding
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -77,21 +78,6 @@ def _worker_run_id(index: int) -> str:
 
 def _worker_digest(index: int) -> str:
     return f"{index:064x}"
-
-
-def _finding(**overrides) -> assurance_models_findings.Finding:
-    payload = {
-        "category": "lifecycle",
-        "component": "agent_session_loop/runner.py",
-        "invariant_key": "retry.budget-respected",
-        "lane": "lifecycle-retry-resume",
-        "severity": "high",
-        "summary": "A retry ran after the budget was exhausted.",
-        "recommendation": "Clamp the retry counter before relaunching.",
-        "evidence": ("events.jsonl",),
-    }
-    payload.update(overrides)
-    return assurance_models_findings.Finding(**payload)
 
 
 def _artifacts(

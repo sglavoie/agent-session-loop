@@ -20,6 +20,8 @@ from agent_session_loop import (
 )
 from tests import support_asl_guards as fixtures
 
+ASL_TEST_LANE = "integration"
+
 
 class GuardControlQueueTests(unittest.TestCase):
     """Guard mutations are durable, validated commands like every other."""

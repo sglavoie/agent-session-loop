@@ -17,6 +17,8 @@ from asl_workbench import operations
 
 from .support_workbench_operations import DEAD_PID, JournalFixture, _record
 
+ASL_TEST_LANE = "integration"
+
 
 class ReconciliationTests(unittest.TestCase):
     """What an interrupted operation is afterwards, and what it is never."""

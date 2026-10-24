@@ -16,6 +16,8 @@ from agent_session_loop import (
 #: The symbols this module took from the runner. The program's no-alias rule
 from tests.asl_run_termination_support import _TerminationCase
 
+ASL_TEST_PORTABLE = True
+
 
 class ReadinessCloseTests(_TerminationCase):
     """The readiness writer enters as a seam and its outcome is recorded."""

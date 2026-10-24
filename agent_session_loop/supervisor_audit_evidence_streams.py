@@ -212,8 +212,8 @@ def _read_mailbox(
     present_ids = {str(parsed["id"]) for _, parsed in parsed_lines if parsed.get("id")}
     missing_ids = sorted((referenced_ids | delivered_ids) - present_ids)
     summary["missing_reference_count"] = len(missing_ids)
-    for identifier in missing_ids:
-        collector.omissions.record("mailbox", REASON_MISSING, identifier)
+    for missing_id in missing_ids:
+        collector.omissions.record("mailbox", REASON_MISSING, missing_id)
     records: list[dict[str, Any]] = []
     counts: dict[str, int] = {}
     unscoped = 0

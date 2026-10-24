@@ -15,6 +15,8 @@ from tests.support_workbench_store import (
     snapshot_payload,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class OrderedIngestionTests(StoreCase):
     """Time orders; the generation counter only breaks ties."""

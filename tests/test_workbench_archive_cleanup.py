@@ -22,6 +22,8 @@ from .support import (
 )
 from .workbench_archive_support import DEAD_PID, ArchiveFixture
 
+ASL_TEST_LANE = "integration"
+
 
 class ExplicitCleanupTests(ArchiveFixture):
     """The confirmations that did not change, held so they cannot drift."""

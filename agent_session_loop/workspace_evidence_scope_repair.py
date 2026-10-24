@@ -1,9 +1,10 @@
 # mypy: disable-error-code="attr-defined,call-arg,has-type,name-defined"
-# ruff: noqa: F401, F403, F405, F821, F822, I001
+# ruff: noqa: F821
 """Workspace-scope repair evidence and generated-child scope updates."""
 
 from __future__ import annotations
 
+from . import durability
 from . import workspace_evidence_bases as _bases
 from . import workspace_evidence_guard as _guard
 
@@ -351,7 +352,7 @@ def _regenerated_repair_child_write_scope(
     except plans_errors.PlanError, ValueError:
         return None
     try:
-        session.path.write_text(rewritten, encoding="utf-8")
+        durability.replace_text(session.path, rewritten)
     except OSError:
         # A child the runner cannot rewrite keeps its narrow durable scope, and
         # the caller's revalidation is what turns that into a refusal to launch

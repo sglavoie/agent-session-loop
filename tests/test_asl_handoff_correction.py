@@ -10,6 +10,8 @@ from .asl_handoff_correction_cases_correction import (
 )
 from .asl_handoff_correction_cases_note import AppendHandoffNoteTests
 
+ASL_TEST_PORTABLE = True
+
 __all__ = [
     "AppendHandoffNoteTests",
     "CorrectionTurnTests",

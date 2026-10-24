@@ -35,6 +35,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ProgressAndHeartbeatTests(FakeHarnessIntegrationBase):
     def test_text_run_emits_human_progress_to_stderr(self) -> None:

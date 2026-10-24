@@ -6,20 +6,27 @@
   this repository.
 - `just all` (alias of `just install`) runs `install.py`, which links
   `~/.local/bin/{asl,agent-session-loop}` and every `skills/<name>` into the
-  four harness skill directories as absolute symlinks into this checkout, each
-  swapped with `os.replace` so nothing that execs `asl` sees a gap. It then
-  renders the ASL startup card into the installed context files.
+  skill directory of every discovered harness root as absolute symlinks into
+  this checkout, each swapped with `os.replace` so nothing that execs `asl`
+  sees a gap. It then renders the ASL startup card into the installed context
+  files. Harness roots (`~/.claude`, `~/.codex`, `~/.copilot`, plus Claude
+  profiles named by `$CLAUDE_CONFIG_DIR` / `$ASL_CLAUDE_CONFIG_DIRS`) are
+  managed only when they already exist; `discover_harness_roots` in
+  `agent_session_loop/install_verify_common.py` is the one definition that
+  `install.py`, `startup_context` and `install_verify` all use.
 - `skills/<name>/SKILL.md` is the source of truth for skills. Run
   `just sync-skills` after any change there: it re-links the skills and runs
   `agent_session_loop/startup_context.py`, which re-renders the marked ASL
-  startup card in `~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`,
-  `~/.claude-personal/CLAUDE.md` and in
+  startup card in each discovered root's `AGENTS.md` / `CLAUDE.md` and in
   `skills/asl/references/supervisor-context.md`.
   Never hand-edit inside `<!-- ASL_CONTEXT_START ... -->`;
   `just check-startup-context` reports a stale block without rewriting it.
-- `just test-fast` / `just test-all` run the shard driver `tests/run_suite.py`. A
-  new test module must be added to its `FAST_MODULES` / `INTEGRATION_MODULES`
-  lists, or the discovery cross-check fails the suite.
+- `just test-fast` / `just test-all` run the shard driver `tests/run_suite.py`.
+  Every `tests/test*.py` module is a fast-lane shard unless it declares
+  `ASL_TEST_LANE = "integration"`; `ASL_TEST_PORTABLE = True` adds a fast module
+  to `just test-portable`, and a facade names its section shards with
+  `ASL_TEST_SHARDS` (`()` for a re-export or helper-only module). Every mode runs
+  a registration shard that fails unless each discovered test runs exactly once.
 - `just lint` runs ShellCheck via `lint-shell`, then `ruff check`, the
   `ruff format --check` gate and mypy via `lint-py`. `just verify-asl-install`
   checks that the active ASL wrappers and installed skills resolve to this

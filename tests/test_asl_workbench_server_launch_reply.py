@@ -18,6 +18,8 @@ from tests.support import (
     _http_request,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchServerLaunchReplyTests(WorkbenchServerTestCase):
     """Launch and reply endpoints."""

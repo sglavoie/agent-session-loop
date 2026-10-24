@@ -16,6 +16,8 @@ from .support_asl_worker_verification import (
     evaluate,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class PolicyOwnershipDigestTests(TempRootMixin):
     """Changing or removing an ownership instruction ages evidence out.

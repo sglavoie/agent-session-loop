@@ -27,6 +27,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ActivityAndFailurePauseTests(FakeHarnessIntegrationBase):
     def test_a_new_turn_supersedes_the_previous_turns_action_required(self) -> None:

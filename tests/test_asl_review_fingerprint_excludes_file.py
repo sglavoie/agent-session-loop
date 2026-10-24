@@ -14,6 +14,8 @@ from tests.support import (
     git_stdout,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewFingerprintExcludesFileTests(ReviewFingerprintBase):
     """Fingerprint evidence from ``core.excludesFile`` and ignore symlinks."""

@@ -5,12 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from .install_verify_agent_mux import _check_agent_mux
-from .install_verify_common import readable_path
+from .install_verify_common import discover_harness_roots, readable_path
 from .install_verify_maintenance import _check_maintenance_job
 from .install_verify_skills import (
     _check_asl_skill,
@@ -31,20 +31,28 @@ def verify_install(
     home: str | Path | None = None,
     path_env: str | None = None,
     require_agent_mux: bool = False,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Return a structured active-install verification payload."""
+    """Return a structured active-install verification payload.
+
+    Skills and startup context are verified only under the harness roots that
+    exist (``install_verify_common.discover_harness_roots``); ``env`` defaults
+    to the process environment and supplies the extra Claude roots.
+    """
 
     resolved_repo = Path(repo_root).resolve() if repo_root is not None else _repo_root()
     resolved_home = (
         Path(home).expanduser().resolve() if home is not None else Path.home()
     )
+    discovery = discover_harness_roots(resolved_home, env)
+    roots = discovery.found
     active_asl, asl_check = _check_asl_path(resolved_repo, path_env)
     checks = [
         asl_check,
-        *_check_skill_links(resolved_repo, resolved_home),
-        *_check_session_run_content(resolved_home),
-        *_check_startup_context(resolved_home),
-        *_check_asl_skill(resolved_repo, resolved_home),
+        *_check_skill_links(resolved_repo, resolved_home, roots),
+        *_check_session_run_content(resolved_home, roots),
+        *_check_startup_context(resolved_home, roots),
+        *_check_asl_skill(resolved_repo, resolved_home, roots),
         _check_status_smoke(
             active_asl=active_asl,
             home=resolved_home,
@@ -69,6 +77,7 @@ def verify_install(
         "repo_root": readable_path(resolved_repo),
         "home": readable_path(resolved_home),
         "active_asl": active_asl,
+        "harness_roots": discovery.payload(),
         "require_agent_mux": require_agent_mux,
         "checks": checks,
         "failures": failures,

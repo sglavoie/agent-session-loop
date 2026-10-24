@@ -18,6 +18,13 @@ from tests.support_workbench_fullstack import (
 )
 from tests.support_workbench_fullstack_case import FullStackCase
 
+# Integration in the fullest sense the repository has: one plan corpus, the
+# real observation source, a connector, a link that can be made to fail, the
+# Pi's store, and the remote provider behind a loopback socket, with the
+# launch children replaced by an inert interpreter rather than the launch
+# path. Nothing here would tell the truth without all of it running.
+ASL_TEST_LANE = "integration"
+
 # ---------------------------------------------------------------------------
 # The corpus reaches the interface
 # ---------------------------------------------------------------------------

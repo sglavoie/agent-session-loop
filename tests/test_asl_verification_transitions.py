@@ -32,6 +32,8 @@ from .support_asl_verification_transitions import (
     _result,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class VerificationMachineModelTests(unittest.TestCase):
     """The declared lifecycle, walked exhaustively in both directions."""

@@ -17,6 +17,8 @@ from tests.workbench_staging_support import (
     TemporaryCase,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class RestagedUnit(TemporaryCase):
     """The unit the release writes, starting the release on another port."""
@@ -72,7 +74,7 @@ class RestagedUnit(TemporaryCase):
             mock.patch.object(runtime, "run") as run,
             mock.patch.object(sys, "argv", ["staging", str(prefix)]),
         ):
-            exec(compile(program, "<staging unit>", "exec"), {})  # noqa: S102
+            exec(compile(program, "<staging unit>", "exec"), {})
         self.assertEqual(run.call_args.args, (prefix,))
         started = run.call_args.kwargs["site"]
         self.assertEqual(started, site)

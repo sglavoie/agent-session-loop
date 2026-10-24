@@ -46,6 +46,10 @@ from tests.support import _discovered, _make_workbench_plan
 
 from .workbench_catalog_support import _minimal_summary_payload
 
+# Integration: most of it is pure catalog algebra, but the reads it proves
+# are observational are proven against a live workbench server.
+ASL_TEST_LANE = "integration"
+
 
 class FieldPartitionTests(unittest.TestCase):
     """Every summary field is classified, exactly once, deliberately."""

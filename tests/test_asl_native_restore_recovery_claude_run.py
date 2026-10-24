@@ -28,6 +28,8 @@ from tests.asl_redirect_continuation_support import (
 from tests.support_asl_native_restore_recovery import RUN_CONVERSATION_ID
 from tests.test_asl_harness_lifecycle import _FakePipe, _FakeProcess
 
+ASL_TEST_LANE = "integration"
+
 
 class ClaudeRefusedRestoreRunTests(fixtures._NativeRestoreRun):
     """The same whole loop, refused by the harness that has no handshake.

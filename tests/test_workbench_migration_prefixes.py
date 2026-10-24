@@ -40,6 +40,8 @@ from .support_workbench_migration import (
     receipt,
 )
 
+ASL_TEST_LANE = "integration"
+
 # ---------------------------------------------------------------------------
 # The migration itself
 

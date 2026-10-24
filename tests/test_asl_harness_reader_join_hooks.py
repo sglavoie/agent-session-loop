@@ -30,6 +30,8 @@ from tests.support import (
     write_process_tree_scripts,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class HarnessReaderJoinAndHookTests(unittest.TestCase):
     """Direct adapter-run tests for bounded reader joins and observation hooks."""

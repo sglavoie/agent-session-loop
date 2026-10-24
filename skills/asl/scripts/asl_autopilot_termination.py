@@ -81,7 +81,7 @@ class _SupervisionEndEmitter:
                     state_dir=state_dir,
                     resolve_at_commit=resolve,
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             if isinstance(result, dict):
                 result["supervision_end"] = {
                     "emitted": False,

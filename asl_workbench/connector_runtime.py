@@ -286,7 +286,8 @@ class ObservationConnector(ReadLane):
             outcome = _Pass()
             try:
                 outcome.cycle = self._source.observe(now)
-            except Exception as error:  # a source is arbitrary provider code
+            # A source is arbitrary provider code.
+            except Exception as error:  # noqa: BLE001
                 outcome.error = f"{type(error).__name__}: {error}"
             with self._lock:
                 self._result = outcome

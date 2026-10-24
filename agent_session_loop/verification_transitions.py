@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F403
 """Verification lifecycle transitions and terminal adjudication."""
 
 from .verification_repair import *

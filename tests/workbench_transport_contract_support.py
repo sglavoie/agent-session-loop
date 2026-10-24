@@ -37,7 +37,6 @@ and capabilities it may exercise.
 
 from __future__ import annotations
 
-# ruff: noqa: F401
 import ast
 import json
 import os

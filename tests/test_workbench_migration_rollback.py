@@ -26,6 +26,8 @@ from .support_workbench_migration import (
     stored_credentials,
 )
 
+ASL_TEST_LANE = "integration"
+
 # ---------------------------------------------------------------------------
 # Rolling back
 

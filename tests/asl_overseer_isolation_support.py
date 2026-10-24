@@ -24,18 +24,10 @@ from agent_session_loop import (
     state_locks,
 )
 from tests.support import assert_no_runner_import
+from tests.support_base import force_pid_alive as _force_pid_alive
+from tests.support_base import write_json as _write_json
 
 DEAD_PID = 4_242_424
-
-
-def _write_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-
-
-def _force_pid_alive(pid: int) -> bool:
-    """Treat only the current process as alive so dead PIDs are deterministic."""
-    return pid == os.getpid()
 
 
 class _CorpusSnapshot:

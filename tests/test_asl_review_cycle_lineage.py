@@ -16,6 +16,8 @@ from tests.support import (
     _discovered,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewCycleLineageTests(RepairCycleFixtures, unittest.TestCase):
     """Resolve repair children, resplits and eventless reviews."""

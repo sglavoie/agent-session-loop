@@ -31,6 +31,8 @@ from tests.support import (
     wait_until,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ExternalQueueAndSelectionTests(FakeHarnessIntegrationBase):
     def test_external_queue_select_future_harness_switches_next_turn(self) -> None:

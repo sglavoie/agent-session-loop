@@ -53,6 +53,13 @@ from asl_workbench.compatibility import (
 from asl_workbench.installation import lock
 from asl_workbench.integrations import PI_SITE, provision
 
+# Integration: the production artifact is unpacked and the packaged
+# application is started as a release, so this lane needs a socket and
+# child interpreters. It is also the one module the Pi's own interpreter
+# runs -- `python3.13 -m unittest -q tests.test_workbench_portable` -- which
+# is a separate lane from any `tests/run_suite.py` lane.
+ASL_TEST_LANE = "integration"
+
 #: A fixed timestamp. Packing is deterministic, so the tests can compare
 #: digests; using the wall clock would make two packs of one tree differ for a
 #: reason that has nothing to do with their content.
@@ -313,7 +320,7 @@ class PackagedRuntimeTest(unittest.TestCase):
     @contextlib.contextmanager
     def _serving(self) -> Iterator[tuple[subprocess.Popen[bytes], dict[str, object]]]:
         """The packaged release, started and listening, then cleaned up."""
-        started = subprocess.Popen(  # noqa: S603 - fixed argv, this interpreter
+        started = subprocess.Popen(
             [
                 sys.executable,
                 "-E",

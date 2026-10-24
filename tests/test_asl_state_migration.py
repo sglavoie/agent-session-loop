@@ -11,6 +11,8 @@ from .asl_state_migration_cases_schema import (
     UpgradeStateSchemaTests,
 )
 
+ASL_TEST_PORTABLE = True
+
 __all__ = [
     "OrphanGuardTests",
     "MigrateStateTests",

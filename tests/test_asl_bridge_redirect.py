@@ -18,6 +18,8 @@ from .asl_bridge_redirect_cases_status import (
     VocabularyTests,
 )
 
+ASL_TEST_PORTABLE = True
+
 __all__ = [
     "CapabilityTests",
     "SubmissionTests",

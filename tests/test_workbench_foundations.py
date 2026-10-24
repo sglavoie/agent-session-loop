@@ -34,6 +34,10 @@ from tests.workbench_support import (
     workbench_cli_entry_points,
 )
 
+# Integration rather than portable: it binds a loopback server and spawns
+# a fresh interpreter to prove the portable package loads without ASL.
+ASL_TEST_LANE = "integration"
+
 
 class CapabilityMatrixTests(unittest.TestCase):
     """The matrix is complete, well-formed, and honest about coverage."""

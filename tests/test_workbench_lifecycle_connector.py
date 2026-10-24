@@ -30,6 +30,8 @@ from .workbench_lifecycle_support import (
     connector_prefix,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ConnectorLifecycleTest(unittest.TestCase):
     """The Mac half: attached to the ASL that is already installed."""

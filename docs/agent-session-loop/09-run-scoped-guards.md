@@ -117,7 +117,7 @@ choosing wrong is how a run either drifts or stalls:
 - **Guidance** (`asl inbox guidance`) for the *direction* of the work — what to
   implement, what approach to take, what to prioritize. It is delivered to the
   model and its effect depends entirely on the model acting on it. Nothing
-  enforces it; see [Guidance delivery](03-live-mailbox-and-future-turn-model-contr.md#guidance-delivery) for what delivery
+  enforces it; see [Guidance delivery](03-live-mailbox-and-future-turn-model-control.md#guidance-delivery) for what delivery
   does and does not promise.
 - **A command guard** (`--deny-command`) for an *action* that must not happen —
   `git push`, a deploy script, a destructive migration. Use it when naming the

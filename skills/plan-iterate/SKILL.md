@@ -1,7 +1,7 @@
 ---
 name: plan-iterate
 description: Iterative refinement of a markdown plan. Default mode assesses completeness, asks targeted questions, applies improvements. --ideal adds ideal-vision divergence analysis sharing one research pass and edits accepted improvements into the plan; --ideal-only prints the ideal vision read-only. Use before session-split or asl prepare.
-allowed-tools: Read, Edit, Glob, Grep, Bash
+allowed-tools: AskUserQuestion, Read, Edit, Glob, Grep, Bash
 ---
 
 # Plan Iterate

@@ -1,5 +1,5 @@
 # mypy: disable-error-code="attr-defined,call-arg,has-type,name-defined"
-# ruff: noqa: F401, F403, F405, F821, F822, I001
+# ruff: noqa: F821, F822
 """Connector lifecycle and CLI assembly for the Workbench connector."""
 
 from __future__ import annotations
@@ -7,6 +7,7 @@ from __future__ import annotations
 from . import workbench_connector_http as _http
 from . import workbench_connector_observation as _observation
 from . import workbench_connector_projection as _projection
+from .cli_defaults import program_name
 
 for _module in (_projection, _observation, _http):
     globals().update(
@@ -245,7 +246,7 @@ def workbench_connect_from_args(
                 )
             )
         else:
-            print(f"agent-session-loop workbench connect: {error}", file=sys.stderr)
+            print(f"{program_name()} workbench connect: {error}", file=sys.stderr)
         return 1
 
     lock = SingleInstanceLock(connector_lock_path(getattr(args, "state_dir", None)))

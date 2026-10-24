@@ -15,6 +15,8 @@ from agent_session_loop import (
 )
 from tests.review_delta_scope_base import ReviewDeltaScopeBase
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewDeltaRescopingTests(ReviewDeltaScopeBase):
     """Delta rescoping, repo state capture, and cycle records."""

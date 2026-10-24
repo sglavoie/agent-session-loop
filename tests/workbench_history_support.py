@@ -18,7 +18,6 @@ module they touch, because every claim worth making spans both halves:
 
 from __future__ import annotations
 
-# ruff: noqa: F401
 import json
 import os
 import unittest

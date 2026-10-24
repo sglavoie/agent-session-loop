@@ -37,6 +37,7 @@ from agent_session_loop import (
     redirect_store_requests,
     redirect_store_vocab,
 )
+from tests.support_base import ManualClock as _Clock
 
 from .support import (
     _write_lock_file,
@@ -69,22 +70,6 @@ def target(
         turn_index=turn_index,
         harness=harness,
     )
-
-
-class _Clock:
-    """A monotonic clock the test advances by hand."""
-
-    def __init__(self, start: float = 1000.0) -> None:
-        self._lock = threading.Lock()
-        self._value = start
-
-    def __call__(self) -> float:
-        with self._lock:
-            return self._value
-
-    def advance(self, delta: float) -> None:
-        with self._lock:
-            self._value += delta
 
 
 class _Cancellation:

@@ -11,6 +11,8 @@ from agent_session_loop import (
 )
 from tests.review_materialization_support import MaterializationFixtures
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
     """Scope repair children and refuse foreign session artifacts."""

@@ -17,6 +17,8 @@ from agent_session_loop import (
 from .support import patched_env
 from .support_asl_turn_preparation import RUN_ID, FakeReviewResume, PreparationTestCase
 
+ASL_TEST_PORTABLE = True
+
 
 class PacketInputTests(PreparationTestCase):
     """The session-shaped facts every prompt shape is built from."""

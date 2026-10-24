@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, F821, F822, I001
+# ruff: noqa: F401
 """Typed, pure transitions for session verification and required-check policy.
 
 Two lanes live here and they are deliberately separate:

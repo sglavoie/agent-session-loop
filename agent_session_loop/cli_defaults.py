@@ -1,9 +1,41 @@
-"""Build-time defaults mirrored from heavier modules.
+"""Build-time defaults mirrored from heavier modules, plus the program name.
 
 Light commands use these instead of importing the heavier modules to build the
-parser. A test keeps them in sync with their authoritative definitions."""
+parser. A test keeps them in sync with their authoritative definitions.
+
+``program_name`` lives here too because this module imports nothing from the
+package: every handler can prefix its error lines with the invoked program name
+without pulling in, or cycling back through, the heavier CLI helpers."""
 
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_FALLBACK_PROGRAM_NAME = "asl"
+
+
+def program_name(argv0: str | None = None) -> str:
+    """Return the name the CLI was invoked as, for usage lines and errors.
+
+    ``cli.main`` names its parser with this, and every handler prefixes its
+    error lines with it, so ``asl status`` reports both as ``asl status`` and
+    the ``agent-session-loop`` wrapper as ``agent-session-loop status``.
+    Interpreter-level launches (``python -m agent_session_loop`` reports
+    ``__main__.py``, test runners report their own script or a
+    ``python -m unittest`` string) fall back to ``asl``.
+    """
+    raw = argv0 if argv0 is not None else (sys.argv[0] if sys.argv else "")
+    name = Path(raw).name if raw else ""
+    if (
+        not name
+        or name == "-c"
+        or name.endswith(".py")
+        or any(character.isspace() for character in name)
+    ):
+        return _FALLBACK_PROGRAM_NAME
+    return name
+
 
 # Build-time defaults mirrored from heavier modules so light commands do not
 # import `metrics` (pulls in review/compact-state) or `workbench_server` (pulls

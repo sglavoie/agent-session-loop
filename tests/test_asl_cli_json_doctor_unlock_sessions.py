@@ -366,6 +366,42 @@ class JsonDoctorUnlockSessionsCliTests(JsonCliHelpers, unittest.TestCase):
             self.assertTrue(payload["lock_path"].endswith("/lock.json"))
             self.assertIn("no lock present", payload["message"])
 
+    def test_unlock_refuses_a_missing_plan_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing-plan"
+            state_dir = Path(tmp) / "state"
+
+            def _unlock(*extra: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "agent_session_loop",
+                        "unlock",
+                        str(missing),
+                        "--state-dir",
+                        str(state_dir),
+                        *extra,
+                    ],
+                    cwd=REPO_ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+            text = _unlock()
+            self.assertEqual(1, text.returncode)
+            self.assertEqual("", text.stdout)
+            self.assertIn("asl unlock: plan directory does not exist", text.stderr)
+
+            as_json = _unlock("--json")
+            self.assertEqual(1, as_json.returncode)
+            payload = json.loads(as_json.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("malformed-plan", payload["reason"])
+            self.assertIn("plan directory does not exist", payload["error"])
+            self.assertFalse(state_dir.exists())
+
     def test_unlock_json_active_lock_failure_goes_to_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"

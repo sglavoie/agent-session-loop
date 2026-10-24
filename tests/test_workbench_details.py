@@ -48,6 +48,10 @@ from asl_workbench import catalog, details
 
 from .support_workbench_details import _scope
 
+# Integration: containment and "a read changes nothing" are only worth
+# asserting against the routes that serve the detail reads.
+ASL_TEST_LANE = "integration"
+
 
 class VocabularyTests(unittest.TestCase):
     """The names a read may use are closed, classified, and self-consistent."""

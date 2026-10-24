@@ -16,6 +16,8 @@ from tests.support_asl_native_restore_recovery import (
     UNRELATED_NO_SUCH_ERROR,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class RestoreDiagnosisTests(unittest.TestCase):
     """The one vocabulary all three harnesses weigh a refusal against.

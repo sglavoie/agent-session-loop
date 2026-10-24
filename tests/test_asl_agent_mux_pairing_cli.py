@@ -15,6 +15,8 @@ from agent_session_loop import (
 )
 from tests.asl_agent_mux_pairing_support import CURRENT, PairingTestBase
 
+ASL_TEST_PORTABLE = True
+
 
 class PairingShapeTests(PairingTestBase):
     """Every outcome presents the same keys."""

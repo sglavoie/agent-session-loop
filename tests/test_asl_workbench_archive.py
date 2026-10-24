@@ -14,6 +14,8 @@ from .asl_workbench_archive_cases_storage import (
     WorkbenchArchiveStorageTests,
 )
 
+ASL_TEST_PORTABLE = True
+
 __all__ = [
     "WorkbenchRegistryTests",
     "WorkbenchArchiveRetentionTests",

@@ -29,6 +29,8 @@ from tests.asl_retention_support import (
     _stamp,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class RetentionSelectionTests(RetentionTestBase):
     """Age cutoff, byte accounting, and the projection's read-only contract."""

@@ -28,6 +28,8 @@ from agent_session_loop.literals import as_literal, as_optional_literal
 from agent_session_loop.plans_errors import PlanError
 from agent_session_loop.plans_session_ids import parse_session_id
 
+ASL_TEST_PORTABLE = True
+
 
 class AlwaysEqual:
     """A value that claims to equal anything, to prove the type test is real."""

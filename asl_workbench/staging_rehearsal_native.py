@@ -1,11 +1,11 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F403, F405
 """Staging-site isolation and native service-definition rewrites."""
 
 from __future__ import annotations
 
 from . import lifecycle_common
 
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403, F405
 from .staging_rehearsal_models import *
 
 

@@ -21,6 +21,8 @@ from tests.support import (
     wait_until,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class LiveVerificationHeartbeatTests(FakeHarnessIntegrationBase):
     def test_live_verification_heartbeat_updates_state_events_and_progress(

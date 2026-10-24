@@ -13,6 +13,8 @@ from agent_session_loop import (
 from tests.asl_overseer_cli_fleet import _OverseerCase
 from tests.asl_overseer_cli_support import WATCHER
 
+ASL_TEST_PORTABLE = True
+
 
 class EvidenceFreshnessTests(_OverseerCase):
     """A hold typed while an action is in flight has to stop the action.

@@ -30,6 +30,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class RunControlTests(FakeHarnessIntegrationBase):
     def test_run_control_stop_after_current_stops_between_sessions(self) -> None:

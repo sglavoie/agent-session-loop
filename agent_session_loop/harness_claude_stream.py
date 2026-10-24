@@ -152,8 +152,8 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
             suffix = "" if not details else f" ({', '.join(details)})"
             return [f"claude result: {subtype}{suffix}"]
         if record_type == "error":
-            message = record.get("message") or record.get("error") or "unknown"
-            return [f"claude error: {message}"]
+            error_text = record.get("message") or record.get("error") or "unknown"
+            return [f"claude error: {error_text}"]
         return []
 
     def _render_system(self, record: dict[str, object]) -> list[str]:

@@ -24,6 +24,11 @@ from .support import (
     assert_no_runner_import,
 )
 
+# Integration: the run controls and the redirect journal are driven here
+# through the shared service and through both surfaces that call it, so a
+# divergence shows up as a failure rather than as two passing suites.
+ASL_TEST_LANE = "integration"
+
 
 class PortableControlRulesTests(unittest.TestCase):
     """What a control means, decided without importing ASL."""

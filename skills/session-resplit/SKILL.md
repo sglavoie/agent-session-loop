@@ -55,14 +55,14 @@ Never infer by reading or modifying the original source plan outside the split p
 
 ### Step 1: Delegate the mechanics to the helper
 
-All resplit mutations go through `skills/session-resplit/scripts/resplit-session.py` (also reachable through the installed skill directory), which delegates to the `agent_session_loop.authoring_*` modules — the same rendering, table-mutation, transaction, and readiness API `session-split` uses. It owns input parsing, target/count inference, plan inspection, target validation, lock acquisition, parent archival, atomic child generation, derived-ledger updates, and readiness refresh. If the helper is missing, stop with a clear error; never hand-write child files, hand-edit manifest tables, or reimplement its schemas.
+All resplit mutations go through the helper at `<skill-dir>/scripts/resplit-session.py`, where `<skill-dir>` is the directory containing this `SKILL.md` (the installed skill directory, not a path relative to the repository you are working in), which delegates to the `agent_session_loop.authoring_*` modules — the same rendering, table-mutation, transaction, and readiness API `session-split` uses. It owns input parsing, target/count inference, plan inspection, target validation, lock acquisition, parent archival, atomic child generation, derived-ledger updates, and readiness refresh. If the helper is missing, stop with a clear error; never hand-write child files, hand-edit manifest tables, or reimplement its schemas.
 
 Your job is the semantic work the helper cannot do: choosing good child boundaries, writing child instructions, and allocating the parent's completion contract across children (Step 2). Supply that through `--child-spec`; everything mechanical belongs to Python.
 
 Run the helper once resolved:
 
 ```bash
-python3 skills/session-resplit/scripts/resplit-session.py <plan-dir-or-session-file> \
+python3 <skill-dir>/scripts/resplit-session.py <plan-dir-or-session-file> \
   [--session <ID>] [--parts <N>] [--child-spec <file>] --skill-prefix {$|/} --json
 ```
 

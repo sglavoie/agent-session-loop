@@ -12,7 +12,6 @@ from unittest import mock
 
 from agent_session_loop import assurance_ledger as ledger
 from agent_session_loop import (
-    assurance_models_findings,
     assurance_models_inbox,
     cli,
     harnesses,
@@ -20,6 +19,8 @@ from agent_session_loop import (
 )
 from agent_session_loop import assurance_projection as projection
 from agent_session_loop.assurance_projection import AuditPublication
+from tests.asl_assurance_models_support import _finding
+from tests.support_asl_assurance_projection import _artifacts, _publication
 
 RUN_ID = "20260810T101112123456Z-4242"
 
@@ -43,47 +44,6 @@ INPUT_DIGEST = "a" * 64
 
 
 OTHER_INPUT_DIGEST = "b" * 64
-
-
-def _finding(**overrides) -> assurance_models_findings.Finding:
-    payload = {
-        "category": "lifecycle",
-        "component": "agent_session_loop/runner.py",
-        "invariant_key": "retry.budget-respected",
-        "lane": "lifecycle-retry-resume",
-        "severity": "high",
-        "summary": "A retry ran after the budget was exhausted.",
-        "recommendation": "Clamp the retry counter before relaunching.",
-        "evidence": ("events.jsonl",),
-    }
-    payload.update(overrides)
-    return assurance_models_findings.Finding(**payload)
-
-
-def _artifacts(
-    digest: str | None = INPUT_DIGEST,
-) -> tuple[assurance_models_findings.EvidenceRef, ...]:
-    return (
-        assurance_models_findings.EvidenceRef(
-            kind="artifact", locator="supervisor-audit-input.json", digest=digest
-        ),
-        assurance_models_findings.EvidenceRef(
-            kind="artifact", locator="supervisor-audit.json"
-        ),
-    )
-
-
-def _publication(**overrides) -> AuditPublication:
-    payload = {
-        "run_id": RUN_ID,
-        "state": "findings",
-        "eligible": True,
-        "findings": (_finding(),),
-        "artifacts": _artifacts(),
-        "completed_at": TIMESTAMP,
-    }
-    payload.update(overrides)
-    return AuditPublication(**payload)
 
 
 class AssuranceCliTestCase(unittest.TestCase):

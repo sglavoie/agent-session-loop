@@ -25,6 +25,8 @@ from tests.support import (
     write_process_tree_scripts,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class HarnessProcessGroupSweepTests(unittest.TestCase):
     """Each turn owns a process group, and nothing it spawned outlives it."""

@@ -46,6 +46,20 @@ from .workspaces import (
 )
 
 
+def require_plan_directory(plan_dir: str | Path) -> Path:
+    """Return the canonical ``plan_dir``, refusing one that is not a directory.
+
+    Every plan-scoped command reports a missing plan with this same message,
+    including the ones (``unlock``, ``compact-state``) that never read the plan
+    files and would otherwise quietly report on a state directory that cannot
+    belong to anything.
+    """
+    canonical_dir = canonicalize_path(plan_dir)
+    if not canonical_dir.is_dir():
+        raise PlanError(f"plan directory does not exist: {canonical_dir}")
+    return canonical_dir
+
+
 def inspect_plan(
     plan_dir: str | Path,
     *,
@@ -55,9 +69,7 @@ def inspect_plan(
 ) -> PlanSnapshot:
     """Inspect a split plan directory and return durable session state."""
     recover_pending_plan_transaction(plan_dir)
-    canonical_dir = canonicalize_path(plan_dir)
-    if not canonical_dir.is_dir():
-        raise PlanError(f"plan directory does not exist: {canonical_dir}")
+    canonical_dir = require_plan_directory(plan_dir)
 
     context_path = canonical_dir / "context.md"
     manifest_path = canonical_dir / "manifest.md"

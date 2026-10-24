@@ -21,6 +21,8 @@ from tests.support import (
     write_review_cycle_event,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class WorkbenchRecoveryTests(fixtures.WorkbenchRecoveryCase):
     def test_seeded_state_fixtures_cover_every_recovery_kind(self) -> None:

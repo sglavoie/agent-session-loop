@@ -18,6 +18,7 @@ from . import (
     workbench_registry,
     workbench_registry_models,
 )
+from .cli_defaults import program_name
 from .workbench_archive_commands import (
     ArchiveRefused,
     ArchiveView,
@@ -288,7 +289,7 @@ def workbench_pin_from_args(args: Any) -> int:
             else None,
         )
     except ArchiveRefused as error:
-        print(f"agent-session-loop workbench pin: {error.message}", file=sys.stderr)
+        print(f"{program_name()} workbench pin: {error.message}", file=sys.stderr)
         return 1
     # Echo the pin as stored rather than as typed: `upsert_pin` canonicalizes,
     # and reporting the raw argument would hide a symlink or a relative path
@@ -311,7 +312,7 @@ def workbench_unpin_from_args(args: Any) -> int:
     try:
         update = unpin_plan(plan_dir)
     except ArchiveRefused as error:
-        print(f"agent-session-loop workbench unpin: {error.message}", file=sys.stderr)
+        print(f"{program_name()} workbench unpin: {error.message}", file=sys.stderr)
         return 1
     print(f"Unpinned {plan_dir} from {update.path}")
     return 0

@@ -13,6 +13,8 @@ from tests.support_workbench_store import (
     run_row,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class IncidentIdentityTests(IncidentCase):
     """A repeat is the same incident, and a different problem is a new one."""

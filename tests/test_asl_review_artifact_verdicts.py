@@ -23,6 +23,8 @@ from tests.support import (
     write_completed_review_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewArtifactVerdictTests(unittest.TestCase):
     """Merge artifacts into verdicts and render the generated review body."""

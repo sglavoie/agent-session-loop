@@ -22,6 +22,8 @@ from tests.asl_overseer_mailbox_support import (
 )
 from tests.support import assert_no_runner_import
 
+ASL_TEST_PORTABLE = True
+
 
 class FleetPolling(_MailboxCase):
     """One pass, many plans, and no plan waiting on another."""

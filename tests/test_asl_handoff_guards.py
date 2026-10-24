@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F401, I001
 """Compatibility facade for handoff-guard test groups."""
 
 from .test_asl_handoff_guards_boundary import (
@@ -17,3 +17,7 @@ from .test_asl_handoff_guards_reopening import (
     PlanArtifactAdjudicationTests,
     RefusalReopeningTruthTests,
 )
+
+
+#: Not a shard of its own: the modules it re-exports run these tests.
+ASL_TEST_SHARDS: tuple[str, ...] = ()

@@ -1,9 +1,9 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F403, F405, I001
 """Dispatch adapter for the read-only ``verify`` operation."""
 
 from __future__ import annotations
 
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403, F405
 from .overseer_verify_shared import *
 from .overseer_verify_context import (
     _decision_id,

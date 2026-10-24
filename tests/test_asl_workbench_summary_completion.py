@@ -19,6 +19,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class WorkbenchSummaryTests(fixtures.WorkbenchSummaryCase):
     def test_assurance_summary_reports_what_the_audit_found(self) -> None:

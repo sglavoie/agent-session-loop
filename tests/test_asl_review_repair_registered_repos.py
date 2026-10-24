@@ -16,6 +16,8 @@ from agent_session_loop import (
 )
 from tests.review_materialization_support import MaterializationFixtures
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.TestCase):
     """Materialize repairs over registered repositories and dry-plan groups."""

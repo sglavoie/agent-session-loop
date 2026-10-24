@@ -9,6 +9,8 @@ from tests.support import (
     _http_request_raw,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchCleanupArchiveTests(support_static.WorkbenchHardeningCase):
     """Cover the cleanup mode and archive view of the workbench front end."""

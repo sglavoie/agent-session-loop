@@ -63,6 +63,8 @@ from tests.support_asl_native_restore_recovery import NOT_A_MISSING_HISTORY, THR
 from tests.test_asl_copilot_acp import FAKE_ACP_FIXTURE
 from tests.test_asl_copilot_acp import SESSION_ID as ACP_SESSION_ID
 
+ASL_TEST_LANE = "integration"
+
 
 class CodexRestoreRefusalTests(unittest.TestCase):
     """A real app-server answering ``thread/resume`` with an error."""

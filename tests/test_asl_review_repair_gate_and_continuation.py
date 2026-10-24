@@ -25,6 +25,8 @@ from tests.support import (
     init_git_repo,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewRepairGateAndContinuationTests(MaterializationFixtures, unittest.TestCase):
     """Gate materialized repairs and project continuation boundaries."""

@@ -1,4 +1,3 @@
-# ruff: noqa: F401, F403, F405, I001
 """Public CLI regressions for explicit, evidence-bound remote-ref recovery."""
 
 from __future__ import annotations

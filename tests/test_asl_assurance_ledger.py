@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F401, I001
 """Compatibility facade for assurance-ledger test groups."""
 
 from .test_asl_assurance_ledger_identity import (
@@ -14,3 +14,7 @@ from .test_asl_assurance_ledger_storage import (
     RejectionTests,
     SequenceTests,
 )
+
+
+#: Not a shard of its own: the modules it re-exports run these tests.
+ASL_TEST_SHARDS: tuple[str, ...] = ()

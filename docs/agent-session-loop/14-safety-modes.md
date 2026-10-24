@@ -208,7 +208,7 @@ gzip artifact paths remain) — while each turn's `result.json` keeps full
 per-turn detail. No state or event record embeds raw verification output; full
 failed-check output lives in the referenced `verification/*.gz` artifacts. A
 record that carries no projection is stamped `version: 2` rather than 3, which
-is what `asl compact` writes when it rewrites a legacy file: the version names
+is what `asl compact-state` writes when it rewrites a legacy file: the version names
 what the record actually contains.
 
 The `agent_mux` block is the durable half of the AgentMux integration — the

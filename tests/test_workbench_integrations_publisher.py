@@ -1,9 +1,15 @@
 # mypy: disable-error-code="attr-defined,name-defined"
-# ruff: noqa: F401, F403, F405, F822, I001
+# ruff: noqa: F403, F405, I001
 """Workbench naming and publisher integration tests."""
 
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403, F405
 from tests.workbench_integrations_support import *
+import unittest.mock
+
+from asl_workbench import installation, lifecycle_common, staging_rehearsal_models
+
+
+ASL_TEST_PORTABLE = True
 
 
 class NamingCase(unittest.TestCase):
@@ -25,14 +31,75 @@ class NamingCase(unittest.TestCase):
         # Every notification ever delivered carries this origin and this
         # fragment. They are not naming, they are addresses somebody has in
         # their notification history.
-        self.assertEqual("https://pi.example.ts.net:9443", PI_SITE.public_origin)
+        tailnet = installation.site_setting(installation.TAILNET_HOST_VARIABLE)
+        self.assertEqual(f"https://{tailnet}:9443", PI_SITE.public_origin)
         self.assertEqual(PI_SITE.public_origin, PI_NOTIFICATION_SITE.private_origin)
-        self.assertEqual("ntfy.sglavoie.com", PI_NOTIFICATION_SITE.host)
+        self.assertEqual(
+            installation.site_setting(installation.NTFY_HOST_VARIABLE),
+            PI_NOTIFICATION_SITE.host,
+        )
         self.assertEqual(PI_SITE.publisher_topic, PI_NOTIFICATION_SITE.topic)
         self.assertEqual(
-            "https://pi.example.ts.net:9443/?workbench=1#run=plan%2Frun-1",
+            f"https://{tailnet}:9443/?workbench=1#run=plan%2Frun-1",
             notifications.notification_link("plan/run-1", site=PI_NOTIFICATION_SITE),
         )
+
+    def test_site_defaults_are_placeholders_a_deployment_overrides(self) -> None:
+        # Nobody's real host ships as a default; the deployment names its own.
+        defaults = {
+            name: installation.site_setting(name, {})
+            for name in installation.SITE_SETTING_DEFAULTS
+        }
+        self.assertEqual("pi.example.ts.net", defaults["ASL_WORKBENCH_TAILNET_HOST"])
+        self.assertEqual("ntfy.example.com", defaults["ASL_WORKBENCH_NTFY_HOST"])
+        self.assertEqual("kuma-admin", defaults["ASL_WORKBENCH_MONITOR_USERNAME"])
+        # The label prefix keeps the one installed agents already carry.
+        self.assertEqual("com.sglavoie", defaults["ASL_LAUNCHD_LABEL_PREFIX"])
+
+        overrides = {
+            "ASL_WORKBENCH_NTFY_HOST": " ntfy.internal.test ",
+            "ASL_LAUNCHD_LABEL_PREFIX": "org.example.",
+            "ASL_WORKBENCH_MONITOR_USERNAME": "",
+        }
+        self.assertEqual(
+            "ntfy.internal.test",
+            installation.site_setting("ASL_WORKBENCH_NTFY_HOST", overrides),
+        )
+        self.assertEqual(
+            "org.example",
+            installation.site_setting("ASL_LAUNCHD_LABEL_PREFIX", overrides),
+        )
+        self.assertEqual(
+            "kuma-admin",
+            installation.site_setting("ASL_WORKBENCH_MONITOR_USERNAME", overrides),
+        )
+        self.assertEqual(
+            {
+                "ASL_WORKBENCH_NTFY_HOST": "ntfy.internal.test",
+                "ASL_LAUNCHD_LABEL_PREFIX": "org.example.",
+            },
+            installation.site_environment(overrides),
+        )
+
+    def test_native_labels_share_one_prefix(self) -> None:
+        prefix = installation.site_setting(installation.LAUNCHD_LABEL_PREFIX_VARIABLE)
+        self.assertEqual(prefix + ".asl-companion", lifecycle_common.LABEL)
+        self.assertEqual(prefix + ".", staging_rehearsal_models.STAGING_LABEL_DOMAIN)
+        self.assertEqual(
+            installation.site_setting(installation.MONITOR_USERNAME_VARIABLE),
+            PI_SITE.monitor_username,
+        )
+
+    def test_services_inherit_the_site_overrides_and_nothing_else(self) -> None:
+        name = installation.NTFY_HOST_VARIABLE
+        with unittest.mock.patch.dict(
+            os.environ, {name: "ntfy.internal.test", "UNRELATED_SETTING": "x"}
+        ):
+            environment = lifecycle_common.service_environment(
+                lifecycle_common.ROLE_SERVICE
+            )
+        self.assertEqual("ntfy.internal.test", environment[name])
+        self.assertNotIn("UNRELATED_SETTING", environment)
 
     def test_two_deployments_on_one_host_are_two_targets(self) -> None:
         """The target id has to separate a rehearsal from what it rehearses.

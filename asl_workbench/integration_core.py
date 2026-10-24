@@ -27,18 +27,21 @@ from .installation import (
     CONNECTOR_TOKEN_PATH,
     INTEGRATION_LOCK,
     LIFECYCLE_LOCK,
+    MONITOR_USERNAME_VARIABLE,
     PREFIX_DIRECTORIES,
     PROVISION_LOCK,
     RECEIPTS_DIRECTORY,
     RUNTIME_LOCK,
     SECRETS_PATH,
     SUMMARY_TOKEN_PATH,
+    TAILNET_HOST_VARIABLE,
     InstallationError,
     atomic,
     document,
     lock,
     private,
     safe_prefix,
+    site_setting,
     write_json,
 )
 from .notifications import (
@@ -218,13 +221,15 @@ class IntegrationSite:
 
 #: The deployed Pi. Its identifiers are the Companion's, unchanged, because
 #: they name resources that already exist on that host; its visible text is the
-#: unified application's.
+#: unified application's. The Tailscale host and the Uptime Kuma admin login
+#: are the deployment's own, set through ``$ASL_WORKBENCH_TAILNET_HOST`` and
+#: ``$ASL_WORKBENCH_MONITOR_USERNAME``; the defaults are placeholders.
 PI_SITE = IntegrationSite(
-    host="pi.example.ts.net",
+    host=site_setting(TAILNET_HOST_VARIABLE),
     port="9443",
     bind_host="127.0.0.1",
     bind_port=8766,
-    public_origin="https://pi.example.ts.net:9443",
+    public_origin=f"https://{site_setting(TAILNET_HOST_VARIABLE)}:9443",
     summary_path="/v1/summary",
     health_path="/v1/health",
     owner_only_path="/v1/runs",
@@ -236,7 +241,7 @@ PI_SITE = IntegrationSite(
     entry_description="ASL counts and observation freshness",
     entry_icon="mdi-console",
     monitor_name="ASL Workbench service health",
-    monitor_username="sglavoie",
+    monitor_username=site_setting(MONITOR_USERNAME_VARIABLE),
     homepage_container="homepage",
     ntfy_container="ntfy",
     kuma_container="uptime-kuma",
@@ -247,8 +252,8 @@ PI_SITE = IntegrationSite(
     legacy_group_headings=("ASL companion",),
     notifications=PI_NOTIFICATION_SITE,
     deployment=DEPLOYMENT_PRODUCTION,
-    # The asl-companion-bridge sidecar in the Pi's homepage/compose.yaml
-    # (sglavoie_raspberry_pi), on the docker0 gateway, to 127.0.0.1:8766.
+    # The asl-companion-bridge sidecar in the Pi's homepage/compose.yaml, on
+    # the docker0 gateway, to 127.0.0.1:8766.
     container_origin="http://host.docker.internal:8768",
 )
 

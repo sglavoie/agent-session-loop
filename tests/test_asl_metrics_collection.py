@@ -21,6 +21,8 @@ from tests.asl_metrics_support import (
     _write_turn_result,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class MetricsCollectionTests(MetricsCollectionBase):
     def test_empty_state_root_reports_zero_counts(self) -> None:

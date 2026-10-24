@@ -24,6 +24,8 @@ from .support_asl_agent_mux_projection import (
     _turn,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class ProcessIdentityTests(unittest.TestCase):
     """Birth identity is probed once per pid and never half-reported."""

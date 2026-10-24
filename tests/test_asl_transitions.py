@@ -17,6 +17,8 @@ from agent_session_loop.transitions import (
     StateMachine,
 )
 
+ASL_TEST_PORTABLE = True
+
 TRAFFIC = StateMachine(
     name="traffic",
     initial="red",

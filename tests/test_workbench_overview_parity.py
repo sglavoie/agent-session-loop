@@ -20,6 +20,8 @@ from tests.workbench_support import (
     ShellDeployment,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class OverviewParityTests(unittest.TestCase):
     """One body of work, read through both providers at once."""

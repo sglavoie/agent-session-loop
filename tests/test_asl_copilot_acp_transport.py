@@ -1,9 +1,12 @@
 # mypy: disable-error-code="attr-defined,name-defined"
-# ruff: noqa: F401, F403, F405, F822, I001
+# ruff: noqa: F403, F405, I001
 """ACP adapter transport tests."""
 
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403, F405
 from tests.asl_copilot_acp_support import *
+
+
+ASL_TEST_LANE = "integration"
 
 
 class AdapterTransportTests(unittest.TestCase):

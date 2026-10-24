@@ -14,6 +14,11 @@ they are addressed by their installed path under a home directory. Where a
 dotfiles stow package links them into ``$HOME`` the write lands in that
 package's tracked file, which is the change the dotfiles repository then
 commits. The bundled reference is the one file this checkout owns.
+
+Only harness roots that already exist are rendered into (``~/.claude``,
+``~/.codex``, plus any Claude profile named by ``$CLAUDE_CONFIG_DIR`` or
+``$ASL_CLAUDE_CONFIG_DIRS``); a missing harness directory is reported as
+skipped and never created.
 """
 
 from __future__ import annotations
@@ -22,12 +27,12 @@ import argparse
 import hashlib
 import json
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import supervisor_guide
+from . import install_verify_common, supervisor_guide
 
 COMMAND_NAME = "startup-context"
 
@@ -78,11 +83,25 @@ class ContextTarget:
     harness: str
 
 
-CONTEXT_TARGETS: tuple[ContextTarget, ...] = (
-    ContextTarget(".codex/AGENTS.md", "codex"),
-    ContextTarget(".claude/CLAUDE.md", "claude"),
-    ContextTarget(".claude-personal/CLAUDE.md", "claude"),
-)
+#: Every harness that loads a rendered card at session start.
+CONTEXT_HARNESSES: tuple[str, ...] = tuple(install_verify_common.CONTEXT_FILES)
+
+
+def context_targets(
+    roots: Iterable[install_verify_common.HarnessRoot],
+) -> tuple[ContextTarget, ...]:
+    """Return the context file of every discovered root whose harness has one.
+
+    Only roots that already exist are passed in (see
+    ``install_verify_common.discover_harness_roots``), so rendering never
+    creates a harness configuration directory.
+    """
+    targets: list[ContextTarget] = []
+    for root in roots:
+        context_file = root.context_file
+        if context_file is not None:
+            targets.append(ContextTarget(context_file, root.harness))
+    return tuple(targets)
 
 
 def _repo_root() -> Path:
@@ -350,23 +369,26 @@ def sync(
     home: str | Path | None = None,
     check: bool = False,
     reference_only: bool = False,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Render every managed startup-context file, or report stale ones.
 
     ``reference_only`` limits the pass to the bundled reference, which is what
-    a machine with no harness installed (CI) can judge.
+    a machine with no harness installed (CI) can judge. Context files are
+    rendered only under harness roots that already exist; ``env`` (default:
+    the process environment) supplies the extra Claude roots.
     """
     root = Path(repo_root).resolve() if repo_root is not None else _repo_root()
     home_root = Path(home).expanduser() if home is not None else Path.home()
+    discovery = install_verify_common.discover_harness_roots(home_root, env)
     files: list[dict[str, Any]] = []
 
-    for target in () if reference_only else CONTEXT_TARGETS:
+    for target in () if reference_only else context_targets(discovery.found):
         path = home_root / target.installed_path
         current = path.read_text(encoding="utf-8") if path.is_file() else ""
         desired = apply_block(current, render_block(target.harness))
         files.append(_file_record(path, home_root, current, desired))
         if not check and current != desired:
-            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(desired, encoding="utf-8")
 
     reference = root / REFERENCE_PATH
@@ -387,6 +409,7 @@ def sync(
         "files": files,
         "stale": stale,
         "written": [] if check else stale,
+        "harness_roots": {**discovery.payload(), "note": discovery.note()},
     }
 
 
@@ -430,7 +453,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if args.json:
         print(json.dumps(payload, sort_keys=True))
-    elif args.check:
+        return 0 if payload["ok"] else 1
+    if not args.reference_only:
+        print(payload["harness_roots"]["note"])
+    if args.check:
         if payload["stale"]:
             for path in payload["stale"]:
                 print(f"stale: {path}")

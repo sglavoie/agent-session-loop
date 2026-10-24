@@ -41,6 +41,8 @@ from tests.workbench_support import (
     workbench_cli_entry_points,
 )
 
+ASL_TEST_LANE = "integration"
+
 # ---------------------------------------------------------------------------
 # Scale is bounded
 # ---------------------------------------------------------------------------

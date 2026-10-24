@@ -34,6 +34,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ProcessSweepAndLeafRecoveryTests(FakeHarnessIntegrationBase):
     def test_turn_sweep_that_killed_something_appends_a_process_sweep_event(

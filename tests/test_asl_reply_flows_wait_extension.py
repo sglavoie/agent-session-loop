@@ -32,6 +32,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class MailboxWaitExtensionTests(rfs.ReplyResumeFlowCase):
     """Stale leases, monotonic jumps, and wait ceilings."""

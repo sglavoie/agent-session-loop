@@ -37,6 +37,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class MailboxWaitLifecycleTests(rfs.ReplyResumeFlowCase):
     """Answered mailbox waits: notifications and idle accounting."""

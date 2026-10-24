@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F401, I001
 """Compatibility facade for diagnostics-export test groups."""
 
 from .test_asl_diagnostics_export_document import (
@@ -12,3 +12,7 @@ from .test_asl_diagnostics_export_limits import (
     ExportDegradedTests,
     ExportDeterminismTests,
 )
+
+
+#: Not a shard of its own: the modules it re-exports run these tests.
+ASL_TEST_SHARDS: tuple[str, ...] = ()

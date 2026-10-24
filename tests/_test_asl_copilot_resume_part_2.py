@@ -289,7 +289,7 @@ class AdapterResumeTransportTests(unittest.TestCase):
                 try:
                     wait_until(lambda: session.prompt_submitted, timeout=WAIT_SECONDS)
                     self.assertTrue(transport.interrupt())
-                except BaseException as error:  # noqa: BLE001 - reported below
+                except BaseException as error:
                     failures.append(error)
 
             worker = threading.Thread(target=stop, name="cancel-copilot")

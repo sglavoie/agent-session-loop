@@ -20,6 +20,8 @@ from .support_workbench_details import (
     _tree_fingerprint,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class DetailRouteTests(_DetailFixture, unittest.TestCase):
     """Every detail view still answers with the information it answered with."""

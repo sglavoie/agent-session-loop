@@ -38,6 +38,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
     """End-to-end coverage for the full post-turn verification lifecycle.

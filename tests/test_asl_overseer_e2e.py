@@ -81,6 +81,8 @@ from tests import support_asl_overseer_e2e as fixtures
 from tests.support_asl_overseer_e2e import setUpModule as setUpModule
 from tests.support_asl_overseer_e2e import tearDownModule as tearDownModule
 
+ASL_TEST_LANE = "integration"
+
 
 class PairedBoundaryTests(assertions._WorldCase):
     """The binary answers, and it answers the contract this client speaks."""

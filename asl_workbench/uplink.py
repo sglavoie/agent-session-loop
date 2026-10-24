@@ -46,7 +46,9 @@ report.
 from __future__ import annotations
 
 import itertools
+import secrets
 import threading
+import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
@@ -84,6 +86,16 @@ class Uplink(UplinkFlowMixin):
     answers -- is in memory, because all of it is about a link that a restart
     ends. The durable half is the store, and it is the store's rows that a
     restarted service reconciles against.
+
+    Two clocks, for two different questions. ``clock`` is wall time: it stamps
+    what is stored, displayed or put on the wire (an envelope's ``sent_at`` and
+    ``deadline`` are read by the Mac against its own wall clock), and it seeds
+    the correlation epoch, which has to stay unique across a reboot.
+    ``monotonic`` measures how long something in *this process* has taken --
+    the link's silence and a waiting read's budget -- because a Pi has no RTC
+    and steps its wall clock when NTP first answers after boot; measured on
+    wall time, that step would declare a live link silent, or hold a request
+    thread for as long as the clock jumped back.
     """
 
     def __init__(
@@ -93,6 +105,7 @@ class Uplink(UplinkFlowMixin):
         clock: Callable[[], float],
         connector_id: str,
         target_id: str,
+        monotonic: Callable[[], float] = time.monotonic,
         capabilities: Iterable[str] | None = None,
         read_wait_seconds: float = READ_WAIT_SECONDS,
         command_lifetime_seconds: float = COMMAND_LIFETIME_SECONDS,
@@ -101,6 +114,7 @@ class Uplink(UplinkFlowMixin):
     ) -> None:
         self.store = store
         self.clock = clock
+        self.monotonic = monotonic
         self.connector_id = connector_id
         self.target_id = target_id
         # What the pairing may be asked for. Taken from the role the *Pi*
@@ -124,11 +138,16 @@ class Uplink(UplinkFlowMixin):
         self._settled: dict[str, ReadAnswer] = {}
         self._bodies: dict[str, _HeldBody] = {}
         self._last_upload_at: float | None = None
-        # Unique across this process and across a restart within the same
-        # second, so a request id the Mac has already seen and discarded is
-        # never reused for a different question.
+        # The same moment on the monotonic clock: what silence is measured from.
+        self._last_upload_mono: float | None = None
+        # Unique across this process and across its restarts, so a request id
+        # the Mac has already seen and discarded is never reused for a
+        # different question. Wall time on purpose -- a monotonic reading
+        # restarts near zero every boot -- plus a random suffix, because a Pi
+        # with no RTC can boot into a second it already lived through before
+        # NTP corrects it.
         self._reads_asked = itertools.count(1)
-        self._epoch = f"{int(self.clock())}"
+        self._epoch = f"{int(self.clock())}.{secrets.token_hex(4)}"
 
     # -- Liveness ------------------------------------------------------------
 
@@ -158,8 +177,8 @@ class Uplink(UplinkFlowMixin):
         learn something the service already knew.
         """
         with self._ready:
-            last = self._last_upload_at
-        if last is not None and now - last > self.silence_seconds:
+            last = self._last_upload_mono
+        if last is not None and self.monotonic() - last > self.silence_seconds:
             self._keep(
                 self.reads.link_down(now=now, note="the connector stopped uploading")
             )
@@ -216,7 +235,10 @@ class Uplink(UplinkFlowMixin):
         except UplinkRefusal:
             self.reads.cancel(request_id, now=now)
             raise
-        answer = self._wait(request_id, until=now + self.read_wait_seconds)
+        # The budget is a duration, so it runs on the monotonic clock: ``now``
+        # is the wall moment the read is stamped with, and a wall step while
+        # the thread waits must neither cut the wait short nor stretch it.
+        answer = self._wait(request_id, until=self.monotonic() + self.read_wait_seconds)
         if answer is not None:
             return answer
         return self._abandon(request_id)
@@ -227,13 +249,16 @@ class Uplink(UplinkFlowMixin):
             return f"read-{self._epoch}-{next(self._reads_asked)}"
 
     def _wait(self, request_id: str, *, until: float) -> ReadAnswer | None:
-        """Block until this read settles or the caller's budget runs out."""
+        """Block until this read settles or the caller's budget runs out.
+
+        ``until`` is a reading of :attr:`monotonic`, not of the wall clock.
+        """
         with self._ready:
             while True:
                 answer = self._settled.pop(request_id, None)
                 if answer is not None:
                     return answer
-                remaining = until - self.clock()
+                remaining = until - self.monotonic()
                 if remaining <= 0:
                     return None
                 self._ready.wait(min(remaining, _WAIT_SLICE_SECONDS))

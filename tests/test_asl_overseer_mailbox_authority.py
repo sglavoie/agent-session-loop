@@ -19,6 +19,8 @@ from tests.asl_overseer_mailbox_support import (
     _state,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class CurrentAuthority(_MailboxCase):
     """No append without a ruling that is about this, and still in force."""

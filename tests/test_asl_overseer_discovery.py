@@ -42,6 +42,8 @@ from tests.asl_overseer_discovery_support import _Corpus
 
 from .support import _WORKBENCH_DEAD_PID, write_plan
 
+ASL_TEST_PORTABLE = True
+
 
 class BeyondTheBridgeLimitTests(unittest.TestCase):
     """The inventory is a fleet view, not a queue frame."""

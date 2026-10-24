@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F401, F403
 
 from .repository_registration_cli import *
 from .repository_registration_derivation import *

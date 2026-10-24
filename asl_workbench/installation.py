@@ -37,10 +37,53 @@ import fcntl
 import json
 import os
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+#: Operator-supplied names of the deployed site, by environment variable. The
+#: defaults are placeholders, not anybody's real host: a deployment sets its
+#: own Tailscale host, ntfy host and Uptime Kuma admin login through these.
+#: ``ASL_LAUNCHD_LABEL_PREFIX`` is the reverse-DNS prefix of every launchd
+#: label; its default is the one already-installed jobs carry, so leaving it
+#: unset never orphans a running launch agent.
+TAILNET_HOST_VARIABLE = "ASL_WORKBENCH_TAILNET_HOST"
+NTFY_HOST_VARIABLE = "ASL_WORKBENCH_NTFY_HOST"
+MONITOR_USERNAME_VARIABLE = "ASL_WORKBENCH_MONITOR_USERNAME"
+LAUNCHD_LABEL_PREFIX_VARIABLE = "ASL_LAUNCHD_LABEL_PREFIX"
+
+SITE_SETTING_DEFAULTS: Mapping[str, str] = {
+    TAILNET_HOST_VARIABLE: "pi.example.ts.net",
+    NTFY_HOST_VARIABLE: "ntfy.example.com",
+    MONITOR_USERNAME_VARIABLE: "kuma-admin",
+    LAUNCHD_LABEL_PREFIX_VARIABLE: "com.sglavoie",
+}
+
+
+def site_setting(name: str, environ: Mapping[str, str] | None = None) -> str:
+    """Return one site setting: its environment override, else its default.
+
+    Read when the site constants are built, at import. A supervised process is
+    started with a scrubbed environment, so the lifecycle forwards whichever of
+    these the installing shell set (:func:`site_environment`).
+    """
+    source = os.environ if environ is None else environ
+    value = source.get(name, "").strip()
+    if name == LAUNCHD_LABEL_PREFIX_VARIABLE:
+        value = value.rstrip(".")
+    return value or SITE_SETTING_DEFAULTS[name]
+
+
+def site_environment(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The site overrides set in ``environ``, to hand on to a service."""
+    source = os.environ if environ is None else environ
+    return {
+        name: source[name].strip()
+        for name in SITE_SETTING_DEFAULTS
+        if source.get(name, "").strip()
+    }
+
 
 #: How deep a prefix must be before it is plausibly dedicated to one service.
 #: ``/home/user`` is three parts and is somebody's whole account; the fourth
@@ -227,6 +270,13 @@ def safe_prefix(prefix: Path) -> None:
 
 
 __all__ = [
+    "LAUNCHD_LABEL_PREFIX_VARIABLE",
+    "MONITOR_USERNAME_VARIABLE",
+    "NTFY_HOST_VARIABLE",
+    "SITE_SETTING_DEFAULTS",
+    "TAILNET_HOST_VARIABLE",
+    "site_environment",
+    "site_setting",
     "BACKUPS_DIRECTORY",
     "CONFIG_PATH",
     "CONNECTOR_TOKEN_PATH",

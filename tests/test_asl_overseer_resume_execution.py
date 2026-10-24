@@ -15,6 +15,8 @@ from agent_session_loop import (
 )
 from tests import support_asl_overseer_resume as fixtures
 
+ASL_TEST_PORTABLE = True
+
 
 class ObservedProgress(fixtures._ResumeCase):
     """A spawned pid is not a resolution."""

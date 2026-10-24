@@ -21,6 +21,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class MultiRepositoryCommitReviewRebindTests(MultiRepositoryEndToEndBase):
     """Commit modes, combined review, and rebind atomicity for four repositories."""

@@ -195,7 +195,8 @@ class ReadLane(MutationLane):
                     payload=dict(payload),
                     deadline=request.deadline,
                 )
-            except Exception as error:  # a responder is arbitrary provider code
+            # A responder is arbitrary provider code.
+            except Exception as error:  # noqa: BLE001
                 # Still an answer. A provider bug costs the caller one read
                 # rather than a deadline's worth of silence, and the code says
                 # the connector could not reach what it was asked for.

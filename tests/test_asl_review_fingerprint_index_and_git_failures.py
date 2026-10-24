@@ -8,14 +8,19 @@ from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
+    git_subprocess,
+    repository_scope_registry,
     review_guard,
     review_guard_git,
     runner,
+    workspaces,
 )
 from tests.review_fingerprint_base import ReviewFingerprintBase
 from tests.support import (
     patched_env,
 )
+
+ASL_TEST_LANE = "integration"
 
 
 class ReviewFingerprintIndexAndGitFailureTests(ReviewFingerprintBase):
@@ -205,3 +210,55 @@ class ReviewFingerprintIndexAndGitFailureTests(ReviewFingerprintBase):
         changed = review_guard._review_guard_changed_paths(before, after)
         self.assertTrue(changed["head_changed"])
         self.assertEqual("", review_guard._review_guard_changed_summary(changed))
+
+
+class GitTimeoutTests(ReviewFingerprintBase):
+    """A git that never returns is killed and reported, never waited on."""
+
+    def _hung(self, argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+    def test_every_git_call_carries_the_default_ceiling(self) -> None:
+        with mock.patch.object(
+            git_subprocess.subprocess, "run", wraps=subprocess.run
+        ) as spawned:
+            git_subprocess.run_git(self.repo_root, ["rev-parse", "--git-dir"])
+            git_subprocess.run_git_reporting(self.repo_root, ["rev-parse", "HEAD"])
+            git_subprocess.run_git(self.repo_root, ["status"], timeout=None)
+
+        ceiling = git_subprocess.GIT_TIMEOUT_SECONDS
+        self.assertEqual(
+            [ceiling, ceiling, None],
+            [call.kwargs["timeout"] for call in spawned.call_args_list],
+        )
+
+    def test_a_timeout_takes_the_unrunnable_path_of_each_shape(self) -> None:
+        with mock.patch.object(git_subprocess.subprocess, "run", self._hung):
+            with self.assertRaises(git_subprocess.GitTimeoutError) as raised:
+                git_subprocess.run_git(self.repo_root, ["status"])
+            self.assertIsInstance(raised.exception, OSError)
+            self.assertEqual(errno.ETIMEDOUT, raised.exception.errno)
+
+            with self.assertRaises(runner.RunError) as converted:
+                git_subprocess.run_git_or_raise(
+                    self.repo_root, ["status"], error=runner.RunError
+                )
+            self.assertIn("did not finish within 300s", str(converted.exception))
+
+            reported = git_subprocess.run_git_reporting(self.repo_root, ["status"])
+            self.assertEqual(1, reported.returncode)
+            self.assertIn("did not finish", reported.stderr)
+
+            fingerprint = self._fingerprint()
+
+        detail = review_guard._review_guard_unavailable_detail(fingerprint)
+        self.assertIsNotNone(detail)
+        self.assertEqual("git-unrunnable", detail["reason"])
+
+    def test_workspace_and_origin_probes_fold_a_timeout_into_their_contract(
+        self,
+    ) -> None:
+        with mock.patch.object(git_subprocess.subprocess, "run", self._hung):
+            with self.assertRaises(workspaces.WorkspaceError):
+                workspaces._git_stdout(self.repo_root, "rev-parse", "--show-toplevel")
+            self.assertIsNone(repository_scope_registry._origin_of(self.repo_root))

@@ -28,6 +28,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class WorkbenchSummaryTests(fixtures.WorkbenchSummaryCase):
     def test_triage_fields_for_invalid_missing_plan(self) -> None:

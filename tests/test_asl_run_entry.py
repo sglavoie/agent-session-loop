@@ -38,7 +38,6 @@ assuming it.
 
 from __future__ import annotations
 
-import argparse
 import ast
 import inspect
 import io
@@ -65,6 +64,9 @@ from agent_session_loop import (
 )
 from agent_session_loop.run_errors import RunError
 from tests.support import assert_no_runner_import, called_names, write_plan
+from tests.support_base import parse_cli_args as _parse
+
+ASL_TEST_PORTABLE = True
 
 #: The symbols this module took from the runner. The program's no-alias rule
 #: says the runner keeps none of them behind, so a re-export added later to
@@ -103,10 +105,6 @@ DURABLE_WRITE_NAMES = frozenset(
         "write_text",
     }
 )
-
-
-def _parse(tokens: list[str]) -> argparse.Namespace:
-    return cli.build_parser().parse_args(tokens)
 
 
 class _EntryFixture:

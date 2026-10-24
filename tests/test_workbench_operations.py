@@ -10,6 +10,11 @@ from asl_workbench import operations
 
 from .support_workbench_operations import _record, _target
 
+# Integration for a third reason: the guarantee is cross-process, so
+# proving it takes real child interpreters racing a real flock, and the
+# route half needs a live server.
+ASL_TEST_LANE = "integration"
+
 
 class VocabularyTests(unittest.TestCase):
     """The status table, and what each status permits."""

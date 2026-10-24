@@ -9,6 +9,8 @@ from tests.support import (
     _http_request_raw,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchStaticRedirectTests(support_static.WorkbenchStaticCase):
     """Cover the urgent-correction composer and conversation recovery front end."""

@@ -59,6 +59,7 @@ from .incidents import (
     INCIDENT_UNANSWERED_QUESTION,
     PublishResult,
 )
+from .installation import NTFY_HOST_VARIABLE, TAILNET_HOST_VARIABLE, site_setting
 
 # -- Message vocabulary -----------------------------------------------------
 
@@ -172,13 +173,16 @@ class NotificationSite:
         return "/" + self.topic
 
 
-#: The deployed Pi's notification site: the existing host, the existing topic,
-#: and the existing private origin. None of the three may change without
-#: breaking either the phone's subscription or every link already delivered.
+#: The deployed Pi's notification site: the ntfy host, the topic, and the
+#: private origin. A deployment names its own hosts through
+#: ``$ASL_WORKBENCH_NTFY_HOST`` and ``$ASL_WORKBENCH_TAILNET_HOST``
+#: (:func:`~asl_workbench.installation.site_setting`); the defaults are
+#: placeholders. Once deployed, none of the three may change without breaking
+#: either the phone's subscription or every link already delivered.
 PI_NOTIFICATION_SITE = NotificationSite(
-    host="ntfy.sglavoie.com",
+    host=site_setting(NTFY_HOST_VARIABLE),
     topic="asl-alerts",
-    private_origin="https://pi.example.ts.net:9443",
+    private_origin=f"https://{site_setting(TAILNET_HOST_VARIABLE)}:9443",
     production=True,
 )
 

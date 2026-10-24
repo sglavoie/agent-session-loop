@@ -57,6 +57,8 @@ from asl_workbench.transport import (
 )
 from tests import support_workbench_remote_reads as fixtures
 
+ASL_TEST_PORTABLE = True
+
 
 class CompositionTests(unittest.TestCase):
     """What a read is, before anything has been asked."""

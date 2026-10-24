@@ -47,6 +47,12 @@ from .workbench_interactions_cases_mutations import (
     OperationIdentityTests,
 )
 
+# Integration: what a mode will carry out, whether its advance warning
+# matches its refusal, and what a recorded-but-unconfirmed operation is
+# allowed to claim are all questions about two live providers answering
+# the same request, so both are bound to loopback sockets.
+ASL_TEST_LANE = "integration"
+
 __all__ = [name for name in globals() if name.endswith("Tests")]
 
 if __name__ == "__main__":

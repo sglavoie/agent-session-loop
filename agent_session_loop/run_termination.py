@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F401, I001
 """Compatibility facade for run terminal, pause, and control behavior."""
 
 from __future__ import annotations

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from . import (
+    durability,
     handoff_guards,
     plans_errors,
     plans_models,
@@ -86,7 +87,7 @@ def prepare_review_session(
         )
         contract_refreshed = refreshed_text != review_text
         if contract_refreshed:
-            session.path.write_text(refreshed_text, encoding="utf-8")
+            durability.replace_text(session.path, refreshed_text)
         rescoped = review_delta._refresh_pending_review_scope(
             session=session,
             event_path=ctx.event_path,
@@ -132,7 +133,7 @@ def prepare_review_session(
                 review_text, review_workspace, review_bases
             )
             if refreshed_text != review_text:
-                session.path.write_text(refreshed_text, encoding="utf-8")
+                durability.replace_text(session.path, refreshed_text)
                 base_refreshed = True
         if contract_refreshed or rescoped or base_refreshed:
             readiness_gate._refresh_active_readiness_state(

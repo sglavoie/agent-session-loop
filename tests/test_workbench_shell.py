@@ -49,6 +49,11 @@ from tests.workbench_support import (
     ShellDeployments,
 )
 
+# Integration because there is no other way to ask the question: the claim
+# is that one front end serves two deployments, so both providers are bound
+# to real loopback sockets over one plan corpus and asked the same things.
+ASL_TEST_LANE = "integration"
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATIC_ROOT = Path(workbench_http.STATIC_ROOT)
 MODULES_ROOT = STATIC_ROOT / "modules"

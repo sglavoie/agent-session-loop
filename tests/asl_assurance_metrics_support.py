@@ -15,6 +15,7 @@ from agent_session_loop import (
 )
 from agent_session_loop import assurance_projection as projection
 from agent_session_loop.assurance_projection import AuditPublication
+from tests.asl_assurance_models_support import _finding
 
 RUN_A = "20260810T100000000000Z-4241"
 RUN_B = "20260810T110000000000Z-4242"
@@ -32,21 +33,6 @@ SINCE = datetime(2026, 8, 10, tzinfo=UTC)
 
 INPUT_DIGEST = "a" * 64
 OTHER_INPUT_DIGEST = "b" * 64
-
-
-def _finding(**overrides) -> assurance_models_findings.Finding:
-    payload = {
-        "category": "lifecycle",
-        "component": "agent_session_loop/runner.py",
-        "invariant_key": "retry.budget-respected",
-        "lane": "lifecycle-retry-resume",
-        "severity": "high",
-        "summary": "A retry ran after the budget was exhausted.",
-        "recommendation": "Clamp the retry counter before relaunching.",
-        "evidence": ("events.jsonl",),
-    }
-    payload.update(overrides)
-    return assurance_models_findings.Finding(**payload)
 
 
 def _artifacts(

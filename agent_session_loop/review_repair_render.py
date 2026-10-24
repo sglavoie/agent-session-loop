@@ -149,8 +149,11 @@ def _merge_verification_checks(
         dependencies = payload.get("on_failure_of")
         if not isinstance(dependencies, list):
             continue
+        # Check names, as the parser above validated them. Typed here because
+        # ``dict.get`` with an ``Any`` default resolves to ``str | None``.
+        dependency_names: list[str] = dependencies
         payload["on_failure_of"] = repair_scope._dedupe_preserving_order(
-            [aliases.get(name, name) for name in dependencies]
+            [aliases.get(dependency, dependency) for dependency in dependency_names]
         )
     return merged
 

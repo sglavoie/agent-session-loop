@@ -16,6 +16,8 @@ from tests.support import (
     init_multi_repo_workspace,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewRepairContractGateTests(ContractGateFixtures, unittest.TestCase):
     """Gate repair children on their verification contracts."""

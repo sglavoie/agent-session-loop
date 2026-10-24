@@ -40,7 +40,6 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
-    cli,
     commit_settlement,
     events,
     plans_files,
@@ -55,6 +54,9 @@ from agent_session_loop import (
 )
 from agent_session_loop.run_errors import RunError
 from tests.support import assert_no_runner_import, called_names, write_plan
+from tests.support_base import parse_cli_args as _parse
+
+ASL_TEST_PORTABLE = True
 
 RUN_ID = "20260903T000000Z-run-payloads"
 
@@ -149,10 +151,6 @@ SEEDED_NULLS = (
 #: that got as far as the feature that writes them, so seeding them would put an
 #: empty list in the state of every run that never repaired a commit.
 UNSEEDED_LATE_KEYS = ("repair_commit_preflights", commit_settlement.COMMIT_FAILURES_KEY)
-
-
-def _parse(tokens: list[str]) -> argparse.Namespace:
-    return cli.build_parser().parse_args(tokens)
 
 
 class _PlanFixture:

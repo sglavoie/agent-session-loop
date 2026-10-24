@@ -21,6 +21,8 @@ from tests.support import (
     write_plan_with_ids,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class FakeHarnessTurnTests(FakeHarnessIntegrationBase):
     def test_successful_fake_harness_turn_persists_state_and_artifacts(self) -> None:

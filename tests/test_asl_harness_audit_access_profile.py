@@ -11,6 +11,8 @@ from agent_session_loop import (
     harnesses,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class AuditAccessProfileTests(unittest.TestCase):
     """The read-only profile expressed in argv, per adapter.

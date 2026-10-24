@@ -15,6 +15,8 @@ from agent_session_loop import (
 )
 from tests import support_asl_guards as fixtures
 
+ASL_TEST_LANE = "integration"
+
 
 class GuardControllerTests(unittest.TestCase):
     """Activation order, atomic materialization, and the active-set contract."""

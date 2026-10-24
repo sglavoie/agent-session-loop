@@ -35,6 +35,8 @@ from agent_session_loop import (
 )
 from tests.support import assert_no_runner_import
 
+ASL_TEST_PORTABLE = True
+
 
 class ReviewSessionBodyBoundaryTests(unittest.TestCase):
     """``review_session_body`` is runner-free and writes one file, on purpose."""
@@ -48,12 +50,12 @@ class ReviewSessionBodyBoundaryTests(unittest.TestCase):
         # Unlike the contract, prompt, and packet modules, this one does write:
         # a review session that is not on disk is not a session the loop can
         # select. That write is `ensure_generated_review_session`'s whole
-        # point, so it is pinned to one call rather than forbidden.
-        self.assertEqual(1, source.count("write_text("))
-        self.assertIn(
-            '    target_path.write_text(body, encoding="utf-8")',
-            source,
-        )
+        # point, so it is pinned to one call rather than forbidden. It is an
+        # atomic replace, because `find_pending_generated_review_session` may
+        # read the file the moment it exists and must never see half of it.
+        self.assertEqual(0, source.count("write_text("))
+        self.assertEqual(1, source.count("durability.replace_text("))
+        self.assertIn("    durability.replace_text(target_path, body)", source)
         for writer in ("open(", "mkdir(", "unlink("):
             self.assertNotIn(writer, source, msg=writer)
 

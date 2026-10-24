@@ -13,10 +13,10 @@ from tests.session_overview_support import (
     DEAD_PID,
     _active_turn_payload,
     _active_verification_payload,
-    _force_pid_alive,
     _make_plan_state_dir,
     _write_json,
 )
+from tests.support_base import force_pid_alive as _force_pid_alive
 
 
 class HelpersTests(unittest.TestCase):

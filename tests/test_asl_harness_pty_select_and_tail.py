@@ -16,6 +16,8 @@ from tests.support import (
     wait_until,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class PtyHarnessSelectAndTailTests(PtyRunHarnessBase):
     def test_text_run_pty_s_and_number_keys_select_future_harness(self) -> None:

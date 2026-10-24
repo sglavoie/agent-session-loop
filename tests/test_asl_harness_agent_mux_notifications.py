@@ -31,6 +31,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class AgentMuxNotificationTests(FakeHarnessIntegrationBase):
     def test_loop_lifecycle_notifications_run_after_state_writes(self) -> None:

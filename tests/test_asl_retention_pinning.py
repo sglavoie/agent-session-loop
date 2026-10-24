@@ -25,6 +25,8 @@ from tests.asl_retention_support import (
     _stamp,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class AssurancePinningTests(RetentionTestBase):
     """Open issues pin their evidence, and an unreadable ledger pins everything.

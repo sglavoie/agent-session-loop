@@ -23,6 +23,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchHardeningTests(support_static.WorkbenchHardeningCase):
     """Disappearing-file, concurrency, caching, and shutdown hardening."""
@@ -192,7 +194,7 @@ class WorkbenchHardeningTests(support_static.WorkbenchHardeningCase):
                 )
                 if status != 200 or not body.get("ok"):
                     errors.append(f"{target.name}: {status} {body!r}")
-            except Exception as error:  # noqa: BLE001 - reported below
+            except Exception as error:
                 errors.append(f"{target.name}: {error!r}")
 
         threads = [threading.Thread(target=pin, args=(target,)) for target in plan_dirs]

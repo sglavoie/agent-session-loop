@@ -32,6 +32,8 @@ from .support import (
     _write_lock_file,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class BridgeCapabilityTests(unittest.TestCase):
     def test_every_advertised_capability_has_a_handler_or_is_an_event(self) -> None:

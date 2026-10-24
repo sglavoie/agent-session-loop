@@ -16,6 +16,8 @@ from agent_session_loop import (
 )
 from tests.review_lifecycle_base import RunReviewHarnessLifecycleBase
 
+ASL_TEST_LANE = "integration"
+
 
 class RunReviewSessionCreationTests(RunReviewHarnessLifecycleBase):
     """Review session creation, models, scope events, and reuse."""

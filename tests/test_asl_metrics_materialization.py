@@ -22,6 +22,8 @@ from tests.asl_metrics_support import (
     _write_turn_result,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class MetricsMaterializationTests(MetricsCollectionBase):
     def test_review_reopens_report_attempts_and_dedupe_materializations(

@@ -210,7 +210,7 @@ class _InlineTailController:
         follower.stop()
         try:
             stopped = follower.join(timeout=INLINE_TAIL_JOIN_TIMEOUT_SECONDS)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001
             self._output.emit_line(f"live tail stopped with error: {error}")
             return
         if not stopped:

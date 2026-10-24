@@ -1,5 +1,5 @@
 # mypy: disable-error-code="attr-defined,name-defined"
-# ruff: noqa: F401, F403, F405, F822, I001
+# ruff: noqa: F401, F403, F405, I001
 """ACP handshake, control, permission, and capability tests."""
 
 # ruff: noqa: F401, F403, F405
@@ -14,6 +14,9 @@ from tests.asl_copilot_acp_support import (
     line,
     update,
 )
+
+
+ASL_TEST_LANE = "integration"
 
 
 class HandshakeTests(unittest.TestCase):

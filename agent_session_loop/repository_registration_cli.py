@@ -1,4 +1,5 @@
 # ruff: noqa: F403, F405
+from .cli_defaults import program_name
 from .repository_registration_derivation import (
     register_repositories,
     register_source_plan,
@@ -44,7 +45,7 @@ def _emit_register_error(
         )
     else:
         print(
-            f"agent-session-loop register-repositories: {error}",
+            f"{program_name()} register-repositories: {error}",
             file=sys.stderr,
         )
     return 1

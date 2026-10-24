@@ -39,6 +39,8 @@ from agent_session_loop import (
 from agent_session_loop.run_errors import RunError
 from tests.support import assert_no_runner_import, patched_env
 
+ASL_TEST_PORTABLE = True
+
 
 def _args(**overrides: Any) -> argparse.Namespace:
     values: dict[str, Any] = {

@@ -12,6 +12,8 @@ from agent_session_loop import (
 )
 from tests.review_fingerprint_base import ReviewFingerprintBase
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewFingerprintDiffEvidenceTests(ReviewFingerprintBase):
     """Fingerprint diff evidence: changed paths, symlinks, drivers, and typechanges."""

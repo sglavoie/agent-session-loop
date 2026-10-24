@@ -20,6 +20,8 @@ from tests.workbench_support import (
     SHELL_QUIET_SECONDS,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class SelectionOrderTests(unittest.TestCase):
     """Filter, count, sort, cut -- and each one provably before the next."""

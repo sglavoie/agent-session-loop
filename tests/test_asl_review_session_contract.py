@@ -37,6 +37,8 @@ from agent_session_loop import (
 )
 from tests.support import assert_no_runner_import
 
+ASL_TEST_PORTABLE = True
+
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "generated_review_gates"
 
 

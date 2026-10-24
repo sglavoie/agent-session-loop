@@ -25,6 +25,12 @@ from tests.support import (
     wait_for_process_exit,
 )
 
+#: The drain bound the detached-descendant probes run under. Their helper holds
+#: the captured pipes open past the kill, so the drain can only end by timing
+#: out; the production five seconds would be dead time on every probe, and how
+#: long the drain waits is not what they assert.
+DRAIN_PROBE_SECONDS = 0.5
+
 
 class TurnCommitSubprocessTests(TurnCommitRunCase):
     """Bounds and cleanup for the nested commit command."""
@@ -170,6 +176,9 @@ class TurnCommitSubprocessTests(TurnCommitRunCase):
         with (
             mock.patch.object(run_commit, "_asl_commit_argv", return_value=stub),
             mock.patch.object(run_commit, "COMMIT_SUBPROCESS_GRACE_SECONDS", 1),
+            mock.patch.object(
+                run_commit_process, "_COMMIT_DRAIN_SECONDS", DRAIN_PROBE_SECONDS
+            ),
         ):
             commit = run_commit._run_asl_commit(
                 cwd=repo,
@@ -266,6 +275,9 @@ class TurnCommitSubprocessTests(TurnCommitRunCase):
         with (
             mock.patch.object(run_commit, "_asl_commit_argv", return_value=stub),
             mock.patch.object(run_commit, "COMMIT_SUBPROCESS_GRACE_SECONDS", 1),
+            mock.patch.object(
+                run_commit_process, "_COMMIT_DRAIN_SECONDS", DRAIN_PROBE_SECONDS
+            ),
             mock.patch.object(
                 run_commit_process, "_snapshot_commit_descendants", fork_after_snapshot
             ),

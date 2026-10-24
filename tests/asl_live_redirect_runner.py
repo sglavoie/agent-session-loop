@@ -105,7 +105,7 @@ def run_harness_acceptance(
         print(f"-- {harness}: {label}")
         try:
             observed = sequence(harness, matrix)
-        except Exception as error:  # noqa: BLE001 - one sequence must not end the run
+        except Exception as error:
             limitations.append(
                 f"{harness}: the {label} sequence raised "
                 f"{type(error).__name__}: {error}"

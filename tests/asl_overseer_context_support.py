@@ -1,4 +1,3 @@
-# ruff: noqa: F401
 """Evidence packets: what they describe, what they refuse, and how little they hold.
 
 Five claims, none of which is provable by reading ``overseer_context``.

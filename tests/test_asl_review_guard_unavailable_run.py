@@ -33,6 +33,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewGuardUnavailableRunTests(unittest.TestCase):
     """A guard that cannot see the worktree must stop the run, not wave it on."""

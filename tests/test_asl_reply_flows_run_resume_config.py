@@ -18,6 +18,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class RunResumeConfigTests(unittest.TestCase):
     """`asl run --resume` rehydrates flags from the persisted run_config."""

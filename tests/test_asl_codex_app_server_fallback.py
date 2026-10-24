@@ -17,6 +17,8 @@ from agent_session_loop import (
 from tests import support_asl_codex_app_server as fixtures
 from tests.support import install_fake_codex
 
+ASL_TEST_LANE = "integration"
+
 
 class AdapterFallbackTests(unittest.TestCase):
     """One turn runs once: before acceptance it may be retried, after it may not."""

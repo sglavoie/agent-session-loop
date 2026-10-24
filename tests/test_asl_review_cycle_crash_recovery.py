@@ -18,6 +18,8 @@ from tests.support import (
     _structured_review_finding,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewCycleCrashRecoveryTests(RepairCycleFixtures, unittest.TestCase):
     """Backfill re-review baselines after materialization crashes."""

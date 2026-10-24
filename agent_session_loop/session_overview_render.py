@@ -1,5 +1,6 @@
 """Focused portion of agent_session_loop/session_overview.py."""
 
+from .cli_defaults import program_name
 from .session_overview_running import *
 
 
@@ -258,7 +259,7 @@ def sessions_from_args(args: argparse.Namespace) -> int:
                 )
             )
         else:
-            print(f"agent-session-loop sessions: {message}", file=sys.stderr)
+            print(f"{program_name()} sessions: {message}", file=sys.stderr)
         return 1
 
     try:
@@ -275,7 +276,7 @@ def sessions_from_args(args: argparse.Namespace) -> int:
                 )
             )
         else:
-            print(f"agent-session-loop sessions: {error}", file=sys.stderr)
+            print(f"{program_name()} sessions: {error}", file=sys.stderr)
         return 1
 
     running_rows: tuple[RunningRow, ...] = ()
@@ -304,7 +305,7 @@ def sessions_from_args(args: argparse.Namespace) -> int:
                 )
             )
         else:
-            print(f"agent-session-loop sessions: {error}", file=sys.stderr)
+            print(f"{program_name()} sessions: {error}", file=sys.stderr)
         return 1
 
     payload = build_sessions_payload(

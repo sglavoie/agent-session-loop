@@ -12,11 +12,15 @@ from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     init_git_repo,
     init_multi_repo_workspace,
+    isolated_home,
 )
 
 
 class ProvenanceExemptRootTests(unittest.TestCase):
     def setUp(self) -> None:
+        # The home-relative cases reason about `~`; give them a home this test
+        # owns rather than the developer's.
+        isolated_home(self)
         self._temp = tempfile.TemporaryDirectory()
         self.addCleanup(self._temp.cleanup)
         self.root = canonicalize_filesystem_path(self._temp.name)
@@ -47,7 +51,7 @@ class ProvenanceExemptRootTests(unittest.TestCase):
     def test_a_tilde_pointer_expands_before_the_absolute_test(self) -> None:
         # Most manifests write `~/.claude/…`, which `Path.is_absolute` calls
         # relative. Only the expansion is asserted here: whether the parent is
-        # also exempted depends on the machine's home directory.
+        # also exempted depends on where the home directory sits.
         home = canonicalize_filesystem_path(Path.home())
 
         roots = repository_intent.provenance_exempt_roots("~/plans/source.md")

@@ -37,6 +37,65 @@ from tests.support_workbench_store import (
     run_row,
 )
 
+ASL_TEST_PORTABLE = True
+
+
+class _FailingStatement:
+    """A connection proxy whose first statement matching ``fail_on`` fails.
+
+    A proxy because :class:`sqlite3.Connection` is a C type whose ``execute``
+    cannot be patched on an instance.
+    """
+
+    def __init__(self, connection: sqlite3.Connection, fail_on: str) -> None:
+        self._connection = connection
+        self._fail_on = fail_on
+        self.failed = False
+
+    def execute(self, sql: str, *parameters: object) -> sqlite3.Cursor:
+        if not self.failed and sql.strip() == self._fail_on:
+            self.failed = True
+            raise sqlite3.OperationalError("database is locked")
+        return self._connection.execute(sql, *parameters)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._connection, name)
+
+
+class TransactionTests(StoreCase):
+    """A unit of work that fails at COMMIT leaves the connection reusable."""
+
+    def test_a_failed_commit_rolls_back_and_frees_the_connection(self) -> None:
+        real = self.store._connection
+        self.store._connection = _FailingStatement(real, "COMMIT")  # type: ignore[assignment]
+        self.addCleanup(setattr, self.store, "_connection", real)
+        with (
+            self.assertRaises(sqlite3.OperationalError),
+            self.store.transaction() as connection,
+        ):
+            connection.execute(
+                "INSERT INTO service_meta (key, value) VALUES ('probe', '1')"
+            )
+        self.assertFalse(real.in_transaction)
+        with self.store.transaction() as connection:
+            connection.execute(
+                "INSERT INTO service_meta (key, value) VALUES ('probe', '2')"
+            )
+        self.assertEqual(
+            real.execute(
+                "SELECT value FROM service_meta WHERE key = 'probe'"
+            ).fetchone()[0],
+            "2",
+        )
+
+    def test_a_rollback_that_cannot_run_does_not_mask_the_failure(self) -> None:
+        real = self.store._connection
+        self.store._connection = _FailingStatement(real, "ROLLBACK")  # type: ignore[assignment]
+        self.addCleanup(setattr, self.store, "_connection", real)
+        with self.assertRaises(KeyError), self.store.transaction():
+            raise KeyError("the original failure")
+        real.execute("ROLLBACK")
+
 
 class MigrationTests(unittest.TestCase):
     """The ledger is one integer, and every upgrade keeps what came before."""
@@ -95,6 +154,19 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(store_migrations.schema_version(connection), 1)
         self.assertEqual(
             connection.execute("SELECT COUNT(*) FROM connector").fetchone()[0], 0
+        )
+
+    def test_a_failed_migration_commit_rolls_back_and_can_be_retried(self) -> None:
+        connection = store_migrations.connect(self.path)
+        self.addCleanup(connection.close)
+        flaky = _FailingStatement(connection, "COMMIT")
+        with self.assertRaises(sqlite3.OperationalError):
+            store_migrations.migrate(flaky, created_at=NOW)  # type: ignore[arg-type]
+        self.assertFalse(connection.in_transaction)
+        self.assertEqual(store_migrations.schema_version(connection), 0)
+        self.assertEqual(
+            store_migrations.migrate(connection, created_at=NOW),
+            store_types.SCHEMA_VERSION,
         )
 
     def test_the_inherited_migrations_are_unchanged(self) -> None:

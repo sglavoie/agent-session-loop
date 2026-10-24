@@ -21,6 +21,8 @@ from typing import Any
 
 from agent_session_loop import agent_mux_contract as contract
 
+ASL_TEST_PORTABLE = True
+
 CORPUS = contract.corpus_root()
 
 

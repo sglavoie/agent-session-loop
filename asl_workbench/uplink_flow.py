@@ -69,6 +69,7 @@ class UplinkFlowMixin(UplinkBodiesMixin):
         """Record the upload, and bring the link up if it was not."""
         with self._ready:
             self._last_upload_at = now
+            self._last_upload_mono = self.monotonic()
         if not self.reads.linked:
             self.reads.link_up(self.capabilities, now=now)
 

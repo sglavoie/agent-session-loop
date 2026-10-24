@@ -33,6 +33,8 @@ from .workbench_catalog_support import (
     _tree_fingerprint,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class CatalogScanTests(unittest.TestCase):
     """One scan preserves everything the queue already showed."""

@@ -25,6 +25,8 @@ from tests.support import (
     write_plan_with_ids,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewCycleAdvanceTests(RepairCycleFixtures, unittest.TestCase):
     """Advance review cycles and record withdrawn repairs."""

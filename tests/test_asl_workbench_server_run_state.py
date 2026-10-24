@@ -22,6 +22,8 @@ from tests.support import (
     write_plan_with_ids,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchServerRunStateTests(WorkbenchArtifactReadTestCase):
     """State, events, and log read endpoints."""

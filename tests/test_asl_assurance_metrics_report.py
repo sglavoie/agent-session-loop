@@ -20,6 +20,8 @@ from tests.asl_assurance_metrics_support import (
     _publication,
 )
 
+ASL_TEST_PORTABLE = True
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 

@@ -45,6 +45,9 @@ from tests.asl_run_termination_support import runner_source
 from tests.support import (
     assert_no_runner_import,
 )
+from tests.support_base import durable_write_receivers as _durable_write_receivers
+
+ASL_TEST_PORTABLE = True
 
 #: The symbols this module took from the runner. The program's no-alias rule
 
@@ -85,19 +88,6 @@ REQUIRED_SEAMS = (
     ("_honor_abort_turn", "reinspect"),
     ("_stop_before_review_work", "record_existing_review_verdict"),
 )
-
-
-def _durable_write_receivers(source: str) -> set[str]:
-    """Every receiver of a ``write_state`` or ``append_event`` call, as source."""
-    tree = ast.parse(source)
-    receivers: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            continue
-        if node.func.attr not in {"write_state", "append_event"}:
-            continue
-        receivers.add(ast.unparse(node.func.value))
-    return receivers
 
 
 def _pause_block_writers(source: str) -> set[str]:

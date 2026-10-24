@@ -25,4 +25,6 @@ from .asl_overseer_isolation_cases_observation import (
 )
 from .asl_overseer_isolation_cases_recovery import RecoveryAuthorizationTests
 
+ASL_TEST_PORTABLE = True
+
 __all__ = [name for name in globals() if name.endswith("Tests")]

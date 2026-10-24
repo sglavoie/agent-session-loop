@@ -16,12 +16,22 @@ from unittest import mock
 
 from agent_session_loop import (
     artifacts,
+    authoring_transaction,
     durability,
     events,
+    handoff_guard_sessions,
     plans_content_hash,
     plans_errors,
     plans_files,
     plans_metadata,
+    plans_models,
+    plans_readiness,
+    plans_status_tables,
+    review_delta,
+    review_session_body,
+    tail_logs,
+    turn_preparation_review,
+    workspace_evidence_scope_repair,
 )
 from tests.support import (
     write_plan,
@@ -108,6 +118,89 @@ class EventPersistenceTests(unittest.TestCase):
                 durability.replace_bytes(target, b"new")
             self.assertEqual(b"old", target.read_bytes())
             self.assertEqual(["state.json"], [p.name for p in Path(tmp).iterdir()])
+
+    def test_write_text_is_an_atomic_replace(self) -> None:
+        # `last-message.txt` is read for a pause signal, so a reader must see
+        # the previous message or the whole new one, never a truncated file.
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "turn" / "last-message.txt"
+            durability.write_text(target, "old")
+            inode = target.stat().st_ino
+            with (
+                mock.patch.object(durability.os, "replace", side_effect=OSError),
+                self.assertRaises(OSError),
+            ):
+                durability.write_text(target, "new")
+            self.assertEqual("old", target.read_text(encoding="utf-8"))
+            self.assertEqual(
+                ["last-message.txt"], [p.name for p in target.parent.iterdir()]
+            )
+            durability.write_text(target, "new")
+            self.assertEqual("new", target.read_text(encoding="utf-8"))
+            self.assertNotEqual(inode, target.stat().st_ino)
+
+    def test_a_log_replaced_whole_is_followed_from_where_it_was(self) -> None:
+        # The turn's final stdout write replaces the streamed log with a new
+        # inode. The follower reopens by path and seeks its offset, so it
+        # prints only what the replacement added rather than the whole log.
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "stdout.log"
+            durability.append_text(log, "one\ntwo\n")
+            target = {
+                "path": log,
+                "stream": "stdout",
+                "session": "1",
+                "turn_index": 1,
+            }
+            offsets: dict[str, int] = {}
+            self.assertEqual(2, len(tail_logs._read_new_log_text(target, offsets)))
+            durability.write_text(log, "one\ntwo\nasl: harness terminated\n")
+            lines = tail_logs._read_new_log_text(target, offsets)
+            self.assertEqual(1, len(lines))
+            self.assertTrue(lines[0].endswith("asl: harness terminated"))
+
+    def test_plan_markdown_writers_replace_rather_than_rewrite_in_place(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            manifest = plan_dir / "manifest.md"
+            before = manifest.read_bytes()
+            metadata = plans_models.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256="deadbeef",
+                checked_at="2026-06-19T00:00:00Z",
+            )
+            with (
+                mock.patch.object(durability.os, "replace", side_effect=OSError),
+                self.assertRaises(plans_errors.PlanError),
+            ):
+                plans_readiness.write_readiness_metadata(plan_dir, metadata)
+            self.assertEqual(before, manifest.read_bytes())
+            self.assertEqual(
+                [], [p.name for p in plan_dir.iterdir() if p.name.endswith(".tmp")]
+            )
+
+    def test_no_plan_or_session_writer_rewrites_a_file_in_place(self) -> None:
+        # A plain `Path.write_text` truncates before it writes, so a crash or a
+        # concurrent reader (`find_pending_generated_review_session`, the
+        # readiness hash) can see a partial plan file.
+        for module in (
+            authoring_transaction,
+            handoff_guard_sessions,
+            plans_files,
+            plans_readiness,
+            plans_status_tables,
+            review_delta,
+            review_session_body,
+            turn_preparation_review,
+            workspace_evidence_scope_repair,
+        ):
+            with self.subTest(module=module.__name__):
+                source = Path(module.__file__ or "").read_text(encoding="utf-8")
+                self.assertNotIn(".write_text(", source)
+                self.assertNotIn(".write_bytes(", source)
 
     def test_staging_path_fits_name_max_for_a_maximal_name(self) -> None:
         target = Path("/nonexistent") / ("a" * 255)

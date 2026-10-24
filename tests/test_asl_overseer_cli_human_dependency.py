@@ -13,6 +13,8 @@ from agent_session_loop import (
 from tests.asl_overseer_cli_fleet import _OverseerCase
 from tests.asl_overseer_cli_support import ACTION
 
+ASL_TEST_PORTABLE = True
+
 
 class HumanDependencyTests(_OverseerCase):
     """That a human question reaches the CLI at all.

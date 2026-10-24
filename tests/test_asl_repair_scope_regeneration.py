@@ -40,6 +40,8 @@ from tests.support import (
     write_completed_review_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class RepairChildWriteScopeRegenerationTests(unittest.TestCase):
     """Widen a materialized repair child whose findings were recomputed."""

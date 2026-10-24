@@ -51,6 +51,8 @@ from tests.support_workbench_remote_actions import (
     submit_body,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class RestartSettlementTests(unittest.TestCase):
     """Two words, and the distinction between them is the whole point."""

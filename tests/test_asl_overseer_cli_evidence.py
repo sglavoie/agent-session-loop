@@ -13,6 +13,8 @@ from agent_session_loop import (
 from tests.asl_overseer_cli_fleet import _OverseerCase
 from tests.asl_overseer_cli_support import GENERATED_CLASS
 
+ASL_TEST_PORTABLE = True
+
 
 class EvidenceBoundaryTests(_OverseerCase):
     """Where an authorization can come from, and where it structurally cannot."""

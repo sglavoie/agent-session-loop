@@ -21,6 +21,8 @@ from tests.support import (
     _write_state_payload,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class WorkbenchRecoveryTests(fixtures.WorkbenchRecoveryCase):
     def test_reply_needed_recovery_uses_latest_paused_turn_artifacts(self) -> None:

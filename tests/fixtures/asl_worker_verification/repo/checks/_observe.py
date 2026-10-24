@@ -112,7 +112,7 @@ def observed(name: str, body: Callable[[], None]) -> int:
     except AssertionError as error:
         exit_code = 1
         detail = str(error) or "assertion failed"
-    except Exception as error:  # noqa: BLE001 - recorded, not swallowed
+    except Exception as error:
         exit_code = 2
         detail = f"{type(error).__name__}: {error}"
     record: dict[str, Any] = {

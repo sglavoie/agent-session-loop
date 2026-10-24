@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from agent_session_loop import (
+    durability,
     events,
     harnesses,
 )
@@ -15,6 +18,8 @@ from tests.support import (
     write_completed_review_plan,
 )
 from tests.support_asl_repair_dispatch import GeneratedRepairDispatchFixture
+
+ASL_TEST_LANE = "integration"
 
 
 class RepairScopeStaleDispatchTests(GeneratedRepairDispatchFixture):
@@ -81,10 +86,18 @@ class RepairScopeStaleDispatchTests(GeneratedRepairDispatchFixture):
         self._narrow(self.child, "OAK")
         # Regeneration is fail-open, so a durable file the runner cannot rewrite
         # is the reachable case where the blocker has to stop the run itself.
-        self.child.chmod(0o444)
-        self.addCleanup(self.child.chmod, 0o644)
+        # The rewrite is an atomic replace, which a read-only mode on the file
+        # alone would not stop, so the replace of this one child is refused.
+        replace_bytes = durability.replace_bytes
+        child = self.child.resolve()
 
-        exit_code, payload = self._run("stale-blocked", self._refuse)
+        def refuse_child(path: Path, *args: Any, **kwargs: Any) -> None:
+            if Path(path).resolve() == child:
+                raise PermissionError(f"read-only: {path}")
+            replace_bytes(path, *args, **kwargs)
+
+        with mock.patch.object(durability, "replace_bytes", side_effect=refuse_child):
+            exit_code, payload = self._run("stale-blocked", self._refuse)
 
         self.assertEqual(1, exit_code)
         self.assertEqual(

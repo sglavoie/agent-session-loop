@@ -66,7 +66,7 @@ def scan_from_args(
     ]
     for candidate in matching:
         mark = "+" if candidate.eligible else "-"
-        detail = candidate.lifecycle
+        detail: str = candidate.lifecycle
         if candidate.ineligible_reasons:
             detail = f"{detail}: {', '.join(candidate.ineligible_reasons)}"
         lines.append(f"  {mark} {candidate.plan_dir} [{detail}]")

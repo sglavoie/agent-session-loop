@@ -219,7 +219,7 @@ def diff_matrices(before: CorpusReplay, after: CorpusReplay) -> MatrixDiff:
     after_keys = set(after.invariant_keys)
     before_keys = set(before.invariant_keys)
     shared_keys = [key for key in before.invariant_keys if key in after_keys]
-    changes = []
+    changes: list[StatusChange] = []
     for run_id in sorted(set(before.matrix) & set(after.matrix)):
         old_row = before.matrix[run_id]
         new_row = after.matrix[run_id]

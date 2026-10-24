@@ -13,6 +13,8 @@ from agent_session_loop import (
 )
 from tests.review_delta_scope_base import ReviewDeltaScopeBase
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewDeltaScopeComputationTests(ReviewDeltaScopeBase):
     """Delta scope computation against recorded repair cycles."""

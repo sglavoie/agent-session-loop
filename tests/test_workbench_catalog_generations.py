@@ -13,6 +13,8 @@ from tests.support import _write_state_payload, write_plan
 
 from .workbench_catalog_support import _minimal_summary_payload, _paused_state_payload
 
+ASL_TEST_LANE = "integration"
+
 
 class LargeCatalogTests(unittest.TestCase):
     """A catalog past the bridge's cap keeps every kind of work."""

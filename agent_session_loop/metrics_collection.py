@@ -193,8 +193,8 @@ def collect_metrics(
 
         for record in event_records:
             name = record.get("name")
-            payload = record.get("payload")
-            payload = payload if isinstance(payload, dict) else {}
+            raw_payload = record.get("payload")
+            payload = raw_payload if isinstance(raw_payload, dict) else {}
             created_at = metrics_models._parse_timestamp(record.get("created_at"))
             if created_at is None or created_at < cutoff:
                 continue

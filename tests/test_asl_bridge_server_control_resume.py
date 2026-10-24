@@ -25,6 +25,8 @@ from .asl_bridge_server_support import (
     _Corpus,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class BridgeControlTests(unittest.TestCase):
     def test_stop_after_current_queues_the_operation_id_as_the_command_id(self) -> None:

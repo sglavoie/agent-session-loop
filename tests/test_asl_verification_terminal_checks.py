@@ -17,6 +17,8 @@ from agent_session_loop import (
 
 from .support_asl_verification_transitions import DEFERRED_REASON
 
+ASL_TEST_PORTABLE = True
+
 
 class TerminalRequiredCheckTests(unittest.TestCase):
     """Session 2's success policy, asked of payloads rather than of runs."""

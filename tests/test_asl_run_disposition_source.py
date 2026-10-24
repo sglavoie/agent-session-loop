@@ -6,6 +6,8 @@ import unittest
 
 from tests.support_asl_disposition_checks import DispositionChecksFixture
 
+ASL_TEST_LANE = "integration"
+
 
 class TerminatingDispositionSourceTests(DispositionChecksFixture):
     """The loop dispatch holds every terminating branch behind the guard."""

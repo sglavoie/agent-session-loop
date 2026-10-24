@@ -29,6 +29,8 @@ from tests.support import (
     write_multi_repo_plan,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class WorkbenchSummaryTests(fixtures.WorkbenchSummaryCase):
     def test_failed_when_last_run_finished_with_ok_false(self) -> None:

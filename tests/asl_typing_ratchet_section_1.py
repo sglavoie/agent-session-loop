@@ -1,11 +1,12 @@
 # mypy: disable-error-code="name-defined,attr-defined,no-redef"
-# ruff: noqa: E402, F401, F403, F405, I001
+# ruff: noqa: E402, F403, F405, I001
 from . import test_asl_typing_ratchet_shared as _shared
 
 globals().update(
     {name: value for name, value in vars(_shared).items() if not name.startswith("__")}
 )
 from .test_asl_typing_ratchet_shared import *
+from .support_base import load_section_tests
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
@@ -37,9 +38,38 @@ BASELINE_DISABLED_CODES = frozenset(
     }
 )
 
-#: The codes a ratcheted module opts back in to. All three are ways a wrong
-#: value reaches a durable record instead of raising at the call site.
-RATCHETED_CODES = frozenset({"arg-type", "union-attr", "index"})
+#: The codes a package module opts back in to: every error code the baseline
+#: hides. Each is a way a wrong value reaches a durable record instead of
+#: raising at the call site. Only ``annotation-unchecked`` stays off, because it
+#: silences notes rather than errors.
+RATCHETED_CODES = frozenset(
+    {
+        "arg-type",
+        "union-attr",
+        "index",
+        "assignment",
+        "var-annotated",
+        "misc",
+        "call-overload",
+        "operator",
+        "override",
+    }
+)
+
+#: The codes the skill-scripts table opts back in to: every package code except
+#: the three the scripts still need annotations for. A code may join this set
+#: once the scripts are clean under it, and none may leave it.
+SCRIPT_RATCHETED_CODES = RATCHETED_CODES - {"arg-type", "union-attr", "index"}
+
+#: The skill script directories. They are not packages, so mypy names each
+#: script by its bare file stem and the scripts table lists those stems.
+SCRIPT_ROOTS = (
+    REPO_ROOT / "skills" / "asl" / "scripts",
+    REPO_ROOT / "skills" / "session-resplit" / "scripts",
+)
+
+#: The scripts table's anchor, named the same way as ``TABLE_ANCHORS``.
+SCRIPTS_TABLE_ANCHOR = "asl_autopilot"
 
 #: The two override tables. An overrides table has no name key -- mypy rejects
 #: one as an unrecognized option -- so each is named by an anchor module that
@@ -52,7 +82,7 @@ TABLE_ANCHORS = {
     CHECKED_TABLE: "agent_session_loop.compact_state",
 }
 
-#: The package modules that meet the boundary contract: clean under all three
+#: The package modules that meet the boundary contract: clean under all nine
 #: codes and clean under the linter below. This set is a floor: every module
 #: that becomes clean adds to it, and nothing may leave it. A module removed
 #: from ``pyproject.toml`` fails here rather than silently rejoining the
@@ -63,17 +93,4 @@ def load_tests(
     loader: unittest.TestLoader, tests: unittest.TestSuite, pattern: str | None
 ) -> unittest.TestSuite:
     """Load only test cases defined in this focused section."""
-    suite = unittest.TestSuite()
-    cases = sorted(
-        (
-            value
-            for value in globals().values()
-            if isinstance(value, type)
-            and issubclass(value, unittest.TestCase)
-            and value.__module__ == __name__
-        ),
-        key=lambda case: case.__name__,
-    )
-    for case in cases:
-        suite.addTests(loader.loadTestsFromTestCase(case))
-    return suite
+    return load_section_tests(loader, __name__)

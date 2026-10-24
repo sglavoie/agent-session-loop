@@ -30,6 +30,8 @@ from tests.asl_overseer_cli_support import WATCHER
 
 from .support import assert_no_runner_import
 
+ASL_TEST_PORTABLE = True
+
 
 class InvocationWorkflowTests(_OverseerCase):
     """The seven steps, in order, with each step's output feeding the next."""

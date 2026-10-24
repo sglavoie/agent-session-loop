@@ -27,6 +27,8 @@ from .workbench_lifecycle_support import (
     older_store,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ServiceLifecycleTest(InstallationTestCase):
     """Install, upgrade, roll back, recover, remove -- with a live release."""

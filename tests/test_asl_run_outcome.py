@@ -46,7 +46,6 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
-    cli,
     events,
     plans_files,
     plans_models,
@@ -58,6 +57,11 @@ from agent_session_loop import (
     state,
 )
 from tests.support import assert_no_runner_import, called_names, write_plan
+from tests.support_base import RaisingStream as _RaisingStream
+from tests.support_base import parse_cli_args as _parse
+from tests.support_base import stderr_owners as _stderr_owners
+
+ASL_TEST_PORTABLE = True
 
 RUN_ID = "20260903T000000Z-run-outcome"
 
@@ -116,24 +120,6 @@ INDEXED_ON_SUCCESS = frozenset({"final_snapshot"})
 INDEXED_UNDER_GUARD = frozenset({"harness", "run_dir", "state_path", "events_path"})
 
 
-def _stderr_owners(source: str) -> set[str]:
-    """The top-level definitions in ``source`` that name ``sys.stderr``."""
-    owners: set[str] = set()
-    for node in ast.parse(source).body:
-        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            continue
-        for inner in ast.walk(node):
-            if (
-                isinstance(inner, ast.Attribute)
-                and inner.attr == "stderr"
-                and isinstance(inner.value, ast.Name)
-                and inner.value.id == "sys"
-            ):
-                owners.add(node.name)
-                break
-    return owners
-
-
 def _bare_payload_reads(tree: ast.Module) -> set[str]:
     """Constant string keys ``_print_text_outcome`` reads off ``payload``.
 
@@ -157,10 +143,6 @@ def _bare_payload_reads(tree: ast.Module) -> set[str]:
         ):
             keys.add(node.slice.value)
     return keys
-
-
-def _parse(tokens: list[str]) -> argparse.Namespace:
-    return cli.build_parser().parse_args(tokens)
 
 
 class _PlanFixture:
@@ -549,20 +531,6 @@ class TerminalEmissionTests(unittest.TestCase):
             redirect_stderr(io.StringIO()),
         ):
             run_outcome._emit_run_payload(self.plan.args(), payload)
-
-
-class _RaisingStream(io.StringIO):
-    """A sink that behaves like a pipe whose reader has gone away."""
-
-    def __init__(self, error: BaseException) -> None:
-        super().__init__()
-        self._error = error
-
-    def write(self, text: str) -> int:
-        raise self._error
-
-    def flush(self) -> None:
-        raise self._error
 
 
 class PortabilityTests(unittest.TestCase):

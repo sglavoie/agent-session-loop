@@ -1,5 +1,5 @@
 # mypy: disable-error-code="name-defined,attr-defined,no-redef"
-# ruff: noqa: E402, F401, F403, F405, I001
+# ruff: noqa: F401, I001
 """Read-only stdio bridge: protocol framing and run projection.
 
 Split from tests/test_asl_workbench_summary.py: the bridge reuses Workbench
@@ -48,3 +48,7 @@ from .support import (
     _write_state_payload,
     write_plan,
 )
+
+
+#: Not a shard of its own: shared helpers for the facade's sections.
+ASL_TEST_SHARDS: tuple[str, ...] = ()

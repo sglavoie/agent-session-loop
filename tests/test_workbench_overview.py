@@ -18,6 +18,12 @@ from tests.workbench_overview_support import (
     _row,
 )
 
+# Integration: the vocabulary halves and the selection algebra would run
+# anywhere, but "both modes present one body of work" is only a claim
+# about two providers answering the same questions, so both are bound to
+# loopback sockets over one corpus.
+ASL_TEST_LANE = "integration"
+
 
 class SharedVocabularyTests(unittest.TestCase):
     """The words the server filters by and the browser sections by, pinned.

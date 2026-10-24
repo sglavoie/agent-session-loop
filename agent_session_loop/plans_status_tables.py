@@ -7,8 +7,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from .plans_files import (
+    _atomic_write_text,
     _raise_read_error,
-    _write_text,
 )
 from .plans_models import (
     PlanSnapshot,
@@ -166,7 +166,7 @@ def sync_derived_status_ledgers(
             _raise_read_error(path, error)
         updated, changed = _sync_status_tables_in_text(current, status_by_session)
         if changed:
-            _write_text(path, updated)
+            _atomic_write_text(path, updated)
             changed_paths.append(path)
 
     return tuple(changed_paths)

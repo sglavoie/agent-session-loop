@@ -16,6 +16,8 @@ from asl_workbench.transport import (
 )
 from tests import support_workbench_remote_reads as fixtures
 
+ASL_TEST_PORTABLE = True
+
 
 class ResponderTests(fixtures.ResponderTestCase):
     """The reading half: a key becomes a directory, a failure becomes a word."""

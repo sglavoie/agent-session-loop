@@ -188,8 +188,8 @@ def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
             if audit_evidence_failures._payload_shows_failure(payload)
         ]
         failing_total += len(failures)
-        outcome = outcomes.get(key)
-        if outcome is None:
+        turn_outcome = outcomes.get(key)
+        if turn_outcome is None:
             if failures:
                 target = (
                     blind
@@ -201,8 +201,8 @@ def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
                     f"reached a {events.VERIFICATION_FINISHED_EVENT} record"
                 )
             continue
-        if outcome.get("passed") is False:
-            acceptance = outcome.get("acceptance")
+        if turn_outcome.get("passed") is False:
+            acceptance = turn_outcome.get("acceptance")
             if acceptance is not None:
                 failing_total += len(failures)
                 accepted_names = list(
@@ -215,8 +215,9 @@ def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
                 failure_names = [failure.get("name") for failure in failures]
                 resolution = _accepted_verification_is_accounted_for(
                     context,
-                    outcome,
-                    session_id=outcome.get("session_id") or outcome.get("session"),
+                    turn_outcome,
+                    session_id=turn_outcome.get("session_id")
+                    or turn_outcome.get("session"),
                 )
                 # A deferral naming checks that never failed is a defect no
                 # amount of unfinished repair loop excuses.
@@ -234,11 +235,11 @@ def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
                         "all-clear review before the run stopped"
                     )
             continue
-        if outcome.get("passed") is not True:
+        if turn_outcome.get("passed") is not True:
             continue
-        diagnostics = outcome.get("diagnostic_count")
+        diagnostics = turn_outcome.get("diagnostic_count")
         diagnostics = diagnostics if isinstance(diagnostics, int) else 0
-        skipped = outcome.get("skipped_count")
+        skipped = turn_outcome.get("skipped_count")
         skipped = skipped if isinstance(skipped, int) else 0
         # Only a conditional diagnostic is ever skipped, and only a diagnostic
         # that actually ran can absorb a failure — the declared count on its own

@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F401
 """Durable incident policy and persist-before-publish delivery.
 
 An incident is the application noticing something nobody asked it to look at:

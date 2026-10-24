@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: I001
 """Progress journal, runner entry helper, and progress CLI tests.
 
 Split from tests/test_agent_session_loop.py."""

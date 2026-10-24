@@ -1,23 +1,34 @@
-# mypy: ignore-errors
-# ruff: noqa
-# ruff: noqa: F821
 #!/usr/bin/env python3
-"""Resplit a pending session through focused parser, contract, and transaction modules."""
+"""Resplit a pending session through the parser, contract, and transaction modules."""
 
 from __future__ import annotations
 
+import argparse
+import json
 import sys
 from pathlib import Path
+from typing import Any
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-import resplit_contracts as _contracts
-import resplit_execution as _execution
-import resplit_parsing as _parsing
-import resplit_render as _render
-import resplit_shared as _shared
+# The sibling modules resolve only after the sys.path insertion above.
+import resplit_contracts as _contracts  # noqa: E402
+import resplit_execution as _execution  # noqa: E402
+import resplit_parsing as _parsing  # noqa: E402
+import resplit_render as _render  # noqa: E402
+import resplit_shared as _shared  # noqa: E402
+from resplit_contracts import _load_child_specs  # noqa: E402
+from resplit_execution import resplit_session  # noqa: E402
+from resplit_shared import (  # noqa: E402
+    PAUSE_REMEDIATION,
+    ResplitError,
+    _validate_parts,
+    plans_errors,
+    plans_files,
+    plans_session_ids,
+)
 
 for _module in (_shared, _parsing, _contracts, _render, _execution):
     globals().update(

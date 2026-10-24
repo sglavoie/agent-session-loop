@@ -23,6 +23,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchServerQueueSortTests(WorkbenchServerTestCase):
     """Queue catalog fields and sort modes."""

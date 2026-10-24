@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from . import pause_policy, plans_errors, responses
+from .cli_defaults import program_name
 from .qna_context import load_qna_context
 from .qna_models import QnAContext, QnAError
 from .qna_render import (
@@ -149,5 +150,5 @@ def _emit_questions_error(
             )
         )
     else:
-        print(f"agent-session-loop questions: {error}", file=sys.stderr)
+        print(f"{program_name()} questions: {error}", file=sys.stderr)
     return 1

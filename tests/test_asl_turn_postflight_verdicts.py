@@ -28,6 +28,8 @@ from .asl_turn_postflight_support import (
     PostflightTestCase,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class FinalizationPauseTests(PostflightTestCase):
     """A guard that pauses still has to reach the guards after it."""

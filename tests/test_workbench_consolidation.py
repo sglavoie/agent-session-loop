@@ -15,6 +15,11 @@ from pathlib import Path
 from asl_workbench import capabilities, operations, remote_actions
 from tests import workbench_acceptance
 
+# Final cross-repository ownership audit: it reads the registered Pi
+# checkout to prove the retired implementation is gone and its historical
+# evidence remains, so it cannot run in a scripts-only portable checkout.
+ASL_TEST_LANE = "integration"
+
 SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
 MONITORING_RELATIVE = Path("services") / "pi-monitoring"
 #: The Pi-side half of the retirement: its presence is what says the Pi

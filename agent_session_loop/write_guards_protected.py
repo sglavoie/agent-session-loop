@@ -106,7 +106,7 @@ def _protected_path_review_changed_paths(
             exclude=exclude,
             include_ignored=include_ignored,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if review_guard._review_guard_unavailable_detail(fingerprint_after) is not None:
         return None

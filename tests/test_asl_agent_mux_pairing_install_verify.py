@@ -16,6 +16,8 @@ from agent_session_loop import (
     install_verify_common,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class InstallVerifyAgentMuxTests(unittest.TestCase):
     """Paired-cockpit health is reported, and never required."""

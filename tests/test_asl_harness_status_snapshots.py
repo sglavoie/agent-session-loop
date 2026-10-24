@@ -18,6 +18,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class StatusSnapshotTests(FakeHarnessIntegrationBase):
     def test_compact_status_snapshot_reports_active_turn(self) -> None:

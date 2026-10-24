@@ -23,6 +23,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class RunReviewBroadGateDeferralTests(RunReviewHarnessLifecycleBase):
     """Deferred broad-gate failures and generated repair sessions."""

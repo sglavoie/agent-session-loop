@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F403
 """Public service layer for validated ASL interventions."""
 
 from .intervention_actions import *

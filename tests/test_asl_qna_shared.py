@@ -1,5 +1,5 @@
 # mypy: disable-error-code="name-defined,attr-defined,no-redef"
-# ruff: noqa: E402, F401, F403, F405, I001
+# ruff: noqa: F401, I001
 """Q&A context loader and questions CLI tests.
 
 Split from tests/test_agent_session_loop.py."""
@@ -35,3 +35,7 @@ from tests.support import (
     REPO_ROOT,
     write_plan,
 )
+
+
+#: Not a shard of its own: shared helpers for the facade's sections.
+ASL_TEST_SHARDS: tuple[str, ...] = ()

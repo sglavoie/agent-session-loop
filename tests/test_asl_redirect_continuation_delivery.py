@@ -28,6 +28,8 @@ from .asl_redirect_continuation_support import (
 )
 from .asl_redirect_run_support import _RedirectedRun
 
+ASL_TEST_PORTABLE = True
+
 
 class UnrecordableDeliveryTests(_RedirectedRun):
     """The delivery line the journal would not take, on a prompt already sent.

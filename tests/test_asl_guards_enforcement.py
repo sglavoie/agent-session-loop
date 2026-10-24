@@ -18,6 +18,8 @@ from agent_session_loop import (
 )
 from tests import support_asl_guards as fixtures
 
+ASL_TEST_LANE = "integration"
+
 
 class CommandGateEnforcementTests(unittest.TestCase):
     """The gate, exercised by real processes resolving a bare name on PATH."""

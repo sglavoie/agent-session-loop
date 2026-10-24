@@ -329,7 +329,7 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
         raise SystemExit(main(sys.argv))
     except SystemExit:
         raise
-    except BaseException:
+    except BaseException:  # noqa: BLE001
         # Never let an unexpected failure in this layer stall the worker; the
         # shim and the postflight comparison are unaffected by anything here.
         raise SystemExit(0) from None

@@ -38,13 +38,14 @@ retain reason.
 `maintenance` is the scheduled counterpart to `gc`: the same reclaim, performed
 daily by a job ASL installs and owns, plus one additional lane `gc` does not
 have. `asl maintenance install` writes
-`~/Library/LaunchAgents/com.sglavoie.asl-maintenance.plist` and bootstraps it
+`~/Library/LaunchAgents/<prefix>.asl-maintenance.plist` (the prefix is
+`ASL_LAUNCHD_LABEL_PREFIX`, default `com.sglavoie`) and bootstraps it
 into the calling user's GUI domain; `asl maintenance uninstall` boots it out and
 deletes the definition, removing nothing from the state corpus. The plist is
 written by the command rather than stowed from the dotfiles repository's
-`launchagents/` on purpose: its `just load-agents` bootstraps every plist in that
-package, so shipping one there would give the label two owners and let a
-`just all` silently re-load a job the operator had deliberately uninstalled. The rendered job runs
+`launchagents/` on purpose: that repository's own `just load-agents` recipe (not
+one in this checkout) bootstraps every plist in that package, so shipping one
+there would give the label two owners and let its `just all` silently re-load a job the operator had deliberately uninstalled. The rendered job runs
 `asl maintenance run --apply --max-runtime-seconds 900 --json` once a day at
 03:30 with `RunAtLoad` false, `ProcessType` `Background`, and `LowPriorityIO`,
 and appends its own output to `maintenance.log` under the state root. The
@@ -144,7 +145,8 @@ full last result plus a bounded 10-entry history. `asl maintenance status` reads
 it back and reports job presence, whether the installed definition still matches
 what this version would render, whether launchd has it loaded, and the last run's
 outcome, reclaimed bytes, and failures; it exits nonzero only when that last
-recorded pass itself failed. `asl verify-install` carries the same information as
+recorded pass itself failed. The install verifier (`just verify-asl-install`,
+or `python3 -m agent_session_loop.install_verify`) carries the same information as
 an advisory `maintenance-job` check, so an install with no job at all still
 verifies clean.
 

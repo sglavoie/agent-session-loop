@@ -53,16 +53,15 @@ from tests.support import (
     write_multi_repo_plan,
     write_plan,
 )
+from tests.support_base import stderr_owners as _stderr_owners
+
+ASL_TEST_PORTABLE = True
 
 #: The symbols this module took from the runner. The program's no-alias rule
 #: says the runner keeps none of them behind, so a re-export added later to
 #: rescue a stale reference fails here rather than in review. `doctor_from_args`
 #: is deliberately absent: its *body* moved, its name did not.
-MOVED_SYMBOLS = (
-    "NOT_IMPLEMENTED_EXIT",
-    "_not_implemented",
-    "_print_doctor_error",
-)
+MOVED_SYMBOLS = ("_print_doctor_error",)
 
 #: Every call that would outlive the process. A rehearsal writes nothing at
 #: all, so this is a flat prohibition rather than a per-function map: the paths
@@ -84,24 +83,6 @@ DURABLE_WRITE_NAMES = frozenset(
         "write_text",
     }
 )
-
-
-def _stderr_owners(source: str) -> set[str]:
-    """The top-level definitions in ``source`` that name ``sys.stderr``."""
-    owners: set[str] = set()
-    for node in ast.parse(source).body:
-        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            continue
-        for inner in ast.walk(node):
-            if (
-                isinstance(inner, ast.Attribute)
-                and inner.attr == "stderr"
-                and isinstance(inner.value, ast.Name)
-                and inner.value.id == "sys"
-            ):
-                owners.add(node.name)
-                break
-    return owners
 
 
 class _DoctorFixture:
@@ -204,14 +185,11 @@ class ExtractionContractTests(unittest.TestCase):
             with self.subTest(symbol=node.name):
                 self.assertEqual(frozenset(), called_names(node) & DURABLE_WRITE_NAMES)
 
-    def test_only_the_two_report_writers_resolve_sys_stderr(self) -> None:
+    def test_only_the_report_writer_resolves_sys_stderr(self) -> None:
         # `run_reporting` owns the single handle on stderr while a run is live.
-        # These two are allowed their own because neither has a run behind it:
-        # one answers an unimplemented subcommand, the other a command that
-        # never starts a loop.
-        self.assertEqual(
-            {"_not_implemented", "_print_doctor_error"}, _stderr_owners(self.source)
-        )
+        # The doctor's error printer is allowed its own because it has no run
+        # behind it: the command never starts a loop.
+        self.assertEqual({"_print_doctor_error"}, _stderr_owners(self.source))
 
 
 class DelegationContractTests(unittest.TestCase):
@@ -405,20 +383,7 @@ class RefusalTests(unittest.TestCase):
 
         self.assertEqual(1, code)
         self.assertEqual("", out)
-        self.assertIn("agent-session-loop doctor:", err)
-
-
-class NotImplementedTests(unittest.TestCase):
-    """The other report to a caller who has no run."""
-
-    def test_an_unimplemented_subcommand_says_so_on_stderr(self) -> None:
-        err = io.StringIO()
-        with redirect_stderr(err):
-            code = run_doctor._not_implemented("frobnicate")
-
-        self.assertEqual(run_doctor.NOT_IMPLEMENTED_EXIT, code)
-        self.assertNotEqual(0, run_doctor.NOT_IMPLEMENTED_EXIT)
-        self.assertIn("frobnicate: not implemented yet", err.getvalue())
+        self.assertIn("asl doctor:", err)
 
 
 class PortabilityTests(unittest.TestCase):

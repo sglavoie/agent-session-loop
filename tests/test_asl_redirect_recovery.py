@@ -24,6 +24,8 @@ from .support_asl_redirect_recovery_4 import (
     RunLoopRecoveryTests,
 )
 
+ASL_TEST_PORTABLE = True
+
 for _test_case in (
     StatusProjectionTests,
     ReadingIsInertTests,

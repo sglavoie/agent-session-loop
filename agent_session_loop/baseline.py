@@ -70,6 +70,7 @@ from .baseline_models import BaselineRunResult as BaselineRunResult
 from .baseline_models import BaselineStatus as BaselineStatus
 from .baseline_report import _print_text_baseline, _run_result_payload
 from .baseline_run import run_baseline as run_baseline
+from .cli_defaults import program_name
 from .plans_errors import PlanError
 from .verification_models import verification_context_from_plan
 
@@ -180,7 +181,7 @@ def baseline_from_args(args: Any) -> int:
         _print_text_baseline(result, plan_dir_arg=str(plan_dir_arg))
         if exit_code != 0:
             print(
-                f"agent-session-loop baseline: {payload_fields['unsatisfied_count']} "
+                f"{program_name()} baseline: {payload_fields['unsatisfied_count']} "
                 f"of {payload_fields['check_count']} baseline check(s) unsatisfied",
                 file=sys.stderr,
             )
@@ -212,4 +213,4 @@ def _emit_baseline_error(
             )
         )
     else:
-        print(f"agent-session-loop baseline: {error}", file=sys.stderr)
+        print(f"{program_name()} baseline: {error}", file=sys.stderr)

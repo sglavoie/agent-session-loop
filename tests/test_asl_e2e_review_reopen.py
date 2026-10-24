@@ -19,6 +19,8 @@ from tests.support import (
     _write_loop_ready_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewReopenEndToEndTests(EndToEndQABase):
     """Completed reviews reopen and re-review through the real CLI."""

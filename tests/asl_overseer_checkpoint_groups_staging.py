@@ -1,6 +1,6 @@
 """Focused portion of tests/test_asl_overseer_checkpoint_groups.py."""
 
-from .asl_overseer_checkpoint_groups_admission import *
+from .asl_overseer_checkpoint_groups_support import *
 
 
 class MixedPermission(_GroupCase):
@@ -171,4 +171,4 @@ class AFailedSecondCommit(_GroupCase):
             )
 
 
-__all__ = ["contextlib", "json", "shutil", "sqlite3", "tempfile", "unittest", "datetime", "Path", "Any", "get_args", "commit_groups", "overseer_checkpoint", "overseer_checkpoint_groups", "overseer_decisions", "overseer_dispatch", "overseer_policy_client", "overseer_store_ledger", "overseer_store_models", "state", "support", "assert_no_runner_import", "PROJECT", "RUN", "ALIASES", "FINGERPRINT", "DIGEST", "MOMENT", "MESSAGE", "FULL_RUN_BOUNDARIES", "_Crash", "_GroupCase", "ClosedVocabulary", "DerivedIdentity", "CommitsTheWholeRegistry", "MixedPermission", "PartialStaging", "AFailedSecondCommit"]  # fmt: skip
+__all__ = ["contextlib", "json", "shutil", "sqlite3", "tempfile", "unittest", "datetime", "Path", "Any", "get_args", "commit_groups", "overseer_checkpoint", "overseer_checkpoint_groups", "overseer_decisions", "overseer_dispatch", "overseer_policy_client", "overseer_store_ledger", "overseer_store_models", "state", "support", "assert_no_runner_import", "PROJECT", "RUN", "ALIASES", "FINGERPRINT", "DIGEST", "MOMENT", "MESSAGE", "FULL_RUN_BOUNDARIES", "_Crash", "_GroupCase", "MixedPermission", "PartialStaging", "AFailedSecondCommit"]  # fmt: skip

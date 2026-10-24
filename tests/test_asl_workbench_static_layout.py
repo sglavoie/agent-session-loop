@@ -9,6 +9,8 @@ from tests.support import (
     _http_request_raw,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchStaticLayoutTests(support_static.WorkbenchStaticCase):
     """Cover the two-pane layout, plan preview and search controls markup."""

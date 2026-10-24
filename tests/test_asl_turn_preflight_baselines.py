@@ -18,6 +18,8 @@ from agent_session_loop import (
 
 from .asl_turn_preflight_support import SESSION_ID, PreflightTestCase, fake_workspace
 
+ASL_TEST_PORTABLE = True
+
 
 class LegacyBaselineTests(PreflightTestCase):
     def test_explicit_external_roots_have_pre_turn_digests(self) -> None:

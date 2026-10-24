@@ -13,6 +13,7 @@ globals().update(
     }
 )
 from .test_asl_typing_ratchet_shared import *
+from .support_base import load_section_tests
 from . import asl_typing_ratchet_section_1 as _asl_typing_ratchet_section_1
 from . import asl_typing_ratchet_section_2 as _asl_typing_ratchet_section_2
 from . import asl_typing_ratchet_section_3 as _asl_typing_ratchet_section_3
@@ -43,14 +44,21 @@ for _part in _PARTS:
 del _part
 
 
+#: The sections run as their own shards, in parallel. Assigned after the
+#: shared names are copied in, so the shared module's own marker cannot
+#: shadow it.
+ASL_TEST_SHARDS = (
+    "tests.asl_typing_ratchet_section_3",
+    "tests.asl_typing_ratchet_section_4",
+)
+ASL_TEST_PORTABLE = True
+
+
 def load_tests(
     loader: unittest.TestLoader, tests: unittest.TestSuite, pattern: str | None
 ) -> unittest.TestSuite:
     """Load the focused test sections as one historical test module."""
-    suite = unittest.TestSuite()
-    for part in _PARTS:
-        suite.addTests(loader.loadTestsFromModule(part))
-    return suite
+    return load_section_tests(loader, *_PARTS)
 
 
 if __name__ == "__main__":

@@ -39,6 +39,8 @@ from asl_workbench.transport import (
 )
 from asl_workbench.uplink import Uplink, UplinkRefusal
 
+ASL_TEST_PORTABLE = True
+
 NOW = 1_700_000_000.0
 CONNECTOR = "mac-studio"
 TARGET = "pi.example.ts.net"
@@ -110,11 +112,15 @@ class UplinkCase(unittest.TestCase):
         )
         self.addCleanup(self.store.close)
         self.now = NOW
+        # Durations run on their own clock. Tests that are not about a wall
+        # step move both together; the ones that are move only one.
+        self.monotonic = 0.0
         self.uplink = self.build()
 
     def build(self, **kwargs: Any) -> Uplink:
         defaults: dict[str, Any] = {
             "clock": lambda: self.now,
+            "monotonic": lambda: self.monotonic,
             "connector_id": CONNECTOR,
             "target_id": TARGET,
             "read_wait_seconds": 0.0,
@@ -323,13 +329,36 @@ class CarriageTests(UplinkCase):
     def test_silence_drops_the_link_and_what_it_was_holding(self) -> None:
         self.uplink.ingest(heartbeat(), now=NOW)
         self.uplink.hand_down(submission("op-1"), now=NOW)
-        self.now = NOW + 10
+        self.now, self.monotonic = NOW + 10, 10.0
         self.uplink.sweep(self.now)
         self.assertTrue(self.uplink.linked, "ten seconds is a quiet Mac, not no Mac")
-        self.now = NOW + 1_000
+        self.now, self.monotonic = NOW + 1_000, 1_000.0
         self.uplink.sweep(self.now)
         self.assertFalse(self.uplink.linked)
         self.assertEqual(self.uplink.carried, 0)
+
+    def test_a_wall_clock_step_is_not_silence(self) -> None:
+        """A Pi has no RTC: its wall clock jumps when NTP first answers.
+
+        Silence is how long the link has actually been quiet, so a forward
+        step of the wall clock with no time elapsing keeps the link up and
+        keeps what it is holding.
+        """
+        self.uplink.ingest(heartbeat(), now=NOW)
+        self.uplink.hand_down(submission("op-1"), now=NOW)
+        self.now, self.monotonic = NOW + 86_400, 1.0
+        self.uplink.sweep(self.now)
+        self.assertTrue(self.uplink.linked)
+        self.assertEqual(self.uplink.carried, 1)
+        self.assertEqual(self.uplink.last_upload_at, NOW)
+
+    def test_read_ids_stay_distinct_across_a_restart_in_the_same_second(
+        self,
+    ) -> None:
+        first = self.build()._next_read_id()
+        second = self.build()._next_read_id()
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.startswith(f"read-{int(NOW)}."))
 
     def test_a_sweep_before_any_upload_decides_nothing(self) -> None:
         """A service that has never been uploaded to has no link to declare down.
@@ -458,6 +487,28 @@ class ReadTests(UplinkCase):
             "an abandoned read is taken back out of the queue, not left to be sent",
         )
 
+    def test_a_wall_clock_step_back_does_not_stretch_a_read_wait(self) -> None:
+        """The wait budget is a duration, so it ignores the wall clock.
+
+        The wall clock is stepped back an hour on every reading while the
+        monotonic one advances a second at a time: a budget measured on wall
+        time would keep this request thread for as long as the clock jumped.
+        """
+        readings = iter(float(second) for second in range(1_000))
+
+        def wall() -> float:
+            self.now -= 3_600.0
+            return self.now
+
+        self.uplink = self.build(
+            clock=wall,
+            monotonic=lambda: next(readings),
+            read_wait_seconds=3.0,
+        )
+        self.uplink.ingest(heartbeat(), now=NOW)
+        answered = self.fetch()
+        self.assertIn(answered.outcome, ("timeout", "cancelled"))
+
     def test_every_read_asks_under_its_own_correlation_id(self) -> None:
         self.uplink.ingest(heartbeat(), now=NOW)
         first = self.fetch()
@@ -478,7 +529,9 @@ class WaitingReadTests(UplinkCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.uplink = self.build(clock=time.time, read_wait_seconds=10.0)
+        self.uplink = self.build(
+            clock=time.time, monotonic=time.monotonic, read_wait_seconds=10.0
+        )
         self.started = time.time()
         self.uplink.ingest(heartbeat(at=self.started), now=self.started)
 

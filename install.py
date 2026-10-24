@@ -2,10 +2,16 @@
 """Link this checkout's ASL wrappers and skills into a home directory.
 
 The wrappers go to ``~/.local/bin`` and every skill under ``skills/`` goes to
-each harness skill directory, all as absolute symlinks into this checkout. A
-skill is a directory with a ``SKILL.md``; the support directories named in
-``SUPPORT_DIRS`` carry none and are linked the same way, so a skill's relative
-read of ``../references/<file>`` resolves in the installed layout too.
+each discovered harness skill directory, all as absolute symlinks into this
+checkout. A skill is a directory with a ``SKILL.md``; the support directories
+named in ``SUPPORT_DIRS`` carry none and are linked the same way, so a skill's
+relative read of ``../references/<file>`` resolves in the installed layout too.
+
+Harness roots are discovered, never invented: ``~/.claude``, ``~/.codex`` and
+``~/.copilot`` are managed only when the directory already exists, and further
+Claude profiles join through ``$CLAUDE_CONFIG_DIR`` or the
+``os.pathsep``-separated ``$ASL_CLAUDE_CONFIG_DIRS``
+(``agent_session_loop.install_verify_common.discover_harness_roots``).
 
 Every link is replaced with ``os.replace`` on a temporary sibling, so a running
 supervisor, launchd job or cockpit that execs ``asl`` mid-install sees the old
@@ -14,7 +20,8 @@ take over from another (or from a stow package) without stopping anything.
 
 An existing symlink is retargeted; an existing real file or directory is never
 overwritten, because it is content somebody put there and a link would shadow
-it. Links into this checkout whose source has gone are pruned.
+it. Links into this checkout whose source has gone are pruned, and only inside
+the harness roots this install manages.
 """
 
 from __future__ import annotations
@@ -22,20 +29,21 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from agent_session_loop.install_verify_common import (  # noqa: E402 - needs REPO_ROOT
+    HarnessRoot,
+    discover_harness_roots,
+)
 
 WRAPPERS = ("agent-session-loop", "asl")
 
 WRAPPER_DIR = ".local/bin"
-
-SKILL_INSTALL_DIRS = (
-    ".claude/skills",
-    ".claude-personal/skills",
-    ".codex/skills",
-    ".copilot/skills",
-)
 
 SUPPORT_DIRS = ("references",)
 
@@ -102,7 +110,12 @@ def install(
     *,
     skills_only: bool = False,
     dry_run: bool = False,
+    roots: Iterable[HarnessRoot] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> list[str]:
+    """Link the wrappers and skills; ``roots`` defaults to the discovered set."""
+    if roots is None:
+        roots = discover_harness_roots(home, env).found
     changes: list[str] = []
     if not skills_only:
         for name in WRAPPERS:
@@ -111,8 +124,8 @@ def install(
             if change:
                 changes.append(change)
     sources = skill_sources(repo_root)
-    for install_dir in SKILL_INSTALL_DIRS:
-        install_root = home / install_dir
+    for root in roots:
+        install_root = home / root.skills_dir
         changes.extend(prune(install_root, repo_root, dry_run=dry_run))
         for source in sources:
             change = link(source, install_root / source.name, dry_run=dry_run)
@@ -140,8 +153,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Report what would change without touching anything",
     )
     args = parser.parse_args(argv)
+    discovery = discover_harness_roots(args.home)
+    print(discovery.note())
+    if not discovery.found:
+        print(
+            "install: no harness root exists; skills are linked only into "
+            "existing harness directories",
+            file=sys.stderr,
+        )
     try:
-        changes = install(args.home, skills_only=args.skills_only, dry_run=args.dry_run)
+        changes = install(
+            args.home,
+            skills_only=args.skills_only,
+            dry_run=args.dry_run,
+            roots=discovery.found,
+        )
     except InstallError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

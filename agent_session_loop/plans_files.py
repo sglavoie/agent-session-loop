@@ -73,13 +73,6 @@ def _is_file(path: Path) -> bool:
         _raise_read_error(path, error)
 
 
-def _write_text(path: Path, text: str) -> None:
-    try:
-        path.write_text(text, encoding="utf-8")
-    except OSError as error:
-        _raise_read_error(path, error)
-
-
 def _atomic_write_text(path: Path, text: str) -> None:
     """Write `text` to `path` via temp-file + `os.replace` so the destination is never
     half-written."""

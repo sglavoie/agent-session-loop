@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F401
 """How a run ends: the terminal verdict, the pause, and the honored stop.
 
 Every run stops exactly once, and there are only three ways it can: it reaches

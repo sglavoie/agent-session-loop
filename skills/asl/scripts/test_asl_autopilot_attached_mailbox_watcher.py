@@ -111,7 +111,7 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
 
         attach = self._attach_status()
         status = _StatusScript([attach] * 7 + [_status_payload(0)])
-        beats = []
+        beats: list[str] = []
         result = autopilot.supervise_run(
             {
                 "plan_dir": "/tmp/plan",

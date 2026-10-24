@@ -7,6 +7,7 @@ import json
 import os
 import select
 import shutil
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -174,12 +175,45 @@ def read_status(*, executable: str | None = None, timeout: float = 5.0) -> Spark
         return SparkStatus("unknown", "app-server-unavailable")
     finally:
         if process is not None:
-            if process.poll() is None:
-                with contextlib.suppress(ProcessLookupError):
-                    process.terminate()
-            try:
-                process.wait(timeout=0.2)
-            except subprocess.TimeoutExpired:
-                with contextlib.suppress(ProcessLookupError):
-                    process.kill()
-                process.wait()
+            _stop_probe(process)
+
+
+def _signal_probe_group(process: subprocess.Popen[bytes], signum: int) -> None:
+    """Signal the probe's whole session, not just the app-server it started.
+
+    The probe runs in its own session (``start_new_session=True``), so its
+    pid is its process-group id, and whatever the app-server spawned is in that
+    group. Called only while the child is still unreaped, which is what keeps
+    the group id from naming anyone else's processes.
+    """
+    try:
+        os.killpg(process.pid, signum)
+    except OSError:
+        # The group is already empty, or the child left it for one of its
+        # own; the direct child is still reachable either way.
+        with contextlib.suppress(OSError):
+            process.send_signal(signum)
+
+
+def _stop_probe(process: subprocess.Popen[bytes]) -> None:
+    """Close the probe's pipes and end its process group, then reap it.
+
+    ``process.poll()`` is deliberately not consulted first: it would reap an
+    exited child, freeing its pid -- and so its group id -- before the group
+    is signalled, and the app-server's own children outlive it in that group.
+    """
+    if process.stdin is not None:
+        # EOF first: an app-server that reads it can exit on its own.
+        with contextlib.suppress(OSError):
+            process.stdin.close()
+    try:
+        _signal_probe_group(process, signal.SIGTERM)
+        try:
+            process.wait(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            _signal_probe_group(process, signal.SIGKILL)
+            process.wait()
+    finally:
+        if process.stdout is not None:
+            with contextlib.suppress(OSError):
+                process.stdout.close()

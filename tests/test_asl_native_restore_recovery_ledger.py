@@ -17,6 +17,8 @@ from agent_session_loop import (
 )
 from tests.support_asl_native_restore_recovery import THREAD_ID
 
+ASL_TEST_LANE = "integration"
+
 
 class RefusedRestoreDispositionTests(unittest.TestCase):
     """Where a refused restore lands among the turn's terminating branches."""

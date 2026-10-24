@@ -15,6 +15,8 @@ from asl_workbench import operations
 
 from .support_workbench_operations import REPO_ROOT, JournalFixture
 
+ASL_TEST_LANE = "integration"
+
 _CHILD_ADMIT = """
 import json, sys, time
 sys.path.insert(0, sys.argv[1])

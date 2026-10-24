@@ -13,6 +13,8 @@ from agent_session_loop import (
 from tests.asl_overseer_cli_fleet import _Fleet
 from tests.asl_overseer_cli_support import WATCHER
 
+ASL_TEST_PORTABLE = True
+
 
 class ProjectScopeTests(unittest.TestCase):
     """Which project a decision is about, when a plan sits under a workspace.

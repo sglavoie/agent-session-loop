@@ -33,6 +33,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class QuestionBoundsFlowTests(rfs.ReplyResumeFlowCase):
     """Oversized last messages and mailbox capacity degradation."""

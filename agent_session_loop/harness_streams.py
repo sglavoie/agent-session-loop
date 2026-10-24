@@ -122,13 +122,13 @@ def start_turn_streams(
                         callback_started = time.monotonic()
                         try:
                             stream_callback(stream_name, processed_chunk)
-                        except Exception as error:
+                        except Exception as error:  # noqa: BLE001
                             reader_errors.append(error)
                         finally:
                             stream_io["callback_seconds"] = float(
                                 stream_io["callback_seconds"]
                             ) + (time.monotonic() - callback_started)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001
             reader_errors.append(error)
         finally:
             pipe.close()

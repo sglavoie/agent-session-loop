@@ -435,14 +435,17 @@ with control_signal.open_wakeup_endpoint(sys.argv[2], event) as path:
             before, {number: signal.getsignal(number) for number in watched}
         )
 
-    # Runs the production `asl run` entry point with two hooks, each widening a
-    # window a producer has to land a wakeup in: the lock publication is
+    # Runs the production `asl run` entry point with two hooks, each holding
+    # open a window a producer has to land a wakeup in: the lock publication is
     # stretched, so a command can arrive between "a producer can find this
     # endpoint" and "the run loop is reading it", and the terminal payload
     # emission can be held open, which is the far side — the lock is released
-    # and the endpoint unlinked. Every signal disposition is captured before
-    # `cli.main` and compared after, so a run that installed a handler and left
-    # it behind reports itself as exit 97.
+    # and the endpoint unlinked. Each window is held until the parent releases
+    # it (see `release`) rather than for a fixed sleep, so the parent's work
+    # provably lands inside it however loaded the machine is, and nobody waits
+    # out a margin sized for the worst case. Every signal disposition is
+    # captured before `cli.main` and compared after, so a run that installed a
+    # handler and left it behind reports itself as exit 97.
     RUN_CHILD_SCRIPT = """
 import pathlib
 import signal
@@ -456,42 +459,52 @@ WATCHED = (signal.SIGUSR1, signal.SIGUSR2, signal.SIGINT, signal.SIGTERM)
 before = {number: signal.getsignal(number) for number in WATCHED}
 
 locked = pathlib.Path(sys.argv[2])
-window = float(sys.argv[3])
-emitting = pathlib.Path(sys.argv[4])
-emit_delay = float(sys.argv[5])
+emitting = pathlib.Path(sys.argv[3])
+hold_emit = sys.argv[4] == "1"
 real_acquire = state_locks.acquire_lock
 real_emit = run_outcome._emit_run_payload
 
 
+def hold_open(marker):
+    # Announce the window, then keep it open until the parent releases it.
+    marker.write_text("open", encoding="utf-8")
+    released = marker.with_name(marker.name + ".release")
+    # The cap only bounds a parent that died without releasing; the test's
+    # cleanup kills this process long before it is reached.
+    deadline = time.monotonic() + 120.0
+    while not released.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
 def widened_acquire(*args, **kwargs):
     info = real_acquire(*args, **kwargs)
-    locked.write_text("locked", encoding="utf-8")
-    time.sleep(window)
+    hold_open(locked)
     return info
 
 
 def delayed_emit(*args, **kwargs):
-    emitting.write_text("emitting", encoding="utf-8")
-    time.sleep(emit_delay)
+    hold_open(emitting)
     return real_emit(*args, **kwargs)
 
 
 state_locks.acquire_lock = widened_acquire
-if emit_delay:
+if hold_emit:
     run_outcome._emit_run_payload = delayed_emit
-code = cli.main(sys.argv[6:])
+code = cli.main(sys.argv[5:])
 if {number: signal.getsignal(number) for number in WATCHED} != before:
     sys.exit(97)
 sys.exit(code)
 """
-    # Wide enough that the parent's marker poll, queue append, and wakeup all
-    # land inside it even on a loaded machine.
-    LOCK_WINDOW_SECONDS = 5.0
 
     def start_run_child(
-        self, *, emit_delay: float = 0.0
+        self, *, hold_emit: bool = False
     ) -> tuple[subprocess.Popen[str], Path, Path]:
-        """Spawn a real `asl run` whose lock publication is held open."""
+        """Spawn a real `asl run` whose lock publication is held open.
+
+        The run stops right after publishing its lock and waits there until
+        the test calls ``release(locked)``; with ``hold_emit`` it stops again
+        just before emitting its terminal payload, until ``release(emitting)``.
+        """
         # Two pending sessions, so honoring the queued stop is visible as a
         # session the run declined to start rather than as the plan running out.
         write_plan(self.plan_dir, ("pending", "pending"))
@@ -523,9 +536,8 @@ sys.exit(code)
                 self.RUN_CHILD_SCRIPT,
                 str(REPO_ROOT),
                 str(locked),
-                str(self.LOCK_WINDOW_SECONDS),
                 str(emitting),
-                str(emit_delay),
+                "1" if hold_emit else "0",
                 "run",
                 str(self.plan_dir),
                 "--cwd",
@@ -547,6 +559,13 @@ sys.exit(code)
         self.awaitMarker(child, locked, "the run never published its lock")
         return child, locked, emitting
 
+    @staticmethod
+    def release(marker: Path) -> None:
+        """Close the window the child announced with ``marker``."""
+        marker.with_name(marker.name + ".release").write_text(
+            "release", encoding="utf-8"
+        )
+
     def awaitMarker(
         self, child: subprocess.Popen[str], marker: Path, message: str
     ) -> None:
@@ -557,14 +576,17 @@ sys.exit(code)
         self.assertTrue(marker.exists(), message)
 
     def test_control_at_lock_publication_never_kills_the_run(self) -> None:
-        child, _locked, _emitting = self.start_run_child()
+        child, locked, _emitting = self.start_run_child()
 
         command = control_queue.append_command(
             self.plan_dir,
             control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
             state_dir=self.state_dir,
         )
+        # Sent while the run still holds the lock and has not reached its loop.
         self.assertEqual(LIVE_WAKEUP, self.notify())
+        self.assertIsNone(child.poll(), "the run left its lock window early")
+        self.release(locked)
 
         stdout, stderr = child.communicate(timeout=180)
         # A negative return code is death by signal, which is what this
@@ -588,10 +610,6 @@ sys.exit(code)
         ]
         self.assertEqual([command.id], [r["command_id"] for r in receipts])
 
-    # Long enough that the parent's lock read, marker poll and send all land
-    # before the run finishes reporting, even on a loaded machine.
-    EMIT_DELAY_SECONDS = 10.0
-
     def test_a_wakeup_resolved_before_release_lands_on_nothing(self) -> None:
         """A wakeup aimed while the lock existed and sent after it is gone.
 
@@ -603,9 +621,7 @@ sys.exit(code)
         run reaches its terminal payload without anything having to absorb a
         late delivery.
         """
-        child, _locked, emitting = self.start_run_child(
-            emit_delay=self.EMIT_DELAY_SECONDS
-        )
+        child, locked, emitting = self.start_run_child(hold_emit=True)
         lock_path = (
             state.plan_state_dir(self.plan_dir, self.state_dir) / state.LOCK_FILE_NAME
         )
@@ -618,6 +634,7 @@ sys.exit(code)
         endpoint = lock.wakeup_endpoint
         self.assertIsNotNone(endpoint)
         assert endpoint is not None
+        self.release(locked)
 
         self.awaitMarker(child, emitting, "the run never reached its terminal payload")
         self.assertFalse(
@@ -629,6 +646,7 @@ sys.exit(code)
             control_signal.NotifyResult(False, "endpoint-closed"),
             control_signal._deliver_wakeup(Path(endpoint)),
         )
+        self.release(emitting)
 
         stdout, stderr = child.communicate(timeout=180)
         self.assertEqual(0, child.returncode, stderr)

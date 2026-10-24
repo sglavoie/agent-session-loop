@@ -18,6 +18,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchQuestionsAPITests(unittest.TestCase):
     """Cover ``GET /api/questions`` paused-run resolver context."""

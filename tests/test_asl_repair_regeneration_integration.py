@@ -26,6 +26,8 @@ from tests.support import (
 )
 from tests.support_asl_repair_dispatch import GeneratedRepairDispatchFixture
 
+ASL_TEST_LANE = "integration"
+
 
 class RepairScopeRegenerationIntegrationTests(GeneratedRepairDispatchFixture):
     """Regeneration lands before preflight, the packet, the prompt and the guard.

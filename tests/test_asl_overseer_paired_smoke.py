@@ -59,6 +59,8 @@ from tests import support
 from tests.support_asl_overseer_assertions import _WorldCase
 from tests.support_asl_overseer_e2e import AUTHORIZED
 
+ASL_TEST_LANE = "integration"
+
 #: Set to any non-empty value other than a falsehood to make a missing installed
 #: pair fail this module rather than skip it. Mirrors ``AMX_ASL_INTEGRATION`` in
 #: the source gate and the paired installed gate in the AgentMux justfile.

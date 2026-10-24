@@ -1,4 +1,3 @@
-# ruff: noqa: F401, F403, F405, I001
 """Reconciliation tests: manifest schema, read-only preview, atomic idempotent apply."""
 
 from __future__ import annotations

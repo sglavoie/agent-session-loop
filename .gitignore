@@ -5,7 +5,9 @@ __pycache__/
 
 **/cache/
 
-# Python tooling caches and the local virtualenv
+# Python tooling caches and the local virtualenv; `.cache/` holds the shard
+# durations `tests/run_suite.py` schedules longest-first from
+.cache/
 .venv/
 .mypy_cache/
 .ruff_cache/

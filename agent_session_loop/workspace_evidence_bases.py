@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, F821, F822, I001
+# ruff: noqa: F401
 """What the registered checkouts look like, and whether a turn stayed inside them.
 
 A session declares which repository aliases it may read and which it may write.

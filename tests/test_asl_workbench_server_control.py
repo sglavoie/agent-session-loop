@@ -21,6 +21,8 @@ from tests.support import (
     _write_lock_file,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchServerControlTests(WorkbenchServerTestCase):
     """Control command and unlock endpoints."""

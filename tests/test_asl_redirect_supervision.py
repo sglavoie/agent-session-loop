@@ -45,4 +45,6 @@ from .asl_redirect_supervision_cases_stops import (
     UncertainEvidenceRequiresAUserTests,
 )
 
+ASL_TEST_PORTABLE = True
+
 __all__ = [name for name in globals() if name.endswith("Tests")]

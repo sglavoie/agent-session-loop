@@ -23,6 +23,8 @@ from tests.support import (
     patched_env,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class WorkbenchServeCliTests(unittest.TestCase):
     """Cover the ``asl workbench serve`` argparse wiring."""

@@ -34,6 +34,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class HandoffCorrectionTests(unittest.TestCase):
     """A mechanically malformed handoff gets one bounded correction turn."""

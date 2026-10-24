@@ -20,17 +20,15 @@ Two halves live here.
 * **The refusals.** :func:`_print_doctor_error` is the single printer every
   stage returns through, so a caller parsing ``--json`` sees one failure shape
   regardless of which stage refused, always with the selected model and effort
-  attached. :func:`_not_implemented` is its neighbour rather than its
-  relative: the answer an unimplemented subcommand gives, kept here because it
-  is the other place in the package that reports to a caller who has no run.
+  attached.
 
 Durable records this boundary writes: **none**. Doctor resolves paths that a
 run would later write — ``state.plan_state_dir(...) / "last-message-doctor.txt"``
 most visibly — and writes to none of them; ``tests/test_asl_run_doctor.py``
 pins that as a flat prohibition so a first writer appearing here is a test
-failure rather than a review catch. Both functions resolve ``sys.stderr``
-directly, which only three surfaces in the package may do: like
-``run_outcome``'s text printer they run where no ``run_reporting`` coordinator
+failure rather than a review catch. :func:`_print_doctor_error` resolves
+``sys.stderr`` directly, which few surfaces in the package may do: like
+``run_outcome``'s text printer it runs where no ``run_reporting`` coordinator
 exists to race, because no run is live.
 
 Nothing here imports the runner, and this boundary needs no ``Protocol`` seam:
@@ -98,13 +96,7 @@ from . import (
     verification_models,
     workspaces,
 )
-
-NOT_IMPLEMENTED_EXIT = 2
-
-
-def _not_implemented(command: str) -> int:
-    print(f"agent-session-loop {command}: not implemented yet", file=sys.stderr)
-    return NOT_IMPLEMENTED_EXIT
+from .cli_defaults import program_name
 
 
 def _print_doctor_error(
@@ -130,7 +122,7 @@ def _print_doctor_error(
         payload.update(run_selection._selected_model_effort_payload(args))
         responses.print_json(payload)
     else:
-        print(f"agent-session-loop doctor: {error}", file=sys.stderr)
+        print(f"{program_name()} doctor: {error}", file=sys.stderr)
     return 1
 
 

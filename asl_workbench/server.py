@@ -91,7 +91,7 @@ class ApplicationRequestHandler(http.server.BaseHTTPRequestHandler):
     server_version = SERVER_VERSION
     sys_version = ""
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
+    def log_message(self, format: str, *args: Any) -> None:
         # Silence the default per-request access log. On the Mac the console
         # carries deliberate startup output only; on the Pi a request line is a
         # private URL and a plan name written to a file nobody rotates.

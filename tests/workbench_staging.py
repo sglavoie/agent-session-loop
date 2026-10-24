@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F403
 """Compatibility facade and entry point for the staging rehearsal.
 
 The reusable implementation lives under :mod:`asl_workbench` so a deployed
@@ -10,9 +10,9 @@ from __future__ import annotations
 import sys
 
 from asl_workbench.staging_rehearsal_cli import main
-from asl_workbench.staging_rehearsal_journal import *  # noqa: F401, F403
-from asl_workbench.staging_rehearsal_models import *  # noqa: F401, F403
-from asl_workbench.staging_rehearsal_native import *  # noqa: F401, F403
+from asl_workbench.staging_rehearsal_journal import *
+from asl_workbench.staging_rehearsal_models import *
+from asl_workbench.staging_rehearsal_native import *
 
 if __name__ == "__main__":  # pragma: no cover - the rehearsal's entry point
     sys.exit(main())

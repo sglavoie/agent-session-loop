@@ -19,6 +19,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class IdleBaselineTests(FakeHarnessIntegrationBase):
     def test_live_turn_action_required_payload_includes_harness(self) -> None:

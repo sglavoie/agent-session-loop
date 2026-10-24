@@ -36,6 +36,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class EndToEndReplyResumeTests(rfs.EndToEndReplyResumeCase):
     """Subprocess coverage for reply resumes and races."""

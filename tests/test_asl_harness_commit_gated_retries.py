@@ -22,6 +22,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class GatedCommitRetryTests(FakeHarnessIntegrationBase):
     def test_a_paused_group_refused_every_time_stops_at_a_bounded_gate(self) -> None:

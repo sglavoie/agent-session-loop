@@ -241,8 +241,8 @@ class InstallVerificationTests(unittest.TestCase):
             for path in (REPO_ROOT / "skills").iterdir()
             if path.is_dir() and (path / "SKILL.md").exists()
         ]
-        for install_dir in install_verify_common.SKILL_INSTALL_DIRS:
-            install_root = home / install_dir
+        for root, _harness in install_verify_common.DEFAULT_HARNESS_ROOTS:
+            install_root = home / root / "skills"
             install_root.mkdir(parents=True)
             for skill_dir in skill_dirs:
                 (install_root / skill_dir.name).symlink_to(
@@ -250,9 +250,9 @@ class InstallVerificationTests(unittest.TestCase):
                     target_is_directory=True,
                 )
 
-        for target in startup_context.CONTEXT_TARGETS:
+        roots = install_verify_common.discover_harness_roots(home, {}).found
+        for target in startup_context.context_targets(roots):
             context_file = home / target.installed_path
-            context_file.parent.mkdir(parents=True, exist_ok=True)
             context_file.write_text(
                 startup_context.render_block(target.harness) + "\n",
                 encoding="utf-8",
@@ -268,6 +268,7 @@ class InstallVerificationTests(unittest.TestCase):
                 repo_root=REPO_ROOT,
                 home=home,
                 path_env=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                env={},
             )
 
             self.assertTrue(payload["ok"], payload["failures"])
@@ -292,6 +293,7 @@ class InstallVerificationTests(unittest.TestCase):
                 repo_root=REPO_ROOT,
                 home=home,
                 path_env=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                env={},
             )
 
             self.assertTrue(payload["ok"], payload["failures"])
@@ -319,6 +321,7 @@ class InstallVerificationTests(unittest.TestCase):
                 repo_root=REPO_ROOT,
                 home=home,
                 path_env=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                env={},
             )
 
             self.assertFalse(payload["ok"])
@@ -444,6 +447,62 @@ class HarnessDocsRegressionTests(unittest.TestCase):
             "--review-harness-model claude-opus-4 --dry-run",
             docs,
         )
+
+
+_MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)\s]+)\)")
+_MARKDOWN_FENCE = re.compile(r"^\s*(```|~~~)")
+_MARKDOWN_HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
+
+
+def _markdown_anchors(path: Path) -> set[str]:
+    """Return the GitHub-style heading anchors of a markdown file."""
+    anchors: set[str] = set()
+    seen: dict[str, int] = {}
+    in_fence = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if _MARKDOWN_FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        match = None if in_fence else _MARKDOWN_HEADING.match(line)
+        if match is None:
+            continue
+        slug = re.sub(r"[^\w\- ]", "", match.group(1).strip().lower()).replace(" ", "-")
+        count = seen.get(slug, 0)
+        seen[slug] = count + 1
+        anchors.add(slug if count == 0 else f"{slug}-{count}")
+    return anchors
+
+
+class MarkdownLinkTests(unittest.TestCase):
+    def test_relative_markdown_links_resolve(self) -> None:
+        # Reference chapters get renamed; every relative link (and its heading
+        # anchor) in the repository's markdown must follow them.
+        files = [REPO_ROOT / "README.md", REPO_ROOT / "AGENTS.md"]
+        for root in ("docs", "skills", "agent_session_loop"):
+            files.extend(sorted((REPO_ROOT / root).rglob("*.md")))
+        failures: list[str] = []
+        checked = 0
+        for path in files:
+            text = re.sub(
+                r"```.*?```", "", path.read_text(encoding="utf-8"), flags=re.S
+            )
+            for target in _MARKDOWN_LINK.findall(text):
+                if re.match(r"[a-z]+:", target) or target.startswith("<"):
+                    continue
+                checked += 1
+                file_part, _, anchor = target.partition("#")
+                destination = (path.parent / file_part) if file_part else path
+                relative = path.relative_to(REPO_ROOT)
+                if not destination.exists():
+                    failures.append(f"{relative}: missing {target}")
+                elif (
+                    anchor
+                    and destination.suffix == ".md"
+                    and anchor not in _markdown_anchors(destination)
+                ):
+                    failures.append(f"{relative}: unknown anchor {target}")
+        self.assertGreater(checked, 30)
+        self.assertEqual(failures, [], "\n".join(failures))
 
 
 if __name__ == "__main__":

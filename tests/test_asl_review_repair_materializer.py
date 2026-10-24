@@ -21,6 +21,8 @@ from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class ReviewRepairMaterializerTests(MaterializationFixtures, unittest.TestCase):
     """Stage and merge repair children from review findings."""

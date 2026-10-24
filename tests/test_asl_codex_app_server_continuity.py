@@ -7,6 +7,8 @@ from typing import Any
 
 from tests import support_asl_codex_app_server as fixtures
 
+ASL_TEST_LANE = "integration"
+
 
 class LostSubmissionResponseTests(unittest.TestCase):
     """``turn/start`` left this process and nothing came back.

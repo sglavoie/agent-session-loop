@@ -12,6 +12,8 @@ from agent_session_loop import (
 )
 from tests.support_asl_run_readiness import RunReadinessGateFixture
 
+ASL_TEST_LANE = "integration"
+
 
 class RunReadinessPreflightTests(RunReadinessGateFixture):
     """Runs repair readiness metadata and skip or rerun core preflight by state."""

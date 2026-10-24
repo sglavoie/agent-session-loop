@@ -10,6 +10,7 @@ from . import (
     progress_repair,
     responses,
 )
+from .cli_defaults import program_name
 from .literals import as_optional_literal
 from .plans_errors import PlanError
 from .plans_models import ReadinessMetadata
@@ -132,7 +133,7 @@ def preflight_from_args(args: argparse.Namespace) -> int:
                 )
             )
         else:
-            print(f"agent-session-loop preflight: {message}", file=sys.stderr)
+            print(f"{program_name()} preflight: {message}", file=sys.stderr)
         return 1
 
     try:
@@ -161,7 +162,7 @@ def preflight_from_args(args: argparse.Namespace) -> int:
             )
         else:
             print(
-                f"agent-session-loop preflight: {error}",
+                f"{program_name()} preflight: {error}",
                 file=sys.stderr,
             )
         return 1

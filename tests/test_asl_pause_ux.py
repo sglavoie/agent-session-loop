@@ -19,6 +19,8 @@ from agent_session_loop import (
 )
 from tests import support_asl_pause_ux as fixtures
 
+ASL_TEST_LANE = "integration"
+
 
 class ArtifactSafetyAndPauseUxTests(fixtures.ArtifactSafetyAndPauseUxCase):
     def test_verify_failed_pause_keeps_the_validator_reason(self) -> None:

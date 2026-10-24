@@ -43,6 +43,8 @@ import itertools
 import unittest
 from pathlib import Path
 
+ASL_TEST_PORTABLE = True
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_PATH = REPO_ROOT / "agent_session_loop" / "runner.py"
 

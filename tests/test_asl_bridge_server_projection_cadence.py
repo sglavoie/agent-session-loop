@@ -25,6 +25,8 @@ from .asl_bridge_server_support import (
     _request,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class _HeldBuilder:
     """A corpus walk the test releases one at a time.

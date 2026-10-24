@@ -26,6 +26,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class SuspendGraceFlowTests(rfs.ReplyResumeFlowCase):
     """Suspend grace windows and unsupervised-seconds tracking."""

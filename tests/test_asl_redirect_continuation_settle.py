@@ -40,6 +40,8 @@ from .support import (
 )
 from .support_asl_turn_dispositions import FakeRunContext
 
+ASL_TEST_PORTABLE = True
+
 
 class SettleRedirectedTurnTests(JournalTestCase):
     """The branch that turns one correction into the next attempt."""

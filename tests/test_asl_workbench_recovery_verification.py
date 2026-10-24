@@ -16,6 +16,8 @@ from tests.support import (
     _write_state_payload,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class WorkbenchRecoveryTests(fixtures.WorkbenchRecoveryCase):
     def test_verify_failed_recovery_uses_runtime_hint_and_failed_turn_artifacts(

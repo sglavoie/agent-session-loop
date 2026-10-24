@@ -290,10 +290,10 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
     # that keeps its own unattributed reading, and a violation two pauses
     # attribute to two sessions makes the choice a guess, so it stays unnamed
     # too and is judged as ambiguous below.
-    for fingerprint, aliases in unnamed.items():
+    for fingerprint, unnamed_aliases in unnamed.items():
         candidates = paused_fingerprints.get(fingerprint, set())
         attributed = next(iter(candidates)) if len(candidates) == 1 else None
-        offenders.setdefault(attributed, set()).update(aliases)
+        offenders.setdefault(attributed, set()).update(unnamed_aliases)
         if fingerprint in unnamed_reverted:
             reverted.add(attributed)
 
@@ -311,9 +311,11 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
 
     pause_unknown = context.events_shed and not paused_any
     caught: list[str] = []
-    for session, aliases in sorted(offenders.items(), key=lambda item: item[0] or ""):
+    for session, offending_aliases in sorted(
+        offenders.items(), key=lambda item: item[0] or ""
+    ):
         who = f"session {session}" if session is not None else "an unnamed session"
-        claim = f"{who} wrote outside its declared scope ({_names(aliases)})"
+        claim = f"{who} wrote outside its declared scope ({_names(offending_aliases)})"
         # A commit naming the offending session cannot predate the guard, which
         # runs after the turn it judges, so its presence says the run carried
         # the out-of-scope write forward instead of holding it. The commit must
@@ -334,7 +336,7 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
         else:
             uncommitted = not any(
                 committed_session == session
-                and (committed_alias is None or committed_alias in aliases)
+                and (committed_alias is None or committed_alias in offending_aliases)
                 for committed_session, committed_alias in attributions
             )
             commit_note = (

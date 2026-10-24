@@ -56,6 +56,8 @@ from agent_session_loop import (
 from tests import support_asl_overseer_decisions as fixtures
 from tests.support_asl_overseer_decisions import PLAN_SCOPE, PROJECT
 
+ASL_TEST_PORTABLE = True
+
 
 class TranscriptProvenanceTests(unittest.TestCase):
     """A role is not an author, and this is where the two come apart."""

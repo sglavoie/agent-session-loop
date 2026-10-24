@@ -21,6 +21,8 @@ from tests.support import (
     write_plan,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class WorkbenchSummaryTests(fixtures.WorkbenchSummaryCase):
     def test_running_classification_with_active_turn(self) -> None:

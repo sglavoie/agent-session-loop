@@ -6,6 +6,8 @@ import contextlib
 import fcntl
 import os
 import shlex
+import sys
+import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
@@ -325,10 +327,42 @@ def mark_run_abandoned(
                     ),
                 )
             return True
-    except Exception:
+    except (OSError, ValueError, TypeError, StateError) as error:
         # Death has already cost the caller its run; refusing to record that
         # is strictly better than raising into a lock acquire or a status read.
+        # These are the failures the claim and the writes can actually raise:
+        # an unwritable state directory, a payload that will not encode, a
+        # state helper refusing. Say so, so a run that stays "running" forever
+        # has a trail.
+        _report_unrecorded_abandonment(plan_state, trigger, error)
         return False
+    except Exception as error:  # noqa: BLE001
+        # Anything else is a bug in this path. The contract above still holds
+        # -- a status read or a lock acquire must not die of it -- but it is
+        # reported with its traceback rather than folded into the expected
+        # case, so a defect cannot hide behind the fail-open default.
+        _report_unrecorded_abandonment(plan_state, trigger, error, unexpected=True)
+        return False
+
+
+def _report_unrecorded_abandonment(
+    plan_state: str | Path,
+    trigger: str,
+    error: BaseException,
+    *,
+    unexpected: bool = False,
+) -> None:
+    """Name, on stderr, a dead run whose terminal record could not be written."""
+    kind = "unexpected error" if unexpected else "error"
+    with suppress(Exception):
+        print(
+            f"agent-session-loop: could not record the abandoned run in "
+            f"{plan_state} (trigger {trigger}); it still reads as running "
+            f"({kind}: {type(error).__name__}: {error})",
+            file=sys.stderr,
+        )
+        if unexpected:
+            traceback.print_exception(error, file=sys.stderr)
 
 
 def _live_run_id(

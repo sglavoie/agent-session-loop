@@ -20,6 +20,7 @@ from agent_session_loop import (
     session_verification,
 )
 from tests.support import assert_no_runner_import, called_names, read_jsonl
+from tests.support_base import call_receivers as _call_receivers
 
 #: The symbols this module took from the runner. The program's no-alias rule
 #: says the runner keeps none of them behind, so a re-export added later to
@@ -36,18 +37,6 @@ MOVED_SYMBOLS = (
     "_record_review_cycle",
     "_advance_review_cycle",
 )
-
-
-def _call_receivers(source: str, *attributes: str) -> set[str]:
-    """Every receiver of a call to one of ``attributes``, as source text."""
-    receivers: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            continue
-        if node.func.attr not in attributes:
-            continue
-        receivers.add(ast.unparse(node.func.value))
-    return receivers
 
 
 def _resume(**overrides: Any) -> review_continuation.ReviewResume:

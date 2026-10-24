@@ -32,6 +32,7 @@ from agent_session_loop import (
     write_guards_protected,
     write_guards_repair,
 )
+from tests.asl_workspace_evidence_support import _workspace
 from tests.support import assert_no_runner_import, called_names, write_plan
 
 #: The symbols this module took from the runner. The program's no-alias rule
@@ -118,26 +119,6 @@ DURABLE_WRITES: dict[str, frozenset[str]] = {
     "_enforce_legacy_implementation_write_guard": frozenset({"write_json_file"}),
     "_enforce_protected_path_guard": frozenset({"write_json_file"}),
 }
-
-
-def _workspace(*aliases: str) -> workspaces.ResolvedWorkspace:
-    """A resolved workspace built from names, with no checkout behind it."""
-    root = Path("/tmp/workspace")
-    return workspaces.ResolvedWorkspace(
-        root=root,
-        repositories=tuple(
-            workspaces.ResolvedRepository(
-                repository=workspaces.Repository(
-                    alias,
-                    alias.lower(),
-                    f"git@github.com:example/{alias.lower()}.git",
-                ),
-                root=root / alias.lower(),
-                origin=f"git@github.com:example/{alias.lower()}.git",
-            )
-            for alias in aliases
-        ),
-    )
 
 
 def _resume(

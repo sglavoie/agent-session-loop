@@ -52,31 +52,21 @@ from agent_session_loop import (
 )
 from tests import support_asl_run_loop_view as run_loop_view
 from tests.support import assert_no_runner_import
+from tests.support_base import RaisingStream as _RaisingStream
+
+ASL_TEST_PORTABLE = True
 
 #: The functions in the runner and its run loop that write ``sys.stderr``
 #: directly: none, since session 28. All three writers of this kind have left
 #: for boundaries that run where
 #: no coordinator exists -- ``_print_text_outcome`` to ``run_outcome`` in
-#: session 26, and ``_not_implemented`` and ``_print_doctor_error`` to
-#: ``run_doctor`` in session 28 -- and each is pinned at its new owner by
+#: session 26, and ``_print_doctor_error`` (with the since-removed
+#: ``_not_implemented``) to ``run_doctor`` in session 28 -- and each is pinned
+#: at its new owner by
 #: ``tests/test_asl_run_outcome.py`` and ``tests/test_asl_run_doctor.py`` under
 #: the same rule. Anything appearing here now is a second writer racing the
 #: coordinator for the terminal while a run is live.
 RUNNER_STDERR_WRITERS: frozenset[str] = frozenset()
-
-
-class _RaisingStream(io.StringIO):
-    """A sink that behaves like a pipe whose reader has gone away."""
-
-    def __init__(self, error: BaseException) -> None:
-        super().__init__()
-        self._error = error
-
-    def write(self, text: str) -> int:
-        raise self._error
-
-    def flush(self) -> None:
-        raise self._error
 
 
 def _stderr_owners(source: str) -> set[str]:

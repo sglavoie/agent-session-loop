@@ -24,6 +24,8 @@ from tests.asl_retention_support import (
     _stamp,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class CorpusRetentionTests(RetentionTestBase):
     """Aggregation across every plan state directory under a state root."""

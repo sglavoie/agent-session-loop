@@ -208,7 +208,7 @@ class SessionState:
                 f"no projection is available yet: {error}",
                 retryable=True,
             ) from error
-        except Exception as error:  # noqa: BLE001 - one plan must not end the loop
+        except Exception as error:
             raise BridgeError(
                 ERROR_INTERNAL,
                 f"snapshot projection failed: {error}",

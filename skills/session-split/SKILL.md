@@ -1,7 +1,7 @@
 ---
 name: session-split
 description: Split a multi-session plan into per-session files for serial execution by `session-run`. Accepts a plan file path or captured inline plan text. Also proposes session boundaries if the plan lacks session structure.
-allowed-tools: Bash, Read, Write
+allowed-tools: Bash, Read, Write, Glob, Grep
 ---
 
 # Session Split

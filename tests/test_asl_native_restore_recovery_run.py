@@ -25,6 +25,8 @@ from tests.asl_redirect_continuation_support import (
 )
 from tests.support_asl_native_restore_recovery import RUN_CONVERSATION_ID
 
+ASL_TEST_LANE = "integration"
+
 
 class RefusedRestoreRunTests(fixtures._NativeRestoreRun):
     """The whole loop: a conversation opened, corrected, and then refused.

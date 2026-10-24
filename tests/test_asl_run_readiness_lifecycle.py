@@ -15,6 +15,8 @@ from agent_session_loop import (
 )
 from tests.support_asl_run_readiness import RunReadinessGateFixture
 
+ASL_TEST_LANE = "integration"
+
 
 class RunReadinessLifecycleTests(RunReadinessGateFixture):
     """Readiness follows the run lifecycle; packet tampering pauses on the guard."""

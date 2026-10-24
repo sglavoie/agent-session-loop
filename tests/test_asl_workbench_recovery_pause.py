@@ -20,6 +20,8 @@ from tests.support import (
     _write_state_payload,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class WorkbenchRecoveryTests(fixtures.WorkbenchRecoveryCase):
     def test_conversation_recovery_reports_the_decision_and_its_commands(self) -> None:

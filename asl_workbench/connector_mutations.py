@@ -149,7 +149,8 @@ class MutationLane(ConnectorState):
                     status=OPERATION_EXPIRED, detail_code=error.detail_code
                 )
                 fault = error.message[:MAX_LABEL_CHARS]
-            except Exception as error:  # a performer is arbitrary provider code
+            # A performer is arbitrary provider code.
+            except Exception as error:  # noqa: BLE001
                 # A failed first attempt may have acted before it raised, and
                 # therefore reports unconfirmed. A failed passive reconciliation
                 # changes no operation; retain it and try the evidence again.

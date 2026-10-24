@@ -3,7 +3,8 @@
 # Shell Script Linter
 #
 # Runs ShellCheck on all shell scripts in the repository.
-# Finds scripts by .sh extension and shebang detection for extensionless files.
+# Finds Git-visible scripts by .sh extension, or by shebang for extensionless
+# executables.
 #
 # Usage:
 #   ./lint.sh
@@ -30,33 +31,24 @@ if ! command -v shellcheck &> /dev/null; then
     exit 1
 fi
 
-# Collect shell scripts
+# Collect shell scripts: tracked and untracked-but-not-ignored files, so
+# ignored runtime trees (node_modules, caches) are never walked.
 scripts=()
-
-is_git_ignored() {
-    local path="$1"
-    local relative="${path#"$SCRIPT_DIR"/}"
-
-    git -C "$SCRIPT_DIR" check-ignore -q -- "$relative" 2>/dev/null
-}
-
-# 1. Find all .sh files (excluding .git/ and Git-ignored runtime files)
-while IFS= read -r -d '' f; do
-    is_git_ignored "$f" && continue
-    scripts+=("$f")
-done < <(find "$SCRIPT_DIR" -path "$SCRIPT_DIR/.git" -prune -o -name '*.sh' -type f -print0)
-
-# 2. Find extensionless files with a bash/sh shebang (same exclusions)
-while IFS= read -r -d '' f; do
-    is_git_ignored "$f" && continue
-    # Skip files that already have an extension
-    [[ "$(basename "$f")" == *.* ]] && continue
-    # Check for a shell shebang: `#!/usr/bin/env bash` or any absolute path to
-    # sh/bash, including Homebrew's (`#!/opt/homebrew/bin/bash`)
+while IFS= read -r -d '' rel; do
+    f="$SCRIPT_DIR/$rel"
+    [[ -f "$f" ]] || continue
+    if [[ "$rel" == *.sh ]]; then
+        scripts+=("$f")
+        continue
+    fi
+    # Extensionless executables with a shell shebang: `#!/usr/bin/env bash` or
+    # any absolute path to sh/bash, including Homebrew's.
+    [[ "$(basename "$rel")" == *.* ]] && continue
+    [[ -x "$f" ]] || continue
     if head -1 "$f" 2>/dev/null | grep -qE '^#!\s*(/usr/bin/env\s+|/\S*/)(ba)?sh(\s|$)'; then
         scripts+=("$f")
     fi
-done < <(find "$SCRIPT_DIR" -path "$SCRIPT_DIR/.git" -prune -o -type f -perm -100 -print0)
+done < <(git -C "$SCRIPT_DIR" ls-files -z --cached --others --exclude-standard)
 
 if [[ ${#scripts[@]} -eq 0 ]]; then
     fail "No shell scripts found"

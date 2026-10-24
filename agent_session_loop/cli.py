@@ -9,10 +9,9 @@ import argparse
 import importlib
 import sys
 from collections.abc import Callable, Sequence
-from pathlib import Path
 
 from . import cli_trace
-from .cli_defaults import _INTERRUPTED_EXIT
+from .cli_defaults import _INTERRUPTED_EXIT, program_name
 from .cli_parser_assurance import _add_assurance_commands
 from .cli_parser_control import _add_control_commands
 from .cli_parser_integrations import (
@@ -90,7 +89,7 @@ def resolve_handler(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser(prog=Path(sys.argv[0]).name)
+    parser = build_parser(prog=program_name())
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     try:
         args = parser.parse_args(raw_argv)

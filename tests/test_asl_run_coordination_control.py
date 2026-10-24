@@ -155,7 +155,7 @@ class ControlDrainTests(fixtures.ControlDrainTestCase):
             try:
                 release.wait(timeout=5.0)
                 self.drain()
-            except BaseException as error:  # noqa: BLE001 - reported, not swallowed
+            except BaseException as error:
                 failures.append(error)
 
         threads = [threading.Thread(target=drain_once) for _ in range(2)]

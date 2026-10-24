@@ -33,6 +33,8 @@ from tests.support import (
     write_multi_repo_plan,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class SettledPauseCommitGateTests(unittest.TestCase):
     """The startup commit gate on the run a settled pause hands over to.

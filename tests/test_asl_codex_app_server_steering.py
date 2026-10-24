@@ -11,6 +11,8 @@ from agent_session_loop import (
 )
 from tests import support_asl_codex_app_server as fixtures
 
+ASL_TEST_LANE = "integration"
+
 
 class SteeringTests(unittest.TestCase):
     """Same-turn delivery, and every way it is allowed to fail."""

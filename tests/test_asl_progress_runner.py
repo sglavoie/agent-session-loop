@@ -1,10 +1,13 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F403, F405, I001
 """Runner progress-entry helper tests."""
 
 from __future__ import annotations
 
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403, F405
 from tests.asl_progress_test_support import *
+
+
+ASL_TEST_PORTABLE = True
 
 
 class RunnerProgressEntryHelperTests(unittest.TestCase):

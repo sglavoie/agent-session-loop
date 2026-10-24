@@ -2,9 +2,15 @@
 # ruff: noqa: I001
 """Discovery facade for focused test_workbench_cutover test groups."""
 
-from ._test_workbench_cutover_part_1 import *  # noqa: F401, F403
-from ._test_workbench_cutover_part_2 import *  # noqa: F401, F403
-from ._test_workbench_cutover_part_3 import *  # noqa: F401, F403
+from ._test_workbench_cutover_part_1 import *  # noqa: F403
+from ._test_workbench_cutover_part_2 import *  # noqa: F403
+from ._test_workbench_cutover_part_3 import *  # noqa: F403
+
+
+# Integration: it writes real prefixes and takes real SQLite backups of
+# them, because a backup proved against a fake database is a claim about
+# the fake.
+ASL_TEST_LANE = "integration"
 
 
 if __name__ == "__main__":

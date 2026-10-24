@@ -36,4 +36,6 @@ from .asl_run_inputs_cases_plan import (
     RunnerOwnedRootsTests,
 )
 
+ASL_TEST_PORTABLE = True
+
 __all__ = [name for name in globals() if name.endswith("Tests")]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from .assurance_models_inbox import (
     Closeout,
@@ -69,27 +69,27 @@ LedgerKind = Literal[
     "issue_kept_distinct",
 ]
 
-KIND_AUDIT_PENDING = "audit_pending"
+KIND_AUDIT_PENDING: Final = "audit_pending"
 
-KIND_AUDIT_COMPLETED = "audit_completed"
+KIND_AUDIT_COMPLETED: Final = "audit_completed"
 
-KIND_AUDIT_SKIPPED = "audit_skipped"
+KIND_AUDIT_SKIPPED: Final = "audit_skipped"
 
-KIND_AUDIT_UNAVAILABLE = "audit_unavailable"
+KIND_AUDIT_UNAVAILABLE: Final = "audit_unavailable"
 
-KIND_ISSUE_OBSERVED = "issue_observed"
+KIND_ISSUE_OBSERVED: Final = "issue_observed"
 
-KIND_ISSUE_DISPOSITION = "issue_disposition"
+KIND_ISSUE_DISPOSITION: Final = "issue_disposition"
 
-KIND_ISSUE_MERGED = "issue_merged"
+KIND_ISSUE_MERGED: Final = "issue_merged"
 
-KIND_HUMAN_CLOSEOUT = "human_closeout"
+KIND_HUMAN_CLOSEOUT: Final = "human_closeout"
 
-KIND_IMPROVEMENT_PLAN_DRAFTED = "improvement_plan_drafted"
+KIND_IMPROVEMENT_PLAN_DRAFTED: Final = "improvement_plan_drafted"
 
-KIND_ISSUE_IDENTITY_BOUND = "issue_identity_bound"
+KIND_ISSUE_IDENTITY_BOUND: Final = "issue_identity_bound"
 
-KIND_ISSUE_KEPT_DISTINCT = "issue_kept_distinct"
+KIND_ISSUE_KEPT_DISTINCT: Final = "issue_kept_distinct"
 
 #: Every record kind the ledger stores, in the order they occur in a run's life.
 LEDGER_KINDS: tuple[LedgerKind, ...] = (

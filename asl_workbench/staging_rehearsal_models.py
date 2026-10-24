@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F401
 """The harness the deployed staging rehearsal is driven and recorded through.
 
 Session 22 stages the candidate release on the two machines that already run
@@ -84,7 +84,11 @@ from pathlib import Path
 from typing import Any
 
 from asl_workbench import lifecycle
-from asl_workbench.installation import atomic
+from asl_workbench.installation import (
+    LAUNCHD_LABEL_PREFIX_VARIABLE,
+    atomic,
+    site_setting,
+)
 from asl_workbench.integrations import PI_SITE, IntegrationSite
 from asl_workbench.notifications import DEPLOYMENT_STAGING
 
@@ -109,8 +113,9 @@ STAGING_PREFIX_NAMES: Mapping[str, str] = {
     "connector_migration": "asl-workbench-staging-migration",
 }
 
-#: The prefix of every native name this rehearsal installs under.
-STAGING_LABEL_DOMAIN = "com.sglavoie."
+#: The prefix of every native name this rehearsal installs under, from
+#: ``$ASL_LAUNCHD_LABEL_PREFIX`` like the production label.
+STAGING_LABEL_DOMAIN = site_setting(LAUNCHD_LABEL_PREFIX_VARIABLE) + "."
 
 #: The prefixes this rehearsal may not touch, by bare name. Both hosts install
 #: the Companion under the same one.

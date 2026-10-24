@@ -16,6 +16,8 @@ from agent_session_loop import (
     guards,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class CommandRuleParsingTests(unittest.TestCase):
     """A rule is an argv prefix, and everything else is refused by name."""

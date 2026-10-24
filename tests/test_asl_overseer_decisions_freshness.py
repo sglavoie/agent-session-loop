@@ -22,6 +22,8 @@ from tests.support_asl_overseer_decisions import (
     RUN,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class PrecedentTests(unittest.TestCase):
     """The session's fourth fixture: an approval that was about something else."""

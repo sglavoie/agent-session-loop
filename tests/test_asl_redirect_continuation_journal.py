@@ -64,6 +64,8 @@ from .support import (
     wait_until,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class SerializationTests(JournalTestCase):
     """Completion and acceptance contend for one latch, and only one wins."""

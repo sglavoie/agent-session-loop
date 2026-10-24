@@ -30,6 +30,7 @@ from .authoring_split import (
     SingleSessionError,
     split_plan,
 )
+from .cli_defaults import program_name
 from .plans_errors import PlanError
 from .plans_models import ReadinessMetadata
 from .workspaces import (
@@ -84,10 +85,10 @@ def _resolve_skill_prefix(skill_prefix: str) -> str:
                 "--skill-prefix {codex,claude,copilot}"
             )
         return harnesses.skill_prefixes()[detected]
-    prefix = harnesses.skill_prefixes().get(skill_prefix)
-    if prefix is None:
-        raise ValueError(f"unknown skill prefix harness: {skill_prefix}")
-    return prefix
+    for harness, prefix in harnesses.skill_prefixes().items():
+        if harness == skill_prefix:
+            return prefix
+    raise ValueError(f"unknown skill prefix harness: {skill_prefix}")
 
 
 def _emit_split_error(
@@ -100,7 +101,7 @@ def _emit_split_error(
             )
         )
     else:
-        print(f"agent-session-loop split: {error}", file=sys.stderr)
+        print(f"{program_name()} split: {error}", file=sys.stderr)
     return 1
 
 
@@ -182,7 +183,7 @@ def check_from_args(args: Any) -> int:
             )
         else:
             print(
-                f"agent-session-loop split --check: {len(result.findings)} "
+                f"{program_name()} split --check: {len(result.findings)} "
                 f"malformed session heading(s) in {source_path}",
                 file=sys.stderr,
             )

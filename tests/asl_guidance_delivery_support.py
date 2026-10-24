@@ -1,4 +1,3 @@
-# ruff: noqa: F401
 """Live guidance delivery: the endpoint, the harness seam, and the poller.
 
 Everything here runs in-process. The harness tests drive the real

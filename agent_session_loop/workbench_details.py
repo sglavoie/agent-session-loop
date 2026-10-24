@@ -1,4 +1,4 @@
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403
 
 from .workbench_details_artifacts import *
 from .workbench_details_logs import *

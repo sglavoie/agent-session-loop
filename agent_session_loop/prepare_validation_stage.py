@@ -250,12 +250,12 @@ def _run_validation_stage(
 
         if failures:
             first_ordinal = min(failures)
-            error = failures[first_ordinal]
-            if isinstance(error, (PlanError, harnesses.HarnessError)):
-                raise error
+            failure = failures[first_ordinal]
+            if isinstance(failure, (PlanError, harnesses.HarnessError)):
+                raise failure
             raise PlanError(
-                f"validator batch {first_ordinal} failed: {error}"
-            ) from error
+                f"validator batch {first_ordinal} failed: {failure}"
+            ) from failure
 
     # Only now are plan mutations allowed. Reassemble each original packet in
     # batch order so corrections cannot change the files a later worker saw.
@@ -297,14 +297,14 @@ def _run_validation_stage(
     post_ingest_session_hashes = _validation_session_hashes(plan_dir, session_ids)
     refreshed_cache = PrepareValidationCache()
     for session_id in session_ids:
-        session = aggregate.session(session_id)
-        if session is None:
+        stored_session = aggregate.session(session_id)
+        if stored_session is None:
             raise _fail(f"stored aggregate is missing session {session_id}")
         refreshed_identity = dict(identities[session_id])
         refreshed_identity["session_sha256"] = post_ingest_session_hashes[session_id]
         refreshed_cache = refreshed_cache.with_entry(
             _cache_entry_for_validation(
-                _single_session_validation(aggregate, session),
+                _single_session_validation(aggregate, stored_session),
                 identity=refreshed_identity,
             )
         )

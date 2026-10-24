@@ -14,17 +14,16 @@ class InstalledStartupContextTests(unittest.TestCase):
             for path in (REPO_ROOT / "skills").iterdir()
             if path.is_dir() and (path / "SKILL.md").exists()
         ]
-        for install_dir in install_verify_common.SKILL_INSTALL_DIRS:
-            install_root = home / install_dir
+        for root in HARNESS_ROOT_DIRS:
+            install_root = home / root / "skills"
             install_root.mkdir(parents=True)
             for skill_dir in skill_dirs:
                 (install_root / skill_dir.name).symlink_to(
                     skill_dir, target_is_directory=True
                 )
 
-        for target in startup_context.CONTEXT_TARGETS:
+        for target in startup_context.context_targets(fixture_roots(home)):
             path = home / target.installed_path
-            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
                 startup_context.render_block(target.harness) + "\n", encoding="utf-8"
             )
@@ -35,6 +34,7 @@ class InstalledStartupContextTests(unittest.TestCase):
             repo_root=REPO_ROOT,
             home=home,
             path_env=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+            env=HARNESS_ENV,
         )
 
     def test_rendered_home_passes_install_verification(self) -> None:
@@ -49,6 +49,37 @@ class InstalledStartupContextTests(unittest.TestCase):
             self.assertIn("asl-skill", names)
             self.assertIn("asl-reference", names)
             self.assertIn("asl-helper", names)
+
+    def test_verification_covers_only_discovered_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home, fake_bin = self.build_home(temp_dir)
+            for root in (".claude-personal", ".copilot"):
+                shutil.rmtree(home / root)
+
+            payload = self.verify(home, fake_bin)
+
+            self.assertTrue(payload["ok"], payload["failures"])
+            self.assertEqual(
+                [root["path"] for root in payload["harness_roots"]["found"]],
+                [".claude", ".codex"],
+            )
+            details = " ".join(check["detail"] for check in payload["checks"])
+            self.assertNotIn(".claude-personal", details)
+            self.assertNotIn(".copilot", details)
+
+    def test_home_without_any_harness_root_fails_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir) / "home"
+            fake_bin = home / ".local/bin"
+            fake_bin.mkdir(parents=True)
+            (fake_bin / "asl").symlink_to(REPO_ROOT / "bin/.local/bin/asl")
+
+            payload = self.verify(home, fake_bin)
+
+            self.assertFalse(payload["ok"])
+            self.assertIn(
+                "harness-roots", {failure["name"] for failure in payload["failures"]}
+            )
 
     def test_missing_context_file_fails_verification(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

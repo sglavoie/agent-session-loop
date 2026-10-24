@@ -1,4 +1,3 @@
-# ruff: noqa: F401
 """Focused tests for the overseer's attributable-changes checkpoint adapter.
 
 ``commit_message`` already guarantees that a scoped commit carries the index and

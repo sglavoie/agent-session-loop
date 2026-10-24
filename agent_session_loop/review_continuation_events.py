@@ -63,9 +63,7 @@ def _parse_review_events(path: Path) -> tuple[ReviewEventRecord, ...] | None:
     }
     records: list[ReviewEventRecord] = []
     try:
-        event_file = path.open(  # noqa: SIM115 - opened here so OSError returns None; closed by the with below
-            "r", encoding="utf-8"
-        )
+        event_file = path.open("r", encoding="utf-8")
     except OSError:
         return None
     with event_file:

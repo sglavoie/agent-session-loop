@@ -14,6 +14,7 @@ from unittest import mock
 from agent_session_loop import (
     contracts,
     plans_session_ids,
+    verification_checks,
     verification_models,
     verification_run,
     verification_transitions,
@@ -504,6 +505,12 @@ class ParallelVerificationTests(unittest.TestCase):
         with (
             mock.patch.object(
                 verification_run, "as_completed", interrupt_once_trees_are_live
+            ),
+            # The escapees hold the pipes, so every killed check's reader join
+            # runs to its bound; a short one keeps the probe from paying the
+            # production five seconds for a wait it does not assert on.
+            mock.patch.object(
+                verification_checks, "_ABANDONED_READER_JOIN_SECONDS", 0.5
             ),
             self.assertRaises(KeyboardInterrupt),
         ):

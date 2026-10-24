@@ -22,6 +22,9 @@ before it.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -40,6 +43,11 @@ from tests import workbench_staging as staging
 from tests.workbench_staging_support import (
     TemporaryCase,
 )
+
+# Integration: it builds the release's own native definitions and
+# restages them, so it exercises the packaging code rather than a
+# description of it.
+ASL_TEST_LANE = "integration"
 
 
 class StagedContract(unittest.TestCase):
@@ -136,6 +144,15 @@ class Isolation(unittest.TestCase):
 
 class Prefixes(unittest.TestCase):
     """No rehearsal prefix reaches the installation that is already there."""
+
+    def setUp(self) -> None:
+        # Every prefix here is home-relative; judge them against a home this
+        # test owns rather than the developer's.
+        home = Path(tempfile.mkdtemp(prefix="asl-test-home-"))
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        patcher = mock.patch.dict(os.environ, {"HOME": str(home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_the_rehearsal_s_own_prefixes_are_accepted(self) -> None:
         for name in staging.STAGING_PREFIX_NAMES.values():

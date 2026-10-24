@@ -52,6 +52,8 @@ from tests.support_asl_codex_app_server import (
 from .asl_redirect_continuation_support import FEEDBACK, SESSION_ID, WORKER_PID
 from .asl_redirect_run_support import _RedirectedRun
 
+ASL_TEST_LANE = "integration"
+
 #: The conversation the fixture run opens and its successor asks to continue.
 CONVERSATION_ID = "conv-1"
 

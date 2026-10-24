@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from . import responses
+from .cli_defaults import program_name
 from .plans_errors import PlanError
 from .prepare import prepare_plan
 from .prepare_models import (
@@ -156,7 +157,7 @@ def prepare_from_args(args: Any) -> int:
                 )
             )
         else:
-            print(f"agent-session-loop prepare: {error}", file=sys.stderr)
+            print(f"{program_name()} prepare: {error}", file=sys.stderr)
         return 1
 
     try:
@@ -290,7 +291,7 @@ def prepare_from_args(args: Any) -> int:
         )
     else:
         _print_text_prepare(result, plan_arg=plan_arg)
-        print(f"agent-session-loop prepare: {error_message}", file=sys.stderr)
+        print(f"{program_name()} prepare: {error_message}", file=sys.stderr)
     return 1
 
 

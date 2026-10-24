@@ -28,6 +28,8 @@ from tests.support import (
     read_jsonl,
 )
 
+ASL_TEST_LANE = "integration"
+
 
 class CommitModeTests(FakeHarnessIntegrationBase):
     def test_commit_per_session_commits_after_each_completed_session(self) -> None:

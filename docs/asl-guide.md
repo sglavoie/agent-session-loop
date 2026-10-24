@@ -332,10 +332,14 @@ just all                  # link the wrappers and skills, render the startup car
 just verify-asl-install   # active wrappers and skills resolve to this checkout
 ```
 
-Cutting an actual release runs Agent Mux's gate, which drives both repositories:
+Cutting an actual release runs Agent Mux's gate, which drives both repositories.
+`paired-release-gate` is a recipe in the
+[Agent Mux](https://github.com/sglavoie/agentmux) checkout, not this one; run it
+there:
 
 ```bash
-just paired-release-gate asl_root=~/1_dev_projects/sglavoie_agent-session-loop signing_key=~/.ssh/amx_release
+# in the Agent Mux checkout
+just paired-release-gate asl_root=/path/to/agent-session-loop signing_key=/path/to/signing_key
 ```
 
 It requires both working trees to be clean, hashes ASL's wrapper and a digest

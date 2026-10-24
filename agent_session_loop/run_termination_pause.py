@@ -1,9 +1,9 @@
-# ruff: noqa: F401, F403, F405, I001
+# ruff: noqa: F403, F405
 """Pause payload assembly, remediation, and durable pause records."""
 
 from __future__ import annotations
 
-# ruff: noqa: F401, F403, F405
+# ruff: noqa: F403, F405
 from .run_termination_shared import *
 
 #: Where a pause's remediation hints sit inside its details payload. A
@@ -184,7 +184,7 @@ def _pause_remediation(
         for key in path:
             current = current.get(key) if isinstance(current, Mapping) else None
         if isinstance(current, list) and current:
-            return [entry for entry in current if isinstance(entry, Mapping)]
+            return [dict(entry) for entry in current if isinstance(entry, Mapping)]
     resolution = details.get("mailbox_resolution")
     if (
         isinstance(resolution, Mapping)

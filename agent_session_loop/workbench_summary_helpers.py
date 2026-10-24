@@ -178,6 +178,9 @@ def _build_invalid_summary(
         )
     except plans_errors.PlanError, OSError, ValueError:
         workspace = {}
+    state_path: Path | None
+    events_path: Path | None
+    progress_path: Path | None
     if state_paths is not None:
         state_path, events_path, progress_path = state_paths
     else:

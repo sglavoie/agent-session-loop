@@ -280,12 +280,16 @@ def append_supervision_end(
     settle after at most one change; only its first change is honoured.
     """
 
-    def commit_fields() -> dict[str, Any]:
-        resolved_outcome, resolved_text = resolve_at_commit()
-        return {
-            "supervision_outcome": resolved_outcome,
-            "text": resolved_text,
-        }
+    commit_fields: Callable[[], dict[str, Any]] | None = None
+    if resolve_at_commit is not None:
+        resolve = resolve_at_commit
+
+        def commit_fields() -> dict[str, Any]:
+            resolved_outcome, resolved_text = resolve()
+            return {
+                "supervision_outcome": resolved_outcome,
+                "text": resolved_text,
+            }
 
     return _append_record(
         plan_dir,
@@ -297,7 +301,7 @@ def append_supervision_end(
         run_id=run_id,
         message_id=message_id,
         created_at=created_at,
-        commit_fields=None if resolve_at_commit is None else commit_fields,
+        commit_fields=commit_fields,
     )
 
 

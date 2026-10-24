@@ -75,6 +75,8 @@ from .support_asl_turn_dispositions import (
     DispositionTestCase,
 )
 
+ASL_TEST_PORTABLE = True
+
 
 class BoundaryTests(unittest.TestCase):
     """The dependency runs one way, and the loop stays the loop's."""
