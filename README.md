@@ -88,6 +88,7 @@ just test-fast
 just test-portable
 just test-all
 just reliability-stress
+just test-browser   # Workbench browser tests; needs Node and npm
 ```
 
 Stdlib `unittest` only. CI (`.github/workflows/`) runs a portable Linux lane

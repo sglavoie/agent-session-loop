@@ -58,19 +58,54 @@ fault_scenarios=(
 )
 
 log_dir="$(mktemp -d)"
-trap 'rm -rf "$log_dir"' EXIT
+suite_pid=""
+shard_pids=()
 
-dump() {
+# Children first, so each one is still ours to find when its parent goes.
+kill_tree() {
+    local child
+    for child in $(pgrep -P "$1" 2>/dev/null); do
+        kill_tree "$child"
+    done
+    kill -TERM "$1" 2>/dev/null || true
+}
+
+# An interrupted or failed run must not leave the load suite or a stress shard
+# running against a deleted log directory. The pid variables are cleared once
+# each job is reaped, so a recycled pid is never signalled.
+cleanup() {
+    trap - EXIT INT TERM
+    local pid
+    for pid in $suite_pid ${shard_pids[@]+"${shard_pids[@]}"}; do
+        kill_tree "$pid"
+    done
+    rm -rf "$log_dir"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Print each failing log whole and only the tail of every other one, which is
+# enough to see where the passing runs stood.
+report_failure() {
+    local log failing
+    for failing in "$@"; do
+        echo "--- $failing (failed)"
+        cat "$failing"
+    done
     for log in "$log_dir"/*.log; do
-        echo "--- $log"
-        cat "$log"
+        for failing in "$@"; do
+            [ "$log" = "$failing" ] && continue 2
+        done
+        echo "--- $log (last 5 lines)"
+        tail -n 5 "$log"
     done
 }
 
 echo "== isolated repetitions (x$reps) =="
 for rep in $(seq 1 "$reps"); do
     if ! python3 -m unittest "${scenarios[@]}" "${fault_scenarios[@]}" > "$log_dir/isolated-$rep.log" 2>&1; then
-        dump
+        report_failure "$log_dir/isolated-$rep.log"
         exit 1
     fi
 done
@@ -81,8 +116,9 @@ done
 echo "== date-sensitive scenarios across timezones =="
 for tz in UTC America/Los_Angeles Asia/Kathmandu Pacific/Chatham; do
     echo "-- TZ=$tz"
-    if ! TZ="$tz" python3 -m unittest "${date_scenarios[@]}" > "$log_dir/tz.log" 2>&1; then
-        dump
+    tz_log="$log_dir/tz-${tz//\//-}.log"
+    if ! TZ="$tz" python3 -m unittest "${date_scenarios[@]}" > "$tz_log" 2>&1; then
+        report_failure "$tz_log"
         exit 1
     fi
 done
@@ -96,7 +132,6 @@ done
 echo "== $shards concurrent shards (x$reps) under full-suite load =="
 python3 -m tests.run_suite --all > "$log_dir/suite.log" 2>&1 &
 suite_pid=$!
-shard_pids=()
 for shard in $(seq 1 "$shards"); do
     (
         for rep in $(seq 1 "$reps"); do
@@ -105,14 +140,16 @@ for shard in $(seq 1 "$shards"); do
     ) > "$log_dir/shard-$shard.log" 2>&1 &
     shard_pids+=("$!")
 done
-failed=0
-for pid in "${shard_pids[@]}"; do
-    wait "$pid" || failed=1
+failed_logs=()
+for shard in $(seq 1 "$shards"); do
+    wait "${shard_pids[$((shard - 1))]}" || failed_logs+=("$log_dir/shard-$shard.log")
 done
+shard_pids=()
 suite_status=0
 wait "$suite_pid" || suite_status=$?
-if [ "$failed" -ne 0 ]; then
-    dump
+suite_pid=""
+if [ "${#failed_logs[@]}" -ne 0 ]; then
+    report_failure "${failed_logs[@]}"
     exit 1
 fi
 if [ "$suite_status" -ne 0 ]; then

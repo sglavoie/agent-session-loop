@@ -35,12 +35,23 @@ test-fast:
 # Run the subset that needs no external process: no git, no shell script, no
 # launchd, no harness executable. This is the lane a non-macOS CI runner can
 # gate on honestly; the macOS lane runs `test-all` against the real tools.
+[doc("Run the tests that need no external process (the portable CI lane)")]
 test-portable:
     python3 -m tests.run_suite --portable
 
 # Run the complete test suite as isolated parallel shards
 test-all:
     python3 -m tests.run_suite --all
+
+# Development-only: the harness lives in tests/workbench_browser and is no
+# dependency of either Workbench deployment. Needs Node and npm; the first run
+# installs the pinned Playwright and its Chromium and WebKit engines.
+[doc("Run the Workbench browser tests (Playwright; needs Node and npm)")]
+[working-directory("tests/workbench_browser")]
+test-browser:
+    test -d node_modules || npm ci
+    npm run test:install
+    npm test
 
 # Reliability stress gate. Repeats the load- and calendar-sensitive scenarios
 # in isolation, then again as concurrent shards while the full suite loads the
@@ -59,6 +70,7 @@ test-all:
 # to. They repeat in isolation and under load with the others, and they are kept
 # out of the budget phase, which measures CLI latency and has nothing to say
 # about a deadline a test pins against its own injected clock.
+[doc("Repeat the load-, calendar- and fault-sensitive scenarios under stress")]
 reliability-stress reps="10" shards="4":
     scripts/reliability-stress.sh {{ reps }} {{ shards }}
 

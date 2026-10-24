@@ -29,10 +29,22 @@ on:
     - cron: "17 6 * * 1"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+# Runs on one ref queue instead of overlapping. Only a pull_request run would
+# cancel one in progress, and this workflow has no pull_request trigger, so a
+# manual dispatch never cuts a scheduled verdict short.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   pinned:
     name: ${{ matrix.harness }} ${{ matrix.line }}
     runs-on: ubuntu-24.04
+    # One npm install and one `--version` call.
+    timeout-minutes: 15
     strategy:
       # One harness release per job, and a failure in one must not hide the
       # verdict for the other five.
@@ -85,6 +97,7 @@ jobs:
   drift:
     name: upstream drift (advisory)
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 

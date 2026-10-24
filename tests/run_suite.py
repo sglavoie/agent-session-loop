@@ -32,10 +32,17 @@ and later runs start the longest shards first, so the slowest one bounds
 wall-clock time instead of starting last; shards with no recorded duration go
 first, in a stable lane-then-name order.
 
+Each shard runs in its own session under a timeout (``--shard-timeout``, or
+``$ASL_TEST_SHARD_TIMEOUT``; default 900 seconds, 0 disables it). A shard that
+overruns has its whole process group killed and is reported as ``TIMEOUT``
+with the output it produced. A failed shard's output is shown as its last
+200 lines unless ``--verbose`` (or ``$ASL_TEST_VERBOSE=1``) asks for all of
+it; the full output is kept under ``.cache/run_suite_logs/``.
+
 Usage:
     python3 -m tests.run_suite --fast
     python3 -m tests.run_suite --portable
-    python3 -m tests.run_suite --all [--jobs N]
+    python3 -m tests.run_suite --all [--jobs N] [--shard-timeout S] [--verbose]
 """
 
 from __future__ import annotations
@@ -44,11 +51,15 @@ import argparse
 import ast
 import collections
 import concurrent.futures
+import contextlib
 import json
 import os
 import re
+import shlex
+import signal
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -57,7 +68,16 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TESTS_DIR = REPO_ROOT / "tests"
 TIMINGS_PATH = REPO_ROOT / ".cache" / "run_suite_timings.json"
+LOGS_DIR = REPO_ROOT / ".cache" / "run_suite_logs"
 REGISTRATION_SHARD = "run_suite registration"
+
+TIMEOUT_ENV = "ASL_TEST_SHARD_TIMEOUT"
+VERBOSE_ENV = "ASL_TEST_VERBOSE"
+DEFAULT_SHARD_TIMEOUT = 900.0
+#: How much of a failed shard's output is shown without ``--verbose``.
+FAILED_OUTPUT_LINES = 200
+#: How long a killed shard's pipes get to drain before its output is taken as is.
+_DRAIN_SECONDS = 10.0
 
 LANE_MARKER = "ASL_TEST_LANE"
 PORTABLE_MARKER = "ASL_TEST_PORTABLE"
@@ -232,24 +252,159 @@ def _shard_commands(
     return sorted(shards, key=lambda shard: -recorded.get(shard[0], float("inf")))
 
 
-def _run_shard(name: str, command: list[str]) -> dict[str, Any]:
+#: Shards still running, so an interrupted driver can take them down with it:
+#: each runs in its own session, out of reach of the terminal's Ctrl-C.
+_LIVE: dict[int, subprocess.Popen[str]] = {}
+_LIVE_LOCK = threading.Lock()
+
+
+def _kill_group(process: subprocess.Popen[str]) -> None:
+    """SIGKILL the shard's process group (its pgid is its pid).
+
+    Only while the leader is unreaped: once it is, its pid -- and so the group
+    id -- may already belong to another shard's new session.
+    """
+    if process.returncode is not None:
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+
+
+def _kill_live_shards() -> None:
+    with _LIVE_LOCK:
+        live = list(_LIVE.values())
+    for process in live:
+        _kill_group(process)
+
+
+def _drain(process: subprocess.Popen[str]) -> str:
+    """What a killed shard wrote, without waiting on a pipe an escapee holds."""
+    try:
+        output, _ = process.communicate(timeout=_DRAIN_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.wait()
+        return (
+            "(no output recovered: a process outside the shard's group still "
+            "holds its output pipe)"
+        )
+    return output or ""
+
+
+def _tests_ran(output: str) -> int:
+    """The last ``Ran N tests`` line: a suite that prints a nested run's
+    summary before its own must be counted by its own."""
+    counts = _RAN_PATTERN.findall(output)
+    return int(counts[-1]) if counts else 0
+
+
+def describe_returncode(returncode: int) -> str:
+    """``rc=1``, or ``rc=-9 (SIGKILL)`` for a shard a signal ended."""
+    if returncode < 0:
+        try:
+            return f"rc={returncode} ({signal.Signals(-returncode).name})"
+        except ValueError:
+            pass
+    return f"rc={returncode}"
+
+
+def _run_shard(
+    name: str, command: list[str], timeout: float | None = None
+) -> dict[str, Any]:
+    """Run one shard in its own session; kill its process group on timeout."""
     started = time.monotonic()
-    completed = subprocess.run(
+    process = subprocess.Popen(
         command,
         cwd=REPO_ROOT,
         text=True,
-        capture_output=True,
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
     )
-    output = completed.stdout + completed.stderr
-    ran_match = _RAN_PATTERN.search(output)
+    with _LIVE_LOCK:
+        _LIVE[process.pid] = process
+    timed_out = False
+    try:
+        output, _ = process.communicate(timeout=timeout or None)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_group(process)
+        output = _drain(process)
+    finally:
+        with _LIVE_LOCK:
+            _LIVE.pop(process.pid, None)
+    output = output or ""
     return {
         "name": name,
-        "returncode": completed.returncode,
+        "command": command,
+        "returncode": process.returncode,
+        "timed_out": timed_out,
         "duration": time.monotonic() - started,
-        "tests": int(ran_match.group(1)) if ran_match else 0,
+        "tests": _tests_ran(output),
         "output": output,
     }
+
+
+def _verdict(result: dict[str, Any]) -> str:
+    if result.get("timed_out"):
+        return "TIMEOUT"
+    return "ok" if result["returncode"] == 0 else "FAIL"
+
+
+def _log_path(name: str) -> Path:
+    return LOGS_DIR / (re.sub(r"[^A-Za-z0-9_.-]+", "_", name) + ".log")
+
+
+def _keep_log(result: dict[str, Any]) -> Path | None:
+    """Write a failed shard's full output under ``.cache``; best effort."""
+    path = _log_path(result["name"])
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(result["output"], encoding="utf-8")
+    except OSError:
+        return None
+    return path
+
+
+def failure_report(
+    result: dict[str, Any], *, verbose: bool, timeout: float | None = None
+) -> str:
+    """The section printed for one failed or timed-out shard."""
+    if result.get("timed_out"):
+        header = (
+            f"=== TIMEOUT: shard {result['name']} killed after {timeout or 0:g}s "
+            f"({describe_returncode(result['returncode'])}); partial output ==="
+        )
+    else:
+        header = (
+            f"=== output from failed shard {result['name']} "
+            f"({describe_returncode(result['returncode'])}) ==="
+        )
+    lines = result["output"].rstrip().splitlines()
+    shown = lines if verbose else lines[-FAILED_OUTPUT_LINES:]
+    parts = [header]
+    if len(shown) < len(lines):
+        log = _keep_log(result)
+        where = f"full output: {log}; " if log else ""
+        parts.append(
+            f"... {len(lines) - len(shown)} earlier lines omitted ({where}"
+            f"--verbose or {VERBOSE_ENV}=1 shows all)"
+        )
+    parts.extend(shown)
+    if command := result.get("command"):
+        parts.append(f"--- rerun this shard: {shlex.join(command)}")
+    return "\n".join(parts)
+
+
+def _env_timeout() -> float:
+    raw = os.environ.get(TIMEOUT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_SHARD_TIMEOUT
+    try:
+        return float(raw)
+    except ValueError as error:
+        raise SystemExit(
+            f"{TIMEOUT_ENV} must be a number of seconds, not {raw!r}"
+        ) from error
 
 
 def _test_ids(suite: Any) -> set[str]:
@@ -362,33 +517,70 @@ def main(argv: list[str] | None = None) -> int:
         default=max(1, (os.cpu_count() or 4) // 2),
         help="maximum parallel shard processes (default: half the CPU count)",
     )
+    parser.add_argument(
+        "--shard-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            f"kill a shard's process group after this long (default: "
+            f"${TIMEOUT_ENV} or {DEFAULT_SHARD_TIMEOUT:g}; 0 disables)"
+        ),
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=os.environ.get(VERBOSE_ENV, "") not in ("", "0"),
+        help=(
+            f"print a failed shard's whole output, not its last "
+            f"{FAILED_OUTPUT_LINES} lines (also ${VERBOSE_ENV}=1)"
+        ),
+    )
     args = parser.parse_args(argv)
     if args.check_registration:
         return check_registration()
     mode = "portable" if args.portable else "fast" if args.fast else "all"
+    timeout = _env_timeout() if args.shard_timeout is None else args.shard_timeout
 
     shards = _shard_commands(mode)
     started = time.monotonic()
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        futures = [pool.submit(_run_shard, name, command) for name, command in shards]
+    # A SIGTERM (a stress run's cleanup trap, a CI cancel) must take the
+    # shards down too, which an exception unwinding through here does.
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, lambda signum, _frame: sys.exit(128 + signum))
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs))
+    try:
+        futures = [
+            pool.submit(_run_shard, name, command, timeout) for name, command in shards
+        ]
         for future in concurrent.futures.as_completed(futures):
             result = future.result()
-            verdict = "ok" if result["returncode"] == 0 else "FAIL"
+            verdict = _verdict(result)
+            suffix = (
+                f"  {describe_returncode(result['returncode'])}"
+                if verdict != "ok"
+                else ""
+            )
             print(
                 f"{verdict:>4}  {result['name']:<44} "
-                f"{result['duration']:6.1f}s  {result['tests']:4d} tests",
+                f"{result['duration']:6.1f}s  {result['tests']:4d} tests{suffix}",
                 flush=True,
             )
             results.append(result)
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        _kill_live_shards()
+        raise
+    pool.shutdown()
     _record_timings(results)
 
-    failures = [result for result in results if result["returncode"] != 0]
+    failures = [result for result in results if _verdict(result) != "ok"]
     total_tests = sum(result["tests"] for result in results)
     wall = time.monotonic() - started
     for result in failures:
-        print(f"\n=== output from failed shard {result['name']} ===")
-        print(result["output"].rstrip())
+        print()
+        print(failure_report(result, verbose=args.verbose, timeout=timeout))
     # A module that ran nothing is not a failure -- the two installed-pair gates
     # skip when the program they judge is not installed -- but it is not a
     # success either, and a suite that printed only `ok` for it would report
