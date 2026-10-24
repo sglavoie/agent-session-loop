@@ -22,6 +22,10 @@ An existing symlink is retargeted; an existing real file or directory is never
 overwritten, because it is content somebody put there and a link would shadow
 it. Links into this checkout whose source has gone are pruned, and only inside
 the harness roots this install manages.
+
+Every destination is checked before anything is touched, so a conflict (real
+content where a link belongs, or a file where a parent directory belongs) fails
+the install with nothing changed and names every path in the way.
 """
 
 from __future__ import annotations
@@ -48,8 +52,16 @@ WRAPPER_DIR = ".local/bin"
 SUPPORT_DIRS = ("references",)
 
 
+#: What every conflict tells the operator to do about it.
+RESOLUTION = "move it aside or delete it, then re-run"
+
+
 class InstallError(Exception):
-    pass
+    """The install cannot proceed; ``changes`` lists what it already did."""
+
+    def __init__(self, message: str, changes: Iterable[str] = ()) -> None:
+        super().__init__(message)
+        self.changes = list(changes)
 
 
 def skill_sources(repo_root: Path) -> list[Path]:
@@ -66,6 +78,28 @@ def skill_sources(repo_root: Path) -> list[Path]:
     return sources
 
 
+def conflict(destination: Path) -> str | None:
+    """Why a link cannot be placed at ``destination``, or ``None`` if it can.
+
+    Real content at the destination is in the way, and so is a non-directory
+    -- a regular file, or a symlink that dangles or points at a file -- where
+    one of its parent directories belongs.
+    """
+    if destination.is_symlink():
+        return None
+    if destination.exists():
+        return f"{destination} exists and is not a symlink; {RESOLUTION}"
+    for parent in destination.parents:
+        if parent.is_dir():
+            return None
+        if parent.is_symlink() or parent.exists():
+            return (
+                f"{parent} is not a directory (a file or a dangling symlink) "
+                f"but must hold links; {RESOLUTION}"
+            )
+    return None
+
+
 def link(source: Path, destination: Path, *, dry_run: bool) -> str | None:
     """Point ``destination`` at ``source`` atomically; return what changed."""
     target = os.fspath(source)
@@ -73,12 +107,18 @@ def link(source: Path, destination: Path, *, dry_run: bool) -> str | None:
         if os.readlink(destination) == target:
             return None
         action = "relinked"
-    elif destination.exists():
-        raise InstallError(f"{destination} exists and is not a symlink")
+    elif problem := conflict(destination):
+        raise InstallError(problem)
     else:
         action = "linked"
     if not dry_run:
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise InstallError(
+                f"cannot create {destination.parent}: {error.strerror or error}; "
+                f"{RESOLUTION}"
+            ) from error
         staging = destination.with_name(f".{destination.name}.asl-install")
         if staging.is_symlink() or staging.exists():
             staging.unlink()
@@ -116,21 +156,45 @@ def install(
     """Link the wrappers and skills; ``roots`` defaults to the discovered set."""
     if roots is None:
         roots = discover_harness_roots(home, env).found
-    changes: list[str] = []
-    if not skills_only:
-        for name in WRAPPERS:
-            source = repo_root / "bin/.local/bin" / name
-            change = link(source, home / WRAPPER_DIR / name, dry_run=dry_run)
-            if change:
-                changes.append(change)
     sources = skill_sources(repo_root)
-    for root in roots:
-        install_root = home / root.skills_dir
-        changes.extend(prune(install_root, repo_root, dry_run=dry_run))
-        for source in sources:
-            change = link(source, install_root / source.name, dry_run=dry_run)
-            if change:
+    wrappers = (
+        []
+        if skills_only
+        else [
+            (repo_root / "bin/.local/bin" / name, home / WRAPPER_DIR / name)
+            for name in WRAPPERS
+        ]
+    )
+    install_roots = [home / root.skills_dir for root in roots]
+    links = wrappers + [
+        (source, install_root / source.name)
+        for install_root in install_roots
+        for source in sources
+    ]
+    # Preflight: one conflict anywhere fails the install before any link,
+    # prune or directory has been touched, and every conflict is named at once.
+    # A parent in the way blocks every link under it; name it once.
+    problems = list(dict.fromkeys(filter(None, (conflict(dest) for _, dest in links))))
+    if problems:
+        raise InstallError(
+            "nothing was changed, because these are in the way:\n  "
+            + "\n  ".join(problems)
+        )
+    changes: list[str] = []
+    try:
+        for source, destination in wrappers:
+            if change := link(source, destination, dry_run=dry_run):
                 changes.append(change)
+        for install_root in install_roots:
+            changes.extend(prune(install_root, repo_root, dry_run=dry_run))
+            for source in sources:
+                destination = install_root / source.name
+                if change := link(source, destination, dry_run=dry_run):
+                    changes.append(change)
+    except InstallError as error:
+        raise InstallError(str(error), changes) from error
+    except OSError as error:
+        raise InstallError(f"install stopped: {error}", changes) from error
     return changes
 
 
@@ -164,11 +228,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         changes = install(
             args.home,
+            REPO_ROOT,
             skills_only=args.skills_only,
             dry_run=args.dry_run,
             roots=discovery.found,
         )
     except InstallError as error:
+        for change in error.changes:
+            print(change)
+        if error.changes:
+            print(
+                f"install: {len(error.changes)} change(s) above were made "
+                "before the error",
+                file=sys.stderr,
+            )
         print(f"error: {error}", file=sys.stderr)
         return 1
     for change in changes:

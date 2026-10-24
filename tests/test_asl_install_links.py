@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib.util
+import io
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ASL_TEST_PORTABLE = True
 
@@ -96,6 +99,99 @@ class InstallLinksTests(unittest.TestCase):
 
         self.assertTrue(real.is_dir())
         self.assertFalse(real.is_symlink())
+
+    def test_a_conflict_in_a_later_root_changes_nothing_anywhere(self) -> None:
+        real = self.home / ".copilot/skills/session-run"
+        real.mkdir(parents=True)
+        (self.home / ".claude/skills").mkdir()
+        stale = self.home / ".claude/skills/gone"
+        stale.symlink_to(self.repo / "skills/gone")
+
+        with self.assertRaises(install_links.InstallError) as raised:
+            self.install()
+
+        message = str(raised.exception)
+        self.assertIn("nothing was changed", message)
+        self.assertIn(f"{real} exists and is not a symlink", message)
+        self.assertIn("move it aside or delete it, then re-run", message)
+        self.assertEqual(raised.exception.changes, [])
+        self.assertFalse((self.home / ".local").exists())
+        self.assertFalse((self.home / ".claude/skills/asl").exists())
+        self.assertFalse((self.home / ".codex/skills").exists())
+        self.assertTrue(stale.is_symlink(), "a failed preflight prunes nothing")
+
+    def test_every_conflict_is_named_at_once(self) -> None:
+        for install_dir in (".claude/skills/asl", ".codex/skills/references"):
+            (self.home / install_dir).mkdir(parents=True)
+
+        with self.assertRaises(install_links.InstallError) as raised:
+            self.install()
+
+        self.assertIn(str(self.home / ".claude/skills/asl"), str(raised.exception))
+        self.assertIn(
+            str(self.home / ".codex/skills/references"), str(raised.exception)
+        )
+
+    def test_a_dangling_symlink_parent_is_a_conflict_not_a_crash(self) -> None:
+        local = self.home / ".local"
+        local.mkdir()
+        (local / "bin").symlink_to(self.root / "gone")
+
+        with self.assertRaises(install_links.InstallError) as raised:
+            self.install()
+
+        self.assertIn(f"{local / 'bin'} is not a directory", str(raised.exception))
+        self.assertEqual(1, str(raised.exception).count(str(local / "bin")))
+        self.assertFalse((self.home / ".claude/skills").exists())
+
+    def test_a_regular_file_parent_is_a_conflict_not_a_crash(self) -> None:
+        (self.home / ".local").write_text("not a directory\n")
+
+        with self.assertRaises(install_links.InstallError) as raised:
+            self.install()
+
+        self.assertIn(
+            f"{self.home / '.local'} is not a directory", str(raised.exception)
+        )
+
+    def test_link_reports_an_unmakeable_parent_as_an_install_error(self) -> None:
+        blocker = self.root / "blocker"
+        blocker.write_text("x\n")
+
+        with (
+            mock.patch.object(install_links, "conflict", return_value=None),
+            self.assertRaises(install_links.InstallError) as raised,
+        ):
+            install_links.link(
+                self.repo / "skills/asl", blocker / "sub/asl", dry_run=False
+            )
+
+        self.assertIn(f"cannot create {blocker / 'sub'}", str(raised.exception))
+
+    def test_main_prints_the_changes_made_before_a_late_error(self) -> None:
+        def failing_prune(*_args: object, **_kwargs: object) -> list[str]:
+            raise OSError("disk on fire")
+
+        environ = {
+            name: value
+            for name, value in os.environ.items()
+            if name not in ("CLAUDE_CONFIG_DIR", "ASL_CLAUDE_CONFIG_DIRS")
+        }
+        environ["PATH"] = str(self.home / ".local/bin")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(install_links, "REPO_ROOT", self.repo),
+            mock.patch.object(install_links, "prune", failing_prune),
+            mock.patch.dict(os.environ, environ, clear=True),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = install_links.main(["--home", str(self.home)])
+
+        self.assertEqual(code, 1)
+        self.assertIn(f"linked: {self.home / '.local/bin/asl'}", stdout.getvalue())
+        self.assertIn("2 change(s) above were made", stderr.getvalue())
+        self.assertIn("disk on fire", stderr.getvalue())
 
     def test_prunes_links_whose_skill_is_gone(self) -> None:
         self.install()

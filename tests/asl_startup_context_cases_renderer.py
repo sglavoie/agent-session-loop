@@ -1,4 +1,7 @@
 # mypy: ignore-errors
+import stat
+from unittest import mock
+
 from .asl_startup_context_support import *
 
 
@@ -26,6 +29,39 @@ class StartupContextRendererTests(unittest.TestCase):
             self.assertEqual(second["written"], [])
             for path, content in snapshot.items():
                 self.assertEqual((repo_root / path).read_bytes(), content, path)
+
+    def test_sync_replaces_context_files_atomically_keeping_mode_and_links(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = self.build_repo(temp_dir)
+            codex = repo_root / ".codex/AGENTS.md"
+            codex.chmod(0o600)
+            dotfiles = Path(temp_dir) / "dotfiles/CLAUDE.md"
+            dotfiles.parent.mkdir()
+            claude = repo_root / ".claude/CLAUDE.md"
+            claude.rename(dotfiles)
+            claude.symlink_to(dotfiles)
+            replaced: list[Path] = []
+            original = startup_context.durability.replace_text
+
+            def recording(path: Path, text: str, **kwargs: Any) -> None:
+                replaced.append(path)
+                original(path, text, **kwargs)
+
+            with mock.patch.object(
+                startup_context.durability, "replace_text", recording
+            ):
+                startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
+
+            self.assertIn(codex, replaced)
+            self.assertIn(dotfiles.resolve(), replaced)
+            self.assertEqual(stat.S_IMODE(codex.stat().st_mode), 0o600)
+            self.assertTrue(claude.is_symlink(), "the context link must survive")
+            self.assertIn(
+                startup_context.start_marker("claude"),
+                dotfiles.read_text(encoding="utf-8"),
+            )
 
     def test_sync_preserves_unrelated_startup_instructions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

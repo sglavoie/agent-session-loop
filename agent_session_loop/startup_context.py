@@ -26,13 +26,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import stat
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import install_verify_common, supervisor_guide
+from . import durability, install_verify_common, supervisor_guide
 
 COMMAND_NAME = "startup-context"
 
@@ -356,6 +357,22 @@ def render_reference() -> str:
     return "\n".join(lines) + "\n"
 
 
+def _replace_file(path: Path, text: str) -> None:
+    """Atomically replace ``path`` with ``text``, keeping its mode and its link.
+
+    A reader (a harness starting up mid-sync) sees the old file or the new one,
+    never a truncated one. A symlinked context file is written at its target,
+    so the link survives and the change lands in the repository that owns the
+    file; an existing file keeps its permission bits.
+    """
+    target = path.resolve() if path.is_symlink() else path
+    try:
+        permissions: int | None = stat.S_IMODE(target.stat().st_mode)
+    except FileNotFoundError:
+        permissions = None
+    durability.replace_text(target, text, permissions=permissions)
+
+
 def _file_record(path: Path, root: Path, current: str, desired: str) -> dict[str, Any]:
     return {
         "path": str(path.relative_to(root)),
@@ -389,7 +406,7 @@ def sync(
         desired = apply_block(current, render_block(target.harness))
         files.append(_file_record(path, home_root, current, desired))
         if not check and current != desired:
-            path.write_text(desired, encoding="utf-8")
+            _replace_file(path, desired)
 
     reference = root / REFERENCE_PATH
     current = reference.read_text(encoding="utf-8") if reference.is_file() else ""
@@ -397,7 +414,7 @@ def sync(
     files.append(_file_record(reference, root, current, desired))
     if not check and current != desired:
         reference.parent.mkdir(parents=True, exist_ok=True)
-        reference.write_text(desired, encoding="utf-8")
+        _replace_file(reference, desired)
 
     stale = [record["path"] for record in files if record["stale"]]
     return {
