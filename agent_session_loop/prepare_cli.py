@@ -213,6 +213,19 @@ def prepare_from_args(args: Any) -> int:
                     f"manifest.md and context.md: {plan_arg}"
                 ),
             )
+    elif plan_path.is_dir():
+        is_split_plan = (plan_path / "manifest.md").is_file() and (
+            plan_path / "context.md"
+        ).is_file()
+        hint = (
+            "; pass --resume to resume a prepared plan directory"
+            if is_split_plan
+            else "; pass the source plan markdown file"
+        )
+        return _emit_input_error(
+            PREPARE_EXIT_REASON_INPUT_ERROR,
+            f"source plan path is a directory, not a file: {plan_arg}{hint}",
+        )
     elif not plan_path.is_file():
         return _emit_input_error(
             PREPARE_EXIT_REASON_INPUT_ERROR,

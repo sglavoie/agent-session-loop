@@ -57,7 +57,7 @@ def _add_workbench_commands(
         "--origin",
         required=True,
         metavar="URL",
-        help="https origin of the service (frames POST to /v1/ingest)",
+        help="HTTPS origin of the service (frames POST to /v1/ingest)",
     )
     workbench_connect_parser.add_argument(
         "--token-file",
@@ -106,7 +106,7 @@ def _add_workbench_commands(
     workbench_connect_parser.add_argument(
         "--json",
         action="store_true",
-        help="Print machine-readable JSON startup output",
+        help="Print machine-readable JSON output for the startup record",
     )
     workbench_connect_parser.set_defaults(
         handler_ref="workbench_connector:workbench_connect_from_args",
@@ -158,7 +158,7 @@ def _add_workbench_commands(
     workbench_registry_parser.add_argument(
         "--json",
         action="store_true",
-        help="Emit the registry payload as machine-readable JSON",
+        help="Print machine-readable JSON output",
     )
     workbench_registry_parser.set_defaults(
         handler_ref="workbench_cli:workbench_registry_from_args",

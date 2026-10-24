@@ -19,7 +19,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import assurance_ledger, assurance_report, session_overview, state
+from . import (
+    assurance_ledger,
+    assurance_report,
+    plans_errors,
+    plans_snapshot,
+    session_overview,
+    state,
+)
+from .cli_defaults import program_name
 from .retention_projection import (
     DEFAULT_MAX_AGE_DAYS,
     RETAIN_PIN_UNKNOWN,
@@ -392,14 +400,17 @@ def _print_report(report: GCReport) -> None:
 
 def gc_from_args(args: argparse.Namespace) -> int:
     """CLI handler for ``asl gc``."""
+    plan_dir = getattr(args, "plan_dir", None)
     try:
+        if plan_dir is not None:
+            plans_snapshot.require_plan_directory(plan_dir)
         report = run_gc(
-            getattr(args, "plan_dir", None),
+            plan_dir,
             state_dir=getattr(args, "state_dir", None),
             max_age_days=getattr(args, "max_age_days", DEFAULT_MAX_AGE_DAYS),
             apply=bool(getattr(args, "apply", False)),
         )
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, plans_errors.PlanError) as error:
         if getattr(args, "json", False):
             print(
                 json.dumps(
@@ -408,7 +419,7 @@ def gc_from_args(args: argparse.Namespace) -> int:
                 )
             )
         else:
-            print(f"gc failed: {error}", file=sys.stderr)
+            print(f"{program_name()} gc: {error}", file=sys.stderr)
         return 1
 
     if getattr(args, "json", False):

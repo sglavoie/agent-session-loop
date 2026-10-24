@@ -146,7 +146,11 @@ def _add_workspace_recovery_commands(
         "--state-dir", metavar="DIR", help="Override operational state directory"
     )
     external_parser.add_argument(
-        "--json", action="store_true", help="Print JSON (also the default)"
+        "--json",
+        action="store_true",
+        help=(
+            "Print machine-readable JSON output (the default; accepted for consistency)"
+        ),
     )
     external_parser.add_argument(
         "--accept",
@@ -182,7 +186,11 @@ def _add_workspace_recovery_commands(
         "--state-dir", metavar="DIR", help="Override operational state directory"
     )
     accept_refs_parser.add_argument(
-        "--json", action="store_true", help="Print JSON (also the default)"
+        "--json",
+        action="store_true",
+        help=(
+            "Print machine-readable JSON output (the default; accepted for consistency)"
+        ),
     )
     accept_refs_parser.add_argument(
         "--accept",
@@ -266,7 +274,7 @@ def _add_progress_commands(
     progress_parser.add_argument(
         "--json",
         action="store_true",
-        help="Print parsed entries as machine-readable JSON",
+        help="Print machine-readable JSON output of the parsed entries",
     )
     progress_parser.set_defaults(handler_ref="progress_cli:progress_from_args")
 

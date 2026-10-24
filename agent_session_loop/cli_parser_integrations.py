@@ -158,7 +158,10 @@ def _add_diagnostics_commands(
     diagnostics_export_parser.add_argument(
         "--json",
         action="store_true",
-        help="Wrap the export in the standard JSON response envelope",
+        help=(
+            "Print machine-readable JSON output: the export inside the "
+            "standard response envelope"
+        ),
     )
     diagnostics_export_parser.set_defaults(
         handler_ref="diagnostics_export:export_from_args"

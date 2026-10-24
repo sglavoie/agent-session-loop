@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ast
 import inspect as inspect_module
+import io
 import subprocess
 import unittest
+from contextlib import redirect_stderr
 from dataclasses import fields
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,7 @@ from agent_session_loop import (
     mailbox_vocabulary,
     overseer_checkpoint_groups,
     overseer_cli,
+    overseer_cli_common,
     overseer_context,
     overseer_decisions,
     overseer_discovery,
@@ -419,6 +422,17 @@ class ExitStatusTests(_OverseerCase):
 
         self.assertEqual(2, status)
         self.assertEqual("plan_unobserved", payload["reason"])
+
+    def test_a_text_error_names_the_leaf_as_typed(self) -> None:
+        error = overseer_cli_common.OverseerCliError("plan_unobserved", "no record")
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = overseer_cli_common._failure(
+                "overseer-inspect", error, as_json=False
+            )
+
+        self.assertEqual(2, status)
+        self.assertEqual("asl overseer inspect: no record\n", stderr.getvalue())
 
     def test_a_partial_view_is_a_refusal_not_a_quiet_success(self) -> None:
         """An incomplete sweep must never read as an empty fleet."""

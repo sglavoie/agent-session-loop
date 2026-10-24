@@ -478,6 +478,61 @@ class ParserSubcommandRegistrationTests(unittest.TestCase):
         self.assertEqual(2, raised.exception.code)
         self.assertIn("unrecognized arguments: --interactive", stderr.getvalue())
 
+    def test_unknown_flag_reports_the_matched_subcommand_usage(self) -> None:
+        cases = (
+            (["gc", "--bogus"], "asl gc"),
+            (["status", "/tmp/plan", "extra"], "asl status"),
+            (["control", "abort", "/tmp/plan", "--bogus"], "asl control abort"),
+            (["workbench", "serve", "--bogus"], "asl workbench serve"),
+        )
+        for argv, leaf in cases:
+            stderr = io.StringIO()
+            with (
+                self.subTest(argv=argv),
+                redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                cli.build_parser(prog="asl").parse_args(argv)
+
+            self.assertEqual(2, raised.exception.code)
+            text = stderr.getvalue()
+            self.assertTrue(text.startswith(f"usage: {leaf} "), text)
+            self.assertIn(f"{leaf}: error: unrecognized arguments:", text)
+            self.assertNotIn("supervisor-guide", text)
+
+    def test_doctor_accepts_plan_dir_positionally_or_by_alias(self) -> None:
+        parser = cli.build_parser()
+        for argv in (
+            ["doctor", "/tmp/plan", "--harness", "codex"],
+            ["doctor", "--harness", "codex", "--plan-dir", "/tmp/plan"],
+            ["doctor", "/tmp/plan", "--harness", "codex", "--plan-dir", "/tmp/plan/"],
+        ):
+            with self.subTest(argv=argv):
+                args = parser.parse_args(argv)
+                self.assertIn(args.plan_dir, ("/tmp/plan", "/tmp/plan/"))
+                self.assertFalse(hasattr(args, "_plan_dir_positional"))
+
+    def test_doctor_refuses_a_missing_or_conflicting_plan_dir(self) -> None:
+        cases = (
+            (["doctor", "--harness", "codex"], "required: PLAN_DIR"),
+            (
+                ["doctor", "/tmp/a", "--harness", "codex", "--plan-dir", "/tmp/b"],
+                "disagree",
+            ),
+        )
+        for argv, expected in cases:
+            stderr = io.StringIO()
+            with (
+                self.subTest(argv=argv),
+                redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                cli.build_parser(prog="asl").parse_args(argv)
+
+            self.assertEqual(2, raised.exception.code)
+            self.assertIn("asl doctor: error:", stderr.getvalue())
+            self.assertIn(expected, stderr.getvalue())
+
     def test_preflight_mark_loop_ready_short_flag(self) -> None:
         parser = cli.build_parser()
 

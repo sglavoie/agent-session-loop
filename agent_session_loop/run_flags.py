@@ -265,9 +265,9 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
         option_strings=("--external-write-root",),
         action="append",
         help=(
-            "Explicitly authorize implementation writes beneath an existing external "
-            "data directory; repeat for several. Canonical roots and write evidence "
-            "are recorded. Repository and control-plane guards remain in force."
+            "Authorize implementation writes beneath an existing external data "
+            "directory; repeat for several (repository and control-plane guards "
+            "still apply)"
         ),
     ),
     RunFlag(

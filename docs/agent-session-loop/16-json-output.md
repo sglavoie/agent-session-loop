@@ -174,8 +174,8 @@ record `stop-after-current-requested`, `stop-after-current-canceled`,
 events also include `current_harness` and `selected_harness`. Abort events also
 include `abort_requested`, `abort_grace_seconds`, `abort_reason`, and — on
 `abort-turn-requested` alone — the `abort_deadline` the terminal actions clear.
-`control-command-observed` is the receipt `asl control --wait` polls for and
-carries the `command_id` and `queue_command` it acknowledges.
+`control-command-observed` is the receipt `asl control <command> --wait` polls
+for and carries the `command_id` and `queue_command` it acknowledges.
 The four `guard-*` actions carry the `command_id` they answer, the `guard_ids`
 they concern, and the active `guards` summary after the change; a rejection
 also carries its `reason` and `detail`. `guards-expired` is recorded once at
@@ -222,7 +222,7 @@ asl run ~/.local/share/agent-plans/example-plan/ --harness codex --reply "1a, 2b
 asl sessions --json
 asl sessions --running --json
 asl sessions --recent --limit 5 --json
-asl doctor --harness codex --plan-dir ~/.local/share/agent-plans/example-plan/ --json
+asl doctor ~/.local/share/agent-plans/example-plan/ --harness codex --json
 asl unlock ~/.local/share/agent-plans/example-plan/ --json
 ```
 

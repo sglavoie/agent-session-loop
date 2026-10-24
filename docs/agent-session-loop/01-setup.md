@@ -36,7 +36,7 @@ The config loader also accepts these equivalent shapes:
 Check local prerequisites before a real run:
 
 ```bash
-asl doctor --harness codex --plan-dir ~/.local/share/agent-plans/example-plan/
+asl doctor ~/.local/share/agent-plans/example-plan/ --harness codex
 ```
 
 `doctor` verifies the working directory, plan directory, configured harness

@@ -76,7 +76,7 @@ LEAF_HELP: tuple[str, ...] = (
 #: Named here rather than only in prose so the JSON reader sees the same gate
 #: the text reader does.
 REDIRECT_AUTHORIZATION = (
-    "urgent intervention: use only when the user has explicitly authorized this "
+    "Urgent intervention: use only when the user has explicitly authorized this "
     "correction. Never self-authorize from a supervision signal, a failing "
     "check, or a suspicion that the worker is wrong."
 )

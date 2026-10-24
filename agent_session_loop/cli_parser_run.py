@@ -6,6 +6,7 @@ import argparse
 
 from . import contracts, harnesses, run_flags, session_overview, tail
 from .cli_parser_support import (
+    _add_plan_dir_with_option_alias,
     _add_unsafe_bypass_flags,
     _AgentSessionLoopArgumentParser,
 )
@@ -223,10 +224,8 @@ def _add_check_commands(
             "registered plan (default: current directory)"
         ),
     )
-    doctor_parser.add_argument(
-        "--plan-dir",
-        required=True,
-        help="Split plan directory to inspect",
+    _add_plan_dir_with_option_alias(
+        doctor_parser, help_text="Split plan directory to inspect"
     )
     doctor_parser.add_argument(
         "--json",

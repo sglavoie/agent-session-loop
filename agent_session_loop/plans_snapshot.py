@@ -49,13 +49,16 @@ from .workspaces import (
 def require_plan_directory(plan_dir: str | Path) -> Path:
     """Return the canonical ``plan_dir``, refusing one that is not a directory.
 
-    Every plan-scoped command reports a missing plan with this same message,
+    Every plan-scoped command reports a missing plan, or a path that names a
+    file rather than a directory, with these same messages,
     including the ones (``unlock``, ``compact-state``) that never read the plan
     files and would otherwise quietly report on a state directory that cannot
     belong to anything.
     """
     canonical_dir = canonicalize_path(plan_dir)
     if not canonical_dir.is_dir():
+        if canonical_dir.exists():
+            raise PlanError(f"plan path is not a directory: {canonical_dir}")
         raise PlanError(f"plan directory does not exist: {canonical_dir}")
     return canonical_dir
 

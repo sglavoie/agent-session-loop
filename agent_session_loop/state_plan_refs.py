@@ -23,7 +23,7 @@ from .state import (
 )
 
 
-def _is_bare_label(raw_value: str) -> bool:
+def is_bare_label(raw_value: str) -> bool:
     """Return True when ``raw_value`` is a bare basename with no path parts.
 
     Only bare labels trigger state lookup. Anything containing a directory
@@ -180,7 +180,7 @@ def resolve_plan_reference(raw_value: str, state_root: Path) -> Path:
     original = plans_files.canonicalize_path(raw_value)
     if original.is_dir():
         return original
-    if not _is_bare_label(raw_value):
+    if not is_bare_label(raw_value):
         return original
 
     matches: dict[str, Path] = {}

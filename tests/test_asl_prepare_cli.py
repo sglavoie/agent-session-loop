@@ -210,6 +210,31 @@ class PrepareCliTests(unittest.TestCase):
         self.assertEqual("input-error", payload["reason"])
         self.assertIn("source plan file does not exist", payload["error"])
 
+    def test_split_plan_directory_source_hints_resume(self) -> None:
+        plan_dir = self.tmp_path / "split-plan"
+        plan_dir.mkdir()
+        (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+        (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
+        code, stdout, _stderr = self._run_cli(
+            str(plan_dir), "--cwd", str(self.repo), "--json"
+        )
+
+        self.assertEqual(1, code)
+        payload = json.loads(stdout)
+        self.assertEqual("input-error", payload["reason"])
+        self.assertIn("is a directory, not a file", payload["error"])
+        self.assertIn("pass --resume", payload["error"])
+
+    def test_plain_directory_source_does_not_hint_resume(self) -> None:
+        code, stdout, _stderr = self._run_cli(
+            str(self.tmp_path), "--cwd", str(self.repo), "--json"
+        )
+
+        self.assertEqual(1, code)
+        payload = json.loads(stdout)
+        self.assertIn("is a directory, not a file", payload["error"])
+        self.assertNotIn("--resume", payload["error"])
+
     def test_missing_cwd_is_cwd_error(self) -> None:
         source = self._write_source()
         code, stdout, _stderr = self._run_cli(

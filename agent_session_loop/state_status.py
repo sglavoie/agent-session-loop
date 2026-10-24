@@ -45,7 +45,7 @@ from .state_payloads import (
     _session_payload,
     _status_counts,
 )
-from .state_plan_refs import resolve_plan_reference
+from .state_plan_refs import is_bare_label, resolve_plan_reference
 from .state_status_text import _print_text_status
 
 
@@ -267,6 +267,12 @@ def status_from_args(args: argparse.Namespace) -> int:
         resolved_plan_dir = resolve_plan_reference(
             args.plan_dir, state_root(args.state_dir)
         )
+        if is_bare_label(str(args.plan_dir)) and not resolved_plan_dir.exists():
+            raise plans_errors.PlanError(
+                f"plan directory does not exist: {resolved_plan_dir}, and no "
+                f"plan label from `{program_name()} sessions` matches "
+                f"{args.plan_dir!r}"
+            )
         snapshot = plans_snapshot.inspect_plan(resolved_plan_dir)
         payload = status_payload(snapshot, args.state_dir)
     except AmbiguousPlanError as error:

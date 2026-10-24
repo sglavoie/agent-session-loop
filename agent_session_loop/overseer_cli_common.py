@@ -26,6 +26,7 @@ from . import (
     overseer_watch,
     responses,
 )
+from .cli_defaults import program_name
 
 #: Exit status for a leaf that answered and found nothing wrong.
 EXIT_OK = 0
@@ -198,7 +199,10 @@ def _failure(command: str, error: OverseerCliError, *, as_json: bool) -> int:
     if as_json:
         print(json.dumps(payload, sort_keys=True))
     else:
-        print(f"{command}: {error.message}", file=sys.stderr)
+        # The JSON ``command`` stays the hyphenated identifier; the text prefix
+        # names the leaf the way the user typed it (``asl overseer inspect:``).
+        leaf = command.replace("-", " ", 1)
+        print(f"{program_name()} {leaf}: {error.message}", file=sys.stderr)
     return EXIT_USAGE
 
 

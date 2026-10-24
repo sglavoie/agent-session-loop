@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import weakref
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 
@@ -91,6 +93,88 @@ class _DescribedSubParsersAction(_SubParsersBase):
             # are printed verbatim, so undo the escaping.
             kwargs["description"] = help_text.replace("%%", "%")
         return super().add_parser(name, **kwargs)
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        """Report leftover tokens from the subcommand that was matched.
+
+        argparse hands a subcommand's unrecognized tokens back up to the root,
+        which then prints the root usage listing every command. A subcommand
+        consumes every remaining token, so nothing above it could have used
+        them: erroring here names the leaf's own usage instead. Nested groups
+        run their own action first, so the deepest matched parser reports.
+        """
+        super().__call__(parser, namespace, values, option_string)
+        chosen = self._name_parser_map.get(values[0])
+        if chosen is None:
+            return
+        leftovers = getattr(namespace, argparse._UNRECOGNIZED_ARGS_ATTR, None)
+        if leftovers:
+            delattr(namespace, argparse._UNRECOGNIZED_ARGS_ATTR)
+            chosen.error(f"unrecognized arguments: {' '.join(leftovers)}")
+        if chosen in _PLAN_DIR_ALIAS_PARSERS:
+            _reconcile_plan_dir_alias(chosen, namespace, "plan_dir")
+
+
+_PLAN_DIR_POSITIONAL_DEST = "_plan_dir_positional"
+
+#: Leaves built by :func:`_add_plan_dir_with_option_alias`, whose two plan
+#: spellings the subparsers action reconciles once the leaf has parsed.
+_PLAN_DIR_ALIAS_PARSERS: weakref.WeakSet[argparse.ArgumentParser] = weakref.WeakSet()
+
+
+def _add_plan_dir_with_option_alias(
+    parser: argparse.ArgumentParser, *, help_text: str
+) -> None:
+    """Accept ``PLAN_DIR`` positionally, keeping ``--plan-dir`` as an alias.
+
+    Exactly one spelling is required, and passing both is refused unless they
+    name the same path. The subparsers action reconciles the two after the
+    leaf parses, so the error names the leaf's own usage line.
+    """
+    parser.add_argument(
+        _PLAN_DIR_POSITIONAL_DEST,
+        metavar="PLAN_DIR",
+        nargs="?",
+        default=None,
+        help=help_text,
+    )
+    parser.add_argument(
+        "--plan-dir",
+        dest="plan_dir",
+        metavar="PLAN_DIR",
+        default=None,
+        help="Alias for the PLAN_DIR positional",
+    )
+    _PLAN_DIR_ALIAS_PARSERS.add(parser)
+
+
+def _reconcile_plan_dir_alias(
+    parser: argparse.ArgumentParser, namespace: argparse.Namespace, dest: str
+) -> None:
+    positional = getattr(namespace, _PLAN_DIR_POSITIONAL_DEST, None)
+    option = getattr(namespace, dest, None)
+    if hasattr(namespace, _PLAN_DIR_POSITIONAL_DEST):
+        delattr(namespace, _PLAN_DIR_POSITIONAL_DEST)
+    if (
+        positional is not None
+        and option is not None
+        and os.path.realpath(os.path.expanduser(positional))
+        != os.path.realpath(os.path.expanduser(option))
+    ):
+        parser.error(
+            f"PLAN_DIR {positional!r} and --plan-dir {option!r} disagree; "
+            "pass one of them"
+        )
+    chosen = positional if positional is not None else option
+    if chosen is None:
+        parser.error("the following arguments are required: PLAN_DIR")
+    setattr(namespace, dest, chosen)
 
 
 class _AgentSessionLoopArgumentParser(argparse.ArgumentParser):
@@ -183,7 +267,7 @@ def _add_workbench_serve_args(
         dest=_workbench_dest("json", child_parser=child_parser),
         action="store_true",
         default=_workbench_default(False, child_parser=child_parser),
-        help="Print machine-readable JSON startup output",
+        help="Print machine-readable JSON output for the startup record",
     )
 
 

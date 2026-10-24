@@ -151,6 +151,28 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
             self.assertEqual("malformed-plan", payload["reason"])
             self.assertEqual("no-such-label-xyz", payload["plan_reference"])
             self.assertNotIn("plan_dir", payload)
+            self.assertIn(
+                "no plan label from `asl sessions` matches 'no-such-label-xyz'",
+                payload["error"],
+            )
+
+    def test_path_argument_error_does_not_mention_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing-plan"
+
+            completed = self._run_status([str(missing)], check=False)
+            self.assertEqual(1, completed.returncode)
+            self.assertIn("plan directory does not exist", completed.stderr)
+            self.assertNotIn("asl sessions", completed.stderr)
+
+    def test_file_argument_reports_not_a_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_file = Path(tmp) / "plan.md"
+            plan_file.write_text("# Plan\n", encoding="utf-8")
+
+            completed = self._run_status([str(plan_file)], check=False)
+            self.assertEqual(1, completed.returncode)
+            self.assertIn("asl status: plan path is not a directory", completed.stderr)
 
     def test_existing_malformed_plan_dir_retains_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
