@@ -32,6 +32,13 @@ and later runs start the longest shards first, so the slowest one bounds
 wall-clock time instead of starting last; shards with no recorded duration go
 first, in a stable lane-then-name order.
 
+``--slice K/N`` runs only the K-th of N disjoint slices of a mode's shards,
+so CI can spread one suite over N parallel jobs. Shards are dealt round-robin
+in lane-then-name order -- never by recorded duration, which a fresh checkout
+does not have and two jobs could disagree on -- so every job computes the same
+partition and the N slices together run each shard exactly once. The
+registration shard runs in slice 1 only.
+
 Each shard runs in its own session under a timeout (``--shard-timeout``, or
 ``$ASL_TEST_SHARD_TIMEOUT``; default 900 seconds, 0 disables it). A shard that
 overruns has its whole process group killed and is reported as ``TIMEOUT``
@@ -43,6 +50,7 @@ Usage:
     python3 -m tests.run_suite --fast
     python3 -m tests.run_suite --portable
     python3 -m tests.run_suite --all [--jobs N] [--shard-timeout S] [--verbose]
+    python3 -m tests.run_suite --all --slice 2/4
 """
 
 from __future__ import annotations
@@ -225,27 +233,47 @@ def _record_timings(results: list[dict[str, Any]]) -> None:
         print(f"note: shard timings not recorded: {error}")
 
 
+def parse_slice(value: str) -> tuple[int, int]:
+    """``"2/4"`` as ``(2, 4)``: the second of four slices, counted from one."""
+    index, sep, count = value.partition("/")
+    try:
+        parsed = (int(index), int(count))
+    except ValueError:
+        parsed = (0, 0)
+    if not sep or not 1 <= parsed[0] <= parsed[1]:
+        raise argparse.ArgumentTypeError(
+            f"expected K/N with 1 <= K <= N, not {value!r}"
+        )
+    return parsed
+
+
 def _shard_commands(
-    mode: str, timings: dict[str, float] | None = None
+    mode: str,
+    timings: dict[str, float] | None = None,
+    slice_: tuple[int, int] = (1, 1),
 ) -> list[tuple[str, list[str]]]:
-    """Every shard ``mode`` runs, longest recorded duration first.
+    """Every shard ``mode`` runs in ``slice_``, longest recorded duration first.
 
     The registration check is a shard like any other, so its imports overlap
     with the tests rather than adding to wall-clock time.
     """
     shards = [
-        (
-            REGISTRATION_SHARD,
-            [sys.executable, "-m", "tests.run_suite", "--check-registration"],
-        )
-    ]
-    shards.extend(
         (module, [sys.executable, "-m", "unittest", module])
         for module in _modules_for(mode)
-    )
+    ]
     if mode == "all":
         shards.extend(
             (path, [sys.executable, str(REPO_ROOT / path)]) for path in SCRIPT_SUITES
+        )
+    index, count = slice_
+    shards = shards[index - 1 :: count]
+    if index == 1:
+        shards.insert(
+            0,
+            (
+                REGISTRATION_SHARD,
+                [sys.executable, "-m", "tests.run_suite", "--check-registration"],
+            ),
         )
     recorded = _load_timings() if timings is None else timings
     # Stable: shards with equal (or no) recorded duration keep lane order.
@@ -529,6 +557,13 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--slice",
+        type=parse_slice,
+        default=(1, 1),
+        metavar="K/N",
+        help="run only the K-th of N disjoint slices of the shards (default: 1/1)",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         default=os.environ.get(VERBOSE_ENV, "") not in ("", "0"),
@@ -543,7 +578,7 @@ def main(argv: list[str] | None = None) -> int:
     mode = "portable" if args.portable else "fast" if args.fast else "all"
     timeout = _env_timeout() if args.shard_timeout is None else args.shard_timeout
 
-    shards = _shard_commands(mode)
+    shards = _shard_commands(mode, slice_=args.slice)
     started = time.monotonic()
     results = []
     # A SIGTERM (a stress run's cleanup trap, a CI cancel) must take the
@@ -594,6 +629,8 @@ def main(argv: list[str] | None = None) -> int:
     label = {"portable": "portable suite", "fast": "fast suite"}.get(
         mode, "complete suite"
     )
+    if args.slice != (1, 1):
+        label += f" (slice {args.slice[0]}/{args.slice[1]})"
     verdict = "FAILED" if failures else "passed"
     print(
         f"\n{label} {verdict}: {total_tests} tests across {len(shards)} shards "

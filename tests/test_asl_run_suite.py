@@ -1,4 +1,4 @@
-"""The shard driver's own failure handling: timeouts, signals, output caps."""
+"""The shard driver's own behavior: slices, timeouts, signals, output caps."""
 
 from __future__ import annotations
 
@@ -114,6 +114,45 @@ class ShardReportTests(unittest.TestCase):
 
         self.assertIn("line 0", report)
         self.assertNotIn("omitted", report)
+
+
+class ShardSliceTests(unittest.TestCase):
+    def _names(self, slice_: tuple[int, int]) -> list[str]:
+        return [name for name, _ in run_suite._shard_commands("all", {}, slice_)]
+
+    def test_the_slices_run_every_shard_exactly_once(self) -> None:
+        whole = self._names((1, 1))
+        sliced = [name for index in (1, 2, 3, 4) for name in self._names((index, 4))]
+
+        self.assertEqual(sorted(sliced), sorted(whole))
+        self.assertEqual(len(sliced), len(set(sliced)))
+
+    def test_only_the_first_slice_checks_registration(self) -> None:
+        self.assertIn(run_suite.REGISTRATION_SHARD, self._names((1, 3)))
+        self.assertNotIn(run_suite.REGISTRATION_SHARD, self._names((2, 3)))
+        self.assertNotIn(run_suite.REGISTRATION_SHARD, self._names((3, 3)))
+
+    def test_recorded_durations_do_not_move_a_shard_between_slices(self) -> None:
+        names = self._names((1, 1))
+        skewed = {name: float(rank) for rank, name in enumerate(names)}
+
+        for index in (1, 2):
+            with self.subTest(slice=index):
+                unrecorded = self._names((index, 2))
+                recorded = [
+                    name
+                    for name, _ in run_suite._shard_commands("all", skewed, (index, 2))
+                ]
+                self.assertEqual(sorted(recorded), sorted(unrecorded))
+
+    def test_a_slice_is_k_of_n_counted_from_one(self) -> None:
+        self.assertEqual(run_suite.parse_slice("2/4"), (2, 4))
+        for value in ("0/4", "5/4", "2", "a/b", "1/0", "/4"):
+            with (
+                self.subTest(value=value),
+                self.assertRaises(run_suite.argparse.ArgumentTypeError),
+            ):
+                run_suite.parse_slice(value)
 
 
 if __name__ == "__main__":

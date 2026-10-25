@@ -11,7 +11,9 @@ on:
 # Python interpreter. The macOS lane is the one that speaks for a release --
 # it runs the complete suite on the platform the ASL/AgentMux pair is developed,
 # installed, and released against. Nothing the Linux lane skips is left
-# unchecked; it is checked on macOS instead.
+# unchecked; it is checked on macOS instead. The macOS lane is one suite dealt
+# across parallel jobs: `--slice K/N` gives each job a disjoint share of the
+# shards, and together the slices run every shard exactly once.
 # Third-party actions are pinned to commit SHAs (the tag they resolved from is
 # in the trailing comment) and the Linux runner to an explicit image, so a moved
 # tag or a runner-image migration cannot change what a commit is checked with.
@@ -68,9 +70,16 @@ jobs:
         run: python3 -m agent_session_loop harness-compat --json
 
   macos-full:
-    name: macOS (full)
+    name: macOS (full ${{ matrix.slice }}/4)
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 25
+    strategy:
+      # A failure in one slice must not hide the verdict for the other three.
+      fail-fast: false
+      matrix:
+        # Keep the count in step with the `/4` in the job name and the suite
+        # step below.
+        slice: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -85,14 +94,19 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
 
+      # Lint is not sliced, so one job runs it for the whole lane.
       - name: Install Python tooling
+        if: matrix.slice == 1
         run: python3 -m pip install --upgrade "ruff==0.16.0" "mypy==2.3.0"
 
       - name: Install shellcheck
+        if: matrix.slice == 1
         run: brew install shellcheck
 
       - name: Lint
+        if: matrix.slice == 1
         run: env ASL_CLI_TRACE=0 just lint
 
-      - name: Complete test suite
-        run: env ASL_CLI_TRACE=0 just test-all
+      - name: Complete test suite (slice ${{ matrix.slice }}/4)
+        # `just test-all`, one slice of it.
+        run: env ASL_CLI_TRACE=0 python3 -m tests.run_suite --all --slice ${{ matrix.slice }}/4
