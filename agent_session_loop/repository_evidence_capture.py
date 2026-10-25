@@ -18,13 +18,42 @@ from . import (
 )
 
 
+def _split_raw_from_patch(text: str, *, argv: Sequence[str]) -> tuple[str, str]:
+    """Split ``--patch-with-raw`` output into ``--name-status`` text and the patch.
+
+    One probe renders both, so the name list and the patches are read from the
+    same diff queue instead of two runs that a concurrent write could set
+    apart. Git prints every raw entry, ``:<mode> <mode> <sha> <sha> <status>``
+    then a tab and the path, followed by one blank line and the patch exactly
+    as plain ``git diff`` renders it, so ``diff_sha256`` stays the hash of the
+    same bytes. Dropping the four fields before the status leaves the
+    ``<status>\t<path>`` line ``--name-status`` prints. A raw entry that does
+    not have that shape fails the capture closed.
+    """
+    names: list[str] = []
+    cursor = 0
+    while text.startswith(":", cursor):
+        end = text.find("\n", cursor)
+        if end < 0:
+            raise evidence_git._ReviewGuardUnavailable("diff-raw-malformed", argv)
+        fields = text[cursor + 1 : end].split(" ", 4)
+        if len(fields) != 5 or "\t" not in fields[4]:
+            raise evidence_git._ReviewGuardUnavailable("diff-raw-malformed", argv)
+        names.append(fields[4] + "\n")
+        cursor = end + 1
+    if names and text.startswith("\n", cursor):
+        cursor += 1
+    return "".join(names), text[cursor:]
+
+
 def _pair_diff_names_with_patches(
     names_text: str, diff_text: str, *, argv: Sequence[str], reason: str
 ) -> tuple[list[str], list[list[str]]]:
     """Attribute each patch in ``diff_text`` to its path in ``names_text``.
 
-    ``names_text`` is ``--name-status`` output, which walks the same diff queue
-    in the same order as the full patch. Its status is what says how many patch
+    ``names_text`` is ``--name-status`` output (see
+    :func:`_split_raw_from_patch`), which walks the same diff queue in the same
+    order as the full patch. Its status is what says how many patch
     sections the path claims, so consuming that many per entry attributes each
     patch without re-parsing ``diff --git`` headers, whose two paths cannot be
     told apart when one of them contains a space. ``--no-renames`` is what keeps
@@ -197,43 +226,28 @@ def _capture_review_repo_fingerprint(
         diff_argv = [
             "diff",
             diff_base,
+            "--patch-with-raw",
             *evidence_git._GUARD_DIFF_FLAGS,
             "--",
             *pathspecs,
         ]
-        diff_text = evidence_git._review_guard_git(cwd_path, diff_argv).stdout
-        names_argv = [
-            "diff",
-            diff_base,
-            "--name-status",
-            *evidence_git._GUARD_DIFF_FLAGS,
-            "--",
-            *pathspecs,
-        ]
-        names_text = evidence_git._review_guard_git(cwd_path, names_argv).stdout
+        names_text, diff_text = _split_raw_from_patch(
+            evidence_git._review_guard_git(cwd_path, diff_argv).stdout,
+            argv=diff_argv,
+        )
         index_diff_argv = [
             "diff",
             "--cached",
             diff_base,
+            "--patch-with-raw",
             *evidence_git._GUARD_DIFF_FLAGS,
             "--",
             *pathspecs,
         ]
-        index_diff_text = evidence_git._review_guard_git(
-            cwd_path, index_diff_argv
-        ).stdout
-        index_names_argv = [
-            "diff",
-            "--cached",
-            diff_base,
-            "--name-status",
-            *evidence_git._GUARD_DIFF_FLAGS,
-            "--",
-            *pathspecs,
-        ]
-        index_names_text = evidence_git._review_guard_git(
-            cwd_path, index_names_argv
-        ).stdout
+        index_names_text, index_diff_text = _split_raw_from_patch(
+            evidence_git._review_guard_git(cwd_path, index_diff_argv).stdout,
+            argv=index_diff_argv,
+        )
         # ``--full-name`` keeps the reported paths repo-root-relative when
         # ``cwd`` is a subdirectory, so they line up with the repo-root-relative
         # allowlist and with the ``repo_root / rel`` lookup below; the

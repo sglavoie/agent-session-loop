@@ -93,9 +93,7 @@ class ReviewFingerprintIndexAndGitFailureTests(ReviewFingerprintBase):
     def test_failed_git_probe_yields_an_unavailable_fingerprint(self) -> None:
         failing = {
             "diff": ("diff", "HEAD"),
-            "name-status": ("diff", "HEAD", "--name-status"),
-            "index-diff": ("diff", "--cached", "HEAD", "--no-renames"),
-            "index-name-status": ("diff", "--cached", "HEAD", "--name-status"),
+            "index-diff": ("diff", "--cached", "HEAD"),
             "untracked": ("ls-files", "--others"),
         }
         real_run_git = review_guard._run_git

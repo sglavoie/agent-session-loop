@@ -237,9 +237,11 @@ class ReviewFingerprintDiffEvidenceTests(ReviewFingerprintBase):
 
         def fake_run_git(cwd, args):
             result = real_run_git(cwd, args)
-            if tuple(args[:3]) == ("diff", "HEAD", "--no-renames"):
+            if tuple(args[:3]) == ("diff", "HEAD", "--patch-with-raw"):
+                # Keep the raw entry that names the path; drop its patch.
+                raw, _, _patch = result.stdout.partition("\n\n")
                 return subprocess.CompletedProcess(
-                    args=result.args, returncode=0, stdout="", stderr=""
+                    args=result.args, returncode=0, stdout=raw + "\n\n", stderr=""
                 )
             return result
 
@@ -251,6 +253,29 @@ class ReviewFingerprintDiffEvidenceTests(ReviewFingerprintBase):
         detail = review_guard._review_guard_unavailable_detail(fingerprint)
         self.assertIsNotNone(detail)
         self.assertEqual("tracked-patch-missing", detail["reason"])
+        self.assertNotIn("tracked_patches", fingerprint)
+
+    def test_a_raw_entry_without_its_fields_fails_closed(self) -> None:
+        self._write("README.md", "mutated\n")
+        real_run_git = review_guard_git._run_git
+
+        def fake_run_git(cwd, args):
+            result = real_run_git(cwd, args)
+            if tuple(args[:3]) == ("diff", "HEAD", "--patch-with-raw"):
+                return subprocess.CompletedProcess(
+                    args=result.args,
+                    returncode=0,
+                    stdout=":100644 M\tREADME.md\n\n" + result.stdout,
+                    stderr="",
+                )
+            return result
+
+        with mock.patch.object(review_guard_git, "_run_git", fake_run_git):
+            fingerprint = self._fingerprint()
+
+        detail = review_guard._review_guard_unavailable_detail(fingerprint)
+        self.assertIsNotNone(detail)
+        self.assertEqual("diff-raw-malformed", detail["reason"])
         self.assertNotIn("tracked_patches", fingerprint)
 
     def test_a_typechanged_path_pairs_both_of_its_patches(self) -> None:
