@@ -24,6 +24,7 @@ from asl_workbench.installation import (
 from .workbench_lifecycle_support import (
     ASL_EXECUTABLE,
     CONNECTOR_ID,
+    PYTHON,
     FakeManager,
     accept,
     connector_configuration,
@@ -50,19 +51,19 @@ class ConnectorLifecycleTest(unittest.TestCase):
         )
 
     def test_installing_records_the_attachment_rather_than_a_package(self) -> None:
-        status = self.installation().install(python=sys.executable, activate=True)
+        status = self.installation().install(python=PYTHON, activate=True)
         self.assertTrue(status["installed"])
         self.assertIsNone(status["artifact"])
         attachment = status["attachment"]
         self.assertEqual(attachment["executable"], ASL_EXECUTABLE)
-        self.assertEqual(attachment["python"], sys.executable)
+        self.assertEqual(attachment["python"], PYTHON)
         self.assertRegex(attachment["revision"], r"^[0-9a-f]{40}$")
         self.assertIn("dirty", attachment)
 
     def test_the_recorded_transport_is_the_one_the_service_would_judge(self) -> None:
         # Recorded by the same function the service applies to a live pairing.
         # A second implementation of that judgement would record nothing.
-        status = self.installation().install(python=sys.executable)
+        status = self.installation().install(python=PYTHON)
         transport = status["attachment"]["transport"]
         self.assertEqual(transport["protocol"], 1)
         self.assertEqual(transport["connector_id"], CONNECTOR_ID)
@@ -73,13 +74,13 @@ class ConnectorLifecycleTest(unittest.TestCase):
     def test_an_artifact_is_refused_for_the_connector(self) -> None:
         with self.assertRaises(lifecycle.LifecycleError) as caught:
             self.installation().install(
-                python=sys.executable, artifact=self.root / "x.zip", digest="a" * 64
+                python=PYTHON, artifact=self.root / "x.zip", digest="a" * 64
             )
         self.assertIn("attaches", str(caught.exception))
 
     def test_reattaching_records_the_revision_but_offers_no_rollback(self) -> None:
-        first = self.installation().install(python=sys.executable)
-        second = self.installation().install(python=sys.executable, upgrade=True)
+        first = self.installation().install(python=PYTHON)
+        second = self.installation().install(python=PYTHON, upgrade=True)
         self.assertEqual(
             first["attachment"]["revision"], second["attachment"]["revision"]
         )
@@ -98,7 +99,7 @@ class ConnectorLifecycleTest(unittest.TestCase):
             {**connector_configuration(self.prefix), "asl": str(impostor)},
         )
         with self.assertRaises(lifecycle.LifecycleError):
-            self.installation().install(python=sys.executable)
+            self.installation().install(python=PYTHON)
 
     def test_a_configuration_with_unexpected_fields_is_refused(self) -> None:
         write_json(
@@ -141,7 +142,7 @@ class ConnectorLifecycleTest(unittest.TestCase):
             lifecycle.connector_settings(self.prefix)
 
     def test_removing_the_connector_unloads_it_and_keeps_the_token(self) -> None:
-        self.installation().install(python=sys.executable, activate=True)
+        self.installation().install(python=PYTHON, activate=True)
         status = self.installation().remove()
         self.assertFalse(status["installed"])
         self.assertIn("remove", FakeManager.calls)
@@ -172,7 +173,7 @@ class HostCommandTest(unittest.TestCase):
             self.assertIn("writable", str(caught.exception))
 
     def test_this_interpreter_is_inside_the_supported_band(self) -> None:
-        self.assertGreaterEqual(lifecycle.python_check(sys.executable)[:2], (3, 13))
+        self.assertGreaterEqual(lifecycle.python_check(PYTHON)[:2], (3, 13))
 
     def test_an_interpreter_that_is_not_one_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

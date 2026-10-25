@@ -1,0 +1,2 @@
+# Bytecode from running the checks, which no trial should count as a change.
+__pycache__/

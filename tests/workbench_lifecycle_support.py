@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -38,6 +41,30 @@ ORIGIN = PI_SITE.public_origin
 
 #: How long a started release is given to publish readiness or to stop.
 TIMEOUT = 30.0
+
+
+def _owned_python() -> str:
+    """The interpreter running the suite, as one only its owner may rewrite.
+
+    The lifecycle refuses an interpreter another user can write to, as it
+    should. Whether ``sys.executable`` passes is up to whoever installed it:
+    Homebrew's is ``0755``, the python.org framework build CI installs is
+    group-writable. So where it would be refused, the tests get a ``0755``
+    wrapper that execs it, and the refusal itself stays covered by the tests
+    that ask for it.
+    """
+    if not os.stat(sys.executable).st_mode & 0o022:
+        return sys.executable
+    directory = tempfile.mkdtemp(prefix="asl-lifecycle-python-")
+    atexit.register(shutil.rmtree, directory, ignore_errors=True)
+    wrapper = Path(directory) / "python3"
+    wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+    wrapper.chmod(0o755)
+    return str(wrapper)
+
+
+#: The interpreter every lifecycle test installs with; see :func:`_owned_python`.
+PYTHON = _owned_python()
 
 
 #: The ASL this checkout installs, named the way an operator names it. Not
@@ -234,7 +261,7 @@ class InstallationTestCase(unittest.TestCase):
     def install(self, which: tuple[Path, str], **options: Any) -> dict[str, Any]:
         path, digest = which
         return self.installation().install(
-            artifact=path, digest=digest, python=sys.executable, **options
+            artifact=path, digest=digest, python=PYTHON, **options
         )
 
     def record(self) -> dict[str, Any]:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 import time
 import unittest
 
@@ -20,6 +19,7 @@ from asl_workbench.installation import (
 from tests.test_workbench_portable import artifact
 
 from .workbench_lifecycle_support import (
+    PYTHON,
     TIMEOUT,
     FakeManager,
     InstallationTestCase,
@@ -232,9 +232,7 @@ class ServiceLifecycleTest(InstallationTestCase):
         with self.assertRaises(InstallationError):
             lifecycle.Installation(
                 bare, manager_factory=FakeManager, validator=accept
-            ).install(
-                artifact=self.first[0], digest=self.first[1], python=sys.executable
-            )
+            ).install(artifact=self.first[0], digest=self.first[1], python=PYTHON)
 
 
 class ReadinessTest(InstallationTestCase):

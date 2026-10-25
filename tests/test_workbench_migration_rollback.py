@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shutil
-import sys
 import unittest
 from contextlib import closing
 
@@ -14,7 +13,7 @@ from asl_workbench.installation import (
     DATABASE_PATH,
     SECRETS_PATH,
 )
-from tests.workbench_lifecycle_support import InstallationTestCase
+from tests.workbench_lifecycle_support import PYTHON, InstallationTestCase
 
 from .support_workbench_migration import (
     PLAN_KEY,
@@ -144,9 +143,7 @@ class RollbackPairingTest(InstallationTestCase):
     def test_the_connector_has_no_paired_state_to_restore(self) -> None:
         installation = lifecycle.Installation(self.prefix)
         with self.assertRaises(lifecycle.LifecycleError):
-            installation.install(
-                python=sys.executable, restore=self.prefix / BACKUPS_DIRECTORY
-            )
+            installation.install(python=PYTHON, restore=self.prefix / BACKUPS_DIRECTORY)
 
 
 if __name__ == "__main__":
