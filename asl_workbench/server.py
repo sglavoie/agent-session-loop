@@ -77,6 +77,17 @@ class ApplicationServer(http.server.ThreadingHTTPServer):
         self.application = application
         super().__init__(address, handler or ApplicationRequestHandler)
 
+    def server_bind(self) -> None:
+        # ``HTTPServer.server_bind`` also names the server with
+        # ``socket.getfqdn``: a reverse DNS lookup whose answer only CGI reads.
+        # Where reverse DNS stalls -- a macOS CI runner, a laptop on a network
+        # with no resolver for it -- that lookup alone held every bind for tens
+        # of seconds. The bound address is the name this server goes by.
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
+
     @property
     def bound_host(self) -> str:
         # AF_INET keeps server_address a (str, int) pair; the stdlib annotation

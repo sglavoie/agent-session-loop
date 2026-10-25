@@ -513,8 +513,9 @@ def main(argv: list[str] | None = None) -> int:
         # harness of its own, so one shard per core oversubscribes the machine
         # several times over. Under that load the loop tests race their own
         # subprocess timeouts and process-group enumeration, which reads as
-        # flaky tests rather than as the overload it is.
-        default=max(1, (os.cpu_count() or 4) // 2),
+        # flaky tests rather than as the overload it is. Half rounded up, not
+        # down: a three-core CI runner would otherwise run every shard serially.
+        default=max(1, ((os.cpu_count() or 4) + 1) // 2),
         help="maximum parallel shard processes (default: half the CPU count)",
     )
     parser.add_argument(

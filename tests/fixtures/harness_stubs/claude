@@ -1,0 +1,6 @@
+#!/bin/sh
+# Placeholder harness for the test suite; see HARNESS_STUBS in tests/__init__.py.
+# It exists to be found on PATH, never to be run: a test that needs a harness
+# to answer mocks `run_harness` or puts its own fake earlier on PATH.
+echo "$(basename "$0"): test harness stub reached; no real harness runs in tests" >&2
+exit 127

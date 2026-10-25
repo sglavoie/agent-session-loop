@@ -1,5 +1,7 @@
 """Focused portion of tests/workbench_support.py."""
 
+from asl_workbench.server import ApplicationServer
+
 from .workbench_support_store import *
 
 
@@ -75,37 +77,21 @@ class RecordingSubmissionLane:
         self.handed.append(dict(payload))
 
 
-class ShellFixtureServer(http.server.ThreadingHTTPServer):
+class ShellFixtureServer(ApplicationServer):
     """A loopback transport for any :class:`Application`, for fixtures only.
 
     ``WorkbenchHTTPServer`` builds a ``LocalProvider`` in its constructor, so
     it cannot carry the remote one. Everything below the application is
-    borrowed from the real handler rather than written again -- this class
-    supplies the application and nothing else.
+    borrowed from the real server and handler rather than written again --
+    this class supplies the application and nothing else.
     """
-
-    allow_reuse_address = True
-    daemon_threads = True
-    # Matches ``WorkbenchHTTPServer``: a browser fetches the whole module graph
-    # in one burst, and the default backlog of five resets whatever does not
-    # fit. See the comment there.
-    request_queue_size = 64
 
     def __init__(
         self,
         address: tuple[str, int],
         application: workbench_http.Application,
     ) -> None:
-        super().__init__(address, _ShellFixtureHandler)
-        self.application = application
-
-    @property
-    def bound_host(self) -> str:
-        return str(self.server_address[0])
-
-    @property
-    def bound_port(self) -> int:
-        return int(self.server_address[1])
+        super().__init__(address, application, handler=_ShellFixtureHandler)
 
 
 class _ShellFixtureHandler(workbench_server.WorkbenchRequestHandler):

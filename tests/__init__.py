@@ -15,3 +15,16 @@ TRACE_ENV_VAR = "ASL_CLI_TRACE"
 # root and skew `asl metrics`. Trace tests re-enable tracing explicitly inside a
 # temporary state root.
 os.environ[TRACE_ENV_VAR] = "0"
+
+#: Placeholder ``codex``, ``claude`` and ``copilot`` executables, put first on
+#: PATH. Much of the suite mocks the harness call but still goes through the
+#: real "is it installed" check (``shutil.which``), so without these it passes
+#: only on a machine with every harness installed and fails -- or waits out
+#: its timeouts -- on one without, such as CI. First, so a developer's installed
+#: harness is never what a test resolves or runs; a test's own fake still wins
+#: because it is put in front later, and a test that swaps PATH out to simulate
+#: a missing harness is unaffected.
+HARNESS_STUBS = os.path.join(os.path.dirname(__file__), "fixtures", "harness_stubs")
+os.environ["PATH"] = os.pathsep.join(
+    entry for entry in (HARNESS_STUBS, os.environ.get("PATH", "")) if entry
+)
