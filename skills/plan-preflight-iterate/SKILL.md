@@ -86,7 +86,7 @@ Capture stdout. Parse the JSON body. Expect the stable shape emitted by `agent_s
 - `mark_loop_ready_requested` (bool), `marked_loop_ready` (bool)
 - Registered plans add `workspace_root`, `registry_digest`, and ordered `repositories`; require them to match the manifest registry and keep their qualified root/origin/overlap findings intact.
 
-If exit code is non-zero and the JSON body contains a `reason` of `plan-structure`, print the error and stop — the plan directory itself is malformed and must be repaired or recreated with `session-split` before this skill can help.
+If exit code is non-zero and the JSON body contains a `reason` of `plan-structure`, print the error and stop — the plan directory itself is malformed and must be repaired or recreated with `session-split` before this skill can help. A `reason` of `plan-not-found` means no directory exists at that path: print the error and the `plan-structure.missing` repair hint, and stop so the user can supply the right `<plan-dir>` (a typo or a moved plan), rather than recommending a re-split.
 
 If `ok` is `True` and the baseline already has no red/yellow findings, skip directly to Step 5 (Mark Loop-Ready). If the only red/yellow findings are `manifest-readiness` and/or `progress-journal-missing` findings, also skip to Step 5: `asl preflight --mark-loop-ready` is the canonical repair for missing readiness metadata, stale readiness SHA, and `draft`/`reviewed` readiness state, **and** it auto-backfills stale/missing `progress.md` (force semantics) when `progress-journal-missing` is the only remaining non-readiness blocker. Both repairs surface in the JSON payload's `auto_repairs` array.
 

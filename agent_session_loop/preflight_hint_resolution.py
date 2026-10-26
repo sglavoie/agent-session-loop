@@ -2,10 +2,30 @@
 
 from __future__ import annotations
 
-from .preflight_models import PreflightFinding, RepairHint
+from .preflight_models import (
+    PLAN_DIRECTORY_MISSING_MESSAGE,
+    PreflightFinding,
+    RepairHint,
+)
 from .preflight_repair_hints import REPAIR_HINTS
 
 _CATEGORY_HINT_OVERRIDES: dict[str, RepairHint] = {
+    # A path that names nothing is far more often a typo or a moved plan than
+    # a lost one, so the hint asks for the path before offering a re-split.
+    "plan-structure.missing": RepairHint(
+        category="plan-structure",
+        check_id="plan-structure.missing",
+        severity_hint="red",
+        message=(
+            "No plan directory exists at this path. Check PLAN_DIR for a typo, "
+            "pass the plan's current location if it moved, or split the source "
+            "plan with session-split if it was never created."
+        ),
+        question_template=(
+            "No plan directory exists at {path}. Which path should I use as PLAN_DIR?"
+        ),
+        fix_category="invocation-fix",
+    ),
     "repository-footprint.multi-repo": RepairHint(
         category="repository-footprint",
         check_id="repository-footprint.multi-repo",
@@ -208,8 +228,19 @@ _CATEGORY_HINT_OVERRIDES: dict[str, RepairHint] = {
 }
 
 
+def is_missing_plan_directory(finding: PreflightFinding) -> bool:
+    """Whether ``finding`` reports that ``PLAN_DIR`` does not exist at all."""
+    return finding.category == "plan-structure" and finding.message.startswith(
+        PLAN_DIRECTORY_MISSING_MESSAGE
+    )
+
+
 def _override_check_id_for_finding(finding: PreflightFinding) -> str:
     """Return the override check_id for a finding, or '' if no override applies."""
+    if finding.category == "plan-structure":
+        if is_missing_plan_directory(finding):
+            return "plan-structure.missing"
+        return ""
     if finding.category == "manifest-readiness":
         if "missing readiness" in finding.message:
             return "manifest-readiness.missing"

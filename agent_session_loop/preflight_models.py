@@ -19,6 +19,12 @@ from .verification_models import VerificationContext
 
 PreflightSeverity = Literal["red", "yellow", "green"]
 
+#: How the ``plan-structure`` finding for a nonexistent ``PLAN_DIR`` begins.
+#: The CLI reports that finding as ``plan-not-found``, and its repair hint asks
+#: for the right path instead of offering to recreate a plan that may only have
+#: been mistyped or moved.
+PLAN_DIRECTORY_MISSING_MESSAGE = "plan directory does not exist"
+
 
 PreflightCategory = Literal[
     "plan-structure",

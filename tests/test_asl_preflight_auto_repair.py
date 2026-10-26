@@ -95,7 +95,7 @@ class AutoRepairPlanTests(unittest.TestCase):
         pause = preflight_auto_repair.build_suggested_pause(report, plan_dir="/plans/x")
         self.assertEqual("unsafe", pause["reason"])
         self.assertIn("missing-contract", pause["detail"])
-        self.assertIn("automatic plan repair failed", pause["detail"])
+        self.assertIn("no automatic repair clears", pause["detail"])
 
     def test_progress_only_repairable_without_pause(self) -> None:
         report = _report(

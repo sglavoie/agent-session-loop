@@ -285,7 +285,10 @@ class JsonStateMaintenanceCliTests(JsonCliHelpers, unittest.TestCase):
             self.assertEqual(1, negative.returncode)
             payload = json.loads(negative.stdout)
             self.assertEqual("invalid-max-age-days", payload["reason"])
-            self.assertIn("--max-age-days must be non-negative", payload["error"])
+            self.assertEqual(
+                "--max-age-days must be a finite, non-negative number; got '-5'",
+                payload["error"],
+            )
             self.assertFalse(payload["paused"])
             self.assertEqual({}, payload["details"])
 

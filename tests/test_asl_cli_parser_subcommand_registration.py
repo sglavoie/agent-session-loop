@@ -6,6 +6,7 @@ import argparse
 import io
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
@@ -704,6 +705,43 @@ class NumericFlagValidationTests(unittest.TestCase):
                 self.assertIn(f"argument {flag}: must be", text)
                 self.assertIn(requirement, text)
                 self.assertNotIn("Traceback", text)
+
+    def test_handler_validated_flags_read_like_argparse_refusals(self) -> None:
+        """Flags a handler checks keep their JSON reason and argparse's wording.
+
+        Each echoes what the user typed, so ``--stale-days -1`` no longer reads
+        back as ``-1.0``, and the requirement is the shared phrase.
+        """
+        cases = (
+            (
+                ["metrics", "--since-days", "-1"],
+                "--since-days must be a positive integer; got '-1'",
+            ),
+            (
+                ["gc", "--max-age-days", "-5"],
+                "--max-age-days must be a finite, non-negative number; got '-5'",
+            ),
+            (
+                ["plans", "--stale-days", "-1"],
+                "--stale-days must be a finite, non-negative number; got '-1'",
+            ),
+            (
+                ["plans", "--stale-days", "-1.5"],
+                "--stale-days must be a finite, non-negative number; got '-1.5'",
+            ),
+            (
+                ["sessions", "--limit", "-1"],
+                "--limit must be a non-negative integer; got '-1'",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            for argv, message in cases:
+                with self.subTest(argv=argv):
+                    stderr = io.StringIO()
+                    with redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+                        code = cli.main([*argv, "--state-dir", tmp])
+                    self.assertEqual(1, code)
+                    self.assertTrue(stderr.getvalue().rstrip().endswith(message))
 
     def test_in_range_values_still_parse(self) -> None:
         parser = cli.build_parser()

@@ -34,6 +34,11 @@ no longer decide a retain question by removing the lock that answers it.
 is never an applied action either.
 `--json` emits the full per-plan projection, including every run's size and
 retain reason.
+A corpus-wide sweep also measures the Workbench archive under
+`<state_root>/archive/`, which `gc` never judges or deletes: the report (and the
+`archive` JSON object) states its entry count and bytes and how many entries are
+past the Workbench retention window, and points at the Workbench Archive view,
+the only place archive entries are purged.
 
 `maintenance` is the scheduled counterpart to `gc`: the same reclaim, performed
 daily by a job ASL installs and owns, plus one additional lane `gc` does not

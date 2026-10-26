@@ -63,6 +63,22 @@ def _parse_int(text: str, requirement: str) -> int:
         raise argparse.ArgumentTypeError(f"{requirement}; got {text!r}") from None
 
 
+def flag_refusal(flag: str, requirement: str, value: float) -> str:
+    """Word a handler-side refusal of ``flag`` like a ``type=`` refusal.
+
+    Flags a handler validates itself, so the refusal keeps its JSON ``reason``
+    under ``--json``, use this to read the same as the argparse-typed ones:
+    ``--since-days must be a positive integer; got '-1'``. A whole float is
+    echoed without its ``.0`` so ``--stale-days -1`` does not read back as
+    ``-1.0``.
+    """
+    if isinstance(value, float) and value.is_integer():
+        echoed = str(int(value))
+    else:
+        echoed = str(value)
+    return f"{flag} {requirement}; got {echoed!r}"
+
+
 def non_negative_float(text: str) -> float:
     """``type=`` for a finite number of seconds, days or minutes, zero allowed."""
     value = _parse_float(text, NON_NEGATIVE_NUMBER)

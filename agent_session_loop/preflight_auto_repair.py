@@ -12,7 +12,10 @@ from . import (
     workspaces,
 )
 from .plans_errors import PlanError
-from .preflight_hint_resolution import _override_check_id_for_finding
+from .preflight_hint_resolution import (
+    _override_check_id_for_finding,
+    is_missing_plan_directory,
+)
 from .preflight_models import (
     PreflightCategory,
     PreflightFinding,
@@ -304,7 +307,8 @@ def build_suggested_pause(
     ``None`` when the report is ok or every blocker is auto-repairable
     (stale lock, progress journal, readiness-only, or a registry migration the
     plan emits). An active lock yields a ``lock-contention`` pause; any other
-    residual blocker yields ``unsafe`` with the failing categories named —
+    residual blocker yields ``unsafe`` with the failing categories named, and
+    a nonexistent plan directory yields ``unsafe`` naming that path —
     matching Step 4a's fallback pause. A registry migration the derivation
     refused adds the fact it refused for, which is the one thing a human has
     to supply before the category can clear.
@@ -312,6 +316,12 @@ def build_suggested_pause(
     if report.ok:
         return None
     blocking = _blocking_findings(report)
+    missing = next(
+        (finding for finding in blocking if is_missing_plan_directory(finding)), None
+    )
+    if missing is not None:
+        # Nothing was repaired or could be: the pause names the absent path.
+        return {"reason": "unsafe", "detail": missing.message}
     if any(
         _override_check_id_for_finding(finding) == "env-lock.active"
         for finding in blocking
@@ -326,7 +336,9 @@ def build_suggested_pause(
     )
     hard = sorted({f.category for f in residual if f.category != "manifest-readiness"})
     if hard:
-        detail = f"automatic plan repair failed: {', '.join(hard)}"
+        # Automatic repair only ever covers the categories handled above, so
+        # these were never attempted; the detail must not claim one failed.
+        detail = f"no automatic repair clears: {', '.join(hard)}"
         if registry.missing_fact is not None:
             detail += (
                 "; the registry migration refuses for missing fact "

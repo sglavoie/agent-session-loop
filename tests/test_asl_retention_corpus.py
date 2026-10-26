@@ -6,7 +6,7 @@ import io
 import json
 import socket
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 
 from agent_session_loop import (
     plans_files,
@@ -200,6 +200,85 @@ class DryRunPurityTests(RetentionTestBase):
         self.assertTrue(
             (self.plan_state / state.RUNS_DIR_NAME / RUN_OLD).is_dir(),
             "a locked plan keeps every run under --apply",
+        )
+
+
+class ArchiveReportTests(RetentionTestBase):
+    """gc states the Workbench archive's size without judging or deleting it."""
+
+    def _archive(self, archive_id: str, *, days_ago: float, size: int) -> None:
+        entry = self.state_root / "archive" / archive_id
+        (entry / "plan").mkdir(parents=True)
+        (entry / "plan" / "blob.bin").write_bytes(b"x" * size)
+        (entry / "archive.json").write_text(
+            json.dumps(
+                {
+                    "archive_id": archive_id,
+                    "original_plan_dir": str(self.tmp_path / archive_id),
+                    "archived_at": _stamp(days_ago),
+                    "expires_at": _stamp(days_ago - 30),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _gc(self, *, apply: bool = False) -> retention.GCReport:
+        return retention.run_gc(
+            state_dir=self.state_root,
+            now=NOW,
+            apply=apply,
+            measure_archive=True,
+            registry_path=self.tmp_path / "absent-registry.json",
+        )
+
+    def test_archive_bytes_and_expired_entries_are_reported_not_reclaimed(
+        self,
+    ) -> None:
+        self._write_run(RUN_OLD, finished_at=_stamp(45), log_bytes=100)
+        self._write_run(RUN_NEW, finished_at=_stamp(1))
+        self._archive("old-entry", days_ago=90, size=5000)
+        self._archive("new-entry", days_ago=1, size=7000)
+
+        report = self._gc(apply=True)
+
+        archive = report.to_dict()["archive"]
+        self.assertFalse(archive["managed_by_gc"])
+        self.assertEqual(2, archive["entry_count"])
+        self.assertGreaterEqual(archive["bytes"], 12000)
+        self.assertEqual(30, archive["retention_days"])
+        self.assertEqual(1, archive["past_retention_count"])
+        self.assertGreaterEqual(archive["past_retention_bytes"], 5000)
+        self.assertLess(archive["past_retention_bytes"], 7000)
+        self.assertIn("Workbench Archive view", archive["purge_hint"])
+        # --apply reclaimed the old run and left every archive entry alone.
+        self.assertEqual(1, report.removed_run_count)
+        self.assertTrue((self.state_root / "archive" / "old-entry").is_dir())
+        self.assertTrue((self.state_root / "archive" / "new-entry").is_dir())
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            retention._print_report(report)
+        text = out.getvalue()
+        self.assertIn("measured in run directories", text)
+        self.assertIn("Archive (not managed by gc): 2 entry(ies)", text)
+        self.assertIn("1 past the 30-day retention window", text)
+        self.assertIn("gc never deletes archive entries", text)
+
+    def test_missing_archive_reads_as_empty(self) -> None:
+        archive = self._gc().to_dict()["archive"]
+        self.assertEqual(0, archive["entry_count"])
+        self.assertEqual(0, archive["bytes"])
+        self.assertEqual(0, archive["past_retention_count"])
+
+    def test_plan_scope_and_unmeasured_sweeps_carry_no_archive(self) -> None:
+        self._archive("entry", days_ago=90, size=10)
+        self.assertIsNone(
+            retention.run_gc(state_dir=self.state_root, now=NOW).to_dict()["archive"]
+        )
+        self.assertIsNone(
+            retention.run_gc(
+                self.plan_dir, state_dir=self.state_root, now=NOW, measure_archive=True
+            ).archive
         )
 
 

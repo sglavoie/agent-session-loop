@@ -23,6 +23,7 @@ from . import (
     tail_records,
 )
 from .cli_defaults import program_name
+from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
 from .tail_control_messages import (
     _ABORT_TERMINAL_ACTIONS,
     _abort_details,
@@ -427,7 +428,7 @@ def tail_plan(
 ) -> None:
     """Print recent activity and optionally follow live events/logs."""
     if lines <= 0:
-        raise tail_models.TailError("--lines must be a positive integer")
+        raise tail_models.TailError(flag_refusal("--lines", POSITIVE_INTEGER, lines))
 
     snapshot = plans_snapshot.inspect_plan(plan_dir)
     plan_state = state.plan_state_dir(snapshot.plan_dir, state_dir)
@@ -489,7 +490,7 @@ def tail_plan_json(
     lands between reading the journal and starting to follow it.
     """
     if lines <= 0:
-        raise tail_models.TailError("--lines must be a positive integer")
+        raise tail_models.TailError(flag_refusal("--lines", POSITIVE_INTEGER, lines))
 
     snapshot = plans_snapshot.inspect_plan(plan_dir)
     plan_state = state.plan_state_dir(snapshot.plan_dir, state_dir)

@@ -11,6 +11,7 @@ from . import (
     repository_scope_payload,
     workspaces,
 )
+from .plans_errors import PLAN_NOT_FOUND_REASON
 from .plans_models import ReadinessMetadata
 from .preflight_auto_repair import (
     AutoRepair,
@@ -19,6 +20,7 @@ from .preflight_auto_repair import (
     repair_hint_payload,
 )
 from .preflight_footprint import _footprint_targets_by_session
+from .preflight_hint_resolution import is_missing_plan_directory
 from .preflight_models import PreflightFinding, PreflightReport
 
 PREFLIGHT_EXIT_REASON_OK = "ok"
@@ -47,7 +49,21 @@ def _counts_by_severity(report: PreflightReport) -> dict[str, int]:
     }
 
 
+def _primary_error_message(report: PreflightReport) -> str:
+    for finding in report.red_findings:
+        if is_missing_plan_directory(finding):
+            return finding.message
+    return (
+        f"{len(report.red_findings)} red, "
+        f"{len(report.yellow_findings)} yellow finding(s)"
+    )
+
+
 def _primary_error_reason(report: PreflightReport) -> str:
+    # A nonexistent PLAN_DIR is reported the way every other plan command
+    # reports it; the red finding stays in ``findings`` for repair consumers.
+    if any(is_missing_plan_directory(finding) for finding in report.red_findings):
+        return PLAN_NOT_FOUND_REASON
     if report.red_findings:
         return PREFLIGHT_EXIT_REASON_RED
     return PREFLIGHT_EXIT_REASON_YELLOW
@@ -148,7 +164,10 @@ def _format_finding_text(finding: PreflightFinding) -> str:
     severity_marker = f"[{finding.severity.upper()}]"
     session_label = f" {finding.session_id}" if finding.session_id else ""
     line = f"  {severity_marker} {finding.category}{session_label}: {finding.message}"
-    if finding.path:
+    # A message that already names its path ("missing context.md in plan
+    # directory: X") would otherwise read the path twice; a line number is
+    # still news, so the location stays whenever it carries one.
+    if finding.path and (finding.line is not None or finding.path not in line):
         location = finding.path
         if finding.line is not None:
             location = f"{location}:{finding.line}"

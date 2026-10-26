@@ -377,3 +377,37 @@ class MigrateStateCliTests(StateMigrationTestBase):
         self.assertEqual(1, code)
         self.assertFalse(payload["ok"])
         self.assertEqual("active-lock", payload["reason"])
+
+    def test_cli_missing_plan_directory_is_plan_not_found(self) -> None:
+        missing = self.tmp_path / "plans" / "no-such-plan"
+        for extra in ([], ["--from", str(self.old_plan)]):
+            with self.subTest(extra=extra):
+                code, payload, _ = self._run_cli(
+                    [
+                        "migrate-state",
+                        str(missing),
+                        *extra,
+                        "--state-dir",
+                        str(self.state_dir),
+                        "--json",
+                    ]
+                )
+                self.assertEqual(1, code)
+                self.assertEqual("plan-not-found", payload["reason"])
+                self.assertIn("plan directory does not exist", payload["error"])
+
+    def test_cli_reads_orphaned_state_whose_plan_directory_is_gone(self) -> None:
+        # The old path never exists on disk, yet its state is still read for an
+        # in-place upgrade: a missing directory only refuses when no state
+        # exists either, so the refusal here is about the record itself.
+        self._write_orphan_state()
+        _, payload, _ = self._run_cli(
+            [
+                "migrate-state",
+                str(self.old_plan),
+                "--state-dir",
+                str(self.state_dir),
+                "--json",
+            ]
+        )
+        self.assertNotIn(payload["reason"], {"plan-not-found", "no-source-state"})

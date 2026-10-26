@@ -11,6 +11,7 @@ from . import (
     responses,
 )
 from .cli_defaults import program_name
+from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
 from .literals import as_optional_literal
 from .plans_errors import PlanError
 from .plans_models import ReadinessMetadata
@@ -29,6 +30,7 @@ from .preflight_output import (
     PREFLIGHT_EXIT_REASON_MARKED,
     PREFLIGHT_EXIT_REASON_OK,
     _preflight_payload_fields,
+    _primary_error_message,
     _primary_error_reason,
     _print_text_preflight,
 )
@@ -116,7 +118,9 @@ def preflight_from_args(args: argparse.Namespace) -> int:
     mark_loop_ready: bool = args.mark_loop_ready
 
     if max_pending_sessions_arg is not None and max_pending_sessions_arg <= 0:
-        message = "--max-pending-sessions must be a positive integer"
+        message = flag_refusal(
+            "--max-pending-sessions", POSITIVE_INTEGER, max_pending_sessions_arg
+        )
         if want_json:
             responses.print_json(
                 responses.error_payload(
@@ -285,10 +289,7 @@ def preflight_from_args(args: argparse.Namespace) -> int:
                     responses.error_payload(
                         "preflight",
                         reason=_primary_error_reason(report),
-                        error=(
-                            f"{len(report.red_findings)} red, "
-                            f"{len(report.yellow_findings)} yellow finding(s)"
-                        ),
+                        error=_primary_error_message(report),
                         paused=False,
                         **payload_fields,
                     )

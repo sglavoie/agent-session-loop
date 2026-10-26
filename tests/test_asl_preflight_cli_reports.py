@@ -238,3 +238,42 @@ class PreflightCliReportTests(PreflightCliFixtures):
         self.assertEqual(
             "manifest-readiness.sha-mismatch", manifest_hints[0]["check_id"]
         )
+
+    def test_preflight_missing_plan_directory_reports_plan_not_found(self) -> None:
+        self.plan_dir = self.tmp_path / "no-such-plan"
+
+        completed = self._run_preflight()
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual("plan-not-found", payload["reason"])
+        self.assertIn("plan directory does not exist", payload["error"])
+        # The red finding stays in the findings list for repair consumers.
+        structure = [
+            finding
+            for finding in payload["findings"]
+            if finding["category"] == "plan-structure"
+        ]
+        self.assertEqual(1, len(structure))
+        hints = [
+            hint
+            for hint in payload["repair_hints"]
+            if hint["category"] == "plan-structure"
+        ]
+        self.assertEqual(["plan-structure.missing"], [h["check_id"] for h in hints])
+        self.assertNotIn("recreate", hints[0]["question_template"].lower())
+        # Nothing was repaired, so the pause must not claim a repair failed.
+        pause = payload["suggested_pause"]
+        self.assertEqual("unsafe", pause["reason"])
+        self.assertNotIn("repair failed", pause["detail"])
+        self.assertIn("plan directory does not exist", pause["detail"])
+
+    def test_preflight_text_finding_names_its_path_once(self) -> None:
+        (self.plan_dir / "context.md").unlink()
+
+        completed = self._run_preflight(json_output=False)
+
+        line = next(
+            row for row in completed.stdout.splitlines() if "missing context.md" in row
+        )
+        self.assertEqual(1, line.count(str(self.plan_dir.resolve())), line)

@@ -15,7 +15,7 @@ from . import (
     responses,
 )
 from .cli_defaults import program_name
-from .cli_parser_support import NON_NEGATIVE_NUMBER
+from .cli_parser_support import NON_NEGATIVE_NUMBER, flag_refusal
 from .workbench_discovery import discover_plans
 from .workbench_registry import load_registry
 from .workbench_registry_models import WorkbenchError
@@ -224,7 +224,7 @@ def plans_from_args(args: Any, *, now: datetime | None = None) -> int:
         return _plans_error(
             args,
             reason="invalid-argument",
-            error=f"--stale-days {NON_NEGATIVE_NUMBER}; got {stale_days}",
+            error=flag_refusal("--stale-days", NON_NEGATIVE_NUMBER, stale_days),
         )
 
     readiness_filter = getattr(args, "readiness", None)
