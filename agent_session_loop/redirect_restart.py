@@ -104,7 +104,9 @@ def predecessor_blocker(directory: Path) -> dict[str, Any] | None:
             mark_stopped(directory)
             return None
         return {"evidence_path": str(directory), "confirmation": confirmation}
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except (OSError, ValueError, KeyError, TypeError, RecursionError) as error:
+        # RecursionError is not a ValueError: an over-deep file must block
+        # like any other malformed evidence rather than crash the restart.
         return {"evidence_path": str(directory), "error": str(error)}
 
 
@@ -144,7 +146,7 @@ def resolution_for(
             and payload["reason"]
         ):
             return payload
-    except OSError, ValueError, KeyError, TypeError:
+    except OSError, ValueError, KeyError, TypeError, RecursionError:
         pass
     return None
 

@@ -176,6 +176,12 @@ class EvidenceTests(unittest.TestCase):
         )
         self.assertIsNotNone(redirect_restart.predecessor_blocker(self.directory))
 
+    def test_over_deep_evidence_blocks_instead_of_crashing(self):
+        (self.directory / "evidence.json").write_text("[" * 1_000_000)
+        blocked = redirect_restart.predecessor_blocker(self.directory)
+        self.assertIsNotNone(blocked)
+        self.assertIn("error", blocked)
+
     def test_unknown_descendant_identity_blocks_even_after_the_group_stops(self):
         redirect_restart.write_evidence(
             self.directory,
