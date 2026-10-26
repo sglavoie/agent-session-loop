@@ -207,11 +207,13 @@ def read_pending_run(run_dir: Path | str) -> PendingRun | None:
     path = record_path(run_dir)
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError, ValueError:
+        # ``ValueError`` covers bytes that are not UTF-8: a damaged record
+        # like any other, not a reason to fail the whole enumeration.
         return None
     try:
         parsed = json.loads(raw)
-    except json.JSONDecodeError, ValueError:
+    except ValueError, RecursionError:
         return None
     if not isinstance(parsed, dict):
         return None

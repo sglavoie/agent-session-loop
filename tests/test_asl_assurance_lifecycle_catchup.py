@@ -16,6 +16,7 @@ from agent_session_loop import (
     assurance_projection,
     events,
     plans_files,
+    state,
     state_abandonment,
     state_assurance_pending,
 )
@@ -490,6 +491,32 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
                 assurance_catchup.OUTCOME_AUDITED, report.results[0].outcome
             )
             self.assertEqual("claude", auditor.harnesses[0])
+
+
+class PendingRecordReadTests(unittest.TestCase):
+    """A damaged pending-audit record reads as absent rather than crashing."""
+
+    def _record(self, root: Path, run_id: str, body: bytes) -> Path:
+        plan_dir = root / "plan"
+        plan_dir.mkdir(exist_ok=True)
+        run_dir = state.plan_state_dir(plan_dir, root / "state") / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        assurance_catchup.record_path(run_dir).write_bytes(body)
+        return run_dir
+
+    def test_a_record_that_is_not_utf8_reads_as_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._record(
+                Path(tmp), "r1", b'{"run_id": "r1", "trigger": "\xff"}'
+            )
+
+            self.assertIsNone(assurance_catchup.read_pending_run(run_dir))
+
+    def test_an_over_deep_record_reads_as_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._record(Path(tmp), "r1", b"[" * 1_000_000 + b"]" * 1_000_000)
+
+            self.assertIsNone(assurance_catchup.read_pending_run(run_dir))
 
 
 if __name__ == "__main__":  # pragma: no cover
