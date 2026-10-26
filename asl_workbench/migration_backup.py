@@ -92,20 +92,26 @@ def backup(
     destination.parent.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
     stage = Path(tempfile.mkdtemp(dir=destination.parent, prefix="backup-"))
     files: dict[str, str] = {}
-    for name in names:
-        source = prefix / name
-        private(source)
-        target = stage / name
-        target.parent.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
-        if name in DATABASE_MEMBERS:
-            copy_database(source, target)
-        else:
-            atomic(target, source.read_bytes())
-        files[name] = digest_of(target)
-    write_json(
-        stage / BACKUP_MANIFEST, {"version": BACKUP_SCHEMA_VERSION, "files": files}
-    )
-    os.replace(stage, destination)
+    try:
+        for name in names:
+            source = prefix / name
+            private(source)
+            target = stage / name
+            target.parent.mkdir(
+                parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE
+            )
+            if name in DATABASE_MEMBERS:
+                copy_database(source, target)
+            else:
+                atomic(target, source.read_bytes())
+            files[name] = digest_of(target)
+        write_json(
+            stage / BACKUP_MANIFEST, {"version": BACKUP_SCHEMA_VERSION, "files": files}
+        )
+        os.replace(stage, destination)
+    except BaseException:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
     return {"version": BACKUP_SCHEMA_VERSION, "files": files}
 
 

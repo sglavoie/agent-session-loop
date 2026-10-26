@@ -161,6 +161,18 @@ class ServiceMigrationTest(LegacyPrefixTestCase):
             self.migration().apply()
         self.assertTrue((prefix / migration.LEGACY_DATABASE_PATH).is_file())
 
+    def test_a_backup_that_fails_leaves_no_migration_to_recover(self) -> None:
+        # Nothing was migrated yet. A record naming a backup that never landed
+        # would refuse every later apply and every recover, and the reason the
+        # backup failed would be buried under a missing-directory error.
+        prefix = self.service_prefix()
+        (prefix / migration.LEGACY_DATABASE_PATH).write_bytes(b"not a database" * 64)
+        with self.assertRaisesRegex(migration.MigrationError, "could not be copied"):
+            self.migration().apply()
+        self.assertFalse((prefix / migration.MIGRATION_PATH).exists())
+        self.assertEqual(list((prefix / BACKUPS_DIRECTORY).iterdir()), [])
+        self.assertEqual(self.migration().recover(), {"recovered": False})
+
     def test_the_migration_backs_the_whole_prefix_up_first(self) -> None:
         prefix = self.service_prefix()
         result = self.migration().apply()

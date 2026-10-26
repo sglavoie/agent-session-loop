@@ -149,6 +149,14 @@ class Migration:
             write_json(self.prefix / MIGRATION_PATH, record)
             try:
                 backup(self.prefix, destination)
+            except BaseException:
+                # Nothing has been migrated yet, and a backup that never landed
+                # is one neither the unwinding below nor `recover` could read:
+                # leaving the record would refuse every later apply and every
+                # recover, and would bury why the backup failed.
+                (self.prefix / MIGRATION_PATH).unlink(missing_ok=True)
+                raise
+            try:
                 for step in plan["steps"]:
                     getattr(self, f"_{step}")()
                 self._verify(plan["role"])
