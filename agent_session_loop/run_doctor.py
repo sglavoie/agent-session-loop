@@ -145,6 +145,11 @@ def doctor_from_args(args: argparse.Namespace) -> int:
         return _print_doctor_error(
             args, reason="input-error", error=ValueError(message)
         )
+    refusal = plans_errors.empty_plan_argument_refusal(args.plan_dir)
+    if refusal is not None:
+        return _print_doctor_error(
+            args, reason="input-error", error=ValueError(refusal)
+        )
     try:
         cwd = plans_files.canonicalize_path(args.cwd)
         if not cwd.is_dir():

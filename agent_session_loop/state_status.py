@@ -263,6 +263,21 @@ def status_from_args(args: argparse.Namespace) -> int:
     by ``asl sessions``. Labels are resolved through the state corpus before
     inspection; direct paths always take precedence and never trigger a lookup.
     """
+    refusal = plans_errors.empty_plan_argument_refusal(args.plan_dir)
+    if refusal is not None:
+        if args.json:
+            responses.print_json(
+                responses.error_payload(
+                    "status",
+                    reason="input-error",
+                    error=refusal,
+                    paused=False,
+                    plan_reference=str(args.plan_dir),
+                )
+            )
+        else:
+            print(f"{program_name()} status: {refusal}", file=sys.stderr)
+        return 1
     try:
         resolved_plan_dir = resolve_plan_reference(
             args.plan_dir, state_root(args.state_dir)

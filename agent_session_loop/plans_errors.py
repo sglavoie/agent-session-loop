@@ -46,6 +46,17 @@ class InputReadError(PlanError):
 PLAN_NOT_FOUND_REASON = "plan-not-found"
 
 
+def empty_plan_argument_refusal(value: object) -> str | None:
+    """The refusal for an empty or blank ``PLAN_DIR``, else ``None``.
+
+    ``Path("")`` is ``.``, so an empty argument would quietly act on whatever
+    directory the shell is in; each command reports this as ``input-error``.
+    """
+    if isinstance(value, str) and not value.strip():
+        return "PLAN_DIR must not be empty"
+    return None
+
+
 def plan_error_reason(error: BaseException, default: str) -> str:
     """``plan-not-found`` for a missing plan directory, else ``default``.
 

@@ -285,6 +285,10 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
             print(f"{program_name()} contract-check: {error}", file=sys.stderr)
         return 1
 
+    refusal = plans_errors.empty_plan_argument_refusal(args.plan_dir)
+    if refusal is not None:
+        return _emit_error("input-error", refusal)
+
     # The plan is read before the root, as verify reads it, so a missing plan
     # directory reads as plan-not-found whatever --cwd names.
     try:

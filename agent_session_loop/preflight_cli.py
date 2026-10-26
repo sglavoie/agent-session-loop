@@ -13,7 +13,7 @@ from . import (
 from .cli_defaults import program_name
 from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
 from .literals import as_optional_literal
-from .plans_errors import PlanError
+from .plans_errors import PlanError, empty_plan_argument_refusal
 from .plans_models import ReadinessMetadata
 from .plans_readiness import write_readiness_metadata
 from .preflight import run_preflight
@@ -117,10 +117,16 @@ def preflight_from_args(args: argparse.Namespace) -> int:
     want_json: bool = args.json
     mark_loop_ready: bool = args.mark_loop_ready
 
-    if max_pending_sessions_arg is not None and max_pending_sessions_arg <= 0:
+    message = empty_plan_argument_refusal(plan_dir_arg)
+    if (
+        message is None
+        and max_pending_sessions_arg is not None
+        and max_pending_sessions_arg <= 0
+    ):
         message = flag_refusal(
             "--max-pending-sessions", POSITIVE_INTEGER, max_pending_sessions_arg
         )
+    if message is not None:
         if want_json:
             responses.print_json(
                 responses.error_payload(

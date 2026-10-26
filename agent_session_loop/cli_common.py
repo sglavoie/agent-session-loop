@@ -99,15 +99,15 @@ def _refused_empty_plan_argument(
     ``Path("")`` is ``.``, so ``asl unlock ""`` would act on whatever
     directory the shell happens to be in. Returns ``True`` when refused.
     """
-    raw_value = args.plan_dir
-    if not isinstance(raw_value, str) or raw_value.strip():
+    refusal = plans_errors.empty_plan_argument_refusal(args.plan_dir)
+    if refusal is None:
         return False
     print_error(
         args,
         command_name=command_name,
         text_label=text_label,
         reason="input-error",
-        error="PLAN_DIR must not be empty",
+        error=refusal,
     )
     return True
 

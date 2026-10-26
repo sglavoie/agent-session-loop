@@ -73,7 +73,7 @@ from .baseline_report import _print_text_baseline, _run_result_payload
 from .baseline_run import run_baseline as run_baseline
 from .cli_defaults import program_name
 from .cli_parser_support import POSITIVE_NUMBER, flag_refusal
-from .plans_errors import PlanError, plan_error_reason
+from .plans_errors import PlanError, empty_plan_argument_refusal, plan_error_reason
 from .verification_models import verification_context_from_plan
 
 
@@ -121,6 +121,13 @@ def baseline_from_args(args: Any) -> int:
                 **common_fields,
             )
             return 1
+
+    refusal = empty_plan_argument_refusal(plan_dir_arg)
+    if refusal is not None:
+        _emit_baseline_error(
+            want_json=want_json, reason="input-error", error=refusal, **common_fields
+        )
+        return 1
 
     try:
         verification_context = verification_context_from_plan(plan_dir_arg, cwd_arg)

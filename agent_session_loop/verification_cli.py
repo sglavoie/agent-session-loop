@@ -229,6 +229,18 @@ def verify_from_args(args: argparse.Namespace) -> int:
     want_json = args.json
     artifact_dir_arg = getattr(args, "artifact_dir", None)
 
+    refusal = plans_errors.empty_plan_argument_refusal(plan_dir_arg)
+    if refusal is not None:
+        _emit_verify_error(
+            want_json=want_json,
+            reason="input-error",
+            error=refusal,
+            plan_dir=str(plan_dir_arg),
+            session=str(raw_session),
+            cwd=None,
+        )
+        return 1
+
     try:
         session_id = plans_session_ids.parse_session_id(raw_session)
     except ValueError as error:
