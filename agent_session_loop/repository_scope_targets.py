@@ -14,6 +14,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from .contract_models import fenced_line_flags
 from .contracts import (
     CommandCheck,
     CompletionContract,
@@ -25,7 +26,6 @@ from .contracts import (
 TargetKind = Literal["contract-path", "contract-cwd", "handoff", "prose"]
 TargetConfidence = Literal["hard", "soft"]
 
-_FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _PATH_SEGMENT = r"[A-Za-z0-9._+@%-]+"
 _ABSOLUTE_PATH_RE = re.compile(
     rf"(?<![\w./~-])(?:~/|/)(?:{_PATH_SEGMENT}/)*{_PATH_SEGMENT}/?"
@@ -64,17 +64,13 @@ def extract_path_targets(text: str) -> tuple[PathTarget, ...]:
     :func:`targets_from_checks`.
     """
     targets: list[PathTarget] = []
-    fence: str | None = None
-    for index, line in enumerate(text.splitlines(), start=1):
-        match = _FENCE_RE.match(line)
-        if match is not None:
-            delimiter = match.group(1)[0] * 3
-            if fence is None:
-                fence = delimiter
-            elif fence == delimiter:
-                fence = None
-            continue
-        if fence is not None:
+    lines = text.splitlines()
+    # The authoring parser's fence rule, so a quoted ``` example inside a
+    # longer fence neither closes it nor turns its snippet into evidence.
+    for index, (line, fenced) in enumerate(
+        zip(lines, fenced_line_flags(lines), strict=True), start=1
+    ):
+        if fenced:
             continue
         targets.extend(_extract_line_targets(line, index))
     return tuple(targets)

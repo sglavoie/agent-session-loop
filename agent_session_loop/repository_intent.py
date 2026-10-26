@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from . import repository_scope, repository_scope_targets
+from .contract_models import fenced_line_flags
 from .workspaces import (
     bounded_repository_rows,
     canonicalize_filesystem_path,
@@ -94,7 +95,6 @@ REDACTED_CREDENTIAL = "***@"
 PROVENANCE_METADATA_FIELDS: tuple[str, ...] = ("Split from",)
 
 _CREDENTIAL_RE = re.compile(r"[^\s/@:]+:[^\s/@]+@")
-_FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _BACKTICK_RE = re.compile(r"`([^`\n]+)`")
 _PROVENANCE_LINE_RE = re.compile(
     r"^\s*(?:[-*]\s+)?\*\*(?:"
@@ -214,17 +214,11 @@ def _without_provenance_metadata(text: str) -> str:
 
 def _backtick_candidates(text: str) -> list[IntentCandidate]:
     candidates: list[IntentCandidate] = []
-    fence: str | None = None
-    for index, line in enumerate(text.splitlines(), start=1):
-        match = _FENCE_RE.match(line)
-        if match is not None:
-            delimiter = match.group(1)[0] * 3
-            if fence is None:
-                fence = delimiter
-            elif fence == delimiter:
-                fence = None
-            continue
-        if fence is not None:
+    lines = text.splitlines()
+    for index, (line, fenced) in enumerate(
+        zip(lines, fenced_line_flags(lines), strict=True), start=1
+    ):
+        if fenced:
             continue
         for span in _BACKTICK_RE.finditer(line):
             value = span.group(1).strip()

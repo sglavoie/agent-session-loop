@@ -42,6 +42,25 @@ class CandidateExtractionTests(unittest.TestCase):
 
         self.assertEqual({"/Users/dev/work/repoA/src/main.py"}, values)
 
+    def test_a_quoted_fence_does_not_close_the_longer_fence_around_it(
+        self,
+    ) -> None:
+        text = (
+            "Real work in /Users/dev/work/repoA/src/main.py.\n"
+            "````markdown\n"
+            "```bash\n"
+            "cd /Users/dev/work/repoB && make `/Users/dev/work/repoC/tool`\n"
+            "```\n"
+            "````\n"
+        )
+
+        values = {
+            candidate.value
+            for candidate in repository_intent.candidates_from_text(text)
+        }
+
+        self.assertEqual({"/Users/dev/work/repoA/src/main.py"}, values)
+
     def test_provenance_metadata_is_where_a_plan_came_from(self) -> None:
         text = (
             "# Plan\n"
