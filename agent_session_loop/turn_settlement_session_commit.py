@@ -74,14 +74,12 @@ def commit_session_if_owed(
         with ctx.persistence.lock:
             turn_payload["repair_commit"] = {
                 "mode": run_selection.REPAIR_COMMIT_MODE_PER_CHILD,
+                # A failure is checked first: one raised while the targets were
+                # being read leaves none, which is not the same as nothing dirty.
                 "result": (
-                    "no-changes"
-                    if not session_targets
-                    else (
-                        "failed"
-                        if failed_commit is not None or commit_error is not None
-                        else "committed"
-                    )
+                    "failed"
+                    if failed_commit is not None or commit_error is not None
+                    else ("no-changes" if not session_targets else "committed")
                 ),
                 "commit_group": commit_group,
             }

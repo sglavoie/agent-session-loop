@@ -11,6 +11,7 @@ from agent_session_loop import (
     session_verification,
     turn_settlement,
 )
+from agent_session_loop.run_errors import RunError
 
 from .support_asl_turn_settlement import SESSION_ID, SettlementTestCase
 
@@ -95,6 +96,20 @@ class SessionCommitTests(SettlementTestCase):
             self.turn_payload["repair_commit"]["mode"],
         )
         self.assertEqual("committed", self.turn_payload["repair_commit"]["result"])
+
+    def test_a_repair_child_whose_targets_could_not_be_read_records_failed(
+        self,
+    ) -> None:
+        def refuse(*_args: object, **_kwargs: object) -> None:
+            raise RunError("workspace write guard did not pass")
+
+        self.patch(commit_settlement, "_dirty_commit_targets", refuse)
+        self.settle(is_repair_session=True, commit_mode=None)
+        # The commit failed before any target was known; "no-changes" would
+        # contradict the session_commit failure recorded beside it.
+        self.assertEqual("failed", self.turn_payload["repair_commit"]["result"])
+        self.assertEqual("commit-failed", self.turn_payload["session_commit"]["reason"])
+        self.assertEqual(1, len(self.soft_failures))
 
     def test_a_repair_child_with_nothing_dirty_records_no_changes(self) -> None:
         self.settle(is_repair_session=True, commit_mode=None)
