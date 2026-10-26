@@ -8,10 +8,10 @@ def _check_original_binding(
 ) -> None:
     """Bind recovery to the workspace of the original failure, before retries."""
     starts: dict[str, dict[str, Any]] = {}
-    for line in event_path.read_text(encoding="utf-8").splitlines():
+    for line in event_path.read_bytes().splitlines():
         try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
+            event = json.loads(line.decode("utf-8"))
+        except ValueError, RecursionError:
             raise RecoveryError("unreadable event history") from None
         if not isinstance(event, dict) or not isinstance(event.get("payload"), dict):
             raise RecoveryError("incomplete event history")

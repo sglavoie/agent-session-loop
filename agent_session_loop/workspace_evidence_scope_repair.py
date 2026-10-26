@@ -53,7 +53,9 @@ def _latest_workspace_scope_repair_requirement(
 ) -> dict[str, Any] | None:
     """Return the latest uncleared retained-mutation record for a session."""
     try:
-        lines = event_path.read_text(encoding="utf-8").splitlines()
+        # Bytes, decoded line by line below: a stray non-UTF-8 byte then
+        # spoils only its own line, the way a torn line does, not the history.
+        lines = event_path.read_bytes().splitlines()
     except FileNotFoundError:
         return None
     except OSError:
@@ -63,8 +65,8 @@ def _latest_workspace_scope_repair_requirement(
     accepted_guard_hashes: set[str] = set()
     for line in reversed(lines):
         try:
-            record = json.loads(line)
-        except TypeError, json.JSONDecodeError:
+            record = json.loads(line.decode("utf-8"))
+        except ValueError, RecursionError:
             continue
         if not isinstance(record, dict):
             continue
