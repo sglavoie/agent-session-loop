@@ -166,6 +166,27 @@ class SuccessfulRedirectTests(RedirectCliTestCase):
         self.assertEqual(redirect_store_vocab.ERROR_INVALID_TTL, payload["reason"])
         self.assertEqual((), self.journal().requests)
 
+    def test_an_invalid_ttl_is_refused_in_the_flags_name_before_the_target(
+        self,
+    ) -> None:
+        """It used to read as no-active-run with no run, and as ttl_seconds."""
+        for live in (False, True):
+            with self.subTest(live_run=live):
+                if live:
+                    self.make_live_run()
+                else:
+                    self.write_state(run_id=None)
+
+                code, payload = self.redirect("--text", FEEDBACK, "--ttl", "99999")
+
+                self.assertEqual(redirect_cli.EXIT_REFUSED, code)
+                self.assertEqual(
+                    redirect_store_vocab.ERROR_INVALID_TTL, payload["reason"]
+                )
+                self.assertIn("--ttl", payload["error"])
+                self.assertNotIn("ttl_seconds", payload["error"])
+                self.assertEqual((), self.journal().requests)
+
 
 class UnavailableControlTests(RedirectCliTestCase):
     """Corrections nothing can carry, and the exit code that says retry later."""

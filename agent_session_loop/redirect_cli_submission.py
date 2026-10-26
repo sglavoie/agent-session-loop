@@ -8,6 +8,7 @@ from .redirect_cli_projection import (
     _stage_for_submission,
     _store_error_details,
     _target_summary,
+    _ttl_is_valid,
     _validated_timeout,
 )
 from .redirect_cli_vocab import *
@@ -36,6 +37,10 @@ def control_redirect_from_args(args: argparse.Namespace) -> int:
         maximum_seconds=redirect_admission.MAX_ACCEPTANCE_WAIT_SECONDS,
     )
     if wait_seconds is None:
+        return EXIT_REFUSED
+    if not _ttl_is_valid(
+        args, command_name=COMMAND_REDIRECT, text_label=TEXT_LABEL_REDIRECT
+    ):
         return EXIT_REFUSED
     expected_target, expectation_ok = _expected_target(
         args,
