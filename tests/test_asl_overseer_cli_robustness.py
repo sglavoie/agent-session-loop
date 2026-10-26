@@ -313,5 +313,46 @@ class UnmatchedSelectorTests(_OverseerCase):
         )
 
 
+class DurationCeilingTests(_OverseerCase):
+    """A duration too large for a timedelta is refused by the parser."""
+
+    def _refused(self, *argv: str) -> None:
+        with (
+            redirect_stderr(io.StringIO()),
+            redirect_stdout(io.StringIO()),
+            self.assertRaises(SystemExit) as caught,
+        ):
+            self.fleet.parse(*argv)
+        self.assertEqual(2, caught.exception.code)
+
+    def test_watch_durations_and_timeouts_have_a_ceiling(self) -> None:
+        plan = str(self.plan)
+        watch = ("watch", "--watcher-id", WATCHER)
+        cases = [
+            (watch, flag, "86400")
+            for flag in (
+                "--for-seconds",
+                "--interval-seconds",
+                "--sweep-seconds",
+                "--lease-seconds",
+            )
+        ]
+        cases.append((watch, "--timeout", "3600"))
+        cases.extend(
+            ((leaf, plan), "--timeout", "3600")
+            for leaf in ("inspect", "decide", "reconcile")
+        )
+        for prefix, flag, ceiling in cases:
+            with self.subTest(leaf=prefix[0], flag=flag):
+                self.fleet.parse(*prefix, flag, ceiling)
+                for value in (str(float(ceiling) + 1), "1e300"):
+                    self._refused(*prefix, flag, value)
+
+    def test_the_largest_bounded_watch_does_not_overflow(self) -> None:
+        payload = self.watch("--for-seconds", "86400", "--interval-seconds", "86400")
+
+        self.assertTrue(payload["complete"])
+
+
 if __name__ == "__main__":
     unittest.main()
