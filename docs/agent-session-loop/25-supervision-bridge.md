@@ -31,7 +31,9 @@ build-time disagreement, and there is no protocol-1 parser left to fall
 back to. The refusal message is a fixed string rather than an
 interpolation of whatever the client sent, because a compatibility reason
 reaches an operator's screen verbatim. Reads survive a mismatch, so a
-stale cockpit can still render what it has and explain itself.
+stale cockpit can still render what it has and explain itself. The one
+exception is `workbench.ensure`, whose answer is mutation capability
+rather than state (see Hello below).
 
 A handshake against a projection that has since moved is answered rather
 than refused: `mutations_enabled` is false and the response names the
@@ -74,7 +76,12 @@ never by position or list length. The list is derived from the registered
 method handlers and event names rather than written by hand, so a name
 cannot be advertised before something stands behind it. `mutation_methods`
 is a subset of `capabilities` in the same order; a capability absent from
-it is a read, and reads are never gated behind the handshake.
+it is a read, and reads never need a current snapshot. One read is still
+gated: `workbench.ensure` writes nothing, but it hands out an owner
+Workbench token whose routes can mutate, so it is refused with the same
+`contract-set-mismatch` an unhandshaken mutation gets until a handshake
+has matched the contract set. It does not need `mutations_enabled`, so a
+handshake against a moved projection still opens it.
 
 ### Requests and responses
 
@@ -334,7 +341,10 @@ bridge never accumulates operator history.
 ### `workbench.ensure`
 
 Takes `plan_dir` and an optional `focus` (`reply`, `verification`,
-`active`, or `events`) and returns a deep link:
+`active`, or `events`) and returns a deep link. It requires a handshake
+that matched the contract set — the link's token is the Workbench owner
+token, which passes its unlock and launch routes — and is refused
+`contract-set-mismatch` before one, exactly as a mutation would be:
 
 ```json
 {"plan_dir":"/plans/alpha","row_id":"<hex>","focus":"reply",

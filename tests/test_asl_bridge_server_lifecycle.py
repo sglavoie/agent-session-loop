@@ -355,6 +355,51 @@ class BridgeWorkbenchLifecycleTests(unittest.TestCase):
             self.assertEqual("127.0.0.1", _RecordingServer.instances[0].kwargs["host"])
             lifecycle.stop()
 
+    def test_the_owner_link_needs_a_contract_matched_handshake(self) -> None:
+        """The link's token passes the Workbench's mutating routes.
+
+        Handing it to a client that never proved its contract set would let
+        that client skip the mutation gate by asking for the link instead.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir, _ = corpus.waiting_plan()
+            lifecycle = bridge_workers.WorkbenchLifecycle(
+                state_dir=corpus.state_root, server_factory=_RecordingServer
+            )
+            session = corpus.session(workbench_lifecycle=lifecycle)
+            ensure = _request(
+                "w1", intervention.ACTION_WORKBENCH, plan_dir=str(plan_dir)
+            )
+
+            before = session.handle_frame(ensure)
+            mismatched = session.handle_frame(
+                _request(
+                    "hs-0",
+                    bridge_protocol.METHOD_HANDSHAKE,
+                    contract_set_id="asl-amx-1.0123456789abcdef",
+                )
+            )
+            after_mismatch = session.handle_frame(ensure)
+            started_before_handshake = list(_RecordingServer.instances)
+            _handshake(session)
+            after = session.handle_frame(ensure)
+            lifecycle.stop()
+
+        for refused in (before, after_mismatch):
+            assert refused is not None
+            self.assertFalse(refused["ok"])
+            self.assertEqual(
+                bridge_protocol.ERROR_CONTRACT_SET_MISMATCH, refused["error"]["code"]
+            )
+            self.assertNotIn("token", json.dumps(refused))
+        assert mismatched is not None
+        self.assertFalse(mismatched["ok"])
+        self.assertEqual([], started_before_handshake)
+        assert after is not None
+        self.assertTrue(after["ok"], after)
+        self.assertIn("token=test-token", after["result"]["url"])
+
     def test_stop_shuts_the_server_down(self) -> None:
         lifecycle = bridge_workers.WorkbenchLifecycle(server_factory=_RecordingServer)
         lifecycle.ensure()

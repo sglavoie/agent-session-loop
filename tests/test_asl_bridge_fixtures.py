@@ -538,10 +538,14 @@ class MutationGateTests(unittest.TestCase):
             },
         )
 
-    def test_reading_methods_never_require_a_handshake(self) -> None:
+    def test_methods_outside_the_mutation_list_are_the_reads(self) -> None:
         readable = set(bridge_session.CAPABILITIES) - set(
             bridge_protocol.MUTATION_METHODS
         )
+        # A capability-granting read is still a read on the wire: it needs a
+        # contract-matched handshake, never a current snapshot.
+        self.assertEqual({"workbench.ensure"}, set(bridge_protocol.CAPABILITY_METHODS))
+        self.assertLessEqual(set(bridge_protocol.CAPABILITY_METHODS), readable)
 
         self.assertEqual(
             {

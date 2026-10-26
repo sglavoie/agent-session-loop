@@ -14,6 +14,7 @@ from . import __version__, intervention
 from .agent_mux_projection import CONTRACT_SET_ID
 from .bridge_protocol import (
     _METHOD_ORDER,
+    CAPABILITY_METHODS,
     ERROR_INVALID_REQUEST,
     ERROR_MALFORMED_JSON,
     ERROR_UNKNOWN_METHOD,
@@ -130,6 +131,8 @@ class BridgeSession(RedirectHandlers):
         # MUTATION_METHODS is gated by construction instead of by remembering.
         if method in MUTATION_METHODS:
             self._require_mutations_enabled(method)
+        elif method in CAPABILITY_METHODS:
+            self._require_contract_handshake(method)
         return handler(self, params)
 
 

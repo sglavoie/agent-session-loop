@@ -139,6 +139,16 @@ MUTATION_METHODS: tuple[str, ...] = (
 )
 
 
+# Reads that hand out capability rather than state. ``workbench.ensure`` writes
+# nothing, so it stays out of ``MUTATION_METHODS`` and needs no current
+# snapshot, but its answer is a tokenized owner URL whose token passes the
+# Workbench's own mutating routes. Serving that before a handshake has matched
+# the contract set would let any client skip the gate by asking for the link,
+# so these methods require a contract-matched handshake and are refused the way
+# an unhandshaken mutation is.
+CAPABILITY_METHODS: tuple[str, ...] = ("workbench.ensure",)
+
+
 EVENT_RUNS_CHANGED = "runs.changed"
 
 
