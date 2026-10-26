@@ -57,6 +57,9 @@ def _read_and_truncate(queue_path: Path) -> str | None:
             chunks.append(chunk)
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)
+        # Flushed like every other queue write: an unsynced truncate can be
+        # undone by a crash and replay commands this drain already consumed.
+        durability.fullsync(fd)
     finally:
         with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -148,7 +151,10 @@ def drain_queue(
             continue
         try:
             payload = json.loads(stripped)
-        except json.JSONDecodeError as error:
+        except (ValueError, RecursionError) as error:
+            # RecursionError is not a ValueError: a pathologically nested line
+            # raises it from the decoder. The queue is already truncated, so it
+            # must reject this one line rather than lose the whole batch.
             rejected.append(
                 RejectedCommand(
                     line_number=line_number,

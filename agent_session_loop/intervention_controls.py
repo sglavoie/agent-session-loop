@@ -81,16 +81,18 @@ def pending_command_ids(
     """Return the command ids still sitting in the queue, read without draining."""
     queue_path = control_queue.queue_path_for_plan(plan_dir, state_dir)
     try:
-        text = queue_path.read_text(encoding="utf-8")
+        # Bytes, decoded line by line below: a stray non-UTF-8 byte then
+        # spoils only its own line, the way a torn line does, not the file.
+        data = queue_path.read_bytes()
     except OSError:
         return frozenset()
     identifiers: set[str] = set()
-    for line in text.splitlines():
+    for line in data.splitlines():
         if not line.strip():
             continue
         try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
+            record = json.loads(line.decode("utf-8"))
+        except ValueError:
             continue
         identifier = record.get("id") if isinstance(record, Mapping) else None
         if isinstance(identifier, str) and identifier:
@@ -107,15 +109,17 @@ def command_observed(
     """Whether the runner recorded its delivery receipt for one command."""
     events_path = state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME
     try:
-        text = events_path.read_text(encoding="utf-8")
+        # Bytes, decoded line by line below: a stray non-UTF-8 byte then
+        # spoils only its own line, the way a torn line does, not the file.
+        data = events_path.read_bytes()
     except OSError:
         return False
-    for line in text.splitlines():
+    for line in data.splitlines():
         if not line.strip():
             continue
         try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
+            record = json.loads(line.decode("utf-8"))
+        except ValueError:
             # A line still being appended is read whole on the next poll.
             continue
         if not isinstance(record, Mapping):

@@ -168,6 +168,37 @@ class MarkRunAbandonedTests(unittest.TestCase):
         )
         self.assertEqual(1, len(read_jsonl(self.events_path)))
 
+    def test_reused_pid_lock_marks_abandoned(self) -> None:
+        # The lock's pid is alive but belongs to a later process: the reader
+        # already proved the owner gone, so abandonment must agree with it.
+        self.write_unfinished_state()
+        payload = {
+            "version": 1,
+            "owner": "agent-session-loop",
+            "pid": os.getpid(),
+            "plan_dir": str(plans_files.canonicalize_path(self.plan_dir)),
+            "created_at": "2026-06-19T12:00:00+00:00",
+            "hostname": socket.gethostname(),
+            "process_start": "Fri Jun 19 11:59:59 2026",
+        }
+        self.lock_path.write_text(json.dumps(payload), encoding="utf-8")
+        with mock.patch.object(
+            state_locks.process_tree,
+            "process_birth",
+            return_value="Mon Oct 26 09:00:01 2026",
+        ):
+            lock_info = state_locks.inspect_lock_info(self.plan_dir, self.state_dir)
+            assert lock_info is not None
+            self.assertTrue(lock_info.stale)
+
+            self.assertTrue(
+                state_abandonment.mark_run_abandoned(
+                    self.plan_state, lock_info=lock_info, trigger="test"
+                )
+            )
+
+        self.assertIn("was reused", self.persisted_state()["abandoned"]["lock_reason"])
+
     def test_abandonment_records_the_reason_it_overwrote(self) -> None:
         # A runner killed while it finalized an operator's stop had already
         # recorded that stop; without keeping it, reclaiming the run erases the

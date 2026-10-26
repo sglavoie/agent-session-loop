@@ -290,9 +290,11 @@ by `ASL_HARNESS_VERSION_PROBE=0` — in which case every harness degrades to
 `unknown`.
 
 Unknown warns, known-incompatible blocks. Default exit is 0 when nothing is
-`incompatible` and 1 when something is; `--strict` exits 3 when any harness is
-not `supported`, which is the mode the scheduled CI lane runs so that a new
-upstream release surfaces as a warning to be triaged rather than as a red build.
+`incompatible` and 1 when something is; `--strict` also fails an `unknown`
+harness, exiting 3 when nothing is incompatible (an incompatible one still exits
+1 first). The scheduled CI lane runs `--strict` and marks the drift job advisory,
+so a new upstream release surfaces as a warning to be triaged rather than as a
+red build.
 Every probe failure — an unresolvable executable, a non-zero `--version`, a
 timeout, unparseable output — degrades to `unknown`, never to `incompatible`, so
 "not installed" stays distinguishable from "known broken" in release evidence.

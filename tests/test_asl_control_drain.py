@@ -5,6 +5,7 @@ Split from tests/test_asl_control.py."""
 from __future__ import annotations
 
 import io
+import os
 import tempfile
 import threading
 import time
@@ -15,6 +16,7 @@ from unittest import mock
 
 from agent_session_loop import (
     control_queue,
+    control_queue_drain,
     events,
     harnesses,
     mailbox,
@@ -419,6 +421,45 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         self.assertEqual(1, len(result.rejected))
         self.assertIn("ignored control queue line 1", stderr.getvalue())
         self.assertIn(control_queue.REJECT_INVALID_JSON, stderr.getvalue())
+
+    def test_the_drain_truncate_is_fullsynced(self) -> None:
+        # An unsynced truncate can be undone by a crash, replaying commands the
+        # drain already consumed; every other queue write is fullsynced.
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+            command_id="stop-1",
+        )
+        sizes_at_sync: list[int] = []
+        with mock.patch.object(
+            control_queue_drain.durability,
+            "fullsync",
+            side_effect=lambda fd: sizes_at_sync.append(os.fstat(fd).st_size),
+        ):
+            result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual(["stop-1"], [command.id for command in result.accepted])
+        self.assertEqual([0], sizes_at_sync)
+
+    def test_a_pathologically_nested_line_is_rejected_alone(self) -> None:
+        # The decoder raises RecursionError, not a JSON error, for deep nesting;
+        # it escaped after the truncate and lost every command in the batch.
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+            command_id="stop-1",
+        )
+        queue_path = control_queue.queue_path_for_plan(self.plan_dir, self.state_dir)
+        with queue_path.open("a", encoding="utf-8") as handle:
+            handle.write("[" * 1_000_000 + "\n")
+        with mock.patch("sys.stderr", new_callable=io.StringIO):
+            result, _ = self.drain(run_control.RunControlState(current_harness="codex"))
+        self.assertEqual(("stop-1",), result.consumed_ids)
+        self.assertEqual(
+            [control_queue.REJECT_INVALID_JSON],
+            [rejected.reason for rejected in result.rejected],
+        )
 
     def queue_abort(
         self,

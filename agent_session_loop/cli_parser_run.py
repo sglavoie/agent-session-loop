@@ -155,7 +155,11 @@ def _add_run_inspection_commands(
         "--lines",
         type=int,
         default=tail.DEFAULT_LINES,
-        help="Recent activity lines to show before following",
+        metavar="N",
+        help=(
+            "Recent activity lines to show before following "
+            f"(default: {tail.DEFAULT_LINES})"
+        ),
     )
     tail_parser.add_argument(
         "--no-follow",

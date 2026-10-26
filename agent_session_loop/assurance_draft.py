@@ -43,6 +43,7 @@ from .assurance_models_primitives import (
     parse_issue_id,
 )
 from .assurance_models_vocab import MAX_LOCATOR_CHARS
+from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
 from .harnesses import HARNESS_NAMES
 
 #: Seconds granted to the single drafting turn. Drafting gets no retry: a
@@ -490,7 +491,7 @@ def draft_improvement_plan(
     if timeout_seconds < 1:
         raise DraftError(
             REASON_INPUT_ERROR,
-            f"--timeout must be a positive integer; got {timeout_seconds}",
+            flag_refusal("--timeout", POSITIVE_INTEGER, timeout_seconds),
         )
     target = _resolve_output(output_path)
 

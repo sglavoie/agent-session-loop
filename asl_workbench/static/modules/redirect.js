@@ -484,7 +484,12 @@ export async function handleRedirectSubmit(event) {
     );
     return;
   }
-  if (!routePlanId()) return;
+  // The plan this correction belongs to, fixed before anything is awaited.
+  // Opening another plan mid-flight resets the composer for that plan, and
+  // nothing this answer says may then reach the other plan's draft or state.
+  const planId = routePlanId();
+  if (!planId) return;
+  const stillHere = () => routePlanId() === planId;
   const textarea = document.getElementById("wb-redirect-text");
   if (!textarea) return;
   const text = textarea.value;
@@ -539,19 +544,21 @@ export async function handleRedirectSubmit(event) {
       // Remembered before the draft is cleared: the retry identity ends here,
       // the attribution has to outlive it or the operator loses their own
       // correction in the progress list.
-      rememberSubmittedRedirect(operationId);
+      // Only on the plan it belongs to: opening another plan reset the list.
+      if (stillHere()) rememberSubmittedRedirect(operationId);
       // A recorded correction is still work nobody has watched finish, so it
       // joins the outstanding list the rest of the matrix writes to. Only the
       // id goes in; the words never leave this tab.
       rememberReceipt({
         operation_id: operationId,
         action: "redirect",
-        plan: routePlanId(),
+        plan: planId,
         outcome: OUTCOME_PENDING,
         status: "accepted",
         reason: null,
         settled: false,
       });
+      if (!stillHere()) return;
       resetRedirectComposer();
       showControlsFeedback(
         "info",
@@ -560,6 +567,8 @@ export async function handleRedirectSubmit(event) {
           : "correction " + operationId + " recorded; watch Progress for acknowledgment"
       );
     } else {
+      // A refusal for a plan no longer on screen has nowhere to be said.
+      if (!stillHere()) return;
       // The draft stays put on every refusal, and on this one the panel says
       // why and offers the new identity that sending it would need.
       if (isRedirectConflict(body)) showRedirectConflict(body, operationId);
@@ -574,12 +583,13 @@ export async function handleRedirectSubmit(event) {
     rememberReceipt({
       operation_id: operationId,
       action: "redirect",
-      plan: routePlanId(),
+      plan: planId,
       outcome: OUTCOME_UNREACHABLE,
       status: null,
       reason: "unreachable",
       settled: false,
     });
+    if (!stillHere()) return;
     showFormError(
       "wb-redirect-form-errors",
       "submission failed: " +
@@ -588,10 +598,13 @@ export async function handleRedirectSubmit(event) {
         operationId
     );
   } finally {
-    state.redirect.inFlight = false;
-    setRedirectSubmitDisabled(!state.redirect.permitted);
+    if (stillHere()) {
+      state.redirect.inFlight = false;
+      setRedirectSubmitDisabled(!state.redirect.permitted);
+    }
     renderOperationReceipts(state.detailOutstanding);
   }
+  if (!stillHere()) return;
   await loadAndRenderRedirect();
 }
 

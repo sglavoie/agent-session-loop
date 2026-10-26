@@ -244,7 +244,9 @@ def probe(
     same ``None``, and those two are the whole distinction this probe exists to
     make.
     """
-    if record.host != socket.gethostname():
+    if state.recorded_on_foreign_host(
+        record.host, pid=record.pid, process_start=record.birth
+    ):
         return UNVERIFIED
     if record.pid <= 0:
         return UNVERIFIED

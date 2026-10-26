@@ -144,3 +144,29 @@ class ExternalRecoveryTests(ExternalRecoveryTestCase):
         self.assertEqual(
             "independent dirt\n", (self.repos["pi"] / "independent.txt").read_text()
         )
+
+    def test_an_unreadable_run_state_is_refused_rather_than_crashing(self):
+        # Bytes that are not UTF-8 used to escape as UnicodeDecodeError.
+        state_path = self.event_path.parent / events.STATE_FILE_NAME
+        for raw in (b'{"run_config": "\xff\xfe"}', b"{not json", b"[]"):
+            state_path.write_bytes(raw)
+            code, preview = self.invoke()
+            self.assertEqual(1, code, preview)
+            self.assertIn("recorded run state is unreadable", json.dumps(preview))
+
+    def test_a_non_utf8_event_line_is_skipped_like_a_torn_one(self):
+        # A stray byte used to fail the whole history with UnicodeDecodeError.
+        with self.event_path.open("ab") as handle:
+            handle.write(b'\n{"name": "run_started", "note": "\xff"}\n')
+        code, preview = self.invoke()
+        self.assertEqual(0, code, preview)
+        self.assertEqual([], preview["remaining_blockers"])
+        self.assertEqual("rejected", preview["original_run_id"])
+
+    def test_an_unreadable_recovery_journal_is_refused_rather_than_crashing(self):
+        journal = self.event_path.parent / "external-change-recovery.json"
+        for raw in (b'{"proposal": "\xff"}', b"{not json", b"[]"):
+            journal.write_bytes(raw)
+            code, preview = self.invoke()
+            self.assertEqual(1, code, preview)
+            self.assertIn("recovery journal is unreadable", json.dumps(preview))

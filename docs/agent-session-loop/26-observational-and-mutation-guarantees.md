@@ -238,7 +238,8 @@ repository's `just build-ccl`; it is not a recipe here.
 
 The test suite is organized as subsystem modules (`tests/test_asl_*.py`,
 stdlib `unittest` only) sharing fixtures through `tests/support.py`.
-`just test-fast` runs the unit/schema/parser modules; `just test-all` runs
+`just test-fast` runs the fast lane (every module that does not declare
+`ASL_TEST_LANE = "integration"`); `just test-all` runs
 everything — including the helper-script suites under `skills/` — as isolated
 parallel shards via `tests/run_suite.py`, which also fails if a test module is
 missing from its shard lists. Individual modules run directly, for example

@@ -116,7 +116,7 @@ class AssuranceProcessPendingTests(fixtures.AssuranceCliTestCase):
 
         self.assertEqual(1, code)
         self.assertEqual("", out)
-        self.assertIn("--limit must be a positive integer; got 0", err)
+        self.assertIn("--limit must be a positive integer; got '0'", err)
 
     def test_a_non_positive_audit_timeout_is_refused(self) -> None:
         code, payload, _ = self.run_json(

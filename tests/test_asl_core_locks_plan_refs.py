@@ -90,6 +90,19 @@ class LockRepositoryClaimTests(unittest.TestCase):
         self.assertTrue(lock_info.active)
         self.assertEqual((), lock_info.repository_roots)
 
+    def test_a_lock_nested_past_the_decoders_depth_reads_as_invalid(self) -> None:
+        # json.loads raises RecursionError, not ValueError, on deep nesting;
+        # every lock reader must classify the file rather than crash on it.
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock_path.write_text("[" * 200_000, encoding="utf-8")
+
+        lock_info = state_locks.read_lock_info(self.plan_dir, self.state_dir)
+
+        assert lock_info is not None
+        self.assertTrue(lock_info.stale)
+        self.assertIsNone(lock_info.pid)
+        self.assertTrue(lock_info.reason.startswith("invalid lock file:"))
+
     def test_a_malformed_repositories_value_reads_as_no_claim(self) -> None:
         raw = {"version": 2, "repositories": {"a": "/w/apple"}}
         lock_info = state.LockInfo(
@@ -297,6 +310,15 @@ class ResolvePlanReferenceTests(unittest.TestCase):
 
             # Directory component present: keep path-only behavior.
             self.assertEqual(plans_files.canonicalize_path("foo/bar"), resolved)
+
+    def test_unreadable_metadata_reads_as_absent(self) -> None:
+        # Bytes that are not UTF-8 and nesting deep enough that the decoder
+        # raises RecursionError, not a JSON error, are both just unusable.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "plan.json"
+            for raw in (b'{"plan_dir": "\xff"}', b"[" * 1_000_000):
+                path.write_bytes(raw)
+                self.assertIsNone(state_plan_refs._read_json_object_safe(path))
 
     def test_missing_state_root_retains_original(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

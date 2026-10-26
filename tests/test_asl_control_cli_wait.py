@@ -518,5 +518,41 @@ class ControlCliWaitTests(unittest.TestCase):
                 self.assertEqual([], self.queued_command_ids())
 
 
+class UndecodableWaitInputTests(unittest.TestCase):
+    # Bytes that are not UTF-8 used to escape as UnicodeDecodeError out of a
+    # receipt wait instead of reading like a torn line or a torn state.
+
+    def test_a_non_utf8_event_line_is_skipped_and_its_neighbors_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / events.EVENTS_FILE_NAME
+            first = json.dumps({"name": events.RUN_CONTROL_EVENT, "payload": {}})
+            last = json.dumps({"name": events.RUN_FINISHED_EVENT, "payload": {}})
+            path.write_bytes(
+                first.encode() + b'\n{"name": "\xff"}\n' + last.encode() + b"\n"
+            )
+
+            records = control_cli_wait._read_wait_records(path)
+
+        self.assertEqual(
+            [events.RUN_CONTROL_EVENT, events.RUN_FINISHED_EVENT],
+            [record["name"] for record in records],
+        )
+
+    def test_a_non_utf8_state_reports_no_active_finalization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            state_path = (
+                state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
+            )
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_bytes(b'{"active_finalization": {"phase": "\xff"}}')
+
+            self.assertIsNone(
+                control_cli_wait._active_finalization(plan_dir, str(state_dir))
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

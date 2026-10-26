@@ -26,10 +26,19 @@ export function historyQuery() {
 }
 
 export async function refreshHistory() {
-  if (state.historyInFlight) return;
+  if (state.historyInFlight) {
+    // A filter changed while a slow read was on the wire. That read answers
+    // the old filter, so dropping this request would leave the pane showing
+    // the wrong project; it runs once the current read settles instead.
+    state.historyPending = true;
+    return;
+  }
   state.historyInFlight = true;
+  state.historyPending = false;
   try {
     const body = await apiRequest(historyQuery());
+    // Superseded while on the wire: the follow-up read draws instead.
+    if (state.historyPending) return;
     if (!body || body.ok !== true) {
       renderHistoryError(body && body.reason ? body.reason : "unknown");
       return;
@@ -42,9 +51,14 @@ export async function refreshHistory() {
     };
     renderHistory();
   } catch (err) {
+    if (state.historyPending) return;
     renderHistoryError(describeError(err));
   } finally {
     state.historyInFlight = false;
+    if (state.historyPending) {
+      state.historyPending = false;
+      refreshHistory();
+    }
   }
 }
 

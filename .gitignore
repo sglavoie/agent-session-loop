@@ -21,7 +21,9 @@ __pycache__/
 skills/final-review.json
 skills/final-review.md
 
-# The repo has no [project] table, so uv only ever writes an empty stub lock
+# The only dependencies are the pinned dev group in pyproject.toml, which CI
+# installs with `pip install --group dev`; a uv lock would be a second,
+# unchecked record of those versions, so a local one stays untracked
 uv.lock
 
 # Claude Code's per-checkout state; `.claude/worktrees/` holds full copies of the

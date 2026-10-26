@@ -145,7 +145,7 @@ def metrics_from_args(args: argparse.Namespace) -> int:
                 responses.error_payload(
                     "metrics",
                     reason=(
-                        "invalid-since-days"
+                        "input-error"
                         if isinstance(error, _InvalidSinceDays)
                         else "os-error"
                         if isinstance(error, OSError)

@@ -50,7 +50,9 @@ def _read_json_object_safe(path: Path) -> dict[str, Any] | None:
         return None
     try:
         parsed = json.loads(raw)
-    except json.JSONDecodeError, ValueError:
+    except ValueError, RecursionError:
+        # RecursionError is not a ValueError: pathologically nested JSON raises
+        # it from the decoder instead of a decode error.
         return None
     return parsed if isinstance(parsed, dict) else None
 

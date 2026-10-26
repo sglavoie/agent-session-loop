@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import os
 import secrets
+import shlex
 import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -347,13 +348,22 @@ def _note_missing_context_files(home: Path, roots: Iterable[HarnessRoot]) -> Non
     """Say which context files the startup card has yet to be rendered into.
 
     This script links; it never renders the card. ``just install`` and
-    ``just sync-skills`` run the renderer after it and create these files.
+    ``just sync-skills`` run the renderer after it and create these files, but
+    only under the real ``$HOME``; for any other ``--home`` the hint names the
+    renderer pointed at that home instead.
     """
+    if home.expanduser().resolve() == Path.home().resolve():
+        remedy = "run `just sync-skills` (or `just install`)"
+    else:
+        command = (
+            "python3 -m agent_session_loop.startup_context "
+            f"--home {shlex.quote(os.fspath(home))}"
+        )
+        remedy = f"run `{command}` from this checkout"
     for path in missing_context_files(home, roots):
         print(
             f"install: {path} does not exist yet; this script does not render "
-            "the ASL startup card, so run `just sync-skills` (or `just install`) "
-            "to create it",
+            f"the ASL startup card, so {remedy} to create it",
             file=sys.stderr,
         )
 

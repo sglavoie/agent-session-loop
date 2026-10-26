@@ -428,7 +428,9 @@ def tail_plan(
 ) -> None:
     """Print recent activity and optionally follow live events/logs."""
     if lines <= 0:
-        raise tail_models.TailError(flag_refusal("--lines", POSITIVE_INTEGER, lines))
+        raise tail_models.TailInputError(
+            flag_refusal("--lines", POSITIVE_INTEGER, lines)
+        )
 
     snapshot = plans_snapshot.inspect_plan(plan_dir)
     plan_state = state.plan_state_dir(snapshot.plan_dir, state_dir)
@@ -490,7 +492,9 @@ def tail_plan_json(
     lands between reading the journal and starting to follow it.
     """
     if lines <= 0:
-        raise tail_models.TailError(flag_refusal("--lines", POSITIVE_INTEGER, lines))
+        raise tail_models.TailInputError(
+            flag_refusal("--lines", POSITIVE_INTEGER, lines)
+        )
 
     snapshot = plans_snapshot.inspect_plan(plan_dir)
     plan_state = state.plan_state_dir(snapshot.plan_dir, state_dir)
@@ -546,6 +550,8 @@ def tail_from_args(args: argparse.Namespace) -> int:
                         if isinstance(error, plans_errors.PlanNotFoundError)
                         else "malformed-plan"
                         if isinstance(error, plans_errors.PlanError)
+                        else "input-error"
+                        if isinstance(error, tail_models.TailInputError)
                         else "tail-error"
                         if isinstance(error, tail_models.TailError)
                         else "os-error"

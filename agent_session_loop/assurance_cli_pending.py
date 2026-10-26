@@ -19,6 +19,7 @@ from .assurance_cli_common import (
     _print_error,
 )
 from .assurance_models_primitives import AssuranceError
+from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
 
 
 def _pending_result_line(result: dict[str, Any]) -> str:
@@ -74,12 +75,12 @@ def assurance_process_pending_from_args(args: argparse.Namespace) -> int:
     if args.limit is not None and args.limit < 1:
         return refuse(
             REASON_INPUT_ERROR,
-            f"--limit must be a positive integer; got {args.limit}",
+            flag_refusal("--limit", POSITIVE_INTEGER, args.limit),
         )
     if args.audit_timeout is not None and args.audit_timeout < 1:
         return refuse(
             REASON_INPUT_ERROR,
-            f"--audit-timeout must be a positive integer; got {args.audit_timeout}",
+            flag_refusal("--audit-timeout", POSITIVE_INTEGER, args.audit_timeout),
         )
 
     plan_dir = None

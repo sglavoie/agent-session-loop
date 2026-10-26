@@ -538,7 +538,7 @@ def gc_from_args(args: argparse.Namespace) -> int:
     if not math.isfinite(max_age_days) or max_age_days < 0:
         return _print_gc_error(
             args,
-            reason="invalid-max-age-days",
+            reason="input-error",
             error=flag_refusal("--max-age-days", NON_NEGATIVE_NUMBER, max_age_days),
         )
     try:

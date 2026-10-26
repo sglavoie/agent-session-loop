@@ -27,25 +27,31 @@ def _add_plan_authoring_commands(
             "directory using the deterministic authoring API."
         ),
     )
-    split_source = split_parser.add_mutually_exclusive_group(required=True)
-    split_source.add_argument(
-        "--plan-file",
-        dest="plan_file",
-        help="Path to the source plan markdown file to split",
-    )
-    split_source.add_argument(
-        "--inline-stdin",
-        dest="inline_stdin",
-        action="store_true",
-        help=(
-            "Capture the source plan from stdin (the last <proposed_plan> "
-            "block, else the raw input) as a durable source file"
+    # The handler requires exactly one source itself so a missing or doubled
+    # source keeps its JSON ``reason``; usage still shows the alternatives.
+    split_parser.show_as_alternatives(
+        split_parser.add_argument(
+            "--plan-file",
+            dest="plan_file",
+            default=None,
+            metavar="PATH",
+            help="Path to the source plan markdown file to split",
+        ),
+        split_parser.add_argument(
+            "--inline-stdin",
+            dest="inline_stdin",
+            action="store_true",
+            help=(
+                "Capture the source plan from stdin (the last <proposed_plan> "
+                "block, else the raw input) as a durable source file"
+            ),
         ),
     )
     split_parser.add_argument(
         "--base-dir",
         dest="base_dir",
         default=None,
+        metavar="DIR",
         help=(
             "Base directory for the captured source and split output "
             "(default: the persistent agent-plans directory)"
@@ -72,6 +78,7 @@ def _add_plan_authoring_commands(
         "--contracts-file",
         dest="contracts_file",
         default=None,
+        metavar="PATH",
         help=(
             "JSON file of completion contracts keyed by canonical session id "
             '({"1": {"done_when": [...], "verify": {...}}, ...}); '
@@ -82,6 +89,7 @@ def _add_plan_authoring_commands(
         "--cwd",
         dest="cwd",
         default=".",
+        metavar="DIR",
         help=(
             "Root the plan is expected to stay inside; a plan that reaches "
             "into another repository is refused until it declares a "
@@ -102,6 +110,7 @@ def _add_plan_authoring_commands(
         "--analysis-file",
         dest="analysis_file",
         default=None,
+        metavar="PATH",
         help="Optional markdown appended verbatim to the manifest execution note",
     )
     split_parser.add_argument(
@@ -120,6 +129,7 @@ def _add_plan_authoring_commands(
     )
     prepare_parser.add_argument(
         "plan",
+        metavar="PLAN",
         help=(
             "Source plan markdown file to prepare (or an existing split "
             "plan directory with --resume)"
@@ -144,6 +154,7 @@ def _add_plan_authoring_commands(
     prepare_parser.add_argument(
         "--cwd",
         default=".",
+        metavar="DIR",
         help=(
             "Repository root for a legacy plan or workspace root for a "
             "registered plan "
@@ -166,6 +177,7 @@ def _add_plan_authoring_commands(
     prepare_parser.add_argument(
         "--validator-model",
         dest="validator_model",
+        metavar="MODEL",
         help=(
             "Validator harness model to request (omit to preserve that "
             "harness's native default)"
@@ -183,6 +195,7 @@ def _add_plan_authoring_commands(
         "--validator-jobs",
         dest="validator_jobs",
         type=int,
+        metavar="N",
         default=_PREPARE_DEFAULT_VALIDATOR_JOBS,
         help=(
             "Maximum concurrent read-only validator workers "
@@ -192,6 +205,7 @@ def _add_plan_authoring_commands(
     prepare_parser.add_argument(
         "--validator-timeout",
         dest="validator_timeout",
+        metavar="SECONDS",
         type=int,
         default=_PREPARE_DEFAULT_VALIDATOR_TIMEOUT_SECONDS,
         help=(
@@ -202,6 +216,7 @@ def _add_plan_authoring_commands(
     prepare_parser.add_argument(
         "--validator-heartbeat",
         dest="validator_heartbeat",
+        metavar="SECONDS",
         type=int,
         default=_PREPARE_DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
         help=(
@@ -221,6 +236,7 @@ def _add_plan_authoring_commands(
     prepare_parser.add_argument(
         "--harness-model",
         dest="harness_model",
+        metavar="MODEL",
         help=(
             "Implementation baseline/fallback model for the resulting `asl run` command"
         ),
@@ -242,12 +258,14 @@ def _add_plan_authoring_commands(
     prepare_parser.add_argument(
         "--review-harness-model",
         dest="review_harness_model",
+        metavar="MODEL",
         help="Review harness model for the resulting `asl run` command",
     )
     prepare_parser.add_argument(
         "--base-dir",
         dest="base_dir",
         default=None,
+        metavar="DIR",
         help=(
             "Base directory for the split plan output "
             "(default: the persistent agent-plans directory)"
@@ -316,30 +334,31 @@ def _add_plan_authoring_commands(
         default=None,
         help="Split plan directory to migrate in place",
     )
-    register_repositories_source = (
-        register_repositories_parser.add_mutually_exclusive_group()
-    )
-    register_repositories_source.add_argument(
-        "--plan-file",
-        dest="plan_file",
-        default=None,
-        help=(
-            "Source plan markdown file to migrate; the migrated markdown is "
-            "emitted and the input file is never written"
+    register_repositories_parser.show_as_alternatives(
+        register_repositories_parser.add_argument(
+            "--plan-file",
+            dest="plan_file",
+            default=None,
+            metavar="PATH",
+            help=(
+                "Source plan markdown file to migrate; the migrated markdown is "
+                "emitted and the input file is never written"
+            ),
         ),
-    )
-    register_repositories_source.add_argument(
-        "--inline-stdin",
-        dest="inline_stdin",
-        action="store_true",
-        help=(
-            "Read the source plan from stdin (the last <proposed_plan> block, "
-            "else the raw input)"
+        register_repositories_parser.add_argument(
+            "--inline-stdin",
+            dest="inline_stdin",
+            action="store_true",
+            help=(
+                "Read the source plan from stdin (the last <proposed_plan> block, "
+                "else the raw input)"
+            ),
         ),
     )
     register_repositories_parser.add_argument(
         "--output",
         default=None,
+        metavar="PATH",
         help=(
             "Write the migrated source plan here instead of stdout "
             "(source-plan mode only)"
@@ -348,6 +367,7 @@ def _add_plan_authoring_commands(
     register_repositories_parser.add_argument(
         "--cwd",
         default=".",
+        metavar="DIR",
         help=(
             "Root the plan is currently bound to; the workspace root is "
             "derived from the repositories the plan reaches "
@@ -379,6 +399,7 @@ def _add_plan_authoring_commands(
     preflight_parser.add_argument(
         "--cwd",
         default=None,
+        metavar="DIR",
         help=(
             "Repository root for legacy environment checks or workspace root "
             "for registered checks (default: skip cwd checks)"

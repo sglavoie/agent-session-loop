@@ -10,6 +10,7 @@ no clock of its own -- the moment is always an argument.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -52,14 +53,18 @@ def _activity_epoch(value: Any) -> float | None:
     if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        # NaN compares false against everything and an infinity outranks every
+        # real moment, so either would scramble the sort and the page cursor.
+        return float(value) if math.isfinite(value) else None
     if not isinstance(value, str) or not value.strip():
         return None
     text = value.strip()
     try:
-        return float(text)
+        number = float(text)
     except ValueError:
         pass
+    else:
+        return number if math.isfinite(number) else None
     return iso_epoch(text)
 
 

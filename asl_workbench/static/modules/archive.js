@@ -516,6 +516,56 @@ export function unreviewedExpiredIds(ids) {
   });
 }
 
+/* The control that opened the purge review, so closing it can hand the
+ * keyboard back there rather than dropping it on the document body. */
+let reviewOpener = null;
+
+function rememberReviewOpener() {
+  const active = document.activeElement;
+  if (!active || active === document.body) {
+    reviewOpener = null;
+    return;
+  }
+  const row = active.closest ? active.closest("[data-archive-id]") : null;
+  reviewOpener = {
+    element: active,
+    archiveId: row ? row.getAttribute("data-archive-id") : null,
+  };
+}
+
+function focusable(node) {
+  return (
+    !!node &&
+    typeof node.focus === "function" &&
+    document.body.contains(node) &&
+    node.disabled !== true &&
+    !node.closest("[hidden]")
+  );
+}
+
+/* Back to the opener; if a re-render replaced it, to the same row's purge
+ * button; failing both, to the bulk purge control. */
+function restoreReviewOpener() {
+  const opener = reviewOpener;
+  reviewOpener = null;
+  const candidates = [];
+  if (opener) {
+    candidates.push(opener.element);
+    if (opener.archiveId) {
+      const list = document.getElementById("wb-archive-entries");
+      const rows = list ? list.querySelectorAll("[data-archive-id]") : [];
+      rows.forEach((row) => {
+        if (row.getAttribute("data-archive-id") === opener.archiveId) {
+          candidates.push(row.querySelector('[data-action="archive-purge"]'));
+        }
+      });
+    }
+  }
+  candidates.push(document.getElementById("wb-archive-purge-selected"));
+  const target = candidates.find(focusable);
+  if (target) target.focus();
+}
+
 /* Name every expired entry this purge would empty, and hold the request until
  * the operator says they have read it. Nothing is sent from here. */
 export function openArchiveReview(ids, expired) {
@@ -523,6 +573,7 @@ export function openArchiveReview(ids, expired) {
   const list = document.getElementById("wb-archive-review-list");
   const message = document.getElementById("wb-archive-review-message");
   if (!panel || !list || !message) return;
+  rememberReviewOpener();
   state.archiveReviewPending = ids.slice();
   message.textContent =
     expired.length +
@@ -560,8 +611,12 @@ export function openArchiveReview(ids, expired) {
 
 export function closeArchiveReview() {
   const panel = document.getElementById("wb-archive-review");
+  const wasOpen = !!panel && !panel.hidden;
   if (panel) panel.hidden = true;
   state.archiveReviewPending = null;
+  // Hiding the panel takes the focused acknowledge or cancel button with it;
+  // the cleanup review hands the keyboard back the same way.
+  if (wasOpen) restoreReviewOpener();
 }
 
 export async function handleArchiveReviewAck() {

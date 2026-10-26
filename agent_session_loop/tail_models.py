@@ -24,3 +24,7 @@ class TextSink(Protocol):
 
 class TailError(Exception):
     """Raised when tail arguments or runtime files are invalid."""
+
+
+class TailInputError(TailError):
+    """A tail argument the caller passed is out of range."""

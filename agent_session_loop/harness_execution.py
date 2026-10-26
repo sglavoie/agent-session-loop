@@ -189,14 +189,18 @@ def run_adapter(
             # everything it spawns.
             env=None if env is None else dict(env),
         )
-    except FileNotFoundError as error:
+    except OSError as error:
         # Nothing started, so nothing is left to stop -- but a caller
         # waiting on a cancellation must be answered rather than left
-        # waiting for a turn that does not exist.
+        # waiting for a turn that does not exist. Any spawn failure counts:
+        # a non-executable binary or an argv over the kernel's limit leaves
+        # the same nothing behind as a missing one.
         lifecycle.close()
-        raise harness_types.HarnessError(
-            f"{self.name} executable not found: {self.executable}"
-        ) from error
+        if isinstance(error, FileNotFoundError):
+            message = f"{self.name} executable not found: {self.executable}"
+        else:
+            message = f"{self.name} could not be started: {error}"
+        raise harness_types.HarnessError(message) from error
 
     if on_spawn is not None:
         with contextlib.suppress(Exception):

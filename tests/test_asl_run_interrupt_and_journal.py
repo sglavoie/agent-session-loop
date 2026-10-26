@@ -27,6 +27,7 @@ from agent_session_loop import (
     turn_execution_constants,
     verification_run,
 )
+from agent_session_loop.run_errors import RunTerminatedBySignal
 from tests.support import (
     REPO_ROOT,
     _contract_block,
@@ -226,6 +227,23 @@ class RunVerificationInterruptTests(unittest.TestCase):
         ]
         self.assertEqual(1, len(pause_records))
         self.assertEqual("interrupted", pause_records[0]["payload"]["reason"])
+
+    def test_a_termination_signal_names_itself_in_the_interrupted_pause(
+        self,
+    ) -> None:
+        write_plan(self.plan_dir, ("pending",))
+
+        with mock.patch.object(
+            handoff_guards,
+            "_append_progress_entry",
+            side_effect=RunTerminatedBySignal("SIGTERM"),
+        ):
+            exit_code, payload = self._invoke_run_locked()
+
+        self.assertEqual(turn_execution_constants.INTERRUPTED_EXIT, exit_code)
+        self.assertEqual("interrupted", payload["pause_reason"])
+        self.assertEqual("run interrupted by SIGTERM", payload["pause_message"])
+        self.assertIsInstance(payload["run_finished_at"], str)
 
 
 class RunProgressJournalIntegrationTests(unittest.TestCase):

@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import harnesses
+from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
     RunFlag(
         dest="harness_model",
         option_strings=("--harness-model",),
+        metavar="MODEL",
         help="Implementation baseline/fallback harness model to request",
     ),
     RunFlag(
@@ -121,6 +123,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
     RunFlag(
         dest="review_harness_model",
         option_strings=("--review-harness-model",),
+        metavar="MODEL",
         help="Generated review harness model to request",
     ),
     RunFlag(
@@ -131,6 +134,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
     RunFlag(
         dest="timeout",
         option_strings=("--timeout",),
+        metavar="SECONDS",
         type=int,
         help="Per-session harness timeout in seconds",
     ),
@@ -147,6 +151,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
     RunFlag(
         dest="audit_harness_model",
         option_strings=("--audit-harness-model",),
+        metavar="MODEL",
         help=(
             "Supervisor audit model to request; wins over a model inherited "
             "from the review role and over the audit harness native default"
@@ -163,6 +168,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
     RunFlag(
         dest="audit_timeout",
         option_strings=("--audit-timeout",),
+        metavar="SECONDS",
         type=int,
         cli_default=600,
         help=(
@@ -307,6 +313,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
     RunFlag(
         dest="note",
         option_strings=("--note",),
+        metavar="TEXT",
         help="Reference note to show in run status and final output",
     ),
     RunFlag(
@@ -522,15 +529,21 @@ def validate_run_namespace(
 
     timeout = getattr(ns, "timeout", None)
     if timeout is not None and timeout <= 0:
-        errors.append(FlagError("--timeout must be a positive integer"))
+        errors.append(FlagError(flag_refusal("--timeout", POSITIVE_INTEGER, timeout)))
 
     max_sessions = getattr(ns, "max_sessions", None)
     if max_sessions is not None and max_sessions <= 0:
-        errors.append(FlagError("--max-sessions must be a positive integer"))
+        errors.append(
+            FlagError(flag_refusal("--max-sessions", POSITIVE_INTEGER, max_sessions))
+        )
 
     max_pending = getattr(ns, "max_pending_sessions", None)
     if max_pending is not None and max_pending <= 0:
-        errors.append(FlagError("--max-pending-sessions must be a positive integer"))
+        errors.append(
+            FlagError(
+                flag_refusal("--max-pending-sessions", POSITIVE_INTEGER, max_pending)
+            )
+        )
 
     max_repair_group_attempts = getattr(ns, "max_repair_group_attempts", None)
     if max_repair_group_attempts is not None and max_repair_group_attempts < 0:
@@ -602,7 +615,9 @@ def validate_run_namespace(
 
     audit_timeout = getattr(ns, "audit_timeout", None)
     if audit_timeout is not None and audit_timeout <= 0:
-        errors.append(FlagError("--audit-timeout must be a positive integer"))
+        errors.append(
+            FlagError(flag_refusal("--audit-timeout", POSITIVE_INTEGER, audit_timeout))
+        )
 
     # An audit harness that equals the implementation harness would grade its
     # own turns. It may equal the review harness, which was already independent

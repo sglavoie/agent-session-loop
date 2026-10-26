@@ -10,6 +10,7 @@ import io
 import json
 import socket
 import urllib.parse
+from unittest import mock
 
 from agent_session_loop import workbench_server
 from tests.asl_workbench_server_support import (
@@ -193,6 +194,55 @@ class WorkbenchServerHTTPTests(WorkbenchServerTestCase):
             headers[name.strip().lower()] = value.strip()
         return int(lines[0].split()[1]), headers, body
 
+    def _post_partial_body(
+        self,
+        server: workbench_server.WorkbenchHTTPServer,
+        *,
+        declared: int,
+        sent: bytes,
+        finish: bool,
+    ) -> tuple[int, dict]:
+        """Declare one length, send fewer bytes, and read the answer."""
+        with socket.create_connection(
+            (server.bound_host, server.bound_port), timeout=10
+        ) as sock:
+            sock.sendall(
+                b"POST /api/registry/pin HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                + f"Authorization: Bearer {server.token}\r\n".encode("ascii")
+                + f"Content-Length: {declared}\r\n\r\n".encode("ascii")
+                + sent
+            )
+            if finish:
+                sock.shutdown(socket.SHUT_WR)
+            chunks: list[bytes] = []
+            while chunk := sock.recv(65536):
+                chunks.append(chunk)
+        head, _, body = b"".join(chunks).partition(b"\r\n\r\n")
+        return int(head.split()[1]), json.loads(body)
+
+    def test_a_body_cut_short_is_refused_rather_than_parsed(self) -> None:
+        server = self._start_server()
+        status, payload = self._post_partial_body(
+            server, declared=64, sent=b"{}", finish=True
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-request", payload["reason"])
+        self.assertIn("2 of 64 declared bytes", payload["error"])
+
+    def test_a_body_that_stalls_is_a_request_timeout_not_a_server_error(
+        self,
+    ) -> None:
+        server = self._start_server()
+        handler = workbench_server.WorkbenchRequestHandler
+        with mock.patch.object(handler, "timeout", 0.3):
+            status, payload = self._post_partial_body(
+                server, declared=64, sent=b"{", finish=False
+            )
+        self.assertEqual(408, status)
+        self.assertEqual("request-timeout", payload["reason"])
+        self.assertNotIn("timed out", payload["error"])
+
     def test_head_on_the_shell_answers_like_get_without_a_body(self) -> None:
         server = self._start_server()
         status, headers, body = self._raw_exchange(server, b"HEAD / HTTP/1.0")
@@ -206,6 +256,20 @@ class WorkbenchServerHTTPTests(WorkbenchServerTestCase):
         self.assertEqual(200, status)
         self.assertEqual(b"", body)
         self.assertIn("application/json", headers.get("content-type", ""))
+
+    def test_other_standard_methods_get_the_applications_405_not_501(
+        self,
+    ) -> None:
+        server = self._start_server()
+        for method in (b"OPTIONS", b"PUT", b"DELETE", b"PATCH"):
+            with self.subTest(method=method):
+                status, headers, body = self._raw_exchange(
+                    server, method + b" /api/queue HTTP/1.0"
+                )
+                self.assertEqual(405, status)
+                payload = json.loads(body)
+                self.assertEqual("method-not-allowed", payload["reason"])
+                self.assertIn("GET", headers.get("allow", ""))
 
     def test_a_stdlib_refusal_names_its_own_status(self) -> None:
         server = self._start_server()

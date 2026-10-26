@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -38,6 +39,9 @@ from .details import DetailError
 from .history_primitives import refuse_non_finite
 from .operations import OperationError
 from .uplink import UplinkRefusal
+
+#: The only spelling of a body length this application reads.
+_CONTENT_LENGTH = re.compile(r"[0-9]+", re.ASCII)
 
 
 class Application:
@@ -291,15 +295,32 @@ class Application:
         policy = self.policy
         length = self._body_length(request, route)
         if length == 0:
-            if policy.require_content_length:
+            # 411 is for a request that declared nothing. An explicit
+            # ``Content-Length: 0`` did declare its length -- an empty body --
+            # and is refused, if at all, for what that empty body lacks.
+            if (
+                policy.require_content_length
+                and request.header("content-length") is None
+            ):
                 raise auth.HttpRefusal(
                     411, "length-required", "request body must declare Content-Length"
                 )
             return {}
         self._check_content_type(request)
-        raw = request.read(length)
-        if not raw:
-            return {}
+        try:
+            raw = request.read(length)
+        except TimeoutError as error:
+            # The client declared a body and stopped sending it. That is a
+            # framing failure of theirs, not a fault of this server's.
+            raise auth.HttpRefusal(
+                408, "request-timeout", "the request body was not received in time"
+            ) from error
+        if len(raw) != length:
+            # A short body is a truncated one: parsing what arrived could act
+            # on a prefix the client never meant as a whole request.
+            raise auth.invalid_request(
+                f"request body ended after {len(raw)} of {length} declared bytes"
+            )
         try:
             decoded = raw.decode("utf-8")
         except UnicodeDecodeError as error:
@@ -310,8 +331,10 @@ class Application:
             # ``NaN`` and the infinities are not JSON, and a body carrying one
             # would reach a bound or a store that cannot hold it. Refused here,
             # with the same answer any other malformed body gets.
+            # A deeply nested body exhausts the decoder's recursion instead of
+            # failing to parse; it is just as malformed and gets the same 400.
             parsed = json.loads(decoded, parse_constant=refuse_non_finite)
-        except ValueError as error:
+        except (ValueError, RecursionError) as error:
             raise auth.invalid_request(
                 f"request body must be valid JSON: {error}"
             ) from error
@@ -330,15 +353,19 @@ class Application:
                 details={"transfer_encoding": encoding},
             )
         raw = request.header("content-length")
-        if not raw:
+        if raw is None:
             return 0
-        try:
-            length = int(raw)
-        except ValueError as error:
+        # ASCII digits and nothing else (RFC 9110 section 8.6). ``int()`` would
+        # also take a sign, an underscore and non-ASCII digits, and a framing
+        # number two parsers can read differently is one they will.
+        declared = raw.strip(" \t")
+        if not _CONTENT_LENGTH.fullmatch(declared):
             raise auth.invalid_request(
-                f"Content-Length is not an integer: {error}"
-            ) from error
-        if length <= 0:
+                "Content-Length must be a non-negative decimal integer",
+                content_length=raw[:32],
+            )
+        length = int(declared)
+        if length == 0:
             return 0
         if length > limit:
             raise auth.HttpRefusal(

@@ -42,12 +42,14 @@ def _event_records(event_path: Path) -> Iterator[dict[str, Any]]:
     A blank line or one torn by an interrupted append says nothing about any
     incident, so it is skipped rather than failing the whole recovery.
     """
-    for line in event_path.read_text(encoding="utf-8").splitlines():
+    # Bytes, decoded line by line: a stray non-UTF-8 byte then spoils only its
+    # own line, the way a torn line does, not the whole history.
+    for line in event_path.read_bytes().splitlines():
         if not line.strip():
             continue
         try:
-            record = json.loads(line)
-        except ValueError:
+            record = json.loads(line.decode("utf-8"))
+        except ValueError, RecursionError:
             continue
         if isinstance(record, dict):
             yield record

@@ -210,10 +210,12 @@ class ReadRequest:
     def __post_init__(self) -> None:
         if self.detail not in DETAIL_KINDS:
             raise RemoteReadError(f"unknown detail kind: {self.detail!r}")
-        if self.limit is not None and self.limit > MAX_DETAIL_ENTRIES:
-            raise RemoteReadError(f"limit above {MAX_DETAIL_ENTRIES}")
-        if self.max_bytes is not None and self.max_bytes > MAX_DETAIL_BYTES:
-            raise RemoteReadError(f"max_bytes above {MAX_DETAIL_BYTES}")
+        if self.offset is not None and self.offset < 0:
+            raise RemoteReadError("offset below 0")
+        if self.limit is not None and not 1 <= self.limit <= MAX_DETAIL_ENTRIES:
+            raise RemoteReadError(f"limit outside 1..{MAX_DETAIL_ENTRIES}")
+        if self.max_bytes is not None and not 1 <= self.max_bytes <= MAX_DETAIL_BYTES:
+            raise RemoteReadError(f"max_bytes outside 1..{MAX_DETAIL_BYTES}")
 
     @property
     def key(self) -> ReadKey:

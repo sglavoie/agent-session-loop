@@ -64,7 +64,9 @@ _DISALLOWED_TRAILERS = ("co-authored-by:", "signed-off-by:")
 REASON_FAILED = "commit-message-failed"
 
 
-REASON_INVALID_ARGUMENTS = "invalid-arguments"
+#: A flag combination or value the command refuses before doing any work;
+#: spelled like every other command's input mistakes.
+REASON_INVALID_ARGUMENTS = "input-error"
 
 
 REASON_NOT_A_WORKTREE = "not-a-worktree"

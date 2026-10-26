@@ -75,7 +75,15 @@ class LiveTurn:
         self._started_at = (
             clock.parse_datetime(active_turn["started_at"]) or clock.utc_now()
         )
-        self._last_activity_at = self._started_at
+        # Idle time feeds the hang sentinel, which schedules on the monotonic
+        # clock, so it is measured on that clock too: a wall-clock step (NTP,
+        # sleep/wake, an operator's date change) must neither fake a hang nor
+        # hide one. Wall-clock timestamps stay for display and records only.
+        # The baseline is backdated by the turn's age so a turn resumed from
+        # an earlier ``started_at`` keeps the idle time it already had.
+        self._last_activity_monotonic = self._monotonic() - max(
+            0.0, (clock.utc_now() - self._started_at).total_seconds()
+        )
 
     def start(self) -> None:
         with self._lock, self._persistence.lock:
@@ -124,7 +132,7 @@ class LiveTurn:
         hang_cleared_payload: dict[str, Any] | None = None
         active_turn_snapshot: dict[str, Any] | None = None
         with self._lock, self._persistence.lock:
-            self._last_activity_at = now
+            self._last_activity_monotonic = self._monotonic()
             self._active_turn["last_activity_at"] = clock.isoformat(now)
             self._active_turn["last_activity_stream"] = stream_name
             self._active_turn["last_activity_preview"] = (
@@ -217,10 +225,7 @@ class LiveTurn:
                 self._started_at,
                 finished_at,
             )
-            active_turn["idle_seconds"] = clock.duration_seconds(
-                self._last_activity_at,
-                finished_at,
-            )
+            active_turn["idle_seconds"] = self._idle_seconds()
             active_turn.pop("hang_suspected", None)
             recovery = (hang_retracted or {}).get("recovery") or (
                 active_turn.get("harness_shutdown") or {}
@@ -349,15 +354,26 @@ class LiveTurn:
         elapsed_intervals = int((now - deadline) // interval) + 1
         return deadline + (elapsed_intervals * interval)
 
+    def _idle_seconds(self, at: float | None = None) -> float:
+        """Seconds from the last activity to ``at`` (default now), monotonically.
+
+        Rounded and clamped exactly as :func:`clock.duration_seconds` is, so
+        readers of ``idle_seconds`` see the same shape as before, and activity
+        recorded after ``at`` reads as zero idle rather than negative.
+        """
+        reading = self._monotonic() if at is None else at
+        return round(max(0.0, reading - self._last_activity_monotonic), 3)
+
     def _record_heartbeat(self) -> dict[str, Any]:
         now = clock.utc_now()
+        now_monotonic = self._monotonic()
         # Hang-sentinel sampling spawns ps, so it stays outside ``self._lock``
         # (same discipline as the amx notify below) and is skipped once
         # ``_stop`` is set so ``stop()``/``finish()`` never wait behind ps.
         assessment: turn_execution_hang_sentinel.HangAssessment | None = None
         if not self._stop.is_set():
             with self._lock:
-                idle_seconds = clock.duration_seconds(self._last_activity_at, now)
+                idle_seconds = self._idle_seconds(now_monotonic)
             input_wait_active = False
             if self._input_wait_probe is not None:
                 with contextlib.suppress(Exception):
@@ -402,7 +418,7 @@ class LiveTurn:
                 "elapsed_seconds": clock.duration_seconds(self._started_at, now),
                 "last_activity_at": self._active_turn.get("last_activity_at"),
                 "last_activity_stream": self._active_turn.get("last_activity_stream"),
-                "idle_seconds": clock.duration_seconds(self._last_activity_at, now),
+                "idle_seconds": self._idle_seconds(now_monotonic),
                 "heartbeat_count": heartbeat_count,
             }
             if self._active_turn.get("session_number") is not None:

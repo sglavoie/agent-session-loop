@@ -75,7 +75,12 @@ export async function handleReplySubmit(event) {
   event.preventDefault();
   clearFormErrors("wb-reply-form-errors");
   showReplyStatus("", "");
-  if (!routePlanId()) return;
+  // The plan this reply belongs to, fixed before anything is awaited. The
+  // operator may open another plan while the POST is in flight, and that
+  // plan's form, draft and retry identity are not this answer's to touch.
+  const planId = routePlanId();
+  if (!planId) return;
+  const stillHere = () => routePlanId() === planId;
   const textarea = document.getElementById("wb-reply-text");
   if (!textarea) return;
   const replyText = textarea.value;
@@ -115,14 +120,22 @@ export async function handleReplySubmit(event) {
     action: "reply",
     path: liveQuestion ? "/api/question-reply" : "/api/reply",
     body: body,
+    planId: planId,
     subject: "the reply",
     feedback: (kind, message) => {
+      if (!stillHere()) return;
       // A refusal belongs beside the draft that is still on screen; anything
       // else belongs with the rest of the operation feedback.
       if (kind === "error") showFormError("wb-reply-form-errors", message);
       showReplyStatus(kind, message);
     },
   });
+  if (answer && !stillHere()) {
+    // The route moved on. File what was learned under the plan it belongs
+    // to, and leave the plan now on screen exactly as the operator has it.
+    rememberAbandonedReply(answer, planId, context);
+    return;
+  }
   if (form) form.removeAttribute("aria-busy");
   if (!answer) {
     if (submitButton) {
@@ -144,7 +157,7 @@ export async function handleReplySubmit(event) {
       rememberReceipt({
         operation_id: answer.operation.id,
         action: "reply",
-        plan: routePlanId(),
+        plan: planId,
         outcome: answer.outcome,
         status: answer.operation.status,
         reason: answer.reason,
@@ -218,4 +231,31 @@ export async function handleReplySubmit(event) {
         " Waiting for the running session to consume it."
     );
   }
+}
+
+/**
+ * Keep the receipt of a reply whose plan is no longer on screen.
+ *
+ * `runMutation` already filed the generic receipt under the captured plan;
+ * the question id is added here for the same reason the on-screen path adds
+ * it. Nothing else is written: the draft, the form and the retry identity on
+ * screen belong to the plan the operator moved to.
+ */
+function rememberAbandonedReply(answer, planId, context) {
+  const identity = answer.operation && answer.operation.id;
+  if (!identity) return;
+  rememberSubmittedReply(identity);
+  if (answer.outcome !== OUTCOME_PENDING && answer.outcome !== OUTCOME_RESULT) {
+    return;
+  }
+  rememberReceipt({
+    operation_id: identity,
+    action: "reply",
+    plan: planId,
+    outcome: answer.outcome,
+    status: answer.operation.status,
+    reason: answer.reason,
+    settled: answer.outcome === OUTCOME_RESULT,
+    question_id: context.question_id,
+  });
 }

@@ -16,6 +16,7 @@ from agent_session_loop import (
     plans_snapshot,
     review,
     review_continuation,
+    review_continuation_state,
     review_cycle,
     review_repair_planning,
     review_session_body,
@@ -28,6 +29,24 @@ from tests.support import (
 )
 
 ASL_TEST_LANE = "integration"
+
+
+class GroupAttemptCapStateTests(unittest.TestCase):
+    def test_a_non_utf8_state_yields_no_recorded_cap(self) -> None:
+        # Bytes that are not UTF-8 used to escape as UnicodeDecodeError instead
+        # of reading as an unrecorded cap, like a torn state already did.
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / events.EVENTS_FILE_NAME
+            state_path = event_path.with_name(events.STATE_FILE_NAME)
+            state_path.write_bytes(
+                b'{"run_config": {"max_repair_group_attempts": 2, "x": "\xff"}}'
+            )
+
+            self.assertIsNone(
+                review_continuation_state._selected_group_attempt_cap_from_history(
+                    (), event_path
+                )
+            )
 
 
 class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):

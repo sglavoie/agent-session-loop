@@ -9,8 +9,11 @@ file. The runtime that uses them lives in
 
 from __future__ import annotations
 
+import contextlib
 import errno
+import fcntl
 import os
+import secrets
 
 from .transport import (
     CAPABILITY_CATALOG,
@@ -199,10 +202,17 @@ class SingleInstanceLock:
     Two connectors publishing under one connector id would interleave
     generations and checkpoints, and the receiver -- which keys everything by
     connector id -- would read the interleaving as a corpus that kept changing
-    its mind. The file is created with ``O_CREAT | O_EXCL`` so the race is
-    resolved by the filesystem, and a file whose recorded owner is gone is
+    its mind. The pid is written to a private temporary file and published
+    with ``os.link``, which refuses an existing name, so the lock file never
+    exists without its owner in it. A file whose recorded owner is gone is
     stolen rather than honoured, because otherwise a crash would need a human
     before the Mac could be observed again.
+
+    Deciding "stale" and removing it are two steps, so every acquire takes an
+    ``flock`` on a sibling guard file for the whole of the decision. The guard
+    is never removed -- removing it would let a late opener lock a different
+    inode than an early one -- and the kernel drops the flock when its holder
+    dies, so the guard itself can never go stale.
     """
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
@@ -240,20 +250,48 @@ class SingleInstanceLock:
             return error.errno != errno.ESRCH
         return True
 
+    @property
+    def guard_path(self) -> str:
+        """The never-removed file whose ``flock`` serialises every acquire."""
+        return self.path + ".guard"
+
     def _create(self) -> bool:
+        """Publish a lock file that already names this process, or report one."""
+        temporary = f"{self.path}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
         try:
-            handle = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            handle = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                os.write(handle, str(os.getpid()).encode("ascii"))
+            finally:
+                os.close(handle)
+            os.link(temporary, self.path)
         except FileExistsError:
             return False
         except OSError as error:
             raise ConnectorError(
                 f"could not create the connector lock: {error}"
             ) from error
-        try:
-            os.write(handle, str(os.getpid()).encode("ascii"))
         finally:
-            os.close(handle)
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
         return True
+
+    def _guard(self) -> int:
+        """Open and ``flock`` the guard file; the caller closes it to release."""
+        try:
+            handle = os.open(self.guard_path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError as error:
+            raise ConnectorError(
+                f"could not open the connector lock guard: {error}"
+            ) from error
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        except OSError as error:
+            os.close(handle)
+            raise ConnectorError(
+                f"could not lock the connector lock guard: {error}"
+            ) from error
+        return handle
 
     def acquire(self) -> None:
         """Take the lock, or raise :class:`ConnectorError`.
@@ -261,25 +299,31 @@ class SingleInstanceLock:
         Two passes, not a loop: the first tries to create the file, and the
         second tries again once a dead owner's file has been removed. A third
         pass would mean another process won the re-creation, which is the case
-        this refuses rather than races against.
+        this refuses rather than races against. Both passes run under the
+        guard, so no other acquire can publish between this one reading a
+        stale owner and removing that owner's file.
         """
-        for _ in range(2):
-            if self._create():
-                return
-            owner = self._owner()
-            if owner is not None and self._alive(owner):
-                raise ConnectorError(
-                    "another workbench connector already holds the lock"
-                )
-            try:
-                os.unlink(self.path)
-            except FileNotFoundError:
-                continue
-            except OSError as error:
-                raise ConnectorError(
-                    f"could not clear a stale connector lock: {error}"
-                ) from error
-        raise ConnectorError("another workbench connector already holds the lock")
+        guard = self._guard()
+        try:
+            for _ in range(2):
+                if self._create():
+                    return
+                owner = self._owner()
+                if owner is not None and self._alive(owner):
+                    raise ConnectorError(
+                        "another workbench connector already holds the lock"
+                    )
+                try:
+                    os.unlink(self.path)
+                except FileNotFoundError:
+                    continue
+                except OSError as error:
+                    raise ConnectorError(
+                        f"could not clear a stale connector lock: {error}"
+                    ) from error
+            raise ConnectorError("another workbench connector already holds the lock")
+        finally:
+            os.close(guard)
 
     def release(self) -> None:
         """Drop the lock, but only if this process still owns it."""

@@ -354,6 +354,8 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
 
         for content in (
             "{not json",
+            # Deep enough that the decoder raises RecursionError instead.
+            "[" * 1_000_000,
             json.dumps({"version": 99, "next_since": 5}),
             json.dumps(
                 {
@@ -363,7 +365,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
                 }
             ),
         ):
-            with self.subTest(content=content):
+            with self.subTest(content=content[:80]):
                 cursor_path.write_text(content, encoding="utf-8")
                 self.assertEqual(0, self.cursor_on_disk(launch))
                 code, lines = self.supervise_lines(supervision_id=launch)
@@ -506,6 +508,26 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         self.assertEqual(1, code)
         self.assertFalse(payload["ok"])
         self.assertEqual("invalid-supervision-id", payload["reason"])
+
+    def test_supervision_cursor_is_private_like_every_mailbox_file(self) -> None:
+        launch = mailbox_validation.new_supervision_id()
+        old_umask = os.umask(0o022)
+        try:
+            mailbox_cursors.write_supervision_cursor(
+                self.plan_dir,
+                launch,
+                1,
+                state_dir=self.state_dir,
+            )
+        finally:
+            os.umask(old_umask)
+
+        cursor_path = mailbox_cursors.supervision_cursor_path_for_plan(
+            self.plan_dir,
+            launch,
+            self.state_dir,
+        )
+        self.assertEqual(0o600, cursor_path.stat().st_mode & 0o777)
 
     def test_supervision_cursor_preserves_its_first_seen_anchor(self) -> None:
         launch = mailbox_validation.new_supervision_id()

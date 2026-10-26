@@ -13,6 +13,26 @@ def _dirty_paths(fingerprint: dict[str, Any]) -> list[str]:
     return evidence["dirty_paths"]
 
 
+def _recorded_run_config(state_path: Path) -> dict[str, Any]:
+    """The run's recorded config, or a recovery refusal when it cannot be read.
+
+    A state that is torn, not UTF-8, or not an object used to escape as a raw
+    decode error; it is refused like every other unusable piece of evidence.
+    """
+    if not state_path.exists():
+        return {}
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except OSError, ValueError, RecursionError:
+        raise RecoveryError("recorded run state is unreadable") from None
+    if not isinstance(payload, dict):
+        raise RecoveryError("recorded run state is unreadable")
+    run_config = payload.get("run_config") or {}
+    if not isinstance(run_config, dict):
+        raise RecoveryError("recorded run config is unreadable")
+    return run_config
+
+
 def _external_proposal(
     plan_dir: Path,
     session_id: str,
@@ -122,12 +142,7 @@ def _external_proposal(
             _refs(fp)
     if set(current) != set(after) or set(before) - set(after):
         raise RecoveryError("repository topology changed outside the retained incident")
-    state_path = event_path.parent / events.STATE_FILE_NAME
-    run_config = (
-        json.loads(state_path.read_text(encoding="utf-8")).get("run_config", {})
-        if state_path.exists()
-        else {}
-    )
+    run_config = _recorded_run_config(event_path.parent / events.STATE_FILE_NAME)
     # Aliases the operator told the run someone else may change: their
     # independent dirt and movement are expected, not evidence against the turn.
     external = frozenset(run_config.get("allow_external_changes") or ())

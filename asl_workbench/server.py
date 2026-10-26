@@ -132,6 +132,23 @@ class ApplicationRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._serve("POST")
 
+    # The application owns the method decision: a known path asked with a
+    # method it does not serve answers 405 with ``Allow``, which only reaches
+    # the client if the stdlib dispatches the request here instead of
+    # answering 501 on its own. Unknown verbs still get the stdlib's 501.
+
+    def do_PUT(self) -> None:
+        self._serve("PUT")
+
+    def do_PATCH(self) -> None:
+        self._serve("PATCH")
+
+    def do_DELETE(self) -> None:
+        self._serve("DELETE")
+
+    def do_OPTIONS(self) -> None:
+        self._serve("OPTIONS")
+
     def _serve(self, method: str) -> None:
         self._body_read = False
         try:
@@ -165,12 +182,17 @@ class ApplicationRequestHandler(http.server.BaseHTTPRequestHandler):
         """Read the body the application already decided may exist."""
         self._body_read = True
         try:
-            return self.rfile.read(length)
+            raw = self.rfile.read(length)
         except OSError:
             # A timeout or a reset mid-body leaves the stream at an unknown
             # offset, so nothing after it on this connection can be framed.
             self.close_connection = True
             raise
+        if len(raw) != length:
+            # The client stopped short of what it declared; the stream is at
+            # an offset nothing after this answer could frame from.
+            self.close_connection = True
+        return raw
 
     def send_error(
         self,

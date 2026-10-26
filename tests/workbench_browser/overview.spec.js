@@ -797,6 +797,49 @@ for (const deployment of DEPLOYMENTS) {
       );
     });
 
+    test("a filter changed during a slow history read is not dropped", async ({
+      page,
+    }) => {
+      await openQueue(page, deployment);
+      await openHistory(page);
+      // The queue poll also re-reads history, which would paper over a
+      // dropped request; stop it so only the filter changes ask.
+      await page.evaluate(async () => {
+        const queue = await import("/static/modules/queue.js");
+        queue.stopQueueTimer();
+      });
+      const wanted = HISTORY_OUTCOMES[HISTORY_OUTCOMES.length - 1];
+      const absent = ["completed", "paused", "abandoned"].find(
+        (name) => HISTORY_OUTCOMES.indexOf(name) === -1,
+      );
+      let release = null;
+      const held = new Promise((resolve) => {
+        release = resolve;
+      });
+      let heldOnce = false;
+      let asked = 0;
+      await page.route("**/api/history*", async (route) => {
+        asked += 1;
+        if (!heldOnce) {
+          heldOnce = true;
+          await held;
+        }
+        await route.continue();
+      });
+      // The first change goes out and is held; the second arrives while it
+      // is still on the wire and has to run once the first settles.
+      await page.locator("#wb-history-outcome").selectOption(absent);
+      await expect.poll(() => asked).toBe(1);
+      await page.locator("#wb-history-outcome").selectOption(wanted);
+      release();
+      await expect.poll(() => asked).toBe(2);
+      await expect(page.locator(".wb-history-row")).toHaveCount(1);
+      await expect(page.locator(".wb-history-row")).toHaveAttribute(
+        "data-outcome",
+        wanted,
+      );
+    });
+
     test("history is narrowed by the same words the queue is", async ({
       page,
     }) => {

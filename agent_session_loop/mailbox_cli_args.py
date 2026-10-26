@@ -14,6 +14,7 @@ from . import (
     mailbox_cursors,
     mailbox_validation,
 )
+from .cli_parser_support import NON_NEGATIVE_INTEGER, flag_refusal
 
 
 def body_from_args(
@@ -156,7 +157,7 @@ def validated_since(
             command_name=command_name,
             text_label=text_label,
             reason="invalid-since",
-            error="--since must be a non-negative integer",
+            error=flag_refusal("--since", NON_NEGATIVE_INTEGER, value),
         )
         return None
     return value

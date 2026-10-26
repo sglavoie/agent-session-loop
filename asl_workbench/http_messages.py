@@ -165,7 +165,7 @@ DOCUMENT_CONTENT_SECURITY_POLICY = (
 #: Statuses whose response ends the connection. A refused body was never read,
 #: so whatever the client was still sending has nowhere to go but the next
 #: request's parser.
-_CLOSING: frozenset[int] = frozenset({411, 413, 415})
+_CLOSING: frozenset[int] = frozenset({408, 411, 413, 415})
 
 
 def unavailable_from(

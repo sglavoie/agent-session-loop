@@ -36,11 +36,16 @@ def acknowledge_external_changes(
         state_root = state.plan_state_dir(plan_dir, state_dir)
         event_path = state_root / events.EVENTS_FILE_NAME
         journal = state_root / RECOVERY_FILE_NAME
-        progress = (
-            json.loads(journal.read_text(encoding="utf-8"))
-            if journal.exists()
-            else None
-        )
+        try:
+            progress = (
+                json.loads(journal.read_text(encoding="utf-8"))
+                if journal.exists()
+                else None
+            )
+        except ValueError, RecursionError:
+            raise RecoveryError("recovery journal is unreadable") from None
+        if progress is not None and not isinstance(progress, dict):
+            raise RecoveryError("recovery journal is unreadable")
         if progress is not None and progress.get("complete"):
             progress = None
         if progress is None:
@@ -315,13 +320,13 @@ def _incident_run_id(event_path: Path, guard: dict[str, Any]) -> str | None:
     earlier incident.
     """
     try:
-        lines = event_path.read_text(encoding="utf-8").splitlines()
+        lines = event_path.read_bytes().splitlines()
     except OSError:
         return None
     for line in reversed(lines):
         try:
-            record = json.loads(line)
-        except ValueError:
+            record = json.loads(line.decode("utf-8"))
+        except ValueError, RecursionError:
             continue
         payload = record.get("payload") if isinstance(record, dict) else None
         if not isinstance(payload, dict):
@@ -357,7 +362,7 @@ def recovery_journal_projection(
         return {}
     try:
         progress = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError, OSError:
+    except ValueError, OSError, RecursionError:
         return {"progress": {"error": "recovery journal is unreadable"}}
     proposal = progress.get("proposal") if isinstance(progress, dict) else None
     if not isinstance(proposal, dict):

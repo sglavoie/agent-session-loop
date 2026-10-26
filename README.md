@@ -111,6 +111,7 @@ command to the `asl` skill (`/asl asl run ...` in Claude Code). The
 - [docs/asl-guide.md](docs/asl-guide.md) — ASL operator guide: command families, live supervision, assurance, Agent Mux integration, releasing, and testing
 - [docs/agent-session-loop.md](docs/agent-session-loop.md) — the complete ASL reference
 - [agent_session_loop/README.md](agent_session_loop/README.md) — package layout and internals
+- [asl_workbench/README.md](asl_workbench/README.md) — the portable Workbench package: module inventory, deployment, and portability boundaries
 
 ## Related
 

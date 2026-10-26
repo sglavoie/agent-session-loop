@@ -23,6 +23,7 @@ from .support_workbench_http_base import (
     Application,
     LocalTokenAuthenticator,
     RecordingProvider,
+    Request,
     RequestPolicy,
     application,
     build,
@@ -353,6 +354,21 @@ class PolicyTests(unittest.TestCase):
         )
         self.assertEqual(response.status, 411)
 
+    def test_an_explicit_zero_length_is_a_declared_empty_body(self) -> None:
+        # `Content-Length: 0` declares its length; answering "must declare"
+        # would tell the client to fix something it already did.
+        provider = RecordingProvider()
+        response = self.remote(provider=provider).handle(
+            build(
+                "POST",
+                "/api/unlock",
+                headers=self.signed(**{"Content-Length": "0"}),
+            )
+        )
+        self.assertNotEqual(response.status, 411)
+        self.assertEqual(response.status, 200, document(response))
+        self.assertEqual(provider.calls[0].body, {})
+
     def test_loopback_keeps_its_historic_answer_to_an_empty_post(self) -> None:
         """No length on loopback is an empty body, not a framing refusal.
 
@@ -410,11 +426,72 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(response.status, 400)
         self.assertEqual(document(response)["reason"], "invalid-request")
 
+    def test_a_content_length_is_ascii_digits_and_nothing_else(self) -> None:
+        # Each of these is an integer to `int()`, and none is a length another
+        # parser on the path would be guaranteed to read the same way.
+        for raw in ("-5", "+2", "1_0", "٢", " ", "2 2", "0x2"):
+            with self.subTest(content_length=raw):
+                provider = RecordingProvider()
+                response = application(provider=provider).handle(
+                    build("POST", "/api/unlock", headers={"Content-Length": raw})
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(document(response)["reason"], "invalid-request")
+                self.assertEqual(provider.calls, [])
+
     def test_a_body_that_is_not_a_json_object_is_refused(self) -> None:
         for raw in (b"[1, 2]", b'"text"', b"not json"):
             with self.subTest(body=raw):
                 response = application().handle(build("POST", "/api/unlock", body=raw))
                 self.assertEqual(response.status, 400)
+
+    def test_a_body_that_never_arrives_is_a_request_timeout(self) -> None:
+        def stalled(length: int) -> bytes:
+            raise TimeoutError("timed out")
+
+        request = Request.build(
+            "POST",
+            "/api/unlock",
+            {
+                "Host": "127.0.0.1:4321",
+                "Content-Type": "application/json",
+                "Content-Length": "2",
+            },
+            read=stalled,
+        )
+        response = application().handle(request)
+        self.assertEqual(response.status, 408)
+        payload = document(response)
+        self.assertEqual(payload["reason"], "request-timeout")
+        self.assertNotIn("timed out", payload["error"])
+        self.assertTrue(response.close, "the stream is at an unknown offset")
+
+    def test_a_body_shorter_than_declared_is_refused_not_parsed(self) -> None:
+        provider = RecordingProvider()
+        response = application(provider=provider).handle(
+            build(
+                "POST",
+                "/api/unlock",
+                headers={"Content-Length": "40"},
+                body=b"{}",
+            )
+        )
+        self.assertEqual(response.status, 400)
+        payload = document(response)
+        self.assertEqual(payload["reason"], "invalid-request")
+        self.assertIn("2 of 40", payload["error"])
+        self.assertEqual(provider.calls, [])
+
+    def test_a_body_nested_past_the_decoders_depth_is_a_bad_request(self) -> None:
+        # Deep enough to exhaust the decoder on every supported Python, small
+        # enough to pass the body cap: the refusal must come from parsing.
+        depth = 200_000
+        raw = b"[" * depth + b"]" * depth
+        response = application().handle(build("POST", "/api/unlock", body=raw))
+        self.assertEqual(response.status, 400)
+        payload = document(response)
+        self.assertEqual(payload["reason"], "invalid-request")
+        self.assertIn("valid JSON", payload["error"])
 
     def test_loopback_says_what_failed_and_the_private_network_does_not(self) -> None:
         """The operator owns the process; a prober owns nothing.

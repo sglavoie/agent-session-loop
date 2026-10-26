@@ -128,7 +128,7 @@ class AuditValidationTests(unittest.TestCase):
         errors = run_flags.validate_run_namespace(namespace(audit_timeout=0))
 
         self.assertEqual(
-            ["--audit-timeout must be a positive integer"],
+            ["--audit-timeout must be a positive integer; got '0'"],
             [error.message for error in errors],
         )
 

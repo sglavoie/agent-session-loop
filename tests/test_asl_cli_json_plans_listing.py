@@ -402,7 +402,7 @@ class JsonPlansListingCliTests(JsonCliHelpers, unittest.TestCase):
                     )
                     self.assertEqual(1, code, stderr)
                     payload = json.loads(stdout)
-                    self.assertEqual("invalid-argument", payload["reason"])
+                    self.assertEqual("input-error", payload["reason"])
                     self.assertIn("finite, non-negative number", payload["error"])
 
     def test_plans_stale_days_beyond_the_calendar_keeps_nothing(self) -> None:

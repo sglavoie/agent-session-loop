@@ -223,7 +223,7 @@ def plans_from_args(args: Any, *, now: datetime | None = None) -> int:
     if stale_days is not None and (not math.isfinite(stale_days) or stale_days < 0):
         return _plans_error(
             args,
-            reason="invalid-argument",
+            reason="input-error",
             error=flag_refusal("--stale-days", NON_NEGATIVE_NUMBER, stale_days),
         )
 

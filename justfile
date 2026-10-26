@@ -35,7 +35,7 @@ verify-asl-install:
 test *ARGS:
     python3 -m unittest {{ ARGS }}
 
-# Run fast unit/schema/parser tests
+# Run the fast lane: every test module not marked ASL_TEST_LANE = "integration"
 test-fast:
     python3 -m tests.run_suite --fast
 

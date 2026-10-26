@@ -194,6 +194,26 @@ class FilterParsingTests(unittest.TestCase):
                 _call(f"/api/queue?limit={overview_vocabulary.MAX_PAGE_LIMIT + 1}")
             )
 
+    def test_a_non_finite_activity_is_no_activity(self) -> None:
+        # NaN sorts nowhere and an infinity outranks every real moment, so
+        # either would scramble the order the page cursor walks.
+        for value in ("nan", "NaN", "inf", "-Infinity", float("nan"), float("inf")):
+            with self.subTest(value=value):
+                self.assertIsNone(overview_selection._activity_epoch(value))
+        self.assertIsNone(
+            overview_selection.activity_at(
+                {"last_activity_at": "nan", "run_started_at": None}
+            )
+        )
+
+    def test_an_offset_less_moment_is_read_as_utc(self) -> None:
+        # The browser reads it as UTC too; local time would move the row
+        # across the eight-hour window by the host's offset.
+        self.assertEqual(
+            overview_selection._activity_epoch("2026-09-15T08:00:00"),
+            overview_selection._activity_epoch("2026-09-15T08:00:00Z"),
+        )
+
     def test_the_filter_set_round_trips_through_the_answer(self) -> None:
         target = (
             "/api/queue?project=scripts&q=alpha&harness=claude&filter=paused"

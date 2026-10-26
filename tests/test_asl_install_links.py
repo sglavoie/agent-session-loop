@@ -327,15 +327,28 @@ class InstallLinksTests(unittest.TestCase):
         (self.home / ".claude/CLAUDE.md").write_text("x\n")
         (self.home / ".codex/AGENTS.md").write_text("x\n")
 
-        code, _stdout, stderr = self.run_main("--dry-run")
+        with mock.patch.object(install_links.Path, "home", return_value=self.home):
+            code, _stdout, stderr = self.run_main("--dry-run")
 
         self.assertEqual(code, 0)
         missing = self.home / ".copilot/copilot-instructions.md"
         self.assertIn(f"{missing} does not exist yet", stderr)
         self.assertIn("just sync-skills", stderr)
+        self.assertNotIn("startup_context --home", stderr)
         self.assertNotIn("CLAUDE.md does not exist", stderr)
         self.assertNotIn("AGENTS.md does not exist", stderr)
         self.assertFalse(missing.exists(), "install.py never renders the card")
+
+    def test_main_points_the_renderer_at_a_non_default_home(self) -> None:
+        # `just sync-skills` renders into the real $HOME, never into --home.
+        code, _stdout, stderr = self.run_main("--dry-run")
+
+        self.assertEqual(code, 0)
+        self.assertIn(
+            f"python3 -m agent_session_loop.startup_context --home {self.home}",
+            stderr,
+        )
+        self.assertNotIn("just sync-skills", stderr)
 
     def test_skills_only_leaves_the_wrappers_alone(self) -> None:
         self.install(skills_only=True)

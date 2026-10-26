@@ -319,6 +319,7 @@ class LiveContractDocsTests(unittest.TestCase):
             "### Live ASL supervision",
             "`asl run --no-mailbox`",
             "The eight mailbox commands",
+            "three private (`0600`) state files, eight commands",
             "Lease freshness is checked only at an active\ndeadline",
             "30-minute ceiling bounds unsupervised time rather\nthan wall clock",
             "`asl control set-model",

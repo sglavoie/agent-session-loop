@@ -67,7 +67,6 @@ was found.
 from __future__ import annotations
 
 import json
-import socket
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -471,7 +470,9 @@ def _read_ownership(plan_state_dir: Path, *, warnings: list[str]) -> Ownership:
 
     pid = _coerce_pid(record.get("pid"))
     hostname = _nonempty_str(record.get("hostname"))
-    foreign_host = hostname is not None and hostname != socket.gethostname()
+    foreign_host = state.recorded_on_foreign_host(
+        hostname, pid=pid, process_start=record.get("process_start")
+    )
     alive: bool | None = None
     if pid is not None and not foreign_host:
         alive = state.is_pid_running(pid)

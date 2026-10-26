@@ -14,7 +14,10 @@ def _add_bridge_commands(
     """The nested `asl bridge` group."""
     bridge_parser = subparsers.add_parser(
         "bridge",
-        help="Serve the read-only NDJSON run projection to a supervision client.",
+        help=(
+            "Serve the NDJSON run projection and token-guarded interventions "
+            "to a supervision client."
+        ),
         epilog=_group_epilogue("bridge", "asl bridge serve --help"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -23,7 +26,10 @@ def _add_bridge_commands(
     )
     bridge_serve_parser = bridge_sub.add_parser(
         "serve",
-        help="Stream hello, run snapshots, and change events over stdio.",
+        help=(
+            "Stream hello, run snapshots, and change events over stdio, and "
+            "accept token-guarded interventions."
+        ),
     )
     bridge_serve_parser.add_argument(
         "--stdio",

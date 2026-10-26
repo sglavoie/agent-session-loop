@@ -607,6 +607,63 @@ class ParserFlagSpellingTests(unittest.TestCase):
                 self.assertIn("--wait-timeout SECONDS", help_text)
                 self.assertNotIn("TIMEOUT,", help_text)
 
+    def _help(self, argv: list[str]) -> str:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), self.assertRaises(SystemExit):
+            cli.build_parser(prog="asl").parse_args([*argv, "--help"])
+        return " ".join(stdout.getvalue().split())
+
+    def test_help_names_values_by_kind_not_by_dest(self) -> None:
+        cases = (
+            (["notify"], ("TEXT",), ()),
+            (["ask"], ("TEXT",), ()),
+            (["prepare"], ("PLAN", "--cwd DIR", "--validator-jobs N"), ("CWD",)),
+            (
+                ["split"],
+                ("--plan-file PATH", "--base-dir DIR", "--cwd DIR"),
+                ("PLAN_FILE", "BASE_DIR"),
+            ),
+            (["register-repositories"], ("--output PATH",), ("OUTPUT",)),
+            (["inbox", "resolve"], ("--note TEXT",), ("NOTE",)),
+            (["tail"], ("--lines N", "(default: 40)"), ("LINES",)),
+            (
+                ["run"],
+                (
+                    "--timeout SECONDS",
+                    "--audit-timeout SECONDS",
+                    "--audit-harness-model MODEL",
+                    "--note TEXT",
+                ),
+                ("AUDIT_TIMEOUT", "AUDIT_HARNESS_MODEL", "NOTE"),
+            ),
+        )
+        for argv, present, absent in cases:
+            help_text = self._help(argv)
+            with self.subTest(argv=argv):
+                for text in present:
+                    self.assertIn(text, help_text)
+                for text in absent:
+                    self.assertNotIn(text, help_text)
+
+    def test_wait_timeout_help_names_the_flag_it_needs(self) -> None:
+        for argv, needed in (
+            (["inbox", "reply"], "--wait-consumed"),
+            (["inbox", "resolve"], "--wait-consumed"),
+            (["inbox", "guidance"], "--wait-delivered"),
+        ):
+            with self.subTest(argv=argv):
+                # argparse may wrap at the hyphen, so compare without spaces.
+                self.assertIn(
+                    f"requires {needed}".replace(" ", ""),
+                    self._help(argv).replace(" ", ""),
+                )
+
+    def test_progress_accepts_a_state_dir_for_label_resolution(self) -> None:
+        args = cli.build_parser().parse_args(
+            ["progress", "label", "--state-dir", "/tmp/state"]
+        )
+        self.assertEqual("/tmp/state", args.state_dir)
+
 
 class NumericFlagValidationTests(unittest.TestCase):
     """Numeric flags refuse NaN, infinity and out-of-range values at parse time.
@@ -811,6 +868,75 @@ class NumericFlagValidationTests(unittest.TestCase):
         args = cli.build_parser().parse_args(["ask", "/tmp/plan", "--text-stdin"])
         self.assertTrue(args.text_stdin)
         self.assertIsNone(args.text)
+
+
+class WorkbenchGroupFlagTests(unittest.TestCase):
+    """Serve flags on the `asl workbench` group reach serve and nothing else.
+
+    A non-serve leaf's own defaults used to overwrite the group's values, so
+    `asl workbench --json registry` printed text and `--port 1 --open
+    registry` was silently accepted.
+    """
+
+    def test_group_json_reaches_every_non_serve_leaf(self) -> None:
+        parser = cli.build_parser()
+        for argv in (
+            ["workbench", "--json", "registry"],
+            ["workbench", "--json", "unpin", "/tmp/plan"],
+            ["workbench", "--json", "pin", "/tmp/plan"],
+        ):
+            with self.subTest(argv=argv):
+                args = parser.parse_args(argv)
+                self.assertTrue(args.json)
+                self.assertFalse(
+                    any(name.startswith("_workbench_") for name in vars(args))
+                )
+
+    def test_serve_only_group_flags_are_refused_before_another_leaf(self) -> None:
+        for argv, flags in (
+            (
+                [
+                    "workbench",
+                    "--port",
+                    "1",
+                    "--host",
+                    "10.0.0.1",
+                    "--open",
+                    "registry",
+                ],
+                "--host, --port, --open",
+            ),
+            (["workbench", "--state-dir", "/tmp/s", "pin", "/tmp/p"], "--state-dir"),
+            (["workbench", "--plan-root", "/tmp/r", "unpin", "/tmp/p"], "--plan-root"),
+        ):
+            stderr = io.StringIO()
+            with (
+                self.subTest(argv=argv),
+                redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                cli.build_parser(prog="asl").parse_args(argv)
+            self.assertEqual(2, raised.exception.code)
+            self.assertIn(
+                f"{flags} only apply to `asl workbench serve`", stderr.getvalue()
+            )
+
+    def test_bare_workbench_keeps_serve_defaults(self) -> None:
+        args = cli.build_parser().parse_args(["workbench"])
+        self.assertIsNone(args.workbench_command)
+        self.assertEqual(cli_defaults._WORKBENCH_DEFAULT_HOST, args.host)
+        self.assertEqual(cli_defaults._WORKBENCH_DEFAULT_PORT, args.port)
+        self.assertIsNone(args.state_dir)
+        self.assertIsNone(args.plan_root)
+        self.assertFalse(args.open)
+        self.assertFalse(args.json)
+
+    def test_serve_leaf_flag_wins_over_group_flag(self) -> None:
+        args = cli.build_parser().parse_args(
+            ["workbench", "--port", "1", "--json", "serve", "--port", "2"]
+        )
+        self.assertEqual(2, args.port)
+        self.assertTrue(args.json)
 
 
 if __name__ == "__main__":

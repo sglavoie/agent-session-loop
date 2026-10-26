@@ -21,6 +21,7 @@ from . import (
     write_guards_legacy,
     write_guards_protected,
 )
+from .run_errors import interrupt_message
 from .run_loop_commit_settlement import _settle_paused_retained_work
 from .run_loop_frame import RunFrame, RunResult
 from .run_loop_terminal import _expire_run_guards, _terminalize
@@ -179,7 +180,7 @@ def _handle_run_crash(frame: RunFrame, error: BaseException) -> RunResult | None
         if not frame.ctx.payload.get("paused"):
             frame.ctx.pause(
                 reason="interrupted",
-                message="run interrupted by user",
+                message=interrupt_message(error),
                 details=dict(frame.ctx.last_session_details),
             )
     else:
@@ -218,7 +219,7 @@ def _record_run_crash(frame: RunFrame, error: BaseException) -> None:
             if not ctx.payload.get("paused"):
                 ctx.pause(
                     reason="interrupted",
-                    message="run interrupted by user",
+                    message=interrupt_message(error),
                     details=dict(ctx.last_session_details),
                 )
         else:

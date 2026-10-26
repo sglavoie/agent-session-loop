@@ -78,8 +78,12 @@ Invariants that survive the move:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import signal
 import threading
+from collections.abc import Iterator
 from pathlib import Path
+from types import FrameType
 from typing import Any, Protocol
 
 from . import (
@@ -102,7 +106,47 @@ from . import (
     verification_models,
 )
 from .run_entry_resume import _apply_resume_config, _ResumeUnavailable
-from .run_errors import RunError
+from .run_errors import RunError, RunTerminatedBySignal, interrupt_message
+
+#: Signals that end a locked run the way Ctrl-C does. SIGTERM is what `kill`,
+#: a process supervisor or a logout sends; SIGHUP is a closed terminal. Left at
+#: their defaults they end the process without a terminal record, a restored
+#: TTY or a killed harness group -- and the harness runs in a session of its
+#: own, so nothing else would ever stop it.
+TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+
+
+@contextlib.contextmanager
+def _termination_signals_interrupt() -> Iterator[None]:
+    """Raise :class:`RunTerminatedBySignal` on a termination signal, then undo.
+
+    Only the main thread can install a handler, and Python runs handlers there
+    anyway, so from any other thread this changes nothing. A signal already set
+    to be ignored -- ``nohup asl run`` -- stays ignored. The previous handlers
+    come back on the way out, so a second signal while the interrupt is being
+    reported takes its default action, like a second Ctrl-C.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def _interrupt(signum: int, _frame: FrameType | None) -> None:
+        raise RunTerminatedBySignal(signal.Signals(signum).name)
+
+    previous: dict[signal.Signals, Any] = {}
+    try:
+        for signum in TERMINATION_SIGNALS:
+            try:
+                if signal.getsignal(signum) is signal.SIG_IGN:
+                    continue
+                previous[signum] = signal.signal(signum, _interrupt)
+            except ValueError, OSError:
+                continue
+        yield
+    finally:
+        for restored, handler in previous.items():
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(restored, handler)
 
 
 class LockedRun(Protocol):
@@ -304,58 +348,61 @@ def run_from_args(
             return 1
 
         try:
-            try:
-                # Checked after acquiring, not before: a check-before-acquire
-                # leaves two racing starters blind to each other and both
-                # proceed, whereas checking under our own published claim means
-                # the worst case is both refusing, which only happens on a
-                # genuine overlap.
-                if verification_context.workspace is not None:
-                    conflicts = run_contention.detect_conflicts(
-                        plan_dir=initial_snapshot.plan_dir,
-                        repository_roots=claimed_repository_roots,
-                        state_dir=args.state_dir,
-                        reclaim=reclaim_stale_locks,
-                    )
-                    if conflicts:
-                        payload = run_outcome._error_payload(
-                            args,
-                            reason=(
-                                events.PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION
-                            ),
-                            message=run_contention.conflict_message(
-                                initial_snapshot.plan_dir, conflicts
-                            ),
-                            paused=True,
-                            cwd=verification_context.root,
-                            snapshot=initial_snapshot,
+            with _termination_signals_interrupt():
+                try:
+                    # Checked after acquiring, not before: a check-before-acquire
+                    # leaves two racing starters blind to each other and both
+                    # proceed, whereas checking under our own published claim means
+                    # the worst case is both refusing, which only happens on a
+                    # genuine overlap.
+                    if verification_context.workspace is not None:
+                        conflicts = run_contention.detect_conflicts(
+                            plan_dir=initial_snapshot.plan_dir,
+                            repository_roots=claimed_repository_roots,
+                            state_dir=args.state_dir,
+                            reclaim=reclaim_stale_locks,
                         )
-                        contention_details = run_contention.conflict_details(conflicts)
-                        payload["details"] = contention_details
-                        payload["pause_details"] = dict(contention_details)
-                        run_outcome._emit_run_payload(args, payload)
-                        return 1
-                exit_code, payload = run_locked(
-                    args=args,
-                    cwd=verification_context.root,
-                    verification_context=verification_context,
-                    timeout=timeout,
-                    max_sessions=max_sessions,
-                    commit_mode=commit_mode,
-                    lock_info=lock_info,
-                    run_id=run_id,
-                    reply_text=reply_text,
-                    reply_origin=reply_origin,
-                    wakeup=wakeup,
-                    redirect_wakeup=redirect_wakeup,
-                )
-            finally:
-                state_locks.release_lock(initial_snapshot.plan_dir, args.state_dir)
-        except KeyboardInterrupt:
+                        if conflicts:
+                            payload = run_outcome._error_payload(
+                                args,
+                                reason=(
+                                    events.PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION
+                                ),
+                                message=run_contention.conflict_message(
+                                    initial_snapshot.plan_dir, conflicts
+                                ),
+                                paused=True,
+                                cwd=verification_context.root,
+                                snapshot=initial_snapshot,
+                            )
+                            contention_details = run_contention.conflict_details(
+                                conflicts
+                            )
+                            payload["details"] = contention_details
+                            payload["pause_details"] = dict(contention_details)
+                            run_outcome._emit_run_payload(args, payload)
+                            return 1
+                    exit_code, payload = run_locked(
+                        args=args,
+                        cwd=verification_context.root,
+                        verification_context=verification_context,
+                        timeout=timeout,
+                        max_sessions=max_sessions,
+                        commit_mode=commit_mode,
+                        lock_info=lock_info,
+                        run_id=run_id,
+                        reply_text=reply_text,
+                        reply_origin=reply_origin,
+                        wakeup=wakeup,
+                        redirect_wakeup=redirect_wakeup,
+                    )
+                finally:
+                    state_locks.release_lock(initial_snapshot.plan_dir, args.state_dir)
+        except KeyboardInterrupt as interrupt:
             payload = run_outcome._error_payload(
                 args,
                 reason="interrupted",
-                message="run interrupted by user",
+                message=interrupt_message(interrupt),
                 paused=True,
                 cwd=cwd,
                 snapshot=initial_snapshot,

@@ -24,19 +24,19 @@ class SplitCommandTests(SplitCliHelpers, unittest.TestCase):
         self.assertIs(cli.resolve_handler(parsed), authoring_split_cli.split_from_args)
         self.assertEqual("auto", parsed.skill_prefix)
         self.assertFalse(parsed.inline_stdin)
-        # A source is required and the two sources are mutually exclusive.
-        with self.assertRaises(SystemExit):
-            parser.parse_args(["split", "--contracts-file", "c.json"])
-        with self.assertRaises(SystemExit):
-            parser.parse_args(
-                [
-                    "split",
-                    "--plan-file",
-                    "P.md",
-                    "--inline-stdin",
-                    "--contracts-file",
-                    "c.json",
-                ]
+        # The handler, not argparse, requires exactly one source, so the
+        # refusal keeps its JSON ``reason`` (as register-repositories does).
+        neither = parser.parse_args(["split", "--json"])
+        both = parser.parse_args(
+            ["split", "--plan-file", "P.md", "--inline-stdin", "--check", "--json"]
+        )
+        for args in (neither, both):
+            code, out, _err = self._run_split(args, stdin="")
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertEqual("input-error", payload["reason"])
+            self.assertIn(
+                "exactly one of --plan-file or --inline-stdin", payload["error"]
             )
 
     def test_split_happy_path_produces_preflight_clean_dir(self) -> None:

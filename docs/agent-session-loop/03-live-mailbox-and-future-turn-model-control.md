@@ -426,7 +426,7 @@ With `--json`, failures use the common error envelope and the following stable
   `question-already-resolved`, `question-not-waiting`, `mailbox-full`,
   `mailbox-read-error`, and `mailbox-write-error`. Lease I/O errors are
   `lease-read-error` and `lease-write-error`.
-- Plan resolution shared by all seven commands reports `ambiguous-plan`,
+- Plan resolution shared by all eight commands reports `ambiguous-plan`,
   `plan-not-found`, `malformed-plan`, `state-error`, or `os-error`.
 
 Supervisor write and wait commands first read the current lease and decide

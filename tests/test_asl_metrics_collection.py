@@ -11,6 +11,7 @@ from agent_session_loop import assurance_projection as assurance_projection
 from agent_session_loop import (
     events,
     metrics,
+    metrics_models,
 )
 from tests.asl_metrics_support import (
     MetricsCollectionBase,
@@ -416,6 +417,27 @@ class AssuranceMetricsSectionTests(unittest.TestCase):
         self.assertEqual(section["runs_recorded"], 0)
         self.assertEqual(section["issues"]["observations"], 0)
         self.assertEqual(section["issues"]["open_total"], 1)
+
+
+class UndecodableRecordTests(unittest.TestCase):
+    # Bytes that are not UTF-8 used to escape as UnicodeDecodeError and end the
+    # whole metrics scan instead of reading like any other corrupt record.
+
+    def test_a_non_utf8_event_line_is_skipped_and_its_neighbors_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            path.write_bytes(b'{"name": "a"}\n{"name": "\xff\n{"name": "b"}\n')
+
+            records = metrics_models._read_event_records(path)
+
+        self.assertEqual(["a", "b"], [record["name"] for record in records])
+
+    def test_a_non_utf8_result_payload_reads_as_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "result.json"
+            path.write_bytes(b'{"status": "\xff\xfe"}')
+
+            self.assertIsNone(metrics_models._read_result_payload(path))
 
 
 if __name__ == "__main__":

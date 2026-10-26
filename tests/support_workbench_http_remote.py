@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import threading
+import time
+from unittest import mock
+
+from asl_workbench.remote_reads import RemoteReadError
 from asl_workbench.store_types import MAX_READ_LIMIT
 
 from .support_workbench_http_base import (
@@ -218,6 +223,28 @@ class RemoteProviderTests(unittest.TestCase):
         self.assertEqual(ask["run_key"], "run-1")
         self.assertEqual(ask["now"], NOW)
 
+    def test_a_detail_window_out_of_bounds_is_the_callers_mistake(self) -> None:
+        for query in ("offset=-1", "limit=0", "max_bytes=0", "offset=x"):
+            with self.subTest(query=query):
+                response = self.remote_app().handle(
+                    build("GET", f"/api/logs?plan_key=plan-abc&stream=stdout&{query}")
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(document(response)["reason"], "invalid-request")
+        self.assertEqual(self.reads.asks, [], "nothing the far end refuses is asked")
+
+    def test_a_read_that_cannot_be_composed_is_not_a_server_error(self) -> None:
+        class RefusingLane:
+            def fetch(self, **kwargs: Any) -> ReadAnswer:
+                raise RemoteReadError("field 'run_key' is malformed")
+
+        app = self.remote_app(reads=RefusingLane())
+        response = app.handle(build("GET", "/api/state?plan_key=plan-abc&run_key=x"))
+        self.assertEqual(response.status, 400)
+        payload = document(response)
+        self.assertEqual(payload["reason"], "invalid-request")
+        self.assertIn("run_key", payload["error"])
+
     def test_a_question_detail_keeps_the_local_response_shape(self) -> None:
         answer = ReadAnswer(
             request_id="question-read",
@@ -382,6 +409,42 @@ class RemoteProviderTests(unittest.TestCase):
         self.assertEqual(
             len(self.mutations.handed), 1, "a replay is never handed down twice"
         )
+
+    def test_two_tabs_submitting_together_admit_only_one(self) -> None:
+        """Lookup, admission and insert share one transaction.
+
+        The first submission's admission decision is held open long enough for
+        a second, different operation on the same plan to arrive. Taken under
+        separate locks, both would read "nothing outstanding" and both would be
+        journalled as pending.
+        """
+        from asl_workbench import service_mutations
+
+        real_admit = service_mutations.admit
+        deciding = threading.Event()
+
+        def slow_admit(*args: Any, **kwargs: Any) -> Any:
+            admission = real_admit(*args, **kwargs)
+            if kwargs.get("operation_id") == "op-a":
+                deciding.set()
+                time.sleep(0.2)
+            return admission
+
+        responses: dict[str, Response] = {}
+
+        def submit(operation_id: str) -> None:
+            responses[operation_id] = self.submit(operation_id)
+
+        with mock.patch.object(service_mutations, "admit", slow_admit):
+            first = threading.Thread(target=submit, args=("op-a",))
+            first.start()
+            self.assertTrue(deciding.wait(5))
+            submit("op-b")
+            first.join(5)
+        self.assertEqual(responses["op-a"].status, 202)
+        self.assertNotEqual(responses["op-b"].status, 202)
+        self.assertIsNone(self.store.operation("op-b"))
+        self.assertEqual(len(self.mutations.handed), 1)
 
     def test_reusing_an_id_for_a_different_target_is_a_conflict(self) -> None:
         self.submit("op-3", plan_key="plan-abc")

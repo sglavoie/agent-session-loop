@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from agent_session_loop import (
+    config,
     preflight,
     preflight_auto_repair,
     preflight_hint_resolution,
@@ -32,6 +33,13 @@ class PreflightRepairHintTests(unittest.TestCase):
                 self.assertTrue(hint.message)
                 self.assertTrue(hint.question_template)
                 self.assertIn(hint.fix_category, _FIX_CATEGORIES)
+
+    def test_env_harness_hint_names_the_real_config_location(self) -> None:
+        message = preflight_repair_hints.REPAIR_HINTS["env-harness"].message
+        relative = f"{config.APP_NAME}/{config.HARNESS_CONFIG_NAME}"
+        self.assertIn(f"`~/.config/{relative}`", message)
+        self.assertIn(f"`$XDG_CONFIG_HOME/{relative}`", message)
+        self.assertNotIn("agent_session_loop/", message)
 
     def test_all_repair_hint_check_ids_are_unique(self) -> None:
         check_ids: list[str] = []

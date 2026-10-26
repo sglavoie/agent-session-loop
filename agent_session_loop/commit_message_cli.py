@@ -25,6 +25,7 @@ from . import (
 from . import (
     commit_message_output as output,
 )
+from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
 
 
 def _generation_timeout(args: argparse.Namespace) -> int:
@@ -39,13 +40,12 @@ def _generation_timeout(args: argparse.Namespace) -> int:
     timeout = getattr(args, "timeout", None)
     if timeout is None:
         return models.DEFAULT_GENERATION_TIMEOUT_SECONDS
-    timeout = int(timeout)
-    if timeout <= 0:
+    if int(timeout) <= 0:
         raise models.CommitMessageError(
-            "--timeout must be a positive number of seconds",
+            flag_refusal("--timeout", POSITIVE_INTEGER, timeout),
             reason=models.REASON_INVALID_ARGUMENTS,
         )
-    return timeout
+    return int(timeout)
 
 
 def _commit_and_report(

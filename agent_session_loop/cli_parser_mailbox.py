@@ -55,7 +55,10 @@ def _add_inbox_commands(
         type=float,
         default=None,
         metavar="SECONDS",
-        help="Delivery wait timeout in seconds (default: 30; maximum: 1800)",
+        help=(
+            "Delivery wait timeout in seconds; requires --wait-delivered "
+            "(default: 30; maximum: 1800)"
+        ),
     )
     inbox_guidance_parser.set_defaults(
         handler_ref="mailbox_cli_guidance:inbox_guidance_from_args",
@@ -94,7 +97,10 @@ def _add_inbox_commands(
         type=float,
         default=None,
         metavar="SECONDS",
-        help="Consumption wait timeout in seconds (default: 90; maximum: 1800)",
+        help=(
+            "Consumption wait timeout in seconds; requires --wait-consumed "
+            "(default: 90; maximum: 1800)"
+        ),
     )
     inbox_reply_parser.set_defaults(
         handler_ref="mailbox_cli_replies:inbox_reply_from_args",
@@ -120,6 +126,7 @@ def _add_inbox_commands(
     resolution_note = inbox_resolve_parser.add_mutually_exclusive_group()
     resolution_note.add_argument(
         "--note",
+        metavar="TEXT",
         help="Optional resolution note (not an operator reply)",
     )
     resolution_note.add_argument(
@@ -139,7 +146,10 @@ def _add_inbox_commands(
         type=float,
         default=None,
         metavar="SECONDS",
-        help="Consumption wait timeout in seconds (default: 90; maximum: 1800)",
+        help=(
+            "Consumption wait timeout in seconds; requires --wait-consumed "
+            "(default: 90; maximum: 1800)"
+        ),
     )
     inbox_resolve_parser.set_defaults(
         handler_ref="mailbox_cli_replies:inbox_resolve_from_args",
@@ -200,6 +210,7 @@ def _add_worker_message_commands(
         ask_parser.add_argument(
             "text",
             nargs="?",
+            metavar="TEXT",
             help=(
                 "New question body (this, --text-stdin, or --question-id, exactly one)"
             ),
@@ -243,6 +254,7 @@ def _add_worker_message_commands(
         notify_parser.add_argument(
             "text",
             nargs="?",
+            metavar="TEXT",
             help="Notice body (this or --text-stdin, exactly one)",
         ),
         notify_parser.add_argument(

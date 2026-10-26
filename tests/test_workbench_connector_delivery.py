@@ -396,6 +396,42 @@ class SingleInstanceTests(unittest.TestCase):
         with self.assertRaises(portable_support.ConnectorError):
             portable_support.SingleInstanceLock(self.path).acquire()
 
+    def test_racing_connectors_never_both_hold_the_lock(self) -> None:
+        # The pid write is slowed so the window between "file exists" and
+        # "file names its owner" is wide open. A racer that read the file in
+        # that window used to see no owner, call it stale, and take it too.
+        real_write = os.write
+
+        def slow_write(handle: int, data: bytes) -> int:
+            threading.Event().wait(0.05)
+            return real_write(handle, data)
+
+        held: list[portable_support.SingleInstanceLock] = []
+        refused: list[portable_support.ConnectorError] = []
+        start = threading.Barrier(4)
+
+        def contend() -> None:
+            lock = portable_support.SingleInstanceLock(self.path)
+            start.wait()
+            try:
+                lock.acquire()
+            except portable_support.ConnectorError as error:
+                refused.append(error)
+            else:
+                held.append(lock)
+
+        with mock.patch("os.write", slow_write):
+            threads = [threading.Thread(target=contend) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+        for lock in held:
+            self.addCleanup(lock.release)
+        self.assertEqual(1, len(held))
+        self.assertEqual(3, len(refused))
+        self.assertEqual(str(os.getpid()), self.path.read_text(encoding="utf-8"))
+
     def test_a_lock_left_by_a_dead_owner_is_stolen(self) -> None:
         # Otherwise a crash would need a human before the Mac could be observed
         # again.

@@ -51,6 +51,7 @@ export const state = {
   historyEntries: [],
   historyMeta: null,
   historyInFlight: false,
+  historyPending: false,
   historyOutcome: null,
   selectedPlan: null,
   cleanupMode: false,
