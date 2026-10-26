@@ -12,8 +12,14 @@ from typing import Any
 from . import plans_metadata, repository_intent, responses
 from .authoring_transaction import PlanTransaction
 from .cli_defaults import program_name
-from .plans_errors import InputReadError, PlanError
+from .plans_errors import (
+    PLAN_NOT_FOUND_REASON,
+    InputReadError,
+    PlanError,
+    PlanNotFoundError,
+)
 from .plans_files import canonicalize_path, read_input_text
+from .plans_snapshot import require_plan_directory
 from .prepare_corrections import CorrectionOutcome, _apply_one_correction
 from .prepare_expansion import insert_expansion_reference, render_expansion
 from .prepare_models import (
@@ -176,6 +182,15 @@ def expand_ingest_from_args(args: Any) -> int:
         else:
             print(f"{program_name()} expand-ingest: {error}", file=sys.stderr)
         return 1
+
+    # A missing plan is the root cause, reported as every plan-scoped command
+    # reports it rather than as a schema defect in the batch.
+    try:
+        require_plan_directory(plan_dir)
+    except PlanNotFoundError as error:
+        return _emit_error(PLAN_NOT_FOUND_REASON, str(error))
+    except PlanError as error:
+        return _emit_error(EXPAND_INGEST_REASON_VALIDATOR_SCHEMA, str(error))
 
     try:
         text = read_input_text(os.path.expanduser(batch_file), label="batch file")

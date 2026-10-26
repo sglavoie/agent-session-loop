@@ -151,6 +151,21 @@ class ExpandIngestCliTests(unittest.TestCase):
             body = json.loads(stdout)
             self.assertEqual("validator-schema", body["reason"])
 
+    def test_missing_plan_directory_is_plan_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            batch = self._write_batch(tmp_path, _validator_payload())
+            missing = tmp_path / "nope"
+
+            code, stdout, _stderr = self._run_cli(
+                str(missing), "--batch-file", str(batch), "--json"
+            )
+
+            self.assertEqual(1, code)
+            payload = json.loads(stdout)
+            self.assertEqual("plan-not-found", payload["reason"])
+            self.assertIn("plan directory does not exist", payload["error"])
+
     def test_missing_batch_file_is_input_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
