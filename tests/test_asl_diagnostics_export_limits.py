@@ -359,6 +359,29 @@ class ExportCommandTests(ExportTestBase):
         self.assertEqual(out, "")
         self.assertIn("--agent-mux", err)
 
+    def test_missing_profile_refusal_reads_like_a_usage_error(self) -> None:
+        _, _, err = self._run(["--state-dir", str(self.state_dir)])
+        self.assertTrue(err.startswith("usage: asl diagnostics export "), err)
+        self.assertIn(
+            "\nasl diagnostics export: error: no export profile selected", err
+        )
+
+    def test_failed_write_names_the_command(self) -> None:
+        self.seed_full_plan()
+        target = self.tmp_path / "already-a-dir"
+        target.mkdir()
+        code, _, err = self._run(
+            [
+                "--agent-mux",
+                "--state-dir",
+                str(self.state_dir),
+                "--output",
+                str(target),
+            ]
+        )
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("asl diagnostics export: could not write"))
+
     def test_json_envelope_wraps_the_export(self) -> None:
         self.seed_full_plan()
         code, out, _ = self._run(
