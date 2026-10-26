@@ -248,6 +248,12 @@ def split_from_args(args: Any) -> int:
             reason, error, want_json=want_json, **{**common_fields, **fields}
         )
 
+    if bool(args.plan_file) == bool(args.inline_stdin):
+        return _emit_error(
+            SPLIT_REASON_INPUT_ERROR,
+            "give exactly one of --plan-file or --inline-stdin",
+        )
+
     if args.check:
         return check_from_args(args)
 

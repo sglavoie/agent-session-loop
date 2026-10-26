@@ -27,19 +27,23 @@ def _add_plan_authoring_commands(
             "directory using the deterministic authoring API."
         ),
     )
-    split_source = split_parser.add_mutually_exclusive_group(required=True)
-    split_source.add_argument(
-        "--plan-file",
-        dest="plan_file",
-        help="Path to the source plan markdown file to split",
-    )
-    split_source.add_argument(
-        "--inline-stdin",
-        dest="inline_stdin",
-        action="store_true",
-        help=(
-            "Capture the source plan from stdin (the last <proposed_plan> "
-            "block, else the raw input) as a durable source file"
+    # The handler requires exactly one source itself so a missing or doubled
+    # source keeps its JSON ``reason``; usage still shows the alternatives.
+    split_parser.show_as_alternatives(
+        split_parser.add_argument(
+            "--plan-file",
+            dest="plan_file",
+            default=None,
+            help="Path to the source plan markdown file to split",
+        ),
+        split_parser.add_argument(
+            "--inline-stdin",
+            dest="inline_stdin",
+            action="store_true",
+            help=(
+                "Capture the source plan from stdin (the last <proposed_plan> "
+                "block, else the raw input) as a durable source file"
+            ),
         ),
     )
     split_parser.add_argument(
@@ -316,25 +320,24 @@ def _add_plan_authoring_commands(
         default=None,
         help="Split plan directory to migrate in place",
     )
-    register_repositories_source = (
-        register_repositories_parser.add_mutually_exclusive_group()
-    )
-    register_repositories_source.add_argument(
-        "--plan-file",
-        dest="plan_file",
-        default=None,
-        help=(
-            "Source plan markdown file to migrate; the migrated markdown is "
-            "emitted and the input file is never written"
+    register_repositories_parser.show_as_alternatives(
+        register_repositories_parser.add_argument(
+            "--plan-file",
+            dest="plan_file",
+            default=None,
+            help=(
+                "Source plan markdown file to migrate; the migrated markdown is "
+                "emitted and the input file is never written"
+            ),
         ),
-    )
-    register_repositories_source.add_argument(
-        "--inline-stdin",
-        dest="inline_stdin",
-        action="store_true",
-        help=(
-            "Read the source plan from stdin (the last <proposed_plan> block, "
-            "else the raw input)"
+        register_repositories_parser.add_argument(
+            "--inline-stdin",
+            dest="inline_stdin",
+            action="store_true",
+            help=(
+                "Read the source plan from stdin (the last <proposed_plan> block, "
+                "else the raw input)"
+            ),
         ),
     )
     register_repositories_parser.add_argument(

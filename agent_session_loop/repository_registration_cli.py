@@ -53,8 +53,9 @@ def _emit_register_error(
 
 def register_repositories_from_args(args: Any) -> int:
     """Run the ``register-repositories`` subcommand from CLI arguments."""
+    sources = (args.plan_dir is not None, bool(args.plan_file), bool(args.inline_stdin))
     source_mode = bool(args.plan_file) or bool(args.inline_stdin)
-    if source_mode == (args.plan_dir is not None):
+    if sum(sources) != 1:
         return _emit_register_error(
             REGISTER_REASON_INPUT_ERROR,
             "give exactly one of PLAN_DIR, --plan-file, or --inline-stdin",
