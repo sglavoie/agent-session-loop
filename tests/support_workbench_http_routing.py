@@ -416,6 +416,17 @@ class PolicyTests(unittest.TestCase):
                 response = application().handle(build("POST", "/api/unlock", body=raw))
                 self.assertEqual(response.status, 400)
 
+    def test_a_body_nested_past_the_decoders_depth_is_a_bad_request(self) -> None:
+        # Deep enough to exhaust the decoder on every supported Python, small
+        # enough to pass the body cap: the refusal must come from parsing.
+        depth = 200_000
+        raw = b"[" * depth + b"]" * depth
+        response = application().handle(build("POST", "/api/unlock", body=raw))
+        self.assertEqual(response.status, 400)
+        payload = document(response)
+        self.assertEqual(payload["reason"], "invalid-request")
+        self.assertIn("valid JSON", payload["error"])
+
     def test_loopback_says_what_failed_and_the_private_network_does_not(self) -> None:
         """The operator owns the process; a prober owns nothing.
 

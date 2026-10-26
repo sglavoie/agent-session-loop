@@ -310,8 +310,10 @@ class Application:
             # ``NaN`` and the infinities are not JSON, and a body carrying one
             # would reach a bound or a store that cannot hold it. Refused here,
             # with the same answer any other malformed body gets.
+            # A deeply nested body exhausts the decoder's recursion instead of
+            # failing to parse; it is just as malformed and gets the same 400.
             parsed = json.loads(decoded, parse_constant=refuse_non_finite)
-        except ValueError as error:
+        except (ValueError, RecursionError) as error:
             raise auth.invalid_request(
                 f"request body must be valid JSON: {error}"
             ) from error
