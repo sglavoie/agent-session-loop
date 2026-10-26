@@ -518,6 +518,20 @@ class PendingRecordReadTests(unittest.TestCase):
 
             self.assertIsNone(assurance_catchup.read_pending_run(run_dir))
 
+    def test_a_non_string_stamp_is_undated_and_still_sorts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._record(Path(tmp), "r1", b'{"run_id": "r1", "recorded_at": 5}')
+            self._record(
+                Path(tmp),
+                "r2",
+                b'{"run_id": "r2", "recorded_at": "2026-08-10T10:11:12+00:00"}',
+            )
+
+            pending = assurance_catchup.iter_pending_runs(state_dir=Path(tmp) / "state")
+
+            self.assertEqual(["r1", "r2"], [item.run_id for item in pending])
+            self.assertIsNone(pending[0].recorded_at)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

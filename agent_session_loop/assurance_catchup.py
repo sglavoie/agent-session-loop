@@ -221,6 +221,9 @@ def read_pending_run(run_dir: Path | str) -> PendingRun | None:
     if not isinstance(run_id, str) or not run_id:
         return None
     config = parsed.get("run_config")
+    # A hand-edited non-string stamp is undated, not a sort key that makes
+    # ``iter_pending_runs`` compare a number with a string and raise.
+    recorded_at = parsed.get("recorded_at")
     return PendingRun(
         run_id=run_id,
         record_path=path,
@@ -228,7 +231,7 @@ def read_pending_run(run_dir: Path | str) -> PendingRun | None:
         run_dir=Path(run_dir),
         plan_dir=_path_or_none(parsed.get("plan_dir")),
         workspace_root=_path_or_none(parsed.get("workspace_root")),
-        recorded_at=parsed.get("recorded_at"),
+        recorded_at=recorded_at if isinstance(recorded_at, str) else None,
         trigger=parsed.get("trigger"),
         skip=parsed.get("skip"),
         run_config=config if isinstance(config, dict) else {},
