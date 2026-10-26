@@ -44,6 +44,57 @@ class DiffParsingTests(unittest.TestCase):
         self.assertEqual(commit_message._parse_diff_into_files("   \n\n"), [])
         self.assertEqual(commit_message._parse_diff_into_files("not a diff\n"), [])
 
+    def test_c_quoted_names_open_their_own_sections(self) -> None:
+        # git quotes a name holding a tab, a quote, or (under the default
+        # `core.quotePath`) non-ASCII bytes; such a header used to match
+        # nothing, so its hunks were folded into the previous file's section.
+        quoted = (
+            'diff --git "a/\\303\\274n.txt" "b/\\303\\274n.txt"\n'
+            "new file mode 100644\n"
+            "index 0000000..1111111\n"
+            "--- /dev/null\n"
+            '+++ "b/\\303\\274n.txt"\n'
+            "@@ -0,0 +1 @@\n"
+            "+umlaut\n"
+            'diff --git "a/tab\\there.txt" b/plain-side.txt\n'
+            "similarity index 90%\n"
+            'rename from "tab\\there.txt"\n'
+            "rename to plain-side.txt\n"
+            "diff --git a/gone.txt b/gone.txt\n"
+            "deleted file mode 100644\n"
+            "--- a/gone.txt\n"
+            "+++ /dev/null\n"
+            "@@ -1 +0,0 @@\n"
+            "-gone\n"
+            "diff --git a/my file.txt b/my file.txt\n"
+            "--- a/my file.txt\t\n"
+            "+++ b/my file.txt\t\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+            "diff --git c/run.sh i/run.sh\n"
+            "old mode 100644\n"
+            "new mode 100755\n"
+        )
+        raw = fixtures.build_file_diff("src/alpha.py", hunks=1, lines=2) + quoted
+
+        files = commit_message._parse_diff_into_files(raw)
+
+        self.assertEqual(
+            [f.path for f in files],
+            [
+                "src/alpha.py",
+                "ün.txt",
+                "plain-side.txt",
+                "gone.txt",
+                "my file.txt",
+                "run.sh",
+            ],
+        )
+        self.assertEqual([f.additions for f in files[:2]], [2, 1])
+        self.assertNotIn("umlaut", files[0].content)
+        self.assertEqual(sum(len(f.content) for f in files), len(raw))
+
     def test_classifies_both_binary_markers_and_skips_line_counting(self) -> None:
         raw = fixtures.build_binary_diff("assets/logo.png") + (
             "diff --git a/assets/icon.ico b/assets/icon.ico\n"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 
 from . import commit_message_models as models
@@ -11,10 +12,144 @@ from . import commit_message_models as models
 # ---------------------------------------------------------------------------
 
 
+# git's C-quoting escapes (``quote_c_style``); anything else is a three-digit
+# octal byte, which is how a non-ASCII name arrives unless ``core.quotePath``
+# is off.
+_C_ESCAPES = {
+    "a": 0x07,
+    "b": 0x08,
+    "t": 0x09,
+    "n": 0x0A,
+    "v": 0x0B,
+    "f": 0x0C,
+    "r": 0x0D,
+    "\\": 0x5C,
+    '"': 0x22,
+}
+
+
+_OCTAL_DIGITS = frozenset("01234567")
+
+
+# The one-letter side prefix: the ``a/``/``b/`` a capture asks for, or the
+# ``c/``/``i/``/``w/`` a mnemonic prefix writes into a diff handed in as text.
+_SIDE_PREFIX = re.compile(r"^\w/")
+
+
+_UNQUOTED_HEADER_SPLIT = re.compile(r"^(\w/.+?) (\w/.+)$")
+
+
+def _read_c_quoted(text: str, start: int) -> tuple[str, int] | None:
+    """Decode the C-quoted name opening at ``text[start]``.
+
+    Returns the name and the index just past its closing quote, or ``None``
+    when no well-formed quoted name starts there.
+    """
+    if text[start : start + 1] != '"':
+        return None
+    decoded = bytearray()
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if char == '"':
+            return decoded.decode("utf-8", errors="replace"), index + 1
+        if char != "\\":
+            decoded.extend(char.encode("utf-8", errors="surrogateescape"))
+            index += 1
+            continue
+        escape = text[index + 1 : index + 2]
+        if escape in _C_ESCAPES:
+            decoded.append(_C_ESCAPES[escape])
+            index += 2
+            continue
+        octal = text[index + 1 : index + 4]
+        if len(octal) == 3 and set(octal) <= _OCTAL_DIGITS:
+            decoded.append(int(octal, 8) & 0xFF)
+            index += 4
+            continue
+        return None
+    return None
+
+
+def _strip_side_prefix(name: str) -> str:
+    return _SIDE_PREFIX.sub("", name, count=1)
+
+
+def _whole_name(text: str) -> str | None:
+    """``text`` as one name: decoded when it is quoted, verbatim otherwise."""
+    if not text.startswith('"'):
+        return text or None
+    parsed = _read_c_quoted(text, 0)
+    if parsed is None or parsed[1] != len(text):
+        return None
+    return parsed[0]
+
+
+def _header_names(rest: str) -> tuple[str, str] | None:
+    """Split what follows ``diff --git`` into its two prefixed names.
+
+    Either side is C-quoted when its name holds a character git escapes, and
+    the two sides quote independently. Two unquoted names cannot be split on
+    a space alone (``a/x y b/x y``), so the split where both sides name the
+    same path wins; a rename falls back to the first `` <letter>/`` boundary.
+    """
+    if rest.startswith('"'):
+        first = _read_c_quoted(rest, 0)
+        if first is None or rest[first[1] : first[1] + 1] != " ":
+            return None
+        second = _whole_name(rest[first[1] + 1 :])
+        return None if second is None else (first[0], second)
+    if rest.endswith('"'):
+        for match in re.finditer(' "', rest):
+            second = _whole_name(rest[match.start() + 1 :])
+            if second is not None:
+                return rest[: match.start()], second
+    for match in re.finditer(" ", rest):
+        old, new = rest[: match.start()], rest[match.end() :]
+        if _strip_side_prefix(old) == _strip_side_prefix(new):
+            return old, new
+    split = _UNQUOTED_HEADER_SPLIT.match(rest)
+    return (split.group(1), split.group(2)) if split else None
+
+
+def _plus_path(content: str) -> str | None:
+    """The new-side name a section's ``+++`` line carries, if any.
+
+    Only the extended header before the first hunk is searched, so an added
+    line that happens to read ``++ x`` is never mistaken for one.
+    """
+    hunk = models._HUNK_PATTERN.search(content)
+    header = content[: hunk.start()] if hunk else content
+    match = models._PLUS_PATH_PATTERN.search(header)
+    if match is None:
+        return None
+    # git appends a tab to a name holding a space; an unquoted name never
+    # holds a tab of its own, since git would have quoted it.
+    name = _whole_name(match.group(1).rstrip("\t"))
+    if name is None or name == "/dev/null":
+        return None
+    return _strip_side_prefix(name)
+
+
+def _section_path(header_rest: str, content: str) -> str:
+    plus = _plus_path(content)
+    if plus is not None:
+        return plus
+    names = _header_names(header_rest)
+    if names is None:
+        return header_rest
+    return _strip_side_prefix(names[1])
+
+
 def _parse_diff_into_files(diff: str) -> list[models.FileDiff]:
     if not diff.strip():
         return []
 
+    # git output is decoded with ``surrogateescape``, so a name or a line that
+    # is not UTF-8 arrives as lone surrogates no size measurement can encode.
+    diff = diff.encode("utf-8", errors="surrogateescape").decode(
+        "utf-8", errors="replace"
+    )
     diff = diff.replace("\r\n", "\n").replace("\r", "\n")
 
     matches = list(models._FILE_HEADER_PATTERN.finditer(diff))
@@ -27,8 +162,7 @@ def _parse_diff_into_files(diff: str) -> list[models.FileDiff]:
         end = matches[i + 1].start() if i + 1 < len(matches) else len(diff)
         content = diff[start:end]
 
-        plus_match = models._PLUS_PATH_PATTERN.search(content)
-        path = plus_match.group(1) if plus_match else match.group(2)
+        path = _section_path(match.group(1), content)
 
         is_binary = bool(
             models._BINARY_FILES_PATTERN.search(content)

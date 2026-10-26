@@ -30,10 +30,13 @@ _NOTICE_NAME_LIMIT = 3
 _PROMPT_NAME_LIMIT = 5
 
 
-_FILE_HEADER_PATTERN = re.compile(r"^diff --git \w/(.+?) \w/(.+?)$", re.MULTILINE)
+# Only the line is matched here: either name may be C-quoted (a tab, a quote,
+# a backslash, or non-ASCII under ``core.quotePath``), which no regular
+# expression splits reliably, so ``commit_message_diff`` parses the names.
+_FILE_HEADER_PATTERN = re.compile(r"^diff --git (.+)$", re.MULTILINE)
 
 
-_PLUS_PATH_PATTERN = re.compile(r"^\+\+\+ \w/(.+)$", re.MULTILINE)
+_PLUS_PATH_PATTERN = re.compile(r"^\+\+\+ (.+)$", re.MULTILINE)
 
 
 _BINARY_FILES_PATTERN = re.compile(r"^Binary files .+ and .+ differ$", re.MULTILINE)
