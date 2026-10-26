@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -26,6 +27,17 @@ class HelpersTests(unittest.TestCase):
         self.assertIsNotNone(parsed)
         self.assertEqual(2026, parsed.year)
         self.assertEqual(0, parsed.utcoffset().total_seconds())
+
+    def test_format_local_time_carries_its_utc_offset(self) -> None:
+        # The rest of the CLI prints UTC; a zone-less local time could not be
+        # told apart from it.
+        with mock.patch.dict(os.environ, {"TZ": "America/New_York"}):
+            time.tzset()
+            self.addCleanup(time.tzset)
+            self.assertEqual(
+                "2024-01-01 22:04:05-05:00",
+                session_overview.format_local_time("2024-01-02T03:04:05Z"),
+            )
 
     def test_parse_iso_timestamp_returns_none_for_garbage(self) -> None:
         self.assertIsNone(session_overview.parse_iso_timestamp("not-a-date"))

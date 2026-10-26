@@ -163,13 +163,11 @@ class TailFollowerEventsTests(TailFollowerTestCase):
 
         self.addCleanup(restore)
 
-        expected = (
-            datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
-            .astimezone()
-            .strftime("%Y-%m-%d %H:%M:%S")
+        # Local wall-clock time, with the offset that makes it unambiguous.
+        self.assertEqual(
+            "2024-01-01 22:04:05-05:00",
+            tail._format_local_datetime("2024-01-02T03:04:05"),
         )
-        self.assertEqual("2024-01-01 22:04:05", expected)
-        self.assertEqual(expected, tail._format_local_datetime("2024-01-02T03:04:05"))
 
     def test_run_control_status_line_reports_unarmed_abort(self) -> None:
         # A main-thread checkpoint observes the abort with no turn to kill, so
