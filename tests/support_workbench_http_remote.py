@@ -6,6 +6,7 @@ import threading
 import time
 from unittest import mock
 
+from asl_workbench.remote_reads import RemoteReadError
 from asl_workbench.store_types import MAX_READ_LIMIT
 
 from .support_workbench_http_base import (
@@ -221,6 +222,28 @@ class RemoteProviderTests(unittest.TestCase):
         self.assertEqual(ask["plan_key"], "plan-abc")
         self.assertEqual(ask["run_key"], "run-1")
         self.assertEqual(ask["now"], NOW)
+
+    def test_a_detail_window_out_of_bounds_is_the_callers_mistake(self) -> None:
+        for query in ("offset=-1", "limit=0", "max_bytes=0", "offset=x"):
+            with self.subTest(query=query):
+                response = self.remote_app().handle(
+                    build("GET", f"/api/logs?plan_key=plan-abc&stream=stdout&{query}")
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(document(response)["reason"], "invalid-request")
+        self.assertEqual(self.reads.asks, [], "nothing the far end refuses is asked")
+
+    def test_a_read_that_cannot_be_composed_is_not_a_server_error(self) -> None:
+        class RefusingLane:
+            def fetch(self, **kwargs: Any) -> ReadAnswer:
+                raise RemoteReadError("field 'run_key' is malformed")
+
+        app = self.remote_app(reads=RefusingLane())
+        response = app.handle(build("GET", "/api/state?plan_key=plan-abc&run_key=x"))
+        self.assertEqual(response.status, 400)
+        payload = document(response)
+        self.assertEqual(payload["reason"], "invalid-request")
+        self.assertIn("run_key", payload["error"])
 
     def test_a_question_detail_keeps_the_local_response_shape(self) -> None:
         answer = ReadAnswer(

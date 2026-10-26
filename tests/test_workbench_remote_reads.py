@@ -102,6 +102,17 @@ class CompositionTests(unittest.TestCase):
                 limit=remote_reads.MAX_DETAIL_ENTRIES + 1,
             )
 
+    def test_a_request_refuses_a_window_the_transport_would_refuse(self) -> None:
+        for bounds in ({"offset": -1}, {"limit": 0}, {"max_bytes": 0}):
+            refused = self.assertRaises(remote_reads.RemoteReadError)
+            with self.subTest(**bounds), refused:
+                remote_reads.ReadRequest(
+                    request_id="r1",
+                    detail="logs",
+                    plan_key=fixtures.PLAN_KEY,
+                    **bounds,
+                )
+
     def test_the_cache_key_separates_windows_of_the_same_artifact(self) -> None:
         first = remote_reads.ReadRequest(
             request_id="r1",

@@ -22,7 +22,7 @@ from .operations import (
     METHOD_ARCHIVE_SETTINGS,
     export_operation,
 )
-from .remote_reads import ReadAnswer
+from .remote_reads import ReadAnswer, RemoteReadError
 from .service_models import _NO_READ_LANE, READ_STATUSES, ServiceState
 from .store_types import DEFAULT_READ_LIMIT, MAX_READ_LIMIT
 from .transport import MAX_DETAIL_BYTES, MAX_DETAIL_ENTRIES
@@ -247,30 +247,34 @@ class ServiceQueries(ServiceState):
         if lane is None:  # pragma: no cover - `unavailable` refused it first
             raise HttpRefusal(503, "operation-unavailable", _NO_READ_LANE)
         now = self._clock()
-        answer = lane.fetch(
-            detail=detail,
-            plan_key=_plan_key(call),
-            run_key=call.optional_query("run_key"),
-            question_id=call.optional_query("question_id"),
-            artifact=call.optional_query("artifact"),
-            stream=call.optional_query("stream"),
-            offset=call.optional_int_query("offset"),
-            limit=(
-                None
-                if call.optional_query("limit") is None
-                else call.bounded_int(
-                    "limit", default=MAX_DETAIL_ENTRIES, maximum=MAX_DETAIL_ENTRIES
-                )
-            ),
-            max_bytes=(
-                None
-                if call.optional_query("max_bytes") is None
-                else call.bounded_int(
-                    "max_bytes", default=MAX_DETAIL_BYTES, maximum=MAX_DETAIL_BYTES
-                )
-            ),
-            now=now,
+        plan_key = _plan_key(call)
+        # Validated here rather than left to the transport: a window the far
+        # end would refuse is the caller's mistake and is answered as one,
+        # not as a composition failure further down.
+        offset = (
+            None
+            if call.optional_query("offset") is None
+            else call.non_negative_int("offset", default=0)
         )
+        limit = _positive_bound(call, "limit", maximum=MAX_DETAIL_ENTRIES)
+        max_bytes = _positive_bound(call, "max_bytes", maximum=MAX_DETAIL_BYTES)
+        try:
+            answer = lane.fetch(
+                detail=detail,
+                plan_key=plan_key,
+                run_key=call.optional_query("run_key"),
+                question_id=call.optional_query("question_id"),
+                artifact=call.optional_query("artifact"),
+                stream=call.optional_query("stream"),
+                offset=offset,
+                limit=limit,
+                max_bytes=max_bytes,
+                now=now,
+            )
+        except RemoteReadError as error:
+            # The read could not be composed from what was asked: an address
+            # or window the transport refuses. The request is what is wrong.
+            raise invalid_request(f"detail read refused: {error}") from error
         if detail == "questions" and answer.answered:
             rows = answer.entries or ()
             if len(rows) == 1 and isinstance(rows[0], Mapping):
@@ -364,6 +368,16 @@ class ServiceQueries(ServiceState):
 # ---------------------------------------------------------------------------
 # Shared shaping
 # ---------------------------------------------------------------------------
+
+
+def _positive_bound(call: Call, key: str, *, maximum: int) -> int | None:
+    """An optional page bound, refused unless it is between 1 and ``maximum``."""
+    if call.optional_query(key) is None:
+        return None
+    value = call.bounded_int(key, default=maximum, maximum=maximum)
+    if value < 1:
+        raise invalid_request(f"query parameter {key!r} must be at least 1")
+    return value
 
 
 def _plan_key(call: Call) -> str:
