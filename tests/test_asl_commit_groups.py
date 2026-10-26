@@ -8,6 +8,7 @@ from .asl_commit_groups_cases_paused import (
     PausedWorkGroupScopeTests,
 )
 from .asl_commit_groups_cases_settlement import (
+    CommitGroupInterruptionTests,
     CommitSettlementBoundaryTests,
     DurableLedgerTests,
 )

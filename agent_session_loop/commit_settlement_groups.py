@@ -84,7 +84,10 @@ def _run_commit_group(
         group["repositories"] = [dict(target) for target in targets]
         skip_clean = True
 
+    latest: dict[str, dict[str, Any]] = {"group": group}
+
     def persist_group(current: dict[str, Any], phase: str) -> None:
+        latest["group"] = current
         _persist_commit_group(
             event_path=event_path,
             payload=payload,
@@ -157,3 +160,39 @@ def _run_commit_group(
         )
     except commit_groups.CommitGroupError as error:
         raise RunError(f"invalid commit group: {error}") from error
+    except RunError as error:
+        # The group is already durable as ``pending`` by now, so letting the
+        # error escape would hand the caller nothing to retry: it would see no
+        # group, treat the failure as one that never built anything durable,
+        # and keep running while the next session's ``git add -A`` absorbed
+        # this group's changes. A Git spawn failure or timeout while reading a
+        # HEAD is a failed repository like any other, so it is recorded as one.
+        return _fail_interrupted_group(
+            latest["group"], error=error, persist=persist_group
+        )
+
+
+def _fail_interrupted_group(
+    group: dict[str, Any],
+    *,
+    error: RunError,
+    persist: Callable[[dict[str, Any], str], None],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Mark a group ``failed`` at the repository an error interrupted.
+
+    Every repository the coordinator finished is recorded before it moves on,
+    so the first one still remaining is the one it was working on.
+    """
+    current = dict(group)
+    commit_groups._refresh_remaining(current)
+    remaining = current.get("remaining_aliases") or [None]
+    current["status"] = commit_groups.GROUP_STATUS_FAILED
+    current["failed_alias"] = remaining[0]
+    persist(current, "repository-failed")
+    return current, {
+        "success": False,
+        "status_result": "error",
+        "error": str(error),
+        "group_id": current.get("group_id"),
+        "repository_key": remaining[0],
+    }
