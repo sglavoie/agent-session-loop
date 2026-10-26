@@ -327,7 +327,12 @@ class _ProgressReporter:
         )
 
     def run_finished(self, payload: dict[str, Any]) -> None:
-        verb = "run finished" if payload["ok"] else "run paused"
+        if payload.get("paused"):
+            verb = "run paused"
+        elif payload["ok"]:
+            verb = "run finished"
+        else:
+            verb = "run stopped"
         reason = payload.get("pause_reason") or payload.get("reason") or "unknown"
         for line in _note_lines(payload, prefix="note"):
             self._emit(line)

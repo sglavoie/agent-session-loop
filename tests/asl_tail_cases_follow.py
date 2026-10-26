@@ -269,7 +269,7 @@ class TailFollowerFollowTests(TailFollowerTestCase):
 
             wait_until(lambda: follower.done)
             self.assertTrue(follower.join(1.0))
-            self.assertIn("run paused: run run-1, reason abandoned", out.getvalue())
+            self.assertIn("run stopped: run run-1, reason abandoned", out.getvalue())
 
     def test_tail_follower_suppresses_event_lines_when_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

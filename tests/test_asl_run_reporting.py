@@ -43,11 +43,13 @@ from typing import Any
 
 from agent_session_loop import (
     commit_settlement,
+    events,
     run_loop,
     run_reporting,
     run_reporting_output,
     run_reporting_status,
     runner,
+    tail,
     turn_execution_protocols,
 )
 from tests import support_asl_run_loop_view as run_loop_view
@@ -342,6 +344,23 @@ class CommitVocabularySeamTests(unittest.TestCase):
             ),
         )
         self.assertNotIn("never completed", quiet)
+
+    def test_run_finished_verb_follows_paused_before_ok(self) -> None:
+        cases = (
+            ({"ok": False, "paused": True, "reason": "verify-failed"}, "run paused"),
+            ({"ok": True, "paused": False, "reason": "all-complete"}, "run finished"),
+            ({"ok": False, "paused": False, "reason": "abandoned"}, "run stopped"),
+        )
+        for fields, verb in cases:
+            with self.subTest(reason=fields["reason"]):
+                payload = {"run_id": "run-1", "duration_seconds": 1.0, **fields}
+                text = self._emitted(
+                    run_reporting._ProgressReporter(enabled=True),
+                    lambda progress, payload=payload: progress.run_finished(payload),
+                )
+                self.assertIn(f"{verb}: run run-1, reason {fields['reason']}", text)
+                tail_line = tail._event_message(events.RUN_FINISHED_EVENT, payload)
+                self.assertTrue(tail_line.startswith(f"{verb}: run run-1"), tail_line)
 
 
 class PausedWorkSettlementLineTests(unittest.TestCase):
