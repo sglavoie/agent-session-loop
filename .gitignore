@@ -23,3 +23,7 @@ skills/final-review.md
 
 # The repo has no [project] table, so uv only ever writes an empty stub lock
 uv.lock
+
+# Claude Code's per-checkout state; `.claude/worktrees/` holds full copies of the
+# repository that agents work in.
+.claude/
