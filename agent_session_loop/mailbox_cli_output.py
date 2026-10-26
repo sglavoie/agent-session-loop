@@ -10,6 +10,7 @@ from typing import Any
 from . import (
     cli_common,
     mailbox_cli_constants,
+    mailbox_constants,
     mailbox_models,
     mailbox_rendering,
 )
@@ -406,6 +407,45 @@ def mailbox_error_details(error: mailbox_models.MailboxError) -> dict[str, Any]:
     return {} if error.path is None else {"path": str(error.path)}
 
 
+#: Sentences for the mailbox rejections a CLI user can cause. ``{detail!r}`` is
+#: the id the rejection names. Every other reason keeps ``str(error)``; the
+#: machine code stays in ``reason`` either way.
+_MAILBOX_ERROR_SENTENCES: dict[str, str] = {
+    mailbox_constants.REJECT_INVALID_TARGET: "the question id must be a UUID",
+    mailbox_constants.REJECT_MISSING_TEXT: "the message text must not be empty",
+    mailbox_constants.REJECT_QUESTION_NOT_FOUND: (
+        "no question with id {detail!r} in this plan's mailbox"
+    ),
+    mailbox_constants.REJECT_QUESTION_NOT_OPEN: "question {detail!r} is no longer open",
+    mailbox_constants.REJECT_QUESTION_ALREADY_ANSWERED: (
+        "question {detail!r} has already been answered"
+    ),
+    mailbox_constants.REJECT_QUESTION_ALREADY_RESOLVED: (
+        "question {detail!r} has already been resolved"
+    ),
+    mailbox_constants.REJECT_QUESTION_NOT_WAITING: (
+        "nothing is waiting on question {detail!r}"
+    ),
+    mailbox_constants.REJECT_QUESTION_ALREADY_WAITING: (
+        "question {detail!r} already has a waiter"
+    ),
+    mailbox_constants.REJECT_GUIDANCE_NOT_FOUND: (
+        "no guidance with id {detail!r} in this plan's mailbox"
+    ),
+}
+
+
+def mailbox_error_message(error: mailbox_models.MailboxError) -> str:
+    """Describe ``error`` as a sentence rather than its bare reason code."""
+    template = _MAILBOX_ERROR_SENTENCES.get(error.reason)
+    if template is None:
+        return str(error)
+    needs_detail = "{detail" in template
+    if needs_detail and error.detail is None:
+        return str(error)
+    return template.format(detail=error.detail)
+
+
 def print_mailbox_error(
     args: argparse.Namespace,
     *,
@@ -418,7 +458,7 @@ def print_mailbox_error(
         command_name=command_name,
         text_label=text_label,
         reason=error.reason,
-        error=str(error),
+        error=mailbox_error_message(error),
         details=mailbox_error_details(error),
     )
 

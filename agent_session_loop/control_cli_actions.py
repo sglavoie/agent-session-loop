@@ -238,6 +238,29 @@ def control_set_model_from_args(args: argparse.Namespace) -> int:
             ),
         )
         return 1
+    # The queue rejects an empty value too, but only with its bare code; refuse
+    # here so the reader gets a sentence and `reason` keeps that code.
+    for flag, value, code, clear_flag in (
+        (
+            "--harness-model",
+            harness_model,
+            control_queue.REJECT_INVALID_MODEL,
+            "--clear-harness-model",
+        ),
+        ("--effort", effort, control_queue.REJECT_INVALID_EFFORT, "--clear-effort"),
+    ):
+        if value is not None and not value.strip():
+            cli_common.print_error(
+                args,
+                command_name=COMMAND_SET_MODEL,
+                text_label="control set-model",
+                reason=code,
+                error=(
+                    f"{flag} needs a non-empty value; pass {clear_flag} to "
+                    "drop the override instead"
+                ),
+            )
+            return 1
 
     def report(
         status: dict[str, Any], queued: control_queue.ControlCommand

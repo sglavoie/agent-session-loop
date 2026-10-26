@@ -375,8 +375,9 @@ root — fails with `reason: os-error` and a `details.queue_path`, still as exac
 one JSON object under `--json` (a single stderr line otherwise), never a
 traceback. Any other command rejected by the durable queue fails with
 `reason: invalid-command`. The control-handler reason vocabulary is
-`abort-timeout`, `finalization-timeout`, `invalid-command`, `invalid-grace`,
-`invalid-harness`, `invalid-reason`, `invalid-timeout`,
+`abort-timeout`, `finalization-timeout`, `invalid-command`, `invalid-effort`,
+`invalid-grace`, `invalid-harness`, `invalid-model`, `invalid-reason`,
+`invalid-timeout`,
 `missing-model-control-operation`, `no-runner`, `os-error`, and
 `receipt-timeout`, plus the guard reasons listed under
 [Run-scoped guards](09-run-scoped-guards.md#run-scoped-guards).
