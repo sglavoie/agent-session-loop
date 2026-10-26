@@ -518,6 +518,17 @@ class PendingRecordReadTests(unittest.TestCase):
 
             self.assertIsNone(assurance_catchup.read_pending_run(run_dir))
 
+    def test_an_over_deep_plan_state_no_longer_describes_the_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._record(Path(tmp), "r1", b'{"run_id": "r1"}')
+            pending = assurance_catchup.read_pending_run(run_dir)
+            assert pending is not None
+            (pending.state_dir / events.STATE_FILE_NAME).write_bytes(
+                b"[" * 1_000_000 + b"]" * 1_000_000
+            )
+
+            self.assertFalse(assurance_catchup._state_still_describes(pending))
+
     def test_a_non_string_stamp_is_undated_and_still_sorts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             self._record(Path(tmp), "r1", b'{"run_id": "r1", "recorded_at": 5}')

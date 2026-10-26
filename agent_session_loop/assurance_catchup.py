@@ -330,7 +330,7 @@ def _state_still_describes(pending: PendingRun) -> bool:
     state_path = pending.state_dir / events.STATE_FILE_NAME
     try:
         parsed = json.loads(state_path.read_text(encoding="utf-8"))
-    except OSError, json.JSONDecodeError, ValueError:
+    except OSError, ValueError, RecursionError:
         return False
     return isinstance(parsed, dict) and parsed.get("run_id") == pending.run_id
 
