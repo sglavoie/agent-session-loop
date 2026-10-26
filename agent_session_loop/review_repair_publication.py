@@ -226,7 +226,9 @@ def recover_review_repair_publication(plan_dir: str | Path) -> dict[str, Any] | 
         return None
     try:
         journal = json.loads(journal_path.read_text(encoding="utf-8"))
-    except OSError, json.JSONDecodeError:
+    except OSError, ValueError, RecursionError:
+        # ValueError covers a torn document and bytes that are not UTF-8; the
+        # decoder raises RecursionError for pathological nesting.
         journal = None
     if not isinstance(journal, Mapping):
         # The journal is published atomically *before* the first destination

@@ -247,6 +247,25 @@ class ReviewRepairPublicationWindowTests(PublicationWindowFixtures, unittest.Tes
         self.assertEqual(before, self._plan_bytes())
         self.assertFalse(self._window_dir().exists())
 
+    def test_an_undecodable_journal_reads_as_torn_rather_than_crashing(
+        self,
+    ) -> None:
+        # Bytes that are not UTF-8, and nesting deep enough that the decoder
+        # raises RecursionError, are no more a journal than a torn document.
+        journal = self._window_dir() / review_repair.REPAIR_PUBLICATION_JOURNAL_NAME
+        for raw in (b"{\xff}\n", b"[" * 1_000_000):
+            with self.subTest(raw=raw[:4]):
+                before = self._plan_bytes()
+                self._window_dir().mkdir(parents=True)
+                journal.write_bytes(raw)
+
+                record = review_repair.recover_review_repair_publication(self.plan_dir)
+
+                assert record is not None
+                self.assertEqual("unopened-publication-window", record["reason"])
+                self.assertEqual(before, self._plan_bytes())
+                self.assertFalse(self._window_dir().exists())
+
     def test_an_unsupported_publication_schema_fails_closed(self) -> None:
         window = self._window_dir()
         window.mkdir(parents=True)
