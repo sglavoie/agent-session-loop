@@ -304,11 +304,14 @@ class ControlCliWaitTests(unittest.TestCase):
         self.assertFalse(payload["details"]["wait"]["observed"])
         self.assertEqual(1, len(self.queued_command_ids()))
 
-    def test_abort_wait_blocks_until_the_turn_is_honored(self) -> None:
-        # No abort signal is armed, so the drain degrades the abort and honors
-        # it immediately — the terminal action the CLI is waiting for. The wait
-        # ends on the run finishing, not on that action: the turn ending leaves
-        # the run finalizing, still holding the lock.
+    def test_abort_wait_blocks_until_the_degraded_abort_finishes_the_run(
+        self,
+    ) -> None:
+        # No abort signal is armed, so the drain degrades the abort to
+        # stop-after-current immediately — the terminal action the CLI is
+        # waiting for, recorded as degraded because nothing was killed. The
+        # wait ends on the run finishing, not on that action: the run still
+        # finalizes, holding the lock.
         self.mark_run_active()
 
         with self.background_runner(after_drain=self.append_run_finished):
@@ -326,7 +329,7 @@ class ControlCliWaitTests(unittest.TestCase):
         self.assertTrue(payload["wait"]["observed"])
         self.assertTrue(payload["wait"]["run_finished"])
         self.assertEqual(
-            events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
+            events.RUN_CONTROL_ACTION_ABORT_TURN_DEGRADED,
             payload["wait"]["terminal_action"],
         )
 

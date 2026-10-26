@@ -65,7 +65,9 @@ distinct outcomes, and only the first of them stops the run:
   `asl control` request.
 
 An abort observed between turns has nothing to kill and degrades to
-stop-after-current instead.
+stop-after-current instead. It is recorded as `abort-turn-degraded` rather than
+`abort-turn-honored`, and `abort --wait` reports that as its
+`wait.terminal_action` once the run finishes at the session boundary.
 
 Killing the turn is not the end of the run. Once the last turn is over the
 runner still owes the plan its terminal supervisor audit, which is an ordinary

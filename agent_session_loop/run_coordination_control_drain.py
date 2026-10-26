@@ -112,7 +112,10 @@ def degrade_abort_to_stop_after_current(
 
     There is nothing to kill, and dropping the command would make
     ``asl control abort`` a silent no-op between turns, so the request becomes
-    the strongest thing it can still mean: no further session starts.
+    the strongest thing it can still mean: no further session starts. The
+    consumption is recorded as ``abort-turn-degraded`` rather than the
+    ``abort-turn-honored`` an ordinary consumption maps to, because nothing was
+    killed and ``asl control abort --wait`` reports whichever it finds.
     """
     consumed = control_state.consume_abort_turn()
     if consumed is not None:
@@ -123,6 +126,7 @@ def degrade_abort_to_stop_after_current(
             action=consumed,
             context=context,
             persistence=persistence,
+            event_action=events.RUN_CONTROL_ACTION_ABORT_TURN_DEGRADED,
             message=("turn abort degraded to stop-after-current: no turn in flight"),
         )
     requested = control_state.request_stop_after_current()

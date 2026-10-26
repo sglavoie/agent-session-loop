@@ -483,7 +483,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
             [
                 events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
                 events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
-                events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_DEGRADED,
                 events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED,
                 events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CONSUMED,
             ],
