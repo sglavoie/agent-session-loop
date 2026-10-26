@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import artifacts, state
+from . import durability, state
 from .mailbox_constants import (
     MAILBOX_FILE_NAME,
     MAILBOX_LEASE_FILE_NAME,
@@ -183,12 +183,15 @@ def write_supervision_cursor(
     )
     try:
         cursor_path.parent.mkdir(parents=True, exist_ok=True)
-        artifacts.atomic_write_bytes(
+        # 0o600 like the mailbox and lease: every mailbox state file is private.
+        durability.replace_bytes(
             cursor_path,
             json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
             + b"\n",
+            mode=0o600,
+            permissions=0o600,
         )
-    except OSError, artifacts.ArtifactError:
+    except OSError:
         pass
 
 
