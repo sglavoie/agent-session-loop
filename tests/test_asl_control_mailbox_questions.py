@@ -459,6 +459,24 @@ class MailboxTestsPart3(MailboxTestsBase):
         self.assertEqual(resolution, view.closure_for(legacy_question_id))
         self.assertEqual((), view.unanswered_questions)
 
+    def test_a_deeply_nested_line_is_rejected_as_invalid_json(self) -> None:
+        # Deep enough that the decoder raises RecursionError instead.
+        self.append_raw(b"[" * 1_000_000 + b"\n")
+
+        question = mailbox_appenders.append_question(
+            self.plan_dir,
+            "Still readable?",
+            state_dir=self.state_dir,
+            created_at=self.timestamp(),
+        )
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+
+        self.assertEqual(
+            [mailbox_constants.REJECT_INVALID_JSON],
+            [rejection.reason for rejection in view.rejected],
+        )
+        self.assertEqual((question,), view.unanswered_questions)
+
 
 if __name__ == "__main__":
     unittest.main()

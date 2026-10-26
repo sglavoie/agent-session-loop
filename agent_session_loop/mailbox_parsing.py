@@ -77,7 +77,8 @@ def _parse_envelope(
         raise RecordRejected(REJECT_EMPTY_LINE)
     try:
         payload = json.loads(raw)
-    except (ValueError, UnicodeDecodeError) as error:
+    except (ValueError, UnicodeDecodeError, RecursionError) as error:
+        # One deeply nested line must cost only itself, not every reader.
         raise RecordRejected(REJECT_INVALID_JSON, str(error)) from error
     if not isinstance(payload, dict):
         raise RecordRejected(REJECT_NOT_OBJECT)
