@@ -24,6 +24,7 @@ from . import (
 )
 
 
+@common_module.leaf("overseer-scan")
 def scan_from_args(
     args: argparse.Namespace,
     *,
@@ -83,6 +84,7 @@ def scan_from_args(
     return common_module.EXIT_OK if inventory.complete else common_module.EXIT_REFUSED
 
 
+@common_module.leaf("overseer-watch")
 def watch_from_args(
     args: argparse.Namespace,
     *,
@@ -162,6 +164,7 @@ def watch_from_args(
     return common_module.EXIT_OK if complete else common_module.EXIT_REFUSED
 
 
+@common_module.leaf("overseer-inspect")
 def inspect_from_args(
     args: argparse.Namespace,
     *,

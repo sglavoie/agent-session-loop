@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import shutil
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 from unittest import mock
 
@@ -12,9 +14,12 @@ from agent_session_loop import (
     overseer_cli_claims,
     overseer_cli_common,
     overseer_discovery,
+    overseer_store_ledger,
+    overseer_store_models,
     state,
 )
 from tests.asl_overseer_cli_fleet import _OverseerCase
+from tests.asl_overseer_cli_support import WATCHER
 
 ASL_TEST_PORTABLE = True
 
@@ -104,6 +109,61 @@ class ClaimsInputTests(_OverseerCase):
 
                 self._refused(status, payload)
                 self.assertIn(key, payload["error"])
+
+
+class DomainRefusalTests(_OverseerCase):
+    """A context or ledger refusal is an exit-2 envelope, never a traceback."""
+
+    def _inspect(self, plan: str, *extra: str) -> tuple[int, dict[str, Any]]:
+        return self.fleet.invoke(
+            "inspect", plan, "--kind", "question_pending", "--summary", "s", *extra
+        )
+
+    def test_an_unknown_incident_is_refused_incident_unknown(self) -> None:
+        self.watch()
+
+        status, payload = self._inspect(str(self.plan), "--incident-id", "999")
+
+        self.assertEqual(2, status, payload)
+        self.assertEqual("incident_unknown", payload["reason"])
+
+    def test_an_ineligible_plan_is_refused_plan_ineligible(self) -> None:
+        dry = self.fleet.write_run("plan-dry", dry_run=True)
+
+        status, payload = self._inspect(str(dry))
+
+        self.assertEqual(2, status, payload)
+        self.assertEqual("plan_ineligible", payload["reason"])
+
+    def test_a_ledger_error_raised_anywhere_in_a_leaf_is_an_envelope(self) -> None:
+        def refusing(**_: Any) -> overseer_store_ledger.Ledger:
+            raise overseer_store_models.LedgerError("no ledger today")
+
+        seams = dataclasses.replace(self.fleet.seams(), open_ledger=refusing)
+        with mock.patch.object(self.fleet, "seams", return_value=seams):
+            for argv in (
+                ("watch", "--watcher-id", WATCHER),
+                ("watch", "--watcher-id", WATCHER, "--release"),
+                ("inspect", str(self.plan)),
+                ("reconcile", str(self.plan)),
+            ):
+                with self.subTest(argv=argv):
+                    status, payload = self.fleet.invoke(*argv)
+
+                    self.assertEqual(2, status, payload)
+                    self.assertEqual("ledger_error", payload["reason"])
+
+    def test_a_blank_watcher_id_is_refused_by_the_parser(self) -> None:
+        for value in ("", "   "):
+            with self.subTest(value=value):
+                with (
+                    redirect_stderr(io.StringIO()),
+                    redirect_stdout(io.StringIO()),
+                    self.assertRaises(SystemExit) as caught,
+                ):
+                    self.fleet.parse("watch", "--watcher-id", value)
+
+                self.assertEqual(2, caught.exception.code)
 
 
 if __name__ == "__main__":

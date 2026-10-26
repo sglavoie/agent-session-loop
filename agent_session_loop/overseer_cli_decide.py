@@ -23,6 +23,7 @@ from . import (
 )
 
 
+@common.leaf("overseer-decide")
 def decide_from_args(
     args: argparse.Namespace,
     *,

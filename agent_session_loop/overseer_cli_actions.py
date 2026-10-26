@@ -107,6 +107,7 @@ def _payload_for(args: argparse.Namespace, operation: str) -> overseer_dispatch.
     return overseer_dispatch.Resume(session_id=args.session_id or "")
 
 
+@common.leaf("overseer-act")
 def act_from_args(
     args: argparse.Namespace,
     *,

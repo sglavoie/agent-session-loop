@@ -7,6 +7,7 @@ import argparse
 from .cli_parser_support import (
     _AgentSessionLoopArgumentParser,
     _group_epilogue,
+    non_blank_text,
     non_negative_float,
     positive_float,
     positive_int,
@@ -109,6 +110,7 @@ def _add_overseer_commands(
     overseer_watch_parser.add_argument(
         "--watcher-id",
         required=True,
+        type=non_blank_text,
         help="Stable identity for this invocation; leases are held under it",
     )
     overseer_watch_parser.add_argument(
@@ -410,6 +412,7 @@ def _add_overseer_commands(
     overseer_act_parser.add_argument(
         "--watcher-id",
         required=True,
+        type=non_blank_text,
         help="The watcher holding the lease on this run",
     )
     overseer_act_parser.add_argument(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import sys
 import time
@@ -23,6 +24,7 @@ from . import (
     overseer_history,
     overseer_policy_client,
     overseer_store_ledger,
+    overseer_store_models,
     overseer_watch,
     responses,
 )
@@ -204,6 +206,40 @@ def _failure(command: str, error: OverseerCliError, *, as_json: bool) -> int:
         leaf = command.replace("-", " ", 1)
         print(f"{program_name()} {leaf}: {error.message}", file=sys.stderr)
     return EXIT_USAGE
+
+
+type Leaf = Callable[..., int]
+
+
+def leaf(command: str) -> Callable[[Leaf], Leaf]:
+    """Answer a domain module's refusal as this leaf's usage envelope.
+
+    The context and ledger modules raise :class:`overseer_context.ContextError`
+    and :class:`overseer_store_models.LedgerError` for a question that names
+    something they cannot serve -- an incident nobody opened, an ineligible
+    plan, a ledger that will not open. Each carries its own reason slug, and a
+    leaf reports it exactly as it reports a malformed invocation, wherever in
+    the leaf it was raised, rather than letting it surface as a traceback.
+    """
+
+    def decorate(function: Leaf) -> Leaf:
+        @functools.wraps(function)
+        def run(args: argparse.Namespace, **kwargs: Any) -> int:
+            try:
+                return function(args, **kwargs)
+            except (
+                overseer_context.ContextError,
+                overseer_store_models.LedgerError,
+            ) as error:
+                return _failure(
+                    command,
+                    OverseerCliError(error.reason, str(error)),
+                    as_json=bool(getattr(args, "json", False)),
+                )
+
+        return run
+
+    return decorate
 
 
 def _scope_payload(scope: overseer_decisions.Scope) -> dict[str, Any]:

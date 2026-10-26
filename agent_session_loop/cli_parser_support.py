@@ -59,6 +59,7 @@ POSITIVE_NUMBER = "must be a finite, positive number"
 NON_NEGATIVE_INTEGER = "must be a non-negative integer"
 POSITIVE_INTEGER = "must be a positive integer"
 PORT_NUMBER = "must be a TCP port number from 0 to 65535"
+NON_BLANK_TEXT = "must not be empty or blank"
 
 _MAX_PORT = 65535
 
@@ -128,6 +129,13 @@ def positive_int(text: str) -> int:
     if value <= 0:
         raise argparse.ArgumentTypeError(f"{POSITIVE_INTEGER}; got {text!r}")
     return value
+
+
+def non_blank_text(text: str) -> str:
+    """``type=`` for an identity that names something, so not empty or blank."""
+    if not text.strip():
+        raise argparse.ArgumentTypeError(f"{NON_BLANK_TEXT}; got {text!r}")
+    return text
 
 
 def port_number(text: str) -> int:

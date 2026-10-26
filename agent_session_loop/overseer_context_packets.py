@@ -57,7 +57,8 @@ def build_packet(
         raise models.ContextError(
             "context can only be assembled for a run discovery identified; "
             f"{candidate.state_dir} is ineligible "
-            f"({', '.join(candidate.ineligible_reasons) or 'no reason recorded'})"
+            f"({', '.join(candidate.ineligible_reasons) or 'no reason recorded'})",
+            reason="plan_ineligible",
         )
     scope = scope_module.scope_digest(candidate)
     captured_at = now()
@@ -249,7 +250,10 @@ def load_packet(
     """
     incident = ledger.incident(incident_id)
     if incident is None:
-        raise models.ContextError(f"no incident {incident_id} to load context for")
+        raise models.ContextError(
+            f"no incident {incident_id} to load context for",
+            reason="incident_unknown",
+        )
 
     scope = ""
     captured_at = now()
