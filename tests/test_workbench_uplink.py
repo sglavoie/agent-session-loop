@@ -26,6 +26,7 @@ from asl_workbench.operations import (
     METHOD_STOP_AFTER_CURRENT,
     OPERATION_ACCEPTED,
     OPERATION_DISPATCHED,
+    OPERATION_EXPIRED,
     OPERATION_PENDING,
 )
 from asl_workbench.store_workbench import WorkbenchStore
@@ -309,11 +310,12 @@ class CarriageTests(UplinkCase):
         self.assertEqual(self.uplink.carried, 0)
         stale = self.store.operation("stale")
         assert stale is not None
-        self.assertEqual(
-            stale["status"],
-            OPERATION_PENDING,
-            "a command that never left was never dispatched",
-        )
+        # A command that never left was never dispatched, and will never be:
+        # left `pending`, it would hold the plan's one outstanding mutation
+        # for good.
+        self.assertEqual(stale["status"], OPERATION_EXPIRED)
+        self.assertEqual(stale["detail_code"], "deadline-passed")
+        self.assertNotIn("dispatched_at", stale)
 
     def test_the_carry_queue_is_bounded(self) -> None:
         """A bound, because the alternative is growing for a Mac that is gone."""
@@ -326,6 +328,21 @@ class CarriageTests(UplinkCase):
         self.assertEqual(raised.exception.reason, "link-congested")
         self.assertEqual(raised.exception.details["carried"], 2)
 
+    def test_a_submission_the_full_queue_refuses_does_not_hold_its_plan(
+        self,
+    ) -> None:
+        self.uplink = self.build(max_carried=1)
+        self.uplink.hand_down(submission("op-0"), now=NOW)
+        self.store.record_operation(
+            operation_record("op-over"), connector_id=CONNECTOR, received_at=NOW
+        )
+        with self.assertRaises(UplinkRefusal):
+            self.uplink.hand_down(submission("op-over"), now=NOW)
+        row = self.store.operation("op-over")
+        assert row is not None
+        self.assertEqual(row["status"], OPERATION_EXPIRED)
+        self.assertIsNone(self.store.outstanding_operation(PLAN_KEY))
+
     def test_silence_drops_the_link_and_what_it_was_holding(self) -> None:
         self.uplink.ingest(heartbeat(), now=NOW)
         self.uplink.hand_down(submission("op-1"), now=NOW)
@@ -336,6 +353,21 @@ class CarriageTests(UplinkCase):
         self.uplink.sweep(self.now)
         self.assertFalse(self.uplink.linked)
         self.assertEqual(self.uplink.carried, 0)
+
+    def test_a_submission_dropped_with_the_link_does_not_hold_its_plan(
+        self,
+    ) -> None:
+        self.uplink.ingest(heartbeat(), now=NOW)
+        self.store.record_operation(
+            operation_record("op-1"), connector_id=CONNECTOR, received_at=NOW
+        )
+        self.uplink.hand_down(submission("op-1"), now=NOW)
+        self.now, self.monotonic = NOW + 1_000, 1_000.0
+        self.uplink.sweep(self.now)
+        row = self.store.operation("op-1")
+        assert row is not None
+        self.assertEqual(row["status"], OPERATION_EXPIRED)
+        self.assertIsNone(self.store.outstanding_operation(PLAN_KEY))
 
     def test_a_wall_clock_step_is_not_silence(self) -> None:
         """A Pi has no RTC: its wall clock jumps when NTP first answers.

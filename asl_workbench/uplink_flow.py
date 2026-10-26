@@ -5,7 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .operations import OPERATION_DISPATCHED
+from .operations import (
+    DETAIL_DEADLINE_PASSED,
+    OPERATION_DISPATCHED,
+    OPERATION_EXPIRED,
+    OPERATION_PENDING,
+)
 from .remote_reads import RemoteReadError
 from .store_types import IngestInvalid, IngestRefused
 from .transport import (
@@ -157,6 +162,7 @@ class UplinkFlowMixin(UplinkBodiesMixin):
                     operation_id = payload.get("operation_id")
                     if isinstance(operation_id, str):
                         self.discard_body(operation_id)
+                self._undelivered(envelope, now=now, detail_code=DETAIL_DEADLINE_PASSED)
                 continue
             # Recorded outside the lock: ``_departed`` writes to the journal,
             # and a database write held across the condition every reader
@@ -193,6 +199,33 @@ class UplinkFlowMixin(UplinkBodiesMixin):
             operation_id, OPERATION_DISPATCHED, now=now, dispatched_at=now
         )
 
+    def _undelivered(
+        self, envelope: Mapping[str, Any], *, now: float, detail_code: str | None
+    ) -> None:
+        """Expire the row of a submission this service will never carry.
+
+        A frame discarded here never left, so the mutation demonstrably did not
+        run. Leaving its row ``pending`` would hold the plan's one outstanding
+        mutation forever: nothing else on this side ever moves a row nobody
+        dispatched, and retention keeps every row that is still open.
+        """
+        payload = envelope.get("payload")
+        if not isinstance(payload, Mapping) or payload.get("request") != REQUEST_MUTATE:
+            return
+        operation_id = payload.get("operation_id")
+        if not isinstance(operation_id, str):
+            return
+        row = self.store.operation(operation_id)
+        if row is None or row.get("status") != OPERATION_PENDING:
+            return
+        self.store.advance_operation(
+            operation_id,
+            OPERATION_EXPIRED,
+            now=now,
+            detail_code=detail_code,
+            settled_at=now,
+        )
+
     def _offer(self, envelope: Mapping[str, Any]) -> None:
         """Queue one frame for the next acknowledgement, or refuse to.
 
@@ -222,7 +255,10 @@ class UplinkFlowMixin(UplinkBodiesMixin):
             self._carry.extend(kept)
             return removed
 
-    def _drop_carried(self) -> None:
+    def _drop_carried(self, *, now: float) -> None:
         """Discard everything queued for a link that is gone."""
         with self._ready:
+            dropped = list(self._carry)
             self._carry.clear()
+        for envelope in dropped:
+            self._undelivered(envelope, now=now, detail_code=None)

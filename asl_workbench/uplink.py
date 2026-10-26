@@ -182,7 +182,7 @@ class Uplink(UplinkFlowMixin):
             self._keep(
                 self.reads.link_down(now=now, note="the connector stopped uploading")
             )
-            self._drop_carried()
+            self._drop_carried(now=now)
         self._expire_bodies(now)
         self._keep(self.reads.expire(now))
 
@@ -319,4 +319,10 @@ class Uplink(UplinkFlowMixin):
             )
         except TransportError as error:
             raise UplinkRefusal(400, error.code, str(error)) from error
-        self._offer(envelope)
+        try:
+            self._offer(envelope)
+        except UplinkRefusal:
+            # The row was journalled before this was asked, and a frame the
+            # queue refused is one that will never leave.
+            self._undelivered(envelope, now=now, detail_code=None)
+            raise
