@@ -246,3 +246,46 @@ class TailFollowerEventsTests(TailFollowerTestCase):
             tail.tail_plan(plan_dir, state_dir=state_dir, follow=False, out=out)
 
             self.assertIn("run finished: run run-1", out.getvalue())
+
+    def test_recent_activity_ends_on_the_run_outcome_not_the_last_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, _state_path, events_path = self.setup_tail_files(
+                tmp_dir
+            )
+            stdout_log = tmp_dir / "stdout.log"
+            stdout_log.write_text(
+                "".join(f"output {index}\n" for index in range(50)), encoding="utf-8"
+            )
+            turn = {
+                "run_id": "run-1",
+                "session_id": "1",
+                "turn_index": 1,
+                "stdout_path": str(stdout_log),
+            }
+            for name, payload, second in (
+                ("run_started", {"run_id": "run-1"}, "00"),
+                ("turn_started", turn, "01"),
+                ("turn_finished", {**turn, "status": "complete"}, "02"),
+                ("run_finished", {"run_id": "run-1", "ok": True}, "03"),
+            ):
+                events.append_event(
+                    events_path,
+                    events.Event(
+                        name=name,
+                        payload={**payload, "reason": "all-complete"},
+                        created_at=f"2026-06-11T12:00:{second}+00:00",
+                    ),
+                )
+
+            out = io.StringIO()
+            tail.tail_plan(
+                plan_dir, state_dir=state_dir, lines=5, follow=False, out=out
+            )
+
+            lines = out.getvalue().splitlines()
+            self.assertEqual(5, len(lines))
+            # The turn's output sits before the event that finished the turn,
+            # so the window still ends on the run's outcome.
+            self.assertTrue(lines[-3].endswith("| output 49"), lines)
+            self.assertIn("run finished: run run-1", lines[-1])

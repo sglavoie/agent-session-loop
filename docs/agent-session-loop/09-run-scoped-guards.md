@@ -441,7 +441,10 @@ text and JSON output continue to report the canonical resolved `plan_dir`.
 
 `tail` prints recent activity for the latest run and follows `events.jsonl`
 plus live harness and commit stdout/stderr logs until the observed run
-finishes. Use `--no-follow` to print recent activity and exit. `tail` remains
+finishes. Recent activity places each log's lines among the run's events,
+just before the event that finished the turn or commit that wrote it, so the
+last `--lines` lines end on the run's latest events rather than on harness
+output. Use `--no-follow` to print recent activity and exit. `tail` remains
 the full event-and-log viewer; the `t` keyboard control embeds a logs-only
 variant of the same follower inside a text TTY `run` so runner progress is the
 single source for heartbeats and event lines.
