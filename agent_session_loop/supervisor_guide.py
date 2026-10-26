@@ -42,6 +42,10 @@ PLACEHOLDERS: tuple[str, ...] = (
     "GUIDANCE_TEXT",
     "REDIRECT_TEXT",
     "RESULT_PATH",
+    "CMD ARG ...",
+    "ALIAS",
+    "PATH",
+    "TEXT",
 )
 
 HANDSHAKE_KEYS: tuple[str, ...] = (

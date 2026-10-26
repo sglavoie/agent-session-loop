@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
@@ -347,6 +348,26 @@ class ParserDefaultsAndSupervisorGuideTests(unittest.TestCase):
         for command in commands:
             with self.subTest(command=command):
                 self.assertIn(command, text)
+
+    def test_supervisor_guide_names_every_placeholder_its_commands_use(
+        self,
+    ) -> None:
+        payload = supervisor_guide.guide_payload(harness="codex")
+        named = {
+            word
+            for placeholder in payload["placeholders"]
+            for word in placeholder.split()
+        }
+        commands = [
+            payload["helper"]["launch"],
+            payload["helper"]["resume"],
+            *(operation["command"] for operation in payload["operations"]),
+        ]
+        for command in commands:
+            for word in re.findall(r"(?<![\w<-])[A-Z][A-Z_]*[A-Z](?![\w>])", command):
+                with self.subTest(command=command, word=word):
+                    self.assertIn(word, named)
+        self.assertIn("CMD ARG ...", payload["placeholders"])
 
     def test_supervisor_guide_guidance_route_waits_for_a_delivery_verdict(
         self,
