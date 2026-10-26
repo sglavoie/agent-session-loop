@@ -209,6 +209,18 @@ def inspect_from_args(
             timeout=float(args.timeout),
         )
         if args.incident_id is not None:
+            # The packet is rebuilt from the incident's own plan, so an incident
+            # filed against another plan would come back under this plan's run
+            # id and scope digest -- one plan's context with another's name.
+            incident = ledger.incident(int(args.incident_id))
+            if incident is not None and incident.plan_dir != (
+                common_module.plan_dir_of(candidate)
+            ):
+                raise common_module.OverseerCliError(
+                    "incident_unknown",
+                    f"incident {args.incident_id} belongs to {incident.plan_dir}, "
+                    f"not {candidate.plan_dir}",
+                )
             packet = overseer_context.load_packet(
                 grant=grant,
                 ledger=ledger,

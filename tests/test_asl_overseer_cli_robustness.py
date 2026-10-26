@@ -354,5 +354,42 @@ class DurationCeilingTests(_OverseerCase):
         self.assertTrue(payload["complete"])
 
 
+class IncidentOwnershipTests(_OverseerCase):
+    """An incident is reloaded only under the plan it was filed against."""
+
+    def test_another_plans_incident_is_refused_incident_unknown(self) -> None:
+        other = self.fleet.write_run("plan-beta")
+        self.fleet.ask_question(other)
+        self.watch()
+        packet = self.inspect()
+
+        status, payload = self.fleet.invoke(
+            "inspect",
+            str(other),
+            "--incident-id",
+            str(packet["packet"]["incident_id"]),
+        )
+
+        self.assertEqual(2, status, payload)
+        self.assertEqual("incident_unknown", payload["reason"])
+        self.assertIn(str(self.plan), payload["error"])
+
+    def test_the_plans_own_incident_still_reloads(self) -> None:
+        self.watch()
+        packet = self.inspect()
+
+        status, payload = self.fleet.invoke(
+            "inspect",
+            str(self.plan),
+            "--incident-id",
+            str(packet["packet"]["incident_id"]),
+        )
+
+        self.assertEqual(0, status, payload)
+        self.assertEqual(
+            packet["packet"]["incident_id"], payload["packet"]["incident_id"]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
