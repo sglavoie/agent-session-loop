@@ -173,6 +173,10 @@ def watch_from_args(
             lines.append(f"    + {enrollment.plan_dir} ({enrollment.lifecycle})")
         for excluded in item.excluded:
             lines.append(f"    - {excluded.plan_dir} [{excluded.reason}]")
+        # What made a sweep partial, as scan prints it: a bare ``[partial]``
+        # says the view is incomplete without saying what is missing.
+        for warning in item.warnings:
+            lines.append(f"    ! {warning}")
     common_module._emit(payload, lines, as_json=as_json)
     return common_module.EXIT_OK if complete else common_module.EXIT_REFUSED
 

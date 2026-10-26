@@ -391,5 +391,23 @@ class IncidentOwnershipTests(_OverseerCase):
         )
 
 
+class WatchTextTests(_OverseerCase):
+    """Text watch output says why a sweep was partial."""
+
+    def test_a_partial_sweep_prints_its_warnings(self) -> None:
+        other = self.fleet.write_run("plan-beta")
+        (state.plan_state_dir(other, self.fleet.state_root) / "state.json").write_text(
+            "{not json", encoding="utf-8"
+        )
+
+        status, text = self.fleet.render("watch", "--watcher-id", WATCHER)
+
+        self.assertEqual(1, status, text)
+        self.assertIn("[partial]", text)
+        warning = next(line for line in text.splitlines() if "! " in line)
+        self.assertIn("is malformed", warning)
+        self.assertTrue(warning.startswith("    ! "), warning)
+
+
 if __name__ == "__main__":
     unittest.main()
