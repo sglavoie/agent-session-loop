@@ -41,7 +41,6 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 from .operations import (
@@ -53,6 +52,7 @@ from .operations import (
     REPLY_BEARING_METHODS,
     require_method,
 )
+from .timestamps import iso_epoch
 
 # -- Actions and methods ----------------------------------------------------
 
@@ -319,15 +319,8 @@ def _recorded_after(created_at: Any, since: float) -> bool:
     place in time must not settle an operation, because settling is the claim
     that cannot be taken back.
     """
-    if not isinstance(created_at, str) or not created_at:
-        return False
-    try:
-        moment = datetime.fromisoformat(created_at)
-    except ValueError:
-        return False
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=UTC)
-    return moment.timestamp() >= since
+    moment = iso_epoch(created_at)
+    return moment is not None and moment >= since
 
 
 __all__ = [

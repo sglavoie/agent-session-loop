@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 # ruff: noqa: F403, F405
+import time
+
+from asl_workbench import actions, archive, overview_selection, timestamps
+from asl_workbench import history_primitives as primitives
+
 from .workbench_history_support import *
 
 
@@ -238,3 +243,48 @@ class AttributionTests(HistoryTestCase):
             {entry.plan_key for entry in result.entries},
             {catalog.plan_key(_PLAN), catalog.plan_key(_OTHER_PLAN)},
         )
+
+
+class NaiveTimestampTests(unittest.TestCase):
+    """A timestamp without an offset is UTC to every reader in the package.
+
+    Run under a non-UTC zone, because a host on UTC cannot tell local time
+    from UTC and would pass either reading.
+    """
+
+    def setUp(self) -> None:
+        previous = os.environ.get("TZ")
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous
+            time.tzset()
+
+        self.addCleanup(restore)
+
+    def test_every_reader_places_a_naive_stamp_at_the_same_utc_moment(self) -> None:
+        naive = "2026-06-19T14:00:00"
+        utc = datetime(2026, 6, 19, 14, tzinfo=UTC)
+        expected = utc.timestamp()
+        self.assertEqual(timestamps.parse_iso(naive), utc)
+        self.assertEqual(timestamps.iso_epoch(naive), expected)
+        self.assertEqual(archive.parse_timestamp(naive), utc)
+        self.assertEqual(primitives.epoch(naive), expected)
+        self.assertEqual(
+            overview_selection.activity_at({"last_activity_at": naive}), expected
+        )
+        self.assertTrue(actions._recorded_after(naive, expected))
+        self.assertFalse(actions._recorded_after(naive, expected + 1))
+
+    def test_an_explicit_offset_is_kept_and_garbage_is_unplaced(self) -> None:
+        self.assertEqual(
+            timestamps.iso_epoch("2026-06-19T14:00:00Z"),
+            timestamps.iso_epoch("2026-06-19T10:00:00-04:00"),
+        )
+        for value in (None, "", "  ", "yesterday", 5):
+            with self.subTest(value=value):
+                self.assertIsNone(timestamps.parse_iso(value))

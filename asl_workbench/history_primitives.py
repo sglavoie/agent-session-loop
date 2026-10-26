@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping
-from datetime import datetime
+
+from .timestamps import iso_epoch
 
 # -- ASL's file and event names ---------------------------------------------
 #
@@ -305,23 +306,15 @@ def epoch(value: object) -> float | None:
     ASL stamps records with ISO strings and history carries numbers, so exactly
     one conversion happens and it happens here. An unparseable stamp becomes
     ``None`` rather than zero: a run whose ending time is unknown is not a run
-    that ended in 1970.
+    that ended in 1970. A naive stamp is UTC, as :mod:`asl_workbench.timestamps`
+    reads it everywhere else.
     """
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
         return float(value) if value >= 0 else None
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        moment = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    try:
-        stamp = moment.timestamp()
-    except (OverflowError, OSError, ValueError):
-        return None
-    return stamp if stamp >= 0 else None
+    stamp = iso_epoch(value)
+    return stamp if stamp is not None and stamp >= 0 else None
 
 
 def head_digest(payload: bytes) -> str:

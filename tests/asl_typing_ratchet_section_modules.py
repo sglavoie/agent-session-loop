@@ -539,6 +539,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "asl_workbench.store_types",
         "asl_workbench.store_values",
         "asl_workbench.store_workbench",
+        "asl_workbench.timestamps",
         "asl_workbench.transport",
         "asl_workbench.transport_checks",
         "asl_workbench.transport_compat",
