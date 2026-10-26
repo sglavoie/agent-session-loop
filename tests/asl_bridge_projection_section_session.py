@@ -102,6 +102,39 @@ class BridgeSessionTests(unittest.TestCase):
             self.assertFalse(response["ok"])
             self.assertEqual("invalid-request", response["error"]["code"])
 
+    def test_a_frame_nested_past_the_decoder_is_refused_not_fatal(self) -> None:
+        """Inside the frame ceiling, yet deep enough to raise RecursionError."""
+        session = self._session()
+        # Sized below MAX_FRAME_BYTES, and past the depth at which every
+        # supported interpreter's decoder gives up.
+        depth = bridge_protocol.MAX_FRAME_BYTES - 64
+
+        response = session.handle_frame(b"[" * depth)
+
+        self.assertIsNone(response["id"])
+        self.assertFalse(response["ok"])
+        self.assertEqual("invalid-request", response["error"]["code"])
+        self.assertTrue(session.handle_frame(_request("req-2", "runs.snapshot"))["ok"])
+
+    def test_an_unexpected_handler_failure_costs_only_its_own_frame(self) -> None:
+        session = self._session()
+
+        def explode(
+            session: bridge_session.BridgeSession, params: Any
+        ) -> dict[str, Any]:
+            raise KeyError("a handler bug")
+
+        with mock.patch.dict(
+            bridge_session.METHOD_HANDLERS, {"runs.snapshot": explode}
+        ):
+            response = session.handle_frame(_request("req-1", "runs.snapshot"))
+
+        self.assertEqual("req-1", response["id"])
+        self.assertFalse(response["ok"])
+        self.assertEqual("internal-error", response["error"]["code"])
+        self.assertTrue(response["error"]["retryable"])
+        self.assertTrue(session.handle_frame(_request("req-2", "runs.snapshot"))["ok"])
+
     def test_a_failing_projection_is_a_retryable_internal_error(self) -> None:
         def explode() -> dict[str, Any]:
             raise RuntimeError("state root vanished")

@@ -15,6 +15,7 @@ from .agent_mux_projection import CONTRACT_SET_ID
 from .bridge_protocol import (
     _METHOD_ORDER,
     CAPABILITY_METHODS,
+    ERROR_INTERNAL,
     ERROR_INVALID_REQUEST,
     ERROR_MALFORMED_JSON,
     ERROR_UNKNOWN_METHOD,
@@ -70,13 +71,25 @@ class BridgeSession(RedirectHandlers):
         return hello_payload()
 
     def handle_frame(self, raw: bytes) -> dict[str, Any] | None:
-        """Answer one request frame; never raise for client-caused failures."""
+        """Answer one request frame; never raise, whatever the frame held.
+
+        A frame can only ever cost its own response: the loop that called this
+        serves every other client request too, so an exception escaping here
+        would end the session for a failure that belonged to one frame.
+        """
         try:
             decoded = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             return _error_response(
                 None,
                 BridgeError(ERROR_MALFORMED_JSON, f"frame is not valid JSON: {error}"),
+            )
+        except RecursionError:
+            # Valid JSON nested deeper than the decoder will follow: a request
+            # this bridge refuses to read rather than one it failed to parse.
+            return _error_response(
+                None,
+                BridgeError(ERROR_INVALID_REQUEST, "frame is nested too deeply"),
             )
         if not isinstance(decoded, Mapping):
             return _error_response(
@@ -90,6 +103,15 @@ class BridgeSession(RedirectHandlers):
             return _response(request_id, self._dispatch(decoded, request_id))
         except BridgeError as error:
             return _error_response(request_id, error)
+        except Exception as error:  # noqa: BLE001 - a handler bug costs one frame
+            return _error_response(
+                request_id,
+                BridgeError(
+                    ERROR_INTERNAL,
+                    f"request failed: {type(error).__name__}",
+                    retryable=True,
+                ),
+            )
 
     def _dispatch(
         self, request: Mapping[str, Any], request_id: str | None

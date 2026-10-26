@@ -102,11 +102,11 @@ Error codes are a closed set — branch on `code`, not on `message`:
 | Code | Meaning | `retryable` |
 | --- | --- | --- |
 | `malformed-json` | Frame was not parseable JSON. `id` is `null`. | no |
-| `invalid-request` | Missing/empty `id`, missing `method`, or non-object `params`. | no |
+| `invalid-request` | Missing/empty `id`, missing `method`, non-object `params`, or a frame nested too deeply to decode (`id` is `null`). | no |
 | `unsupported-protocol` | `protocol` is not 1. `details.supported` lists accepted versions. | no |
 | `unknown-method` | Method not in the capability list. | no |
 | `frame-too-large` | Inbound line exceeded `max_frame_bytes`. | no |
-| `internal-error` | Projection raised. | yes |
+| `internal-error` | Projection raised, or a handler failed unexpectedly. | yes |
 | `mutation-failed` | A durable write or spawn failed. Nothing was applied. | yes |
 | `workbench-unavailable` | The bridge could not start a Workbench server. | yes |
 
