@@ -7,6 +7,7 @@ import argparse
 from .cli_parser_support import (
     _AgentSessionLoopArgumentParser,
     _group_epilogue,
+    int_in_range,
     non_blank_text,
     non_negative_float,
     positive_float,
@@ -242,10 +243,12 @@ def _add_overseer_commands(
     )
     overseer_inspect_parser.add_argument(
         "--limit",
-        type=positive_int,
+        # overseer_context.MAX_EXCERPT_CHARS, restated like the choices above:
+        # the ceiling the packet advertises is the most a host may ask for.
+        type=int_in_range(1, 4000),
         metavar="CHARS",
         default=4000,
-        help="Character ceiling for each expansion (default 4000)",
+        help="Character ceiling for each expansion, at most 4000 (the default)",
     )
     overseer_inspect_parser.add_argument(
         "--timeout",

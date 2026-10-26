@@ -14,6 +14,8 @@ from unittest import mock
 from agent_session_loop import (
     overseer_cli_claims,
     overseer_cli_common,
+    overseer_context,
+    overseer_context_reader,
     overseer_discovery,
     overseer_store_ledger,
     overseer_store_models,
@@ -219,6 +221,59 @@ class RefusedContextGrantTests(_OverseerCase):
                     self.assertIsNone(payload["evidence_digest"])
                     self.assertNotIn("statements", payload)
             getattr(self.fleet.policy, kind).clear()
+
+
+class ExpansionCeilingTests(_OverseerCase):
+    """No --limit widens an expansion past the ceiling the packet advertises."""
+
+    def test_a_limit_above_the_ceiling_is_refused_by_the_parser(self) -> None:
+        ceiling = overseer_context.MAX_EXCERPT_CHARS
+        self.assertEqual(ceiling, self.fleet.parse("inspect", str(self.plan)).limit)
+        self.assertEqual(
+            ceiling,
+            self.fleet.parse("inspect", str(self.plan), "--limit", str(ceiling)).limit,
+        )
+        with (
+            redirect_stderr(io.StringIO()),
+            redirect_stdout(io.StringIO()),
+            self.assertRaises(SystemExit) as caught,
+        ):
+            self.fleet.parse("inspect", str(self.plan), "--limit", str(ceiling + 1))
+        self.assertEqual(2, caught.exception.code)
+
+    def test_expand_itself_narrows_a_wider_limit_to_the_ceiling(self) -> None:
+        packet = self.observed()
+        ledger = self.fleet.open_ledger(state_dir=self.fleet.state_root)
+        decision = self.fleet.policy(
+            plan_dir=str(self.plan),
+            access="context",
+            repositories=(),
+            timeout=1.0,
+        )
+        long_text = "x" * (overseer_context.MAX_EXCERPT_CHARS * 3)
+        projection = mock.Mock(detail=long_text, shown=1, records=1)
+        with (
+            mock.patch.object(
+                overseer_context_reader._Reader, "project", return_value=projection
+            ),
+            mock.patch.object(
+                overseer_context_reader._Reader,
+                "fingerprint",
+                return_value=("d" * 64, len(long_text)),
+            ),
+        ):
+            excerpt = overseer_context.expand(
+                grant=decision.grant(),
+                ledger=ledger,
+                incident_id=packet["packet"]["incident_id"],
+                kind="status",
+                state_dir=self.fleet.state_root,
+                limit=10**9,
+            )
+
+        self.assertIsNone(excerpt.refusal)
+        self.assertEqual(overseer_context.MAX_EXCERPT_CHARS, len(excerpt.text))
+        self.assertTrue(excerpt.truncated)
 
 
 if __name__ == "__main__":

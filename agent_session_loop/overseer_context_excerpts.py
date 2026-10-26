@@ -86,6 +86,9 @@ def expand(
         )
 
     text = projection.detail
+    # The ceiling is the packet's published promise, so a wider ask narrows to
+    # it rather than widening it.
+    limit = min(limit, models.MAX_EXCERPT_CHARS)
     clipped = len(text) > limit
     if clipped:
         text = text[:limit].rstrip()
