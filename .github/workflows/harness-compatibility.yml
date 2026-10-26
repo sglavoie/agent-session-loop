@@ -30,17 +30,24 @@ on:
     # every other cron on the runner fleet.
     - cron: "17 6 * * 1"
   workflow_dispatch:
-  # A change to POLICY (or to how it is smoked) is exactly what this workflow
-  # judges; nothing else in the tree can change its verdict.
+  # A change to POLICY (or to how it is smoked) is what this workflow judges.
+  # The verdict also rests on how the executable is resolved
+  # (`harnesses.py`, `resolve_executable`) and on the `harness-compat` parser
+  # (`cli_parser_run.py`, `--harness` / `--strict`), so those trigger it too;
+  # the weekly schedule catches anything subtler.
   push:
     branches: [main]
     paths:
       - "agent_session_loop/harness_compatibility.py"
+      - "agent_session_loop/harnesses.py"
+      - "agent_session_loop/cli_parser_run.py"
       - ".github/workflows/harness-compatibility.yml"
   pull_request:
     branches: [main]
     paths:
       - "agent_session_loop/harness_compatibility.py"
+      - "agent_session_loop/harnesses.py"
+      - "agent_session_loop/cli_parser_run.py"
       - ".github/workflows/harness-compatibility.yml"
 
 permissions:
@@ -76,6 +83,9 @@ jobs:
             package: "@github/copilot"
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # Nothing here pushes, so the token is not left in .git/config.
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -101,9 +111,10 @@ jobs:
       - name: Install ${{ matrix.package }}@${{ steps.pin.outputs.version }}
         run: npm install -g "${{ matrix.package }}@${{ steps.pin.outputs.version }}"
 
-      # `--strict` exits 3 on anything that is not `supported`, and exactly one
-      # harness is named, so this asserts the pinned release against its own
-      # policy row and says nothing about the two that are not installed.
+      # `--strict` fails on anything that is not `supported` (exit 1 for an
+      # incompatible release, which wins, else 3 for an unknown one), and
+      # exactly one harness is named, so this asserts the pinned release against
+      # its own policy row and says nothing about the two that are not installed.
       - name: Compatibility smoke (no model use)
         run: |
           python3 -m agent_session_loop harness-compat \
@@ -115,6 +126,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # Nothing here pushes, so the token is not left in .git/config.
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -133,8 +147,9 @@ jobs:
             "@anthropic-ai/claude-code@latest" \
             "@github/copilot@latest"
 
-      # Advisory by construction: `continue-on-error` turns the strict exit 3
-      # into a visible annotation rather than a failed workflow. A harness that
+      # Advisory by construction: `continue-on-error` turns the strict non-zero
+      # exit (1 incompatible, 3 unknown) into a visible annotation rather than a
+      # failed workflow. A harness that
       # has moved past the pinned window is news, not a broken build.
       - name: Report drift against the pinned window
         continue-on-error: true

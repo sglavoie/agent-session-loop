@@ -151,17 +151,19 @@ class AuthoritativeLaneDocsTests(unittest.TestCase):
             sorted(name.split("==", 1)[0] for name in dev), ["mypy", "ruff"]
         )
         self.assertTrue(all("==" in name for name in dev), dev)
-        for name in (
-            "check.yml",
-            "harness-compatibility.yml",
-            "workbench-browser.yml",
-        ):
-            workflow = (REPO_ROOT / ".github" / "workflows" / name).read_text(
-                encoding="utf-8"
-            )
+        workflows = sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
+        self.assertGreaterEqual(len(workflows), 3)
+        for path in workflows:
+            name = path.name
+            workflow = path.read_text(encoding="utf-8")
             with self.subTest(workflow=name):
                 for uses in re.findall(r"uses:\s*(\S+)", workflow):
                     self.assertRegex(uses, r"@[0-9a-f]{40}$")
+                # No job pushes, so no checkout leaves the token in .git/config.
+                self.assertEqual(
+                    workflow.count("uses: actions/checkout@"),
+                    workflow.count("persist-credentials: false"),
+                )
                 for runner in re.findall(r"runs-on:\s*(\S+)", workflow):
                     self.assertNotIn("latest", runner)
                 self.assertNotRegex(workflow, r"(ruff|mypy)==")

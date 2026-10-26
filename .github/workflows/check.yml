@@ -47,6 +47,9 @@ jobs:
         python-version: ["3.14", "3.15"]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # Nothing here pushes, so the token is not left in .git/config.
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -126,16 +129,22 @@ jobs:
         slice: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # Nothing here pushes, so the token is not left in .git/config.
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
-          # The tool pins live in pyproject.toml, so it is the cache key.
-          cache: pip
+          # The tool pins live in pyproject.toml, so it is the cache key. Only
+          # slice 1 installs anything with pip, so only it uses the cache.
+          cache: ${{ matrix.slice == 1 && 'pip' || '' }}
           cache-dependency-path: pyproject.toml
 
+      # Only `just lint` needs just; the suite step calls run_suite directly.
       - name: Install just
+        if: matrix.slice == 1
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
 
       # Lint is not sliced, so one job runs it for the whole lane.
