@@ -102,6 +102,49 @@ class InputErrorWordingTests(unittest.TestCase):
         self.assertEqual("invalid-question-source", payload["reason"])
         self.assertIn("TEXT, --text-stdin, or --question-id", payload["error"])
 
+    def test_handler_checked_flag_values_share_reason_and_wording(self) -> None:
+        state = ("--state-dir", str(self.state_dir))
+        cases = (
+            (("tail", str(self.plan_dir), "--lines", "0", *state), "--lines", "0"),
+            (("plans", "--stale-days", "-1", *state), "--stale-days", "-1"),
+            (("metrics", "--since-days", "0", *state), "--since-days", "0"),
+            (("gc", "--max-age-days", "-1", *state), "--max-age-days", "-1"),
+            (("commit", "--timeout", "-1"), "--timeout", "-1"),
+            (("assurance", "list", "--limit", "0", *state), "--limit", "0"),
+            (
+                ("assurance", "process-pending", "--audit-timeout", "0", *state),
+                "--audit-timeout",
+                "0",
+            ),
+            (
+                (
+                    "assurance",
+                    "closeout",
+                    "r1",
+                    "--outcome",
+                    "reworked",
+                    "--rework-minutes",
+                    "-3",
+                    *state,
+                ),
+                "--rework-minutes",
+                "-3",
+            ),
+            (
+                ("prepare", str(self.tmp / "p.md"), "--validator-jobs", "0", *state),
+                "--validator-jobs",
+                "0",
+            ),
+        )
+        for argv, flag, value in cases:
+            with self.subTest(argv=argv):
+                payload = self._json_refusal(*argv)
+                self.assertEqual("input-error", payload["reason"])
+                self.assertIn(f"{flag} must be", payload["error"])
+                self.assertTrue(
+                    payload["error"].endswith(f"; got '{value}'"), payload["error"]
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

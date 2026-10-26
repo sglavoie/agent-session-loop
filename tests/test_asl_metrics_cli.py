@@ -131,7 +131,7 @@ class MetricsCliTests(unittest.TestCase):
         )
         self.assertEqual(1, exit_code)
         payload = json.loads(stdout)
-        self.assertEqual("invalid-since-days", payload["reason"])
+        self.assertEqual("input-error", payload["reason"])
         self.assertFalse(payload["paused"])
         self.assertEqual({}, payload["details"])
 

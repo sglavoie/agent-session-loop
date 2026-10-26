@@ -284,7 +284,7 @@ class JsonStateMaintenanceCliTests(JsonCliHelpers, unittest.TestCase):
             negative = _gc("--max-age-days", "-5", "--json")
             self.assertEqual(1, negative.returncode)
             payload = json.loads(negative.stdout)
-            self.assertEqual("invalid-max-age-days", payload["reason"])
+            self.assertEqual("input-error", payload["reason"])
             self.assertEqual(
                 "--max-age-days must be a finite, non-negative number; got '-5'",
                 payload["error"],
@@ -297,7 +297,7 @@ class JsonStateMaintenanceCliTests(JsonCliHelpers, unittest.TestCase):
                     refused = _gc("--max-age-days", value, "--json")
                     self.assertEqual(1, refused.returncode)
                     payload = json.loads(refused.stdout)
-                    self.assertEqual("invalid-max-age-days", payload["reason"])
+                    self.assertEqual("input-error", payload["reason"])
 
     def test_gc_cli_dry_run_then_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
