@@ -110,6 +110,26 @@ class PendingScopeRefreshTests(DeltaHarness):
         self.assertIsNone(payload["fallback_reason"])
         self.assertIs(True, payload["refreshed"])
 
+    def test_a_crlf_session_keeps_its_line_endings_when_rescoped(self) -> None:
+        base = self.head()
+        self.record_repair_cycle(repo_head=base)
+        path = self._write_pending_review_session(
+            {
+                "mode": review_session_body.REVIEW_SCOPE_DELTA,
+                "base_sha": base,
+                "changed_files": ["stale.py"],
+                "baseline_dirty": False,
+                "prior_findings": [self.finding],
+            }
+        )
+        path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+        (self.repo_root / "appeared.py").write_text("new\n", encoding="utf-8")
+
+        self.assertTrue(self._refresh(path))
+        raw = path.read_bytes()
+        self.assertIn(b"appeared.py", raw)
+        self.assertEqual(raw.count(b"\n"), raw.count(b"\r\n"))
+
     def test_an_unchanged_scope_writes_nothing(self) -> None:
         base = self.head()
         self.record_repair_cycle(repo_head=base)

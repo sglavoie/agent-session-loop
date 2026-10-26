@@ -79,8 +79,9 @@ class ReviewDeltaBoundaryTests(unittest.TestCase):
         self.assertEqual(set(), _call_receivers(self.source, "write_text"))
         self.assertEqual(1, self.source.count("durability."))
         self.assertIn(
-            "durability.replace_text(session.path, rescoped, sync_file=True, "
-            "sync_parent=True)",
+            "durability.replace_text(\n        session.path,\n"
+            "        plans_files.with_line_ending(rescoped, line_ending),\n"
+            "        sync_file=True,\n        sync_parent=True,\n    )",
             self.source,
         )
         for reach in ("open(", "mkdir(", "unlink("):

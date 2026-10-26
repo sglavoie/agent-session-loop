@@ -73,6 +73,7 @@ from . import (
     durability,
     events,
     plans_errors,
+    plans_files,
     plans_models,
     review,
     review_continuation,
@@ -587,7 +588,9 @@ def _refresh_pending_review_scope(
     before the session executes. Only the scope section is rewritten, so the
     session keeps its identity, version marker, and pending handoff.
     """
-    text = session.path.read_text(encoding="utf-8")
+    # Edited as LF text and written back in the file's own line ending, so a
+    # re-scope does not silently convert a CRLF session.
+    text, line_ending = plans_files.read_text_and_line_ending(session.path)
     if review_session_body.REVIEW_SCOPE_HEADING not in text:
         return False
     if workspace is None:
@@ -605,7 +608,12 @@ def _refresh_pending_review_scope(
     rescoped = review_session_body.rescoped_review_session_body(text, delta)
     if rescoped is None or rescoped == text:
         return False
-    durability.replace_text(session.path, rescoped, sync_file=True, sync_parent=True)
+    durability.replace_text(
+        session.path,
+        plans_files.with_line_ending(rescoped, line_ending),
+        sync_file=True,
+        sync_parent=True,
+    )
     persistence.append_event(
         event_path,
         events.REVIEW_SCOPE_EVENT,
