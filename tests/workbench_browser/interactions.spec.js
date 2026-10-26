@@ -1300,6 +1300,60 @@ for (const deployment of DEPLOYMENTS) {
       ).toBeVisible();
     });
 
+    test("a restore stays shut until its receipt settles", async ({ page }) => {
+      await openArchive(page, deployment);
+      const { byOperation } = await capabilities(page);
+      test.skip(
+        !byOperation["archive-list"].available ||
+          !byOperation["archive-restore"].available,
+        "this deployment does not carry out restores",
+      );
+      // The restore is only recorded, and its receipt stays pending until
+      // released: the window a second click used to start a second loop in.
+      let submissions = 0;
+      await page.route("**/api/archive/restore", (route) => {
+        submissions += 1;
+        return route.fulfill({
+          status: 202,
+          json: { ok: true, operation: { operation_id: "op-held", status: "pending" } },
+        });
+      });
+      let release;
+      const held = new Promise((resolve) => {
+        release = resolve;
+      });
+      await page.route("**/api/archive?operation_id=*", async (route) => {
+        await held;
+        return route.fulfill({
+          json: { ok: true, operation: { operation_id: "op-held", status: "consumed" } },
+        });
+      });
+      const row = page.locator(
+        `#wb-archive-entries [data-archive-id="${ARCHIVE.expired.archive_id}"]`,
+      );
+      const restore = row.locator('[data-action="archive-restore"]');
+      await restore.click();
+      await expect.poll(() => submissions).toBe(1);
+      await expect(restore).toBeDisabled();
+      await expect(restore).toHaveAttribute(
+        "data-disabled-reason",
+        /still settling/,
+      );
+      // A second request from code rather than the (disabled) button is
+      // refused too, and nothing more goes on the wire.
+      await page.evaluate(async (id) => {
+        const archive = await import("/static/modules/archive.js");
+        await archive.handleArchiveRestore(id);
+      }, ARCHIVE.expired.archive_id);
+      expect(submissions).toBe(1);
+      release();
+      await expect(page.locator("#wb-archive-restore-selected")).not.toHaveAttribute(
+        "data-disabled-reason",
+        /still settling/,
+      );
+      expect(submissions).toBe(1);
+    });
+
     test("a bulk action with nothing selected explains the selection, not the mode", async ({
       page,
     }) => {
