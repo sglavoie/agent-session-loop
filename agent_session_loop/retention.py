@@ -33,6 +33,7 @@ from . import (
 )
 from .cli_defaults import program_name
 from .cli_parser_support import NON_NEGATIVE_NUMBER, flag_refusal
+from .formatting import count_noun
 from .retention_projection import (
     DEFAULT_MAX_AGE_DAYS,
     RETAIN_PIN_UNKNOWN,
@@ -405,7 +406,8 @@ def _print_archive(archive: dict[str, Any]) -> None:
         print("Archive (not managed by gc): empty")
         return
     line = (
-        f"Archive (not managed by gc): {archive['entry_count']} entry(ies), "
+        "Archive (not managed by gc): "
+        f"{count_noun(archive['entry_count'], 'entry', 'entries')}, "
         f"{format_bytes(archive['bytes'])} at {archive['path']}"
     )
     past = archive["past_retention_count"]
@@ -431,7 +433,9 @@ def _print_report(report: GCReport) -> None:
     unresolved = len(report.unresolved_state_dirs)
     plan_line = f"Plans: {len(report.plans)} judged"
     if unresolved:
-        plan_line += f", {unresolved} state dir(s) unresolved and not judged"
+        plan_line += (
+            f", {count_noun(unresolved, 'state dir')} unresolved and not judged"
+        )
     print(plan_line)
     print(f"Runs: {report.reclaimable_run_count} reclaimable of {report.run_count}")
     print(
@@ -457,7 +461,7 @@ def _print_report(report: GCReport) -> None:
             for entry in reclaiming:
                 print(
                     f"  {format_bytes(entry.retention.reclaimable_bytes)}  "
-                    f"{len(entry.retention.reclaimable_runs)} run(s)  "
+                    f"{count_noun(len(entry.retention.reclaimable_runs), 'run')}  "
                     f"{entry.retention.plan_dir}"
                 )
 
@@ -466,7 +470,7 @@ def _print_report(report: GCReport) -> None:
         print("Retained by reason:")
         for reason, totals in retained.items():
             print(
-                f"  {reason}: {totals['run_count']} run(s), "
+                f"  {reason}: {count_noun(totals['run_count'], 'run')}, "
                 f"{format_bytes(totals['bytes'])}"
             )
     locked = report.locked_plans()
@@ -485,21 +489,24 @@ def _print_report(report: GCReport) -> None:
             )
         else:
             print(
-                f"Assurance inbox: {assurance['open_issue_count']} open issue(s) "
-                f"pinning {assurance['pinned_run_count']} run(s); ledger kept at "
+                "Assurance inbox: "
+                f"{count_noun(assurance['open_issue_count'], 'open issue')} "
+                f"pinning {count_noun(assurance['pinned_run_count'], 'run')}; "
+                "ledger kept at "
                 f"{assurance['ledger_path']}"
             )
         missing = assurance["missing_run_references"]
         if missing:
             print(
-                f"Assurance inbox: {len(missing)} pinned run(s) no longer on disk: "
+                "Assurance inbox: "
+                f"{count_noun(len(missing), 'pinned run')} no longer on disk: "
                 f"{', '.join(missing[:5])}"
                 f"{' …' if len(missing) > 5 else ''}"
             )
 
     if report.applied:
         print(
-            f"Removed: {report.removed_run_count} run(s), "
+            f"Removed: {count_noun(report.removed_run_count, 'run')}, "
             f"{format_bytes(report.reclaimed_bytes)} reclaimed"
         )
         for entry in report.plans:
