@@ -201,6 +201,41 @@ class InvocationWorkflowTests(_OverseerCase):
         self.assertEqual(overseer_cli.EXIT_OK, status, payload)
         self.assertEqual(1, payload["released"])
 
+    def test_a_bounded_watch_keeps_its_leases_for_the_act_that_follows(
+        self,
+    ) -> None:
+        """The skill's loop: `watch --for-seconds`, inspect, decide, then act."""
+        self.watch("--for-seconds", "1")
+        packet = self.inspect()
+
+        status, payload = self.act(
+            packet,
+            "--text",
+            "carry on",
+            "--reviewed-evidence",
+            self._reviewed(packet),
+            "--claims-file",
+            self._claims(),
+        )
+
+        self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+        self.assertTrue(payload["dispatch"]["performed"], payload["dispatch"]["detail"])
+        _status, released = self.fleet.invoke(
+            "watch", "--watcher-id", WATCHER, "--release"
+        )
+        self.assertEqual(1, released["released"])
+
+    def test_a_lapsed_lease_asks_for_a_rewatch_rather_than_a_human(self) -> None:
+        packet = self.observed()
+        self.fleet.invoke("watch", "--watcher-id", WATCHER, "--release")
+
+        status, payload = self.act(packet, "--text", "carry on")
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        self.assertEqual("ownership_lost", payload["dispatch"]["refusal"])
+        self.assertIsNone(payload["escalation"])
+        self.assertTrue(payload["rewatch"])
+
     def test_a_later_sweep_enrols_a_run_that_started_mid_invocation(self) -> None:
         """`watch while invoked` means a run that appears later joins."""
         self.watch()

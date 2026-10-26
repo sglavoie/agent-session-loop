@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import sys
 from collections.abc import Mapping
 from dataclasses import replace
@@ -36,6 +37,7 @@ from .verification_command_diagnosis import (
 from .verification_models import (
     VerificationContext,
     _coerce_verification_context,
+    require_verification_root,
     verification_context_from_plan,
 )
 
@@ -100,7 +102,7 @@ def _diagnose_contract_check(
                 CONTRACT_CHECK_ISSUE_BARE_PYTHON,
                 (
                     "unversioned `python` is frequently unavailable where "
-                    f"`python3` exists: {' '.join(check.argv)}; use `python3`"
+                    f"`python3` exists: {shlex.join(check.argv)}; use `python3`"
                 ),
             )
         scope = diagnose_command_scope(check)
@@ -123,7 +125,7 @@ def _diagnose_contract_check(
         return (
             CONTRACT_CHECK_ROW_OK,
             None,
-            f"command is runnable: {' '.join(check.argv)}",
+            f"command is runnable: {shlex.join(check.argv)}",
         )
 
     if isinstance(check, FileExistsCheck):
@@ -156,7 +158,8 @@ def _diagnose_contract_check(
                 CONTRACT_CHECK_ISSUE_FILE_MISSING,
                 f"file does not exist: {check.path}",
             )
-        except OSError as error:
+        except (OSError, ValueError) as error:
+            # ValueError covers UnicodeDecodeError, as the runtime check does.
             return (
                 CONTRACT_CHECK_ROW_FACTUAL_ISSUE,
                 CONTRACT_CHECK_ISSUE_FILE_MISSING,
@@ -282,14 +285,8 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
             print(f"{program_name()} contract-check: {error}", file=sys.stderr)
         return 1
 
-    try:
-        verification_context = verification_context_from_plan(plan_dir_arg, cwd_arg)
-    except (plans_errors.PlanError, OSError) as error:
-        return _emit_error(
-            plans_errors.plan_error_reason(error, CONTRACT_CHECK_EXIT_REASON_CWD_ERROR),
-            str(error),
-        )
-
+    # The plan is read before the root, as verify reads it, so a missing plan
+    # directory reads as plan-not-found whatever --cwd names.
     try:
         snapshot = plans_snapshot.inspect_plan(plan_dir_arg)
     except plans_errors.PlanError as error:
@@ -297,6 +294,15 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
             plans_errors.plan_error_reason(
                 error, CONTRACT_CHECK_EXIT_REASON_PLAN_ERROR
             ),
+            str(error),
+        )
+
+    try:
+        require_verification_root(cwd_arg)
+        verification_context = verification_context_from_plan(plan_dir_arg, cwd_arg)
+    except (plans_errors.PlanError, OSError) as error:
+        return _emit_error(
+            plans_errors.plan_error_reason(error, CONTRACT_CHECK_EXIT_REASON_CWD_ERROR),
             str(error),
         )
 

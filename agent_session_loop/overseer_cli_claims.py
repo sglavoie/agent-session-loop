@@ -21,14 +21,38 @@ from . import (
 def _resolve_candidate(
     inventory: overseer_discovery.Inventory, plan_dir: str
 ) -> overseer_discovery.Candidate:
+    """The one record that speaks for ``plan_dir``.
+
+    A state directory copied aside still names the plan it was copied from, so
+    several records can claim one plan. Only a record whose directory is the
+    plan's own hash is that plan's; a stray copy sorting earlier must not
+    shadow it. When no record proves its identity the first claimant is
+    returned, and its ``plan_identity_mismatch`` refuses it downstream. Two
+    records that both prove it are ambiguous, and that fails closed.
+    """
     wanted = common.canonical_plan(plan_dir)
-    for candidate in inventory.candidates:
-        if common.canonical_plan(candidate.plan_dir) == wanted:
-            return candidate
-    raise common.OverseerCliError(
-        "plan_unobserved",
-        f"discovery has no record of {wanted}; run `asl overseer scan` first",
-    )
+    claimants = [
+        candidate
+        for candidate in inventory.candidates
+        if common.canonical_plan(candidate.plan_dir) == wanted
+    ]
+    if not claimants:
+        raise common.OverseerCliError(
+            "plan_unobserved",
+            f"discovery has no record of {wanted}; run `asl overseer scan` first",
+        )
+    proven = [
+        candidate
+        for candidate in claimants
+        if "plan_identity_mismatch" not in candidate.ineligible_reasons
+    ]
+    if len(proven) > 1:
+        raise common.OverseerCliError(
+            "plan_identity_ambiguous",
+            f"{len(proven)} state records each claim {wanted}: "
+            + ", ".join(str(candidate.state_dir) for candidate in proven),
+        )
+    return proven[0] if proven else claimants[0]
 
 
 def _independent_plans(
@@ -131,6 +155,23 @@ def _claim_projects(
     return tuple(str(item) for item in listed)
 
 
+def _string_list(entry: dict[str, Any], key: str, position: int) -> tuple[str, ...]:
+    """An optional list of strings, refused when it is any other shape.
+
+    Iterating whatever arrived would split a bare string into characters and
+    raise on a number, so a claim of the wrong shape is reported as one.
+    """
+    listed = entry.get(key, [])
+    if not isinstance(listed, list) or not all(
+        isinstance(item, str) for item in listed
+    ):
+        raise common.OverseerCliError(
+            "claims_invalid",
+            f"claim {position} has a {key} that is not a list of strings",
+        )
+    return tuple(listed)
+
+
 def parse_claims(
     text: str, *, scope: overseer_decisions.Scope
 ) -> tuple[overseer_decisions.Claim, ...]:
@@ -156,6 +197,12 @@ def parse_claims(
     except json.JSONDecodeError as error:
         raise common.OverseerCliError(
             "claims_invalid", f"claims are not JSON: {error}"
+        ) from error
+    except RecursionError as error:
+        # Not a ValueError: pathologically nested JSON raises it from the
+        # decoder instead of a decode error.
+        raise common.OverseerCliError(
+            "claims_invalid", "claims are nested too deeply to decode"
         ) from error
     if not isinstance(loaded, list):
         raise common.OverseerCliError(
@@ -197,11 +244,9 @@ def parse_claims(
                 scope=claim_scope,
                 operations=cast(
                     tuple[overseer_decisions.Operation, ...],
-                    tuple(str(item) for item in entry.get("operations", ())),
+                    _string_list(entry, "operations", position),
                 ),
-                corroborating=tuple(
-                    str(item) for item in entry.get("corroborating", ())
-                ),
+                corroborating=_string_list(entry, "corroborating", position),
                 reading=str(entry.get("reading", "")),
             )
         )
@@ -215,12 +260,17 @@ def _claims_text(args: argparse.Namespace) -> str:
             raise common.OverseerCliError(
                 "claims_invalid", "--claims-file and --claims-stdin are exclusive"
             )
-        return sys.stdin.read()
+        try:
+            return sys.stdin.read()
+        except (OSError, UnicodeDecodeError) as error:
+            raise common.OverseerCliError(
+                "claims_invalid", f"cannot read claims from stdin: {error}"
+            ) from error
     if not path:
         return "[]"
     try:
         return Path(path).read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         raise common.OverseerCliError(
             "claims_invalid", f"cannot read {path}: {error}"
         ) from error

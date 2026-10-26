@@ -47,7 +47,7 @@ asl overseer watch --watcher-id "$WATCHER" --for-seconds 300 --json
 
 If `complete` is `false`, you are looking at part of the fleet. Say so in your report. Never summarize a partial sweep as "nothing needs attention".
 
-Pass `--plan` and `--project` through from the user's invocation. Re-run `watch` periodically for as long as you are invoked so runs that start later join. When you are done, run `asl overseer watch --watcher-id "$WATCHER" --release` — an abandoned lease does expire on its own, but not before it has locked another watcher out for its full term.
+Pass `--plan` and `--project` through from the user's invocation. Re-run `watch` periodically for as long as you are invoked so runs that start later join; each sweep renews your leases. A `--for-seconds` watch returns with its leases still held, so the `act` in step 5 can use them; they lapse after `--lease-seconds` (default 300) unless a later `watch` renews them. When you are done, run `asl overseer watch --watcher-id "$WATCHER" --release` — an abandoned lease does expire on its own, but not before it has locked another watcher out for its full term.
 
 ### 2. Authorize
 
@@ -145,6 +145,8 @@ The dispatcher re-checks authority twice — once before the adapter prepares an
 **`--reviewed-evidence` is what closes that**, and it is the digest step 4's listing printed. It is required on every claim-bearing `act`. A new hold, a changed statement, or a superseding decision arriving since you read the record is refused `evidence_changed` before any decision is weighed — at the check before the adapter prepares, which closes the window between your `decide` and your `act`, and again at the check before it performs, which closes the window inside the dispatch itself.
 
 Omitting it is refused `evidence_unbound` rather than treated as a weaker check. The leaf could read the record itself and pin what it saw, and that is exactly the wrong answer: it would be writing your reading for you, and every hold that arrived before you invoked it would be silently absorbed into the record you are then said to have reviewed.
+
+`ownership_lost` is not escalation material and carries no escalation: it means this watcher holds no live lease on the plan. Re-run `watch` with the same `--watcher-id` and act again. If the sweep reports the plan `owned_elsewhere`, another watcher has it — leave it to them.
 
 `evidence_changed` is not a stale token and not a retry. The record you reasoned about has moved, so go back to step 4, read what is there now, and write claims about it.
 

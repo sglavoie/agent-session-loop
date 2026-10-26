@@ -1,18 +1,22 @@
 """Canonical supervisor workflow guide behind ``asl supervisor-guide``.
 
 One structured model renders both the text and the JSON form, so an agent that
-reads either surface receives the same commands. Only ``harnesses`` and
-``responses`` are imported: the command stays light enough to be resolved
-lazily from ``cli.py`` without pulling in the runner or mailbox subsystems.
+reads either surface receives the same commands. Only ``harnesses``,
+``responses`` and the parser's own refusal wording are imported: the command
+stays light enough to be resolved lazily from ``cli.py`` without pulling in the
+runner or mailbox subsystems.
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Mapping
 from typing import Any
 
 from . import harnesses, responses
+from .cli_defaults import program_name
+from .cli_parser_support import flag_refusal
 
 COMMAND_NAME = "supervisor-guide"
 
@@ -42,6 +46,10 @@ PLACEHOLDERS: tuple[str, ...] = (
     "GUIDANCE_TEXT",
     "REDIRECT_TEXT",
     "RESULT_PATH",
+    "CMD ARG ...",
+    "ALIAS",
+    "PATH",
+    "TEXT",
 )
 
 HANDSHAKE_KEYS: tuple[str, ...] = (
@@ -356,6 +364,19 @@ def render_text(payload: Mapping[str, Any]) -> str:
 
 
 def supervisor_guide_from_args(args: argparse.Namespace) -> int:
+    if args.harness not in (AUTO_HARNESS, *harnesses.HARNESS_NAMES):
+        error = flag_refusal(
+            "--harness",
+            f"must be one of {', '.join((AUTO_HARNESS, *harnesses.HARNESS_NAMES))}",
+            args.harness,
+        )
+        if args.json:
+            responses.print_json(
+                responses.error_payload(COMMAND_NAME, reason="input-error", error=error)
+            )
+        else:
+            print(f"{program_name()} {COMMAND_NAME}: {error}", file=sys.stderr)
+        return 1
     payload = guide_payload(harness=args.harness)
     if args.json:
         responses.print_json(payload)

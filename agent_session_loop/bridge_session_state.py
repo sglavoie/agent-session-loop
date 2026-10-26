@@ -63,6 +63,15 @@ class Operation:
     #: in memory rather than persisted: a mark is meaningless to the process
     #: that did not take it, and the durable journal reconciles by timestamp.
     witness_offset: int = 0
+    #: Digest of what the request this id was accepted for asked for: its text,
+    #: resolution, question, and run. Never part of
+    #: the payload -- it is a fingerprint of operator words -- and compared on
+    #: replay so a reused id cannot pass a different request off as a retry.
+    request_digest: str | None = None
+    #: The ``plan_dir`` exactly as the accepted request spelled it, compared on
+    #: replay alongside the method: an id reused against another plan is a
+    #: different target, not a retry.
+    requested_plan_dir: str | None = None
 
     @property
     def terminal(self) -> bool:
@@ -262,13 +271,12 @@ class SessionState:
             "snapshot_digest": current,
         }
 
-    def _require_mutations_enabled(self, method: str) -> None:
-        """Refuse a mutation that no live handshake authorizes.
+    def _require_contract_handshake(self, method: str) -> None:
+        """Refuse a gated method until a handshake has matched the contract set.
 
-        Complementary to the action token rather than redundant with it: the
-        token proves the *plan* has not moved since the client read it, and this
-        proves the client read it from a projection produced by the contract set
-        the bridge implements and still holds.
+        The half of the mutation gate a capability-granting read needs too: it
+        does not care whether the snapshot has moved since, only that the
+        client proved it speaks the contract set this bridge implements.
         """
         if self.handshake_id is None:
             raise BridgeError(
@@ -277,6 +285,16 @@ class SessionState:
                 retryable=False,
                 details={"contract_set_id": CONTRACT_SET_ID, "method": method},
             )
+
+    def _require_mutations_enabled(self, method: str) -> None:
+        """Refuse a mutation that no live handshake authorizes.
+
+        Complementary to the action token rather than redundant with it: the
+        token proves the *plan* has not moved since the client read it, and this
+        proves the client read it from a projection produced by the contract set
+        the bridge implements and still holds.
+        """
+        self._require_contract_handshake(method)
         current = str(self._current_snapshot()["digest"])
         if self.handshake_digest != current:
             raise BridgeError(

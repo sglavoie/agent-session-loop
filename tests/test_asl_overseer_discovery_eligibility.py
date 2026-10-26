@@ -6,7 +6,7 @@ import json
 import socket
 import unittest
 
-from agent_session_loop import overseer_discovery, state
+from agent_session_loop import events, overseer_discovery, state
 from tests.asl_overseer_discovery_support import (
     STARTED_AT,
     _Corpus,
@@ -174,6 +174,27 @@ class IncompleteEvidenceTests(unittest.TestCase):
         self.assertEqual(("record_unobserved",), candidate.ineligible_reasons)
         self.assertEqual(1, len(inventory.warnings))
         self.assertIn("is malformed", inventory.warnings[0])
+
+    def test_an_undecodable_record_or_lock_is_unobserved_not_a_crash(self) -> None:
+        """Non-UTF-8 bytes and nesting deep enough to exhaust the decoder."""
+        for raw in (b'{"run_id": "\xff"}', b"[" * 1_000_000):
+            for file_name in (events.STATE_FILE_NAME, state.LOCK_FILE_NAME):
+                with self.subTest(file=file_name, raw=raw[:8]):
+                    corpus = _Corpus(self)
+                    plan_dir = corpus.write_run("plan-alpha")
+                    plan_state = state.plan_state_dir(plan_dir, corpus.state_root)
+                    (plan_state / file_name).write_bytes(raw)
+
+                    inventory = corpus.inventory()
+
+                    self.assertEqual(1, len(inventory.candidates))
+                    self.assertEqual(1, len(inventory.warnings))
+                    self.assertIn("is malformed", inventory.warnings[0])
+                    if file_name == events.STATE_FILE_NAME:
+                        self.assertEqual(
+                            ("record_unobserved",),
+                            inventory.candidates[0].ineligible_reasons,
+                        )
 
     def test_a_state_directory_with_no_record_yet_is_unknown(self) -> None:
         corpus = _Corpus(self)

@@ -161,6 +161,8 @@ def _iter_state_plan_dirs(state_root: Path) -> Iterator[Path]:
     except OSError as error:
         raise OSError(f"could not scan state root {state_root}: {error}") from error
     for child in children:
+        if not plans_files.is_plan_state_dir_name(child.name):
+            continue
         try:
             is_state_dir = child.is_dir()
         except OSError:

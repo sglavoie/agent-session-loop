@@ -16,6 +16,23 @@ class PlanNotFoundError(PlanError):
     """
 
 
+class ContractError(PlanError):
+    """Raised for a malformed completion contract, with where it went wrong.
+
+    ``line`` is the 1-based line of the parsed text the defect sits on, when the
+    parser can point at one. ``repository`` marks a check that breaks the plan's
+    repository-registry rules rather than the contract's own syntax, so a
+    reader can tell an alias problem from a JSON typo.
+    """
+
+    def __init__(
+        self, message: str, *, line: int | None = None, repository: bool = False
+    ) -> None:
+        super().__init__(message)
+        self.line = line
+        self.repository = repository
+
+
 class InputReadError(PlanError):
     """Raised when a file the caller named cannot be read or is not UTF-8.
 

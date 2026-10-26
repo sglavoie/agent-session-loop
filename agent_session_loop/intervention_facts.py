@@ -319,6 +319,13 @@ def question_context(
     return None, None
 
 
+def _recorded_run_id(plan_dir: str | Path, state_dir: str | Path | None) -> Any:
+    state_path = state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
+    return state_payloads._runner_state_payload(state_path, lock_info=None).get(
+        "run_id"
+    )
+
+
 def unanswered_question_ids(
     plan_dir: str | Path,
     *,
@@ -328,12 +335,7 @@ def unanswered_question_ids(
     """Return open question ids, degrading an unreadable mailbox to none."""
     try:
         if run_id is None:
-            state_path = (
-                state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
-            )
-            run_id = state_payloads._runner_state_payload(
-                state_path, lock_info=None
-            ).get("run_id")
+            run_id = _recorded_run_id(plan_dir, state_dir)
         unanswered = mailbox.unanswered_questions_for_run(
             plan_dir, run_id, state_dir=state_dir
         )
@@ -343,4 +345,27 @@ def unanswered_question_ids(
         message.id
         for message in unanswered
         if isinstance(message.id, str) and message.id
+    )
+
+
+def open_question_ids(
+    plan_dir: str | Path,
+    *,
+    state_dir: str | Path | None = None,
+    view: mailbox_snapshot.MailboxView | None = None,
+) -> frozenset[str]:
+    """Return the recorded run's questions a reply can still close.
+
+    The same set ``asl status`` counts as open: an earlier run's question is
+    history, and a ``--wait`` question whose wait ended refuses every closure.
+    """
+    try:
+        run_id = _recorded_run_id(plan_dir, state_dir)
+        if view is None:
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+    except OSError, ValueError, mailbox_models.MailboxError:
+        return frozenset()
+    return frozenset(
+        message.id
+        for message in view.open_questions(run_id if isinstance(run_id, str) else None)
     )

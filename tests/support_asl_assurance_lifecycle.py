@@ -15,6 +15,7 @@ from agent_session_loop import (
     events,
     harnesses,
     live_verification,
+    plans_files,
     plans_metadata,
     plans_session_scope,
     state,
@@ -72,7 +73,7 @@ class _RunHistory:
         init_git_repo(workspace / "app")
         plan_dir = tmp / "plan"
         plan_dir.mkdir()
-        state_dir = tmp / "state" / "planhash"
+        state_dir = tmp / "state" / plans_files.path_sha256(plan_dir)
         run_dir = state_dir / "runs" / RUN_ID
         run_dir.mkdir(parents=True)
 

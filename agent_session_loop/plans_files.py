@@ -99,6 +99,26 @@ def read_input_text(path: str | os.PathLike[str], *, label: str) -> str:
         raise InputReadError(f"cannot read {label} {path}: {error}") from error
 
 
+def read_text_and_line_ending(path: Path) -> tuple[str, str]:
+    """Read UTF-8 ``path`` as LF text, and return the line ending it mostly uses.
+
+    The text reads as :meth:`Path.read_text` would, with universal newlines,
+    so edits match against LF text; the ending (``"\\r\\n"`` or ``"\\n"``) is
+    what :func:`with_line_ending` restores before the file is written back, so
+    an edit does not silently convert a CRLF file. Raises :class:`OSError` or
+    :class:`UnicodeDecodeError` as reading the file would.
+    """
+    raw = path.read_bytes()
+    text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    ending = "\r\n" if raw.count(b"\r\n") * 2 > raw.count(b"\n") else "\n"
+    return text, ending
+
+
+def with_line_ending(text: str, ending: str) -> str:
+    """Return LF ``text`` written with ``ending`` between its lines."""
+    return text if ending == "\n" else text.replace("\n", ending)
+
+
 def _fsync_directory(path: Path) -> None:
     """Make directory-entry changes durable before a transaction advances."""
     descriptor = os.open(path, os.O_RDONLY)
@@ -106,6 +126,19 @@ def _fsync_directory(path: Path) -> None:
         durability.fullsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+_PLAN_STATE_DIR_NAME_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def is_plan_state_dir_name(name: str) -> bool:
+    """Whether ``name`` is a per-plan state directory name (a path digest).
+
+    Per-plan state lives at ``<state_root>/<path_sha256(plan_dir)>``; anything
+    else under the state root (the Workbench ``archive/``, ledgers, locks) is
+    a sibling, not a plan, and every state-root scan skips it.
+    """
+    return _PLAN_STATE_DIR_NAME_RE.fullmatch(name) is not None
 
 
 def path_sha256(path: str | Path) -> str:

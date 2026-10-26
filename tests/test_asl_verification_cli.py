@@ -322,6 +322,64 @@ class VerifyCliTests(unittest.TestCase):
             # Interpreter guidance now lives authoritatively in the hint.
             self.assertIn("python3", hint["message"])
 
+    def test_verify_json_names_a_missing_command_cwd_not_the_command(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            contract = _contract_block(
+                '{"type": "command", "name": "cmd", "argv": ["true"], '
+                '"cwd": "no-such-dir"}'
+            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(1, completed.returncode)
+            payload = json.loads(completed.stdout)
+            check = payload["checks"][0]
+            self.assertEqual("command-error", check["failure_reason"])
+            self.assertIn("command cwd does not exist", check["detail"])
+            self.assertIn("no-such-dir", check["detail"])
+
+    def test_verify_json_refuses_a_missing_cwd_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            contract = _contract_block('{"type": "file_exists", "path": "a"}')
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+            missing = tmp_dir / "missing-root"
+
+            completed = self._run_verify(plan_dir, session="1", cwd=missing)
+
+            self.assertEqual(1, completed.returncode)
+            payload = json.loads(completed.stdout)
+            self.assertEqual("cwd-error", payload["reason"])
+            self.assertEqual(f"cwd does not exist: {missing}", payload["error"])
+
+    def test_verify_json_passed_command_detail_is_shell_quoted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            argv = [sys.executable, "-c", "print('a b')"]
+            contract = _contract_block(
+                '{"type": "command", "name": "cmd", '
+                f'"argv": {json.dumps(argv)}, "timeout_seconds": 30}}'
+            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(0, completed.returncode, completed.stdout)
+            detail = json.loads(completed.stdout)["checks"][0]["detail"]
+            self.assertEqual(f"command exited 0: {shlex.join(argv)}", detail)
+            self.assertEqual(argv, shlex.split(detail.split(": ", 1)[1]))
+
     def test_verify_json_failure_attaches_repair_hint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -376,6 +434,30 @@ class VerifyCliTests(unittest.TestCase):
             self.assertEqual("1", payload["session"])
             self.assertIn("Verify JSON is invalid", payload["error"])
 
+    def test_verify_json_reports_a_non_utf8_session_file_as_unreadable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            contract = _contract_block('{"type": "file_exists", "path": "a"}')
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+            session_file = plan_dir / "session-1.md"
+            with session_file.open("ab") as handle:
+                handle.write(b"\nnotes \xff\xfe\n")
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("malformed-contract", payload["reason"])
+            self.assertIn("cannot read", payload["error"])
+            self.assertIn("utf-8", payload["error"])
+
     def test_verify_json_invalid_session_id_reports_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -409,6 +491,26 @@ class VerifyCliTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertEqual("invalid-session", payload["reason"])
             self.assertEqual("not-a-session", payload["session"])
+
+    def test_verify_json_reports_an_absent_session_as_invalid_session(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            write_plan(plan_dir, ("pending",))
+
+            completed = self._run_verify(plan_dir, session="3", cwd=repo_root)
+
+            self.assertEqual(1, completed.returncode)
+            payload = json.loads(completed.stdout)
+            self.assertEqual("invalid-session", payload["reason"])
+            self.assertEqual(
+                f"session 3 is not present in {plan_dir}", payload["error"]
+            )
+            self.assertNotIn("repair_hint", payload)
 
     def test_verify_reports_a_missing_plan_directory_before_its_sessions(
         self,

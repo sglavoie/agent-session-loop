@@ -361,5 +361,54 @@ class ReadCommandLabelResolutionTests(unittest.TestCase):
         self.assertNotIn("to control", help_text)
 
 
+class MailboxCommandLabelResolutionTests(unittest.TestCase):
+    """Mailbox commands name an unknown label the way ``status`` does."""
+
+    QUESTION_ID = "11111111-1111-4111-8111-111111111111"
+    COMMANDS: tuple[tuple[str, ...], ...] = (
+        ("inbox", "read"),
+        ("inbox", "reply", "--to", QUESTION_ID, "--text", "yes"),
+        ("inbox", "resolve", "--to", QUESTION_ID, "--action", "continue"),
+        ("inbox", "guidance", "--text", "prefer the parser"),
+        ("inbox", "acknowledge", "--attempt", "attempt-1"),
+        ("outbox", "wait", "--timeout", "0"),
+        (
+            "outbox",
+            "supervise",
+            "--supervision-id",
+            "22222222-2222-4222-8222-222222222222",
+            "--timeout",
+            "0",
+        ),
+        ("ask", "Which shape?"),
+    )
+
+    def test_unknown_label_names_the_sessions_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            for command in self.COMMANDS:
+                words = 1 if command[0] == "ask" else 2
+                argv = [
+                    *command[:words],
+                    "no-such-label-here",
+                    *command[words:],
+                    "--state-dir",
+                    str(state_dir),
+                    "--json",
+                ]
+                with self.subTest(command=" ".join(command[:words])):
+                    stdout = io.StringIO()
+                    with redirect_stdout(stdout):
+                        code = cli.main(argv)
+                    self.assertEqual(1, code)
+                    payload = json.loads(stdout.getvalue())
+                    self.assertEqual("plan-not-found", payload["reason"])
+                    self.assertIn(
+                        "no plan label from `asl sessions` matches "
+                        "'no-such-label-here'",
+                        payload["error"],
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()

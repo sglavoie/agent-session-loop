@@ -71,6 +71,49 @@ A polish and hardening round after the public release.
   text prints every finding in full; counts of one read in the singular; tail
   and sessions times carry their UTC offset; `doctor` shows its required
   arguments and refuses a bad harness as JSON; `sessions --limit 0` is refused.
+- Overseer: an undecodable or over-deep state, lock, ledger, claims file or
+  Agent Mux answer is reported or refused instead of crashing the fleet; a
+  plan resolves to the record that proves its identity, not a stray copy;
+  context and ledger refusals are exit-2 envelopes; a bounded `watch` keeps
+  its leases so `act` can use them, and `ownership_lost` asks for a re-watch
+  rather than a human; `decide` refuses when Agent Mux withholds the context
+  grant; expansions keep their 4000-character ceiling; an unknown `--plan`,
+  another plan's incident and an unschedulable duration are refused; partial
+  watch sweeps print their warnings.
+- Supervision: `outbox supervise` wakes only for the current run's
+  still-open questions; an over-deep mailbox or liveness line and an
+  undecodable `questions` input are refused rather than crashing; a LOST
+  report says why the runner state is not fresh; mailbox commands name the
+  sessions-label lookup for an unknown plan; reply and resolve report
+  `waited` and `timed_out`, and a reply no run can consume skips its wait;
+  the supervisor guide lists every placeholder and refuses a bad harness as
+  JSON; `inbox acknowledge` refuses a wrong attempt token.
+- Bridge: `workbench.ensure` needs a contract-matched handshake; a reused
+  operation id that names a different request is refused; one unreadable or
+  mistyped plan state no longer empties the projection; over-deep frames,
+  handler failures and over-long request ids are answered instead of ending
+  the bridge; a closed stdout exits 0. Redirect text names its refusal
+  reason and `--ttl` is checked first; over-deep redirect journal lines and
+  torn event lines no longer block redirect status or scope recovery.
+- Contracts and readiness: a non-string check type, a huge timeout and
+  non-UTF-8 session files or regex targets are refused instead of crashing;
+  a missing check cwd or `--cwd` root is named rather than blamed on the
+  command, and contract-check and preflight diagnose it; `verify` reports an
+  absent session as `invalid-session`; preflight calls a registered plan's
+  JSON typo malformed and points at the file line; `baseline --json` and
+  `expand-ingest` report bad input as `input-error` and `plan-not-found`;
+  tilde and longer fences around Verify JSON are read, CRLF files keep their
+  newlines, a non-integer validator version is refused, and command details
+  are shell-quoted.
+- Housekeeping: `harness-compat` survives non-UTF-8 output, finishes when the
+  CLI exits rather than when its pipe closes, and checks each harness once;
+  `metrics` decides first-pass from the whole turn history, ignores
+  non-finite durations and clamps an oversized window like `gc`; only
+  digest-named state dirs are scanned, so `archive/` is no longer counted as
+  a plan; `gc` counts read in the singular; `diagnostics export` names
+  itself and removes its temporary file on failure; `plans` shows a
+  never-run plan's activity and reports a bad `--readiness` as
+  `input-error`; an empty PLAN_DIR is refused.
 
 ### Changed
 

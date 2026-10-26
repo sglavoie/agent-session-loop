@@ -62,7 +62,7 @@ asl maintenance run [--state-dir DIR] [--dry-run|--apply] [--force] [--max-age-d
 asl maintenance status [--state-dir DIR] [--executable PATH] [--no-probe] [--json]
 asl maintenance uninstall [--state-dir DIR] [--no-bootstrap] [--json]
 asl migrate-state PLAN_DIR [--from OLD_PLAN_PATH] [--state-dir DIR] [--apply] [--json]
-asl metrics [--since-days N] [--state-dir DIR] [--json]
+asl metrics [--since-days DAYS] [--state-dir DIR] [--json]
 asl commit [PATH] [--yes] [--verify|--no-verify] [--staged] [--dry-run] [--guidance TEXT] [--from-id SHA] [--pathspec PATH ...] [--expect-snapshot TOKEN] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SECONDS] [--prepare-only] [--message-file PATH] [--json]
 asl bridge serve [--stdio] [--protocol VERSION] [--state-dir DIR] [--plan-root DIR]
 asl agent-mux pairing [--state-dir DIR] [--migrate] [--json]
@@ -108,7 +108,9 @@ report. `scan` lists what discovery can see and asks AgentMux nothing, so its
 `eligible` flag is ASL's own opinion and not permission. `watch` is what asks:
 it sweeps the fleet, authorizes each plan in scope, and takes a lease on the
 ones AgentMux allows, re-sweeping until `--for-seconds` elapses so runs that
-start mid-invocation join without re-invoking anything. `--release` hands the
+start mid-invocation join without re-invoking anything. A `--for-seconds` watch
+returns with its leases still held, renewed by its last sweep, so the `act`
+that follows can use them. `--release` hands the
 leases back; an abandoned lease expires on its own, but not before it has kept
 another watcher out for its whole term. Selectors (`--plan`, `--project`) only
 narrow, and exclusions take precedence over them — except that naming a plan

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -19,7 +20,9 @@ from typing import Literal
 from .contracts import CommandCheck
 from .verification_models import _resolve_under_root
 
-CommandDiagnosticReason = Literal["executable-not-found", "module-not-importable"]
+CommandDiagnosticReason = Literal[
+    "cwd-not-found", "executable-not-found", "module-not-importable"
+]
 CommandScopeDiagnosticReason = Literal[
     "operator-health-check-all",
     "operator-health-unscoped",
@@ -157,6 +160,9 @@ def diagnose_command(
 
     Returns ``None`` unless a problem is positively determined:
 
+    - ``cwd-not-found`` when the check's working directory is not a directory
+      under an existing ``repo_root`` (a missing root is the caller's own
+      finding, so it is not repeated per check).
     - ``executable-not-found`` when ``argv[0]`` has no path separator and does
       not resolve via ``which`` (a path-bearing ``argv[0]`` is skipped — it may
       be a repo-relative binary the plan builds).
@@ -171,6 +177,19 @@ def diagnose_command(
     argv = check.argv
     if not argv:
         return None
+
+    command_cwd = (
+        repo_root if check.cwd is None else _resolve_under_root(repo_root, check.cwd)
+    )
+    try:
+        cwd_missing = repo_root.is_dir() and not command_cwd.is_dir()
+    except OSError:
+        cwd_missing = False
+    if cwd_missing:
+        return CommandDiagnostic(
+            reason="cwd-not-found",
+            detail=f"command cwd does not exist: {command_cwd}",
+        )
 
     executable = argv[0]
     has_separator = _has_path_separator(executable)
@@ -187,12 +206,7 @@ def diagnose_command(
 
     if _is_module_invocation(argv) and resolved_interpreter is not None:
         module = argv[2]
-        probe_cwd = (
-            repo_root
-            if check.cwd is None
-            else _resolve_under_root(repo_root, check.cwd)
-        )
-        outcome = module_probe(resolved_interpreter, module, cwd=probe_cwd)
+        outcome = module_probe(resolved_interpreter, module, cwd=command_cwd)
         if outcome is False:
             return CommandDiagnostic(
                 reason="module-not-importable",
@@ -217,7 +231,7 @@ def diagnose_command_scope(
         return None
 
     subcommand = argv[2]
-    rendered = " ".join(argv)
+    rendered = shlex.join(argv)
     if subcommand == "check-all":
         return CommandScopeDiagnostic(
             reason="operator-health-check-all",

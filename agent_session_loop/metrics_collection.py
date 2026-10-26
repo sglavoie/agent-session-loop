@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import (
@@ -12,12 +12,14 @@ from . import (
     compact_state,
     events,
     execution_timing,
+    execution_timing_models,
     metrics_invocations,
     metrics_models,
     metrics_timing,
     metrics_timing_evidence,
     plans_errors,
     plans_snapshot,
+    retention_projection,
     review_continuation,
     session_overview,
     state,
@@ -35,12 +37,9 @@ def collect_metrics(
         raise ValueError("--since-days must be a positive integer")
     state_root = state.state_root(state_dir)
     now = now or datetime.now(UTC)
-    try:
-        cutoff = now - timedelta(days=since_days)
-    except OverflowError:
-        raise ValueError(
-            f"--since-days {since_days} reaches back past the earliest date"
-        ) from None
+    # A window past what ``datetime`` can subtract covers the whole history,
+    # the same clamp ``gc --max-age-days`` applies, rather than an error.
+    cutoff = retention_projection._age_cutoff(now, since_days)
 
     turns_total = 0
     turns_successful = 0
@@ -49,6 +48,10 @@ def collect_metrics(
     interrupted_turns = 0
     session_turns: dict[tuple[str, str], metrics_models._SessionTurns] = {}
     completion_times: dict[tuple[str, str], str] = {}
+    # The earliest implementation turn each session ever had, window or not:
+    # the window picks which sessions count, but "first pass" is about the
+    # session's whole history, so a failure before the window still counts.
+    first_turns: dict[tuple[str, str], tuple[str, bool]] = {}
 
     pause_counts: dict[str, int] = {}
     pauses_total = 0
@@ -164,13 +167,32 @@ def collect_metrics(
         timing_unattributable_results += plan_timing_report.unattributable_turn_results
 
         for payload in turn_payloads:
+            session_id = payload.get("session_id")
+            started_at = payload.get("started_at")
+            if (
+                payload.get("session_kind") == metrics_models._IMPLEMENTATION_KIND
+                and isinstance(session_id, str)
+                and isinstance(started_at, str)
+            ):
+                turn = (
+                    started_at,
+                    payload.get("status_result") == metrics_models._COMPLETE_STATUS,
+                )
+                key = (dir_key, session_id)
+                earliest = first_turns.get(key)
+                if earliest is None or turn < earliest:
+                    first_turns[key] = turn
+
+        for payload in turn_payloads:
             finished_at = metrics_models._parse_timestamp(payload.get("finished_at"))
             if finished_at is None or finished_at < cutoff:
                 continue
             active = True
             turns_total += 1
-            duration = payload.get("duration_seconds")
-            duration = float(duration) if isinstance(duration, (int, float)) else 0.0
+            duration = (
+                execution_timing_models._finite_seconds(payload.get("duration_seconds"))
+                or 0.0
+            )
             successful = payload.get("status_result") == metrics_models._COMPLETE_STATUS
             if successful:
                 turns_successful += 1
@@ -338,11 +360,11 @@ def collect_metrics(
     sessions_attempted = len(session_turns)
     sessions_completed = 0
     sessions_first_pass = 0
-    for tracker in session_turns.values():
+    for key, tracker in session_turns.items():
         ordered = tracker.sorted_turns()
         if any(ok for _, ok in ordered):
             sessions_completed += 1
-            if ordered[0][1]:
+            if first_turns.get(key, ordered[0])[1]:
                 sessions_first_pass += 1
 
     verify_sessions_repaired = 0

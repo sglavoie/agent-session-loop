@@ -18,6 +18,7 @@ from agent_session_loop import (
     mailbox_appenders,
     mailbox_cursors,
     mailbox_vocabulary,
+    redirect_store_vocab,
     state,
     workbench_launch,
 )
@@ -115,6 +116,94 @@ class BridgeReplyTests(unittest.TestCase):
             self.assertNotIn(REPLY_TEXT, json.dumps(result))
             self.assertNotIn(REPLY_TEXT, json.dumps(updates))
             self.assertNotIn(REPLY_TEXT, json.dumps(corpus.snapshot()))
+
+    def test_an_identical_retry_replays_the_stored_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir, _ = corpus.waiting_plan()
+            row = corpus.row_for(plan_dir)
+            session = corpus.session()
+            params = {
+                "plan_dir": str(plan_dir),
+                "operation_id": "op-1",
+                "action_token": row["action_token"],
+                "text": REPLY_TEXT,
+            }
+
+            first = session.question_reply(params)
+            # The landed reply moved the token; the retry still replays.
+            again = session.question_reply(params | {"action_token": "0" * 32})
+
+            self.assertEqual(first, again)
+            replies = [
+                line
+                for line in corpus.mailbox_lines(plan_dir)
+                if line["kind"] == mailbox_vocabulary.KIND_REPLY
+            ]
+            self.assertEqual(1, len(replies))
+
+    def test_a_reused_operation_id_for_another_request_is_refused(self) -> None:
+        """Answering a different request with the old receipt drops it silently."""
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir, _ = corpus.waiting_plan()
+            row = corpus.row_for(plan_dir)
+            session = corpus.session()
+            params = {
+                "plan_dir": str(plan_dir),
+                "operation_id": "op-1",
+                "action_token": row["action_token"],
+                "text": REPLY_TEXT,
+            }
+            session.question_reply(params)
+
+            refusals = {}
+            for label, call in (
+                (
+                    "text",
+                    lambda: session.question_reply(params | {"text": "other words"}),
+                ),
+                (
+                    "method",
+                    lambda: session.question_resolve(params | {"action": "continue"}),
+                ),
+                (
+                    "plan",
+                    lambda: session.question_reply(
+                        params | {"plan_dir": str(plan_dir.parent / "elsewhere")}
+                    ),
+                ),
+            ):
+                with self.assertRaises(bridge_protocol.BridgeError) as caught:
+                    call()
+                refusals[label] = caught.exception
+
+            replies = [
+                line
+                for line in corpus.mailbox_lines(plan_dir)
+                if line["kind"] == mailbox_vocabulary.KIND_REPLY
+            ]
+
+        self.assertEqual(1, len(replies))
+        for label, error in refusals.items():
+            with self.subTest(changed=label):
+                self.assertEqual(bridge_protocol.ERROR_INVALID_REQUEST, error.code)
+                self.assertFalse(error.retryable)
+                self.assertEqual(
+                    redirect_store_vocab.ERROR_REPLAY_CONFLICT,
+                    error.details["reason"],
+                )
+                self.assertEqual("op-1", error.details["operation_id"])
+                self.assertNotIn(REPLY_TEXT, json.dumps(error.details))
+        self.assertEqual(
+            redirect_store_vocab.CONFLICT_FEEDBACK, refusals["text"].details["conflict"]
+        )
+        self.assertEqual(
+            redirect_store_vocab.CONFLICT_TARGET, refusals["method"].details["conflict"]
+        )
+        self.assertEqual(
+            redirect_store_vocab.CONFLICT_TARGET, refusals["plan"].details["conflict"]
+        )
 
     def test_receipt_settles_the_operation_as_consumed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

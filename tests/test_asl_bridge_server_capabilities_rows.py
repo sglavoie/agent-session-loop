@@ -20,6 +20,8 @@ from agent_session_loop import (
     mailbox_appenders,
     state,
     workbench_details,
+    workbench_registry_models,
+    workbench_summary,
 )
 
 from .asl_bridge_server_support import (
@@ -102,6 +104,29 @@ class BridgeRowActionTests(unittest.TestCase):
             self.assertEqual(3, row["question"]["turn_index"])
             self.assertEqual("2", row["session_id"])
             self.assertEqual(2, row["question"]["unanswered_count"])
+
+    def test_a_wrongly_typed_state_field_fails_only_its_own_plan(self) -> None:
+        """A numeric run_id used to fail every snapshot, and so every handshake."""
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            waiting, _ = corpus.waiting_plan()
+            odd = _make_workbench_plan(corpus.plans_root, "plan-odd")
+            corpus.write_state(odd, {"run_id": 7, "harness": 3, "paused": True})
+
+            snapshot = corpus.snapshot()
+            # The Workbench listing reads the same summary, so it is coerced
+            # there rather than only isolated in the bridge.
+            summary = workbench_summary.build_workbench_summary(
+                workbench_registry_models.DiscoveredPlan(
+                    plan_dir=odd, sources=("plan-root",)
+                ),
+                state_dir=corpus.state_root,
+                reclaim=False,
+            )
+
+        self.assertIn(str(waiting), [row["plan_dir"] for row in snapshot["rows"]])
+        self.assertEqual("7", summary.run_id)
+        self.assertEqual("3", summary.harness)
 
     def test_missing_wait_metadata_stays_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

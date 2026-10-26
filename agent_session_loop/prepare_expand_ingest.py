@@ -12,8 +12,19 @@ from typing import Any
 from . import plans_metadata, repository_intent, responses
 from .authoring_transaction import PlanTransaction
 from .cli_defaults import program_name
-from .plans_errors import InputReadError, PlanError
-from .plans_files import canonicalize_path, read_input_text
+from .plans_errors import (
+    PLAN_NOT_FOUND_REASON,
+    InputReadError,
+    PlanError,
+    PlanNotFoundError,
+)
+from .plans_files import (
+    canonicalize_path,
+    read_input_text,
+    read_text_and_line_ending,
+    with_line_ending,
+)
+from .plans_snapshot import require_plan_directory
 from .prepare_corrections import CorrectionOutcome, _apply_one_correction
 from .prepare_expansion import insert_expansion_reference, render_expansion
 from .prepare_models import (
@@ -92,7 +103,7 @@ def ingest_expand_batch(
     for session in update.sessions:
         session_path = canonical_dir / session.session_id.filename
         try:
-            session_text = session_path.read_text(encoding="utf-8")
+            session_text, line_ending = read_text_and_line_ending(session_path)
         except FileNotFoundError as error:
             raise PlanError(f"missing session file: {session_path}") from error
         except (OSError, UnicodeDecodeError) as error:
@@ -117,7 +128,10 @@ def ingest_expand_batch(
             )
             outcomes.append(outcome)
         if session_text != original_text:
-            transaction.stage(session.session_id.filename, session_text)
+            transaction.stage(
+                session.session_id.filename,
+                with_line_ending(session_text, line_ending),
+            )
 
     files = transaction.commit()
     return ExpandIngestResult(
@@ -176,6 +190,15 @@ def expand_ingest_from_args(args: Any) -> int:
         else:
             print(f"{program_name()} expand-ingest: {error}", file=sys.stderr)
         return 1
+
+    # A missing plan is the root cause, reported as every plan-scoped command
+    # reports it rather than as a schema defect in the batch.
+    try:
+        require_plan_directory(plan_dir)
+    except PlanNotFoundError as error:
+        return _emit_error(PLAN_NOT_FOUND_REASON, str(error))
+    except PlanError as error:
+        return _emit_error(EXPAND_INGEST_REASON_VALIDATOR_SCHEMA, str(error))
 
     try:
         text = read_input_text(os.path.expanduser(batch_file), label="batch file")

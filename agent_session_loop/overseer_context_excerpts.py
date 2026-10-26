@@ -43,10 +43,13 @@ def expand(
     """
     incident = ledger.incident(incident_id)
     if incident is None:
-        raise models.ContextError(f"no incident {incident_id} to expand")
+        raise models.ContextError(
+            f"no incident {incident_id} to expand", reason="incident_unknown"
+        )
     if kind not in models.SOURCE_KINDS:
         raise models.ContextError(
-            f"{kind!r} is not an evidence family; use one of {models.SOURCE_KINDS}"
+            f"{kind!r} is not an evidence family; use one of {models.SOURCE_KINDS}",
+            reason="source_unknown",
         )
 
     view = ledger.read_evidence(plan_dir=incident.plan_dir, grant=grant)
@@ -83,6 +86,9 @@ def expand(
         )
 
     text = projection.detail
+    # The ceiling is the packet's published promise, so a wider ask narrows to
+    # it rather than widening it.
+    limit = min(limit, models.MAX_EXCERPT_CHARS)
     clipped = len(text) > limit
     if clipped:
         text = text[:limit].rstrip()

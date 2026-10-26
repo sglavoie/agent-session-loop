@@ -20,7 +20,7 @@ from .contract_models import (
     VerificationCheck,
 )
 from .literals import as_literal
-from .plans_errors import PlanError
+from .plans_errors import ContractError, PlanError
 from .plans_session_ids import SessionId
 from .workspaces import RepositoryRegistry, WorkspaceError, validate_repository_alias
 
@@ -42,7 +42,12 @@ def _require_positive_number(
             f"session {session_id.value} contract field {label!r} must be a "
             "positive number"
         )
-    numeric = float(value)
+    try:
+        numeric = float(value)
+    except OverflowError:
+        # An integer too large for a float is still a positive number; the
+        # caller's upper bound refuses it by name.
+        numeric = float("inf") if value > 0 else float("-inf")
     if numeric != numeric or numeric <= 0:
         raise PlanError(
             f"session {session_id.value} contract field {label!r} must be a "
@@ -117,6 +122,10 @@ def _review_replay(payload: dict, *, index: int, session_id: SessionId) -> bool:
     return raw
 
 
+def _repository_error(message: str) -> ContractError:
+    return ContractError(message, repository=True)
+
+
 def _repository_alias(
     payload: dict,
     *,
@@ -130,17 +139,17 @@ def _repository_alias(
             return None
         if len(repository_registry) == 1:
             return repository_registry.aliases[0]
-        raise PlanError(
+        raise _repository_error(
             f"session {session_id.value} contract check #{index + 1} "
             "'repo' is required when the repository registry has multiple entries"
         )
     if repository_registry is None:
-        raise PlanError(
+        raise _repository_error(
             f"session {session_id.value} contract check #{index + 1} "
             "'repo' is only valid when the plan declares a repository registry"
         )
     if not isinstance(raw, str) or not raw:
-        raise PlanError(
+        raise _repository_error(
             f"session {session_id.value} contract check #{index + 1} "
             "'repo' must be a non-empty repository alias when provided"
         )
@@ -149,7 +158,7 @@ def _repository_alias(
         if repository_registry is not None:
             repository_registry.get(alias)
     except WorkspaceError as error:
-        raise PlanError(
+        raise _repository_error(
             f"session {session_id.value} contract check #{index + 1} "
             f"'repo' is invalid: {error}"
         ) from error
@@ -170,7 +179,7 @@ def _validate_repository_relative_value(
         or PurePosixPath(value).is_absolute()
         or ".." in PurePosixPath(value).parts
     ):
-        raise PlanError(
+        raise _repository_error(
             f"session {session_id.value} contract check #{index + 1} "
             f"'{field}' must stay beneath the selected repository and cannot "
             "be absolute or traverse upward"
@@ -407,7 +416,7 @@ def _parse_check(
             "must be a JSON object"
         )
     raw_type = payload.get("type")
-    if raw_type not in CHECK_PARSERS:
+    if not isinstance(raw_type, str) or raw_type not in CHECK_PARSERS:
         allowed = ", ".join(sorted(CHECK_PARSERS))
         raise PlanError(
             f"session {session_id.value} contract check #{index + 1} "

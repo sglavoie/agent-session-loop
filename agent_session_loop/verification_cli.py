@@ -15,6 +15,7 @@ from .verification_models import (
     CheckResult,
     VerificationContext,
     VerificationResult,
+    require_verification_root,
     verification_context_from_plan,
 )
 from .verification_run import run_verification
@@ -260,7 +261,29 @@ def verify_from_args(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # The session is then checked against the plan, as contract-check checks
+    # it, so an absent session is not reported as a malformed contract. A plan
+    # that cannot be inspected skips this: reading the contract below reports
+    # the session file's own defect, as it did before.
     try:
+        snapshot = plans_snapshot.inspect_plan(plan_dir_arg)
+    except plans_errors.PlanError:
+        known_ids = None
+    else:
+        known_ids = {status.id for status in snapshot.sessions}
+    if known_ids is not None and session_id.value not in known_ids:
+        _emit_verify_error(
+            want_json=want_json,
+            reason=VERIFY_EXIT_REASON_INVALID_SESSION,
+            error=f"session {session_id.value} is not present in {plan_dir_arg}",
+            plan_dir=str(plan_dir_arg),
+            session=session_id.value,
+            cwd=None,
+        )
+        return 1
+
+    try:
+        require_verification_root(cwd_arg)
         verification_context = verification_context_from_plan(plan_dir_arg, cwd_arg)
     except (plans_errors.PlanError, OSError) as error:
         _emit_verify_error(

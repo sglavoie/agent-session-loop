@@ -134,6 +134,35 @@ def consumption_wait_timeout(
     )
 
 
+def await_consumption(
+    args: argparse.Namespace,
+    plan_dir: str | Path,
+    closure_id: str,
+    *,
+    timeout: float,
+    skip: bool = False,
+) -> tuple[mailbox_models.MailboxMessage | None, bool, bool]:
+    """Return ``(receipt, waited, timed_out)`` for one appended closure.
+
+    Only a requested ``--wait-consumed`` waits, and ``skip`` says no consumer
+    exists to wait for. The closure append is authoritative, so an observation
+    failure after it stays a truthful successful append with no receipt, and is
+    not a timeout either.
+    """
+    if skip or not getattr(args, "wait_consumed", False):
+        return None, False, False
+    try:
+        receipt = wait_for_receipt(
+            plan_dir,
+            closure_id,
+            state_dir=args.state_dir,
+            timeout=timeout,
+        )
+    except mailbox_models.MailboxError:
+        return None, True, False
+    return receipt, True, receipt is None
+
+
 def wait_for_receipt(
     plan_dir: str | Path,
     closure_id: str,

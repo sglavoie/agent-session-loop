@@ -6,6 +6,8 @@ layered on :class:`SessionState`.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,7 @@ from asl_workbench import operations as operation_rules
 from . import (
     intervention,
     mailbox_models,
+    redirect_store_vocab,
     workbench_actions,
     workbench_launch,
     workbench_operations,
@@ -24,6 +27,7 @@ from .bridge_errors import _bridge_error, _optional_str, _require_str
 from .bridge_projection import row_id
 from .bridge_protocol import (
     ERROR_INTERNAL,
+    ERROR_INVALID_REQUEST,
     ERROR_MUTATION_FAILED,
     EVENT_OPERATION_UPDATED,
     MAX_OPERATIONS,
@@ -37,6 +41,24 @@ from .bridge_protocol import (
     _bounded_path,
 )
 from .bridge_session_state import Operation, SessionState
+
+#: The request fields that make a retry the same request. ``action_token`` is
+#: deliberately absent: a request that landed moves the plan, so a client that
+#: refreshed before retrying holds a different token for the same request.
+_REQUEST_IDENTITY_FIELDS: tuple[str, ...] = (
+    "text",
+    "action",
+    "note",
+    "question_id",
+    "run_id",
+)
+
+
+def _request_digest(params: Mapping[str, Any]) -> str:
+    """Fingerprint what a mutation asked for, without keeping its words."""
+    identity = {key: params.get(key) for key in _REQUEST_IDENTITY_FIELDS}
+    encoded = json.dumps(identity, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(encoded.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 class OperationLedger(SessionState):
@@ -105,17 +127,48 @@ class OperationLedger(SessionState):
         assert selected is not None  # validate_action proved this
         return selected
 
-    def _replay(self, params: Mapping[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    def _replay(
+        self, params: Mapping[str, Any], method: str
+    ) -> tuple[str, dict[str, Any] | None]:
         """Return the operation id and, when already accepted, its receipt.
 
         Replaying is what makes a client retry safe *before* ASL's own state has
         moved: once it has moved, the action token refuses the retry instead.
+
+        A retry is only a retry when it is the same request. An id reused for
+        another method or plan, or for different words, is refused the way
+        ``run.redirect`` refuses one rather than answered with the old receipt:
+        reporting that as a success would tell the client its new request landed
+        when it was silently dropped.
         """
         operation_id = _require_str(params, "operation_id")
         existing = self.operations.get(operation_id)
-        if existing is not None:
-            return operation_id, existing.payload()
-        return operation_id, None
+        if existing is None:
+            return operation_id, None
+        if existing.method != method or (
+            existing.requested_plan_dir is not None
+            and existing.requested_plan_dir != params.get("plan_dir")
+        ):
+            conflict: str | None = redirect_store_vocab.CONFLICT_TARGET
+        elif (
+            existing.request_digest is not None
+            and existing.request_digest != _request_digest(params)
+        ):
+            conflict = redirect_store_vocab.CONFLICT_FEEDBACK
+        else:
+            conflict = None
+        if conflict is not None:
+            raise BridgeError(
+                ERROR_INVALID_REQUEST,
+                "operation id already names a different request; "
+                "the recorded one was left untouched",
+                details={
+                    "reason": redirect_store_vocab.ERROR_REPLAY_CONFLICT,
+                    "conflict": conflict,
+                    "operation_id": existing.payload()["operation_id"] or "",
+                },
+            )
+        return operation_id, existing.payload()
 
     def _accept(
         self,
@@ -127,6 +180,7 @@ class OperationLedger(SessionState):
         closure_id: str | None = None,
         command_id: str | None = None,
         witness_offset: int = 0,
+        request: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         operation = Operation(
             operation_id=operation_id,
@@ -139,6 +193,8 @@ class OperationLedger(SessionState):
             closure_id=closure_id,
             command_id=command_id,
             witness_offset=witness_offset,
+            request_digest=None if request is None else _request_digest(request),
+            requested_plan_dir=None if request is None else request.get("plan_dir"),
         )
         self.operations[operation_id] = operation
         self._evict()

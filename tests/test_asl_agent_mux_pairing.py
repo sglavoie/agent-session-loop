@@ -110,6 +110,12 @@ class PairingIdentityTests(PairingTestBase):
         self.assertEqual(report["reason"], agent_mux_pairing.REASON_OK)
         self.assertEqual(report["plans"]["total"], 0)
 
+    def test_workbench_archive_is_not_counted_as_a_plan(self) -> None:
+        (self.state_dir / "archive" / "entry").mkdir(parents=True)
+        report = self._survey()
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["plans"]["total"], 0)
+
     def test_absent_root_pairs_cleanly(self) -> None:
         report = agent_mux_pairing.survey(state_dir=self.tmp_path / "never-created")
         self.assertTrue(report["ok"])

@@ -116,7 +116,7 @@ directory, listed in `details.existing_outputs`; rerun with `--resume` on it,
 or pass `--force-new` for an intentional second split).
 
 `metrics` aggregates workflow reliability and storage numbers from the
-persisted state corpus, defaulting to the last 7 days (`--since-days N`
+persisted state corpus, defaulting to the last 7 days (`--since-days DAYS`
 widens or narrows the window). It reports turn totals and unsuccessful
 runtime, first-pass session completion, pause counts by reason (including the
 never-retry quota/auth/invalid-model classifications), verification repair

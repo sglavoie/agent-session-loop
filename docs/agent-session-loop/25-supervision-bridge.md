@@ -31,7 +31,9 @@ build-time disagreement, and there is no protocol-1 parser left to fall
 back to. The refusal message is a fixed string rather than an
 interpolation of whatever the client sent, because a compatibility reason
 reaches an operator's screen verbatim. Reads survive a mismatch, so a
-stale cockpit can still render what it has and explain itself.
+stale cockpit can still render what it has and explain itself. The one
+exception is `workbench.ensure`, whose answer is mutation capability
+rather than state (see Hello below).
 
 A handshake against a projection that has since moved is answered rather
 than refused: `mutations_enabled` is false and the response names the
@@ -74,18 +76,27 @@ never by position or list length. The list is derived from the registered
 method handlers and event names rather than written by hand, so a name
 cannot be advertised before something stands behind it. `mutation_methods`
 is a subset of `capabilities` in the same order; a capability absent from
-it is a read, and reads are never gated behind the handshake.
+it is a read, and reads never need a current snapshot. One read is still
+gated: `workbench.ensure` writes nothing, but it hands out an owner
+Workbench token whose routes can mutate, so it is refused with the same
+`contract-set-mismatch` an unhandshaken mutation gets until a handshake
+has matched the contract set. It does not need `mutations_enabled`, so a
+handshake against a moved projection still opens it.
 
 ### Requests and responses
 
-A request is `{"type":"request","protocol":1,"id":"<non-empty>",
+A request is `{"type":"request","protocol":2,"id":"<non-empty>",
 "method":"<name>","params":{}}`. `params` must be an object when
-present. The response echoes `id` and carries `ok` plus exactly one of
-`result` or `error`:
+present; a frame naming any other `protocol` is refused
+`unsupported-protocol`. `id` is at most 64 characters: the response echoes it, so a
+longer one is refused `invalid-request` with a `null` `id` before
+anything runs, rather than letting an oversize echo drop the answer to a
+mutation that landed. The response echoes `id` and carries `ok` plus
+exactly one of `result` or `error`:
 
 ```json
-{"type":"response","id":"req-1","ok":true,"result":{...}}
-{"type":"response","id":"req-1","ok":false,
+{"type":"response","protocol":2,"id":"req-1","ok":true,"result":{...}}
+{"type":"response","protocol":2,"id":"req-1","ok":false,
  "error":{"code":"unknown-method","message":"...",
           "retryable":false,"details":{"method":"runs.explode"}}}
 ```
@@ -95,11 +106,11 @@ Error codes are a closed set — branch on `code`, not on `message`:
 | Code | Meaning | `retryable` |
 | --- | --- | --- |
 | `malformed-json` | Frame was not parseable JSON. `id` is `null`. | no |
-| `invalid-request` | Missing/empty `id`, missing `method`, or non-object `params`. | no |
-| `unsupported-protocol` | `protocol` is not 1. `details.supported` lists accepted versions. | no |
+| `invalid-request` | Missing/empty/over-64-character `id`, missing `method`, non-object `params`, or a frame nested too deeply to decode (`id` is `null`). | no |
+| `unsupported-protocol` | `protocol` is not 2. `details.supported` lists accepted versions. | no |
 | `unknown-method` | Method not in the capability list. | no |
 | `frame-too-large` | Inbound line exceeded `max_frame_bytes`. | no |
-| `internal-error` | Projection raised. | yes |
+| `internal-error` | Projection raised, or a handler failed unexpectedly. | yes |
 | `mutation-failed` | A durable write or spawn failed. Nothing was applied. | yes |
 | `workbench-unavailable` | The bridge could not start a Workbench server. | yes |
 
@@ -122,14 +133,18 @@ with the CLI and the Workbench so a client sees one vocabulary:
 
 None of these end the server loop. An oversize frame has its remainder
 drained so the next line still parses. Only end-of-stream on stdin or a
-broken stdout ends the process, and both exit 0.
+broken stdout ends the process, and both exit 0. A broken stdout leaves
+the frame that hit it buffered, so the bridge points stdout at the null
+device before returning; otherwise the interpreter's exit-time flush
+would fail again and turn that 0 into 120.
 
 ### `runs.snapshot`
 
 Returns the deterministic projection of every active or actionable plan:
 
 ```json
-{"protocol":1,"rows":[...],"row_count":1,
+{"protocol":2,"contract_set_id":"asl-amx-1.<16 hex>",
+ "rows":[...],"row_count":1,
  "warnings":[],"truncated":false,"digest":"<hex>",
  "projection":{"interval_seconds":1.0,"observed_interval_seconds":9.8,
    "build_seconds":9.8,"age_seconds":0.4,
@@ -204,7 +219,8 @@ The server polls the projection at least once per second and emits an
 event only when the snapshot digest actually changed:
 
 ```json
-{"type":"event","seq":1,"event":"runs.changed","data":{"digest":"<hex>"}}
+{"type":"event","protocol":2,"seq":1,"event":"runs.changed",
+ "data":{"digest":"<hex>","row_count":1}}
 ```
 
 `seq` is monotonic across the session. An idle corpus produces no
@@ -296,7 +312,15 @@ spawns `asl run --resume --reply-stdin`, which rehydrates the harness,
 model, effort, state directory, and workspace binding the original run
 persisted, and streams the reply through stdin so it never appears in
 argv. Replaying the same `operation_id` returns the stored receipt
-without spawning again.
+without spawning again — but only for the same request. The receipt
+remembers the method, the `plan_dir` as sent, and a digest of `text`,
+`action`, `note`, `question_id`, and `run_id` (not `action_token`, which a
+landed request moves). A reused id that changes any of them is refused
+`invalid-request` with `details.reason: "redirect-replay-conflict"`, the
+same refusal `run.redirect` gives: `details.conflict` is `target` for
+another method or plan and `feedback` for different content. Answering
+it with the old receipt would report a new request as landed when it was
+dropped.
 
 ### Operations and `operation.updated`
 
@@ -334,7 +358,10 @@ bridge never accumulates operator history.
 ### `workbench.ensure`
 
 Takes `plan_dir` and an optional `focus` (`reply`, `verification`,
-`active`, or `events`) and returns a deep link:
+`active`, or `events`) and returns a deep link. It requires a handshake
+that matched the contract set — the link's token is the Workbench owner
+token, which passes its unlock and launch routes — and is refused
+`contract-set-mismatch` before one, exactly as a mutation would be:
 
 ```json
 {"plan_dir":"/plans/alpha","row_id":"<hex>","focus":"reply",

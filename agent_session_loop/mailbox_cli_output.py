@@ -381,9 +381,15 @@ def outbox_lost_text_lines(
             if evidence["lock_active"]
             else "not active"
         )
-        runner_state = (
-            "fresh" if evidence["runner_state_fresh"] else "absent or finished"
-        )
+        runner_state = {
+            mailbox_cli_constants.RUNNER_STATE_FRESH: "fresh",
+            mailbox_cli_constants.RUNNER_STATE_ABSENT: "absent",
+            mailbox_cli_constants.RUNNER_STATE_UNREADABLE: "unreadable",
+            mailbox_cli_constants.RUNNER_STATE_FINISHED: "finished",
+            mailbox_cli_constants.RUNNER_STATE_STALE: (
+                "stale (unfinished, its runner is gone)"
+            ),
+        }.get(str(evidence.get("runner_state")), "unknown")
         lines.extend(
             (
                 f"Run evidence: lock {lock}, "

@@ -187,7 +187,15 @@ _SCOPE_DOMAIN = b"agent_session_loop.overseer_context.scope.v1\x00"
 
 
 class ContextError(Exception):
-    """A packet was asked for that cannot be assembled or named."""
+    """A packet was asked for that cannot be assembled or named.
+
+    ``reason`` is the snake_case slug a CLI envelope reports for it, so the
+    wrong question is told apart from a refusal without parsing the message.
+    """
+
+    def __init__(self, message: str, *, reason: str = "context_unavailable") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)

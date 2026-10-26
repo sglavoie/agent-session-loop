@@ -1,19 +1,20 @@
 # ruff: noqa: F403, F405
 from .scope_recovery_common import *
-from .scope_recovery_common import _digest, _refs, _updates
+from .scope_recovery_common import _digest, _event_records, _refs, _updates
 
 
 def _check_original_binding(
     event_path: Path, guard: dict[str, Any], workspace: workspaces.ResolvedWorkspace
 ) -> None:
-    """Bind recovery to the workspace of the original failure, before retries."""
+    """Bind recovery to the workspace of the original failure, before retries.
+
+    Blank and torn lines are skipped the way every other history reader skips
+    them: ``append_event`` writes a blank repair line after a torn append, so
+    refusing them refused every plan whose log had ever been interrupted.
+    """
     starts: dict[str, dict[str, Any]] = {}
-    for line in event_path.read_bytes().splitlines():
-        try:
-            event = json.loads(line.decode("utf-8"))
-        except ValueError, RecursionError:
-            raise RecoveryError("unreadable event history") from None
-        if not isinstance(event, dict) or not isinstance(event.get("payload"), dict):
+    for event in _event_records(event_path):
+        if not isinstance(event.get("payload"), dict):
             raise RecoveryError("incomplete event history")
         payload = event["payload"]
         run_id = payload.get("run_id")

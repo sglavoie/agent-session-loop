@@ -159,7 +159,9 @@ def _searchable_text(
     if harness:
         parts.append(harness)
     parts.extend(sources)
-    joined = " ".join(part for part in parts if part)
+    # Only text is searchable: a field read from a corrupt state file may be a
+    # number or a mapping, and one such plan must not fail the whole listing.
+    joined = " ".join(part for part in parts if part and isinstance(part, str))
     return " ".join(joined.lower().split())
 
 

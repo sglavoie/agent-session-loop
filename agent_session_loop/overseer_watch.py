@@ -71,7 +71,11 @@ serviced only by the watcher holding its lease, and a lease is taken from an
 unwilling holder only after its term expires. The claim is attempted *before*
 the authorization question, so a duplicate watcher spends no subprocess on work
 that is not its own. A watcher that finishes its invocation releases what it
-holds, so the next one does not have to wait the term out.
+holds, so the next one does not have to wait the term out. Through the CLI an
+invocation is the host's whole session rather than one ``watch`` call: a
+bounded ``asl overseer watch --for-seconds`` returns with its leases still
+held, because the ``act`` that follows it needs them, and ``--release`` is what
+ends the invocation.
 
 Durable records this boundary writes: **ledger rows only** -- policy epochs,
 decisions, enrollments and watch leases. It writes nothing into any plan's state
@@ -257,6 +261,7 @@ def watch(
     authorize: Authorize = overseer_policy_client.authorize,
     authorize_timeout: float = overseer_policy_client.DEFAULT_TIMEOUT_SECONDS,
     build_inventory: BuildInventory = overseer_discovery.build_inventory,
+    release_on_return: bool = True,
 ) -> Invocation:
     """Sweep repeatedly until ``until``, then give up what is held.
 
@@ -271,6 +276,11 @@ def watch(
     to expire. A watcher that dies instead of returning leaves them to expire,
     which is the slow path and the only safe one -- nothing else can prove it is
     gone.
+
+    ``release_on_return`` false keeps the leases instead, for a caller whose
+    invocation outlives this call: the CLI's bounded watch is followed by an
+    ``act`` that refuses ``ownership_lost`` without one. They still expire at
+    the end of their term, so a host that never comes back strands nothing.
     """
     sweeps: list[Sweep] = []
     while now() < until:
@@ -297,7 +307,7 @@ def watch(
     return Invocation(
         watcher=watcher,
         sweeps=tuple(sweeps),
-        released=release(watcher=watcher, ledger=ledger),
+        released=(release(watcher=watcher, ledger=ledger) if release_on_return else 0),
     )
 
 

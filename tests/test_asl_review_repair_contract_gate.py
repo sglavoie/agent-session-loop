@@ -103,7 +103,7 @@ class ReviewRepairContractGateTests(ContractGateFixtures, unittest.TestCase):
             review_repair.REVIEW_REPAIR_REASON_NOT_LOOP_READY, result.reason
         )
         self.assertTrue(
-            any("repository-contract" in blocker for blocker in result.blockers),
+            any("malformed-contract" in blocker for blocker in result.blockers),
             msg=str(result.blockers),
         )
         self.assertTrue((self.plan_dir / "session-2.1.md").exists())

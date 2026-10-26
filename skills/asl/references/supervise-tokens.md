@@ -64,7 +64,8 @@ later exit from this one's.
   ..., sessions <complete>/<total> complete.` line, an `Active turn: ...` line,
   and a `Next step:` line naming `asl status <plan-dir> --json`. Under `--json`
   the same arrives as `state: "LOST"` plus `lost_reason` and a `run_evidence`
-  object (`lock_active`, `lock_pid`, `run_id`, `runner_state_fresh`,
+  object (`lock_active`, `lock_pid`, `run_id`, `runner_state` (`fresh`,
+  `absent`, `unreadable`, `finished` or `stale`), `runner_state_fresh`,
   `active_turn`, `sessions_complete`, `sessions_total`); both keys are `null`
   under every other token.
 - The two reasons call for different things. `helper-exited-without-record`

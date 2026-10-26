@@ -312,6 +312,7 @@ class OlderComponentTests(_InstalledCase):
         self.world.change(AUTHORIZED)
         self.world.publish_turn(self.plan, (AUTHORIZED,))
         packet = self.observed()
+        reviewed = self.reviewed(packet)
         self.world.install_predating_binary()
 
         status, payload = self.act(
@@ -320,6 +321,7 @@ class OlderComponentTests(_InstalledCase):
             self.allowing("commit"),
             "--message",
             "chore: checkpoint work in progress",
+            reviewed=reviewed,
         )
 
         self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)

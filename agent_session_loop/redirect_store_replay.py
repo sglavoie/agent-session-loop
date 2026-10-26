@@ -429,6 +429,11 @@ def _replay(data: bytes) -> _Replay:
             # The message names a position, never the bytes at it.
             replay.reject(seq, REJECT_INVALID_JSON, error.msg)
             continue
+        except RecursionError:
+            # Nested past the decoder's depth: unreadable like any bad line, so
+            # it is counted rather than allowed to fail every journal reader.
+            replay.reject(seq, REJECT_INVALID_JSON, "nested too deeply")
+            continue
         if not isinstance(payload, dict):
             replay.reject(seq, REJECT_NOT_OBJECT)
             continue

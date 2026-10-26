@@ -1,17 +1,41 @@
 """Focused portion of agent_session_loop/diagnostics_export.py."""
 
+from .cli_defaults import program_name
 from .diagnostics_export_build import *
+
+
+def _error_label() -> str:
+    """How stderr names this command: ``asl diagnostics export``."""
+    return f"{program_name()} diagnostics export"
+
+
+def _print_usage() -> None:
+    """Print the command's usage line, as argparse does before an exit 2."""
+    from . import cli
+
+    parser = cli.build_parser(prog=program_name())
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            group = action.choices["diagnostics"]
+            for sub in group._actions:
+                if isinstance(sub, argparse._SubParsersAction):
+                    sub.choices["export"].print_usage(sys.stderr)
+                    return
 
 
 def _write_output(path: str, payload: bytes) -> None:
     """Write the export beside its destination and rename it into place."""
     target = Path(path)
     temp = target.with_name(f".{target.name}.tmp")
-    with temp.open("wb") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temp, target)
+    try:
+        with temp.open("wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, target)
+    finally:
+        # A failed write or rename must not leave the partial file behind.
+        temp.unlink(missing_ok=True)
 
 
 def export_from_args(args: argparse.Namespace) -> int:
@@ -31,7 +55,8 @@ def export_from_args(args: argparse.Namespace) -> int:
                 )
             )
         else:
-            print(f"{COMMAND_NAME}: {message}", file=sys.stderr)
+            _print_usage()
+            print(f"{_error_label()}: error: {message}", file=sys.stderr)
         return 2
 
     document = build_export(
@@ -57,7 +82,7 @@ def export_from_args(args: argparse.Namespace) -> int:
                     )
                 )
             else:
-                print(f"{COMMAND_NAME}: {message}", file=sys.stderr)
+                print(f"{_error_label()}: {message}", file=sys.stderr)
             return 1
 
     ok = bool(document.get("ok"))
@@ -93,7 +118,7 @@ def export_from_args(args: argparse.Namespace) -> int:
         print(f"Wrote {output} ({len(payload)} bytes, digest {document['digest']})")
         if not ok:
             sys.stdout.flush()
-            print(f"{COMMAND_NAME}: {document.get('error', '')}", file=sys.stderr)
+            print(f"{_error_label()}: {document.get('error', '')}", file=sys.stderr)
 
     return 0 if ok else 1
 

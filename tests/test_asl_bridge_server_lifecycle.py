@@ -7,6 +7,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -355,6 +357,51 @@ class BridgeWorkbenchLifecycleTests(unittest.TestCase):
             self.assertEqual("127.0.0.1", _RecordingServer.instances[0].kwargs["host"])
             lifecycle.stop()
 
+    def test_the_owner_link_needs_a_contract_matched_handshake(self) -> None:
+        """The link's token passes the Workbench's mutating routes.
+
+        Handing it to a client that never proved its contract set would let
+        that client skip the mutation gate by asking for the link instead.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir, _ = corpus.waiting_plan()
+            lifecycle = bridge_workers.WorkbenchLifecycle(
+                state_dir=corpus.state_root, server_factory=_RecordingServer
+            )
+            session = corpus.session(workbench_lifecycle=lifecycle)
+            ensure = _request(
+                "w1", intervention.ACTION_WORKBENCH, plan_dir=str(plan_dir)
+            )
+
+            before = session.handle_frame(ensure)
+            mismatched = session.handle_frame(
+                _request(
+                    "hs-0",
+                    bridge_protocol.METHOD_HANDSHAKE,
+                    contract_set_id="asl-amx-1.0123456789abcdef",
+                )
+            )
+            after_mismatch = session.handle_frame(ensure)
+            started_before_handshake = list(_RecordingServer.instances)
+            _handshake(session)
+            after = session.handle_frame(ensure)
+            lifecycle.stop()
+
+        for refused in (before, after_mismatch):
+            assert refused is not None
+            self.assertFalse(refused["ok"])
+            self.assertEqual(
+                bridge_protocol.ERROR_CONTRACT_SET_MISMATCH, refused["error"]["code"]
+            )
+            self.assertNotIn("token", json.dumps(refused))
+        assert mismatched is not None
+        self.assertFalse(mismatched["ok"])
+        self.assertEqual([], started_before_handshake)
+        assert after is not None
+        self.assertTrue(after["ok"], after)
+        self.assertIn("token=test-token", after["result"]["url"])
+
     def test_stop_shuts_the_server_down(self) -> None:
         lifecycle = bridge_workers.WorkbenchLifecycle(server_factory=_RecordingServer)
         lifecycle.ensure()
@@ -563,6 +610,56 @@ class BridgeDiagnosticsTests(unittest.TestCase):
                 mailbox_vocabulary.KIND_REPLY,
                 [line["kind"] for line in corpus.mailbox_lines(plan_dir)],
             )
+
+
+# Serves on the real ``sys.stdout``, which is what an exit-time flush touches.
+_SERVE_REAL_STDIO = """
+import sys
+from agent_session_loop import bridge_server
+sys.exit(
+    bridge_server.serve_stdio(
+        reader=sys.stdin.buffer,
+        writer=sys.stdout,
+        diagnostics=sys.stderr,
+        state_dir=sys.argv[1],
+        include_default_dirs=False,
+    )
+)
+"""
+
+
+class BridgeClosedStdoutTests(unittest.TestCase):
+    def test_a_client_closing_stdout_gets_a_clean_exit(self) -> None:
+        """The frame that hit EPIPE stays buffered and was flushed again at exit.
+
+        That second flush printed ``Exception ignored ... BrokenPipeError`` and
+        turned the documented exit 0 into 120.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            state_root.mkdir()
+            child = subprocess.Popen(
+                [sys.executable, "-c", _SERVE_REAL_STDIO, str(state_root)],
+                cwd=repo_root,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                assert child.stdout is not None and child.stdin is not None
+                self.assertIn(b'"type":"hello"', child.stdout.readline())
+                child.stdout.close()
+                child.stdin.write(_request("r1", "runs.snapshot") + b"\n")
+                child.stdin.flush()
+                _, stderr = child.communicate(timeout=WAIT * 4)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+
+        self.assertEqual(0, child.returncode, stderr.decode("utf-8", "replace"))
+        self.assertNotIn(b"BrokenPipeError", stderr)
 
 
 if __name__ == "__main__":

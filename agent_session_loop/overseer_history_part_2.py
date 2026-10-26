@@ -82,6 +82,17 @@ def _read_answer(
             summary=f"history output was not JSON: {error}",
             exit_status=exit_status,
         )
+    except RecursionError:
+        # Not a ValueError: pathologically nested JSON raises it from the
+        # decoder instead of a decode error.
+        return _failed(
+            plan_dir=plan_dir,
+            repositories=repositories,
+            limits=limits,
+            failure="response_unreadable",
+            summary="history output was nested too deeply to decode",
+            exit_status=exit_status,
+        )
     if not isinstance(parsed, dict):
         return _failed(
             plan_dir=plan_dir,

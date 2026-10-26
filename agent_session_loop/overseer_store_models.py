@@ -74,7 +74,16 @@ WITHHOLDING_REASONS: tuple[Withholding, ...] = (
 
 
 class LedgerError(Exception):
-    """The ledger could not be opened, migrated, or used as asked."""
+    """The ledger could not be opened, migrated, or used as asked.
+
+    ``reason`` is the snake_case slug a CLI envelope reports for it.
+    """
+
+    default_reason = "ledger_error"
+
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason or self.default_reason
 
 
 class LedgerRefused(LedgerError):
@@ -85,6 +94,8 @@ class LedgerRefused(LedgerError):
     has no such result, and a return value would be one more thing a caller can
     forget to check.
     """
+
+    default_reason = "ledger_refused"
 
 
 @dataclass(frozen=True)

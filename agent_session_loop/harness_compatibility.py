@@ -36,9 +36,12 @@ without incurring model usage.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
+import signal
 import subprocess
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -273,26 +276,19 @@ def probe_executable(
     policy = POLICY[harness]
     argv = [executable, *policy.version_argv]
     try:
-        completed = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        probe = Probe(harness, executable, None, "", "probe-timeout")
+        returncode, output = _run_version_command(argv, timeout_seconds)
     except OSError as error:
         probe = Probe(harness, executable, None, str(error), "probe-error")
     else:
-        output = f"{completed.stdout}\n{completed.stderr}".strip()
-        if completed.returncode != 0:
+        if returncode is None:
+            probe = Probe(harness, executable, None, output, "probe-timeout")
+        elif returncode != 0:
             probe = Probe(
                 harness,
                 executable,
                 None,
                 output,
-                f"probe-exit-{completed.returncode}",
+                f"probe-exit-{returncode}",
             )
         else:
             version = parse_version(output)
@@ -306,6 +302,40 @@ def probe_executable(
     if use_cache and identity is not None:
         _probe_cache[identity] = probe
     return probe
+
+
+def _run_version_command(
+    argv: Sequence[str], timeout_seconds: float
+) -> tuple[int | None, str]:
+    """Run ``argv`` and return its exit status (``None`` on timeout) and output.
+
+    Output goes to temporary files rather than pipes, and the wait is on the
+    process itself: a CLI that leaves a background child holding its stdout
+    has still answered once it exits. On a timeout the whole process group is
+    killed and whatever it printed so far is kept.
+    """
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            start_new_session=True,
+        )
+        try:
+            returncode: int | None = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            returncode = None
+            with contextlib.suppress(OSError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        texts = []
+        for stream in (stdout, stderr):
+            stream.seek(0)
+            # A CLI may print bytes that are not UTF-8; quote them rather than
+            # raising, because this probe must never fail.
+            texts.append(stream.read().decode("utf-8", errors="replace"))
+    return returncode, "\n".join(texts).strip()
 
 
 def clear_probe_cache() -> None:
@@ -475,8 +505,9 @@ def check_all(
     timeout_seconds: float = PROBE_TIMEOUT_SECONDS,
     use_cache: bool = True,
 ) -> tuple[Compatibility, ...]:
-    """Classify every requested harness, in :data:`HARNESS_NAMES` order."""
-    requested = tuple(harnesses_to_check or HARNESS_NAMES)
+    """Classify every requested harness once, in :data:`HARNESS_NAMES` order."""
+    wanted = set(harnesses_to_check or HARNESS_NAMES)
+    requested = tuple(name for name in HARNESS_NAMES if name in wanted)
     return tuple(
         check_harness(
             harness,

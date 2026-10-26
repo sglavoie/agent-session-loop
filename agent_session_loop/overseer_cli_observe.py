@@ -24,6 +24,7 @@ from . import (
 )
 
 
+@common_module.leaf("overseer-scan")
 def scan_from_args(
     args: argparse.Namespace,
     *,
@@ -41,6 +42,7 @@ def scan_from_args(
         window = common_module._pause_window_seconds(args)
         selection = common_module._selection(args)
         inventory = seams.build_inventory(state_dir=state_dir)
+        common_module._refuse_unmatched_plans(selection, inventory)
     except common_module.OverseerCliError as error:
         return common_module._failure("overseer-scan", error, as_json=as_json)
     matching = [
@@ -83,6 +85,7 @@ def scan_from_args(
     return common_module.EXIT_OK if inventory.complete else common_module.EXIT_REFUSED
 
 
+@common_module.leaf("overseer-watch")
 def watch_from_args(
     args: argparse.Namespace,
     *,
@@ -93,9 +96,12 @@ def watch_from_args(
     One sweep by default. ``--for-seconds`` keeps sweeping until the deadline,
     which is what "watch while invoked" means: newly started runs and eligible
     pauses join on a later sweep without the operator re-invoking anything.
-    ``--release`` gives the leases back, which is what ending an invocation
-    means -- an abandoned lease expires on its own, but only after it has kept
-    another watcher out for the rest of its term.
+    Its leases are still held when it returns -- a bounded watch is one step of
+    the host's invocation, and the ``act`` after it needs them -- so they end
+    at their term or at ``--release``. ``--release`` gives the leases back,
+    which is what ending an invocation means -- an abandoned lease expires on
+    its own, but only after it has kept another watcher out for the rest of its
+    term.
     """
     as_json = bool(getattr(args, "json", False))
     state_dir = common_module._state_dir(args)
@@ -115,10 +121,18 @@ def watch_from_args(
             as_json=as_json,
         )
         return common_module.EXIT_OK
+    selection = common_module._selection(args)
+    if selection.plans:
+        try:
+            common_module._refuse_unmatched_plans(
+                selection, seams.build_inventory(state_dir=state_dir)
+            )
+        except common_module.OverseerCliError as error:
+            return common_module._failure("overseer-watch", error, as_json=as_json)
     common: dict[str, Any] = {
         "watcher": watcher,
         "ledger": ledger,
-        "selection": common_module._selection(args),
+        "selection": selection,
         "state_dir": state_dir,
         "now": seams.utc_now,
         "pause_window_seconds": common_module._pause_window_seconds(args),
@@ -134,6 +148,7 @@ def watch_from_args(
             sleep=seams.sleep,
             sweep_seconds=float(args.sweep_seconds),
             interval_seconds=float(args.interval_seconds),
+            release_on_return=False,
             **common,
         )
         sweeps = list(invocation.sweeps)
@@ -158,10 +173,15 @@ def watch_from_args(
             lines.append(f"    + {enrollment.plan_dir} ({enrollment.lifecycle})")
         for excluded in item.excluded:
             lines.append(f"    - {excluded.plan_dir} [{excluded.reason}]")
+        # What made a sweep partial, as scan prints it: a bare ``[partial]``
+        # says the view is incomplete without saying what is missing.
+        for warning in item.warnings:
+            lines.append(f"    ! {warning}")
     common_module._emit(payload, lines, as_json=as_json)
     return common_module.EXIT_OK if complete else common_module.EXIT_REFUSED
 
 
+@common_module.leaf("overseer-inspect")
 def inspect_from_args(
     args: argparse.Namespace,
     *,
@@ -193,6 +213,18 @@ def inspect_from_args(
             timeout=float(args.timeout),
         )
         if args.incident_id is not None:
+            # The packet is rebuilt from the incident's own plan, so an incident
+            # filed against another plan would come back under this plan's run
+            # id and scope digest -- one plan's context with another's name.
+            incident = ledger.incident(int(args.incident_id))
+            if incident is not None and incident.plan_dir != (
+                common_module.plan_dir_of(candidate)
+            ):
+                raise common_module.OverseerCliError(
+                    "incident_unknown",
+                    f"incident {args.incident_id} belongs to {incident.plan_dir}, "
+                    f"not {candidate.plan_dir}",
+                )
             packet = overseer_context.load_packet(
                 grant=grant,
                 ledger=ledger,

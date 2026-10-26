@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 import threading
 import time
@@ -140,6 +141,17 @@ def _run_command_check(
     start = time.monotonic()
     if cancellation is not None and cancellation.cancelled:
         raise _VerificationCancelled(check.name)
+    if not cwd.is_dir():
+        # Popen reports a missing cwd as FileNotFoundError, which would
+        # otherwise read as the executable being absent.
+        return CheckResult(
+            name=check.name,
+            kind=check.kind,
+            status="fail",
+            failure_reason="command-error",
+            detail=f"command cwd does not exist: {cwd}",
+            duration_seconds=time.monotonic() - start,
+        )
     try:
         process = subprocess.Popen(
             list(check.argv),
@@ -278,7 +290,7 @@ def _run_command_check(
             failure_reason="command-timeout",
             detail=(
                 f"command timed out after {check.timeout_seconds:g}s: "
-                f"{' '.join(check.argv)}"
+                f"{shlex.join(check.argv)}"
             ),
             duration_seconds=duration,
             sweep=sweep,
@@ -296,7 +308,7 @@ def _run_command_check(
             name=check.name,
             kind=check.kind,
             status="pass",
-            detail=f"command exited 0: {' '.join(check.argv)}",
+            detail=f"command exited 0: {shlex.join(check.argv)}",
             returncode=0,
             duration_seconds=duration,
             sweep=sweep,

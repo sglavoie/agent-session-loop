@@ -120,7 +120,18 @@ class InputErrorWordingTests(unittest.TestCase):
             (("commit", "--timeout", "-1"), "--timeout", "-1"),
             (("assurance", "list", "--limit", "0", *state), "--limit", "0"),
             (("sessions", "--limit", "0", *state), "--limit", "0"),
+            (
+                ("baseline", str(self.plan_dir), "--total-timeout", "0"),
+                "--total-timeout",
+                "0",
+            ),
+            (
+                ("baseline", str(self.plan_dir), "--per-check-timeout", "nan"),
+                "--per-check-timeout",
+                "nan",
+            ),
             (("doctor", str(self.plan_dir), "--harness", "nope"), "--harness", "nope"),
+            (("supervisor-guide", "--harness", "bogus"), "--harness", "bogus"),
             (
                 ("assurance", "process-pending", "--audit-timeout", "0", *state),
                 "--audit-timeout",

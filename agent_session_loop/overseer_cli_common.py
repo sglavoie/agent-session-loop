@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
+import sqlite3
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -23,6 +25,7 @@ from . import (
     overseer_history,
     overseer_policy_client,
     overseer_store_ledger,
+    overseer_store_models,
     overseer_watch,
     responses,
 )
@@ -174,6 +177,24 @@ def _selection(args: argparse.Namespace) -> overseer_watch.Selection:
     return overseer_watch.Selection(plans=plans, projects=projects)
 
 
+def _refuse_unmatched_plans(
+    selection: overseer_watch.Selection, inventory: overseer_discovery.Inventory
+) -> None:
+    """Refuse a ``--plan`` no state record belongs to, as ``inspect`` does.
+
+    A selector that matched nothing narrows the fleet to nothing, and an empty
+    answer to a misspelled plan reads exactly like a plan with nothing to say.
+    """
+    unmatched = selection.unmatched_plans(inventory.candidates)
+    if unmatched:
+        raise OverseerCliError(
+            "plan_unobserved",
+            "discovery has no record of "
+            + ", ".join(canonical_plan(plan) for plan in unmatched)
+            + "; run `asl overseer scan` to see the plans it does know",
+        )
+
+
 def _pause_window_seconds(args: argparse.Namespace) -> float:
     hours = getattr(args, "pause_window_hours", None)
     if hours is None:
@@ -204,6 +225,51 @@ def _failure(command: str, error: OverseerCliError, *, as_json: bool) -> int:
         leaf = command.replace("-", " ", 1)
         print(f"{program_name()} {leaf}: {error.message}", file=sys.stderr)
     return EXIT_USAGE
+
+
+type Leaf = Callable[..., int]
+
+
+def leaf(command: str) -> Callable[[Leaf], Leaf]:
+    """Answer a domain module's refusal as this leaf's usage envelope.
+
+    The context and ledger modules raise :class:`overseer_context.ContextError`
+    and :class:`overseer_store_models.LedgerError` for a question that names
+    something they cannot serve -- an incident nobody opened, an ineligible
+    plan, a ledger that will not open. Each carries its own reason slug, and a
+    leaf reports it exactly as it reports a malformed invocation, wherever in
+    the leaf it was raised, rather than letting it surface as a traceback.
+    """
+
+    def decorate(function: Leaf) -> Leaf:
+        @functools.wraps(function)
+        def run(args: argparse.Namespace, **kwargs: Any) -> int:
+            try:
+                return function(args, **kwargs)
+            except (
+                overseer_context.ContextError,
+                overseer_store_models.LedgerError,
+            ) as error:
+                return _failure(
+                    command,
+                    OverseerCliError(error.reason, str(error)),
+                    as_json=bool(getattr(args, "json", False)),
+                )
+            except sqlite3.DatabaseError as error:
+                # The ledger is the only database a leaf touches, and a page
+                # corrupted past the header only says so at the query that
+                # reaches it, long after the open succeeded.
+                return _failure(
+                    command,
+                    OverseerCliError(
+                        "ledger_unreadable", f"overseer ledger is unreadable: {error}"
+                    ),
+                    as_json=bool(getattr(args, "json", False)),
+                )
+
+        return run
+
+    return decorate
 
 
 def _scope_payload(scope: overseer_decisions.Scope) -> dict[str, Any]:

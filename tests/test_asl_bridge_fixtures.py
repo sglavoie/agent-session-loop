@@ -538,10 +538,21 @@ class MutationGateTests(unittest.TestCase):
             },
         )
 
-    def test_reading_methods_never_require_a_handshake(self) -> None:
+    def test_the_request_id_bound_is_the_corpus_bound(self) -> None:
+        """Every id the bridge echoes must be one the response schema accepts."""
+        self.assertEqual(
+            schema()["definitions"]["RequestId"]["maxLength"],
+            bridge_protocol.MAX_REQUEST_ID_CHARS,
+        )
+
+    def test_methods_outside_the_mutation_list_are_the_reads(self) -> None:
         readable = set(bridge_session.CAPABILITIES) - set(
             bridge_protocol.MUTATION_METHODS
         )
+        # A capability-granting read is still a read on the wire: it needs a
+        # contract-matched handshake, never a current snapshot.
+        self.assertEqual({"workbench.ensure"}, set(bridge_protocol.CAPABILITY_METHODS))
+        self.assertLessEqual(set(bridge_protocol.CAPABILITY_METHODS), readable)
 
         self.assertEqual(
             {

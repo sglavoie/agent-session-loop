@@ -172,6 +172,12 @@ def run_core_preflight(plan_dir: str | Path) -> PreflightReport:
     )
 
 
+def _session_paths(snapshot: PlanSnapshot | None) -> dict[str, str]:
+    if snapshot is None:
+        return {}
+    return {status.id: str(status.session.path) for status in snapshot.sessions}
+
+
 def run_environment_preflight(
     plan_dir: str | Path,
     *,
@@ -468,6 +474,12 @@ def run_preflight(
             core_report.contracts_by_session,
             cwd,
             context=verification_context,
+            session_paths=_session_paths(core_report.snapshot),
+            footprint_escapes=frozenset(
+                target.value
+                for target in (footprint.out_of_root if footprint else ())
+                if target.kind == "contract-cwd"
+            ),
         )
         baseline_findings = _check_baselines(
             core_report.contracts_by_session,

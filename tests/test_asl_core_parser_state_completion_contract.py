@@ -13,6 +13,26 @@ from agent_session_loop import (
 from tests.asl_core_support import ParserAndStateTestsBase
 
 
+def _contract_text(json_block: str, *, fence: str = "```") -> str:
+    return "\n".join(
+        [
+            "## Completion Contract",
+            "",
+            "### Done when",
+            "- something",
+            "",
+            "### Verify",
+            "",
+            f"{fence}json",
+            json_block,
+            fence,
+            "",
+            "## Handoff",
+            "- **Status**: pending",
+        ]
+    )
+
+
 class ParserAndStateTests(ParserAndStateTestsBase):
     def test_parse_completion_contract_requires_json_fenced_block(self) -> None:
         text = "\n".join(
@@ -492,3 +512,49 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 )
                 with self.assertRaisesRegex(plans_errors.PlanError, pattern):
                     contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_refuses_an_unhashable_check_type(
+        self,
+    ) -> None:
+        # A list or object 'type' cannot be looked up in the parser table; it
+        # is a malformed contract, never a TypeError traceback.
+        for raw_type in ('["command"]', '{"t": 1}'):
+            with self.subTest(raw_type=raw_type):
+                text = _contract_text(
+                    '{"checks": [{"type": ' + raw_type + ', "path": "a"}]}'
+                )
+                with self.assertRaisesRegex(
+                    plans_errors.PlanError, "'type' must be one of"
+                ):
+                    contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_bounds_an_integer_too_large_for_float(
+        self,
+    ) -> None:
+        text = _contract_text(
+            '{"checks": [{"type": "command", "argv": ["true"], '
+            '"timeout_seconds": ' + "9" * 400 + "}]}"
+        )
+        with self.assertRaisesRegex(plans_errors.PlanError, "must be <= 3600"):
+            contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_accepts_tilde_and_longer_fences(
+        self,
+    ) -> None:
+        block = '{"checks": [{"type": "file_exists", "path": "a"}]}'
+        for fence in ("~~~", "````", "~~~~~"):
+            with self.subTest(fence=fence):
+                contract = contracts.parse_completion_contract(
+                    _contract_text(block, fence=fence), session_id="1"
+                )
+                assert contract is not None
+                self.assertEqual("a", contract.verify.checks[0].path)
+
+    def test_parse_completion_contract_keeps_a_shorter_inner_fence_as_content(
+        self,
+    ) -> None:
+        # A ``` line inside a ```` block is content, so the block runs on to
+        # the matching closer instead of ending early on invalid JSON.
+        text = _contract_text("```", fence="````")
+        with self.assertRaisesRegex(plans_errors.PlanError, "Verify JSON is invalid"):
+            contracts.parse_completion_contract(text, session_id="1")

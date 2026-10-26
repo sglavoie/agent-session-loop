@@ -501,10 +501,16 @@ def _read_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
         return None, None
     except OSError as error:
         return None, f"is unreadable: {error}"
+    except UnicodeDecodeError as error:
+        return None, f"is malformed: {error}"
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError as error:
         return None, f"is malformed: {error}"
+    except RecursionError:
+        # Not a ValueError: pathologically nested JSON raises it from the
+        # decoder instead of a decode error.
+        return None, "is malformed: nested too deeply to decode"
     if not isinstance(parsed, dict):
         return None, "is not a JSON object"
     return parsed, None

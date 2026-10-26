@@ -260,9 +260,31 @@ class ArchiveReportTests(RetentionTestBase):
             retention._print_report(report)
         text = out.getvalue()
         self.assertIn("measured in run directories", text)
-        self.assertIn("Archive (not managed by gc): 2 entry(ies)", text)
+        self.assertIn("Archive (not managed by gc): 2 entries", text)
         self.assertIn("1 past the 30-day retention window", text)
         self.assertIn("gc never deletes archive entries", text)
+
+    def test_archive_is_not_an_unresolved_plan_state_dir(self) -> None:
+        self._write_run(RUN_NEW, finished_at=_stamp(1))
+        self._archive("entry", days_ago=1, size=10)
+        report = self._gc()
+        self.assertEqual([], report.to_dict()["unresolved_state_dirs"])
+        self.assertEqual(1, len(report.plans))
+
+    def test_text_counts_one_of_a_thing_in_the_singular(self) -> None:
+        self._write_run(RUN_OLD, finished_at=_stamp(45), log_bytes=100)
+        self._write_run(RUN_NEW, finished_at=_stamp(1))
+        self._archive("only-entry", days_ago=1, size=10)
+        report = self._gc(apply=True)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            retention._print_report(report)
+        text = out.getvalue()
+        self.assertIn("Archive (not managed by gc): 1 entry, ", text)
+        self.assertIn("Removed: 1 run, ", text)
+        self.assertIn(": 1 run, ", text.split("Retained by reason:")[1])
+        self.assertNotIn("(s)", text)
+        self.assertNotIn("(ies)", text)
 
     def test_missing_archive_reads_as_empty(self) -> None:
         archive = self._gc().to_dict()["archive"]

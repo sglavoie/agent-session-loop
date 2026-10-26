@@ -24,6 +24,7 @@ from . import (
 )
 
 
+@common.leaf("overseer-reconcile")
 def reconcile_from_args(
     args: argparse.Namespace,
     *,

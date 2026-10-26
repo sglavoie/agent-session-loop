@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -40,6 +41,12 @@ class MetricsCollectionTests(MetricsCollectionBase):
             state_dir=self.state_root / "absent", since_days=7, now=self.now
         )
         self.assertEqual(0, report.state_dirs_scanned)
+
+    def test_non_plan_children_of_the_state_root_are_not_scanned(self) -> None:
+        _make_state_dir(self.state_root, self.tmp_path / "plan-g")
+        (self.state_root / "archive" / "entry").mkdir(parents=True)
+        report = self._collect()
+        self.assertEqual(1, report.state_dirs_scanned)
 
     def test_rejects_non_positive_since_days(self) -> None:
         with self.assertRaises(ValueError):
@@ -80,6 +87,69 @@ class MetricsCollectionTests(MetricsCollectionBase):
         self.assertEqual(3, report.turns["total"])
         self.assertEqual(1, report.turns["unsuccessful"])
         self.assertEqual(60.0, report.turns["unsuccessful_runtime_seconds"])
+
+    def test_a_failure_before_the_window_still_spoils_first_pass(self) -> None:
+        state_dir = _make_state_dir(self.state_root, self.tmp_path / "plan-d")
+        _write_turn_result(
+            state_dir,
+            run_id="run-1",
+            turn_index=1,
+            session_id="1",
+            started_at=_iso(self.now, hours_ago=24 * 10),
+            finished_at=_iso(self.now, hours_ago=24 * 10 - 0.1),
+            status_result="verify-failed",
+        )
+        _write_turn_result(
+            state_dir,
+            run_id="run-2",
+            turn_index=1,
+            session_id="1",
+            started_at=_iso(self.now, hours_ago=24 * 2),
+            finished_at=_iso(self.now, hours_ago=24 * 2 - 0.1),
+        )
+        report = self._collect(since_days=7)
+        self.assertEqual(1, report.first_pass["sessions_attempted"])
+        self.assertEqual(1, report.first_pass["sessions_completed"])
+        self.assertEqual(0, report.first_pass["sessions_completed_first_pass"])
+        self.assertEqual(0.0, report.first_pass["first_pass_rate"])
+
+    def test_non_finite_or_boolean_durations_add_no_runtime(self) -> None:
+        state_dir = _make_state_dir(self.state_root, self.tmp_path / "plan-e")
+        for index, duration in enumerate((float("inf"), float("nan"), True), 1):
+            _write_turn_result(
+                state_dir,
+                run_id="run-1",
+                turn_index=index,
+                session_id=str(index),
+                started_at=_iso(self.now, hours_ago=3),
+                finished_at=_iso(self.now, hours_ago=2.9),
+                duration_seconds=duration,
+            )
+        report = self._collect()
+        self.assertEqual(3, report.turns["total"])
+        self.assertEqual(0.0, report.turns["successful_runtime_seconds"])
+        json.dumps(report.turns, allow_nan=False)
+
+    def test_a_window_past_the_calendar_covers_the_whole_history(self) -> None:
+        state_dir = _make_state_dir(self.state_root, self.tmp_path / "plan-f")
+        _write_turn_result(
+            state_dir,
+            run_id="run-1",
+            turn_index=1,
+            session_id="1",
+            started_at=_iso(self.now, hours_ago=24 * 400),
+            finished_at=_iso(self.now, hours_ago=24 * 400 - 0.1),
+        )
+        _append_event(
+            state_dir,
+            created_at=_iso(self.now, hours_ago=24 * 400),
+            name="run_paused",
+            payload={"reason": "verify-failed", "details": {}},
+        )
+        report = self._collect(since_days=99999999999)
+        self.assertEqual(1, report.turns["total"])
+        self.assertEqual(1, report.pauses["total"])
+        json.dumps(report.to_dict(), allow_nan=False)
 
     def test_review_turns_do_not_count_toward_first_pass(self) -> None:
         state_dir = _make_state_dir(self.state_root, self.tmp_path / "plan-b")

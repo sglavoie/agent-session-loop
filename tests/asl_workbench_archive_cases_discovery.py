@@ -32,6 +32,33 @@ class WorkbenchDiscoveryTests(unittest.TestCase):
             self.assertIsNone(discovered.profile)
             self.assertEqual((), result.warnings)
 
+    def test_an_unreadable_state_file_hides_only_its_own_plan(self) -> None:
+        """A non-UTF-8 or too-deep state.json used to abort the whole walk."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_root = tmp_path / "state"
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            good = state_root / plans_files.path_sha256(plan_dir)
+            good.mkdir(parents=True)
+            (good / "state.json").write_text(
+                json.dumps({"plan_dir": str(plan_dir)}), encoding="utf-8"
+            )
+            for name, payload in (
+                ("0-binary", b"\xff\xfe{not utf-8}"),
+                ("1-deep", b"[" * 1_000_000 + b"]" * 1_000_000),
+            ):
+                corrupt = state_root / name
+                corrupt.mkdir()
+                (corrupt / "state.json").write_bytes(payload)
+
+            with patched_env(AGENT_PLANS_DIR=None):
+                result = workbench_discovery.discover_plans(
+                    state_root=state_root,
+                    include_default_dirs=False,
+                )
+
+            self.assertEqual([plan_dir], [found.plan_dir for found in result.plans])
+
     def test_discovers_plans_from_registry_pin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp).resolve()

@@ -139,6 +139,16 @@ MUTATION_METHODS: tuple[str, ...] = (
 )
 
 
+# Reads that hand out capability rather than state. ``workbench.ensure`` writes
+# nothing, so it stays out of ``MUTATION_METHODS`` and needs no current
+# snapshot, but its answer is a tokenized owner URL whose token passes the
+# Workbench's own mutating routes. Serving that before a handshake has matched
+# the contract set would let any client skip the gate by asking for the link,
+# so these methods require a contract-matched handshake and are refused the way
+# an unhandshaken mutation is.
+CAPABILITY_METHODS: tuple[str, ...] = ("workbench.ensure",)
+
+
 EVENT_RUNS_CHANGED = "runs.changed"
 
 
@@ -385,6 +395,13 @@ MAX_PATH_CHARS = 1024
 
 
 MAX_ID_CHARS = 128
+
+
+# The request id is echoed verbatim on the response, so it is bounded on the
+# way in: an id the size of a frame would push its own answer past the ceiling,
+# and a mutation could land with its response dropped. Mirrors the corpus
+# ``RequestId`` bound, so every id this bridge echoes is one the schema accepts.
+MAX_REQUEST_ID_CHARS = 64
 
 
 MAX_WARNINGS = 8

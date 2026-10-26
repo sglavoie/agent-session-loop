@@ -215,7 +215,8 @@ canonical cwd, resolved executable, and environment signature; the repository
 fingerprint is stored inside the record so preflight can tell *stale* evidence
 (fingerprint changed) from *missing* evidence. Per-check runtime is clamped to
 120 seconds and the whole pass to 600 seconds by default
-(`--per-check-timeout` / `--total-timeout` override, never exceeding the caps).
+(`--per-check-timeout` / `--total-timeout` override, never exceeding the caps;
+a value that is not a finite, positive number is refused as `input-error`).
 `baseline-results.json` is excluded from the readiness hash by construction, so
 recording evidence never invalidates a loop-ready manifest. Preflight requires
 current baseline evidence only while no session is complete; once

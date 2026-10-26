@@ -253,6 +253,38 @@ def _validated_timeout(
     return timeout
 
 
+def _ttl_is_valid(
+    args: argparse.Namespace,
+    *,
+    command_name: str,
+    text_label: str,
+) -> bool:
+    """Check ``--ttl`` up front, reporting a rejection in place.
+
+    The journal enforces the same range, but only after the target check, so a
+    bad value used to surface as ``no-active-run`` with no run, and under the
+    journal's ``ttl_seconds`` name with one. Checked here, next to
+    ``--timeout``, it is refused for what it is, in the flag's own name.
+    """
+    requested = getattr(args, "ttl", None)
+    try:
+        redirect_store_validation._validate_ttl(requested)
+    except redirect_store_models.RedirectStoreError:
+        cli_common.print_error(
+            args,
+            command_name=command_name,
+            text_label=text_label,
+            reason=redirect_store_vocab.ERROR_INVALID_TTL,
+            error=(
+                f"--ttl must be between "
+                f"{redirect_store_vocab.REDIRECT_MIN_TTL_SECONDS} and "
+                f"{redirect_store_vocab.REDIRECT_MAX_TTL_SECONDS} seconds"
+            ),
+        )
+        return False
+    return True
+
+
 def _expected_target(
     args: argparse.Namespace,
     *,

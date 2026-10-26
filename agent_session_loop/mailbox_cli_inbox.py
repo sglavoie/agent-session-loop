@@ -183,6 +183,25 @@ def inbox_acknowledge_from_args(args: argparse.Namespace) -> int:
             details={"attempt": args.attempt},
         )
         return 1
+    if (
+        attempt is not None
+        and not requested
+        and not redirect_ack_attempt.token_identifies(args.attempt, attempt)
+    ):
+        # Checked before enumerating, so an attempt that carries nothing
+        # cannot make a wrong token read as a successful empty receipt.
+        cli_common.print_error(
+            args,
+            command_name=mailbox_cli_constants.COMMAND_INBOX_ACKNOWLEDGE,
+            text_label="inbox acknowledge",
+            reason=redirect_ack_attempt.ERROR_ATTEMPT_MISMATCH,
+            error="acknowledgment names an attempt that is not the live one",
+            details={
+                "attempt": args.attempt,
+                "live_attempt": redirect_ack_attempt.attempt_token(attempt),
+            },
+        )
+        return 1
     if attempt is not None and not requested:
         # No explicit ids: receipt exactly what this attempt carries. A worker
         # reading its prompt always has the ids, so this is the convenience

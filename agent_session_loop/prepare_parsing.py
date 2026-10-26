@@ -437,7 +437,10 @@ def parse_validator_output(payload: object) -> PrepareValidation:
     """
     if not isinstance(payload, dict):
         raise _fail("validator output must be a JSON object")
-    version = payload.get("version")
+    raw_version = payload.get("version")
+    # ``True == 1`` and ``1.0 == 1``, so only an exact int names a version;
+    # anything else would be stored back as the non-integer it arrived as.
+    version = raw_version if type(raw_version) is int else None
     if version == LEGACY_PREPARE_VALIDATION_VERSION:
         data = _require_object(
             payload,
@@ -468,7 +471,7 @@ def parse_validator_output(payload: object) -> PrepareValidation:
         repo_required = True
     else:
         raise _fail(
-            f"unsupported version {version!r}; expected "
+            f"unsupported version {raw_version!r}; expected "
             f"{LEGACY_PREPARE_VALIDATION_VERSION} or {PREPARE_VALIDATION_VERSION}"
         )
     raw_sessions = data.get("sessions")

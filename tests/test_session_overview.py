@@ -318,7 +318,7 @@ class ScanRunningRowsTests(unittest.TestCase):
     def test_live_lock_in_wrong_state_dir_is_stale(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_root = Path(tmp) / "state"
-            state_dir = state_root / "not-the-plan-hash"
+            state_dir = state_root / ("0" * 64)  # a digest, but not this plan's
             state_dir.mkdir(parents=True)
             plan_dir = Path(tmp) / "plans" / "wrong-hash"
             plan_dir.mkdir(parents=True)

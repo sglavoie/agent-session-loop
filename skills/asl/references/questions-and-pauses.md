@@ -23,8 +23,9 @@ asl inbox resolve <plan-dir> --to <question-id> --action pause [--note '<note>']
 Add `--wait-consumed --wait-timeout 300` when closing a live question so the
 command can confirm the receipt. A successful append is only **accepted** until
 `consumed: true` and a receipt are returned; a consumption timeout remains a
-successful append with `consumed: false`. Never call an unconsumed closure
-“delivered,” and keep polling the helper after either outcome.
+successful append with `consumed: false` and `timed_out: true`. Never call an
+unconsumed closure “delivered,” and keep polling the helper after either
+outcome.
 
 Use `--text-stdin` or `--note-stdin` when a body should not appear in argv. A
 reply supplies a factual answer. A `continue` resolution supplies no answer and

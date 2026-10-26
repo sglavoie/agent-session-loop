@@ -381,6 +381,7 @@ def _add_state_commands(
         "--since-days",
         # Validated by the handler, which reports it in the JSON envelope.
         type=int,
+        metavar="DAYS",
         default=_METRICS_DEFAULT_SINCE_DAYS,
         help=(
             "Number of days of history to aggregate "

@@ -59,6 +59,7 @@ POSITIVE_NUMBER = "must be a finite, positive number"
 NON_NEGATIVE_INTEGER = "must be a non-negative integer"
 POSITIVE_INTEGER = "must be a positive integer"
 PORT_NUMBER = "must be a TCP port number from 0 to 65535"
+NON_BLANK_TEXT = "must not be empty or blank"
 
 _MAX_PORT = 65535
 
@@ -114,6 +115,24 @@ def positive_float(text: str) -> float:
     return value
 
 
+def float_at_most(high: float, *, allow_zero: bool) -> Callable[[str], float]:
+    """``type=`` for a finite duration with a ceiling.
+
+    A value past ``high`` is refused by name rather than accepted and left to
+    overflow the first ``timedelta`` it reaches.
+    """
+    floor = "non-negative" if allow_zero else "positive"
+    requirement = f"must be a finite, {floor} number no greater than {high:g}"
+
+    def parse(text: str) -> float:
+        value = _parse_float(text, requirement)
+        if value < 0 or (value == 0 and not allow_zero) or value > high:
+            raise argparse.ArgumentTypeError(f"{requirement}; got {text!r}")
+        return value
+
+    return parse
+
+
 def non_negative_int(text: str) -> int:
     """``type=`` for a count or index where zero is meaningful."""
     value = _parse_int(text, NON_NEGATIVE_INTEGER)
@@ -128,6 +147,13 @@ def positive_int(text: str) -> int:
     if value <= 0:
         raise argparse.ArgumentTypeError(f"{POSITIVE_INTEGER}; got {text!r}")
     return value
+
+
+def non_blank_text(text: str) -> str:
+    """``type=`` for an identity that names something, so not empty or blank."""
+    if not text.strip():
+        raise argparse.ArgumentTypeError(f"{NON_BLANK_TEXT}; got {text!r}")
+    return text
 
 
 def port_number(text: str) -> int:

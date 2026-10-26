@@ -45,15 +45,14 @@ def supervision_run_evidence(
     counts = status.get("counts")
     counts = counts if isinstance(counts, dict) else {}
     active_turn = status.get("active_turn")
+    runner_state_condition = _runner_state_condition(runner_state)
     return {
         "lock_active": bool(lock.get("active")),
         "lock_pid": lock.get("pid"),
         "run_id": runner_state.get("run_id"),
-        "runner_state_fresh": bool(
-            runner_state.get("present")
-            and not runner_state.get("error")
-            and not runner_state.get("run_finished_at")
-            and not runner_state.get("stale_unfinished")
+        "runner_state": runner_state_condition,
+        "runner_state_fresh": (
+            runner_state_condition == mailbox_cli_constants.RUNNER_STATE_FRESH
         ),
         "active_turn": (
             {
@@ -68,6 +67,19 @@ def supervision_run_evidence(
             value for value in counts.values() if isinstance(value, int)
         ),
     }
+
+
+def _runner_state_condition(runner_state: dict[str, Any]) -> str:
+    """Name why the runner state is or is not evidence of a live run."""
+    if not runner_state.get("present"):
+        return mailbox_cli_constants.RUNNER_STATE_ABSENT
+    if runner_state.get("error"):
+        return mailbox_cli_constants.RUNNER_STATE_UNREADABLE
+    if runner_state.get("run_finished_at"):
+        return mailbox_cli_constants.RUNNER_STATE_FINISHED
+    if runner_state.get("stale_unfinished"):
+        return mailbox_cli_constants.RUNNER_STATE_STALE
+    return mailbox_cli_constants.RUNNER_STATE_FRESH
 
 
 def _run_evidence_is_live(evidence: dict[str, Any] | None) -> bool:

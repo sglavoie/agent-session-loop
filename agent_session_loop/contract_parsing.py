@@ -8,9 +8,9 @@ from pathlib import Path
 from .contract_checks import _parse_check
 from .contract_markdown import (
     _extract_bullets,
-    _extract_json_block,
     _final_handoff_start,
     _find_heading_index,
+    _locate_json_block,
     _section_end,
     completion_contract_heading_indices,
 )
@@ -24,7 +24,7 @@ from .contract_models import (
     VerificationCheck,
     VerifyRecipe,
 )
-from .plans_errors import PlanError
+from .plans_errors import ContractError, PlanError
 from .plans_files import canonicalize_path
 from .plans_registry import read_repository_registry
 from .plans_session_ids import SessionId, parse_session_id, session_id_to_filename
@@ -180,13 +180,18 @@ def parse_completion_contract(
     verify_end = _section_end(section, verify_start, max_level=3, end=len(section))
     verify_lines = section[verify_start + 1 : verify_end]
 
-    json_text = _extract_json_block(verify_lines, canonical_id)
+    json_start, json_end = _locate_json_block(verify_lines, canonical_id)
+    json_text = "\n".join(verify_lines[json_start:json_end])
     try:
         payload = json.loads(json_text)
     except json.JSONDecodeError as error:
-        raise PlanError(
+        # Reported as a line of ``text`` (the session file), not of the block:
+        # the heading, the Verify subsection, and the fence all sit above it.
+        line = contract_start + verify_start + json_start + error.lineno + 2
+        raise ContractError(
             f"session {canonical_id.value} Verify JSON is invalid: {error.msg} "
-            f"at line {error.lineno} column {error.colno}"
+            f"at line {line} column {error.colno}",
+            line=line,
         ) from error
 
     recipe = _parse_verify_payload(
@@ -235,7 +240,7 @@ def read_completion_contract(
         raise PlanError(
             f"missing session file for session {canonical_id.value}: {session_path}"
         ) from error
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         raise PlanError(f"cannot read {session_path}: {error}") from error
     registry = read_repository_registry(canonical_dir)
     return parse_completion_contract(

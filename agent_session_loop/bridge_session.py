@@ -14,12 +14,15 @@ from . import __version__, intervention
 from .agent_mux_projection import CONTRACT_SET_ID
 from .bridge_protocol import (
     _METHOD_ORDER,
+    CAPABILITY_METHODS,
+    ERROR_INTERNAL,
     ERROR_INVALID_REQUEST,
     ERROR_MALFORMED_JSON,
     ERROR_UNKNOWN_METHOD,
     ERROR_UNSUPPORTED_PROTOCOL,
     EVENT_NAMES,
     MAX_FRAME_BYTES,
+    MAX_REQUEST_ID_CHARS,
     METHOD_HANDSHAKE,
     METHOD_RECOVER_CONVERSATION,
     METHOD_REDIRECT_STATUS,
@@ -69,13 +72,25 @@ class BridgeSession(RedirectHandlers):
         return hello_payload()
 
     def handle_frame(self, raw: bytes) -> dict[str, Any] | None:
-        """Answer one request frame; never raise for client-caused failures."""
+        """Answer one request frame; never raise, whatever the frame held.
+
+        A frame can only ever cost its own response: the loop that called this
+        serves every other client request too, so an exception escaping here
+        would end the session for a failure that belonged to one frame.
+        """
         try:
             decoded = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             return _error_response(
                 None,
                 BridgeError(ERROR_MALFORMED_JSON, f"frame is not valid JSON: {error}"),
+            )
+        except RecursionError:
+            # Valid JSON nested deeper than the decoder will follow: a request
+            # this bridge refuses to read rather than one it failed to parse.
+            return _error_response(
+                None,
+                BridgeError(ERROR_INVALID_REQUEST, "frame is nested too deeply"),
             )
         if not isinstance(decoded, Mapping):
             return _error_response(
@@ -84,11 +99,31 @@ class BridgeSession(RedirectHandlers):
             )
 
         raw_id = decoded.get("id")
+        if isinstance(raw_id, str) and len(raw_id) > MAX_REQUEST_ID_CHARS:
+            # Refused before dispatch and answered uncorrelated: echoing it
+            # could cost the response, and nothing may run unanswered.
+            return _error_response(
+                None,
+                BridgeError(
+                    ERROR_INVALID_REQUEST,
+                    f"request id exceeds {MAX_REQUEST_ID_CHARS} characters",
+                    details={"max_id_chars": str(MAX_REQUEST_ID_CHARS)},
+                ),
+            )
         request_id = raw_id if isinstance(raw_id, str) and raw_id else None
         try:
             return _response(request_id, self._dispatch(decoded, request_id))
         except BridgeError as error:
             return _error_response(request_id, error)
+        except Exception as error:  # noqa: BLE001 - a handler bug costs one frame
+            return _error_response(
+                request_id,
+                BridgeError(
+                    ERROR_INTERNAL,
+                    f"request failed: {type(error).__name__}",
+                    retryable=True,
+                ),
+            )
 
     def _dispatch(
         self, request: Mapping[str, Any], request_id: str | None
@@ -130,6 +165,8 @@ class BridgeSession(RedirectHandlers):
         # MUTATION_METHODS is gated by construction instead of by remembering.
         if method in MUTATION_METHODS:
             self._require_mutations_enabled(method)
+        elif method in CAPABILITY_METHODS:
+            self._require_contract_handshake(method)
         return handler(self, params)
 
 

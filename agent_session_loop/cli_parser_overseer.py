@@ -7,8 +7,10 @@ import argparse
 from .cli_parser_support import (
     _AgentSessionLoopArgumentParser,
     _group_epilogue,
+    float_at_most,
+    int_in_range,
+    non_blank_text,
     non_negative_float,
-    positive_float,
     positive_int,
 )
 
@@ -29,6 +31,16 @@ _OVERSEER_EXIT_STATUS = (
     "exist, exits 2 with the snake_case reason `plan_unobserved`, unlike the\n"
     "`plan-not-found` exit 1 that other `asl` commands report."
 )
+
+# Ceilings for the overseer's durations. Each becomes a `timedelta` or a
+# subprocess timeout, both of which overflow long before a float does, so a
+# value past them is refused by name instead of crashing the leaf. A day bounds
+# one watch invocation and its leases; an hour bounds one Agent Mux answer.
+_MAX_WATCH_SECONDS = 86400.0
+_MAX_TIMEOUT_SECONDS = 3600.0
+_watch_seconds = float_at_most(_MAX_WATCH_SECONDS, allow_zero=True)
+_positive_watch_seconds = float_at_most(_MAX_WATCH_SECONDS, allow_zero=False)
+_timeout_seconds = float_at_most(_MAX_TIMEOUT_SECONDS, allow_zero=False)
 
 
 def _add_overseer_commands(
@@ -109,6 +121,7 @@ def _add_overseer_commands(
     overseer_watch_parser.add_argument(
         "--watcher-id",
         required=True,
+        type=non_blank_text,
         help="Stable identity for this invocation; leases are held under it",
     )
     overseer_watch_parser.add_argument(
@@ -127,27 +140,31 @@ def _add_overseer_commands(
     )
     overseer_watch_parser.add_argument(
         "--for-seconds",
-        type=non_negative_float,
+        type=_watch_seconds,
         metavar="SECONDS",
-        help="Keep sweeping for this long instead of running a single sweep",
+        help=(
+            "Keep sweeping for this long instead of running a single sweep; "
+            "leases stay held afterwards until --release or --lease-seconds "
+            "runs out"
+        ),
     )
     overseer_watch_parser.add_argument(
         "--interval-seconds",
-        type=non_negative_float,
+        type=_watch_seconds,
         metavar="SECONDS",
         default=15.0,
         help="Wait this long between sweeps under --for-seconds (default 15)",
     )
     overseer_watch_parser.add_argument(
         "--sweep-seconds",
-        type=positive_float,
+        type=_positive_watch_seconds,
         metavar="SECONDS",
         default=60.0,
         help="Budget for one sweep; plans not reached are reported deferred",
     )
     overseer_watch_parser.add_argument(
         "--lease-seconds",
-        type=positive_float,
+        type=_positive_watch_seconds,
         metavar="SECONDS",
         default=300.0,
         help="How long each watch lease is held before it expires (default 300)",
@@ -167,7 +184,7 @@ def _add_overseer_commands(
         "--timeout",
         "--wait-timeout",
         dest="timeout",
-        type=positive_float,
+        type=_timeout_seconds,
         default=10.0,
         metavar="SECONDS",
         help="Seconds to wait for each Agent Mux authorization (default 10)",
@@ -236,16 +253,18 @@ def _add_overseer_commands(
     )
     overseer_inspect_parser.add_argument(
         "--limit",
-        type=positive_int,
+        # overseer_context.MAX_EXCERPT_CHARS, restated like the choices above:
+        # the ceiling the packet advertises is the most a host may ask for.
+        type=int_in_range(1, 4000),
         metavar="CHARS",
         default=4000,
-        help="Character ceiling for each expansion (default 4000)",
+        help="Character ceiling for each expansion, at most 4000 (the default)",
     )
     overseer_inspect_parser.add_argument(
         "--timeout",
         "--wait-timeout",
         dest="timeout",
-        type=positive_float,
+        type=_timeout_seconds,
         default=10.0,
         metavar="SECONDS",
         help="Seconds to wait for the Agent Mux authorization (default 10)",
@@ -362,7 +381,7 @@ def _add_overseer_commands(
         "--timeout",
         "--wait-timeout",
         dest="timeout",
-        type=positive_float,
+        type=_timeout_seconds,
         default=10.0,
         metavar="SECONDS",
         help="Seconds to wait for the Agent Mux authorization (default 10)",
@@ -410,6 +429,7 @@ def _add_overseer_commands(
     overseer_act_parser.add_argument(
         "--watcher-id",
         required=True,
+        type=non_blank_text,
         help="The watcher holding the lease on this run",
     )
     overseer_act_parser.add_argument(
@@ -522,7 +542,7 @@ def _add_overseer_commands(
         "--timeout",
         "--wait-timeout",
         dest="timeout",
-        type=positive_float,
+        type=_timeout_seconds,
         default=10.0,
         metavar="SECONDS",
         help="Seconds to wait for each Agent Mux authorization (default 10)",
@@ -558,7 +578,7 @@ def _add_overseer_commands(
         "--timeout",
         "--wait-timeout",
         dest="timeout",
-        type=positive_float,
+        type=_timeout_seconds,
         default=10.0,
         metavar="SECONDS",
         help="Seconds to wait for each Agent Mux authorization (default 10)",

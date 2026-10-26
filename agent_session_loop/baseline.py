@@ -32,6 +32,7 @@ The module is stdlib-only.
 
 from __future__ import annotations
 
+import math
 import sys
 from typing import Any, TypedDict
 
@@ -71,6 +72,7 @@ from .baseline_models import BaselineStatus as BaselineStatus
 from .baseline_report import _print_text_baseline, _run_result_payload
 from .baseline_run import run_baseline as run_baseline
 from .cli_defaults import program_name
+from .cli_parser_support import POSITIVE_NUMBER, flag_refusal
 from .plans_errors import PlanError, plan_error_reason
 from .verification_models import verification_context_from_plan
 
@@ -101,9 +103,24 @@ def baseline_from_args(args: Any) -> int:
     common_fields: _BaselineErrorFields = {
         "plan_dir": str(plan_dir_arg),
         "cwd": str(cwd_arg),
-        "per_check_timeout": per_check_timeout,
-        "total_timeout": total_timeout,
+        # NaN and infinity have no JSON spelling, so a refused one is echoed
+        # only in the error text.
+        "per_check_timeout": _json_number(per_check_timeout),
+        "total_timeout": _json_number(total_timeout),
     }
+
+    for flag, value in (
+        ("--per-check-timeout", per_check_timeout),
+        ("--total-timeout", total_timeout),
+    ):
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            _emit_baseline_error(
+                want_json=want_json,
+                reason="input-error",
+                error=flag_refusal(flag, POSITIVE_NUMBER, value),
+                **common_fields,
+            )
+            return 1
 
     try:
         verification_context = verification_context_from_plan(plan_dir_arg, cwd_arg)
@@ -188,6 +205,10 @@ def baseline_from_args(args: Any) -> int:
             )
 
     return exit_code
+
+
+def _json_number(value: float | None) -> float | None:
+    return value if value is None or math.isfinite(value) else None
 
 
 def _emit_baseline_error(

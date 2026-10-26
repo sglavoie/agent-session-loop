@@ -153,7 +153,7 @@ def read_record(
     try:
         record_path = record_path_for_plan(plan_dir, supervision_id, state_dir)
         payload = json.loads(record_path.read_text(encoding="utf-8"))
-    except OSError, ValueError:
+    except OSError, ValueError, RecursionError:
         return None
     if not isinstance(payload, dict):
         return None

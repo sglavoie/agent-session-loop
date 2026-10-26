@@ -11,6 +11,7 @@ from typing import Any
 
 from . import (
     plans_errors,
+    plans_models,
     plans_readiness,
     responses,
 )
@@ -231,11 +232,15 @@ def plans_from_args(args: Any, *, now: datetime | None = None) -> int:
     if readiness_filter is not None:
         try:
             readiness_filter = plans_readiness.parse_readiness_state(readiness_filter)
-        except plans_errors.PlanError as error:
+        except plans_errors.PlanError:
             return _plans_error(
                 args,
-                reason="invalid-readiness",
-                error=str(error),
+                reason="input-error",
+                error=flag_refusal(
+                    "--readiness",
+                    f"must be one of {', '.join(plans_models.READINESS_STATES)}",
+                    readiness_filter,
+                ),
             )
 
     try:
@@ -261,9 +266,9 @@ def plans_from_args(args: Any, *, now: datetime | None = None) -> int:
 
     for summary in summaries:
         readiness: dict[str, str] | None = None
-        if readiness_filter is not None or (
-            stale_days is not None and not summary.last_activity_at
-        ):
+        # A never-run plan's activity is its readiness check stamp, so it is
+        # read whenever activity is unknown, not only for a filter that needs it.
+        if readiness_filter is not None or not summary.last_activity_at:
             readiness = _plan_readiness_payload(
                 summary.plan_dir,
                 warnings=warnings,
