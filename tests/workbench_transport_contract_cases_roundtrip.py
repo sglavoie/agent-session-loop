@@ -215,6 +215,20 @@ class InvalidMessagesFailPredictably(unittest.TestCase):
             transport.encode_frame(envelope)
         self.assertEqual(transport.ERROR_MALFORMED, caught.exception.code)
 
+    def test_a_number_too_large_for_a_float_is_a_refused_field(self) -> None:
+        envelope = fixture("observation-heartbeat")
+        envelope["payload"]["projection_age_seconds"] = 10**400
+        with self.assertRaises(transport.TransportError) as caught:
+            transport.validate_frame(json.dumps(envelope).encode("utf-8"))
+        self.assertEqual(transport.ERROR_INVALID_FIELD, caught.exception.code)
+
+    def test_a_count_too_large_for_the_store_is_a_refused_field(self) -> None:
+        envelope = fixture("observation-heartbeat")
+        envelope["payload"]["source_generation"] = 2**63
+        with self.assertRaises(transport.TransportError) as caught:
+            transport.validate_frame(json.dumps(envelope).encode("utf-8"))
+        self.assertEqual(transport.ERROR_INVALID_FIELD, caught.exception.code)
+
     def test_detail_content_is_bounded_well_under_the_frame_ceiling(self) -> None:
         payload = detail_payload(
             content="x" * (transport.MAX_DETAIL_BYTES + 1), encoding="utf-8"

@@ -129,18 +129,29 @@ def _flag(value: Any, where: str) -> bool:
     return value
 
 
+#: SQLite's largest INTEGER, which every count is eventually stored as.
+_MAX_COUNT = 2**63 - 1
+
+
 def _count(value: Any, where: str, *, minimum: int = 0) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise _fail(ERROR_INVALID_FIELD, where, "expected an integer")
     if value < minimum:
         raise _fail(ERROR_INVALID_FIELD, where, f"below {minimum}")
+    if value > _MAX_COUNT:
+        # Past what the store's integer columns can bind.
+        raise _fail(ERROR_INVALID_FIELD, where, f"above {_MAX_COUNT}")
     return value
 
 
 def _number(value: Any, where: str, *, minimum: float | None = None) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise _fail(ERROR_INVALID_FIELD, where, "expected a number")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        # An integer too large for a float is no more finite than ``inf``.
+        raise _fail(ERROR_INVALID_FIELD, where, "expected a finite number") from None
     if number != number or number in (float("inf"), float("-inf")):
         raise _fail(ERROR_INVALID_FIELD, where, "expected a finite number")
     if minimum is not None and number < minimum:
