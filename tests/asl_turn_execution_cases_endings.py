@@ -223,6 +223,26 @@ class TurnExecutorEndingTests(unittest.TestCase):
         self.assertNotIn(events.TURN_FINISHED_EVENT, names)
         self.assertIsNotNone(finalization.after)
 
+    def test_lone_surrogates_in_harness_output_do_not_lose_the_turn(self) -> None:
+        # A JS CLI that slices a string mid-emoji emits a lone "\ud83d" escape,
+        # which json.loads keeps and a strict UTF-8 log write refuses.
+        text = "cut \ud83d here\n"
+        log = turn_execution_artifacts.prepare_stream_logs(self.harness.paths)
+        log("stdout", text)
+        execution = self.harness.run(
+            harness_result(stdout=text, stderr=text, last_message=text)
+        )
+
+        finalization = self.finalize(execution)
+
+        self.assertEqual("no-status-change", finalization.turn_payload["status_result"])
+        for name in ("stdout", "stderr", "last_message"):
+            with self.subTest(log=name):
+                self.assertEqual(
+                    "cut � here\n",
+                    self.harness.paths[name].read_text(encoding="utf-8"),
+                )
+
     def test_unreadable_plan_is_carried_rather_than_raised(self) -> None:
         execution = self.harness.run(harness_result())
         # A harness that removed the manifest leaves a plan the runner cannot

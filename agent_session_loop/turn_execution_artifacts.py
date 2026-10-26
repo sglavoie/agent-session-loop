@@ -22,10 +22,22 @@ from . import (
     turn_execution_signals,
 )
 
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _log_text(text: str) -> str:
+    """``text`` with any lone surrogate replaced, so it can be written as UTF-8.
+
+    A JS harness that slices a string mid-emoji emits a lone ``\\ud83d``
+    escape, which ``json.loads`` keeps and a strict UTF-8 write refuses; the
+    pipe decoder already replaces undecodable bytes the same way.
+    """
+    return _LONE_SURROGATE.sub("\ufffd", text)
+
 
 def prepare_stream_logs(paths: dict[str, Path]) -> harnesses.StreamCallback:
     def stream_callback(stream_name: harnesses.StreamName, text: str) -> None:
-        durability.append_text(paths[stream_name], text)
+        durability.append_text(paths[stream_name], _log_text(text))
 
     return stream_callback
 
@@ -188,9 +200,9 @@ def write_turn_artifacts(
         if stdout_text and not stdout_text.endswith("\n"):
             stdout_text += "\n"
         stdout_text += f"asl: {termination_note}\n"
-    durability.write_text(paths["stdout"], stdout_text)
-    durability.write_text(paths["stderr"], result.stderr)
-    durability.write_text(paths["last_message"], result.last_message)
+    durability.write_text(paths["stdout"], _log_text(stdout_text))
+    durability.write_text(paths["stderr"], _log_text(result.stderr))
+    durability.write_text(paths["last_message"], _log_text(result.last_message))
 
     status_changes = (
         plans_payloads.status_changes(before, after) if after is not None else ()
