@@ -3,6 +3,7 @@
 from .workbench_history_cases_basics import (
     AttributionTests,
     ClassificationTests,
+    NaiveTimestampTests,
     VocabularyTests,
 )
 from .workbench_history_cases_enrichment import (
@@ -28,6 +29,7 @@ __all__ = [
     "VocabularyTests",
     "ClassificationTests",
     "AttributionTests",
+    "NaiveTimestampTests",
     "EnrichmentTests",
     "NoFalseCompletionTests",
     "RetentionTests",

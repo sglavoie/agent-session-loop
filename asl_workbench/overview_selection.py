@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
 from .overview_filters import QueueFilters, counts_from_states, histogram, matches
@@ -27,6 +26,7 @@ from .overview_vocabulary import (
     primary_state,
     project_names,
 )
+from .timestamps import iso_epoch
 
 __all__ = [
     "QueuePage",
@@ -60,11 +60,7 @@ def _activity_epoch(value: Any) -> float | None:
         return float(text)
     except ValueError:
         pass
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed.timestamp()
+    return iso_epoch(text)
 
 
 def activity_at(row: Mapping[str, Any]) -> float | None:

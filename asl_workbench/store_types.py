@@ -10,7 +10,7 @@ from . import freshness as freshness_module
 # One integer in ``PRAGMA user_version`` is the whole migration ledger. A table
 # of applied migrations would need a migration of its own before it could be
 # read.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 #: The version an installation migrated from the Companion arrives at. Named so
 #: the upgrade test can assert it rather than a bare ``3``.

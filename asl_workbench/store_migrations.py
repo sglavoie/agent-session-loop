@@ -223,11 +223,27 @@ _MIGRATION_4: tuple[str, ...] = (
     "CREATE INDEX catalog_entry_present ON catalog_entry (connector_id, present)",
 )
 
+# Indexes for the lookups the ingestion and detail paths make on every
+# upload. Incident observation asks for a run's latest ending by
+# `(connector_id, run_key)` and for a plan's later completion by
+# `(connector_id, plan_key, recorded_at)`; a detail read resolves a run by
+# `run_key` alone, which the primary key cannot answer because it leads with
+# the connector. Without these each was a scan of a table retention keeps
+# large. `IF NOT EXISTS` so a database that gained one by hand still upgrades.
+_MIGRATION_5: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS history_entry_run "
+    "ON history_entry (connector_id, run_key, recorded_at)",
+    "CREATE INDEX IF NOT EXISTS history_entry_plan "
+    "ON history_entry (connector_id, plan_key, recorded_at)",
+    "CREATE INDEX IF NOT EXISTS run_summary_run_key ON run_summary (run_key)",
+)
+
 MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, _MIGRATION_1),
     (2, _MIGRATION_2),
     (3, incidents.MIGRATION),
     (4, _MIGRATION_4),
+    (5, _MIGRATION_5),
 )
 
 

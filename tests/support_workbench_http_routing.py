@@ -442,6 +442,33 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(remote_response.status, 404)
         self.assertEqual(document(remote_response)["reason"], "not-found")
 
+    def test_a_wrong_method_does_not_reveal_a_concealed_route(self) -> None:
+        """A 405 and its ``Allow`` would confirm what the 404 above conceals."""
+        public = application(role=ROLE_PUBLIC, policy=REMOTE_POLICY)
+        concealed = public.handle(build("POST", "/api/registry", body=b"{}"))
+        self.assertEqual(concealed.status, 404)
+        self.assertIsNone(concealed.headers.get("Allow"))
+        # A path the caller could reach still names its methods.
+        self.assertEqual(
+            public.handle(build("POST", "/api/health", body=b"{}")).status, 405
+        )
+        # And so does a caller who proved a role, or a mode that conceals nothing.
+        summary = application(role=ROLE_SUMMARY, policy=REMOTE_POLICY)
+        local = application(role=ROLE_PUBLIC)
+        for app in (summary, local):
+            with self.subTest(app=app):
+                response = app.handle(build("POST", "/api/registry", body=b"{}"))
+                self.assertEqual(response.status, 405)
+
+    def test_head_is_answered_by_the_get_route(self) -> None:
+        provider = RecordingProvider()
+        response = application(provider=provider).handle(build("HEAD", "/api/queue"))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(provider.calls[0].route.key, ("GET", "/api/queue"))
+        # HEAD stands in for GET only: it does not reach a mutation.
+        refused = application().handle(build("HEAD", "/api/launch"))
+        self.assertEqual(refused.status, 405)
+
     def test_loopback_refuses_a_host_some_other_name_resolved_to(self) -> None:
         """DNS rebinding: a page's own name re-pointed at 127.0.0.1.
 

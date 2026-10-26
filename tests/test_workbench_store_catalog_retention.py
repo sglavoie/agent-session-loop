@@ -189,6 +189,29 @@ class CatalogTests(StoreCase):
         self.assertEqual(counts.plans, 3)
         self.assertEqual(counts.absent_plans, 0)
 
+    def test_project_and_search_filters_are_literal_rather_than_patterns(
+        self,
+    ) -> None:
+        """``_`` and ``%`` are text here, and project membership is exact."""
+        entries = [
+            catalog_entry("plan-a", projects=["my_app"], search_text="ship my_app"),
+            catalog_entry("plan-b", projects=["my-app"], search_text="ship my-app"),
+            catalog_entry("plan-c", projects=["My_App"], search_text="ship 100%"),
+            catalog_entry("plan-d", projects=["x"], search_text="ship 1000"),
+        ]
+        self.send_catalog(observed_at=NOW - 10, generation="gen-1", entries=entries)
+
+        def keys(**filters: str) -> list[str]:
+            return sorted(
+                row["plan_key"] for row in self.store.catalog(now=NOW, **filters)
+            )
+
+        self.assertEqual(keys(project="my_app"), ["plan-a"])
+        self.assertEqual(keys(project="My_App"), ["plan-c"])
+        self.assertEqual(keys(search="my_app"), ["plan-a"])
+        self.assertEqual(keys(search="100%"), ["plan-c"])
+        self.assertEqual(keys(search="\\"), [])
+
     def test_catalog_labels_rather_than_run_rows_name_a_plan(self) -> None:
         """The catalog knows what a plan is called; a run summary only guessed."""
         self.send_snapshot(

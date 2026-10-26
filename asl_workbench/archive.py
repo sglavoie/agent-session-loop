@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from .timestamps import parse_iso
+
 # -- The operations this surface owns ----------------------------------------
 
 #: Registry pins. Not archive operations, but the same registry file and the
@@ -405,15 +407,7 @@ def parse_timestamp(value: Any) -> datetime | None:
     ``None`` rather than raising is what makes an unreadable timestamp an
     ``undated`` entry instead of an error that hides every other entry.
     """
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed
+    return parse_iso(value)
 
 
 def classify_entry(
