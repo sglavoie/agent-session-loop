@@ -83,6 +83,20 @@ def progress_path(plan_dir: str | Path) -> Path:
     return canonicalize_path(plan_dir) / PROGRESS_FILE_NAME
 
 
+def _read_progress_text(path: Path) -> str:
+    """The journal's text, or a ``PlanError`` when it cannot be read as UTF-8.
+
+    A decode failure is a malformed journal, not a crash: every reader of the
+    journal already reports a ``PlanError`` as unreadable.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as error:
+        _raise_read_error(path, error)
+    except UnicodeDecodeError as error:
+        raise PlanError(f"cannot read {path}: not valid UTF-8 ({error})") from error
+
+
 def _validate_progress_version(path: Path, text: str) -> None:
     match = _PROGRESS_VERSION_RE.search(text)
     if match is None:
@@ -229,10 +243,7 @@ def read_progress_entries(plan_dir: str | Path) -> tuple[ProgressEntry, ...]:
     path = progress_path(plan_dir)
     if not _is_file(path):
         return ()
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as error:
-        _raise_read_error(path, error)
+    text = _read_progress_text(path)
     _validate_progress_version(path, text)
     return tuple(_parse_progress_entries(text))
 
@@ -249,10 +260,7 @@ def append_progress_entry(plan_dir: str | Path, entry: ProgressEntry) -> Path:
     rendered_entry = render_progress_entry(entry)
 
     if path.exists():
-        try:
-            existing = path.read_text(encoding="utf-8")
-        except OSError as error:
-            _raise_read_error(path, error)
+        existing = _read_progress_text(path)
         _validate_progress_version(path, existing)
         existing_entries = _parse_progress_entries(existing)
         if existing_entries:

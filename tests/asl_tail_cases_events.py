@@ -217,3 +217,32 @@ class TailFollowerEventsTests(TailFollowerTestCase):
                 self.assertNotIn("abort pending", message)
                 self.assertNotIn("remaining", message)
                 self.assertNotIn("grace not started", message)
+
+    def test_tail_skips_a_non_utf8_event_line_instead_of_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, _state_path, events_path = self.setup_tail_files(
+                Path(tmp)
+            )
+            events.append_event(
+                events_path,
+                events.Event(
+                    name="run_started",
+                    payload={"run_id": "run-1", "plan_dir": str(plan_dir)},
+                    created_at="2026-06-11T12:00:00+00:00",
+                ),
+            )
+            with events_path.open("ab") as handle:
+                handle.write(b"\xff\n")
+            events.append_event(
+                events_path,
+                events.Event(
+                    name="run_finished",
+                    payload={"run_id": "run-1", "ok": True, "reason": "all-complete"},
+                    created_at="2026-06-11T12:00:02+00:00",
+                ),
+            )
+
+            out = io.StringIO()
+            tail.tail_plan(plan_dir, state_dir=state_dir, follow=False, out=out)
+
+            self.assertIn("run finished: run run-1", out.getvalue())

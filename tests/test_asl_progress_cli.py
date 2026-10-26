@@ -6,6 +6,8 @@ from __future__ import annotations
 # ruff: noqa: F403, F405
 from tests.asl_progress_test_support import *
 
+from agent_session_loop import state_mailbox_status
+
 
 ASL_TEST_PORTABLE = True
 
@@ -354,6 +356,31 @@ class ProgressCliTests(unittest.TestCase):
             self.assertEqual("progress", payload["command"])
             self.assertEqual("malformed-progress-journal", payload["reason"])
             self.assertIn("v999", payload["error"])
+
+    def test_progress_reports_a_non_utf8_journal_instead_of_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1",))
+            self._run_backfill(plan_dir)
+            with plans_progress.progress_path(plan_dir).open("ab") as journal:
+                journal.write(b"\xff\n")
+
+            code, out, err = self._run_progress(plan_dir, json_output=True)
+            self.assertEqual(1, code, err)
+            payload = json.loads(out)
+            self.assertEqual("malformed-progress-journal", payload["reason"])
+            self.assertIn("not valid UTF-8", payload["error"])
+
+            # The text view shows the journal as written, the byte replaced.
+            code, out, err = self._run_progress(plan_dir)
+            self.assertEqual(0, code, err)
+            self.assertIn("## Session 1", out)
+            self.assertTrue(out.endswith("�\n"))
+
+            # `asl status` reaches its unreadable-journal branch.
+            journal = state_mailbox_status._progress_journal_payload(plan_dir)
+            self.assertTrue(journal["present"])
+            self.assertIn("not valid UTF-8", journal["error"])
 
     def test_follow_progress_streams_newly_appended_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

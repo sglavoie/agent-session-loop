@@ -12,10 +12,12 @@ from typing import Any
 
 from agent_session_loop import (
     contracts,
+    events,
     plans_session_ids,
     review,
     review_session_body,
     review_session_contract,
+    state,
 )
 from tests.support import (
     _contract_block,
@@ -271,6 +273,27 @@ class ReviewVerdictCommandTests(unittest.TestCase):
                 review.FINAL_REVIEW_ARTIFACT_FILENAME,
                 payload["next_steps"][0],
             )
+
+    def test_non_utf8_event_log_and_review_do_not_crash_the_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("complete",))
+            self._write_review(plan_dir, f"body\n{review.REVIEW_STATUS_ALL_CLEAR}\n")
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            # A stray byte spoils only its own line of the event history.
+            (plan_state / events.EVENTS_FILE_NAME).write_bytes(b"\xff\n")
+
+            payload = review.review_verdict_payload(plan_dir, state_dir)
+            self.assertTrue(payload["ok"], payload)
+            self.assertEqual("all-clear", payload["outcome"])
+
+            # A review that is not UTF-8 reads as malformed, not as a crash.
+            (plan_dir / review.FINAL_REVIEW_FILENAME).write_bytes(b"body \xff\n")
+            payload = review.review_verdict_payload(plan_dir, state_dir)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(review.REVIEW_REASON_MALFORMED, payload["reason"])
 
     def test_missing_review_step_keeps_metacharacter_plan_path_one_arg(
         self,

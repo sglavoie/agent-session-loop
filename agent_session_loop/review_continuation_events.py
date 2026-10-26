@@ -63,17 +63,19 @@ def _parse_review_events(path: Path) -> tuple[ReviewEventRecord, ...] | None:
     }
     records: list[ReviewEventRecord] = []
     try:
-        event_file = path.open("r", encoding="utf-8")
+        event_file = path.open("rb")
     except OSError:
         return None
     with event_file:
-        for line in event_file:
-            line = line.strip()
-            if not line:
+        # Bytes, decoded line by line: a stray non-UTF-8 byte then spoils only
+        # its own line, the way a torn line does, not the whole history.
+        for raw_line in event_file:
+            raw_line = raw_line.strip()
+            if not raw_line:
                 continue
             try:
-                record = json.loads(line)
-            except json.JSONDecodeError, ValueError:
+                record = json.loads(raw_line.decode("utf-8"))
+            except ValueError, RecursionError:
                 continue
             if not isinstance(record, dict):
                 continue
@@ -107,18 +109,19 @@ def read_standing_pause_reason(event_path: str | Path) -> str | None:
     reason: str | None = None
     try:
         event_file = Path(event_path).open(  # noqa: SIM115 - opened here so OSError returns None; closed by the with below
-            "r", encoding="utf-8"
+            "rb"
         )
     except OSError:
         return None
     with event_file:
-        for line in event_file:
-            line = line.strip()
-            if not line:
+        # Decoded line by line, as `_parse_review_events` does.
+        for raw_line in event_file:
+            raw_line = raw_line.strip()
+            if not raw_line:
                 continue
             try:
-                record = json.loads(line)
-            except json.JSONDecodeError, ValueError:
+                record = json.loads(raw_line.decode("utf-8"))
+            except ValueError, RecursionError:
                 continue
             if not isinstance(record, dict):
                 continue

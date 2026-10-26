@@ -234,7 +234,11 @@ def progress_from_args(args: argparse.Namespace) -> int:
 
     if progress_file.exists():
         try:
-            sys.stdout.write(progress_file.read_text(encoding="utf-8"))
+            # Shown as written, a stray non-UTF-8 byte replaced, the way
+            # `--tail` already streams it: the text view is for reading.
+            sys.stdout.write(
+                progress_file.read_bytes().decode("utf-8", errors="replace")
+            )
         except OSError as error:
             print(
                 f"{program_name()} progress: cannot read {progress_file}: {error}",
