@@ -568,12 +568,25 @@ export function syncSelectedPlanView() {
   // visible list so the operator does not have to wait for the next
   // queue poll cycle.
   state.rowsByPlan.forEach((row, dir) => {
-    row.setAttribute(
-      "data-selected",
-      dir === state.selectedPlan ? "true" : "false"
-    );
+    markRowSelected(row, dir === state.selectedPlan);
   });
   updatePreview(state.lastVisiblePlans || []);
+}
+
+/**
+ * Mark a queue row as the selected one, for the eye and for a screen reader.
+ *
+ * `data-selected` drives the styling; `aria-current` is what an assistive
+ * technology announces on the focusable row, which would otherwise say
+ * nothing about which plan the preview is showing.
+ */
+export function markRowSelected(row, selected) {
+  row.setAttribute("data-selected", selected ? "true" : "false");
+  if (selected) {
+    row.setAttribute("aria-current", "true");
+  } else {
+    row.removeAttribute("aria-current");
+  }
 }
 
 export function populateRow(row, plan) {
