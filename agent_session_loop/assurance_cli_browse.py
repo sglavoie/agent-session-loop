@@ -29,6 +29,7 @@ from .assurance_cli_common import (
 from .assurance_models_primitives import AssuranceError, parse_issue_id
 from .assurance_models_vocab import ISSUE_STATES, SEVERITIES
 from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
+from .formatting import count_noun
 
 
 def assurance_list_from_args(args: argparse.Namespace) -> int:
@@ -135,7 +136,7 @@ def _show_text_lines(payload: dict[str, Any]) -> list[str]:
         lines.append(f"  also named by   {', '.join(absorbed_keys)}")
     lines.extend(
         (
-            f"History: {issue['occurrence_count']} occurrence(s)  "
+            f"History: {count_noun(issue['occurrence_count'], 'occurrence')}  "
             f"first {issue['first_seen_at']}  last {issue['last_seen_at']}  "
             f"reopened {issue['reopened_count']}",
             f"Summary: {issue['summary']}",
@@ -150,7 +151,8 @@ def _show_text_lines(payload: dict[str, Any]) -> list[str]:
     lines.append(f"Observations ({issue['occurrence_count']}):")
     if issue["occurrences_omitted"]:
         lines.append(
-            f"  ... {issue['occurrences_omitted']} older occurrence(s) not shown"
+            f"  ... {count_noun(issue['occurrences_omitted'], 'older occurrence')} "
+            "not shown"
         )
     for occurrence in issue["occurrences"]:
         artifact = occurrence["audit_artifact"]
@@ -184,10 +186,8 @@ def _show_text_lines(payload: dict[str, Any]) -> list[str]:
                 + ("" if digest is None else f"  sha256 {digest}")
             )
         if run["artifacts_omitted"]:
-            lines.append(
-                f"    ... {run['artifacts_omitted']} more artifact "
-                "reference(s) not shown"
-            )
+            omitted = count_noun(run["artifacts_omitted"], "more artifact reference")
+            lines.append(f"    ... {omitted} not shown")
 
     if issue["plans"]:
         lines.append(f"Improvement plans ({len(issue['plans'])}):")

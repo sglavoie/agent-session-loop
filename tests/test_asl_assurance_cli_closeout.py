@@ -159,6 +159,24 @@ class AssuranceCloseoutTests(fixtures.AssuranceCliTestCase):
             self.inbox().run(fixtures.RUN_ID).closeout.outcome,
         )
 
+    def test_one_minute_of_rework_reads_in_the_singular(self) -> None:
+        self.open_three_issues()
+
+        code, out, err = self.run_cli(
+            [
+                "assurance",
+                "closeout",
+                fixtures.RUN_ID,
+                "--outcome",
+                "reworked",
+                "--rework-minutes",
+                "1",
+            ]
+        )
+
+        self.assertEqual(0, code, err)
+        self.assertIn("Rework: 1 minute\n", out)
+
     def test_a_bare_run_id_resolves_through_the_state_corpus(self) -> None:
         self.open_three_issues()
         plan_dir = self.seed_run_directory("alpha-plan", fixtures.RUN_ID)

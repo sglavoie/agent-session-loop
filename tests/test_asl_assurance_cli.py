@@ -101,7 +101,7 @@ class AssuranceListTests(fixtures.AssuranceCliTestCase):
         code, out, err = self.run_cli(["assurance", "list", "--limit", "2"])
         self.assertEqual(0, code, err)
         self.assertEqual(["ASI-3", "ASI-2"], self.list_rows(out))
-        self.assertIn("1 more matching issue(s) not shown", out)
+        self.assertIn("1 more matching issue not shown", out)
 
     def test_default_limit_is_fifty_rows(self) -> None:
         self.open_three_issues()
@@ -169,7 +169,7 @@ class AssuranceShowTests(fixtures.AssuranceCliTestCase):
         self.assertIn("state open", out)
         self.assertIn("retry.budget-respected", out)
         self.assertIn("lifecycle-retry-resume", out)
-        self.assertIn("1 occurrence(s)", out)
+        self.assertIn("History: 1 occurrence ", out)
         self.assertIn(fixtures.RUN_ID, out)
         self.assertIn("supervisor-audit-input.json", out)
         self.assertIn(fixtures.INPUT_DIGEST, out)

@@ -13,6 +13,7 @@ from . import assurance_projection as projection
 from . import responses, state_plan_refs
 from .assurance_models_primitives import AssuranceError, issue_id_number
 from .cli_defaults import program_name
+from .formatting import count_noun
 
 """Operator surface over the assurance inbox.
 
@@ -268,8 +269,8 @@ def _print_warnings(fields: dict[str, Any]) -> None:
     omitted = fields["warnings_omitted"]
     if omitted:
         print(
-            f"{program_name()} assurance: warning: {omitted} further "
-            "unreadable ledger record(s) not shown",
+            f"{program_name()} assurance: warning: "
+            f"{count_noun(omitted, 'further unreadable ledger record')} not shown",
             file=sys.stderr,
         )
 
@@ -431,7 +432,7 @@ def _list_text_lines(payload: dict[str, Any]) -> list[str]:
         )
     if payload["omitted_count"]:
         lines.append(
-            f"  ... {payload['omitted_count']} more matching issue(s) not "
-            "shown; raise --limit or pass --all"
+            f"  ... {count_noun(payload['omitted_count'], 'more matching issue')} "
+            "not shown; raise --limit or pass --all"
         )
     return lines

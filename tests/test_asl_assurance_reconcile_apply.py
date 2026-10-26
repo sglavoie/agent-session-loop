@@ -380,7 +380,5 @@ class ApplyTests(ReconcileTestCase):
             ["assurance", "reconcile", "--apply", str(path), "--yes"]
         )
         self.assertEqual(0, code, err)
-        self.assertIn(
-            "Applied 4 record(s): 3 binding(s), 0 ruling(s) and 1 merge(s).", out
-        )
+        self.assertIn("Applied 4 records: 3 bindings, 0 rulings and 1 merge.", out)
         self.assertIn("Merging is irreversible.", out)

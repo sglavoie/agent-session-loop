@@ -32,6 +32,7 @@ from .assurance_models_reconcile import (
     ReconciliationManifest,
     parse_reconciliation_manifest,
 )
+from .formatting import count_noun
 
 _RECONCILE_HINTS: dict[str, str] = {
     reconcile.STALE_CATALOG_DIGEST: (
@@ -65,9 +66,13 @@ def _read_manifest(args: argparse.Namespace) -> ReconciliationManifest:
     return parse_reconciliation_manifest(payload)
 
 
+def _were(count: int) -> str:
+    return "was" if count == 1 else "were"
+
+
 def _reconcile_preview_text_lines(payload: dict[str, Any]) -> list[str]:
     lines = [
-        f"Inbox: {payload['issue_count']} canonical issue(s), "
+        f"Inbox: {count_noun(payload['issue_count'], 'canonical issue')}, "
         f"{payload['bound_count']} with an identity key.",
         f"Catalog: {payload['catalog_digest']}",
     ]
@@ -101,13 +106,16 @@ def _reconcile_preview_text_lines(payload: dict[str, Any]) -> list[str]:
             lines.append(f"  ... and {omitted} more")
     if payload["truncated_pairs"]:
         lines.append(
-            f"{payload['truncated_pairs']} weaker pair(s) were not offered; "
+            f"{count_noun(payload['truncated_pairs'], 'weaker pair')} "
+            f"{_were(payload['truncated_pairs'])} not offered; "
             "reconcile again after applying this manifest to see them."
         )
-    if payload["suppressed_pairs"]:
+    suppressed = payload["suppressed_pairs"]
+    if suppressed:
         lines.append(
-            f"{payload['suppressed_pairs']} pair(s) were already reviewed as "
-            "distinct defects and are not asked about again."
+            f"{count_noun(suppressed, 'pair')} {_were(suppressed)} already "
+            f"reviewed as distinct defects and {'is' if suppressed == 1 else 'are'} "
+            "not asked about again."
         )
     lines.append("Nothing was written. To act on this:")
     lines.append("  asl assurance reconcile --json | jq .manifest > manifest.json")
@@ -122,12 +130,15 @@ def _reconcile_apply_text_lines(payload: dict[str, Any]) -> list[str]:
             "Every decision in this manifest is already recorded; nothing was written."
         ]
     lines = [
-        f"Applied {payload['records']} record(s): {payload['bindings']} binding(s), "
-        f"{payload['kept_distinct']} ruling(s) and {payload['merges']} merge(s).",
+        f"Applied {count_noun(payload['records'], 'record')}: "
+        f"{count_noun(payload['bindings'], 'binding')}, "
+        f"{count_noun(payload['kept_distinct'], 'ruling')} and "
+        f"{count_noun(payload['merges'], 'merge')}.",
     ]
     if payload["kept_distinct"]:
         lines.append(
-            f"{payload['kept_distinct']} pair(s) were reviewed as distinct defects; "
+            f"{count_noun(payload['kept_distinct'], 'pair')} "
+            f"{_were(payload['kept_distinct'])} reviewed as distinct defects; "
             "they stop being suggested until one of them changes."
         )
     if payload["merges"]:
@@ -153,8 +164,8 @@ def _reconcile_apply(args: argparse.Namespace) -> int:
     merges = manifest.of_kind(DECISION_MERGE)
     if merges and not _confirm(
         args,
-        f"Apply {len(manifest.decisions)} decision(s), including {len(merges)} "
-        "merge(s)? Merging cannot be undone.",
+        f"Apply {count_noun(len(manifest.decisions), 'decision')}, including "
+        f"{count_noun(len(merges), 'merge')}? Merging cannot be undone.",
     ):
         return _print_error(
             args,

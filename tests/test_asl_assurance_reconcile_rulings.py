@@ -195,7 +195,7 @@ class KeepDistinctTests(ReconcileTestCase):
         code, out, err = self.run_cli(["assurance", "reconcile"])
         self.assertEqual(0, code, err)
         self.assertIn("No pairs need review.", out)
-        self.assertIn("1 pair(s) were already reviewed as distinct defects", out)
+        self.assertIn("1 pair was already reviewed as distinct defects and is not", out)
 
 
 class ConcurrentApplyTests(ReconcileTestCase):

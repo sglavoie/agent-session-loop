@@ -400,7 +400,8 @@ def assurance_closeout_from_args(args: argparse.Namespace) -> int:
         return 0
     print(f"Run {closeout.run_id} was closed out as {closeout.outcome}.")
     if closeout.rework_minutes is not None:
-        print(f"Rework: {closeout.rework_minutes:g} minute(s)")
+        unit = "minute" if closeout.rework_minutes == 1 else "minutes"
+        print(f"Rework: {closeout.rework_minutes:g} {unit}")
     if closeout.issue_ids:
         print(f"Linked issues: {', '.join(closeout.issue_ids)}")
     if closeout.plan_id is not None:
