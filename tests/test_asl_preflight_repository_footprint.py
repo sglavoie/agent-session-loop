@@ -80,6 +80,11 @@ class RepositoryFootprintPreflightTests(unittest.TestCase):
         self.assertEqual(["red", "red"], [finding.severity for finding in findings])
         self.assertIn("escapes the bound root", findings[0].message)
         self.assertIn("2 git repositories", findings[1].message)
+        # The session-scoped finding names its session file.
+        self.assertEqual(
+            str(report.snapshot.sessions[0].session.path), findings[0].path
+        )
+        self.assertIsNone(findings[1].path)
         self.assertEqual(
             ["repository-footprint.out-of-root", "repository-footprint.multi-repo"],
             [

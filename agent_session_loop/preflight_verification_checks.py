@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ from .contracts import (
     CompletionContract,
 )
 from .plans_errors import PlanError
-from .preflight_models import PreflightFinding, _finding
+from .preflight_models import PreflightFinding, PreflightSeverity, _finding
 from .verification_command_diagnosis import diagnose_command, diagnose_command_scope
 from .verification_models import VerificationContext
 
@@ -86,6 +87,8 @@ def _check_command_runnability(
     context: VerificationContext | None = None,
     which: Any | None = None,
     module_probe: Any | None = None,
+    session_paths: Mapping[str, str] | None = None,
+    footprint_escapes: frozenset[str] = frozenset(),
 ) -> tuple[PreflightFinding, ...]:
     """Flag contract command checks that cannot run in this environment.
 
@@ -96,6 +99,13 @@ def _check_command_runnability(
     to red findings and ``module-not-importable`` to a yellow finding. All block
     ``--mark-loop-ready``.
 
+    A check whose location cannot be resolved is a ``repository-contract``
+    finding in a registered plan. In a legacy plan it is a contract escaping
+    its bound root, so it is ``malformed-contract``, and it is left out when
+    its ``cwd`` is in ``footprint_escapes``: the ``repository-footprint``
+    finding already reports that very target.
+
+    ``session_paths`` maps a session id to its file, which every finding names.
     ``which`` and ``module_probe`` are optional injectable seams forwarded to
     :func:`diagnose_command`; when ``None`` the helper's own defaults
     (``shutil.which`` / a bounded import probe) are used.
@@ -104,6 +114,8 @@ def _check_command_runnability(
         return ()
 
     verification_context = context or VerificationContext.legacy(cwd)
+    registered = verification_context.workspace is not None
+    paths = session_paths or {}
     diagnose_kwargs: dict[str, Any] = {}
     if which is not None:
         diagnose_kwargs["which"] = which
@@ -114,18 +126,22 @@ def _check_command_runnability(
 
     for session_id in sorted(contracts_by_session):
         contract = contracts_by_session[session_id]
+        path = paths.get(session_id)
         for check in contract.verify.checks:
             if not isinstance(check, CommandCheck):
                 continue
             try:
                 resolved = verification_context.resolve_check(check)
             except PlanError as error:
+                if not registered and (check.cwd or ".") in footprint_escapes:
+                    continue
                 findings.append(
                     _finding(
                         "red",
-                        "repository-contract",
+                        "repository-contract" if registered else "malformed-contract",
                         f"session {session_id} check {check.name!r} is invalid",
                         session_id=session_id,
+                        path=path,
                         detail=str(error),
                     )
                 )
@@ -138,43 +154,23 @@ def _check_command_runnability(
             if diagnostic is None:
                 continue
             if diagnostic.reason == "cwd-not-found":
-                findings.append(
-                    _finding(
-                        "red",
-                        "command-not-runnable",
-                        (
-                            f"session {session_id} check {check.name!r} "
-                            "cwd does not exist"
-                        ),
-                        session_id=session_id,
-                        detail=diagnostic.detail,
-                    )
-                )
+                severity: PreflightSeverity = "red"
+                summary = "cwd does not exist"
             elif diagnostic.reason == "executable-not-found":
-                findings.append(
-                    _finding(
-                        "red",
-                        "command-not-runnable",
-                        (
-                            f"session {session_id} check {check.name!r} "
-                            "executable is not on PATH"
-                        ),
-                        session_id=session_id,
-                        detail=diagnostic.detail,
-                    )
-                )
+                severity = "red"
+                summary = "executable is not on PATH"
             else:
-                findings.append(
-                    _finding(
-                        "yellow",
-                        "command-not-runnable",
-                        (
-                            f"session {session_id} check {check.name!r} "
-                            "module is not importable"
-                        ),
-                        session_id=session_id,
-                        detail=diagnostic.detail,
-                    )
+                severity = "yellow"
+                summary = "module is not importable"
+            findings.append(
+                _finding(
+                    severity,
+                    "command-not-runnable",
+                    f"session {session_id} check {check.name!r} {summary}",
+                    session_id=session_id,
+                    path=path,
+                    detail=diagnostic.detail,
                 )
+            )
 
     return tuple(findings)

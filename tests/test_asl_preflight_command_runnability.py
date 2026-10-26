@@ -148,6 +148,38 @@ class PreflightCommandRunnabilityTests(unittest.TestCase):
         self.assertIn("cwd does not exist", finding.message)
         self.assertIn("no-such-dir", finding.detail)
 
+    def test_legacy_escaping_cwd_is_a_malformed_contract_on_its_file(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = contracts.CommandCheck(
+                name="esc", argv=("true",), timeout_seconds=300, cwd=".."
+            )
+            contracts_by_session = {"1": self._contract("1", check)}
+            session_paths = {"1": f"{tmp}/session-1.md"}
+
+            findings = preflight_verification_checks._check_command_runnability(
+                contracts_by_session,
+                tmp,
+                which=lambda name: f"/usr/bin/{name}",
+                session_paths=session_paths,
+            )
+            # The footprint already reports this very target as escaping.
+            deduplicated = preflight_verification_checks._check_command_runnability(
+                contracts_by_session,
+                tmp,
+                which=lambda name: f"/usr/bin/{name}",
+                session_paths=session_paths,
+                footprint_escapes=frozenset({".."}),
+            )
+
+        self.assertEqual(1, len(findings))
+        finding = findings[0]
+        self.assertEqual("malformed-contract", finding.category)
+        self.assertEqual(f"{tmp}/session-1.md", finding.path)
+        self.assertIn("escapes the bound root", finding.detail)
+        self.assertEqual((), deduplicated)
+
     def test_missing_module_emits_single_yellow(self) -> None:
         contracts_by_session = {
             "1": self._contract(

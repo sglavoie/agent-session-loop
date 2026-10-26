@@ -141,6 +141,11 @@ def _check_repository_footprint(
         plan_dir=plan_dir,
         provenance_roots=provenance_roots,
     )
+    session_paths = (
+        {}
+        if snapshot is None
+        else {status.id: str(status.session.path) for status in snapshot.sessions}
+    )
     findings: list[PreflightFinding] = []
     for session_id in sorted(targets_by_session):
         session_footprint = repository_scope.resolve_footprint(
@@ -159,6 +164,7 @@ def _check_repository_footprint(
                         "bound root"
                     ),
                     session_id=session_id,
+                    path=session_paths.get(session_id),
                     line=target.line or None,
                     detail=f"{target.value} is outside {footprint.root}",
                 )
