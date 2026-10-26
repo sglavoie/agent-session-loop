@@ -91,6 +91,27 @@ def print_error(
     print(message, file=sys.stderr)
 
 
+def _refused_empty_plan_argument(
+    args: argparse.Namespace, *, command_name: str, text_label: str
+) -> bool:
+    """Refuse an empty plan argument, which would otherwise name the cwd.
+
+    ``Path("")`` is ``.``, so ``asl unlock ""`` would act on whatever
+    directory the shell happens to be in. Returns ``True`` when refused.
+    """
+    raw_value = args.plan_dir
+    if not isinstance(raw_value, str) or raw_value.strip():
+        return False
+    print_error(
+        args,
+        command_name=command_name,
+        text_label=text_label,
+        reason="input-error",
+        error="PLAN_DIR must not be empty",
+    )
+    return True
+
+
 def resolve_plan_dir_argument(
     args: argparse.Namespace,
     *,
@@ -110,6 +131,10 @@ def resolve_plan_dir_argument(
     raw_value = str(args.plan_dir)
     if not hasattr(args, "json"):
         args.json = False
+    if _refused_empty_plan_argument(
+        args, command_name=command_name, text_label=text_label
+    ):
+        return False
     try:
         resolved = state_plan_refs.resolve_plan_reference(
             raw_value, state.state_root(getattr(args, "state_dir", None))
@@ -171,6 +196,10 @@ def resolve_plan_context(
     text_label: str,
 ) -> PlanCommandContext | None:
     """Resolve and inspect ``args.plan_dir``, reporting failures in place."""
+    if _refused_empty_plan_argument(
+        args, command_name=command_name, text_label=text_label
+    ):
+        return None
     try:
         resolved_plan_dir = state_plan_refs.resolve_plan_reference(
             args.plan_dir, state.state_root(args.state_dir)

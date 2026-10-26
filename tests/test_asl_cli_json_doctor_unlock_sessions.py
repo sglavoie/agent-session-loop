@@ -412,6 +412,43 @@ class JsonDoctorUnlockSessionsCliTests(JsonCliHelpers, unittest.TestCase):
             self.assertIn("plan directory does not exist", payload["error"])
             self.assertFalse(state_dir.exists())
 
+    def test_unlock_refuses_an_empty_plan_argument_instead_of_the_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            # The cwd is a real plan, so resolving "" to it would succeed.
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            state_dir = Path(tmp) / "state"
+            env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
+
+            def _unlock(*extra: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "agent_session_loop",
+                        "unlock",
+                        "",
+                        "--state-dir",
+                        str(state_dir),
+                        *extra,
+                    ],
+                    cwd=plan_dir,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+            text = _unlock()
+            self.assertEqual(1, text.returncode)
+            self.assertIn("asl unlock: PLAN_DIR must not be empty", text.stderr)
+
+            as_json = _unlock("--json")
+            self.assertEqual(1, as_json.returncode)
+            payload = json.loads(as_json.stdout)
+            self.assertEqual("input-error", payload["reason"])
+            self.assertFalse(state_dir.exists())
+
     def test_unlock_refuses_a_directory_that_is_not_a_split_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             not_a_plan = Path(tmp) / "empty"
