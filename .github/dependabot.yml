@@ -22,3 +22,15 @@ updates:
         update-types:
           - minor
           - patch
+
+  # The `dev` dependency group in pyproject.toml pins the lint toolchain (ruff,
+  # mypy) that `just lint` and both CI lanes install.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      pip-minor-patch:
+        update-types:
+          - minor
+          - patch

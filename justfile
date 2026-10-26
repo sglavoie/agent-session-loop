@@ -64,9 +64,9 @@ test-browser:
     npm test
 
 # Reliability stress gate. Repeats the load- and calendar-sensitive scenarios
-# in isolation, then again as concurrent shards while the full suite loads the
-# machine, then sweeps the date-sensitive ones across timezones, and finally
-# enforces the end-to-end time budgets on a quiet machine.
+# in isolation, then sweeps the date-sensitive ones across timezones, then
+# repeats them again as concurrent shards while the full suite loads the
+# machine, and finally enforces the end-to-end time budgets on a quiet machine.
 #
 # The correctness scenarios synchronize on run state and pin their own clock,
 # so neither contention nor the calendar may change their outcome. Time budgets

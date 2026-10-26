@@ -47,6 +47,10 @@ It stops with a terminal status (`complete`, `max-sessions`, `stopped`, `needs_a
 
 `asl prepare PLAN.md --cwd ROOT` runs the whole preparation pipeline (split, validate, expand, baseline, mark loop-ready) in one deterministic command and prints the exact `asl run` command on success, `asl split --check --plan-file PLAN.md` lints a source plan's session headings without writing anything and reports every malformed heading at once (each with a `suggested_line` when the repair is unambiguous) so `session-split` repairs a plan instead of dead-ending on `malformed-plan`, `asl baseline` records completion-contract baseline evidence for the preflight gate, `asl compact-state` reclaims duplicated operational JSON (dry-run by default, `--apply` to rewrite), `asl bridge serve --stdio --protocol 2` exposes the active/actionable run corpus and every operator intervention to an external supervision client over NDJSON on stdio (body-free snapshots plus `runs.changed`, an explicit `question.get`, and token-guarded `question.reply`, `question.resolve`, `run.resume`, `run.stop_after_current`, `run.abort`, and `workbench.ensure` that share one service layer with the CLI and Workbench, answer `accepted` with an operation ID, and report later outcomes as body-free `operation.updated` events), and `asl metrics` reports reliability, windowed review materializations and reopen attempts/results, and storage numbers over the recent state corpus (default activity window: last 7 days).
 
+### Inspection and maintenance
+
+`asl doctor PLAN_DIR --harness codex|claude|copilot` checks a plan's harness and path prerequisites before its first run; `asl tail PLAN_DIR_OR_ID` follows a plan's run events and harness logs (`--no-follow` prints once); `asl plans` lists discovered plan directories (filter with `--stale-days DAYS`, `--never-run` or `--readiness READINESS`); `asl review-verdict PLAN_DIR_OR_ID` prints the full final-review verdict with its continuation evaluation and remediation commands; `asl overseer scan|watch|inspect|...` is the CLI the `asl-overseer` skill drives to watch authorized runs; `asl gc [PLAN_DIR] [--max-age-days DAYS]` reclaims old run directories (dry-run unless `--apply`); and `asl unlock PLAN_DIR_OR_ID` removes a stale operational lock (`--force` even when it appears active).
+
 See `docs/agent-session-loop.md` for the split → expand → run workflow, the `$asl` Autopilot skill, and the Workbench security model, registry, cleanup/archive, Recovery Center, and smoke checklist.
 
 ## Plans and preparation
@@ -390,11 +394,19 @@ no shell script, no launchd, no harness executable — so it can run on a machin
 (such as Linux) without those tools. `just test-all` runs against the real
 tools, so nothing is reported as passing on a machine that does not have them.
 The workflows in `.github/workflows/` are active: `check.yml` runs on every push
-to `main` and every pull request against it -- a Linux lane (lint plus
-`just test-portable`, on Python 3.14 and 3.15) and a macOS lane (lint plus
-`just test-all`, sliced across parallel jobs); `workbench-browser.yml` runs
-`just test-browser` for changes under `tests/workbench_browser/` or
-`asl_workbench/`; and `harness-compatibility.yml` is a no-model-use
+to `main` and every pull request against it -- a Linux lane on Python 3.14
+and 3.15 (lint, `just test-portable`, the read-only
+`python3 -m agent_session_loop.startup_context --check --reference-only`
+staleness check, and the no-model `asl harness-compat --json` policy check), a
+Python 3.13 job that runs `python3.13 -m unittest -q tests.test_workbench_portable`
+to hold the portable Workbench to its remote host's interpreter, and a macOS
+lane (lint plus `just test-all`, sliced across parallel jobs);
+`workbench-browser.yml` runs `just test-browser` for changes under
+`tests/workbench_browser/`, `asl_workbench/`, the `agent_session_loop`
+modules the browser fixture server imports directly (`cli`, `events`,
+`plans_files`, `state` and every `workbench_*` module), or the shared
+`tests/workbench_support*.py` seeding (the rest of the CLI it reaches
+transitively is covered by the Python suite's own Workbench shell tests); and `harness-compatibility.yml` is a no-model-use
 `asl harness-compat` smoke that runs weekly and for changes to
 `agent_session_loop/harness_compatibility.py`. A failed test job uploads
 `.cache/run_suite_logs/`, the full output of every failed shard. The same
