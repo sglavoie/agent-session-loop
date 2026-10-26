@@ -13,6 +13,7 @@ from . import (
     authoring_source_models,
     authoring_transaction,
     contracts,
+    harnesses,
 )
 from .authoring_transaction import PlanTransaction
 from .contracts import COMPLETION_CONTRACT_HEADING
@@ -86,8 +87,23 @@ def _author_plan_directory(
     *,
     base_dir: str | Path | None,
     force_new: bool = False,
+    harness: str | None = None,
 ) -> Path:
-    """Author the split plan directory deterministically, in one transaction."""
+    """Author the split plan directory deterministically, in one transaction.
+
+    Sessions render exactly as ``asl split`` renders them: trimmed instruction
+    lines with a registered plan's scope fields lifted into the session header,
+    and a manifest whose ``session-run`` command carries ``harness``'s skill
+    prefix.
+    """
+    skill_prefix = next(
+        (
+            prefix
+            for name, prefix in harnesses.skill_prefixes().items()
+            if name == harness
+        ),
+        "/",
+    )
     resolver = authoring_paths.resolve_plan_output(
         source_path, base_dir, force_new=force_new
     )
@@ -110,13 +126,16 @@ def _author_plan_directory(
             authoring_render.render_session_file(
                 session_id=session.session_id,
                 title=session.title,
-                instruction_lines=_strip_contract_lines(list(session.lines)),
+                instruction_lines=_strip_contract_lines(
+                    list(session.instruction_lines)
+                ),
                 heading_level=session.heading_level,
                 is_first=index == 0,
                 previous_session_id=(
                     parsed.sessions[index - 1].session_id if index else None
                 ),
                 contract=contract,
+                scope=session.scope,
                 repository_registry=parsed.registry,
             ),
         )
@@ -145,6 +164,7 @@ def _author_plan_directory(
                     checked_at="pending",
                 ),
                 registry=parsed.registry,
+                skill_prefix=skill_prefix,
             )
         ),
     )

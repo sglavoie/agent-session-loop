@@ -246,6 +246,7 @@ def prepare_plan(
             contracts_by_id,
             base_dir=base_dir,
             force_new=force_new,
+            harness=harness,
         )
         steps.append(
             PrepareStep(
