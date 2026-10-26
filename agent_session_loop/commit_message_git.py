@@ -35,6 +35,25 @@ def _git(
     return run_git_reporting(cwd, args, stdin_text=stdin_text, env=env, timeout=timeout)
 
 
+def _git_paths(
+    cwd: Path,
+    args: Sequence[str],
+    *,
+    stdin_text: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run git over paths named literally, never as pathspec patterns.
+
+    Every path this module hands git is a filename the run recorded, so
+    ``app/[id]/page.tsx`` must not glob-match ``app/i/page.tsx`` and a file
+    called ``:notes.md`` must not be parsed as pathspec magic. Only these
+    calls carry the override: the commit itself does not, because a
+    repository's hooks inherit its environment and may rely on globbing.
+    """
+    literal = {**(env or {}), "GIT_LITERAL_PATHSPECS": "1"}
+    return _git(cwd, args, stdin_text=stdin_text, env=literal)
+
+
 def find_git_root(start: Path) -> Path | None:
     """Walk upward from ``start`` for the directory holding ``.git``."""
     current = Path(start).resolve()
@@ -66,7 +85,7 @@ def has_staged_changes(cwd: Path, pathspec: Sequence[str] | None = None) -> bool
     anything else is a git failure and must not read as staged content.
     """
     argv = ["diff", "--cached", "--quiet", *_pathspec_args(pathspec)]
-    return _git(cwd, argv).returncode == 1
+    return _git_paths(cwd, argv).returncode == 1
 
 
 def stage_all(cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -87,17 +106,17 @@ def stage_paths(cwd: Path, paths: Sequence[str]) -> subprocess.CompletedProcess[
         return subprocess.CompletedProcess(
             ["git", "add", "--"], 0, stdout="", stderr=""
         )
-    return _git(cwd, ["add", "--", *paths])
+    return _git_paths(cwd, ["add", "--", *paths])
 
 
 def _deletion_already_staged(cwd: Path, path: str) -> bool:
     target = cwd / path
     if target.exists() or target.is_symlink():
         return False
-    in_index = _git(cwd, ["ls-files", "--", path])
+    in_index = _git_paths(cwd, ["ls-files", "--", path])
     if in_index.returncode != 0 or in_index.stdout.strip():
         return False
-    in_head = _git(cwd, ["ls-tree", "--name-only", "-z", "HEAD", "--", path])
+    in_head = _git_paths(cwd, ["ls-tree", "--name-only", "-z", "HEAD", "--", path])
     return in_head.returncode == 0 and in_head.stdout.rstrip("\0") == path
 
 
@@ -125,7 +144,9 @@ def capture_staged_diff(
     ``pathspec`` narrows the capture to the paths this invocation owns, so an
     unrelated entry staged before the run never reaches the prompt.
     """
-    result = _git(cwd, ["diff", "--cached", "--no-ext-diff", *_pathspec_args(pathspec)])
+    result = _git_paths(
+        cwd, ["diff", "--cached", "--no-ext-diff", *_pathspec_args(pathspec)]
+    )
     if result.returncode != 0:
         raise models.CommitMessageError(
             f"failed to capture staged diff: {result.stderr.strip()}",
@@ -177,7 +198,7 @@ def changes_are_all_binary(
             "--no-renames",
             *_pathspec_args(pathspec),
         ]
-    result = _git(cwd, args)
+    result = _git_paths(cwd, args)
     if result.returncode != 0 or not result.stdout.strip():
         return False
     return all(
@@ -194,7 +215,7 @@ def _staged_index_entries(cwd: Path, pathspec: Sequence[str]) -> str:
     scoped commit is built from and what the snapshot token attests to are
     read out of the index by the same command.
     """
-    result = _git(cwd, ["ls-files", "--stage", "-z", "--", *pathspec])
+    result = _git_paths(cwd, ["ls-files", "--stage", "-z", "--", *pathspec])
     if result.returncode != 0:
         raise models.CommitMessageError(
             f"failed to read the staged entries: {result.stderr.strip()}",
@@ -215,7 +236,9 @@ def _paths_staged_for_deletion(
     """
     if not head_sha(cwd):
         return []
-    tracked = _git(cwd, ["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", *pathspec])
+    tracked = _git_paths(
+        cwd, ["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", *pathspec]
+    )
     if tracked.returncode != 0:
         raise models.CommitMessageError(
             f"failed to read the tracked paths: {tracked.stderr.strip()}",
@@ -259,7 +282,9 @@ def _build_scoped_index(
                 reason=models.REASON_COMMIT_FAILED,
             )
     for path in _paths_staged_for_deletion(cwd, pathspec, staged_entries):
-        removed = _git(cwd, ["update-index", "--force-remove", "--", path], env=env)
+        removed = _git_paths(
+            cwd, ["update-index", "--force-remove", "--", path], env=env
+        )
         if removed.returncode != 0:
             raise models.CommitMessageError(
                 f"failed to stage {path} for deletion: {removed.stderr.strip()}",
@@ -313,7 +338,7 @@ def pathspec_snapshot(cwd: Path, pathspec: Sequence[str]) -> str:
     every unrelated index entry.  It is what lets a commit prove, minutes
     later, that it is still committing what the message describes.
     """
-    result = _git(cwd, ["ls-files", "--stage", "--", *pathspec])
+    result = _git_paths(cwd, ["ls-files", "--stage", "--", *pathspec])
     if result.returncode != 0:
         raise models.CommitMessageError(
             f"failed to read the staged snapshot: {result.stderr.strip()}",
@@ -335,7 +360,9 @@ def worktree_drifted_paths(cwd: Path, pathspec: Sequence[str]) -> list[str]:
     altogether, which is how a path staged as a deletion and then recreated is
     caught.
     """
-    result = _git(cwd, ["status", "--porcelain", "-uall", *_pathspec_args(pathspec)])
+    result = _git_paths(
+        cwd, ["status", "--porcelain", "-uall", *_pathspec_args(pathspec)]
+    )
     if result.returncode != 0:
         raise models.CommitMessageError(
             f"failed to probe the worktree: {result.stderr.strip()}",

@@ -96,6 +96,34 @@ class GitSurfaceTests(unittest.TestCase):
             self.staged_names(), ["changed.txt", "gone.txt", "worktree_gone.txt"]
         )
 
+    def test_scoped_paths_are_literal_rather_than_pathspec_patterns(self) -> None:
+        # `[id]` would glob-match `i`, and a leading colon would parse as magic.
+        self.write("seed.txt", "seed\n")
+        commit_message.stage_all(self.repo)
+        git_stdout(self.repo, "commit", "-qm", "seed")
+        self.write("app/[id]/page.tsx", "dynamic\n")
+        self.write("app/i/page.tsx", "static\n")
+        self.write(":notes.md", "notes\n")
+        owned = ["app/[id]/page.tsx", ":notes.md"]
+
+        result = commit_message.stage_paths(self.repo, owned)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.staged_names(), [":notes.md", "app/[id]/page.tsx"])
+        self.assertTrue(commit_message.has_staged_changes(self.repo, owned))
+        commit_message.pathspec_snapshot(self.repo, owned)
+        self.assertEqual([], commit_message.worktree_drifted_paths(self.repo, owned))
+        committed = commit_message.commit_staged(self.repo, "scoped", pathspec=owned)
+        self.assertEqual(committed.returncode, 0, committed.stderr)
+        self.assertEqual(
+            sorted(
+                git_stdout(
+                    self.repo, "show", "--name-only", "--format=", "HEAD"
+                ).splitlines()
+            ),
+            [":notes.md", "app/[id]/page.tsx"],
+        )
+
     def test_stage_paths_still_rejects_an_unknown_path(self) -> None:
         result = commit_message.stage_paths(self.repo, ["never-existed.txt"])
 
