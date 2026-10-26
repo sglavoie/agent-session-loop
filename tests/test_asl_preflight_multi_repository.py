@@ -376,6 +376,34 @@ class MultiRepositoryPreflightTests(unittest.TestCase):
             {finding.category for finding in report.findings},
         )
 
+    def test_registered_json_typo_is_a_malformed_contract_at_its_line(
+        self,
+    ) -> None:
+        # A plain JSON syntax error is not a repository defect just because the
+        # plan is registered, and its line is the session file's, not the
+        # fenced block's.
+        session = self.plan_dir / "session-1.md"
+        lines = session.read_text(encoding="utf-8").splitlines(keepends=True)
+        opener = next(
+            index for index, line in enumerate(lines) if line.strip() == "```json"
+        )
+        lines.insert(opener + 1, "[,\n")
+        session.write_text("".join(lines), encoding="utf-8")
+
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        findings = [
+            finding
+            for finding in report.findings
+            if finding.category in {"malformed-contract", "repository-contract"}
+        ]
+        self.assertEqual(1, len(findings))
+        finding = findings[0]
+        self.assertEqual("malformed-contract", finding.category)
+        self.assertEqual(str(session.resolve()), finding.path)
+        self.assertEqual(opener + 2, finding.line)
+        self.assertIn(f"at line {opener + 2} column", finding.message)
+
     def test_registered_payload_has_ordered_repository_summaries(self) -> None:
         report = preflight.run_preflight(
             self.plan_dir,

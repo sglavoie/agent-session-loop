@@ -20,7 +20,7 @@ from .contract_models import (
     VerificationCheck,
 )
 from .literals import as_literal
-from .plans_errors import PlanError
+from .plans_errors import ContractError, PlanError
 from .plans_session_ids import SessionId
 from .workspaces import RepositoryRegistry, WorkspaceError, validate_repository_alias
 
@@ -122,6 +122,10 @@ def _review_replay(payload: dict, *, index: int, session_id: SessionId) -> bool:
     return raw
 
 
+def _repository_error(message: str) -> ContractError:
+    return ContractError(message, repository=True)
+
+
 def _repository_alias(
     payload: dict,
     *,
@@ -135,17 +139,17 @@ def _repository_alias(
             return None
         if len(repository_registry) == 1:
             return repository_registry.aliases[0]
-        raise PlanError(
+        raise _repository_error(
             f"session {session_id.value} contract check #{index + 1} "
             "'repo' is required when the repository registry has multiple entries"
         )
     if repository_registry is None:
-        raise PlanError(
+        raise _repository_error(
             f"session {session_id.value} contract check #{index + 1} "
             "'repo' is only valid when the plan declares a repository registry"
         )
     if not isinstance(raw, str) or not raw:
-        raise PlanError(
+        raise _repository_error(
             f"session {session_id.value} contract check #{index + 1} "
             "'repo' must be a non-empty repository alias when provided"
         )
@@ -154,7 +158,7 @@ def _repository_alias(
         if repository_registry is not None:
             repository_registry.get(alias)
     except WorkspaceError as error:
-        raise PlanError(
+        raise _repository_error(
             f"session {session_id.value} contract check #{index + 1} "
             f"'repo' is invalid: {error}"
         ) from error
@@ -175,7 +179,7 @@ def _validate_repository_relative_value(
         or PurePosixPath(value).is_absolute()
         or ".." in PurePosixPath(value).parts
     ):
-        raise PlanError(
+        raise _repository_error(
             f"session {session_id.value} contract check #{index + 1} "
             f"'{field}' must stay beneath the selected repository and cannot "
             "be absolute or traverse upward"

@@ -15,7 +15,7 @@ from .contracts import (
 )
 from .plans_content_hash import stable_readiness_sha256
 from .plans_discovery import noncanonical_session_file_suggestions
-from .plans_errors import PlanError
+from .plans_errors import ContractError, PlanError
 from .plans_handoff import HANDOFF_HEADING
 from .plans_models import PlanSnapshot, ReadinessMetadata, SessionFile
 from .plans_readiness import parse_readiness_metadata
@@ -270,9 +270,13 @@ def _check_session_contracts(
                 repository_registry=repository_registry,
             )
         except PlanError as error:
+            # Only a check that breaks the registry's rules is a repository
+            # contract; a JSON typo in a registered plan is still malformed.
             category: PreflightCategory = (
                 "repository-contract"
                 if repository_registry is not None
+                and isinstance(error, ContractError)
+                and error.repository
                 else "malformed-contract"
             )
             findings.append(
@@ -282,6 +286,7 @@ def _check_session_contracts(
                     f"session {session.id} completion contract is malformed: {error}",
                     session_id=session.id,
                     path=str(session.path),
+                    line=error.line if isinstance(error, ContractError) else None,
                 )
             )
             continue
