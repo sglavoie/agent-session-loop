@@ -316,6 +316,14 @@ class RejectionTests(LedgerTestCase):
         self.assertEqual((), view.records)
         self.assertEqual(ledger.REJECT_INVALID_RECORD, view.rejected[0].reason)
 
+    def test_an_over_deep_line_is_rejected_not_raised(self) -> None:
+        self.write_ledger_text("[" * 1_000_000 + "]" * 1_000_000 + "\n")
+        view = self.read()
+        self.assertEqual((), view.records)
+        self.assertEqual(
+            [ledger.REJECT_INVALID_JSON], [item.reason for item in view.rejected]
+        )
+
     def test_rejected_raw_text_is_bounded(self) -> None:
         self.write_ledger_text("{" + "x" * (ledger.MAX_REJECTED_RAW_CHARS * 2) + "\n")
         rejected = self.read().rejected[0]

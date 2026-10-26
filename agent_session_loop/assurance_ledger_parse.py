@@ -132,7 +132,7 @@ def parse_ledger_bytes(data: bytes, path: Path) -> LedgerView:
             continue
         try:
             envelope = json.loads(raw)
-        except ValueError as error:
+        except (ValueError, RecursionError) as error:
             _reject(
                 rejected,
                 seq=seq,
