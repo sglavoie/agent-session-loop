@@ -25,27 +25,33 @@ def _review_guard_excludes(args: argparse.Namespace) -> tuple[str, ...]:
     repository, and so a typo fails the run instead of silently widening the
     guard's blind spot.
     """
-    raw: list[str] = []
+    # Each entry keeps the name of where it came from, so a refusal blames the
+    # environment variable rather than a flag the operator never passed.
+    raw: list[tuple[str, str]] = []
     env_value = os.environ.get(REVIEW_GUARD_EXCLUDE_ENV_VAR)
     if env_value:
-        raw.extend(env_value.split(os.pathsep))
-    raw.extend(getattr(args, "review_guard_exclude", None) or ())
+        raw.extend(
+            (REVIEW_GUARD_EXCLUDE_ENV_VAR, entry)
+            for entry in env_value.split(os.pathsep)
+        )
+    raw.extend(
+        ("--review-guard-exclude", entry)
+        for entry in getattr(args, "review_guard_exclude", None) or ()
+    )
 
     excludes: set[str] = set()
-    for entry in raw:
+    for source, entry in raw:
         candidate = entry.strip()
         if not candidate:
             continue
         pure = PurePosixPath(candidate)
         if pure.is_absolute():
             raise RunError(
-                "--review-guard-exclude must be repo-relative, got "
-                f"absolute path {candidate!r}"
+                f"{source} must be repo-relative, got absolute path {candidate!r}"
             )
         if ".." in pure.parts:
             raise RunError(
-                "--review-guard-exclude must not contain '..' segments, got "
-                f"{candidate!r}"
+                f"{source} must not contain '..' segments, got {candidate!r}"
             )
         normalized = pure.as_posix().rstrip("/")
         if normalized:

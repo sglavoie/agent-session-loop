@@ -142,6 +142,21 @@ class ReviewGuardExcludeTests(unittest.TestCase):
         with self.assertRaisesRegex(RunError, r"must not contain '\.\.' segments"):
             review_guard._review_guard_excludes(args)
 
+    def test_a_refused_environment_entry_names_the_environment_variable(
+        self,
+    ) -> None:
+        env_var = review_guard.REVIEW_GUARD_EXCLUDE_ENV_VAR
+        for value, message in (("/etc", "must be repo-relative"), ("a/../..", "'..'")):
+            with self.subTest(value=value):
+                with (
+                    mock.patch.dict(os.environ, {env_var: value}),
+                    self.assertRaises(RunError) as caught,
+                ):
+                    review_guard._review_guard_excludes(_args())
+                self.assertTrue(str(caught.exception).startswith(env_var))
+                self.assertIn(message, str(caught.exception))
+                self.assertNotIn("--review-guard-exclude", str(caught.exception))
+
     def test_a_missing_namespace_attribute_reads_as_no_allowlist(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(review_guard.REVIEW_GUARD_EXCLUDE_ENV_VAR, None)
