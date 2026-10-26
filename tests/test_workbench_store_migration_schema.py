@@ -172,10 +172,53 @@ class MigrationTests(unittest.TestCase):
     def test_the_inherited_migrations_are_unchanged(self) -> None:
         """Migrations 1 to 3 are the Companion's, so an existing file skips them."""
         versions = [version for version, _ in store_migrations.MIGRATIONS]
-        self.assertEqual(versions, [1, 2, 3, 4])
+        self.assertEqual(versions, [1, 2, 3, 4, 5])
         self.assertEqual(store_migrations.MIGRATIONS[2][1], incidents.MIGRATION)
         self.assertEqual(store_types.SCHEMA_VERSION, versions[-1])
         self.assertEqual(store_types.COMPANION_SCHEMA_VERSION, 3)
+
+    def test_the_per_upload_lookups_are_answered_from_an_index(self) -> None:
+        """Incident observation and run resolution do not scan their tables."""
+        connection = store_migrations.connect(self.path)
+        self.addCleanup(connection.close)
+        store_migrations.migrate(connection, created_at=NOW)
+        lookups = {
+            "history_entry_run": (
+                "SELECT MAX(recorded_at) FROM history_entry "
+                "WHERE connector_id = ? AND run_key = ?",
+                ("c", "r"),
+            ),
+            "history_entry_plan": (
+                "SELECT 1 FROM history_entry WHERE connector_id = ? AND plan_key = ? "
+                "AND outcome = 'completed' AND recorded_at > ?",
+                ("c", "p", 0.0),
+            ),
+            "run_summary_run_key": (
+                "SELECT 1 FROM run_summary WHERE run_key = ? AND present = 1",
+                ("r",),
+            ),
+        }
+        for index, (sql, parameters) in lookups.items():
+            with self.subTest(index=index):
+                plan = " ".join(
+                    str(row["detail"])
+                    for row in connection.execute(
+                        f"EXPLAIN QUERY PLAN {sql}", parameters
+                    )
+                )
+                self.assertIn(index, plan)
+
+    def test_the_index_migration_reapplies_over_an_index_added_by_hand(self) -> None:
+        connection = store_migrations.connect(self.path)
+        self.addCleanup(connection.close)
+        upto_four = store_migrations.MIGRATIONS[:4]
+        with mock.patch.object(store_migrations, "MIGRATIONS", upto_four):
+            store_migrations.migrate(connection, created_at=NOW)
+        connection.execute("CREATE INDEX run_summary_run_key ON run_summary (run_key)")
+        self.assertEqual(
+            store_migrations.migrate(connection, created_at=NOW),
+            store_types.SCHEMA_VERSION,
+        )
 
     def test_an_installed_companion_database_keeps_every_row_and_identifier(
         self,
