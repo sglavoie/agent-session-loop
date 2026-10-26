@@ -198,6 +198,19 @@ class RegisterRepositoriesCommandTests(unittest.TestCase):
         self.assertEqual("lock-contention", payload["reason"])
         self.assertIsNone(plans_registry.read_repository_registry(self.plan_dir))
 
+    def test_non_utf8_manifest_is_a_plan_refusal_not_a_traceback(self) -> None:
+        self._write_legacy_plan()
+        manifest = self.plan_dir / "manifest.md"
+        manifest.write_bytes(manifest.read_bytes() + b"\n\xff\xfe\n")
+
+        code, stdout, _stderr = self._register("--json")
+
+        self.assertEqual(1, code)
+        payload = json.loads(stdout)
+        self.assertFalse(payload["ok"])
+        self.assertIn("manifest.md", payload["error"])
+        self.assertIn("utf-8", payload["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

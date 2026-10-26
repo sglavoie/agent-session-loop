@@ -145,7 +145,7 @@ def read_repository_registry(plan_dir: str | Path) -> RepositoryRegistry | None:
         return None
     try:
         text = manifest_path.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         _raise_read_error(manifest_path, error)
     return parse_repository_registry_manifest(text)
 
