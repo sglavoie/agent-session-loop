@@ -395,6 +395,32 @@ class SplitCommandTests(SplitCliHelpers, unittest.TestCase):
             context = (output_dir / "context.md").read_text(encoding="utf-8")
             self.assertNotIn("Session 1", context)
 
+    def test_split_reports_an_existing_split_as_already_split(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text(self._TWO_SESSION_PLAN, encoding="utf-8")
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1", "2"))
+            args = self._split_args(
+                plan_file=str(plan),
+                contracts_file=str(contracts_file),
+                base_dir=str(tmp_dir / "out"),
+            )
+            code, out, err = self._run_split(args)
+            self.assertEqual(0, code, out + err)
+            first = json.loads(out)
+
+            code, out, _ = self._run_split(args)
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertEqual("already-split", payload["reason"])
+            self.assertEqual(first["plan_id"], payload["details"]["plan_id"])
+            existing = payload["details"]["existing_outputs"]
+            self.assertEqual(1, len(existing))
+            self.assertIn(first["output_dir"], existing[0])
+
     def test_split_refuses_contracts_for_sessions_the_plan_lacks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)

@@ -38,6 +38,8 @@ SPLIT_REASON_OK = "ok"
 SPLIT_REASON_SINGLE_SESSION = "single-session"
 SPLIT_REASON_MALFORMED_PLAN = "malformed-plan"
 SPLIT_REASON_INPUT_ERROR = "input-error"
+#: The plan id already has a split output and ``--force-new`` was not given.
+SPLIT_REASON_ALREADY_SPLIT = "already-split"
 SPLIT_REASON_REGISTRY_REQUIRED = repository_intent.REASON_REPOSITORY_REGISTRY_REQUIRED
 
 #: Emitted when a plan's resolved locations reach a second Git repository.

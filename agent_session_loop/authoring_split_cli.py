@@ -18,9 +18,14 @@ from .authoring_lint import (
     lint_plan_document,
     plan_footprint_payload,
 )
-from .authoring_paths import capture_inline_plan, extract_inline_plan
+from .authoring_paths import (
+    DuplicateSplitError,
+    capture_inline_plan,
+    extract_inline_plan,
+)
 from .authoring_split import (
     MULTI_REPOSITORY_MESSAGE,
+    SPLIT_REASON_ALREADY_SPLIT,
     SPLIT_REASON_INPUT_ERROR,
     SPLIT_REASON_MALFORMED_PLAN,
     SPLIT_REASON_REGISTRY_REQUIRED,
@@ -384,6 +389,15 @@ def split_from_args(args: Any) -> int:
             SPLIT_REASON_INPUT_ERROR,
             str(error),
             unknown_session_ids=list(error.session_ids),
+        )
+    except DuplicateSplitError as error:
+        return _emit_error(
+            SPLIT_REASON_ALREADY_SPLIT,
+            str(error),
+            details={
+                "plan_id": error.plan_id,
+                "existing_outputs": list(error.existing_outputs),
+            },
         )
     except PlanError as error:
         return _emit_error(SPLIT_REASON_MALFORMED_PLAN, str(error))

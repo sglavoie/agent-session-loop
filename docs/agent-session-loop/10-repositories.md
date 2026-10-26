@@ -243,7 +243,9 @@ rows and `registry_digest`; those keys remain absent for legacy sources.
 Stable failure reasons: `single-session` (splitting is not needed),
 `malformed-plan` (the parser's line-specific `PlanError` verbatim),
 `missing-contract:<id>`, `invalid-contract:<id>` (a present contract entry that
-is not a JSON object or is missing `done_when`/`verify`), and `input-error`. The
+is not a JSON object or is missing `done_when`/`verify`), `already-split` (the
+plan id already has an output directory and `--force-new` was not given;
+`details.existing_outputs` names it), and `input-error`. The
 `session-split` skill is a thin
 wrapper that authors the per-session contracts and then calls `asl split`.
 
