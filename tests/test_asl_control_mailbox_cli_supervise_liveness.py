@@ -62,9 +62,56 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         self.assertTrue(evidence["lock_active"])
         self.assertEqual(os.getpid(), evidence["lock_pid"])
         self.assertEqual("run-live", evidence["run_id"])
+        self.assertEqual(
+            mailbox_cli_constants.RUNNER_STATE_FRESH, evidence["runner_state"]
+        )
+        self.assertTrue(evidence["runner_state_fresh"])
         self.assertEqual("1", evidence["active_turn"]["session_id"])
         self.assertEqual(0, evidence["sessions_complete"])
         self.assertEqual(1, evidence["sessions_total"])
+
+    def test_lost_evidence_names_why_the_runner_state_is_not_fresh(self) -> None:
+        cases = (
+            ({}, mailbox_cli_constants.RUNNER_STATE_ABSENT, "runner state absent,"),
+            (
+                {"present": True, "error": "not valid JSON"},
+                mailbox_cli_constants.RUNNER_STATE_UNREADABLE,
+                "runner state unreadable,",
+            ),
+            (
+                {"present": True, "run_finished_at": "2026-08-10T12:00:00+00:00"},
+                mailbox_cli_constants.RUNNER_STATE_FINISHED,
+                "runner state finished,",
+            ),
+            (
+                {"present": True, "stale_unfinished": True},
+                mailbox_cli_constants.RUNNER_STATE_STALE,
+                "runner state stale (unfinished, its runner is gone),",
+            ),
+            (
+                {"present": True},
+                mailbox_cli_constants.RUNNER_STATE_FRESH,
+                "runner state fresh,",
+            ),
+        )
+        for runner_state, condition, wording in cases:
+            with self.subTest(condition=condition):
+                with mock.patch.object(
+                    mailbox_cli_status.state_status,
+                    "status_payload",
+                    return_value={"runner_state": runner_state},
+                ):
+                    evidence = mailbox_cli_status.supervision_run_evidence(
+                        self.plan_dir, self.state_dir
+                    )
+                assert evidence is not None
+                self.assertEqual(condition, evidence["runner_state"])
+                lines = mailbox_cli_output.outbox_lost_text_lines(
+                    self.plan_dir,
+                    mailbox_cli_constants.SUPERVISE_LOST_HELPER_EXITED,
+                    evidence,
+                )
+                self.assertIn(wording, lines[1])
 
     def test_outbox_supervise_reports_a_helper_that_never_started(self) -> None:
         launch = mailbox_validation.new_supervision_id()

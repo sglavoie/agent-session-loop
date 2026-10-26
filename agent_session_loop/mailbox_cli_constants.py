@@ -32,6 +32,12 @@ SUPERVISE_TOKEN_DONE = "DONE"
 SUPERVISE_TOKEN_LOST = "LOST"
 SUPERVISE_LOST_HELPER_EXITED = "helper-exited-without-record"
 SUPERVISE_LOST_HELPER_NEVER_STARTED = "helper-never-started"
+# What a LOST report's run evidence says about the runner state file.
+RUNNER_STATE_FRESH = "fresh"
+RUNNER_STATE_ABSENT = "absent"
+RUNNER_STATE_UNREADABLE = "unreadable"
+RUNNER_STATE_FINISHED = "finished"
+RUNNER_STATE_STALE = "stale"
 # Only the launch race: a helper stamps its liveness record about a second in,
 # so this is the window in which a missing record is not yet evidence of
 # anything. A probe-confirmed death never waits it out.

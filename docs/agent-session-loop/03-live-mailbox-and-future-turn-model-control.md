@@ -390,7 +390,8 @@ The eight mailbox commands share normal plan-reference, `--state-dir`, and
   the active turn, and `asl status` as the next step. `--json` returns the
   ordinary wait payload plus `state`, `cursor_path`, and `since`, plus
   `lost_reason` and a `run_evidence` object (`lock_active`, `lock_pid`,
-  `run_id`, `runner_state_fresh`, `active_turn`, `sessions_complete`,
+  `run_id`, `runner_state` (`fresh`, `absent`, `unreadable`, `finished` or
+  `stale`), `runner_state_fresh`, `active_turn`, `sessions_complete`,
   `sessions_total`) that are `null` under the other three tokens.
   `asl outbox wait` is unchanged and remains the general-purpose reader.
 
