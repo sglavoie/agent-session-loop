@@ -175,6 +175,15 @@ def resolve_plan_context(
         resolved_plan_dir = state_plan_refs.resolve_plan_reference(
             args.plan_dir, state.state_root(args.state_dir)
         )
+        if (
+            state_plan_refs.is_bare_label(str(args.plan_dir))
+            and not resolved_plan_dir.exists()
+        ):
+            raise plans_errors.PlanNotFoundError(
+                f"plan directory does not exist: {resolved_plan_dir}, and no "
+                f"plan label from `{program_name()} sessions` matches "
+                f"{str(args.plan_dir)!r}"
+            )
         snapshot = plans_snapshot.inspect_plan(resolved_plan_dir)
         status = state_status.status_payload(snapshot, args.state_dir)
     except state.AmbiguousPlanError as error:
