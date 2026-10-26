@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 import threading
 import time
@@ -289,7 +290,7 @@ def _run_command_check(
             failure_reason="command-timeout",
             detail=(
                 f"command timed out after {check.timeout_seconds:g}s: "
-                f"{' '.join(check.argv)}"
+                f"{shlex.join(check.argv)}"
             ),
             duration_seconds=duration,
             sweep=sweep,
@@ -307,7 +308,7 @@ def _run_command_check(
             name=check.name,
             kind=check.kind,
             status="pass",
-            detail=f"command exited 0: {' '.join(check.argv)}",
+            detail=f"command exited 0: {shlex.join(check.argv)}",
             returncode=0,
             duration_seconds=duration,
             sweep=sweep,

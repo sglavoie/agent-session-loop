@@ -390,6 +390,26 @@ class ContractCheckCliTests(unittest.TestCase):
             self.assertEqual("cwd-error", payload["reason"])
             self.assertEqual(f"cwd does not exist: {missing}", payload["error"])
 
+    def test_runnable_command_detail_is_shell_quoted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            contract = _contract_block(
+                '{"type": "command", "name": "c", '
+                '"argv": ["python3", "-c", "print(1); print(2)"]}'
+            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+
+            code, payload = self._run(plan_dir, repo_root)
+
+            self.assertEqual(0, code, payload)
+            self.assertEqual(
+                "command is runnable: python3 -c 'print(1); print(2)'",
+                payload["checks"][0]["detail"],
+            )
+
     def test_unversioned_python_is_factual_issue(self) -> None:
         # An unversioned ``python`` interpreter is frequently unavailable where
         # ``python3`` exists, so it stays actionable with the ``bare-python``

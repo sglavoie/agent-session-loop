@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -230,7 +231,7 @@ def diagnose_command_scope(
         return None
 
     subcommand = argv[2]
-    rendered = " ".join(argv)
+    rendered = shlex.join(argv)
     if subcommand == "check-all":
         return CommandScopeDiagnostic(
             reason="operator-health-check-all",

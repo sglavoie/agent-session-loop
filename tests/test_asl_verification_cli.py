@@ -360,6 +360,26 @@ class VerifyCliTests(unittest.TestCase):
             self.assertEqual("cwd-error", payload["reason"])
             self.assertEqual(f"cwd does not exist: {missing}", payload["error"])
 
+    def test_verify_json_passed_command_detail_is_shell_quoted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            argv = [sys.executable, "-c", "print('a b')"]
+            contract = _contract_block(
+                '{"type": "command", "name": "cmd", '
+                f'"argv": {json.dumps(argv)}, "timeout_seconds": 30}}'
+            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(0, completed.returncode, completed.stdout)
+            detail = json.loads(completed.stdout)["checks"][0]["detail"]
+            self.assertEqual(f"command exited 0: {shlex.join(argv)}", detail)
+            self.assertEqual(argv, shlex.split(detail.split(": ", 1)[1]))
+
     def test_verify_json_failure_attaches_repair_hint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)

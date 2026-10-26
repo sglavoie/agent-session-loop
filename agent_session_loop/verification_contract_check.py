@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import sys
 from collections.abc import Mapping
 from dataclasses import replace
@@ -101,7 +102,7 @@ def _diagnose_contract_check(
                 CONTRACT_CHECK_ISSUE_BARE_PYTHON,
                 (
                     "unversioned `python` is frequently unavailable where "
-                    f"`python3` exists: {' '.join(check.argv)}; use `python3`"
+                    f"`python3` exists: {shlex.join(check.argv)}; use `python3`"
                 ),
             )
         scope = diagnose_command_scope(check)
@@ -124,7 +125,7 @@ def _diagnose_contract_check(
         return (
             CONTRACT_CHECK_ROW_OK,
             None,
-            f"command is runnable: {' '.join(check.argv)}",
+            f"command is runnable: {shlex.join(check.argv)}",
         )
 
     if isinstance(check, FileExistsCheck):
