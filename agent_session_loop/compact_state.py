@@ -124,19 +124,57 @@ def _stream_has_metadata(check: dict[str, Any], stream: str) -> bool:
     return bool(check.get(f"{stream}_sha256"))
 
 
+def _claim_artifact_target(
+    artifact_dir: Path,
+    base_name: str,
+    compressed: bytes,
+    claimed: set[Path],
+) -> tuple[Path, bool]:
+    """Pick the failure-artifact path for one stream and say if it is on disk.
+
+    The first candidate is the live-verification name (``{check}-{stream}``);
+    later candidates append an ordinal. A candidate is skipped when another
+    stream of this result already claimed it (two checks sharing a name, or
+    two unnamed checks) or when a file holding *different* bytes already sits
+    there, so extraction never overwrites output it does not own. A file that
+    already holds exactly these compressed bytes (an interrupted prior apply)
+    is reused. The choice depends only on the payload and the disk as it was
+    before this pass, so a dry run projects the same paths an apply writes.
+    """
+    ordinal = 1
+    while True:
+        name = base_name if ordinal == 1 else f"{base_name}-{ordinal}"
+        target = artifact_dir / f"{artifacts.derive_artifact_stem(name)}.gz"
+        ordinal += 1
+        if target in claimed:
+            continue
+        try:
+            existing = target.read_bytes()
+        except FileNotFoundError:
+            claimed.add(target)
+            return target, False
+        except OSError:
+            continue  # a directory or unreadable entry: never write over it
+        if existing == compressed:
+            claimed.add(target)
+            return target, True
+
+
 def _compact_check_streams(
     check: dict[str, Any],
     *,
     artifact_dir: Path,
     apply: bool,
     stats: _Stats,
+    claimed: set[Path],
 ) -> None:
     """Bound raw stdout/stderr on one verification check in place.
 
     Failed-check output is extracted to a gzip artifact (so it stays byte-for-
     byte recoverable) before the raw copy is replaced with a bounded preview;
     successful-check output is replaced with a preview and its full copy is
-    discarded. Already-compact v2 streams are skipped.
+    discarded. Already-compact v2 streams are skipped. ``claimed`` holds the
+    artifact paths this result already uses, so each stream gets its own.
     """
     failed = check.get("status") != "pass" or bool(check.get("failure_reason"))
     check_name = check.get("name") or "check"
@@ -154,20 +192,18 @@ def _compact_check_streams(
         if failed:
             stats.failed_output_extracted += 1
             if not check.get(f"{stream}_artifact_path"):
-                stem = artifacts.derive_artifact_stem(f"{check_name}-{stream}")
-                target = artifact_dir / f"{stem}.gz"
                 # Deterministic compression lets a dry-run project the exact
-                # artifact size without writing it; an artifact already on
-                # disk (interrupted prior apply) only counts its size delta.
+                # artifact size without writing it; an identical artifact
+                # already on disk (interrupted prior apply) adds nothing.
                 compressed = artifacts.gzip_compress(raw_bytes)
-                try:
-                    existing_size = target.stat().st_size
-                except OSError:
-                    existing_size = 0
-                stats.artifact_bytes_added += len(compressed) - existing_size
-                if apply:
-                    artifact_dir.mkdir(parents=True, exist_ok=True)
-                    artifacts.atomic_write_bytes(target, compressed, durable=True)
+                target, on_disk = _claim_artifact_target(
+                    artifact_dir, f"{check_name}-{stream}", compressed, claimed
+                )
+                if not on_disk:
+                    stats.artifact_bytes_added += len(compressed)
+                    if apply:
+                        artifact_dir.mkdir(parents=True, exist_ok=True)
+                        artifacts.atomic_write_bytes(target, compressed, durable=True)
                 check[f"{stream}_artifact_path"] = str(target)
         else:
             check.setdefault(f"{stream}_artifact_path", None)
@@ -194,6 +230,15 @@ def _compact_result_payload(
     if isinstance(verification, dict):
         checks = verification.get("checks")
         if isinstance(checks, list):
+            # Paths the record already points at stay theirs.
+            claimed = {
+                Path(path)
+                for check in checks
+                if isinstance(check, dict)
+                for stream in ("stdout", "stderr")
+                if isinstance(path := check.get(f"{stream}_artifact_path"), str)
+                and path
+            }
             for check in checks:
                 if isinstance(check, dict):
                     _compact_check_streams(
@@ -201,6 +246,7 @@ def _compact_result_payload(
                         artifact_dir=artifact_dir,
                         apply=apply,
                         stats=stats,
+                        claimed=claimed,
                     )
     return compact
 

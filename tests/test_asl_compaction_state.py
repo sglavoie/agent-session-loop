@@ -327,6 +327,100 @@ class StateCompactionTests(unittest.TestCase):
                 )
                 self.assertEqual(2, report.failed_output_extracted)
 
+    def test_same_named_or_unnamed_checks_keep_distinct_artifacts(self) -> None:
+        # Two checks sharing a name, or two with no name, derived the same
+        # `{name}-{stream}` stem, so the second extraction overwrote the
+        # first's gzip and artifact_bytes_added counted bytes no longer on
+        # disk. An unrelated file already at the first candidate path must
+        # survive too.
+        first = "first-output " + self.big
+        second = "second-output " + self.big
+        for name in ("dup", None):
+            with self.subTest(name=name):
+                checks = [
+                    {"status": "fail", "stdout": first, "stderr": ""},
+                    {"status": "fail", "stdout": second, "stderr": ""},
+                ]
+                if name is not None:
+                    for check in checks:
+                        check["name"] = name
+                result_path = self._write_result(checks)
+                artifact_dir = result_path.parent / "verification"
+                artifact_dir.mkdir(exist_ok=True)
+                foreign = artifact_dir / f"{name or 'check'}-stdout.gz"
+                foreign.write_bytes(b"not ours")
+                disk_before = self._state_dir_disk_bytes()
+
+                projected = compact_state.compact_plan_state(
+                    self.plan_dir, state_dir=self.state_dir, apply=False
+                )
+                report = compact_state.compact_plan_state(
+                    self.plan_dir, state_dir=self.state_dir, apply=True
+                )
+
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+                paths = [
+                    Path(check["stdout_artifact_path"])
+                    for check in payload["verification"]["checks"]
+                ]
+                self.assertNotEqual(paths[0], paths[1])
+                self.assertNotIn(foreign, paths)
+                self.assertEqual(b"not ours", foreign.read_bytes())
+                self.assertEqual(first, artifacts.read_gzip(paths[0]).decode("utf-8"))
+                self.assertEqual(second, artifacts.read_gzip(paths[1]).decode("utf-8"))
+                self.assertEqual(
+                    sum(path.stat().st_size for path in paths),
+                    report.artifact_bytes_added,
+                )
+                self.assertEqual(
+                    disk_before - self._state_dir_disk_bytes(),
+                    report.actual_bytes_reclaimed,
+                )
+                self.assertEqual(
+                    projected.artifact_bytes_added, report.artifact_bytes_added
+                )
+                self.assertEqual(
+                    projected.projected_bytes_reclaimed,
+                    report.actual_bytes_reclaimed,
+                )
+                for path in paths:
+                    path.unlink()
+
+    def test_reapply_after_interrupted_apply_reuses_written_artifacts(self) -> None:
+        # An apply interrupted after the gzip writes but before result.json
+        # was replaced leaves identical artifacts behind; the next pass must
+        # reuse them instead of adding copies or counting their bytes twice.
+        first = "first-output " + self.big
+        second = "second-output " + self.big
+        checks = [
+            {"name": "dup", "status": "fail", "stdout": first, "stderr": ""},
+            {"name": "dup", "status": "fail", "stdout": second, "stderr": ""},
+        ]
+        result_path = self._write_result(checks)
+        original = result_path.read_bytes()
+        compact_state.compact_plan_state(
+            self.plan_dir, state_dir=self.state_dir, apply=True
+        )
+        written = sorted((result_path.parent / "verification").iterdir())
+        result_path.write_bytes(original)  # simulate the lost result rewrite
+
+        report = compact_state.compact_plan_state(
+            self.plan_dir, state_dir=self.state_dir, apply=True
+        )
+
+        self.assertEqual(0, report.artifact_bytes_added)
+        self.assertEqual(
+            written, sorted((result_path.parent / "verification").iterdir())
+        )
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [first, second],
+            [
+                artifacts.read_gzip(check["stdout_artifact_path"]).decode("utf-8")
+                for check in payload["verification"]["checks"]
+            ],
+        )
+
     def test_overlong_check_names_compact_without_aborting(self) -> None:
         # A ~192-char check name plus the "-stdout" stream suffix and the
         # full 64-hex digest used to push the gzip artifact (and its
