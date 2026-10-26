@@ -192,14 +192,24 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
 
 def _open_questions_in(
     wait_result: mailbox_cli_models.OutboxWaitResult,
+    plan_dir: Path,
+    state_dir: str | None,
 ) -> tuple[mailbox_models.MailboxMessage, ...]:
-    """Return the woken questions no closure has already answered."""
-    view = wait_result.mailbox_view
-    if view is None:
-        return wait_result.questions
-    unanswered = {question.id for question in view.unanswered_questions}
+    """Return the woken questions a reply can still close.
+
+    Scoped like ``asl status``: a question from an earlier run, or a ``--wait``
+    question whose wait already ended, refuses every reply, so reporting it as
+    ACTION would hand the supervisor a question it cannot answer.
+    """
+    if not wait_result.questions:
+        return ()
+    from . import intervention_facts
+
+    open_ids = intervention_facts.open_question_ids(
+        plan_dir, state_dir=state_dir, view=wait_result.mailbox_view
+    )
     return tuple(
-        question for question in wait_result.questions if question.id in unanswered
+        question for question in wait_result.questions if question.id in open_ids
     )
 
 
@@ -215,9 +225,7 @@ def _carried_question_ids(
     """
     from . import intervention_facts
 
-    open_ids = set(
-        intervention_facts.unanswered_question_ids(plan_dir, state_dir=state_dir)
-    )
+    open_ids = intervention_facts.open_question_ids(plan_dir, state_dir=state_dir)
     if not open_ids or since <= 0:
         return frozenset()
     try:
@@ -358,7 +366,7 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
             for supervision_end in wait_result.supervision_ends
             if supervision_end.supervision_id == supervision_id
         )
-        open_questions = _open_questions_in(wait_result)
+        open_questions = _open_questions_in(wait_result, plan_dir, args.state_dir)
         if own_supervision_ends or open_questions:
             break
         if wait_result.lost_reason is not None:

@@ -160,6 +160,7 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
 
     def test_outbox_supervise_prefers_an_open_question_over_a_dead_probe(self) -> None:
         launch = mailbox_validation.new_supervision_id()
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
         self.write_liveness_record(launch)
         mailbox_appenders.append_question(
             self.plan_dir,

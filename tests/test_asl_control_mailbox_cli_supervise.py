@@ -26,6 +26,7 @@ from agent_session_loop import (
     mailbox_snapshot,
     mailbox_validation,
     mailbox_vocabulary,
+    mailbox_waits,
     state,
     supervision_liveness,
 )
@@ -150,6 +151,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         self.assertGreaterEqual(self.cursor_on_disk(launch), notice.seq)
 
     def test_outbox_supervise_resumes_its_persisted_cursor(self) -> None:
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
         question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
@@ -167,16 +169,23 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         )
         self.assertEqual(question.seq, self.cursor_on_disk(launch))
 
-        code, second = self.supervise_lines(supervision_id=launch)
-        self.assertEqual(0, code)
-        self.assertEqual(["IDLE"], second)
-
-        # A different launch keeps its own cursor and still sees the question.
-        code, other = self.supervise_lines(
-            supervision_id=mailbox_validation.new_supervision_id()
+        code, second = self.payload_from(
+            mailbox_cli_outbox.outbox_supervise_from_args,
+            self.args(timeout=0, supervision_id=launch),
         )
         self.assertEqual(0, code)
-        self.assertEqual("ACTION questions=1", other[0])
+        self.assertEqual(question.seq, second["since"])
+
+        # A different launch keeps its own cursor and still sees the question.
+        code, other = self.payload_from(
+            mailbox_cli_outbox.outbox_supervise_from_args,
+            self.args(
+                timeout=0, supervision_id=mailbox_validation.new_supervision_id()
+            ),
+        )
+        self.assertEqual(0, code)
+        self.assertEqual(0, other["since"])
+        self.assertEqual("ACTION", other["state"])
 
     def test_outbox_supervise_reports_again_a_question_left_unanswered(
         self,
@@ -254,6 +263,55 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         launch = mailbox_validation.new_supervision_id()
         self.supervise_lines(supervision_id=launch)
 
+        code, lines = self.supervise_lines(supervision_id=launch)
+        self.assertEqual(0, code)
+        self.assertEqual(["IDLE"], lines)
+
+    def test_outbox_supervise_absorbs_another_runs_new_question(self) -> None:
+        # Never behind the cursor, so not carried: still not this run's, and
+        # reply refuses it, so it must not read as ACTION.
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        mailbox_appenders.append_question(
+            self.plan_dir,
+            "Left open by an earlier run",
+            state_dir=self.state_dir,
+            run_id="run-earlier",
+        )
+
+        code, lines = self.supervise_lines(
+            supervision_id=mailbox_validation.new_supervision_id()
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(["IDLE"], lines)
+
+    def test_outbox_supervise_absorbs_a_question_whose_wait_timed_out(
+        self,
+    ) -> None:
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        question, wait = mailbox_waits.append_wait_question(
+            self.plan_dir,
+            "Still blocked?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+            session_id="5",
+            turn_index=2,
+            waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_WORKER,
+        )
+        mailbox_waits.finish_wait(
+            self.plan_dir,
+            question.id,
+            wait.id,
+            reason=mailbox_vocabulary.WAIT_END_REASON_TIMEOUT,
+            state_dir=self.state_dir,
+        )
+        launch = mailbox_validation.new_supervision_id()
+
+        code, lines = self.supervise_lines(supervision_id=launch)
+        self.assertEqual(0, code)
+        self.assertEqual(["IDLE"], lines)
+
+        # Nor is it carried back once the cursor has moved past it.
         code, lines = self.supervise_lines(supervision_id=launch)
         self.assertEqual(0, code)
         self.assertEqual(["IDLE"], lines)
@@ -338,6 +396,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         self.assertEqual(own.seq, payload["since"])
 
     def test_outbox_supervise_self_heals_an_unusable_cursor(self) -> None:
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
         question = mailbox_appenders.append_question(
             self.plan_dir,
             "Which shape?",
@@ -427,6 +486,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
     def test_outbox_supervise_reenters_the_wait_on_the_remaining_budget(
         self,
     ) -> None:
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
         mailbox_path = mailbox_cursors.mailbox_path_for_plan(
             self.plan_dir, self.state_dir
         )
