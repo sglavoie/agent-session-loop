@@ -62,6 +62,14 @@ def register_repositories_from_args(args: Any) -> int:
             "give exactly one of PLAN_DIR, --plan-file, or --inline-stdin",
             want_json=bool(args.json),
         )
+    # Every derivation resolves contract paths against --cwd, so a missing root
+    # would surface as a misleading contract-path refusal; name it instead.
+    if not Path(os.path.expanduser(str(args.cwd))).is_dir():
+        return _emit_register_error(
+            REGISTER_REASON_INPUT_ERROR,
+            f"cwd is not a directory: {args.cwd}",
+            want_json=bool(args.json),
+        )
     if source_mode:
         return _register_source_plan_from_args(args)
     return _register_plan_dir_from_args(args)

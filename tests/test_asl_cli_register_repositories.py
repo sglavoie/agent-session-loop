@@ -211,6 +211,26 @@ class RegisterRepositoriesCommandTests(unittest.TestCase):
         self.assertIn("manifest.md", payload["error"])
         self.assertIn("utf-8", payload["error"])
 
+    def test_missing_cwd_is_named_rather_than_blamed_on_a_contract(self) -> None:
+        self._write_legacy_plan()
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            code = cli.main(
+                [
+                    "register-repositories",
+                    str(self.plan_dir),
+                    "--cwd",
+                    str(self.workspace / "missing"),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(1, code)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual("input-error", payload["reason"])
+        self.assertIn("cwd is not a directory", payload["error"])
+        self.assertIsNone(plans_registry.read_repository_registry(self.plan_dir))
+
 
 if __name__ == "__main__":
     unittest.main()
