@@ -41,6 +41,7 @@ class FaultQualificationTests(assertions._WorldCase):
         self.assertEqual(overseer_cli.EXIT_OK, status, decided)
         self.assertTrue(decided["authorized"])
 
+        reviewed = self.reviewed(packet)
         self.world.write_config(authorized=False)
         status, payload = self.act(
             packet,
@@ -48,6 +49,7 @@ class FaultQualificationTests(assertions._WorldCase):
             self.allowing("commit"),
             "--message",
             "checkpoint work in progress",
+            reviewed=reviewed,
         )
 
         self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
@@ -97,6 +99,7 @@ class FaultQualificationTests(assertions._WorldCase):
     def test_configuration_the_binary_cannot_read_is_never_read_past(self) -> None:
         """Unreadable is not permissive. The answer is unavailable, so it is no."""
         packet = self.observed()
+        reviewed = self.reviewed(packet)
         self.world.corrupt_config()
 
         decision = self.world.authorize(
@@ -113,6 +116,7 @@ class FaultQualificationTests(assertions._WorldCase):
             self.allowing("guidance"),
             "--text",
             "commit what you have and carry on",
+            reviewed=reviewed,
         )
 
         self.assertFalse(decision.allowed)
@@ -125,6 +129,7 @@ class FaultQualificationTests(assertions._WorldCase):
     def test_a_binary_answering_another_contract_is_not_trusted(self) -> None:
         """A deployed pair that disagrees on the contract refuses on both sides."""
         packet = self.observed()
+        reviewed = self.reviewed(packet)
         self.world.install_mismatched_binary()
 
         decision = self.world.authorize(
@@ -141,6 +146,7 @@ class FaultQualificationTests(assertions._WorldCase):
             self.allowing("guidance"),
             "--text",
             "commit what you have and carry on",
+            reviewed=reviewed,
         )
 
         self.assertEqual("unsupported_contract", decision.failure)

@@ -199,5 +199,27 @@ class DomainRefusalTests(_OverseerCase):
                 self.assertEqual(2, caught.exception.code)
 
 
+class RefusedContextGrantTests(_OverseerCase):
+    """No context grant means an unseen record, not an empty one."""
+
+    def test_decide_refuses_rather_than_listing_zero_statements(self) -> None:
+        for kind, expected in (
+            ("refused", "unauthorized"),
+            ("unavailable", "policy_unavailable"),
+        ):
+            getattr(self.fleet.policy, kind).add(str(self.plan))
+            for extra in (("--list-statements",), ("--operation", "guidance")):
+                with self.subTest(kind=kind, extra=extra):
+                    status, payload = self.fleet.invoke(
+                        "decide", str(self.plan), *extra
+                    )
+
+                    self.assertEqual(1, status, payload)
+                    self.assertEqual(expected, payload["reason"])
+                    self.assertIsNone(payload["evidence_digest"])
+                    self.assertNotIn("statements", payload)
+            getattr(self.fleet.policy, kind).clear()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -71,7 +71,7 @@ def decide_from_args(
         claims = claims_module.parse_claims(
             claims_module._claims_text(args), scope=scope
         )
-        _decision, grant = claims_module._grant_for(
+        decision, grant = claims_module._grant_for(
             candidate,
             access=overseer_policy_client.ACCESS_CONTEXT,
             seams=seams,
@@ -79,6 +79,28 @@ def decide_from_args(
         )
     except common.OverseerCliError as error:
         return common._failure("overseer-decide", error, as_json=as_json)
+    if grant is None:
+        # Without a context grant no statement is readable, so the record is
+        # not empty -- it is unseen. Listing it as zero statements under a
+        # digest would hand the host a binding for a reading nobody did, and
+        # ruling on it would turn a refused permission into ``no_decision``,
+        # which reads as a question for a human.
+        refusal = "unauthorized" if decision.available else "policy_unavailable"
+        detail = decision.summary or decision.reason
+        payload = responses.error_payload(
+            "overseer-decide",
+            reason=refusal,
+            error=detail,
+            plan_dir=candidate.plan_dir,
+            authorized=False,
+            evidence_digest=None,
+        )
+        common._emit(
+            payload,
+            [f"decide on {candidate.plan_dir}: refused ({refusal})", f"  {detail}"],
+            as_json=as_json,
+        )
+        return common.EXIT_REFUSED
     evidence = evidence_module.gather(
         candidate=candidate,
         grant=grant,
