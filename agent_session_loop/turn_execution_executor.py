@@ -262,10 +262,14 @@ class TurnExecutor:
                 interrupted=True,
             )
         except Exception:
-            live_turn.stop()
-            live_turn.finish(clock.utc_now())
-            if on_failure is not None:
-                on_failure()
+            try:
+                live_turn.stop()
+                live_turn.finish(clock.utc_now())
+            finally:
+                # The state write in ``finish`` can fail for the same reason
+                # the launch did; the turn's interactive surfaces still go.
+                if on_failure is not None:
+                    on_failure()
             raise
         live_turn.stop()
         # The poll thread is joined by now, so no later tick can arm a signal

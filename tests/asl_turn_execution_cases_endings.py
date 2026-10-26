@@ -162,6 +162,38 @@ class TurnExecutorEndingTests(unittest.TestCase):
         self.assertEqual(["stopped"], abandoned)
         self.assertIsNone(self.harness.persistence.states[-1]["active_turn"])
 
+    def test_a_failing_teardown_still_drops_the_turn_s_surfaces(self) -> None:
+        # The state write that clears active_turn can fail for the same reason
+        # the launch did (a full disk); the interactive surfaces still go.
+        active_turn = self.harness.active_turn()
+        live_turn = self.harness.live_turn(active_turn)
+        abandoned: list[str] = []
+        persistence = self.harness.persistence
+        recorded_write = persistence.write_state
+
+        def crash(*_args: object, **_kwargs: object) -> None:
+            def refuse(payload: dict[str, Any]) -> None:
+                raise OSError("No space left on device")
+
+            persistence.write_state = refuse  # type: ignore[method-assign]
+            raise RuntimeError("x")
+
+        self.addCleanup(setattr, persistence, "write_state", recorded_write)
+        with (
+            silent_delivery(),
+            mock.patch.object(harnesses, "run_harness", side_effect=crash),
+            self.assertRaises((RuntimeError, OSError)),
+        ):
+            self.harness.executor.launch(
+                self.harness.launch_spec(),
+                live_turn=live_turn,
+                active_turn=active_turn,
+                payload=self.harness.payload,
+                on_failure=lambda: abandoned.append("stopped"),
+            )
+
+        self.assertEqual(["stopped"], abandoned)
+
     def test_after_stop_runs_before_the_live_turn_is_cleared(self) -> None:
         active_turn = self.harness.active_turn()
         live_turn = self.harness.live_turn(active_turn)
