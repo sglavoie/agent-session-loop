@@ -14,9 +14,11 @@ from .assurance_cli_common import (
     REASON_INPUT_ERROR,
     REASON_INVALID_ISSUE_ID,
     REASON_LEDGER_READ_FAILED,
+    REASON_PLAN_NOT_FOUND,
     TEXT_LABEL_PLAN,
     TEXT_LABEL_PROCESS_PENDING,
     _print_error,
+    _unknown_plan_label,
 )
 from .assurance_models_primitives import AssuranceError
 from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
@@ -97,6 +99,9 @@ def assurance_process_pending_from_args(args: argparse.Namespace) -> int:
             )
         except state.StateError as error:
             return refuse(REASON_INPUT_ERROR, str(error))
+        unknown = _unknown_plan_label(args.plan, plan_dir)
+        if unknown is not None:
+            return refuse(REASON_PLAN_NOT_FOUND, unknown)
 
     try:
         report = catchup.process_pending(

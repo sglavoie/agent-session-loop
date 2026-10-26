@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from . import assurance_ledger as ledger
 from . import assurance_projection as projection
-from . import responses
+from . import responses, state_plan_refs
 from .assurance_models_primitives import AssuranceError, issue_id_number
 from .cli_defaults import program_name
 
@@ -128,6 +129,23 @@ REASON_AMBIGUOUS_PLAN = "ambiguous-plan"
 REASON_CANCELLED = "cancelled"
 
 REASON_MANIFEST_READ_FAILED = "manifest-read-failed"
+
+REASON_PLAN_NOT_FOUND = "plan-not-found"
+
+
+def _unknown_plan_label(raw_value: str, resolved: Path) -> str | None:
+    """Say why a bare ``--plan`` label names nothing, as every command does.
+
+    A bare label that matches no recorded plan resolves to a directory under
+    the shell's cwd that does not exist; using it would silently narrow the
+    command to nothing rather than report the typo.
+    """
+    if not state_plan_refs.is_bare_label(raw_value) or resolved.exists():
+        return None
+    return (
+        f"plan directory does not exist: {resolved}, and no plan label "
+        f"from `{program_name()} sessions` matches {raw_value!r}"
+    )
 
 
 def _print_error(

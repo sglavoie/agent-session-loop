@@ -172,6 +172,17 @@ class AssuranceProcessPendingTests(fixtures.AssuranceCliTestCase):
             [row["run_id"] for row in payload["results"]],
         )
 
+    def test_a_plan_label_that_names_no_plan_is_refused(self) -> None:
+        self.seed_pending_run("alpha", fixtures.RUN_ID)
+
+        code, payload, _ = self.run_json(
+            ["assurance", "process-pending", "--plan", "no-such-plan"]
+        )
+
+        self.assertEqual(1, code)
+        self.assertEqual("plan-not-found", payload["reason"])
+        self.assertIn("'no-such-plan'", payload["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

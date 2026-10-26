@@ -237,6 +237,25 @@ class AssuranceCloseoutTests(fixtures.AssuranceCliTestCase):
         self.assertEqual(1, code)
         self.assertEqual("unknown-run", payload["reason"])
 
+    def test_a_plan_label_that_names_no_plan_is_refused(self) -> None:
+        self.open_three_issues()
+        self.seed_run_directory("alpha-plan", fixtures.RUN_ID)
+
+        code, payload, _ = self.run_json(
+            [
+                "assurance",
+                "closeout",
+                fixtures.RUN_ID,
+                "--outcome",
+                "accepted",
+                "--plan",
+                "no-such-plan",
+            ]
+        )
+
+        self.assertEqual(1, code)
+        self.assertEqual("plan-not-found", payload["reason"])
+
     def test_a_run_the_inbox_never_audited_is_refused(self) -> None:
         self.open_three_issues()
 

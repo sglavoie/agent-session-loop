@@ -20,11 +20,13 @@ from .assurance_cli_common import (
     REASON_INPUT_ERROR,
     REASON_INVALID_ISSUE_ID,
     REASON_LEDGER_WRITE_FAILED,
+    REASON_PLAN_NOT_FOUND,
     REASON_UNKNOWN_ISSUE,
     REASON_UNKNOWN_RUN,
     TEXT_LABEL_CLOSEOUT,
     TEXT_LABEL_MERGE,
     _print_error,
+    _unknown_plan_label,
 )
 from .assurance_models_primitives import AssuranceError, parse_issue_id
 from .assurance_models_vocab import CLOSEOUT_OUTCOMES
@@ -281,6 +283,9 @@ def _resolve_run_location(
             )
         except state.StateError as error:
             return None, refuse(REASON_INPUT_ERROR, str(error))
+        unknown = _unknown_plan_label(args.plan, plan_dir)
+        if unknown is not None:
+            return None, refuse(REASON_PLAN_NOT_FOUND, unknown)
 
     try:
         located = state_plan_refs.find_run_locations(
