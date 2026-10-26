@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from . import durability
+from .contract_models import fenced_line_flags
 from .plans_errors import (
     InputReadError,
     PlanError,
@@ -70,8 +71,15 @@ def _darwin_stored_case(resolved: str) -> str:
 
 
 def plan_title_from_markdown(content: str) -> str | None:
-    """Return the first ``# H1`` title in Markdown, if present."""
-    for line in content.splitlines():
+    """Return the first ``# H1`` title in Markdown, if present.
+
+    A ``# comment`` inside a fenced code block is code, not a heading.
+    """
+    lines = content.splitlines()
+    fenced = fenced_line_flags(lines)
+    for index, line in enumerate(lines):
+        if fenced[index]:
+            continue
         match = PLAN_TITLE_RE.match(line)
         if match:
             return match.group(1)
