@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -124,21 +125,38 @@ def _set_offsets_to_eof(
 def _read_new_log_text(
     target: dict[str, Any],
     offsets: dict[str, int],
+    *,
+    final: bool = False,
 ) -> list[str]:
+    """The complete lines appended to a log since the last read.
+
+    The offset stops after the last newline read, so a line written in two
+    appends, or cut inside a multibyte character, is printed once, whole, when
+    its newline arrives; ``final`` flushes a last unterminated line once the
+    run is over. A log that shrank below the offset was truncated or
+    rewritten and is read again from the start. A log replaced whole by a
+    longer one (the turn's final stdout write) keeps its offset, so only what
+    the replacement added is printed.
+    """
     path = target["path"]
     key = _target_key(path)
     if not isinstance(path, Path) or not path.exists():
         offsets.setdefault(key, 0)
         return []
 
+    offset = offsets.get(key, 0)
     try:
         with path.open("rb") as log_file:
-            log_file.seek(offsets.get(key, 0))
+            if os.fstat(log_file.fileno()).st_size < offset:
+                offset = 0
+            log_file.seek(offset)
             data = log_file.read()
-            offsets[key] = log_file.tell()
     except OSError:
         return []
 
+    if not final:
+        data = data[: data.rfind(b"\n") + 1]
+    offsets[key] = offset + len(data)
     if not data:
         return []
     text = data.decode("utf-8", "replace")
@@ -166,6 +184,42 @@ def _print_lines(lines: list[str], out: tail_models.TextSink) -> None:
         print(line, file=out, flush=True)
 
 
+def _target_sort_key(target: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        _int_sort_key(target.get("turn_index")),
+        _session_sort_key(target.get("session_id") or target.get("session")),
+        str(target.get("stream")),
+    )
+
+
+def _log_anchors(
+    run_records: list[dict[str, Any]],
+) -> dict[str, tuple[int, bool]]:
+    """Where each log's lines belong among the run's events.
+
+    Log lines carry no timestamps, so a log is placed by the events that name
+    it: just before the first ``*_finished`` record that names it (its turn or
+    commit wrote the log before finishing), or, while nothing has finished it,
+    just after the last record that names it. Maps target key to ``(index,
+    before)``.
+    """
+    anchors: dict[str, tuple[int, bool]] = {}
+    finished: set[str] = set()
+    for index, record in enumerate(run_records):
+        named: dict[str, dict[str, Any]] = {}
+        _add_log_targets(named, tail_records._payload(record))
+        is_finish = str(record.get("name", "")).endswith("_finished")
+        for key in named:
+            if key in finished:
+                continue
+            if is_finish:
+                anchors[key] = (index, True)
+                finished.add(key)
+            else:
+                anchors[key] = (index, False)
+    return anchors
+
+
 def _emit_recent(
     *,
     records: list[dict[str, Any]],
@@ -178,16 +232,27 @@ def _emit_recent(
 ) -> None:
     run_records = tail_records._event_records_for_run(records, run_id)
     targets.update(_discover_targets(run_records, state_payload))
-    activity = [tail_event_messages._event_line(record) for record in run_records]
-    for target in sorted(
-        targets.values(),
-        key=lambda value: (
-            _int_sort_key(value.get("turn_index")),
-            _session_sort_key(value.get("session_id") or value.get("session")),
-            str(value.get("stream")),
-        ),
-    ):
-        activity.extend(_read_log_lines(target))
+    # Interleave each log with the events of the turn that wrote it, rather
+    # than listing every log after every event: the last `lines` lines must
+    # still end on the run's outcome, not on the final turn's output.
+    anchors = _log_anchors(run_records)
+    before: dict[int, list[str]] = {}
+    after: dict[int, list[str]] = {}
+    trailing: list[str] = []
+    for target in sorted(targets.values(), key=_target_sort_key):
+        log_lines = _read_log_lines(target)
+        anchor = anchors.get(_target_key(target["path"]))
+        if anchor is None:
+            trailing.extend(log_lines)
+        else:
+            index, is_before = anchor
+            (before if is_before else after).setdefault(index, []).extend(log_lines)
+    activity: list[str] = []
+    for index, record in enumerate(run_records):
+        activity.extend(before.get(index, ()))
+        activity.append(tail_event_messages._event_line(record))
+        activity.extend(after.get(index, ()))
+    activity.extend(trailing)
 
     if activity:
         _print_lines(activity[-lines:], out)

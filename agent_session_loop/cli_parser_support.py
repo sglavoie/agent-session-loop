@@ -303,20 +303,25 @@ def _add_plan_dir_with_option_alias(
     name the same path. The subparsers action reconciles the two after the
     leaf parses, so the error names the leaf's own usage line.
     """
-    parser.add_argument(
+    positional = parser.add_argument(
         _PLAN_DIR_POSITIONAL_DEST,
         metavar="PLAN_DIR",
         nargs="?",
         default=None,
         help=help_text,
     )
-    parser.add_argument(
+    option = parser.add_argument(
         "--plan-dir",
         dest="plan_dir",
         metavar="PLAN_DIR",
         default=None,
         help="Alias for the PLAN_DIR positional",
     )
+    if isinstance(parser, _AgentSessionLoopArgumentParser):
+        # Usage shows the pair as one required choice, `(PLAN_DIR | --plan-dir
+        # PLAN_DIR)`, rather than an optional `[PLAN_DIR]` the reconciliation
+        # below then refuses to go without.
+        parser.show_as_alternatives(positional, option, required=True)
     _PLAN_DIR_ALIAS_PARSERS.add(parser)
 
 
@@ -355,14 +360,16 @@ class _AgentSessionLoopArgumentParser(argparse.ArgumentParser):
         # so every level inherits the described-subparser registry.
         self.register("action", "parsers", _DescribedSubParsersAction)
 
-    def show_as_alternatives(self, *actions: argparse.Action) -> None:
-        """Render ``actions`` as ``[A | B]`` in usage without enforcing it.
+    def show_as_alternatives(
+        self, *actions: argparse.Action, required: bool = False
+    ) -> None:
+        """Render ``actions`` as ``[A | B]`` (``(A | B)`` if ``required``) in usage.
 
         For a pair the handler already validates itself -- so a conflict keeps
         its JSON ``reason`` instead of argparse's plain-text exit 2 -- while
         the usage line still tells the reader that the two are alternatives.
         """
-        group = argparse._MutuallyExclusiveGroup(self)
+        group = argparse._MutuallyExclusiveGroup(self, required=required)
         group._group_actions.extend(actions)
         self._display_only_groups.append(group)
 

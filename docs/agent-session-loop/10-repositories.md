@@ -145,8 +145,10 @@ an unattended sweeper should make. A pass that suffered a partial failure
 reports `partial-failure` and suppresses the over-budget verdict, because a
 corpus that failed to shrink has not proven that policy cannot shrink it.
 
-Each pass fsyncs a `maintenance.json` manifest under the state root holding the
-full last result plus a bounded 10-entry history. `asl maintenance status` reads
+Each `--apply` pass (the scheduled job always passes it) fsyncs a
+`maintenance.json` manifest under the state root holding the full last result
+plus a bounded 10-entry history; a dry run writes nothing, the manifest
+included. `asl maintenance status` reads
 it back and reports job presence, whether the installed definition still matches
 what this version would render, whether launchd has it loaded, and the last run's
 outcome, reclaimed bytes, and failures; it exits nonzero only when that last
@@ -241,7 +243,9 @@ rows and `registry_digest`; those keys remain absent for legacy sources.
 Stable failure reasons: `single-session` (splitting is not needed),
 `malformed-plan` (the parser's line-specific `PlanError` verbatim),
 `missing-contract:<id>`, `invalid-contract:<id>` (a present contract entry that
-is not a JSON object or is missing `done_when`/`verify`), and `input-error`. The
+is not a JSON object or is missing `done_when`/`verify`), `already-split` (the
+plan id already has an output directory and `--force-new` was not given;
+`details.existing_outputs` names it), and `input-error`. The
 `session-split` skill is a thin
 wrapper that authors the per-session contracts and then calls `asl split`.
 
@@ -256,8 +260,10 @@ malformed heading in the plan. Each entry in the `findings` array carries `line`
 categories: `invalid-session-id`, `zero-id-component`, `malformed-heading`,
 `missing-id-whitespace`, `missing-session-id`, `non-numeric-session-id`,
 `session-id-suffix`, `dangling-title-separator`, `malformed-title`,
-`punctuation-free-title`, `unsupported-title-separator`, and
-`duplicate-session-id`. `suggested_line` is non-null exactly when the damage has
+`punctuation-free-title`, `unsupported-title-separator`,
+`duplicate-session-id`, and `out-of-order-session` (a session whose id sorts
+before the one above it: sessions run in dotted numeric order, so the source
+must list them that way). `suggested_line` is non-null exactly when the damage has
 a single correct rewrite (`punctuation-free-title` and
 `unsupported-title-separator`), and any suggestion emitted is guaranteed to
 parse; every other category would invent an id, renumber sessions, or drop a

@@ -222,8 +222,8 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             with redirect_stdout(buffer):
                 state_status_text._print_text_status(payload)
             output = buffer.getvalue()
-            self.assertIn("1 open questions (2 unanswered historical)", output)
-            self.assertIn("1 resolutions, 1 notices", output)
+            self.assertIn("1 open question (2 unanswered historical)", output)
+            self.assertIn("1 resolution, 1 notice,", output)
 
     def test_status_payload_projects_supervision_ends(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -250,7 +250,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             with redirect_stdout(buffer):
                 state_status_text._print_text_status(payload)
             output = buffer.getvalue()
-            self.assertIn("0 notices, 1 supervision ends", output)
+            self.assertIn("0 notices, 1 supervision end,", output)
 
     def test_status_payload_retires_open_questions_once_the_run_ends(
         self,

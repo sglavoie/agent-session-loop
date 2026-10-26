@@ -1,5 +1,6 @@
 # ruff: noqa: F403, F405
 from .cli_defaults import program_name
+from .plans_files import read_input_text
 from .repository_registration_derivation import (
     register_repositories,
     register_source_plan,
@@ -169,12 +170,9 @@ def _register_source_plan_from_args(args: Any) -> int:
                 "replaces its source",
             )
         try:
-            text = Path(source_path).read_text(encoding="utf-8")
-        except OSError as error:
-            return _emit_error(
-                REGISTER_REASON_INPUT_ERROR,
-                f"cannot read source plan {source_path}: {error}",
-            )
+            text = read_input_text(source_path, label="source plan")
+        except plans_errors.InputReadError as error:
+            return _emit_error(REGISTER_REASON_INPUT_ERROR, str(error))
 
     try:
         result = register_source_plan(text, cwd=args.cwd)

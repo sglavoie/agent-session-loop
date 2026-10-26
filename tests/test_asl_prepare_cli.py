@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
+    authoring_paths,
     cli,
     harnesses,
     plans_files,
@@ -101,6 +102,19 @@ class PrepareCliTests(unittest.TestCase):
         self.assertEqual("prepare", payload["command"])
         self.assertEqual("input-error", payload["reason"])
         self.assertIn("must differ", payload["error"])
+
+    def test_non_utf8_source_plan_is_input_error(self) -> None:
+        source = self.tmp_path / "bad-plan.md"
+        source.write_bytes(b"# P\n\n## Session 1: a\n\n\xff\n")
+
+        code, stdout, _stderr = self._run_cli(
+            str(source), "--cwd", str(self.repo), "--json"
+        )
+
+        self.assertEqual(1, code)
+        payload = json.loads(stdout)
+        self.assertEqual("input-error", payload["reason"])
+        self.assertIn("can't decode byte", payload["error"])
 
     def test_rebind_workspace_requires_resume(self) -> None:
         source = self._write_source()
@@ -263,6 +277,37 @@ class PrepareCliTests(unittest.TestCase):
         payload = json.loads(stdout)
         self.assertEqual("input-error", payload["reason"])
         self.assertIn("manifest.md", payload["error"])
+
+    def test_already_split_source_reports_already_split_with_its_outputs(
+        self,
+    ) -> None:
+        # A duplicate split used to fall through the generic PlanError branch
+        # as plan-structure, which reads as "the plan directory is malformed".
+        source = self._write_source()
+        existing = f"{self.base_dir / 'abc-def'} [draft]"
+        with mock.patch.object(
+            prepare_cli,
+            "prepare_plan",
+            side_effect=authoring_paths.DuplicateSplitError("abc-def", (existing,)),
+        ):
+            code, stdout, _stderr = self._run_cli(
+                str(source),
+                "--cwd",
+                str(self.repo),
+                "--base-dir",
+                str(self.base_dir),
+                "--json",
+            )
+
+        self.assertEqual(1, code)
+        payload = json.loads(stdout)
+        self.assertEqual("already-split", payload["reason"])
+        self.assertEqual(
+            {"plan_id": "abc-def", "existing_outputs": [existing]},
+            payload["details"],
+        )
+        self.assertIn("--resume", payload["error"])
+        self.assertIn("--force-new", payload["error"])
 
     def test_single_session_source_returns_needs_plan_iteration(self) -> None:
         source = self._write_source(session_count=1)

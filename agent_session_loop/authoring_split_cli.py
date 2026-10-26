@@ -18,9 +18,14 @@ from .authoring_lint import (
     lint_plan_document,
     plan_footprint_payload,
 )
-from .authoring_paths import capture_inline_plan, extract_inline_plan
+from .authoring_paths import (
+    DuplicateSplitError,
+    capture_inline_plan,
+    extract_inline_plan,
+)
 from .authoring_split import (
     MULTI_REPOSITORY_MESSAGE,
+    SPLIT_REASON_ALREADY_SPLIT,
     SPLIT_REASON_INPUT_ERROR,
     SPLIT_REASON_MALFORMED_PLAN,
     SPLIT_REASON_REGISTRY_REQUIRED,
@@ -28,10 +33,12 @@ from .authoring_split import (
     InvalidContractError,
     MissingContractError,
     SingleSessionError,
+    UnknownContractError,
     split_plan,
 )
 from .cli_defaults import program_name
-from .plans_errors import PlanError
+from .plans_errors import InputReadError, PlanError
+from .plans_files import read_input_text
 from .plans_models import ReadinessMetadata
 from .workspaces import (
     RepositoryRegistry,
@@ -130,11 +137,11 @@ def check_from_args(args: Any) -> int:
                 want_json=want_json,
             )
         try:
-            text = Path(source_path).read_text(encoding="utf-8")
-        except OSError as error:
+            text = read_input_text(source_path, label="source plan")
+        except InputReadError as error:
             return _emit_split_error(
                 SPLIT_REASON_INPUT_ERROR,
-                f"cannot read source plan {source_path}: {error}",
+                str(error),
                 want_json=want_json,
                 source_path=source_path,
             )
@@ -287,14 +294,11 @@ def split_from_args(args: Any) -> int:
 
     # Load the Step 7 contracts keyed by canonical session id.
     try:
-        contracts_text = Path(os.path.expanduser(str(args.contracts_file))).read_text(
-            encoding="utf-8"
+        contracts_text = read_input_text(
+            os.path.expanduser(str(args.contracts_file)), label="contracts file"
         )
-    except OSError as error:
-        return _emit_error(
-            SPLIT_REASON_INPUT_ERROR,
-            f"cannot read contracts file {args.contracts_file}: {error}",
-        )
+    except InputReadError as error:
+        return _emit_error(SPLIT_REASON_INPUT_ERROR, str(error))
     try:
         contracts_by_id = json.loads(contracts_text)
     except json.JSONDecodeError as error:
@@ -312,12 +316,9 @@ def split_from_args(args: Any) -> int:
     split_cwd = getattr(args, "cwd", None)
     if split_cwd is not None:
         try:
-            plan_text = Path(source_path).read_text(encoding="utf-8")
-        except OSError as error:
-            return _emit_error(
-                SPLIT_REASON_INPUT_ERROR,
-                f"cannot read source plan {source_path}: {error}",
-            )
+            plan_text = read_input_text(source_path, label="source plan")
+        except InputReadError as error:
+            return _emit_error(SPLIT_REASON_INPUT_ERROR, str(error))
         footprint = plan_footprint_payload(
             plan_text,
             split_cwd,
@@ -360,14 +361,11 @@ def split_from_args(args: Any) -> int:
     analysis_note: str | None = None
     if args.analysis_file:
         try:
-            analysis_note = Path(os.path.expanduser(str(args.analysis_file))).read_text(
-                encoding="utf-8"
+            analysis_note = read_input_text(
+                os.path.expanduser(str(args.analysis_file)), label="analysis file"
             )
-        except OSError as error:
-            return _emit_error(
-                SPLIT_REASON_INPUT_ERROR,
-                f"cannot read analysis file {args.analysis_file}: {error}",
-            )
+        except InputReadError as error:
+            return _emit_error(SPLIT_REASON_INPUT_ERROR, str(error))
 
     try:
         result = split_plan(
@@ -384,6 +382,23 @@ def split_from_args(args: Any) -> int:
         return _emit_error(f"missing-contract:{error.session_id}", str(error))
     except InvalidContractError as error:
         return _emit_error(f"invalid-contract:{error.session_id}", str(error))
+    except InputReadError as error:
+        return _emit_error(SPLIT_REASON_INPUT_ERROR, str(error))
+    except UnknownContractError as error:
+        return _emit_error(
+            SPLIT_REASON_INPUT_ERROR,
+            str(error),
+            unknown_session_ids=list(error.session_ids),
+        )
+    except DuplicateSplitError as error:
+        return _emit_error(
+            SPLIT_REASON_ALREADY_SPLIT,
+            str(error),
+            details={
+                "plan_id": error.plan_id,
+                "existing_outputs": list(error.existing_outputs),
+            },
+        )
     except PlanError as error:
         return _emit_error(SPLIT_REASON_MALFORMED_PLAN, str(error))
 

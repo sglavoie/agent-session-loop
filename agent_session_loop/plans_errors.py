@@ -16,6 +16,15 @@ class PlanNotFoundError(PlanError):
     """
 
 
+class InputReadError(PlanError):
+    """Raised when a file the caller named cannot be read or is not UTF-8.
+
+    A :class:`PlanError` still, so existing handlers keep working; a command
+    that distinguishes its own input from a malformed plan reports it as
+    ``input-error`` instead of blaming the plan's structure.
+    """
+
+
 #: The ``reason`` every command reports when ``PLAN_DIR`` does not exist.
 PLAN_NOT_FOUND_REASON = "plan-not-found"
 

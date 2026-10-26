@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import commit_message, commit_message_git
 from tests import support_asl_commit_message as fixtures
 from tests.support import (
     git_stdout,
+    init_git_repo,
 )
 
 
@@ -163,6 +165,94 @@ class CommitHandlerTests(fixtures.CommitHandlerCase):
         )
         # The unrelated staged edit is neither committed nor unstaged.
         self.assertIn("M  src/beta.py", self.porcelain())
+
+    def test_drifted_paths_are_reported_verbatim(self) -> None:
+        # Plain porcelain C-quotes a non-ASCII name and writes a rename as
+        # `old -> new`, so the refusal named `"\303\274n..."` and split a name
+        # that itself holds ` -> ` at the wrong arrow.
+        names = ["ün.txt", "a -> b.txt"]
+        for name in names:
+            self.write(name, "seed\n")
+        self.write("old.txt", "seed\n")
+        commit_message.stage_paths(self.repo, [*names, "old.txt"])
+        git_stdout(self.repo, "commit", "-qm", "seed", "--no-verify")
+        git_stdout(self.repo, "mv", "old.txt", "x -> new.txt")
+        for name in [*names, "x -> new.txt"]:
+            self.write(name, "edited after staging\n")
+        scope = [*names, "old.txt", "x -> new.txt"]
+        snapshot = commit_message.pathspec_snapshot(self.repo, scope)
+
+        with self.assertRaises(commit_message.CommitMessageError) as caught:
+            commit_message.assert_pathspec_snapshot(self.repo, scope, snapshot)
+
+        self.assertEqual(
+            sorted([*names, "x -> new.txt"]),
+            caught.exception.details["paths"],
+        )
+
+    def _submodule_commit(self, sub: Path, name: str) -> None:
+        (sub / name).write_text(f"{name}\n", encoding="utf-8")
+        git_stdout(sub, "add", name)
+        git_stdout(sub, "commit", "-qm", name, "--no-verify")
+
+    def _prepare_submodule_bump(self) -> tuple[Path, str]:
+        """A committed submodule whose bumped HEAD is staged and prepared."""
+        sub = self.repo / "sub"
+        init_git_repo(sub)
+        git_stdout(self.repo, "add", "sub")
+        git_stdout(self.repo, "commit", "-qm", "add sub", "--no-verify")
+        self._submodule_commit(sub, "bump.txt")
+        commit_message.stage_paths(self.repo, ["sub"])
+        # `log` drops the bump's `diff --git` header unless the capture pins
+        # its own submodule format.
+        git_stdout(self.repo, "config", "diff.submodule", "log")
+
+        code, out, err = self.run_commit(
+            str(self.repo), "--prepare-only", "--pathspec", "sub"
+        )
+        self.assertEqual(0, code, err)
+        return sub, json.loads(out.partition("\n\n")[0])["snapshot"]
+
+    def _commit_submodule(self, snapshot: str) -> tuple[int, str]:
+        code, _out, err = self.run_commit(
+            str(self.repo),
+            "--yes",
+            "--pathspec",
+            "sub",
+            "--expect-snapshot",
+            snapshot,
+            "--message-file",
+            "-",
+            stdin="chore: bump the submodule\n",
+        )
+        return code, err
+
+    def test_dirty_submodule_content_does_not_drift_a_pointer_bump(self) -> None:
+        # Status reports `MM sub` for edits or untracked files inside the
+        # submodule, none of which a gitlink commit carries; reading that as
+        # drift refused every scoped commit of the bump.
+        sub, snapshot = self._prepare_submodule_bump()
+        (sub / "README.md").write_text("edited inside\n", encoding="utf-8")
+        (sub / "scratch.txt").write_text("untracked inside\n", encoding="utf-8")
+
+        code, err = self._commit_submodule(snapshot)
+
+        self.assertEqual(0, code, err)
+        self.assertEqual(
+            git_stdout(sub, "rev-parse", "HEAD"),
+            git_stdout(self.repo, "rev-parse", "HEAD:sub"),
+        )
+
+    def test_a_submodule_head_moved_after_capture_still_drifts(self) -> None:
+        sub, snapshot = self._prepare_submodule_bump()
+        self._submodule_commit(sub, "later.txt")
+        before = self.commit_count()
+
+        code, err = self._commit_submodule(snapshot)
+
+        self.assertEqual(1, code)
+        self.assertIn("changed after the diff was captured", err)
+        self.assertEqual(before, self.commit_count())
 
     def test_expect_snapshot_without_pathspec_is_refused(self) -> None:
         self.write("src/alpha.py", "print('alpha')\n")

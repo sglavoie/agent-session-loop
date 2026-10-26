@@ -6,6 +6,7 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 
+from .contract_models import fenced_line_flags
 from .plans_errors import (
     PlanError,
 )
@@ -31,12 +32,28 @@ from .workspaces import (
     WorkspaceError,
 )
 
+#: A cell boundary: a pipe that is not escaped as ``\|`` inside cell text.
+_UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
+
+
+def escape_table_cell(value: str) -> str:
+    r"""Escape ``|`` as ``\|`` so a value stays inside one Markdown table cell."""
+    return value.replace("|", "\\|")
+
 
 def _split_table_row(line: str) -> tuple[str, list[str]] | None:
+    r"""Split a Markdown table row into its leading indent and raw cells.
+
+    An escaped ``\|`` is cell text, not a boundary, and stays escaped in the
+    returned cell so a row rejoined from these cells reads the same.
+    """
     if not line.lstrip().startswith("|"):
         return None
     leading = line[: len(line) - len(line.lstrip())]
-    return leading, line.strip().strip("|").split("|")
+    body = line.strip().lstrip("|")
+    while body.endswith("|") and not body.endswith("\\|"):
+        body = body[:-1]
+    return leading, _UNESCAPED_PIPE_RE.split(body)
 
 
 def _normalize_table_header(value: str) -> str:
@@ -58,19 +75,12 @@ def parse_repository_registry_manifest(
 ) -> RepositoryRegistry | None:
     """Parse the exact authoritative repository table from rendered manifest text."""
     lines = manifest_text.splitlines()
-    headings: list[int] = []
-    fence: str | None = None
-    for index, line in enumerate(lines):
-        match = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
-        if match is not None:
-            delimiter = match.group(1)[0]
-            if fence is None:
-                fence = delimiter
-            elif fence == delimiter:
-                fence = None
-            continue
-        if fence is None and line == "## Repositories":
-            headings.append(index)
+    fenced = fenced_line_flags(lines)
+    headings = [
+        index
+        for index, line in enumerate(lines)
+        if not fenced[index] and line == "## Repositories"
+    ]
     if not headings:
         return None
     if len(headings) != 1:

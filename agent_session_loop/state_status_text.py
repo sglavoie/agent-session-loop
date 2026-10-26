@@ -6,9 +6,30 @@ from pathlib import Path
 from typing import Any
 
 from . import workspaces
-from .formatting import format_duration_seconds
+from .formatting import count_noun, format_duration_seconds
 from .state_mailbox_status import _guidance_state_summary
 from .state_payloads import _session_label_from_payload
+
+
+def _run_outcome_line(runner_state: dict[str, Any]) -> str | None:
+    """How the recorded run ended, or stands paused, as one ``Run state`` line.
+
+    The verb follows ``paused`` first, then ``ok``: a run that ended without
+    succeeding and without pausing (an abandoned one, say) stopped. A run that
+    has neither finished nor paused prints nothing here; the active-turn and
+    staleness lines describe it.
+    """
+    reason = runner_state.get("reason") or "unknown"
+    finished_at = runner_state.get("run_finished_at")
+    if runner_state.get("paused"):
+        paused_at = runner_state.get("paused_at") or finished_at
+        when = f" at {paused_at}" if paused_at else ""
+        return f"Run state: paused ({reason}){when}"
+    if not finished_at:
+        return None
+    if runner_state.get("ok"):
+        return f"Run state: finished {reason} at {finished_at}"
+    return f"Run state: stopped ({reason}) at {finished_at}"
 
 
 def _print_text_status(payload: dict[str, Any]) -> None:
@@ -71,6 +92,12 @@ def _print_text_status(payload: dict[str, Any]) -> None:
         run_id = runner_state.get("run_id") or "unknown"
         run_started_at = runner_state.get("run_started_at") or "unknown"
         print(f"Run state: run {run_id} started {run_started_at}")
+        outcome = _run_outcome_line(runner_state)
+        if outcome:
+            print(outcome)
+        pause_message = runner_state.get("pause_message")
+        if runner_state.get("paused") and isinstance(pause_message, str):
+            print(f"Pause detail: {pause_message}")
         if runner_state.get("stale_unfinished"):
             stale_reason = runner_state.get("stale_reason") or "stale unfinished"
             print(f"Run state: stale/orphaned ({stale_reason})")
@@ -186,14 +213,17 @@ def _print_text_status(payload: dict[str, Any]) -> None:
                 and unanswered > open_questions
                 else ""
             )
+            supervision_ends = count_noun(
+                mailbox_status.get("supervision_ends"), "supervision end"
+            )
             print(
                 "Mailbox: active"
                 f"{full_suffix}, seq {mailbox_status.get('last_seq')}, "
                 f"{mailbox_status.get('pending_guidance')} pending guidance, "
-                f"{open_questions} open questions{history_suffix}, "
-                f"{mailbox_status.get('resolutions')} resolutions, "
-                f"{mailbox_status.get('notices')} notices, "
-                f"{mailbox_status.get('supervision_ends')} supervision ends, "
+                f"{count_noun(open_questions, 'open question')}{history_suffix}, "
+                f"{count_noun(mailbox_status.get('resolutions'), 'resolution')}, "
+                f"{count_noun(mailbox_status.get('notices'), 'notice')}, "
+                f"{supervision_ends}, "
                 f"{mailbox_status.get('size_bytes')}/"
                 f"{mailbox_status.get('max_bytes')} bytes"
             )
@@ -237,14 +267,11 @@ def _print_text_status(payload: dict[str, Any]) -> None:
         else:
             entry_count = progress_journal.get("entry_count") or 0
             last_appended = progress_journal.get("last_appended")
-            entry_word = "entry" if entry_count == 1 else "entries"
+            entries = count_noun(entry_count, "entry", "entries")
             if last_appended:
-                print(
-                    f"Progress journal: {entry_count} {entry_word}, "
-                    f"last appended {last_appended}"
-                )
+                print(f"Progress journal: {entries}, last appended {last_appended}")
             else:
-                print(f"Progress journal: {entry_count} {entry_word}")
+                print(f"Progress journal: {entries}")
 
     active_turn = payload.get("active_turn")
     if isinstance(active_turn, dict):

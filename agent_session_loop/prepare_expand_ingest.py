@@ -12,8 +12,8 @@ from typing import Any
 from . import plans_metadata, repository_intent, responses
 from .authoring_transaction import PlanTransaction
 from .cli_defaults import program_name
-from .plans_errors import PlanError
-from .plans_files import canonicalize_path
+from .plans_errors import InputReadError, PlanError
+from .plans_files import canonicalize_path, read_input_text
 from .prepare_corrections import CorrectionOutcome, _apply_one_correction
 from .prepare_expansion import insert_expansion_reference, render_expansion
 from .prepare_models import (
@@ -95,7 +95,7 @@ def ingest_expand_batch(
             session_text = session_path.read_text(encoding="utf-8")
         except FileNotFoundError as error:
             raise PlanError(f"missing session file: {session_path}") from error
-        except OSError as error:
+        except (OSError, UnicodeDecodeError) as error:
             raise PlanError(f"cannot read {session_path}: {error}") from error
 
         original_text = session_text
@@ -178,12 +178,9 @@ def expand_ingest_from_args(args: Any) -> int:
         return 1
 
     try:
-        text = Path(os.path.expanduser(batch_file)).read_text(encoding="utf-8")
-    except OSError as error:
-        return _emit_error(
-            EXPAND_INGEST_REASON_INPUT_ERROR,
-            f"cannot read batch file {batch_file}: {error}",
-        )
+        text = read_input_text(os.path.expanduser(batch_file), label="batch file")
+    except InputReadError as error:
+        return _emit_error(EXPAND_INGEST_REASON_INPUT_ERROR, str(error))
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as error:

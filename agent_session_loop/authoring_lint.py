@@ -14,6 +14,7 @@ from . import (
 )
 from .authoring_parse import (
     _iter_structural_lines,
+    _out_of_order_session_error,
     _parse_repository_registry,
     _parse_source_session_heading,
     _source_heading_error,
@@ -22,11 +23,9 @@ from .authoring_parse import (
 from .authoring_render import _contract_file_targets
 from .authoring_source_models import (
     _ATX_CLOSING_MARKER_RE,
-    _NON_SESSION_PLAN_HEADING_RE,
     _SESSION_HEADING_PREFIX_RE,
     LINT_DUPLICATE_SESSION_ID,
     LINT_MISSING_REPOSITORY_REGISTRY,
-    LINT_NON_NUMERIC_SESSION_ID,
     LINT_SUGGESTABLE_CATEGORIES,
     LINT_UNSUPPORTED_TITLE_SEPARATOR,
     PlanLintFinding,
@@ -36,6 +35,7 @@ from .authoring_source_models import (
     SourceScopeError,
 )
 from .plans_errors import PlanError
+from .plans_session_ids import SessionId
 
 
 def _suggest_heading_repair(error: SourceHeadingError) -> str | None:
@@ -51,17 +51,6 @@ def _suggest_heading_repair(error: SourceHeadingError) -> str | None:
     after_token = prefix.group("rest")
     payload = after_token.lstrip(" \t")
     gap = after_token[: len(after_token) - len(payload)]
-
-    # ``## Session plan`` is ordinary prose whose first word happens to be the
-    # reserved session marker. It cannot describe a valid session (IDs are
-    # numeric), and rewriting it to a stable overview heading leaves its body
-    # untouched. Keep this deliberately narrow: other non-numeric values may
-    # be an intended session whose ID was omitted.
-    if (
-        error.category == LINT_NON_NUMERIC_SESSION_ID
-        and _NON_SESSION_PLAN_HEADING_RE.fullmatch(payload) is not None
-    ):
-        return f"{head[: -len('Session')]}Plan overview{closing_marker}"
 
     if error.category not in LINT_SUGGESTABLE_CATEGORIES:
         return None
@@ -108,6 +97,7 @@ def lint_plan_document(
     findings: list[PlanLintFinding] = []
     session_ids: list[str] = []
     first_id_lines: dict[str, int] = {}
+    previous: tuple[SessionId, int] | None = None
 
     lines = text.splitlines()
     structural_lines = tuple(_iter_structural_lines(lines))
@@ -168,6 +158,20 @@ def lint_plan_document(
 
         first_id_lines[session_id.value] = line_number
         session_ids.append(session_id.value)
+        out_of_order = _out_of_order_session_error(
+            session_id, previous, line_number=line_number, line=line
+        )
+        if out_of_order is not None:
+            findings.append(
+                PlanLintFinding(
+                    line=line_number,
+                    category=out_of_order.category,
+                    message=str(out_of_order),
+                    source_line=line,
+                    suggested_line=None,
+                )
+            )
+        previous = (session_id, line_number)
 
     if not findings and registry is not None:
         try:

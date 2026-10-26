@@ -3,7 +3,27 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from typing import Any
+
+
+def format_local_timestamp(moment: datetime) -> str:
+    """``moment`` in local time with its UTC offset: ``2026-10-25 23:07:09-06:00``.
+
+    Compact text for a reader, but never zone-less: the rest of the CLI prints
+    UTC, so a bare wall-clock time could not be told apart from it.
+    """
+    return moment.astimezone().isoformat(sep=" ", timespec="seconds")
+
+
+def count_noun(count: Any, singular: str, plural: str | None = None) -> str:
+    """``count`` with ``singular`` or its plural: ``1 entry``, ``2 entries``.
+
+    ``plural`` defaults to ``singular + "s"``. A count that is not exactly one
+    (zero, many, or an unknown ``None``) takes the plural.
+    """
+    noun = singular if count == 1 else (plural or f"{singular}s")
+    return f"{count} {noun}"
 
 
 def format_duration_seconds(value: Any) -> str:

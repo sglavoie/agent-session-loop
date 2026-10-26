@@ -189,7 +189,7 @@ def follow_events(path: str | Path) -> Iterator[list[dict[str, Any]]]:
                     continue
                 try:
                     raw = json.loads(text)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError, RecursionError:
                     continue
                 if isinstance(raw, dict):
                     records.append(raw)
@@ -201,9 +201,8 @@ class _TailFollowLoop:
         self,
         *,
         state_path: Path,
-        events_path: Path,
+        batches: Iterator[list[dict[str, Any]]],
         run_id: str | None,
-        seen_event_count: int,
         targets: dict[str, dict[str, Any]],
         offsets: dict[str, int],
         out: tail_models.TextSink,
@@ -213,9 +212,10 @@ class _TailFollowLoop:
         include_events: bool = True,
     ) -> None:
         self._state_path = state_path
-        self._events_path = events_path
+        # The `follow_events` generator `tail --json` follows: it survives a
+        # truncated or rotated events file and holds back a torn last line.
+        self._batches = batches
         self._run_id = run_id
-        self._seen_event_count = seen_event_count
         self._targets = targets
         self._offsets = offsets
         self._out = out
@@ -234,14 +234,13 @@ class _TailFollowLoop:
 
     def _poll_once(self) -> bool:
         state_payload = tail_records._read_json_file(self._state_path)
-        current_records = tail_records._read_event_records(self._events_path)
+        new_records = next(self._batches)
         if self._run_id is None:
-            self._run_id = tail_records._latest_run_id(state_payload, current_records)
+            self._run_id = tail_records._latest_run_id(state_payload, new_records)
 
-        run_records = tail_records._event_records_for_run(current_records, self._run_id)
+        run_records = tail_records._event_records_for_run(new_records, self._run_id)
         self._targets.update(tail_logs._discover_targets(run_records, state_payload))
 
-        new_records = current_records[self._seen_event_count :]
         finished = False
         for record in new_records:
             if not tail_records._matches_run(record, self._run_id):
@@ -253,7 +252,6 @@ class _TailFollowLoop:
             tail_logs._add_log_targets(self._targets, tail_records._payload(record))
             if record.get("name") == "run_finished":
                 finished = True
-        self._seen_event_count = len(current_records)
 
         for target in list(self._targets.values()):
             tail_logs._print_lines(
@@ -263,7 +261,8 @@ class _TailFollowLoop:
         if finished or _state_run_finished(state_payload):
             for target in list(self._targets.values()):
                 tail_logs._print_lines(
-                    tail_logs._read_new_log_text(target, self._offsets), self._out
+                    tail_logs._read_new_log_text(target, self._offsets, final=True),
+                    self._out,
                 )
             return True
         return False
@@ -364,8 +363,12 @@ class TailFollower:
         snapshot = plans_snapshot.inspect_plan(self._plan_dir)
         plan_state = state.plan_state_dir(snapshot.plan_dir, self._state_dir)
         state_path = plan_state / events.STATE_FILE_NAME
+        # The first batch is the initial read, so no record lands between
+        # reading the journal and starting to follow it.
         events_path = plan_state / events.EVENTS_FILE_NAME
-        records = tail_records._read_event_records(events_path)
+        tail_records._require_readable_events(events_path)
+        batches = follow_events(events_path)
+        records = next(batches)
         state_payload = tail_records._read_json_file(state_path)
         run_id = tail_records._latest_run_id(state_payload, records)
         run_records = tail_records._event_records_for_run(records, run_id)
@@ -376,9 +379,8 @@ class TailFollower:
         tail_logs._set_offsets_to_eof(targets, offsets)
         return _TailFollowLoop(
             state_path=state_path,
-            events_path=events_path,
+            batches=batches,
             run_id=run_id,
-            seen_event_count=len(records),
             targets=targets,
             offsets=offsets,
             out=self._out,
@@ -436,7 +438,9 @@ def tail_plan(
     plan_state = state.plan_state_dir(snapshot.plan_dir, state_dir)
     state_path = plan_state / events.STATE_FILE_NAME
     events_path = plan_state / events.EVENTS_FILE_NAME
-    records = tail_records._read_event_records(events_path)
+    tail_records._require_readable_events(events_path)
+    batches = follow_events(events_path)
+    records = next(batches)
     state_payload = tail_records._read_json_file(state_path)
     run_id = tail_records._latest_run_id(state_payload, records)
     targets: dict[str, dict[str, Any]] = {}
@@ -458,9 +462,8 @@ def tail_plan(
     stop_event = threading.Event()
     follow_loop = _TailFollowLoop(
         state_path=state_path,
-        events_path=events_path,
+        batches=batches,
         run_id=run_id,
-        seen_event_count=len(records),
         targets=targets,
         offsets=offsets,
         out=out,
@@ -499,7 +502,9 @@ def tail_plan_json(
     snapshot = plans_snapshot.inspect_plan(plan_dir)
     plan_state = state.plan_state_dir(snapshot.plan_dir, state_dir)
     state_path = plan_state / events.STATE_FILE_NAME
-    batches = follow_events(plan_state / events.EVENTS_FILE_NAME)
+    events_path = plan_state / events.EVENTS_FILE_NAME
+    tail_records._require_readable_events(events_path)
+    batches = follow_events(events_path)
     records = next(batches)
     run_id = tail_records._latest_run_id(
         tail_records._read_json_file(state_path), records

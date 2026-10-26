@@ -252,7 +252,14 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
             f"{suffix}"
         )
     if name == "run_finished":
-        verb = "run finished" if payload.get("ok") else "run paused"
+        # `paused` first: a run that ended without succeeding did not
+        # necessarily pause (an abandoned one stopped).
+        if payload.get("paused"):
+            verb = "run paused"
+        elif payload.get("ok"):
+            verb = "run finished"
+        else:
+            verb = "run stopped"
         reason = payload.get("pause_reason") or payload.get("reason") or "unknown"
         return (
             f"{verb}: run {payload.get('run_id', 'unknown')}, "

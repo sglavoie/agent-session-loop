@@ -41,7 +41,7 @@ from . import (
     repository_intent,
 )
 from .plans_errors import PlanError
-from .plans_files import canonicalize_path
+from .plans_files import canonicalize_path, read_input_text
 from .plans_snapshot import inspect_plan
 from .prepare_baseline import _run_baseline_stage
 from .prepare_commands import _format_resume_command, _format_run_command
@@ -196,12 +196,7 @@ def prepare_plan(
         source_path = os.path.realpath(
             os.path.abspath(os.path.expanduser(os.fspath(source)))
         )
-        try:
-            text = Path(source_path).read_text(encoding="utf-8")
-        except OSError as error:
-            raise PlanError(
-                f"cannot read source plan {source_path}: {error}"
-            ) from error
+        text = read_input_text(source_path, label="source plan")
 
         parsed: authoring_source_models.ParsedPlan | None
         try:
@@ -251,6 +246,7 @@ def prepare_plan(
             contracts_by_id,
             base_dir=base_dir,
             force_new=force_new,
+            harness=harness,
         )
         steps.append(
             PrepareStep(

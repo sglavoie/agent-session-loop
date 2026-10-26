@@ -57,6 +57,7 @@ class _Stats:
     artifact_bytes_added: int = 0
     pass_output_removed: int = 0
     failed_output_extracted: int = 0
+    unparseable_event_lines: int = 0
     rewritten_paths: list[str] = field(default_factory=list)
 
 
@@ -76,6 +77,7 @@ class CompactionReport:
     actual_bytes_reclaimed: int
     pass_output_removed: int
     failed_output_extracted: int
+    unparseable_event_lines: int
     rewritten_paths: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -94,6 +96,7 @@ class CompactionReport:
             "actual_bytes_reclaimed": self.actual_bytes_reclaimed,
             "pass_output_removed": self.pass_output_removed,
             "failed_output_extracted": self.failed_output_extracted,
+            "unparseable_event_lines": self.unparseable_event_lines,
             "rewritten_paths": list(self.rewritten_paths),
         }
 
@@ -107,12 +110,6 @@ def _dump_state_bytes(payload: dict[str, Any]) -> bytes:
     return (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8")
 
 
-def _dump_events_bytes(records: list[dict[str, Any]]) -> bytes:
-    """Serialize events one JSON object per line, matching ``append_event``."""
-    lines = [json.dumps(record, sort_keys=True) + "\n" for record in records]
-    return "".join(lines).encode("utf-8")
-
-
 def _stream_has_metadata(check: dict[str, Any], stream: str) -> bool:
     """Return True when ``stream`` already carries v2 bounded metadata.
 
@@ -124,19 +121,57 @@ def _stream_has_metadata(check: dict[str, Any], stream: str) -> bool:
     return bool(check.get(f"{stream}_sha256"))
 
 
+def _claim_artifact_target(
+    artifact_dir: Path,
+    base_name: str,
+    compressed: bytes,
+    claimed: set[Path],
+) -> tuple[Path, bool]:
+    """Pick the failure-artifact path for one stream and say if it is on disk.
+
+    The first candidate is the live-verification name (``{check}-{stream}``);
+    later candidates append an ordinal. A candidate is skipped when another
+    stream of this result already claimed it (two checks sharing a name, or
+    two unnamed checks) or when a file holding *different* bytes already sits
+    there, so extraction never overwrites output it does not own. A file that
+    already holds exactly these compressed bytes (an interrupted prior apply)
+    is reused. The choice depends only on the payload and the disk as it was
+    before this pass, so a dry run projects the same paths an apply writes.
+    """
+    ordinal = 1
+    while True:
+        name = base_name if ordinal == 1 else f"{base_name}-{ordinal}"
+        target = artifact_dir / f"{artifacts.derive_artifact_stem(name)}.gz"
+        ordinal += 1
+        if target in claimed:
+            continue
+        try:
+            existing = target.read_bytes()
+        except FileNotFoundError:
+            claimed.add(target)
+            return target, False
+        except OSError:
+            continue  # a directory or unreadable entry: never write over it
+        if existing == compressed:
+            claimed.add(target)
+            return target, True
+
+
 def _compact_check_streams(
     check: dict[str, Any],
     *,
     artifact_dir: Path,
     apply: bool,
     stats: _Stats,
+    claimed: set[Path],
 ) -> None:
     """Bound raw stdout/stderr on one verification check in place.
 
     Failed-check output is extracted to a gzip artifact (so it stays byte-for-
     byte recoverable) before the raw copy is replaced with a bounded preview;
     successful-check output is replaced with a preview and its full copy is
-    discarded. Already-compact v2 streams are skipped.
+    discarded. Already-compact v2 streams are skipped. ``claimed`` holds the
+    artifact paths this result already uses, so each stream gets its own.
     """
     failed = check.get("status") != "pass" or bool(check.get("failure_reason"))
     check_name = check.get("name") or "check"
@@ -154,20 +189,18 @@ def _compact_check_streams(
         if failed:
             stats.failed_output_extracted += 1
             if not check.get(f"{stream}_artifact_path"):
-                stem = artifacts.derive_artifact_stem(f"{check_name}-{stream}")
-                target = artifact_dir / f"{stem}.gz"
                 # Deterministic compression lets a dry-run project the exact
-                # artifact size without writing it; an artifact already on
-                # disk (interrupted prior apply) only counts its size delta.
+                # artifact size without writing it; an identical artifact
+                # already on disk (interrupted prior apply) adds nothing.
                 compressed = artifacts.gzip_compress(raw_bytes)
-                try:
-                    existing_size = target.stat().st_size
-                except OSError:
-                    existing_size = 0
-                stats.artifact_bytes_added += len(compressed) - existing_size
-                if apply:
-                    artifact_dir.mkdir(parents=True, exist_ok=True)
-                    artifacts.atomic_write_bytes(target, compressed, durable=True)
+                target, on_disk = _claim_artifact_target(
+                    artifact_dir, f"{check_name}-{stream}", compressed, claimed
+                )
+                if not on_disk:
+                    stats.artifact_bytes_added += len(compressed)
+                    if apply:
+                        artifact_dir.mkdir(parents=True, exist_ok=True)
+                        artifacts.atomic_write_bytes(target, compressed, durable=True)
                 check[f"{stream}_artifact_path"] = str(target)
         else:
             check.setdefault(f"{stream}_artifact_path", None)
@@ -194,6 +227,15 @@ def _compact_result_payload(
     if isinstance(verification, dict):
         checks = verification.get("checks")
         if isinstance(checks, list):
+            # Paths the record already points at stay theirs.
+            claimed = {
+                Path(path)
+                for check in checks
+                if isinstance(check, dict)
+                for stream in ("stdout", "stderr")
+                if isinstance(path := check.get(f"{stream}_artifact_path"), str)
+                and path
+            }
             for check in checks:
                 if isinstance(check, dict):
                     _compact_check_streams(
@@ -201,6 +243,7 @@ def _compact_result_payload(
                         artifact_dir=artifact_dir,
                         apply=apply,
                         stats=stats,
+                        claimed=claimed,
                     )
     return compact
 
@@ -271,17 +314,35 @@ def _compact_state_file(path: Path, *, apply: bool, stats: _Stats) -> None:
 
 
 def _compact_events_file(path: Path, *, apply: bool, stats: _Stats) -> None:
+    """Compact each event record, keeping lines that do not parse verbatim.
+
+    A crash mid-append leaves a torn final record (and a torn multi-byte
+    character can leave a line that is not even UTF-8). Event readers already
+    skip such a line and ``append_event`` starts its next record on a fresh
+    line, so the fragment carries no record anyone reads; failing the whole
+    plan over it would also leave ``state.json`` and every ``result.json``
+    uncompacted. The fragment is written back byte-for-byte -- including a
+    missing final newline -- so compaction neither loses nor invents bytes,
+    and each one is counted in the report.
+    """
     original = path.read_bytes()
-    records: list[dict[str, Any]] = []
-    for line in original.decode("utf-8").splitlines():
-        if not line.strip():
+    pieces = original.split(b"\n")
+    out: list[bytes] = []
+    for index, piece in enumerate(pieces):
+        terminated = index < len(pieces) - 1
+        if not piece.strip():
             continue
-        parsed = json.loads(line)
+        try:
+            parsed = json.loads(piece.decode("utf-8"))
+        except ValueError:  # JSONDecodeError and UnicodeDecodeError
+            stats.unparseable_event_lines += 1
+            out.append(piece + b"\n" if terminated else piece)
+            continue
         if isinstance(parsed, dict):
-            records.append(_compact_event_record(parsed))
-        else:
-            records.append(parsed)
-    compact = _dump_events_bytes(records)
+            parsed = _compact_event_record(parsed)
+        # Serialize events one JSON object per line, matching ``append_event``.
+        out.append((json.dumps(parsed, sort_keys=True) + "\n").encode("utf-8"))
+    compact = b"".join(out)
     _rewrite(path, original, compact, apply=apply, stats=stats)
 
 
@@ -355,6 +416,7 @@ def compact_plan_state(
         actual_bytes_reclaimed=reclaimed if apply else 0,
         pass_output_removed=stats.pass_output_removed,
         failed_output_extracted=stats.failed_output_extracted,
+        unparseable_event_lines=stats.unparseable_event_lines,
         rewritten_paths=tuple(stats.rewritten_paths),
     )
 
@@ -378,6 +440,10 @@ def _print_report(report: CompactionReport) -> None:
         f"Failed-check outputs extracted: {report.failed_output_extracted}; "
         f"pass outputs removed (lossy): {report.pass_output_removed}"
     )
+    if report.unparseable_event_lines:
+        print(
+            f"Unparseable event lines kept verbatim: {report.unparseable_event_lines}"
+        )
     if not report.applied and report.files_rewritten:
         print("Re-run with --apply to write the compact records.")
 

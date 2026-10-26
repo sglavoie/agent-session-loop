@@ -319,7 +319,7 @@ class ProgressAndHeartbeatTests(FakeHarnessIntegrationBase):
 
         self.assertEqual(0, tail_process.returncode, tail_stderr)
         self.assertEqual("", tail_stderr)
-        timestamp = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
+        timestamp = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] "
         self.assertRegex(
             tail_stdout,
             timestamp + r"session 1/2 started",

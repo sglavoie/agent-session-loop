@@ -6,6 +6,8 @@ from __future__ import annotations
 # ruff: noqa: F403, F405
 from tests.asl_progress_test_support import *
 
+from agent_session_loop import state_mailbox_status
+
 
 ASL_TEST_PORTABLE = True
 
@@ -141,6 +143,16 @@ class ProgressCliTests(unittest.TestCase):
                 "preexisting\n",
                 progress_file.read_text(encoding="utf-8"),
             )
+
+    def test_backfill_counts_a_single_entry_in_the_singular(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1",))
+
+            code, out, err = self._run_backfill(plan_dir)
+
+            self.assertEqual(0, code, err)
+            self.assertIn("wrote 1 entry to ", out)
 
     def test_backfill_force_overwrites_existing_journal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -354,6 +366,86 @@ class ProgressCliTests(unittest.TestCase):
             self.assertEqual("progress", payload["command"])
             self.assertEqual("malformed-progress-journal", payload["reason"])
             self.assertIn("v999", payload["error"])
+
+    def test_progress_reports_a_non_utf8_journal_instead_of_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1",))
+            self._run_backfill(plan_dir)
+            with plans_progress.progress_path(plan_dir).open("ab") as journal:
+                journal.write(b"\xff\n")
+
+            code, out, err = self._run_progress(plan_dir, json_output=True)
+            self.assertEqual(1, code, err)
+            payload = json.loads(out)
+            self.assertEqual("malformed-progress-journal", payload["reason"])
+            self.assertIn("not valid UTF-8", payload["error"])
+
+            # The text view shows the journal as written, the byte replaced.
+            code, out, err = self._run_progress(plan_dir)
+            self.assertEqual(0, code, err)
+            self.assertIn("## Session 1", out)
+            self.assertTrue(out.endswith("�\n"))
+
+            # `asl status` reaches its unreadable-journal branch.
+            journal = state_mailbox_status._progress_journal_payload(plan_dir)
+            self.assertTrue(journal["present"])
+            self.assertIn("not valid UTF-8", journal["error"])
+
+    def test_progress_refuses_tail_with_json_as_an_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+
+            code, out, err = self._run_progress(plan_dir, tail=True, json_output=True)
+
+            self.assertEqual(1, code)
+            self.assertEqual("", err)
+            payload = json.loads(out)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("input-error", payload["reason"])
+            self.assertIn("--tail", payload["error"])
+
+    def test_follow_progress_reprints_a_journal_rewritten_shorter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            journal = plans_progress.progress_path(plan_dir)
+            journal.write_text("# Progress\n" + "old entry\n" * 20, encoding="utf-8")
+            stop = threading.Event()
+            seen = threading.Event()
+
+            class WaitableStringIO(io.StringIO):
+                def write(self, value: str) -> int:
+                    written = super().write(value)
+                    if "appended after" in self.getvalue():
+                        seen.set()
+                    return written
+
+            buffer = WaitableStringIO()
+            thread = threading.Thread(
+                target=progress_cli.follow_progress,
+                args=(plan_dir,),
+                kwargs={"out": buffer, "poll_interval": 0.01, "stop_event": stop},
+                daemon=True,
+            )
+            thread.start()
+            try:
+                # A forced backfill replaces the journal whole, shorter.
+                replacement = journal.with_name("progress.md.tmp")
+                replacement.write_text("# Progress\nrebuilt\n", encoding="utf-8")
+                os.replace(replacement, journal)
+                with journal.open("a", encoding="utf-8") as handle:
+                    handle.write("appended after\n")
+                self.assertTrue(seen.wait(timeout=2.0), buffer.getvalue())
+            finally:
+                stop.set()
+                thread.join(timeout=2.0)
+
+            output = buffer.getvalue()
+            self.assertIn("--- progress.md rewritten ---\n", output)
+            self.assertIn("rebuilt\n", output)
+            self.assertNotIn("old entry", output)
 
     def test_follow_progress_streams_newly_appended_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

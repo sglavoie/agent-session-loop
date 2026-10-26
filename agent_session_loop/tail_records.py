@@ -16,11 +16,27 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
         return None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, ValueError, RecursionError) as error:
         raise tail_models.TailError(f"cannot read {path}: {error}") from error
     if not isinstance(raw, dict):
         raise tail_models.TailError(f"{path} did not contain a JSON object")
     return raw
+
+
+def _require_readable_events(path: Path) -> None:
+    """Refuse an events file that exists but cannot be opened.
+
+    ``follow_events`` reads an unopenable file as "nothing yet", which suits a
+    poll but would let the first read of a tail report no activity for a
+    journal it could not read at all.
+    """
+    if not path.exists():
+        return
+    try:
+        with path.open("rb"):
+            pass
+    except OSError as error:
+        raise tail_models.TailError(f"cannot read {path}: {error}") from error
 
 
 def _read_event_records(path: Path) -> list[dict[str, Any]]:
@@ -29,16 +45,18 @@ def _read_event_records(path: Path) -> list[dict[str, Any]]:
 
     records: list[dict[str, Any]] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_bytes().splitlines()
     except OSError as error:
         raise tail_models.TailError(f"cannot read {path}: {error}") from error
 
+    # Decoded line by line: a stray non-UTF-8 byte spoils only its own line,
+    # the way a torn line does, not the whole history.
     for line in lines:
         if not line.strip():
             continue
         try:
-            raw = json.loads(line)
-        except json.JSONDecodeError:
+            raw = json.loads(line.decode("utf-8"))
+        except ValueError, RecursionError:
             continue
         if isinstance(raw, dict):
             records.append(raw)

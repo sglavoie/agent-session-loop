@@ -327,6 +327,100 @@ class StateCompactionTests(unittest.TestCase):
                 )
                 self.assertEqual(2, report.failed_output_extracted)
 
+    def test_same_named_or_unnamed_checks_keep_distinct_artifacts(self) -> None:
+        # Two checks sharing a name, or two with no name, derived the same
+        # `{name}-{stream}` stem, so the second extraction overwrote the
+        # first's gzip and artifact_bytes_added counted bytes no longer on
+        # disk. An unrelated file already at the first candidate path must
+        # survive too.
+        first = "first-output " + self.big
+        second = "second-output " + self.big
+        for name in ("dup", None):
+            with self.subTest(name=name):
+                checks = [
+                    {"status": "fail", "stdout": first, "stderr": ""},
+                    {"status": "fail", "stdout": second, "stderr": ""},
+                ]
+                if name is not None:
+                    for check in checks:
+                        check["name"] = name
+                result_path = self._write_result(checks)
+                artifact_dir = result_path.parent / "verification"
+                artifact_dir.mkdir(exist_ok=True)
+                foreign = artifact_dir / f"{name or 'check'}-stdout.gz"
+                foreign.write_bytes(b"not ours")
+                disk_before = self._state_dir_disk_bytes()
+
+                projected = compact_state.compact_plan_state(
+                    self.plan_dir, state_dir=self.state_dir, apply=False
+                )
+                report = compact_state.compact_plan_state(
+                    self.plan_dir, state_dir=self.state_dir, apply=True
+                )
+
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+                paths = [
+                    Path(check["stdout_artifact_path"])
+                    for check in payload["verification"]["checks"]
+                ]
+                self.assertNotEqual(paths[0], paths[1])
+                self.assertNotIn(foreign, paths)
+                self.assertEqual(b"not ours", foreign.read_bytes())
+                self.assertEqual(first, artifacts.read_gzip(paths[0]).decode("utf-8"))
+                self.assertEqual(second, artifacts.read_gzip(paths[1]).decode("utf-8"))
+                self.assertEqual(
+                    sum(path.stat().st_size for path in paths),
+                    report.artifact_bytes_added,
+                )
+                self.assertEqual(
+                    disk_before - self._state_dir_disk_bytes(),
+                    report.actual_bytes_reclaimed,
+                )
+                self.assertEqual(
+                    projected.artifact_bytes_added, report.artifact_bytes_added
+                )
+                self.assertEqual(
+                    projected.projected_bytes_reclaimed,
+                    report.actual_bytes_reclaimed,
+                )
+                for path in paths:
+                    path.unlink()
+
+    def test_reapply_after_interrupted_apply_reuses_written_artifacts(self) -> None:
+        # An apply interrupted after the gzip writes but before result.json
+        # was replaced leaves identical artifacts behind; the next pass must
+        # reuse them instead of adding copies or counting their bytes twice.
+        first = "first-output " + self.big
+        second = "second-output " + self.big
+        checks = [
+            {"name": "dup", "status": "fail", "stdout": first, "stderr": ""},
+            {"name": "dup", "status": "fail", "stdout": second, "stderr": ""},
+        ]
+        result_path = self._write_result(checks)
+        original = result_path.read_bytes()
+        compact_state.compact_plan_state(
+            self.plan_dir, state_dir=self.state_dir, apply=True
+        )
+        written = sorted((result_path.parent / "verification").iterdir())
+        result_path.write_bytes(original)  # simulate the lost result rewrite
+
+        report = compact_state.compact_plan_state(
+            self.plan_dir, state_dir=self.state_dir, apply=True
+        )
+
+        self.assertEqual(0, report.artifact_bytes_added)
+        self.assertEqual(
+            written, sorted((result_path.parent / "verification").iterdir())
+        )
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [first, second],
+            [
+                artifacts.read_gzip(check["stdout_artifact_path"]).decode("utf-8")
+                for check in payload["verification"]["checks"]
+            ],
+        )
+
     def test_overlong_check_names_compact_without_aborting(self) -> None:
         # A ~192-char check name plus the "-stdout" stream suffix and the
         # full 64-hex digest used to push the gzip artifact (and its
@@ -428,6 +522,51 @@ class StateCompactionTests(unittest.TestCase):
         # The finished event no longer embeds every turn.
         self.assertNotIn("turns", lines[2]["payload"])
         self.assertEqual("r", lines[2]["payload"]["run_id"])
+
+    def test_torn_event_lines_are_kept_and_the_rest_still_compacts(self) -> None:
+        # A crash mid-append leaves a torn final record (here also a torn
+        # UTF-8 sequence mid-file). Compaction used to fail the whole plan
+        # with a bare JSON error naming no file, leaving state.json and
+        # every result.json uncompacted.
+        state_path = self._write_state({"run_id": "r", "turns": [self._v1_turn()]})
+        result_path = self._write_result(
+            [{"name": "c1", "status": "fail", "stdout": self.big, "stderr": ""}]
+        )
+        good = json.dumps(
+            {"created_at": "t1", "name": "run_started", "payload": {"run_id": "r"}},
+            sort_keys=True,
+        ).encode("utf-8")
+        not_utf8 = b'{"name": "z\xe2\x82'
+        torn = b'{"name": "y", "creat'
+        events_path = self.plan_state / events.EVENTS_FILE_NAME
+        events_path.write_bytes(good + b"\n" + not_utf8 + b"\n" + good + b"\n" + torn)
+
+        projected = compact_state.compact_plan_state(
+            self.plan_dir, state_dir=self.state_dir, apply=False
+        )
+        report = compact_state.compact_plan_state(
+            self.plan_dir, state_dir=self.state_dir, apply=True
+        )
+
+        self.assertEqual(2, projected.unparseable_event_lines)
+        self.assertEqual(2, report.to_dict()["unparseable_event_lines"])
+        lines = events_path.read_bytes().split(b"\n")
+        # Fragments stay byte-for-byte, the torn tail still unterminated.
+        self.assertEqual(not_utf8, lines[1])
+        self.assertEqual(torn, lines[-1])
+        for line in (lines[0], lines[2]):
+            record = json.loads(line)
+            self.assertEqual("run_started", record["name"])
+            self.assertEqual(events.EVENT_SCHEMA_VERSION, record["version"])
+        self.assertIn(str(state_path), report.rewritten_paths)
+        self.assertIn(str(result_path), report.rewritten_paths)
+        self.assertEqual(
+            run_persistence.COMPACT_STATE_SCHEMA_VERSION,
+            json.loads(state_path.read_text(encoding="utf-8"))["version"],
+        )
+        self.assertEqual(
+            projected.projected_bytes_reclaimed, report.actual_bytes_reclaimed
+        )
 
     def test_apply_is_idempotent(self) -> None:
         self._write_state({"run_id": "r", "turns": [self._v1_turn()]})

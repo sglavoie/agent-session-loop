@@ -116,7 +116,7 @@ class SplitCommandTests(SplitCliHelpers, unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             plan = tmp_dir / "PLAN.md"
-            plan.write_text("# Plan\n\n## Session foo\n\nBody\n", encoding="utf-8")
+            plan.write_text("# Plan\n\n## Session 1a\n\nBody\n", encoding="utf-8")
             contracts_file = tmp_dir / "contracts.json"
             self._write_contracts(contracts_file, ("1",))
 
@@ -357,6 +357,145 @@ class SplitCommandTests(SplitCliHelpers, unittest.TestCase):
             self.assertEqual(1, code)
             payload = json.loads(out)
             self.assertEqual("input-error", payload["reason"])
+
+    def test_split_drops_a_leading_byte_order_mark(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text(
+                "\ufeff## Session 1: A\r\n\r\nDo a.\r\n\r\n"
+                "## Session 2: B\r\n\r\nDo b.\r\n",
+                encoding="utf-8",
+            )
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1", "2"))
+            contracts_file.write_text(
+                "\ufeff" + contracts_file.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+
+            code, out, _ = self._run_split(
+                self._split_args(plan_file=str(plan), check=True)
+            )
+            self.assertEqual(0, code, out)
+            self.assertEqual(["1", "2"], json.loads(out)["session_ids"])
+
+            code, out, err = self._run_split(
+                self._split_args(
+                    plan_file=str(plan),
+                    contracts_file=str(contracts_file),
+                    base_dir=str(tmp_dir / "out"),
+                )
+            )
+
+            self.assertEqual(0, code, out + err)
+            payload = json.loads(out)
+            self.assertEqual(["1", "2"], payload["session_ids"])
+            output_dir = Path(payload["output_dir"])
+            context = (output_dir / "context.md").read_text(encoding="utf-8")
+            self.assertNotIn("Session 1", context)
+
+    def test_split_reports_an_existing_split_as_already_split(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text(self._TWO_SESSION_PLAN, encoding="utf-8")
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1", "2"))
+            args = self._split_args(
+                plan_file=str(plan),
+                contracts_file=str(contracts_file),
+                base_dir=str(tmp_dir / "out"),
+            )
+            code, out, err = self._run_split(args)
+            self.assertEqual(0, code, out + err)
+            first = json.loads(out)
+
+            code, out, _ = self._run_split(args)
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertEqual("already-split", payload["reason"])
+            self.assertEqual(first["plan_id"], payload["details"]["plan_id"])
+            existing = payload["details"]["existing_outputs"]
+            self.assertEqual(1, len(existing))
+            self.assertIn(first["output_dir"], existing[0])
+
+    def test_split_refuses_contracts_for_sessions_the_plan_lacks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text(self._TWO_SESSION_PLAN, encoding="utf-8")
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1", "2", "3", "01"))
+            base = tmp_dir / "out"
+
+            code, out, _ = self._run_split(
+                self._split_args(
+                    plan_file=str(plan),
+                    contracts_file=str(contracts_file),
+                    base_dir=str(base),
+                )
+            )
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertEqual("input-error", payload["reason"])
+            self.assertEqual(["01", "3"], payload["unknown_session_ids"])
+            self.assertIn("01, 3", payload["error"])
+            self.assertFalse(base.exists())
+
+    def test_split_reports_non_utf8_inputs_as_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text(self._TWO_SESSION_PLAN, encoding="utf-8")
+            bad_plan = tmp_dir / "BAD.md"
+            bad_plan.write_bytes(b"# P\n\n## Session 1: a\n\n\xff\n")
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1", "2"))
+            bad_contracts = tmp_dir / "bad.json"
+            bad_contracts.write_bytes(b'{"1": "\xff"}')
+            bad_analysis = tmp_dir / "analysis.md"
+            bad_analysis.write_bytes(b"\xfe\xff")
+            cases = (
+                ("check", {"plan_file": str(bad_plan), "check": True}),
+                (
+                    "split source",
+                    {"plan_file": str(bad_plan), "contracts_file": str(contracts_file)},
+                ),
+                (
+                    "split source with cwd",
+                    {
+                        "plan_file": str(bad_plan),
+                        "contracts_file": str(contracts_file),
+                        "cwd": str(tmp_dir),
+                    },
+                ),
+                (
+                    "contracts",
+                    {"plan_file": str(plan), "contracts_file": str(bad_contracts)},
+                ),
+                (
+                    "analysis",
+                    {
+                        "plan_file": str(plan),
+                        "contracts_file": str(contracts_file),
+                        "analysis_file": str(bad_analysis),
+                    },
+                ),
+            )
+            for label, overrides in cases:
+                with self.subTest(label):
+                    code, out, _ = self._run_split(
+                        self._split_args(base_dir=str(tmp_dir / "out"), **overrides)
+                    )
+
+                    self.assertEqual(1, code)
+                    payload = json.loads(out)
+                    self.assertEqual("input-error", payload["reason"])
+                    self.assertIn("can't decode byte", payload["error"])
+            self.assertFalse((tmp_dir / "out").exists())
 
 
 if __name__ == "__main__":

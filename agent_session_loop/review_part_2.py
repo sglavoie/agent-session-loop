@@ -230,6 +230,13 @@ def load_review_verdict(
             "error": f"could not read {FINAL_REVIEW_FILENAME}: {error}",
             "review_output_path": str(review_path),
         }
+    except UnicodeDecodeError as error:
+        return {
+            "ok": False,
+            "reason": REVIEW_REASON_MALFORMED,
+            "error": f"{FINAL_REVIEW_FILENAME} is not valid UTF-8: {error}",
+            "review_output_path": str(review_path),
+        }
 
     payload = parse_review_verdict(text)
     payload["review_output_path"] = str(review_path)
@@ -253,7 +260,7 @@ def load_review_verdict(
 
     try:
         artifact_text = artifact_path.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         return {
             "ok": False,
             "reason": REVIEW_REASON_MALFORMED_ARTIFACT,
@@ -309,7 +316,7 @@ def _review_verdict_summary(verdict: dict[str, Any]) -> tuple[str, int]:
     if isinstance(output_path, str) and output_path:
         try:
             text = Path(output_path).read_text(encoding="utf-8")
-        except OSError:
+        except OSError, UnicodeDecodeError:
             text = ""
     stripped = text.strip()
     return stripped, len(stripped)

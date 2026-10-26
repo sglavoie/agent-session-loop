@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import NoReturn
 
 from . import durability
+from .contract_models import fenced_line_flags
 from .plans_errors import (
+    InputReadError,
     PlanError,
 )
 
@@ -69,12 +71,32 @@ def _darwin_stored_case(resolved: str) -> str:
 
 
 def plan_title_from_markdown(content: str) -> str | None:
-    """Return the first ``# H1`` title in Markdown, if present."""
-    for line in content.splitlines():
+    """Return the first ``# H1`` title in Markdown, if present.
+
+    A ``# comment`` inside a fenced code block is code, not a heading.
+    """
+    lines = content.splitlines()
+    fenced = fenced_line_flags(lines)
+    for index, line in enumerate(lines):
+        if fenced[index]:
+            continue
         match = PLAN_TITLE_RE.match(line)
         if match:
             return match.group(1)
     return None
+
+
+def read_input_text(path: str | os.PathLike[str], *, label: str) -> str:
+    """Read a caller-named UTF-8 text file, dropping a leading byte-order mark.
+
+    An unreadable file and one whose bytes are not UTF-8 both raise
+    :class:`InputReadError` naming ``label`` and the path, so a command reports
+    either as its own input refusal rather than as a decode traceback.
+    """
+    try:
+        return Path(path).read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as error:
+        raise InputReadError(f"cannot read {label} {path}: {error}") from error
 
 
 def _fsync_directory(path: Path) -> None:
@@ -99,7 +121,7 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _raise_read_error(path: Path, error: OSError) -> NoReturn:
+def _raise_read_error(path: Path, error: OSError | UnicodeDecodeError) -> NoReturn:
     raise PlanError(f"cannot read {path}: {error}") from error
 
 

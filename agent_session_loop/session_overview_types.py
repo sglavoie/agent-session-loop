@@ -28,7 +28,7 @@ from . import (
     state_payloads,
     workspaces,
 )
-from .formatting import format_duration_seconds
+from .formatting import format_duration_seconds, format_local_timestamp
 
 DEFAULT_RECENT_LIMIT = 20
 
@@ -216,7 +216,7 @@ def format_local_time(value: Any) -> str:
     parsed = parse_iso_timestamp(value)
     if parsed is None:
         return "unknown"
-    return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    return format_local_timestamp(parsed)
 
 
 def plan_basename_label(plan_dir: str | Path) -> str:

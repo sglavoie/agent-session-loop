@@ -163,13 +163,11 @@ class TailFollowerEventsTests(TailFollowerTestCase):
 
         self.addCleanup(restore)
 
-        expected = (
-            datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
-            .astimezone()
-            .strftime("%Y-%m-%d %H:%M:%S")
+        # Local wall-clock time, with the offset that makes it unambiguous.
+        self.assertEqual(
+            "2024-01-01 22:04:05-05:00",
+            tail._format_local_datetime("2024-01-02T03:04:05"),
         )
-        self.assertEqual("2024-01-01 22:04:05", expected)
-        self.assertEqual(expected, tail._format_local_datetime("2024-01-02T03:04:05"))
 
     def test_run_control_status_line_reports_unarmed_abort(self) -> None:
         # A main-thread checkpoint observes the abort with no turn to kill, so
@@ -217,3 +215,92 @@ class TailFollowerEventsTests(TailFollowerTestCase):
                 self.assertNotIn("abort pending", message)
                 self.assertNotIn("remaining", message)
                 self.assertNotIn("grace not started", message)
+
+    def test_tail_skips_a_non_utf8_event_line_instead_of_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, _state_path, events_path = self.setup_tail_files(
+                Path(tmp)
+            )
+            events.append_event(
+                events_path,
+                events.Event(
+                    name="run_started",
+                    payload={"run_id": "run-1", "plan_dir": str(plan_dir)},
+                    created_at="2026-06-11T12:00:00+00:00",
+                ),
+            )
+            with events_path.open("ab") as handle:
+                handle.write(b"\xff\n")
+            events.append_event(
+                events_path,
+                events.Event(
+                    name="run_finished",
+                    payload={"run_id": "run-1", "ok": True, "reason": "all-complete"},
+                    created_at="2026-06-11T12:00:02+00:00",
+                ),
+            )
+
+            out = io.StringIO()
+            tail.tail_plan(plan_dir, state_dir=state_dir, follow=False, out=out)
+
+            self.assertIn("run finished: run run-1", out.getvalue())
+
+    def test_tail_reports_an_unopenable_events_file_instead_of_no_activity(
+        self,
+    ) -> None:
+        # The follower reads an unopenable file as "nothing yet", which made
+        # the first read print "No activity yet." for a journal it never read.
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, _state_path, events_path = self.setup_tail_files(
+                Path(tmp)
+            )
+            events_path.unlink(missing_ok=True)
+            events_path.mkdir()
+
+            with self.assertRaisesRegex(tail_models.TailError, "cannot read"):
+                tail.tail_plan(
+                    plan_dir, state_dir=state_dir, follow=False, out=io.StringIO()
+                )
+
+    def test_recent_activity_ends_on_the_run_outcome_not_the_last_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, _state_path, events_path = self.setup_tail_files(
+                tmp_dir
+            )
+            stdout_log = tmp_dir / "stdout.log"
+            stdout_log.write_text(
+                "".join(f"output {index}\n" for index in range(50)), encoding="utf-8"
+            )
+            turn = {
+                "run_id": "run-1",
+                "session_id": "1",
+                "turn_index": 1,
+                "stdout_path": str(stdout_log),
+            }
+            for name, payload, second in (
+                ("run_started", {"run_id": "run-1"}, "00"),
+                ("turn_started", turn, "01"),
+                ("turn_finished", {**turn, "status": "complete"}, "02"),
+                ("run_finished", {"run_id": "run-1", "ok": True}, "03"),
+            ):
+                events.append_event(
+                    events_path,
+                    events.Event(
+                        name=name,
+                        payload={**payload, "reason": "all-complete"},
+                        created_at=f"2026-06-11T12:00:{second}+00:00",
+                    ),
+                )
+
+            out = io.StringIO()
+            tail.tail_plan(
+                plan_dir, state_dir=state_dir, lines=5, follow=False, out=out
+            )
+
+            lines = out.getvalue().splitlines()
+            self.assertEqual(5, len(lines))
+            # The turn's output sits before the event that finished the turn,
+            # so the window still ends on the run's outcome.
+            self.assertTrue(lines[-3].endswith("| output 49"), lines)
+            self.assertIn("run finished: run run-1", lines[-1])

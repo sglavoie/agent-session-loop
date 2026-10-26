@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +24,7 @@ from .authoring_render import (
 )
 from .authoring_transaction import PlanTransaction, refresh_readiness_metadata
 from .plans_errors import PlanError
+from .plans_files import read_input_text
 from .plans_models import ReadinessMetadata
 from .workspaces import (
     RepositoryRegistry,
@@ -37,6 +38,8 @@ SPLIT_REASON_OK = "ok"
 SPLIT_REASON_SINGLE_SESSION = "single-session"
 SPLIT_REASON_MALFORMED_PLAN = "malformed-plan"
 SPLIT_REASON_INPUT_ERROR = "input-error"
+#: The plan id already has a split output and ``--force-new`` was not given.
+SPLIT_REASON_ALREADY_SPLIT = "already-split"
 SPLIT_REASON_REGISTRY_REQUIRED = repository_intent.REASON_REPOSITORY_REGISTRY_REQUIRED
 
 #: Emitted when a plan's resolved locations reach a second Git repository.
@@ -85,6 +88,22 @@ class InvalidContractError(PlanError):
         super().__init__(f"invalid contract for session {session_id}: {detail}")
 
 
+class UnknownContractError(PlanError):
+    """Raised when the contracts file keys a session the plan does not define.
+
+    An entry no session claims would otherwise be dropped without a word, which
+    hides a plan whose headings did not parse the way its author meant (a
+    renumbered session, a heading the splitter read as context).
+    """
+
+    def __init__(self, session_ids: Sequence[str]) -> None:
+        self.session_ids = tuple(session_ids)
+        super().__init__(
+            "contracts file names session(s) the plan does not define: "
+            + ", ".join(self.session_ids)
+        )
+
+
 @dataclass(frozen=True)
 class SplitResult:
     """The authoritative outcome of one deterministic ``asl split`` run."""
@@ -121,19 +140,16 @@ def split_plan(
 
     Contracts are validated *before* the collision-safe output directory is
     created, so a :class:`MissingContractError` (no contract for a session) or a
-    malformed contract leaves no empty directory behind. A plan with fewer than
+    malformed contract leaves no empty directory behind; so does an
+    :class:`UnknownContractError` (a contract keyed to no parsed session). A
+    leading UTF-8 byte-order mark is dropped before parsing. A plan with fewer than
     two sessions raises :class:`SingleSessionError`; a malformed source heading
     raises the line-specific :class:`PlanError` from the parser verbatim.
     """
     canonical_source = os.path.realpath(
         os.path.abspath(os.path.expanduser(os.fspath(plan_file)))
     )
-    try:
-        text = Path(canonical_source).read_text(encoding="utf-8")
-    except OSError as error:
-        raise PlanError(
-            f"cannot read source plan {canonical_source}: {error}"
-        ) from error
+    text = read_input_text(canonical_source, label="source plan")
 
     parsed = parse_plan_document(text)
     if len(parsed.sessions) < 2:
@@ -167,6 +183,9 @@ def split_plan(
             spec["verify"],
             repository_registry=parsed.registry,
         )
+    unknown = sorted(set(contracts_by_id) - set(contracts))
+    if unknown:
+        raise UnknownContractError(unknown)
 
     resolver = resolve_plan_output(canonical_source, base_dir, force_new=force_new)
     output_dir = Path(str(resolver["output_dir"]))

@@ -159,6 +159,39 @@ class EventPersistenceTests(unittest.TestCase):
             self.assertEqual(1, len(lines))
             self.assertTrue(lines[0].endswith("asl: harness terminated"))
 
+    def test_a_log_line_is_followed_whole_and_a_truncated_log_from_the_start(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "stdout.log"
+            log.write_bytes(b"")
+            target = {"path": log, "stream": "stdout", "session": "1", "turn_index": 1}
+            offsets: dict[str, int] = {}
+            # One line written in two appends, the second split inside "é".
+            with log.open("ab") as handle:
+                handle.write(b"caf\xc3")
+            self.assertEqual([], tail_logs._read_new_log_text(target, offsets))
+            with log.open("ab") as handle:
+                handle.write(b"\xa9 done\nnext")
+            self.assertEqual(
+                ["stdout session=1 turn=1 | café done"],
+                tail_logs._read_new_log_text(target, offsets),
+            )
+            # A truncated log is read again from its start.
+            log.write_bytes(b"fresh\n")
+            self.assertEqual(
+                ["stdout session=1 turn=1 | fresh"],
+                tail_logs._read_new_log_text(target, offsets),
+            )
+            # The final read flushes an unterminated last line.
+            with log.open("ab") as handle:
+                handle.write(b"tail end")
+            self.assertEqual([], tail_logs._read_new_log_text(target, offsets))
+            self.assertEqual(
+                ["stdout session=1 turn=1 | tail end"],
+                tail_logs._read_new_log_text(target, offsets, final=True),
+            )
+
     def test_plan_markdown_writers_replace_rather_than_rewrite_in_place(
         self,
     ) -> None:

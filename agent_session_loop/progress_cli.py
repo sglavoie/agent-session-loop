@@ -32,6 +32,7 @@ from . import (
     tail,
 )
 from .cli_defaults import program_name
+from .formatting import count_noun
 
 DEFAULT_POLL_INTERVAL_SECONDS = tail.POLL_INTERVAL_SECONDS
 
@@ -126,8 +127,8 @@ def backfill_progress_from_args(args: argparse.Namespace) -> int:
         )
         return 0
     print(
-        f"{program_name()} backfill-progress: wrote {result.entries_written} "
-        f"entries to {result.path}"
+        f"{program_name()} backfill-progress: wrote "
+        f"{count_noun(result.entries_written, 'entry', 'entries')} to {result.path}"
     )
     return 0
 
@@ -141,6 +142,13 @@ def follow_progress(
 ) -> None:
     """Poll ``progress.md`` and stream newly appended bytes to ``out``.
 
+    Every append replaces the journal atomically, so a new inode is the norm
+    and says nothing; what was already printed is what decides. A journal no
+    longer starting with it was rewritten (``backfill-progress --force``
+    replaces it whole, often shorter): a marker line says so and the journal
+    is printed again from its start, so the follower neither goes silent nor
+    misses an entry that lands past an offset counted against the old file.
+
     Returns when ``stop_event`` is set; tests pass a short interval and a
     pre-built event so the loop can be exercised without real waits.
     """
@@ -148,21 +156,24 @@ def follow_progress(
     stop = stop_event if stop_event is not None else threading.Event()
     progress_file = plans_progress.progress_path(plan_dir)
     try:
-        offset = progress_file.stat().st_size if progress_file.exists() else 0
+        seen = progress_file.read_bytes() if progress_file.exists() else b""
     except OSError:
-        offset = 0
+        seen = b""
 
     while not stop.is_set():
-        if progress_file.exists():
-            try:
-                data = progress_file.read_bytes()
-            except OSError:
-                data = None
-            if data is not None and len(data) > offset:
-                new_text = data[offset:].decode("utf-8", errors="replace")
-                out_stream.write(new_text)
-                out_stream.flush()
-                offset = len(data)
+        try:
+            data: bytes | None = progress_file.read_bytes()
+        except OSError:
+            data = None
+        if data is not None and data != seen:
+            if data.startswith(seen):
+                new_data = data[len(seen) :]
+            else:
+                out_stream.write(f"--- {progress_file.name} rewritten ---\n")
+                new_data = data
+            out_stream.write(new_data.decode("utf-8", errors="replace"))
+            out_stream.flush()
+            seen = data
         if stop.is_set():
             break
         stop.wait(poll_interval)
@@ -177,6 +188,18 @@ def progress_from_args(args: argparse.Namespace) -> int:
     plan_dir_arg = args.plan_dir
     want_json: bool = args.json
     follow: bool = args.tail
+    if want_json and follow:
+        # The journal is Markdown; following it streams text, so there is no
+        # JSON document `--tail` could keep printing.
+        responses.print_json(
+            responses.error_payload(
+                "progress",
+                reason="input-error",
+                error="--tail cannot be combined with --json",
+                paused=False,
+            )
+        )
+        return 1
 
     plan_dir = plans_files.canonicalize_path(plan_dir_arg)
     progress_file = plans_progress.progress_path(plan_dir)
@@ -234,7 +257,11 @@ def progress_from_args(args: argparse.Namespace) -> int:
 
     if progress_file.exists():
         try:
-            sys.stdout.write(progress_file.read_text(encoding="utf-8"))
+            # Shown as written, a stray non-UTF-8 byte replaced, the way
+            # `--tail` already streams it: the text view is for reading.
+            sys.stdout.write(
+                progress_file.read_bytes().decode("utf-8", errors="replace")
+            )
         except OSError as error:
             print(
                 f"{program_name()} progress: cannot read {progress_file}: {error}",

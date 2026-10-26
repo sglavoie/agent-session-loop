@@ -26,11 +26,14 @@ SESSION_HEADING_RE = re.compile(
     r"[ \t]*$",
     re.IGNORECASE,
 )
-#: Detects H2--H6 ATX lines whose content begins with the ``Session`` token.
-#: A detected line that does not match ``SESSION_HEADING_RE`` is malformed,
-#: rather than ordinary plan content.
+#: Detects H2--H6 ATX lines that start a session id after the ``Session``
+#: token: a digit after optional horizontal whitespace and at most one ``#``,
+#: ``:``, ``.``, or ``-`` (``Session 1``, ``Session1``, ``Session #1``). A
+#: detected line that does not match ``SESSION_HEADING_RE`` is malformed rather
+#: than ordinary plan content. A heading whose next word is not an id
+#: (``### Session cookies``, ``## Session plan``) is prose and stays content.
 _SESSION_HEADING_CANDIDATE_RE = re.compile(
-    r"^ {0,3}#{2,6}[ \t]+Session\b",
+    r"^ {0,3}#{2,6}[ \t]+Session[ \t]*[#:.-]?[0-9]",
     re.IGNORECASE,
 )
 _SESSION_HEADING_PREFIX_RE = re.compile(
@@ -40,8 +43,6 @@ _SESSION_HEADING_PREFIX_RE = re.compile(
 _SOURCE_SESSION_ID_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
 _ATX_CLOSING_MARKER_RE = re.compile(r"[ \t]+#+[ \t]*$")
 _TITLE_SEPARATORS = frozenset((":", "-", "–", "—"))
-#: Matches an opening/closing fenced-code delimiter (``` or ~~~, 3+ chars).
-_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 
 #: Stable machine-readable categories for malformed source-heading diagnostics.
 #: They are the repair vocabulary shared by ``asl split --check`` and the
@@ -58,6 +59,7 @@ LINT_MALFORMED_TITLE = "malformed-title"
 LINT_PUNCTUATION_FREE_TITLE = "punctuation-free-title"
 LINT_UNSUPPORTED_TITLE_SEPARATOR = "unsupported-title-separator"
 LINT_DUPLICATE_SESSION_ID = "duplicate-session-id"
+LINT_OUT_OF_ORDER_SESSION = "out-of-order-session"
 LINT_REPOSITORIES_PLACEMENT = "repositories-placement"
 LINT_DUPLICATE_REPOSITORIES = "duplicate-repositories"
 LINT_MALFORMED_REPOSITORIES = "malformed-repositories"
@@ -82,11 +84,6 @@ LINT_SUGGESTABLE_CATEGORIES = frozenset(
         LINT_UNSUPPORTED_TITLE_SEPARATOR,
     )
 )
-
-#: A prose heading that would otherwise be mistaken for a malformed session
-#: marker. The exact ``Session plan`` phrase has one safe interpretation: it
-#: is a plan-overview section, not a session with an ID.
-_NON_SESSION_PLAN_HEADING_RE = re.compile(r"^plan[ \t]*$", re.IGNORECASE)
 
 
 class SourceHeadingError(PlanError):
@@ -192,13 +189,6 @@ class PlanLintResult:
     session_ids: tuple[str, ...]
     registry: RepositoryRegistry | None = None
     repository_footprint: dict[str, Any] | None = None
-
-
-def _fence_delimiter(line: str) -> str | None:
-    match = _FENCE_RE.match(line)
-    if match is None:
-        return None
-    return match.group(1)[0] * 3  # normalize to the 3-char family marker
 
 
 # ---------------------------------------------------------------------------

@@ -221,6 +221,68 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertFalse(runner_state["stale_unfinished"])
             self.assertIsNone(runner_state["stale_reason"])
 
+    def test_status_text_reports_how_the_recorded_run_ended(self) -> None:
+        base = {
+            "run_id": "20260619T120000Z-4",
+            "harness": "claude",
+            "run_started_at": "2026-06-19T12:00:00+00:00",
+            "run_finished_at": "2026-06-19T12:30:00+00:00",
+            "active_turn": None,
+        }
+        cases = (
+            (
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "verification-failed",
+                    "paused_at": "2026-06-19T12:29:00+00:00",
+                    "pause_message": "check `just test` failed",
+                },
+                (
+                    "Run state: paused (verification-failed) at "
+                    "2026-06-19T12:29:00+00:00",
+                    "Pause detail: check `just test` failed",
+                ),
+            ),
+            (
+                {"ok": True, "paused": False, "reason": "all-complete"},
+                ("Run state: finished all-complete at 2026-06-19T12:30:00+00:00",),
+            ),
+            (
+                {"ok": False, "paused": False, "reason": "abandoned"},
+                ("Run state: stopped (abandoned) at 2026-06-19T12:30:00+00:00",),
+            ),
+        )
+        for fields, expected in cases:
+            with (
+                self.subTest(reason=fields["reason"]),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                plan_dir = Path(tmp) / "plan"
+                state_dir = Path(tmp) / "state"
+                write_plan(plan_dir, ("complete",))
+                plan_state = state.plan_state_dir(plan_dir, state_dir)
+                plan_state.mkdir(parents=True)
+                (plan_state / events.STATE_FILE_NAME).write_text(
+                    json.dumps({**base, **fields}), encoding="utf-8"
+                )
+                args = argparse.Namespace(
+                    plan_dir=str(plan_dir), state_dir=str(state_dir), json=False
+                )
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    self.assertEqual(0, state_status.status_from_args(args))
+                lines = buffer.getvalue().splitlines()
+                start = lines.index(
+                    "Run state: run 20260619T120000Z-4 started "
+                    "2026-06-19T12:00:00+00:00"
+                )
+                self.assertEqual(
+                    list(expected), lines[start + 1 : start + 1 + len(expected)]
+                )
+                if not fields["paused"]:
+                    self.assertNotIn("Pause detail:", buffer.getvalue())
+
     def test_status_payload_does_not_flag_stale_when_active_lock_held(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"

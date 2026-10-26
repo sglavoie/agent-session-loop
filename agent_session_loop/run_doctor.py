@@ -97,6 +97,7 @@ from . import (
     workspaces,
 )
 from .cli_defaults import program_name
+from .cli_parser_support import flag_refusal
 
 
 def _print_doctor_error(
@@ -119,7 +120,9 @@ def _print_doctor_error(
             cwd=str(cwd) if cwd is not None else str(args.cwd),
             plan_dir=str(plan_dir) if plan_dir is not None else str(args.plan_dir),
         )
-        payload.update(run_selection._selected_model_effort_payload(args))
+        if args.harness in harnesses.HARNESS_NAMES:
+            # A refused harness has no model or effort to resolve.
+            payload.update(run_selection._selected_model_effort_payload(args))
         responses.print_json(payload)
     else:
         print(f"{program_name()} doctor: {error}", file=sys.stderr)
@@ -128,6 +131,20 @@ def _print_doctor_error(
 
 def doctor_from_args(args: argparse.Namespace) -> int:
     """Check local harness prerequisites from CLI arguments."""
+    harness_name = getattr(args, "harness", None)
+    if harness_name not in harnesses.HARNESS_NAMES:
+        # Validated here rather than by argparse, so a missing or unknown
+        # harness keeps its JSON `input-error` under --json instead of
+        # argparse's plain-text exit 2.
+        requirement = f"must be one of {', '.join(harnesses.HARNESS_NAMES)}"
+        message = (
+            f"--harness is required and {requirement}"
+            if harness_name is None
+            else flag_refusal("--harness", requirement, harness_name)
+        )
+        return _print_doctor_error(
+            args, reason="input-error", error=ValueError(message)
+        )
     try:
         cwd = plans_files.canonicalize_path(args.cwd)
         if not cwd.is_dir():

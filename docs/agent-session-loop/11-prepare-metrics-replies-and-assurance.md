@@ -95,8 +95,11 @@ and canonical, however, so `Session 03.004` produces ID `3.4`,
 `session-3.4.md`, and unpadded manifest and completion-contract IDs. The
 general-purpose `SessionId` API remains strict; zero padding is tolerated only
 while parsing the source heading. An H2-H6 line outside a fence that begins
-with the `Session` token but has a zero component, unsupported or dangling
-separator, or another malformed suffix raises a line-specific `PlanError`.
+with the `Session` token followed by a digit (after optional whitespace and at
+most one `#`, `:`, `.`, or `-`) but has a zero component, unsupported or
+dangling separator, or another malformed suffix raises a line-specific
+`PlanError`. A heading whose next word is not an id, such as
+`### Session cookies`, is ordinary content.
 The grammar-neutral structure gate surfaces that diagnostic as
 `needs-plan-iteration` before authoring any output rather than treating the
 candidate as body text or as a plan with no boundaries.
@@ -107,8 +110,10 @@ and forwarded into both the emitted `asl run` command and any emitted
 `--review-harness`. Preparation deliberately has no validator-model flag:
 `--validator-harness` always uses that harness's native or configured default.
 Stable JSON reasons: `ok`, `needs-plan-iteration`, `validation-failed`,
-`baseline-unsatisfied`, `not-loop-ready`, `input-error`, `cwd-error`, and
-`plan-structure`.
+`baseline-unsatisfied`, `not-loop-ready`, `input-error`, `cwd-error`,
+`plan-structure`, and `already-split` (the source plan already has a split
+directory, listed in `details.existing_outputs`; rerun with `--resume` on it,
+or pass `--force-new` for an intentional second split).
 
 `metrics` aggregates workflow reliability and storage numbers from the
 persisted state corpus, defaulting to the last 7 days (`--since-days N`

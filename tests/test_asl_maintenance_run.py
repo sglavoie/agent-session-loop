@@ -4,6 +4,9 @@ Split from tests/test_asl_maintenance.py."""
 
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
 import json
 import threading
 import unittest
@@ -12,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_session_loop import (
+    maintenance_cli,
     maintenance_models,
     maintenance_plan,
     maintenance_policy,
@@ -227,6 +231,32 @@ class ManifestTests(MaintenanceTestBase):
         self.assertEqual(
             len(payload["history"]), maintenance_policy.MANIFEST_HISTORY_LIMIT
         )
+
+    def test_a_dry_run_writes_no_manifest_and_keeps_the_last_run(self) -> None:
+        # `asl maintenance run` without --apply is documented as no writes,
+        # yet it fsynced maintenance.json and replaced the recorded last run
+        # (what `maintenance status` reports) with a pass that never ran.
+        self._write_run(
+            RUN_OLD, finished_at=_stamp(200), bodies={"stderr.log": b"m" * 4096}
+        )
+        self._write_run(RUN_NEWEST, finished_at=_stamp(1))
+        manifest = maintenance_policy.manifest_path(self.state_root)
+
+        args = argparse.Namespace(
+            state_dir=str(self.state_root), apply=False, force=True, json=True
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            maintenance_cli.run_from_args(args)
+        self.assertFalse(manifest.exists())
+
+        self._run(apply=True)
+        recorded = manifest.read_bytes()
+        planned = self._run(apply=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            maintenance_cli.run_from_args(args)
+
+        self.assertEqual(planned.outcome, maintenance_policy.OUTCOME_PLANNED)
+        self.assertEqual(recorded, manifest.read_bytes())
 
     def test_the_manifest_carries_reclaimed_bytes_and_failures(self) -> None:
         self._write_run(

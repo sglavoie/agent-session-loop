@@ -221,7 +221,11 @@ def upgrade_plan_state_schema(
             {"state_path": str(state_path), "schema_version": state_obj["version"]},
         )
 
-    lock = _read_lock_path(plan_state / LOCK_FILE_NAME, canonical_plan_dir)
+    # Only --apply may reclaim a lock this host has proven dead: a dry run
+    # writes nothing, and a dead owner classifies as inactive either way.
+    lock = _read_lock_path(
+        plan_state / LOCK_FILE_NAME, canonical_plan_dir, reclaim=apply
+    )
 
     def _report(
         *,

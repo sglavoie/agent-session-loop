@@ -148,6 +148,38 @@ class GitSurfaceTests(unittest.TestCase):
         self.assertIn("+print('alpha')", result.diff)
         self.assertEqual(result.total_size, len(result.diff.encode("utf-8")))
 
+    def test_capture_ignores_diff_configuration_and_quoted_names(self) -> None:
+        # Each of these settings used to leave no header the parser matched,
+        # so a real staged change was reported as an empty diff.
+        for key, value in (
+            ("diff.noprefix", "true"),
+            ("diff.mnemonicPrefix", "true"),
+            ("color.diff", "always"),
+            ("color.ui", "always"),
+            ("core.quotePath", "true"),
+        ):
+            git_stdout(self.repo, "config", key, value)
+        self.write("plain.txt", "plain\n")
+        self.write("ünï.txt", "umlaut\n")
+        self.write('qu"ote.txt', "quote\n")
+        self.write("tab\there.txt", "tab\n")
+        commit_message.stage_all(self.repo)
+
+        result = commit_message.capture_staged_diff(self.repo)
+
+        self.assertFalse(result.is_empty)
+        self.assertEqual(
+            sorted(result.files_included),
+            sorted(["plain.txt", "ünï.txt", 'qu"ote.txt', "tab\there.txt"]),
+        )
+        self.assertNotIn("\x1b[", result.diff)
+        self.assertIn("+umlaut", result.diff)
+        git_stdout(self.repo, "commit", "-qm", "seed", "--no-verify")
+        committed = commit_message.capture_commit_diff("HEAD", self.repo)
+        self.assertEqual(
+            sorted(committed.files_included), sorted(result.files_included)
+        )
+
     def test_capture_staged_diff_on_a_clean_index_is_empty(self) -> None:
         result = commit_message.capture_staged_diff(self.repo)
 

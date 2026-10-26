@@ -297,6 +297,10 @@ def _runner_state_payload(
         "paused": raw.get("paused"),
         "reason": raw.get("reason"),
         "pause_policy": runner_pause_policy,
+        # What the runner told the operator when it paused, and when: the text
+        # outcome line needs both, and a paused run is otherwise only a reason.
+        "pause_message": raw.get("pause_message") or None,
+        "paused_at": raw.get("paused_at"),
         "run_started_at": raw.get("run_started_at"),
         "run_finished_at": raw.get("run_finished_at"),
         # Body-free activity records from this runner state, not plan history.

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from .contract_models import _FENCE_RE, COMPLETION_CONTRACT_HEADING
+from .contract_models import COMPLETION_CONTRACT_HEADING
+from .contract_models import fenced_line_flags as fenced_line_flags
 from .plans_errors import PlanError
 from .plans_handoff import HANDOFF_HEADING
 from .plans_session_ids import SessionId
@@ -34,40 +35,6 @@ def _find_heading_index(
         if lines[index].strip() == heading:
             return index
     return None
-
-
-def fenced_line_flags(lines: list[str]) -> list[bool]:
-    """Return, per line, whether it belongs to a fenced code block.
-
-    A fence opens on a run of at least three backticks or tildes and closes only
-    on a run of the same character, at least as long as the opener, followed by
-    nothing but whitespace. A shorter run, a different character, or an info
-    string is content, so a nested example never closes the block quoting it.
-    """
-    flags = [False] * len(lines)
-    fence_char: str | None = None
-    fence_length = 0
-    for index, line in enumerate(lines):
-        match = _FENCE_RE.match(line)
-        if fence_char is None:
-            if match is not None:
-                run = match.group("run")
-                fence_char = run[0]
-                fence_length = len(run)
-                flags[index] = True
-            continue
-        flags[index] = True
-        if match is None:
-            continue
-        run = match.group("run")
-        if (
-            run[0] == fence_char
-            and len(run) >= fence_length
-            and match.group("rest").strip() == ""
-        ):
-            fence_char = None
-            fence_length = 0
-    return flags
 
 
 def completion_contract_heading_indices(

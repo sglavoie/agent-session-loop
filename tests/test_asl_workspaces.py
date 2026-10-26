@@ -186,6 +186,25 @@ class RepositoryRegistryTests(unittest.TestCase):
         self.assertEqual(registry.digest, parsed.digest)
         self.assertEqual("code.internal:2222/org/svc", parsed.get("SVC").origin)
 
+    def test_repositories_heading_quoted_inside_a_longer_fence_is_not_a_section(
+        self,
+    ) -> None:
+        # A shorter inner fence used to close the quoting ```` block, so the
+        # quoted heading read as a second, duplicate registry section.
+        registry = _registry(
+            (("SVC", "svc", "ssh://git@code.internal:2222/org/svc.git"),)
+        )
+        manifest = (
+            "# Manifest\n\n## Repositories\n\n"
+            + authoring_manifest.render_repository_registry_table(registry)
+            + "\n## Notes\n\n````markdown\n```\n## Repositories\n````\n"
+        )
+
+        parsed = plans_registry.parse_repository_registry_manifest(manifest)
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(registry.digest, parsed.digest)
+
     def test_registry_preserves_order_exact_lookup_and_stable_digest(self) -> None:
         registry = _registry()
         self.assertEqual(("SVC", "OAK", "OWL", "Kiln"), registry.aliases)

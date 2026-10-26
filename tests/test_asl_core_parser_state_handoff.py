@@ -425,6 +425,19 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertEqual((), handoff.discovered_facts)
             self.assertEqual((), handoff.open_questions)
 
+    def test_read_session_handoff_reports_non_utf8_file_as_plan_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            (plan_dir / "session-1.md").write_bytes(
+                b"# Session 1\n\n\xff\n\n## Handoff\n\n- **Status**: pending\n"
+            )
+
+            with self.assertRaisesRegex(plans_errors.PlanError, "can't decode byte"):
+                plans_handoff.read_session_handoff(self._session_file(plan_dir))
+            with self.assertRaisesRegex(plans_errors.PlanError, "can't decode byte"):
+                plans_handoff.normalize_generated_review_handoff_artifacts(plan_dir)
+
     def test_read_session_handoff_block_without_status_line_yields_empty_status(
         self,
     ) -> None:

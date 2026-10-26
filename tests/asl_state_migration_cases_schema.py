@@ -289,6 +289,26 @@ class UpgradeStateSchemaTests(StateMigrationTestBase):
         self.assertEqual(os.getpid(), caught.exception.details["pid"])
         self.assertEqual(before, state_path.read_bytes())
 
+    def test_dry_run_leaves_a_dead_owner_lock_and_apply_reclaims_it(self) -> None:
+        # The dry run used to delete a lock whose owner had died; reclaiming
+        # it is a write, so only --apply may do it.
+        state_path = self._write_own_state(version=2)
+        before = state_path.read_bytes()
+        lock_path = self._write_dead_owner_lock(self.new_state_dir, self.new_plan)
+        lock_before = lock_path.read_bytes()
+        with redirect_stderr(io.StringIO()) as stderr:
+            report = self._upgrade(apply=False)
+        self.assertFalse(report.applied)
+        self.assertTrue(report.schema_upgraded)
+        self.assertEqual(lock_before, lock_path.read_bytes())
+        self.assertEqual(before, state_path.read_bytes())
+        self.assertNotIn("reclaimed stale lock", stderr.getvalue())
+
+        with redirect_stderr(io.StringIO()):
+            applied = self._upgrade(apply=True)
+        self.assertTrue(applied.applied)
+        self.assertFalse(lock_path.exists())
+
     def test_a_live_run_already_at_v3_is_a_benign_noop(self) -> None:
         self._write_own_state(version=2)
         self._upgrade()

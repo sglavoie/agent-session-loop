@@ -245,7 +245,7 @@ def run_maintenance(
     min_free_fraction: float = MIN_FREE_FRACTION,
     max_runtime_seconds: float = DEFAULT_MAX_RUNTIME_SECONDS,
     lock_wait_seconds: float = LOCK_WAIT_SECONDS,
-    record: bool = True,
+    record: bool | None = None,
 ) -> MaintenanceResult:
     """Measure, plan and — under ``apply`` — perform one maintenance pass.
 
@@ -254,9 +254,14 @@ def run_maintenance(
     claim, and again once it is held, because waiting is exactly the situation
     in which the reason for deleting can expire. Every mutation happens under
     that claim, and each one re-reads liveness, pins, and plan locks for itself
-    immediately before it acts. ``record`` writes the durable manifest and is
-    only turned off by a caller that is measuring, not maintaining.
+    immediately before it acts. ``record`` writes the durable manifest; left
+    unset it follows ``apply``, so a dry run writes nothing at all and leaves
+    the last recorded pass (what ``asl maintenance status`` reports) as the
+    last pass that actually ran. The scheduled job always passes ``--apply``,
+    so every pass it makes, a no-op included, is still recorded.
     """
+    if record is None:
+        record = apply
     moment = _now(now)
     deadline = _Deadline(max_runtime_seconds)
     root = state.state_root(state_dir)

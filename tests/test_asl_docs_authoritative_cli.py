@@ -376,6 +376,8 @@ class AuthoritativeCliDocsTests(unittest.TestCase):
         )
         self.assertIn("intentional duplicate split", split_skill)
         self.assertIn("`--force-new`", split_skill)
+        self.assertIn("`already-split`", split_skill)
+        self.assertIn("`details.existing_outputs`", split_skill)
 
         self.assertIn("Reading such a lock also removes it", self.docs)
         self.assertIn("reclaimed stale lock at <path>", self.docs)

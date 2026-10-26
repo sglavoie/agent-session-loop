@@ -31,6 +31,7 @@ from .authoring_source_models import (
     LINT_MISSING_ID_WHITESPACE,
     LINT_MISSING_SESSION_ID,
     LINT_NON_NUMERIC_SESSION_ID,
+    LINT_OUT_OF_ORDER_SESSION,
     LINT_PUNCTUATION_FREE_TITLE,
     LINT_REPOSITORIES_PLACEMENT,
     LINT_SESSION_ID_SUFFIX,
@@ -42,8 +43,8 @@ from .authoring_source_models import (
     SourceHeadingError,
     SourceRegistryError,
     SourceScopeError,
-    _fence_delimiter,
 )
+from .contract_models import fenced_line_flags
 from .plans_session_ids import SessionId
 from .workspaces import (
     Repository,
@@ -213,6 +214,34 @@ def _parse_source_session_heading(
     return session_id, title, len(heading.group("hashes"))
 
 
+def _out_of_order_session_error(
+    session_id: SessionId,
+    previous: tuple[SessionId, int] | None,
+    *,
+    line_number: int,
+    line: str,
+) -> SourceHeadingError | None:
+    """Diagnose a session that sorts before the one written above it.
+
+    ``session-run`` executes sessions in dotted-numeric order while the split
+    links each session to the one above it in the source, so a plan written
+    out of order would hand a session the wrong predecessor. The repair is a
+    renumbering or a move, which changes what the plan means, so it is
+    reported rather than sorted silently.
+    """
+    if previous is None or not session_id < previous[0]:
+        return None
+    previous_id, previous_line = previous
+    return _source_heading_error(
+        line_number,
+        f"session {session_id.value!r} follows session {previous_id.value!r} "
+        f"(line {previous_line}); sessions must appear in ascending dotted "
+        f"numeric order, the order they run in",
+        line,
+        category=LINT_OUT_OF_ORDER_SESSION,
+    )
+
+
 def _iter_structural_lines(
     lines: Sequence[str],
 ) -> Iterator[tuple[int, str, bool, bool]]:
@@ -222,21 +251,13 @@ def _iter_structural_lines(
     parser and the accumulating linter can never disagree about which lines are
     structure and which are content.
     """
-    fence: str | None = None
+    fenced = fenced_line_flags(lines)
     for index, line in enumerate(lines):
-        delimiter = _fence_delimiter(line)
-        if delimiter is not None:
-            if fence is None:
-                fence = delimiter
-            elif fence == delimiter:
-                fence = None
-            # A different fence family inside an open fence is content; ignore.
-
         is_candidate = (
-            fence is None and _SESSION_HEADING_CANDIDATE_RE.match(line) is not None
+            not fenced[index] and _SESSION_HEADING_CANDIDATE_RE.match(line) is not None
         )
         is_repositories = (
-            fence is None
+            not fenced[index]
             and _REPOSITORIES_HEADING_CANDIDATE_RE.fullmatch(line) is not None
         )
         yield index + 1, line, is_candidate, is_repositories
@@ -294,7 +315,7 @@ def _parse_repository_registry(
             first_heading,
             category=LINT_REPOSITORIES_PLACEMENT,
         )
-    if first_heading != _REPOSITORIES_HEADING:
+    if first_heading.rstrip(" \t") != _REPOSITORIES_HEADING:
         raise _source_registry_error(
             first_heading_line,
             "repository registry heading must be exactly '## Repositories'",
@@ -423,6 +444,7 @@ def parse_plan_document(text: str) -> ParsedPlan:
 
     current: dict[str, Any] | None = None
     first_id_lines: dict[str, int] = {}
+    previous: tuple[SessionId, int] | None = None
 
     def _flush(end: int) -> None:
         if current is None:
@@ -474,6 +496,12 @@ def parse_plan_document(text: str) -> ParsedPlan:
                 category=LINT_DUPLICATE_SESSION_ID,
             )
         first_id_lines[session_id.value] = line_number
+        out_of_order = _out_of_order_session_error(
+            session_id, previous, line_number=line_number, line=line
+        )
+        if out_of_order is not None:
+            raise out_of_order
+        previous = (session_id, line_number)
 
         _flush(index)
         current = {

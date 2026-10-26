@@ -441,7 +441,10 @@ text and JSON output continue to report the canonical resolved `plan_dir`.
 
 `tail` prints recent activity for the latest run and follows `events.jsonl`
 plus live harness and commit stdout/stderr logs until the observed run
-finishes. Use `--no-follow` to print recent activity and exit. `tail` remains
+finishes. Recent activity places each log's lines among the run's events,
+just before the event that finished the turn or commit that wrote it, so the
+last `--lines` lines end on the run's latest events rather than on harness
+output. Use `--no-follow` to print recent activity and exit. `tail` remains
 the full event-and-log viewer; the `t` keyboard control embeds a logs-only
 variant of the same follower inside a text TTY `run` so runner progress is the
 single source for heartbeats and event lines.
@@ -456,7 +459,7 @@ PID, harness, session ID, turn index, and plan; `Recent sessions` lists the
 most recently finished turns with finished time, duration, status result,
 harness, session ID, run ID, and plan. `--running` and `--recent` are
 independent filters; passing neither (or both) shows both sections. `--limit`
-must be non-negative, defaults to `20`, and truncates recent rows only. Text
+must be a positive integer, defaults to `20`, and truncates recent rows only. Text
 output uses compact plan-directory basenames; `--verbose` opts into full
 canonical paths; JSON always includes full paths. The compact plan basename
 shown after `plan` can be passed directly to `asl status` as its
@@ -490,6 +493,9 @@ Reclaim figures are net of the gzip bytes those retained failure artifacts add
 (reported separately as `artifact_bytes_added`), so a compaction that keeps a
 poorly compressible failure artifact never reports more saving than is actually
 reclaimed on disk.
+An `events.jsonl` line that does not parse (a record torn by a crash
+mid-append) is written back byte-for-byte rather than failing the plan, and
+counted as `unparseable_event_lines`.
 Every rewrite is atomic (temp-file + rename), so an interrupted compaction never
 leaves a partially written JSON file, and re-running is idempotent. `--json`
 emits the full `CompactionReport` payload.

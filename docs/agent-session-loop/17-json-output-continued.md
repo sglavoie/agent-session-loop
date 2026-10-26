@@ -109,7 +109,12 @@ top-level payload also surfaces `active_turn` and `active_verification` (each
 block with `stale_unfinished` (boolean) and `stale_reason` (string or `null`).
 `stale_unfinished` is `true` whenever `state.json` is present without a
 `run_finished_at` and no active lock guards it (no lock file, or a stale lock);
-`stale_reason` carries a short human-readable explanation. Text output prints
+`stale_reason` carries a short human-readable explanation. `runner_state` also
+carries `paused_at` and `pause_message`, and text output follows the regular
+`Run state: run <id> started <ts>` line with the run's outcome:
+`Run state: paused (<reason>) at <ts>` plus a `Pause detail: <message>` line,
+`Run state: finished <reason> at <ts>`, or `Run state: stopped (<reason>) at
+<ts>` for a run that ended neither successfully nor paused. Text output prints
 `Run state: stale/orphaned (<reason>)` immediately under the regular
 `Run state:` line whenever the runner state is orphaned. When that orphan is
 *provably* dead the same call also marks it abandoned (see [Stale unfinished
@@ -160,7 +165,7 @@ rows include `plan_dir`, `state_dir`, `run_id`, `harness`, `session_id`,
 `artifact_dir`. Plan paths in JSON are always full canonical paths; the
 text rendering uses basenames by default and switches to full paths when
 `--verbose` is passed. A missing state root returns success with empty
-arrays. Invalid parsed inputs such as `--limit -1` produce
+arrays. Invalid parsed inputs such as `--limit 0` produce
 `reason: input-error`; catastrophic state-root errors produce
 `reason: state-error`.
 

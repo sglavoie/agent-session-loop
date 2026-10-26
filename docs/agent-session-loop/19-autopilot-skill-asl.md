@@ -17,8 +17,9 @@ while the runner waits for a reply.
 that whole workflow as one canonical model, so an agent that never opened this
 document still gets the exact commands. Text and JSON render from the same
 model and therefore carry equivalent commands; the JSON payload is `ok`,
-`command`, `selected_harness`, `skills`, `helper`, `operations`, and
-`leaf_help`. It covers the `$asl` / `/asl` skill invocation carrying the user's
+`command`, `selected_harness`, `skills`, `helper`, `operations`,
+`leaf_help`, and `placeholders` (the uppercase names the commands leave for
+the caller to fill, such as `PLAN_DIR` and `SUPERVISION_ID`). It covers the `$asl` / `/asl` skill invocation carrying the user's
 exact `asl run` command, the detached
 `<skill-dir>/scripts/asl-autopilot.py --command ... --supervision-id ... --json --detach`
 launch and its `--reply-stdin` resume, the `asl outbox supervise`,
@@ -35,7 +36,8 @@ candidate rather than failing. The command is registered through the lazy
 `handler_ref` mechanism, so importing or building `cli.py` never loads it.
 
 Every nested command group — `bridge`, `workbench`, `control`, `inbox`,
-`outbox`, and `assurance` — carries an epilogue, because a leaf-only group's
+`outbox`, `assurance`, `diagnostics`, `maintenance`, `agent-mux`, `overseer`,
+and the nested `control guard` — carries an epilogue, because a leaf-only group's
 help lists its leaves and none of their flags, which reads to an agent like the
 flags do not exist. Those groups say that they list leaves only and name the
 leaf help to read instead, such as `asl outbox supervise --help`; the

@@ -43,6 +43,18 @@ class PlanResolutionTests(PlanAuthoringBase):
             "# New\n\n## Session 1\n", authoring_paths.extract_inline_plan(raw)
         )
 
+    def test_title_from_plan_skips_comments_in_code_fences(self) -> None:
+        text = (
+            "## Context\n\n## Session 1: Install\n\n"
+            "```bash\n# remove the old virtualenv first\nrm -rf .venv\n```\n\n"
+            "~~~~\n```\n# still quoted\n~~~~\n\n"
+            "# Real title\n"
+        )
+        self.assertEqual("Real title", authoring_paths.title_from_plan(text))
+        self.assertEqual(
+            "plan", authoring_paths.title_from_plan("```\n# only a comment\n```\n")
+        )
+
     def test_extract_inline_plan_rejects_empty(self) -> None:
         with self.assertRaises(ValueError):
             authoring_paths.extract_inline_plan("<proposed_plan>   </proposed_plan>")

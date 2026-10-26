@@ -9,6 +9,8 @@ from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
+    authoring_parse,
+    authoring_split,
     authoring_transaction,
     baseline,
     baseline_cache,
@@ -22,6 +24,7 @@ from agent_session_loop import (
     prepare_baseline,
     prepare_models,
     prepare_packet,
+    prepare_structure,
     prepare_validation_cache,
     prepare_validation_store,
     state_locks,
@@ -102,6 +105,53 @@ class PrepareRegisteredWorkspaceTests(PrepareEndToEndFixtures):
             ["ok", "ok", "ok", "ok", "ok", "ok"],
             [step.status for step in result.steps],
         )
+
+    def test_prepare_authoring_renders_sessions_and_manifest_as_split_does(
+        self,
+    ) -> None:
+        source = self._write_registered_source(DEFAULT_MULTI_REPO_SPECS[:2])
+        text = source.read_text(encoding="utf-8")
+        parsed = authoring_parse.parse_plan_document(text)
+        blockers, contracts_by_id = prepare_structure._structure_blockers(parsed)
+        self.assertEqual([], blockers)
+
+        prepared = prepare_structure._author_plan_directory(
+            str(source),
+            text,
+            parsed,
+            contracts_by_id,
+            base_dir=self.tmp_path / "prepared",
+            harness="codex",
+        )
+        split = authoring_split.split_plan(
+            plan_file=source,
+            contracts_by_id={
+                session.session_id.value: {
+                    "done_when": list(
+                        contracts_by_id[session.session_id.value].done_when
+                    ),
+                    "verify": json.loads(
+                        next(
+                            line
+                            for line in session.lines
+                            if line.startswith('{"session"')
+                        )
+                    ),
+                }
+                for session in parsed.sessions
+            },
+            base_dir=self.tmp_path / "split",
+            skill_prefix="$",
+        ).output_dir
+
+        for session in parsed.sessions:
+            name = session.session_id.filename
+            prepared_text = (prepared / name).read_text(encoding="utf-8")
+            self.assertEqual((split / name).read_text(encoding="utf-8"), prepared_text)
+            self.assertEqual(1, prepared_text.count("**Reads repositories**:"))
+        manifest = (prepared / "manifest.md").read_text(encoding="utf-8")
+        self.assertIn(f"$session-run {prepared}/", manifest)
+        self.assertNotIn("/session-run", manifest)
 
     def test_registered_prepare_uses_v3_and_repository_aware_baselines(self) -> None:
         specs = DEFAULT_MULTI_REPO_SPECS[:2]

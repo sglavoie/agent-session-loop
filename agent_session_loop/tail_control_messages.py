@@ -12,13 +12,14 @@ from . import (
     events,
     workspaces,
 )
+from .formatting import format_local_timestamp
 
 
 def _format_local_datetime(value: Any) -> str:
     parsed = clock.parse_datetime(value)
     if parsed is None:
         return "none"
-    return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    return format_local_timestamp(parsed)
 
 
 def _progress_commit_label(payload: dict[str, Any]) -> str:

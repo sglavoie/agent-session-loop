@@ -49,6 +49,27 @@ class PlanParsingTests(PlanAuthoringBase):
                 self.assertIn("###### Session 009 — fake", parsed.sessions[0].lines)
                 self.assertIn("### Session nope / malformed", parsed.sessions[0].lines)
 
+    def test_parse_plan_document_closes_fence_only_on_matching_run(self) -> None:
+        text = (
+            "# Plan\n\n## Session 1: Teach\n\n"
+            "````markdown\n"
+            "```text\n"
+            "## Session 9: Example inside an example\n"
+            "```\n"
+            "## Session 8: Still quoted\n"
+            "~~~~\n"
+            "```python\n"
+            "````\n\n"
+            "## Session 2: Real work\n\nDo it.\n"
+        )
+        parsed = authoring_parse.parse_plan_document(text)
+
+        self.assertEqual(("1", "2"), parsed.session_ids)
+        self.assertIn(
+            "## Session 9: Example inside an example", parsed.sessions[0].lines
+        )
+        self.assertIn("## Session 8: Still quoted", parsed.sessions[0].lines)
+
     def test_parse_plan_document_rejects_duplicate_ids(self) -> None:
         text = "## Session 1: A\n\nx\n\n## Session 01: B\n\ny\n"
         with self.assertRaises(plans_errors.PlanError) as raised:
@@ -110,7 +131,7 @@ class PlanParsingTests(PlanAuthoringBase):
         self,
     ) -> None:
         cases = (
-            ("## Session nope: Bad id", "invalid session id"),
+            ("## Session #1: Bad id", "invalid session id"),
             ("## Session 1..2: Bad id", "invalid session id"),
             ("## Session 0: Zero", "zero-valued session id component"),
             ("## Session 1.0: Zero", "zero-valued session id component"),
@@ -172,6 +193,26 @@ class PlanParsingTests(PlanAuthoringBase):
         self.assertEqual(
             ("# Plan", "", "", "Shared context.", ""), parsed.context_lines
         )
+
+    def test_repositories_heading_tolerates_trailing_whitespace(self) -> None:
+        for trailing in (" ", "\t", "  \t "):
+            with self.subTest(trailing=repr(trailing)):
+                text = (
+                    f"# Plan\n\n## Repositories{trailing}\n\n"
+                    "| Alias | Path | Origin |\n"
+                    "| --- | --- | --- |\n"
+                    "| app | repo | https://example.com/app.git |\n\n"
+                    "## Session 1: A\n\n"
+                    "**Reads repositories**: app\n"
+                    "**Writes repositories**: app\n\nx\n"
+                )
+
+                parsed = authoring_parse.parse_plan_document(text)
+                lint = authoring_lint.lint_plan_document(text)
+
+                self.assertIsNotNone(parsed.registry)
+                self.assertEqual(("app",), parsed.registry.aliases)
+                self.assertEqual((), lint.findings)
 
     def test_parse_plan_document_ignores_registry_shaped_content(
         self,

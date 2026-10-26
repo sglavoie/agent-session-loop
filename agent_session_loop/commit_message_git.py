@@ -136,6 +136,26 @@ def dequalify_paths(qualified: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
+# The captured diff is parsed by `commit_message_diff`, so its shape must not
+# follow the user's git configuration: `diff.noprefix` / `diff.mnemonicPrefix`
+# move the side prefixes, `color.diff=always` wraps every header in escapes, an
+# external or textconv driver replaces the patch, `diff.submodule=log` drops a
+# submodule's `diff --git` header, and `core.quotePath` octal-escapes every
+# non-ASCII name. Names git still has to quote (a tab, a quote, a backslash)
+# are decoded by the parser.
+_DIFF_CONFIG = ("-c", "core.quotePath=false")
+
+
+_DIFF_FORMAT = (
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+    "--submodule=short",
+)
+
+
 def capture_staged_diff(
     cwd: Path, pathspec: Sequence[str] | None = None
 ) -> models.DiffResult:
@@ -145,7 +165,14 @@ def capture_staged_diff(
     unrelated entry staged before the run never reaches the prompt.
     """
     result = _git_paths(
-        cwd, ["diff", "--cached", "--no-ext-diff", *_pathspec_args(pathspec)]
+        cwd,
+        [
+            *_DIFF_CONFIG,
+            "diff",
+            "--cached",
+            *_DIFF_FORMAT,
+            *_pathspec_args(pathspec),
+        ],
     )
     if result.returncode != 0:
         raise models.CommitMessageError(
@@ -165,7 +192,7 @@ def capture_commit_diff(sha: str, cwd: Path) -> models.DiffResult:
         )
     full_sha = resolved.stdout.strip()
 
-    result = _git(cwd, ["show", full_sha, "--format=", "--no-ext-diff"])
+    result = _git(cwd, [*_DIFF_CONFIG, "show", full_sha, "--format=", *_DIFF_FORMAT])
     if result.returncode != 0:
         raise models.CommitMessageError(
             f"failed to capture diff for commit {sha}: {result.stderr.strip()}",
@@ -188,14 +215,24 @@ def changes_are_all_binary(
     then reports the ordinary empty-diff error rather than a specific cause it
     could not actually establish.
     """
+    # `--no-textconv` keeps a binary file binary here exactly as it is in the
+    # captured diff, whatever textconv driver the repository configures.
     if from_id is not None:
-        args = ["show", from_id, "--numstat", "--format=", "--no-renames"]
+        args = [
+            "show",
+            from_id,
+            "--numstat",
+            "--format=",
+            "--no-renames",
+            "--no-textconv",
+        ]
     else:
         args = [
             "diff",
             "--cached",
             "--numstat",
             "--no-renames",
+            "--no-textconv",
             *_pathspec_args(pathspec),
         ]
     result = _git_paths(cwd, args)
@@ -359,25 +396,40 @@ def worktree_drifted_paths(cwd: Path, pathspec: Sequence[str]) -> list[str]:
     is not blank (edited or deleted since staging) or when it is untracked
     altogether, which is how a path staged as a deletion and then recreated is
     caught.
+
+    A submodule is committed as its HEAD alone, so only a HEAD that moved
+    since staging drifts; edited or untracked files inside it never reach the
+    commit and are ignored, whatever ``submodule.<name>.ignore`` says.
     """
     result = _git_paths(
-        cwd, ["status", "--porcelain", "-uall", *_pathspec_args(pathspec)]
+        cwd,
+        [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "-uall",
+            "--ignore-submodules=dirty",
+            *_pathspec_args(pathspec),
+        ],
     )
     if result.returncode != 0:
         raise models.CommitMessageError(
             f"failed to probe the worktree: {result.stderr.strip()}",
             reason=models.REASON_DIFF_FAILED,
         )
+    # `-z` writes each name verbatim (never C-quoted) as `XY <path>\0`; a rename
+    # or copy names its new path there and its source in the next record,
+    # which is skipped: the new name is the one a commit would carry.
     drifted: list[str] = []
-    for line in result.stdout.splitlines():
-        if len(line) < 4:
+    records = iter(result.stdout.split("\0"))
+    for record in records:
+        if len(record) < 4:
             continue
-        if line.startswith("??") or line[1] != " ":
-            path = line[3:]
-            # A rename entry reads `R  old -> new`; the new name is the one a
-            # commit would carry.
-            _, arrow, renamed = path.partition(" -> ")
-            drifted.append(renamed if arrow else path)
+        status = record[:2]
+        if "R" in status or "C" in status:
+            next(records, None)
+        if status == "??" or status[1] != " ":
+            drifted.append(record[3:])
     return drifted
 
 

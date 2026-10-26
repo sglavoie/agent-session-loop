@@ -215,6 +215,44 @@ class TailFollowerFollowTests(TailFollowerTestCase):
             self.assertIn("run finished: run run-1", text)
             self.assertIn("stdout session=1 turn=1 | final stdout", text)
 
+    def test_tail_follower_keeps_following_a_truncated_events_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, state_path, events_path = self.setup_tail_files(
+                Path(tmp)
+            )
+            self.write_state_payload(
+                state_path, {"run_id": "run-1", "run_finished_at": None}
+            )
+
+            def started(session_id: str) -> events.Event:
+                return events.Event(
+                    name="turn_started",
+                    payload={
+                        "run_id": "run-1",
+                        "session_id": session_id,
+                        "total_sessions": 9,
+                        "turn_index": 1,
+                    },
+                    created_at="2026-06-11T12:00:00+00:00",
+                )
+
+            for session_id in ("1", "2", "3"):
+                events.append_event(events_path, started(session_id))
+            out = io.StringIO()
+            follower = tail.TailFollower(
+                plan_dir, state_dir=state_dir, out=out, poll_interval=0.01
+            )
+            self.addCleanup(self.cleanup_follower, follower)
+            follower.start()
+
+            # Rewritten shorter: the next record is still printed, not lost to
+            # an offset counted against the old file.
+            events_path.write_text("", encoding="utf-8")
+            events.append_event(events_path, started("4"))
+
+            wait_until(lambda: "session 4/9 started" in out.getvalue())
+            self.assertNotIn("session 3/9 started", out.getvalue())
+
     def test_tail_follower_stops_on_synthetic_abandoned_run_finished(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -269,7 +307,7 @@ class TailFollowerFollowTests(TailFollowerTestCase):
 
             wait_until(lambda: follower.done)
             self.assertTrue(follower.join(1.0))
-            self.assertIn("run paused: run run-1, reason abandoned", out.getvalue())
+            self.assertIn("run stopped: run run-1, reason abandoned", out.getvalue())
 
     def test_tail_follower_suppresses_event_lines_when_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
