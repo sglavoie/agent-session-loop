@@ -61,6 +61,19 @@ export function routePlanId() {
   return address ? address.value : "";
 }
 
+/**
+ * A check that a read begun now still describes the plan on screen.
+ *
+ * Call it before the first await and ask the returned function after each
+ * one: a panel whose answer arrives after the route moved to another plan
+ * must neither draw it nor write it into shared state, or plan A's panels
+ * and tokens would appear inside plan B's view.
+ */
+export function planReadGuard() {
+  const requested = routePlanId();
+  return () => routePlanId() !== requested;
+}
+
 /** True when this row is the run a `#run=` deep link was written about. */
 export function planMatchesRunKey(plan, runKey) {
   if (!plan || !runKey) return false;

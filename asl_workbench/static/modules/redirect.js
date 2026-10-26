@@ -51,7 +51,7 @@ import {
   REDIRECT_UNRESOLVED_STAGES,
 } from "./constants.js";
 import { showControlsFeedback } from "./controls.js";
-import { planBody, planUrl, routePlanId } from "./identity.js";
+import { planBody, planReadGuard, planUrl, routePlanId } from "./identity.js";
 import { rememberReceipt, renderOperationReceipts } from "./operations.js";
 import { clearFormErrors, showFormError } from "./profile.js";
 import { refresh } from "./queue.js";
@@ -192,10 +192,14 @@ export function currentRedirectOperationId() {
 }
 
 export async function loadAndRenderRedirect() {
+  // A late answer about another plan would hand this plan's composer that
+  // plan's action token, so it is dropped rather than recorded.
+  const stale = planReadGuard();
   try {
     const body = await apiRequest(
       planUrl("/api/redirect-status")
     );
+    if (stale()) return;
     if (body && body.ok === true) {
       state.redirect.status = body;
       state.redirect.actionToken = body.action_token || null;
@@ -217,6 +221,7 @@ export async function loadAndRenderRedirect() {
       );
     }
   } catch (err) {
+    if (stale()) return;
     renderRedirectUnavailable(describeError(err));
   }
 }

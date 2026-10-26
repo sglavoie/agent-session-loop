@@ -1011,6 +1011,72 @@ for (const deployment of DEPLOYMENTS) {
       );
     });
 
+    test("a panel read that lands after a plan switch is not drawn", async ({
+      page,
+    }) => {
+      const alpha = await openDetail(page, deployment, "alpha");
+      const bravo = rowFor(await catalog(page), "bravo");
+      await page.evaluate(async () => {
+        const detail = await import("/static/modules/detail.js");
+        detail.stopDetailTimer();
+      });
+      await page.waitForFunction(async () => {
+        const { state } = await import("/static/modules/state.js");
+        return !state.detailInFlight;
+      });
+      const param = alpha.plan_dir ? "plan_dir" : "plan_key";
+      const value = alpha.plan_dir || alpha.plan_key;
+      // Hold alpha's panel reads, then answer them with alpha's data only
+      // once bravo is on screen: the late answers must be dropped.
+      let release;
+      const held = new Promise((resolve) => {
+        release = resolve;
+      });
+      const late = async (route) => {
+        const url = new URL(route.request().url());
+        if (url.searchParams.get(param) !== value) return route.continue();
+        await held;
+        const body = url.pathname === "/api/logs"
+          ? { ok: true, text: "ALPHA-LATE" }
+          : {
+              ok: true,
+              action_token: "alpha-token",
+              permitted_actions: ["redirect"],
+              disabled_reasons: {},
+              live_target: null,
+            };
+        return route.fulfill({ json: body });
+      };
+      await page.route("**/api/logs?**", late);
+      await page.route("**/api/redirect-status?**", late);
+      await page.evaluate(async () => {
+        const panels = await import("/static/modules/panels.js");
+        const redirect = await import("/static/modules/redirect.js");
+        window.__lateReads = Promise.all([
+          panels.loadAndRenderLog("stdout"),
+          redirect.loadAndRenderRedirect(),
+        ]);
+      });
+      await page.evaluate((hash) => {
+        window.location.hash = hash;
+      }, detailHash(bravo));
+      await expect(page.locator("#wb-detail-state")).toHaveAttribute(
+        "data-state",
+        PLAN_STATES.bravo.primary_state,
+      );
+      release();
+      const after = await page.evaluate(async () => {
+        await window.__lateReads;
+        const { state } = await import("/static/modules/state.js");
+        return {
+          stdout: document.getElementById("wb-detail-stdout").textContent,
+          token: state.redirect.actionToken,
+        };
+      });
+      expect(after.stdout).not.toBe("ALPHA-LATE");
+      expect(after.token).not.toBe("alpha-token");
+    });
+
     test("a detail error leaves nothing of the plan behind it", async ({
       page,
     }) => {

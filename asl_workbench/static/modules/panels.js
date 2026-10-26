@@ -14,7 +14,7 @@ import {
   LINKED_QUESTION_OPEN_TIMEOUT_MS,
   REPLY_CONTEXT_ERROR_HINTS,
 } from "./constants.js";
-import { planUrl, routePlanId } from "./identity.js";
+import { planReadGuard, planUrl, routePlanId } from "./identity.js";
 import {
   applyActionAvailability,
   receiptsForPlan,
@@ -39,10 +39,12 @@ export function findPin(planDir) {
 }
 
 export async function loadAndRenderState() {
+  const stale = planReadGuard();
   try {
     const body = await apiRequest(
       planUrl("/api/state")
     );
+    if (stale()) return;
     const statePayload = body && body.state ? body.state : null;
     renderActive(statePayload);
     renderVerification(statePayload);
@@ -165,10 +167,12 @@ export function renderSessionsFromState(payload) {
 }
 
 export async function loadAndRenderEvents() {
+  const stale = planReadGuard();
   try {
     const body = await apiRequest(
       planUrl("/api/events", { limit: 20 })
     );
+    if (stale()) return;
     renderEvents(body && Array.isArray(body.events) ? body.events : []);
   } catch (err) {
     // soft fail
@@ -310,10 +314,12 @@ export function formatEventTime(value) {
 }
 
 export async function loadAndRenderProgress() {
+  const stale = planReadGuard();
   try {
     const body = await apiRequest(
       planUrl("/api/progress")
     );
+    if (stale()) return;
     renderProgress(body && Array.isArray(body.entries) ? body.entries : []);
   } catch (err) {
     // soft fail
@@ -411,27 +417,33 @@ export function populateUL(el, items, label) {
 export async function loadAndRenderLog(stream) {
   const el = document.getElementById("wb-detail-" + stream);
   if (!el) return;
+  const stale = planReadGuard();
   try {
     const body = await apiRequest(
       planUrl("/api/logs", { stream: stream, tail_lines: 120 })
     );
+    if (stale()) return;
     if (body && body.ok && typeof body.text === "string") {
       el.textContent = body.text || "(empty)";
     } else {
       el.textContent = "(no log)";
     }
   } catch (err) {
+    if (stale()) return;
     el.textContent = "(no log)";
   }
 }
 
 export async function loadAndRenderArtifacts() {
+  const stale = planReadGuard();
   try {
     const body = await apiRequest(
       planUrl("/api/artifacts")
     );
+    if (stale()) return;
     renderArtifactsPanel(body && body.artifacts ? body.artifacts : {});
   } catch (err) {
+    if (stale()) return;
     renderArtifactsPanel({});
   }
 }
