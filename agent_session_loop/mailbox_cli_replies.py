@@ -65,19 +65,12 @@ def inbox_reply_from_args(args: argparse.Namespace) -> int:
     mailbox_cli_agent_mux.notify_agent_mux_mailbox_reply(
         context, args, message, projection
     )
-    receipt = None
-    if getattr(args, "wait_consumed", False):
-        try:
-            receipt = mailbox_cli_receipts.wait_for_receipt(
-                context.snapshot.plan_dir,
-                message.id,
-                state_dir=args.state_dir,
-                timeout=consumption_timeout,
-            )
-        except mailbox_models.MailboxError:
-            # The closure append is authoritative. A later observation failure
-            # must remain a truthful successful append with consumed=false.
-            receipt = None
+    receipt, waited, timed_out = mailbox_cli_receipts.await_consumption(
+        args,
+        context.snapshot.plan_dir,
+        message.id,
+        timeout=consumption_timeout,
+    )
     consumed = receipt is not None
     payload = responses.success_payload(
         mailbox_cli_constants.COMMAND_INBOX_REPLY,
@@ -92,6 +85,8 @@ def inbox_reply_from_args(args: argparse.Namespace) -> int:
         message=mailbox_cli_output.message_payload(message),
         delivery_state="consumed" if consumed else "accepted",
         consumed=consumed,
+        waited=waited,
+        timed_out=timed_out,
         receipt=None
         if receipt is None
         else mailbox_cli_output.message_payload(receipt),
@@ -177,17 +172,12 @@ def inbox_resolve_from_args(args: argparse.Namespace) -> int:
         projection,
         active_run_id=run_id,
     )
-    receipt = None
-    if getattr(args, "wait_consumed", False):
-        try:
-            receipt = mailbox_cli_receipts.wait_for_receipt(
-                context.snapshot.plan_dir,
-                message.id,
-                state_dir=args.state_dir,
-                timeout=consumption_timeout,
-            )
-        except mailbox_models.MailboxError:
-            receipt = None
+    receipt, waited, timed_out = mailbox_cli_receipts.await_consumption(
+        args,
+        context.snapshot.plan_dir,
+        message.id,
+        timeout=consumption_timeout,
+    )
     consumed = receipt is not None
 
     payload = responses.success_payload(
@@ -205,6 +195,8 @@ def inbox_resolve_from_args(args: argparse.Namespace) -> int:
         message=mailbox_cli_output.message_payload(message),
         delivery_state="consumed" if consumed else "accepted",
         consumed=consumed,
+        waited=waited,
+        timed_out=timed_out,
         receipt=None
         if receipt is None
         else mailbox_cli_output.message_payload(receipt),

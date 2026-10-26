@@ -243,7 +243,8 @@ The eight mailbox commands share normal plan-reference, `--state-dir`, and
   target fails with `question-not-found`. `--wait-consumed` optionally waits
   for a worker/runner receipt, with `--wait-timeout` defaulting to 90 seconds;
   a receipt timeout leaves the successful append `ok: true`,
-  `delivery_state: accepted`, and `consumed: false`.
+  `delivery_state: accepted`, `consumed: false`, and `timed_out: true`;
+  `waited` says whether a consumption wait ran at all.
 - `asl inbox resolve` atomically closes a live-run question without fabricating
   reply text. `--action continue` directs a worker to proceed without treating
   an optional `--note`/`--note-stdin` value as an operator answer;

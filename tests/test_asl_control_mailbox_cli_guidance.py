@@ -60,6 +60,8 @@ class MailboxCliTests(MailboxCliTestsBase):
         self.assertEqual("accepted", payload["delivery_state"])
         self.assertFalse(payload["consumed"])
         self.assertIsNone(payload["receipt"])
+        self.assertTrue(payload["waited"])
+        self.assertTrue(payload["timed_out"])
 
     def test_reply_json_exposes_consumption_receipt(self) -> None:
         self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
@@ -97,6 +99,42 @@ class MailboxCliTests(MailboxCliTestsBase):
         self.assertEqual("consumed", payload["delivery_state"])
         self.assertTrue(payload["consumed"])
         self.assertEqual(receipt.id, payload["receipt"]["id"])
+        self.assertTrue(payload["waited"])
+        self.assertFalse(payload["timed_out"])
+
+    def test_closures_report_whether_they_waited_for_consumption(self) -> None:
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        for handler, extra in (
+            (mailbox_cli_replies.inbox_reply_from_args, {"text": "answer"}),
+            (
+                mailbox_cli_replies.inbox_resolve_from_args,
+                {"action": mailbox_vocabulary.RESOLUTION_ACTION_CONTINUE},
+            ),
+        ):
+            for wait_consumed in (False, True):
+                with self.subTest(handler=handler.__name__, wait=wait_consumed):
+                    question = mailbox_appenders.append_question(
+                        self.plan_dir,
+                        "Need answer",
+                        state_dir=self.state_dir,
+                        run_id="run-live",
+                    )
+                    with mock.patch.object(
+                        mailbox_cli_receipts, "wait_for_receipt", return_value=None
+                    ):
+                        code, payload = self.payload_from(
+                            handler,
+                            self.args(
+                                to=question.id,
+                                wait_consumed=wait_consumed,
+                                wait_timeout=0 if wait_consumed else None,
+                                **extra,
+                            ),
+                        )
+                    self.assertEqual(0, code)
+                    self.assertFalse(payload["consumed"])
+                    self.assertEqual(wait_consumed, payload["waited"])
+                    self.assertEqual(wait_consumed, payload["timed_out"])
 
     def test_guidance_and_reply_append_records_and_renew_lease(self) -> None:
         code, guidance_payload = self.payload_from(
