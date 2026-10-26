@@ -26,6 +26,7 @@ would be reformatted by ``ruff format`` and the pin would rot silently.
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from agent_session_loop import (
     plans_errors,
     plans_session_ids,
     review,
+    review_session_body,
     review_session_contract,
 )
 from tests.support import assert_no_runner_import
@@ -193,6 +195,43 @@ class ReviewSessionContractBoundaryTests(unittest.TestCase):
                 plans_session_ids.parse_session_id("9"),
                 plan_dir=Path("/tmp"),
             )
+
+    def test_a_heading_quoted_inside_a_line_is_not_the_contract_section(
+        self,
+    ) -> None:
+        # A prior finding's title is rendered into the scope section ahead of
+        # the contract, and a reviewer can name the heading it is about.
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp).resolve()
+            session_id = plans_session_ids.parse_session_id("9")
+            body = review_session_body.build_generated_review_session_body(
+                session_id,
+                review_harness="claude",
+                plan_dir=plan_dir,
+                delta={
+                    "mode": review_session_body.REVIEW_SCOPE_FULL,
+                    "prior_findings": [
+                        {
+                            "id": "F1",
+                            "severity": "high",
+                            "title": "Session 2's ## Completion Contract has no "
+                            "## Handoff after it",
+                            "evidence": [{"path": "session-2.md"}],
+                            "done_criteria": ["fixed"],
+                        }
+                    ],
+                },
+            )
+
+            refreshed = review_session_contract.refreshed_generated_review_contract(
+                body, session_id, plan_dir=plan_dir
+            )
+
+        # The scope section survives whole, and the recipe is not duplicated.
+        self.assertIn(review_session_body.REVIEW_SCOPE_DETAIL_HEADING, refreshed)
+        self.assertIn("  - Done when: fixed\n", refreshed)
+        self.assertEqual(1, refreshed.split("\n").count("## Completion Contract"))
+        self.assertEqual(1, refreshed.count("### Verify"))
 
 
 if __name__ == "__main__":

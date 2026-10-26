@@ -592,8 +592,16 @@ def refreshed_generated_review_contract(
             1,
         )
 
-    contract_at = refreshed.find(contracts.COMPLETION_CONTRACT_HEADING)
-    handoff_at = refreshed.find(plans_handoff.HANDOFF_HEADING, contract_at + 1)
+    # Headings are whole lines: a prior finding's title rendered into the scope
+    # section, or a replayed check's pattern, may quote either one mid-line.
+    contract_match = re.compile(
+        rf"(?m)^{re.escape(contracts.COMPLETION_CONTRACT_HEADING)}[ \t]*$"
+    ).search(refreshed)
+    contract_at = contract_match.start() if contract_match is not None else -1
+    handoff_match = re.compile(
+        rf"(?m)^{re.escape(plans_handoff.HANDOFF_HEADING)}[ \t]*$"
+    ).search(refreshed, contract_at + 1)
+    handoff_at = handoff_match.start() if handoff_match is not None else -1
     if contract_at < 0 or handoff_at < 0:
         raise plans_errors.PlanError(
             "generated review is missing its Completion Contract or Handoff"
