@@ -21,7 +21,12 @@ from .plans_models import PlanSnapshot, ReadinessMetadata, SessionFile
 from .plans_readiness import parse_readiness_metadata
 from .plans_session_scope import SessionScopeError
 from .plans_snapshot import inspect_plan
-from .preflight_models import PreflightCategory, PreflightFinding, _finding
+from .preflight_models import (
+    PLAN_DIRECTORY_MISSING_MESSAGE,
+    PreflightCategory,
+    PreflightFinding,
+    _finding,
+)
 
 WORD_AMBIGUITY_SENTINELS: tuple[str, ...] = (
     "TBD",
@@ -76,7 +81,7 @@ def _check_plan_structure(
             _finding(
                 "red",
                 "plan-structure",
-                f"plan directory does not exist: {canonical_dir}",
+                f"{PLAN_DIRECTORY_MISSING_MESSAGE}: {canonical_dir}",
                 path=str(canonical_dir),
             )
         )

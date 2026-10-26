@@ -51,6 +51,7 @@ from . import (
     responses,
 )
 from .cli_defaults import program_name
+from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
 from .metrics_collection import collect_metrics
 from .metrics_invocations import (
     _bump,
@@ -132,7 +133,7 @@ def metrics_from_args(args: argparse.Namespace) -> int:
     try:
         if since_days <= 0:
             raise _InvalidSinceDays(
-                f"--since-days must be a positive integer: {since_days}"
+                flag_refusal("--since-days", POSITIVE_INTEGER, since_days)
             )
         report = metrics_collection.collect_metrics(
             state_dir=getattr(args, "state_dir", None),

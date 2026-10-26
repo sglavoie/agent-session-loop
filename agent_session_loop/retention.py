@@ -28,17 +28,22 @@ from . import (
     responses,
     session_overview,
     state,
+    workbench_archive_storage,
+    workbench_archive_workflows,
 )
 from .cli_defaults import program_name
+from .cli_parser_support import NON_NEGATIVE_NUMBER, flag_refusal
 from .retention_projection import (
     DEFAULT_MAX_AGE_DAYS,
     RETAIN_PIN_UNKNOWN,
     RETAIN_PLAN_LOCKED,
     PlanRetention,
+    _dir_size_bytes,
     corpus_retention,
     pinned_run_ids,
     plan_retention,
 )
+from .workbench_archive_commands import ArchiveRefused
 
 __all__ = [
     "PlanGC",
@@ -87,6 +92,9 @@ class GCReport:
     plans: tuple[PlanGC, ...]
     unresolved_state_dirs: tuple[str, ...]
     assurance: dict[str, Any] = field(default_factory=dict)
+    #: The Workbench archive under the same state root, which gc never judges
+    #: or deletes; ``None`` for a plan-scoped sweep. See :func:`_archive_payload`.
+    archive: dict[str, Any] | None = None
 
     @property
     def run_count(self) -> int:
@@ -158,6 +166,7 @@ class GCReport:
             "retained_by_reason": self.retained_by_reason(),
             "unresolved_state_dirs": list(self.unresolved_state_dirs),
             "assurance": dict(self.assurance),
+            "archive": None if self.archive is None else dict(self.archive),
             "plans": [entry.to_dict() for entry in self.plans],
         }
 
@@ -248,6 +257,72 @@ def _assurance_payload(
     return payload
 
 
+#: How an operator empties Workbench archive entries; gc never does.
+ARCHIVE_PURGE_HINT = (
+    "purge them from the Workbench Archive view (`asl workbench serve`)"
+)
+
+
+def _archive_payload(
+    state_dir: str | Path | None,
+    *,
+    now: datetime | None,
+    registry_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Measure the Workbench archive that gc leaves alone, deleting nothing.
+
+    Archive entries sit under ``<state_root>/archive/`` beside the plan state
+    directories gc judges, and can hold most of the state root's bytes. A
+    report that said "0 B reclaimable of N measured" without them implied the
+    root held N. ``past_retention_count`` is the Archive view's own
+    classification against the live retention window, so the two surfaces never
+    disagree on what an operator may empty; it is ``None`` when the registry
+    holding that window cannot be read.
+    """
+    root = workbench_archive_storage.archive_root(state_dir)
+    payload: dict[str, Any] = {
+        "path": str(root),
+        "managed_by_gc": False,
+        "entry_count": 0,
+        "bytes": 0,
+        "retention_days": None,
+        "past_retention_count": None,
+        "past_retention_bytes": None,
+        "error": None,
+        "purge_hint": ARCHIVE_PURGE_HINT,
+    }
+    if not root.is_dir():
+        payload.update(past_retention_count=0, past_retention_bytes=0)
+        return payload
+    payload["bytes"] = _dir_size_bytes(root)
+    try:
+        view = workbench_archive_workflows.review_archive(
+            state_dir=state_dir, registry_path=registry_path, now=now
+        )
+    except ArchiveRefused as error:
+        payload["entry_count"] = len(
+            workbench_archive_storage.list_archive_entries(state_dir).entries
+        )
+        payload["error"] = str(error)
+        return payload
+    candidates = set(view.review.candidate_ids)
+    past_bytes = 0
+    for entry in view.entries:
+        if entry.archive_id in candidates:
+            entry_dir = (
+                entry.archive_dir
+                or workbench_archive_storage.archive_entry_dir(
+                    entry.archive_id, state_dir
+                )
+            )
+            past_bytes += _dir_size_bytes(entry_dir)
+    payload["entry_count"] = len(view.entries)
+    payload["retention_days"] = view.retention_days
+    payload["past_retention_count"] = len(candidates)
+    payload["past_retention_bytes"] = past_bytes
+    return payload
+
+
 def run_gc(
     plan_dir: str | Path | None = None,
     *,
@@ -255,12 +330,18 @@ def run_gc(
     max_age_days: float = DEFAULT_MAX_AGE_DAYS,
     apply: bool = False,
     now: datetime | None = None,
+    measure_archive: bool = False,
+    registry_path: str | Path | None = None,
 ) -> GCReport:
     """Project — and under ``apply``, delete — the reclaimable run directories.
 
     ``plan_dir`` restricts the sweep to one plan; omitting it judges every plan
     state directory under the resolved state root, which is the aggregate the
-    corpus-wide dry run reports.
+    corpus-wide dry run reports. ``measure_archive`` adds the size of the
+    Workbench archive to a corpus-wide report as context only; ``asl gc`` asks
+    for it, while maintenance, which measures the whole root itself, does not
+    pay for a second walk. ``registry_path`` names the Workbench registry whose
+    archive retention window classifies the entries (default: the user's).
     """
     root_path = state.state_root(state_dir)
     pinned = pinned_run_ids(root_path)
@@ -276,6 +357,11 @@ def run_gc(
         cutoff_at = corpus.cutoff_at
         reports: tuple[PlanRetention, ...] = corpus.plans
         unresolved = corpus.unresolved_state_dirs
+        archive = (
+            _archive_payload(state_dir, now=now, registry_path=registry_path)
+            if measure_archive
+            else None
+        )
     else:
         report = plan_retention(
             plan_dir,
@@ -289,6 +375,7 @@ def run_gc(
         cutoff_at = report.cutoff_at
         reports = (report,)
         unresolved = ()
+        archive = None
     return GCReport(
         scope=scope,
         applied=apply,
@@ -298,6 +385,7 @@ def run_gc(
         plans=tuple(_sweep_plan(report, apply=apply) for report in reports),
         unresolved_state_dirs=unresolved,
         assurance=_assurance_payload(pinned, root=root_path),
+        archive=archive,
     )
 
 
@@ -309,6 +397,27 @@ def format_bytes(count: int) -> str:
             return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
         value /= 1024
     return f"{int(count)} B"
+
+
+def _print_archive(archive: dict[str, Any]) -> None:
+    """Say what the Workbench archive holds, and that gc leaves it alone."""
+    if not archive["entry_count"] and not archive["bytes"]:
+        print("Archive (not managed by gc): empty")
+        return
+    line = (
+        f"Archive (not managed by gc): {archive['entry_count']} entry(ies), "
+        f"{format_bytes(archive['bytes'])} at {archive['path']}"
+    )
+    past = archive["past_retention_count"]
+    if past is not None:
+        window = archive["retention_days"]
+        line += f"; {past} past the {window}-day retention window"
+        if past:
+            line += f" ({format_bytes(archive['past_retention_bytes'])})"
+    elif archive["error"]:
+        line += f"; retention window unreadable ({archive['error']})"
+    print(line)
+    print(f"  gc never deletes archive entries; {archive['purge_hint']}.")
 
 
 def _print_report(report: GCReport) -> None:
@@ -327,8 +436,10 @@ def _print_report(report: GCReport) -> None:
     print(f"Runs: {report.reclaimable_run_count} reclaimable of {report.run_count}")
     print(
         f"Reclaimable: {format_bytes(report.reclaimable_bytes)} of "
-        f"{format_bytes(report.total_bytes)} measured"
+        f"{format_bytes(report.total_bytes)} measured in run directories"
     )
+    if report.archive is not None:
+        _print_archive(report.archive)
 
     if report.scope == "plan":
         for run in report.plans[0].retention.runs:
@@ -428,7 +539,7 @@ def gc_from_args(args: argparse.Namespace) -> int:
         return _print_gc_error(
             args,
             reason="invalid-max-age-days",
-            error=f"--max-age-days must be non-negative: {max_age_days:g}",
+            error=flag_refusal("--max-age-days", NON_NEGATIVE_NUMBER, max_age_days),
         )
     try:
         if plan_dir is not None:
@@ -440,6 +551,7 @@ def gc_from_args(args: argparse.Namespace) -> int:
             state_dir=getattr(args, "state_dir", None),
             max_age_days=max_age_days,
             apply=bool(getattr(args, "apply", False)),
+            measure_archive=True,
         )
     except plans_errors.PlanError as error:
         return _print_gc_error(

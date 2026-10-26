@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import agent_mux_projection, artifacts, events, plans_files
+from .plans_errors import PlanNotFoundError
 from .state import (
     LOCK_FILE_NAME,
     STATE_MIGRATED_EVENT,
@@ -185,6 +186,13 @@ def upgrade_plan_state_schema(
     plan_state = plan_state_dir(canonical_plan_dir, state_dir)
     state_path = plan_state / events.STATE_FILE_NAME
     if not plan_state.is_dir() or not state_path.is_file():
+        # State outlives a deleted plan and can still be upgraded, so a missing
+        # directory only explains the refusal when there is no state either; a
+        # mistyped PLAN_DIR then reads as one, not as a plan that never ran.
+        if not canonical_plan_dir.exists():
+            raise PlanNotFoundError(
+                f"plan directory does not exist: {canonical_plan_dir}"
+            )
         raise MigrationError(
             "no-source-state",
             f"no state to upgrade at {plan_state}",
