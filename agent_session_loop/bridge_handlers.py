@@ -56,7 +56,7 @@ class MutationHandlers(OperationLedger):
 
     def question_reply(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """Answer the live question, returning a receipt rather than the text."""
-        operation_id, replay = self._replay(params)
+        operation_id, replay = self._replay(params, intervention.ACTION_REPLY)
         if replay is not None:
             return replay
         facts = self._authorize(params, intervention.ACTION_REPLY)
@@ -78,11 +78,12 @@ class MutationHandlers(OperationLedger):
             question_id=question_id,
             closure_id=outcome.closure_id,
             witness_offset=mark,
+            request=params,
         )
 
     def question_resolve(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """Close the live question answerlessly, continuing or pausing the run."""
-        operation_id, replay = self._replay(params)
+        operation_id, replay = self._replay(params, intervention.ACTION_RESOLVE)
         if replay is not None:
             return replay
         facts = self._authorize(params, intervention.ACTION_RESOLVE)
@@ -111,6 +112,7 @@ class MutationHandlers(OperationLedger):
             facts,
             question_id=question_id,
             closure_id=outcome.closure_id,
+            request=params,
         )
 
     def _control(
@@ -124,7 +126,9 @@ class MutationHandlers(OperationLedger):
         ones, held to ``AUTHORIZATION_STRICT`` because a supervision client acts
         on a row it was shown.
         """
-        operation_id, replay = self._replay(params)
+        action = control_rules.asl_action_for(kind)
+        assert action is not None  # every control the bridge sends has one
+        operation_id, replay = self._replay(params, action)
         if replay is not None:
             return replay
         try:
@@ -148,11 +152,11 @@ class MutationHandlers(OperationLedger):
             ) from error
         facts = outcome.activity.facts
         assert facts is not None  # a strict dispatch refuses an unreadable plan
-        action = control_rules.asl_action_for(kind)
-        assert action is not None  # and refuses a control with no action
         # The operation id *is* the command id, so the runner's own delivery
         # receipt settles this operation without any bridge-side bookkeeping.
-        return self._accept(operation_id, action, facts, command_id=operation_id)
+        return self._accept(
+            operation_id, action, facts, command_id=operation_id, request=params
+        )
 
     def run_stop_after_current(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """Ask the runner to finish the current session and then stop."""
@@ -168,7 +172,7 @@ class MutationHandlers(OperationLedger):
 
     def run_resume(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """Spawn ``asl run --resume`` for a paused plan, streaming the reply."""
-        operation_id, replay = self._replay(params)
+        operation_id, replay = self._replay(params, intervention.ACTION_RESUME)
         if replay is not None:
             return replay
         # Authorization is the last read before the spawn, so the fingerprint a
@@ -195,6 +199,7 @@ class MutationHandlers(OperationLedger):
             facts,
             question_id=facts.question_id,
             witness_offset=mark,
+            request=params,
         )
 
     def workbench_ensure(self, params: Mapping[str, Any]) -> dict[str, Any]:

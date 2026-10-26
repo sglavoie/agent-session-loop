@@ -63,6 +63,15 @@ class Operation:
     #: in memory rather than persisted: a mark is meaningless to the process
     #: that did not take it, and the durable journal reconciles by timestamp.
     witness_offset: int = 0
+    #: Digest of what the request this id was accepted for asked for: its text,
+    #: resolution, question, and run. Never part of
+    #: the payload -- it is a fingerprint of operator words -- and compared on
+    #: replay so a reused id cannot pass a different request off as a retry.
+    request_digest: str | None = None
+    #: The ``plan_dir`` exactly as the accepted request spelled it, compared on
+    #: replay alongside the method: an id reused against another plan is a
+    #: different target, not a retry.
+    requested_plan_dir: str | None = None
 
     @property
     def terminal(self) -> bool:

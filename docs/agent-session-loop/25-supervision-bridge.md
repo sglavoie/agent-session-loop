@@ -303,7 +303,15 @@ spawns `asl run --resume --reply-stdin`, which rehydrates the harness,
 model, effort, state directory, and workspace binding the original run
 persisted, and streams the reply through stdin so it never appears in
 argv. Replaying the same `operation_id` returns the stored receipt
-without spawning again.
+without spawning again — but only for the same request. The receipt
+remembers the method, the `plan_dir` as sent, and a digest of `text`,
+`action`, `note`, `question_id`, and `run_id` (not `action_token`, which a
+landed request moves). A reused id that changes any of them is refused
+`invalid-request` with `details.reason: "redirect-replay-conflict"`, the
+same refusal `run.redirect` gives: `details.conflict` is `target` for
+another method or plan and `feedback` for different content. Answering
+it with the old receipt would report a new request as landed when it was
+dropped.
 
 ### Operations and `operation.updated`
 
