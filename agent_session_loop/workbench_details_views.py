@@ -1,4 +1,6 @@
 # ruff: noqa: F403, F405
+import os
+
 from .workbench_details_logs import *
 from .workbench_details_logs import _missing
 from .workbench_details_models import *
@@ -77,8 +79,18 @@ def read_last_message(
     return {"plan_dir": str(reader.plan_dir), **payload}
 
 
-def read_result(reader: PlanReader) -> _JSONDict:
-    """The active turn's ``result.json``, parsed."""
+def read_result(
+    reader: PlanReader,
+    *,
+    max_bytes: int = details.MAX_READ_BYTES,
+) -> _JSONDict:
+    """The active turn's ``result.json``, parsed, when it fits ``max_bytes``.
+
+    Bounded like its siblings: a file larger than the bound is not read
+    whole, and since a prefix of a JSON document does not parse, the answer
+    says it was too large (``truncated``) with ``result: None`` -- the same
+    way ``read_final_review`` leaves an oversized ``final-review.json`` out.
+    """
     try:
         resolved = Path(reader.scope.artifact("result_path", readable=True))
     except DetailError as error:
@@ -90,16 +102,29 @@ def read_result(reader: PlanReader) -> _JSONDict:
             details={"plan_dir": str(reader.plan_dir)},
         ) from error
     try:
-        text = resolved.read_text(encoding="utf-8")
+        with resolved.open("rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            # One byte past the bound tells a file that grew since the stat
+            # apart from one that is exactly at it.
+            raw = handle.read(max_bytes + 1)
     except FileNotFoundError as error:
         raise _missing(resolved, "result file") from error
     except OSError as error:
         raise DetailError(
             details.REASON_OS_ERROR, str(error), details={"path": str(resolved)}
         ) from error
+    if len(raw) > max_bytes:
+        return {
+            "plan_dir": str(reader.plan_dir),
+            "path": str(resolved),
+            "size": max(size, len(raw)),
+            "truncated": True,
+            "result": None,
+        }
     try:
+        text = raw.decode("utf-8")
         parsed = json.loads(text) if text else {}
-    except json.JSONDecodeError as error:
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise DetailError(
             details.REASON_OS_ERROR,
             f"result file is not valid JSON: {error}",
@@ -108,6 +133,8 @@ def read_result(reader: PlanReader) -> _JSONDict:
     return {
         "plan_dir": str(reader.plan_dir),
         "path": str(resolved),
+        "size": len(raw),
+        "truncated": False,
         "result": parsed,
     }
 

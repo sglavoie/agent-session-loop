@@ -294,13 +294,29 @@ def append_command(
 
     queue_path = queue_path_for_plan(plan_dir, state_dir)
     queue_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(queue_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    fd = os.open(queue_path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        os.write(fd, line.encode("utf-8"))
-        # The caller is told the command is queued once this returns, so the
-        # line has to survive a crash from here on.
-        os.fsync(fd)
+        original_size = os.fstat(fd).st_size
+        encoded = line.encode("utf-8")
+        # A crash or a full disk can leave the queue ending mid-line; appending
+        # straight after it would glue this command onto the fragment and the
+        # drain would reject both as one unparsable line.
+        if original_size and os.pread(fd, 1, original_size - 1) != b"\n":
+            encoded = b"\n" + encoded
+        try:
+            view = memoryview(encoded)
+            while view:
+                view = view[os.write(fd, view) :]
+            # The caller is told the command is queued once this returns, so
+            # the line has to survive a crash from here on.
+            os.fsync(fd)
+        except OSError:
+            # A failed append must not leave a fragment for the next writer to
+            # repair: the caller is told nothing was queued.
+            with contextlib.suppress(OSError):
+                os.ftruncate(fd, original_size)
+            raise
     finally:
         with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)

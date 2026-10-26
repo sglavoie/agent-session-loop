@@ -51,6 +51,8 @@ def _add_inbox_commands(
     )
     inbox_guidance_parser.add_argument(
         "--wait-timeout",
+        "--timeout",
+        dest="wait_timeout",
         type=float,
         default=None,
         metavar="SECONDS",
@@ -88,6 +90,8 @@ def _add_inbox_commands(
     )
     inbox_reply_parser.add_argument(
         "--wait-timeout",
+        "--timeout",
+        dest="wait_timeout",
         type=float,
         default=None,
         metavar="SECONDS",
@@ -131,6 +135,8 @@ def _add_inbox_commands(
     )
     inbox_resolve_parser.add_argument(
         "--wait-timeout",
+        "--timeout",
+        dest="wait_timeout",
         type=float,
         default=None,
         metavar="SECONDS",
@@ -206,6 +212,8 @@ def _add_worker_message_commands(
     )
     ask_parser.add_argument(
         "--wait-timeout",
+        "--timeout",
+        dest="wait_timeout",
         type=float,
         default=None,
         metavar="SECONDS",
@@ -283,6 +291,8 @@ def _add_outbox_commands(
     )
     outbox_wait_parser.add_argument(
         "--timeout",
+        "--wait-timeout",
+        dest="timeout",
         type=float,
         default=300.0,
         metavar="SECONDS",
@@ -315,6 +325,8 @@ def _add_outbox_commands(
     )
     outbox_supervise_parser.add_argument(
         "--timeout",
+        "--wait-timeout",
+        dest="timeout",
         type=float,
         default=550.0,
         metavar="SECONDS",

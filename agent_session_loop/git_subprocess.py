@@ -109,12 +109,18 @@ def run_git(
     translates ``\\r\\n`` and a lone ``\\r`` to ``\\n``. ``env`` overlays the
     ambient environment rather than replacing it. A git still running after
     ``timeout`` seconds is killed and raises :class:`GitTimeoutError`.
+
+    Decoded output is UTF-8 with ``surrogateescape``: a filename that is not
+    UTF-8 round-trips through the surrogates instead of raising a
+    :class:`UnicodeDecodeError` that no ``RunError`` handler would catch.
     """
     try:
         return subprocess.run(
             _argv(cwd, args, chdir=chdir),
             cwd=cwd if chdir else None,
             text=decode,
+            encoding="utf-8" if decode else None,
+            errors="surrogateescape" if decode else None,
             input=stdin_text,
             capture_output=True,
             check=False,

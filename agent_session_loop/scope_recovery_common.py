@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,23 @@ from . import (
 
 class RecoveryError(ValueError):
     """The retained evidence cannot support this narrow acceptance."""
+
+
+def _event_records(event_path: Path) -> Iterator[dict[str, Any]]:
+    """Yield each event record that parses as an object, in journal order.
+
+    A blank line or one torn by an interrupted append says nothing about any
+    incident, so it is skipped rather than failing the whole recovery.
+    """
+    for line in event_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            yield record
 
 
 def _digest(value: Any) -> str:

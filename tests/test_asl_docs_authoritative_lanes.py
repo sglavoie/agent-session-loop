@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import ast
 import os
+import re
+import subprocess
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -119,6 +122,50 @@ class AuthoritativeLaneDocsTests(unittest.TestCase):
         ]
         self.assertNotIn("fault_scenarios", budget_line)
         self.assertIn("just reliability-stress", self.docs)
+
+    def test_the_stress_script_refuses_counts_that_are_not_positive(self) -> None:
+        """A count that would loop zero times must fail, not report ok."""
+        script = REPO_ROOT / "scripts" / "reliability-stress.sh"
+        for args in (["abc"], ["0"], ["3", "-1"], ["3", "x"], ["01"]):
+            with self.subTest(args=args):
+                completed = subprocess.run(
+                    ["bash", os.fspath(script), *args],
+                    cwd=REPO_ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 2, completed.stdout)
+                self.assertEqual(completed.stdout, "")
+                self.assertIn("usage:", completed.stderr)
+                self.assertIn("positive integers", completed.stderr)
+
+    def test_ci_lints_with_the_dev_group_and_pins_every_action(self) -> None:
+        """One list of linter versions, and no action that can move under CI."""
+        pyproject = tomllib.loads(
+            (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        dev = pyproject["dependency-groups"]["dev"]
+        self.assertEqual(
+            sorted(name.split("==", 1)[0] for name in dev), ["mypy", "ruff"]
+        )
+        self.assertTrue(all("==" in name for name in dev), dev)
+        for name in ("check.yml", "harness-compatibility.yml"):
+            workflow = (REPO_ROOT / ".github" / "workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            with self.subTest(workflow=name):
+                for uses in re.findall(r"uses:\s*(\S+)", workflow):
+                    self.assertRegex(uses, r"@[0-9a-f]{40}$")
+                for runner in re.findall(r"runs-on:\s*(\S+)", workflow):
+                    self.assertNotIn("latest", runner)
+                self.assertNotRegex(workflow, r"(ruff|mypy)==")
+        check = (REPO_ROOT / ".github/workflows/check.yml").read_text(encoding="utf-8")
+        self.assertIn("python3 -m pip install --group dev", check)
+        self.assertNotIn("cache-dependency-path: .github", check)
+        self.assertEqual(2, check.count("path: .cache/run_suite_logs/"))
+        self.assertIn('python-version: ["3.14", "3.15"]', check)
 
     def test_the_pause_no_reply_clears_says_where_to_look_in_both_places(self) -> None:
         """A stop nobody can answer has to name the evidence that ends it."""

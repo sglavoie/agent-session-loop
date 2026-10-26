@@ -1,6 +1,6 @@
 # ruff: noqa: F403, F405
 from .scope_recovery_common import *
-from .scope_recovery_common import _digest, _refs
+from .scope_recovery_common import _digest, _event_records, _refs
 from .scope_recovery_ref_updates import _check_original_binding
 
 RECOVERY_FILE_NAME = "external-change-recovery.json"
@@ -34,7 +34,7 @@ def _external_proposal(
         raise RecoveryError("an unchanged registered workspace binding is required")
     workspace = workspaces.resolve_workspace(metadata.workspace_root, registry)
     scope = plans_session_scope.parse_session_scope(
-        snapshot.next_pending.path.read_text(), registry.aliases
+        snapshot.next_pending.path.read_text(encoding="utf-8"), registry.aliases
     )
     if (
         not aliases
@@ -69,12 +69,14 @@ def _external_proposal(
     # Root and origin projections from the rejected run must still resolve exactly.
     starts = {}
     original_start = None
-    for line in event_path.read_text().splitlines():
-        event = json.loads(line)
-        payload = event["payload"]
-        if event["name"] == events.RUN_STARTED_EVENT:
+    for event in _event_records(event_path):
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if event.get("name") == events.RUN_STARTED_EVENT:
             starts[payload.get("run_id")] = payload
-        if payload.get("details", {}).get("workspace_write_guard") == guard:
+        details = payload.get("details")
+        if isinstance(details, dict) and details.get("workspace_write_guard") == guard:
             original_start = starts.get(payload.get("run_id"))
             break
     roots = [
@@ -122,7 +124,7 @@ def _external_proposal(
         raise RecoveryError("repository topology changed outside the retained incident")
     state_path = event_path.parent / events.STATE_FILE_NAME
     run_config = (
-        json.loads(state_path.read_text()).get("run_config", {})
+        json.loads(state_path.read_text(encoding="utf-8")).get("run_config", {})
         if state_path.exists()
         else {}
     )

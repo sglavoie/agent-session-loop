@@ -40,6 +40,10 @@ def _darwin_stored_case(resolved: str) -> str:
     with another of its links. Whatever lies below that directory keeps the
     caller's spelling, and any failure keeps ``resolved`` unchanged.
     """
+    # ``F_GETPATH`` is macOS-only; this guard is also what lets a type check
+    # for another platform see that the call below is unreachable there.
+    if sys.platform != "darwin":
+        return resolved
     head, tail = resolved, ""
     while not os.path.isdir(head):
         parent, name = os.path.split(head)

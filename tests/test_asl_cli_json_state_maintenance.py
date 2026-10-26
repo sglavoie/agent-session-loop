@@ -237,6 +237,50 @@ class JsonStateMaintenanceCliTests(JsonCliHelpers, unittest.TestCase):
             self.assertIn("plan directory does not exist", payload["error"])
             self.assertFalse(state_dir.exists())
 
+    def test_gc_cli_refuses_a_directory_that_is_not_a_split_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            not_a_plan = Path(tmp) / "empty"
+            not_a_plan.mkdir()
+            state_dir = Path(tmp) / "state"
+
+            def _gc(*extra: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "agent_session_loop",
+                        "gc",
+                        *extra,
+                        "--state-dir",
+                        str(state_dir),
+                    ],
+                    cwd=REPO_ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+            text = _gc(str(not_a_plan))
+            self.assertEqual(1, text.returncode)
+            self.assertIn("asl gc: missing context.md", text.stderr)
+
+            as_json = _gc(str(not_a_plan), "--json")
+            self.assertEqual(1, as_json.returncode)
+            payload = json.loads(as_json.stdout)
+            self.assertEqual(
+                {"ok", "command", "reason", "error", "paused", "details", "plan_dir"},
+                set(payload),
+            )
+            self.assertEqual("malformed-plan", payload["reason"])
+
+            negative = _gc("--max-age-days", "-5", "--json")
+            self.assertEqual(1, negative.returncode)
+            payload = json.loads(negative.stdout)
+            self.assertEqual("invalid-max-age-days", payload["reason"])
+            self.assertIn("--max-age-days must be non-negative", payload["error"])
+            self.assertFalse(payload["paused"])
+            self.assertEqual({}, payload["details"])
+
     def test_gc_cli_dry_run_then_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)

@@ -387,8 +387,15 @@ of `docs/agent-session-loop.md`.
 no shell script, no launchd, no harness executable — so it can run on a machine
 (such as Linux) without those tools. `just test-all` runs against the real
 tools, so nothing is reported as passing on a machine that does not have them.
-The workflows in `.github/workflows/` (a Linux/macOS test lane and a scheduled,
-no-model-use `asl harness-compat` smoke) are disabled; run the recipes locally.
+The workflows in `.github/workflows/` are active: `check.yml` runs on every push
+to `main` and every pull request against it -- a Linux lane (lint plus
+`just test-portable`, on Python 3.14 and 3.15) and a macOS lane (lint plus
+`just test-all`, sliced across parallel jobs) -- and `harness-compatibility.yml`
+is a weekly, no-model-use `asl harness-compat` smoke. A failed test job uploads
+`.cache/run_suite_logs/`, the full output of every failed shard. The same
+recipes run locally, and CI installs its linters from the `dev` dependency
+group in `pyproject.toml` (`python3 -m pip install --group dev`), so install
+that group to lint with the versions CI gates on.
 
 `just reliability-stress [reps] [shards]` re-runs the load- and calendar-sensitive
 scenarios in isolation, then across a spread of timezone offsets, then as

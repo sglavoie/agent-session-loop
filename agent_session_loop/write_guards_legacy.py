@@ -111,7 +111,7 @@ def _enforce_legacy_implementation_write_guard(
     if evidence["passed"]:
         with persistence.lock:
             turn_payload["workspace_write_guard"] = evidence
-            durability.write_json_file(paths["result"], turn_payload)
+            durability.write_json_file(paths["result"], turn_payload, durable=True)
         return False
 
     reason = events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE
@@ -135,7 +135,7 @@ def _enforce_legacy_implementation_write_guard(
     with persistence.lock:
         payload["final_snapshot"] = plans_payloads.snapshot_payload(inspected)
         turn_payload["workspace_write_guard"] = guard_record
-        durability.write_json_file(paths["result"], turn_payload)
+        durability.write_json_file(paths["result"], turn_payload, durable=True)
     turn_execution_commit.record_turn_rejected(
         event_path=event_path,
         payload=payload,

@@ -15,8 +15,13 @@ on:
 # across parallel jobs: `--slice K/N` gives each job a disjoint share of the
 # shards, and together the slices run every shard exactly once.
 # Third-party actions are pinned to commit SHAs (the tag they resolved from is
-# in the trailing comment) and the Linux runner to an explicit image, so a moved
-# tag or a runner-image migration cannot change what a commit is checked with.
+# in the trailing comment) and both runners to an explicit image, so a moved tag
+# or a runner-image migration cannot change what a commit is checked with. The
+# lint toolchain is pinned in pyproject.toml's `dev` dependency group, the one
+# list both lanes and a developer's machine install from.
+#
+# A failed test job uploads `.cache/run_suite_logs/`, where the shard driver
+# keeps every failed shard's full output; the job log shows only its tail.
 #
 # The token is read-only: nothing here writes to the repository. A newer push to
 # the same pull request cancels the run it supersedes; pushes to main always
@@ -30,25 +35,35 @@ concurrency:
 
 jobs:
   linux-portable:
-    name: Linux (portable)
+    name: Linux (portable, Python ${{ matrix.python-version }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      # A failure on one interpreter must not hide the verdict for the other.
+      fail-fast: false
+      matrix:
+        # The README promises Python 3.14 or later: the floor, and the newest
+        # release, which is what a developer's `python3` tends to be.
+        python-version: ["3.14", "3.15"]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.14"
-          # The tool pins live in this file, so it is the cache key.
+          python-version: ${{ matrix.python-version }}
+          # The tool pins live in pyproject.toml, so it is the cache key.
           cache: pip
-          cache-dependency-path: .github/workflows/check.yml
+          cache-dependency-path: pyproject.toml
 
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
 
+      # `--group` needs pip 25.1 or later, which the runner's pip may predate.
       - name: Install Python tooling
-        run: python3 -m pip install --upgrade "ruff==0.16.0" "mypy==2.3.0"
+        run: |
+          python3 -m pip install --upgrade "pip>=25.1"
+          python3 -m pip install --group dev
 
       # ShellCheck ships with the Ubuntu runner image.
       - name: Lint and type-check
@@ -69,9 +84,18 @@ jobs:
       - name: Harness compatibility policy
         run: python3 -m agent_session_loop harness-compat --json
 
+      - name: Upload failed shard logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: run-suite-logs-linux-py${{ matrix.python-version }}
+          path: .cache/run_suite_logs/
+          if-no-files-found: ignore
+
   macos-full:
     name: macOS (full ${{ matrix.slice }}/4)
-    runs-on: macos-latest
+    # What `macos-latest` resolves to today, named so it cannot move under us.
+    runs-on: macos-26
     timeout-minutes: 25
     strategy:
       # A failure in one slice must not hide the verdict for the other three.
@@ -87,17 +111,20 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
-          # The tool pins live in this file, so it is the cache key.
+          # The tool pins live in pyproject.toml, so it is the cache key.
           cache: pip
-          cache-dependency-path: .github/workflows/check.yml
+          cache-dependency-path: pyproject.toml
 
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
 
       # Lint is not sliced, so one job runs it for the whole lane.
+      # `--group` needs pip 25.1 or later, which the runner's pip may predate.
       - name: Install Python tooling
         if: matrix.slice == 1
-        run: python3 -m pip install --upgrade "ruff==0.16.0" "mypy==2.3.0"
+        run: |
+          python3 -m pip install --upgrade "pip>=25.1"
+          python3 -m pip install --group dev
 
       - name: Install shellcheck
         if: matrix.slice == 1
@@ -107,6 +134,25 @@ jobs:
         if: matrix.slice == 1
         run: env ASL_CLI_TRACE=0 just lint
 
+      # Recorded shard durations only order a slice's shards (longest first);
+      # they never decide the partition, so a stale or missing file changes
+      # how long a slice takes, not what it runs. Each run saves a new entry
+      # and restores the newest one for its slice.
+      - name: Restore shard timings
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/run_suite_timings.json
+          key: run-suite-timings-macos-${{ matrix.slice }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: run-suite-timings-macos-${{ matrix.slice }}-
+
       - name: Complete test suite (slice ${{ matrix.slice }}/4)
         # `just test-all`, one slice of it.
         run: env ASL_CLI_TRACE=0 python3 -m tests.run_suite --all --slice ${{ matrix.slice }}/4
+
+      - name: Upload failed shard logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: run-suite-logs-macos-${{ matrix.slice }}
+          path: .cache/run_suite_logs/
+          if-no-files-found: ignore

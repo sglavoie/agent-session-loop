@@ -386,7 +386,7 @@ def _correct_malformed_handoff(
     evidence["exhausted"] = False
     with persistence.lock:
         turn_payload["handoff_correction"] = evidence
-        durability.write_json_file(paths["result"], turn_payload)
+        durability.write_json_file(paths["result"], turn_payload, durable=True)
         payload["final_snapshot"] = plans_payloads.snapshot_payload(corrected)
         persistence.append_event(
             event_path, events.TURN_HANDOFF_CORRECTION_EVENT, evidence

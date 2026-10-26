@@ -187,6 +187,13 @@ class WorkbenchHTTPServer(ApplicationServer):
         *,
         token: str | None = None,
     ) -> None:
+        if not is_loopback_host(config.host):
+            # Checked here as well as by the CLI: the bind address is this
+            # server's read access control, so no constructor may bind another.
+            raise ValueError(
+                f"host {config.host!r} is not a loopback address; the local "
+                "Workbench serves reads without a token, so it only binds loopback"
+            )
         self.config = config
         self.token = token if token is not None else secrets.token_urlsafe(TOKEN_BYTES)
         # Launch bookkeeping. Deliberately in memory and deliberately per

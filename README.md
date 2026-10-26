@@ -42,8 +42,9 @@ were found and which startup cards are stale, without touching anything.
 
 Every directory under `skills/` needs a `SKILL.md`. Shared support directories
 that intentionally have none (such as `skills/references/`) must be listed in
-`SUPPORT_DIRS` in `install.py`; any other directory without a `SKILL.md` fails
-the install as a malformed skill.
+`SUPPORT_DIRS` in `agent_session_loop/install_verify_common.py`, which
+`install.py` and `just verify-asl-install` share; any other directory without a
+`SKILL.md` fails the install as a malformed skill.
 
 `just sync-skills` re-links the skills and renders the ASL startup card into
 the context file of each discovered harness root (`~/.codex/AGENTS.md`,

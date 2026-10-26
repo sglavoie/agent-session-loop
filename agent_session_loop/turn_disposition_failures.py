@@ -49,7 +49,7 @@ def _record_spark_fallback(
         ctx.payload["spark"].update(spark_status_update)
         ctx.payload["spark"]["active_route"] = dict(spark_route)
         ctx.payload["final_snapshot"] = plans_payloads.snapshot_payload(after)
-        durability.write_json_file(paths["result"], turn_payload)
+        durability.write_json_file(paths["result"], turn_payload, durable=True)
         ctx.persistence.append_event(
             ctx.event_path,
             "spark_fallback",
@@ -127,7 +127,7 @@ def _reconcile_unsettled_completion(
     }
     with ctx.persistence.lock:
         turn_payload["completion_reconciliation"] = record
-        durability.write_json_file(paths["result"], turn_payload)
+        durability.write_json_file(paths["result"], turn_payload, durable=True)
         if handoff_guards._reopened(reverted):
             ctx.persistence.append_event(
                 ctx.event_path,
@@ -210,7 +210,7 @@ def settle_restore_refused(
     record = refusal.describe()
     with ctx.persistence.lock:
         turn_payload["conversation_restore_refused"] = record
-        durability.write_json_file(paths["result"], turn_payload)
+        durability.write_json_file(paths["result"], turn_payload, durable=True)
         ctx.persistence.append_event(
             ctx.event_path,
             events.CONVERSATION_CONTINUATION_EVENT,

@@ -165,6 +165,8 @@ def _run_bounded_asl_commit(
         cwd=cwd,
         env=_asl_commit_env(),
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,

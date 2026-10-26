@@ -421,6 +421,85 @@ for (const deployment of DEPLOYMENTS) {
       expect(await detailHeader(page)).toEqual(viaPlan);
     });
 
+    test("a plan opened while another's read is in flight shows the one opened last", async ({
+      page,
+    }) => {
+      await openQueue(page, deployment);
+      const plans = await catalog(page);
+      const alpha = rowFor(plans, "alpha");
+      const bravo = rowFor(plans, "bravo");
+      await openDetail(page, deployment, alpha);
+      const alphaLabel = (await detailHeader(page)).label;
+      await openDetail(page, deployment, bravo);
+      const bravoLabel = (await detailHeader(page)).label;
+      expect(alphaLabel).not.toBe(bravoLabel);
+
+      // Hold alpha's plan read on the wire, so the switch to bravo lands
+      // while it is still in flight.
+      // The API names a plan as `plan_dir` / `plan_key`, not as the hash's
+      // `dir` / `key`.
+      const held = {
+        param: alpha.plan_dir ? "plan_dir" : "plan_key",
+        value: addressOf(alpha).value,
+      };
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      let markHeld;
+      const holding = new Promise((resolve) => {
+        markHeld = resolve;
+      });
+      const isAlphaRead = (url) =>
+        /\/api\/plan\?/.test(url) &&
+        new URL(url).searchParams.get(held.param) === held.value;
+      await page.route(/\/api\/plan\?/, async (route) => {
+        if (isAlphaRead(route.request().url())) {
+          markHeld();
+          await gate;
+        }
+        await route.continue();
+      });
+      await page.evaluate((hash) => {
+        window.location.hash = hash;
+      }, detailHash(alpha));
+      await holding;
+      // Every label the header shows once bravo is opened: alpha's late
+      // answer must never be drawn over it, not merely be corrected by the
+      // next poll.
+      await page.evaluate((hash) => {
+        const label = document.getElementById("wb-detail-label");
+        window.__wbLabels = [];
+        new MutationObserver(() => {
+          window.__wbLabels.push((label.textContent || "").trim());
+        }).observe(label, { childList: true, characterData: true, subtree: true });
+        window.location.hash = hash;
+      }, detailHash(bravo));
+      const bravoRead = page.waitForResponse(
+        (response) =>
+          /\/api\/plan\?/.test(response.url()) && !isAlphaRead(response.url()),
+      );
+      const alphaRead = page.waitForResponse((response) =>
+        isAlphaRead(response.url()),
+      );
+      release();
+      await alphaRead;
+      // The follow-up read is for the plan now on screen.
+      await bravoRead;
+      await expect(page.locator("#wb-detail-label")).toHaveText(bravoLabel);
+      await expect
+        .poll(() =>
+          page.evaluate(async () => {
+            const { state } = await import("/static/modules/state.js");
+            return state.detailInFlight;
+          }),
+        )
+        .toBe(false);
+      const labels = await page.evaluate(() => window.__wbLabels);
+      expect(labels).not.toContain(alphaLabel);
+      await expect(page.locator("#wb-detail-label")).toHaveText(bravoLabel);
+    });
+
     test("an unresolvable run link says so instead of showing an empty plan", async ({
       page,
     }) => {

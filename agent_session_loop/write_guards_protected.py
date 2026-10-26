@@ -210,7 +210,7 @@ def _enforce_protected_path_guard(
                 "observed_paths": list(changed_paths),
                 "coverage": {rule.id: coverage_by_id.get(rule.id) for rule in active},
             }
-            durability.write_json_file(paths["result"], turn_payload)
+            durability.write_json_file(paths["result"], turn_payload, durable=True)
         return False
 
     if unavailable_detail is not None:
@@ -290,7 +290,7 @@ def _enforce_protected_path_guard(
             guard_record["deferred_to_pause_reason"] = primary_reason
         with persistence.lock:
             turn_payload["protected_path_guard"] = guard_record
-            durability.write_json_file(paths["result"], turn_payload)
+            durability.write_json_file(paths["result"], turn_payload, durable=True)
             # The primary pause was published before this verdict existed, so
             # its live details are amended in place -- ``payload["details"]``
             # is the same object -- rather than republished under a reason
@@ -329,7 +329,7 @@ def _enforce_protected_path_guard(
     with persistence.lock:
         payload["final_snapshot"] = plans_payloads.snapshot_payload(inspected)
         turn_payload["protected_path_guard"] = guard_record
-        durability.write_json_file(paths["result"], turn_payload)
+        durability.write_json_file(paths["result"], turn_payload, durable=True)
     turn_execution_commit.record_turn_rejected(
         event_path=event_path,
         payload=payload,

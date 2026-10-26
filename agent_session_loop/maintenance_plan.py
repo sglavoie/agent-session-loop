@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import retention, retention_projection, state, state_locks
+from . import clock, retention, retention_projection, state, state_locks
 from .maintenance_bodies import _iter_bodies, _over_budget_selection
 from .maintenance_models import (
     CorpusUsage,
@@ -126,10 +126,10 @@ def _compactable_runs(
         for run in entry.retention.runs:
             if run.reason != retention_projection.RETAIN_NEWEST_RUN:
                 continue
-            if not run.finished_at:
-                continue
-            finished = datetime.fromisoformat(run.finished_at)
-            if finished > cutoff:
+            # A naive or offset-bearing stamp is read as an instant, so it
+            # compares with the aware cutoff instead of raising TypeError.
+            finished = clock.parse_datetime(run.finished_at)
+            if finished is None or finished > cutoff:
                 continue
             eligible.append((entry.retention.plan_dir, run))
     eligible.sort(key=lambda pair: (pair[0], pair[1].run_id))

@@ -24,6 +24,7 @@ from . import (
     assurance_report,
     plans_errors,
     plans_snapshot,
+    responses,
     session_overview,
     state,
 )
@@ -398,29 +399,59 @@ def _print_report(report: GCReport) -> None:
         print("Re-run with --apply to delete the reclaimable runs.")
 
 
+def _print_gc_error(args: argparse.Namespace, *, reason: str, error: str) -> int:
+    """Report one ``asl gc`` refusal in the common error envelope; returns 1."""
+    if getattr(args, "json", False):
+        plan_dir = getattr(args, "plan_dir", None)
+        responses.print_json(
+            responses.error_payload(
+                "gc",
+                reason=reason,
+                error=error,
+                paused=False,
+                plan_dir=None if plan_dir is None else str(plan_dir),
+            )
+        )
+    else:
+        print(f"{program_name()} gc: {error}", file=sys.stderr)
+    return 1
+
+
 def gc_from_args(args: argparse.Namespace) -> int:
     """CLI handler for ``asl gc``."""
     plan_dir = getattr(args, "plan_dir", None)
+    max_age_days = getattr(args, "max_age_days", DEFAULT_MAX_AGE_DAYS)
+    if max_age_days < 0:
+        return _print_gc_error(
+            args,
+            reason="invalid-max-age-days",
+            error=f"--max-age-days must be non-negative: {max_age_days:g}",
+        )
     try:
         if plan_dir is not None:
-            plans_snapshot.require_plan_directory(plan_dir)
+            # The validation `asl status` reports: a directory that is not a
+            # split plan (no context.md / manifest.md) owns no runs to judge.
+            plans_snapshot.require_split_plan_directory(plan_dir)
         report = run_gc(
             plan_dir,
             state_dir=getattr(args, "state_dir", None),
-            max_age_days=getattr(args, "max_age_days", DEFAULT_MAX_AGE_DAYS),
+            max_age_days=max_age_days,
             apply=bool(getattr(args, "apply", False)),
         )
-    except (OSError, ValueError, plans_errors.PlanError) as error:
-        if getattr(args, "json", False):
-            print(
-                json.dumps(
-                    {"ok": False, "command": "gc", "error": str(error)},
-                    sort_keys=True,
-                )
-            )
-        else:
-            print(f"{program_name()} gc: {error}", file=sys.stderr)
-        return 1
+    except plans_errors.PlanError as error:
+        return _print_gc_error(
+            args,
+            reason=(
+                "plan-not-found"
+                if isinstance(error, plans_errors.PlanNotFoundError)
+                else "malformed-plan"
+            ),
+            error=str(error),
+        )
+    except OSError as error:
+        return _print_gc_error(args, reason="os-error", error=str(error))
+    except ValueError as error:
+        return _print_gc_error(args, reason="gc-error", error=str(error))
 
     if getattr(args, "json", False):
         print(json.dumps(report.to_dict(), sort_keys=True))

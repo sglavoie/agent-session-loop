@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import pause_policy, plans_errors, responses
+from . import cli_common, pause_policy, plans_errors, responses
 from .cli_defaults import program_name
 from .qna_context import load_qna_context
 from .qna_models import QnAContext, QnAError
@@ -100,6 +100,10 @@ def questions_payload(context: QnAContext) -> dict[str, Any]:
 
 def questions_from_args(args: argparse.Namespace) -> int:
     """Run the ``questions`` subcommand from CLI arguments."""
+    if not cli_common.resolve_plan_dir_argument(
+        args, command_name="questions", text_label="questions"
+    ):
+        return 1
     plan_dir_arg = args.plan_dir
     state_dir_arg = args.state_dir
     want_json = bool(args.json)

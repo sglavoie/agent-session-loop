@@ -134,8 +134,11 @@ def _add_overseer_commands(
     )
     overseer_watch_parser.add_argument(
         "--timeout",
+        "--wait-timeout",
+        dest="timeout",
         type=float,
         default=10.0,
+        metavar="SECONDS",
         help="Seconds to wait for each Agent Mux authorization (default 10)",
     )
     overseer_watch_parser.add_argument(
@@ -207,8 +210,11 @@ def _add_overseer_commands(
     )
     overseer_inspect_parser.add_argument(
         "--timeout",
+        "--wait-timeout",
+        dest="timeout",
         type=float,
         default=10.0,
+        metavar="SECONDS",
         help="Seconds to wait for the Agent Mux authorization (default 10)",
     )
     overseer_inspect_parser.add_argument(
@@ -321,8 +327,11 @@ def _add_overseer_commands(
     )
     overseer_decide_parser.add_argument(
         "--timeout",
+        "--wait-timeout",
+        dest="timeout",
         type=float,
         default=10.0,
+        metavar="SECONDS",
         help="Seconds to wait for the Agent Mux authorization (default 10)",
     )
     overseer_decide_parser.add_argument(
@@ -478,8 +487,11 @@ def _add_overseer_commands(
     )
     overseer_act_parser.add_argument(
         "--timeout",
+        "--wait-timeout",
+        dest="timeout",
         type=float,
         default=10.0,
+        metavar="SECONDS",
         help="Seconds to wait for each Agent Mux authorization (default 10)",
     )
     overseer_act_parser.add_argument(
@@ -511,8 +523,11 @@ def _add_overseer_commands(
     )
     overseer_reconcile_parser.add_argument(
         "--timeout",
+        "--wait-timeout",
+        dest="timeout",
         type=float,
         default=10.0,
+        metavar="SECONDS",
         help="Seconds to wait for each Agent Mux authorization (default 10)",
     )
     overseer_reconcile_parser.add_argument(

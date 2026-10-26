@@ -28,6 +28,13 @@ check-startup-context:
 verify-asl-install:
     python3 -m agent_session_loop.install_verify
 
+# Run chosen test modules, classes or ids directly, without the shard driver:
+# `just test -q tests.test_asl_run_suite`. With no arguments, unittest runs its
+# own discovery in one process, which is no substitute for `test-all`.
+[doc("Run unittest on the given modules or test ids (e.g. tests.test_asl_run_suite)")]
+test *ARGS:
+    python3 -m unittest {{ ARGS }}
+
 # Run fast unit/schema/parser tests
 test-fast:
     python3 -m tests.run_suite --fast
@@ -83,6 +90,7 @@ lint-py:
     ruff check .
     ruff format --check .
     mypy
+    mypy --platform linux
 
 # Run all linters
 lint: lint-shell lint-py

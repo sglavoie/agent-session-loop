@@ -320,6 +320,14 @@ def workbench_pin_from_args(args: Any) -> int:
 def workbench_unpin_from_args(args: Any) -> int:
     """``asl workbench unpin`` -- the terminal's spelling of :func:`unpin_plan`."""
     plan_dir = args.plan_dir
+    # Unpinning is idempotent, so a path with no pin still exits 0; it just
+    # says so instead of claiming to have removed something.
+    try:
+        was_pinned = workbench_registry.is_pinned(
+            workbench_registry.load_registry(), plan_dir
+        )
+    except workbench_registry_models.WorkbenchError:
+        was_pinned = True
     try:
         update = unpin_plan(plan_dir)
     except ArchiveRefused as error:
@@ -328,13 +336,16 @@ def workbench_unpin_from_args(args: Any) -> int:
         responses.print_json(
             responses.success_payload(
                 "workbench-unpin",
-                reason="unpinned",
+                reason="unpinned" if was_pinned else "not-pinned",
                 plan_dir=plan_dir,
                 registry_path=str(update.path),
             )
         )
         return 0
-    print(f"Unpinned {plan_dir} from {update.path}")
+    if was_pinned:
+        print(f"Unpinned {plan_dir} from {update.path}")
+    else:
+        print(f"{plan_dir} was not pinned in {update.path}; nothing to unpin")
     return 0
 
 

@@ -43,6 +43,7 @@ from typing import Any
 
 from . import assurance_projection as projection
 from . import (
+    clock,
     events,
     plans_files,
     state,
@@ -349,10 +350,10 @@ def generation_watermark(inbox: projection.AssuranceProjection) -> str | None:
 
 def _moment(timestamp: str) -> datetime:
     """Order two ledger timestamps by instant rather than by spelling."""
-    try:
-        return datetime.fromisoformat(timestamp)
-    except ValueError:
-        return datetime.min.replace(tzinfo=UTC)
+    # Always aware, so a hand-edited naive stamp cannot make ``max`` compare
+    # naive with aware and raise.
+    parsed = clock.parse_datetime(timestamp)
+    return parsed if parsed is not None else datetime.min.replace(tzinfo=UTC)
 
 
 def _predates_generation(

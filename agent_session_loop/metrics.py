@@ -48,7 +48,9 @@ from . import (
     metrics_collection,
     metrics_models,
     metrics_render,
+    responses,
 )
+from .cli_defaults import program_name
 from .metrics_collection import collect_metrics
 from .metrics_invocations import (
     _bump,
@@ -120,23 +122,40 @@ from .metrics_timing_evidence import (
 )
 
 
+class _InvalidSinceDays(ValueError):
+    """A ``--since-days`` value the collector would refuse."""
+
+
 def metrics_from_args(args: argparse.Namespace) -> int:
     """CLI handler for ``asl metrics``."""
+    since_days = getattr(args, "since_days", metrics_models.DEFAULT_SINCE_DAYS)
     try:
+        if since_days <= 0:
+            raise _InvalidSinceDays(
+                f"--since-days must be a positive integer: {since_days}"
+            )
         report = metrics_collection.collect_metrics(
             state_dir=getattr(args, "state_dir", None),
-            since_days=getattr(args, "since_days", metrics_models.DEFAULT_SINCE_DAYS),
+            since_days=since_days,
         )
     except (OSError, ValueError) as error:
         if getattr(args, "json", False):
-            print(
-                json.dumps(
-                    {"ok": False, "command": "metrics", "error": str(error)},
-                    sort_keys=True,
+            responses.print_json(
+                responses.error_payload(
+                    "metrics",
+                    reason=(
+                        "invalid-since-days"
+                        if isinstance(error, _InvalidSinceDays)
+                        else "os-error"
+                        if isinstance(error, OSError)
+                        else "metrics-error"
+                    ),
+                    error=str(error),
+                    paused=False,
                 )
             )
         else:
-            print(f"metrics failed: {error}", file=sys.stderr)
+            print(f"{program_name()} metrics: {error}", file=sys.stderr)
         return 1
 
     if getattr(args, "json", False):

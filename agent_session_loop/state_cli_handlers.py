@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import plans_errors, plans_files, plans_snapshot, responses
+from . import cli_common, plans_errors, plans_files, plans_snapshot, responses
 from .cli_defaults import program_name
 from .state import StateError, UnlockResult, lock_path_for_plan, plan_state_dir
 from .state_locks import unlock_plan
@@ -63,8 +63,12 @@ def _unlock_error_details(args: argparse.Namespace) -> dict[str, Any]:
 
 def unlock_from_args(args: argparse.Namespace) -> int:
     """Remove a plan lock from CLI arguments."""
+    if not cli_common.resolve_plan_dir_argument(
+        args, command_name="unlock", text_label="unlock"
+    ):
+        return 1
     try:
-        plans_snapshot.require_plan_directory(args.plan_dir)
+        plans_snapshot.require_split_plan_directory(args.plan_dir)
         result = unlock_plan(args.plan_dir, args.state_dir, force=args.force)
     except (plans_errors.PlanError, StateError, OSError) as error:
         if args.json:

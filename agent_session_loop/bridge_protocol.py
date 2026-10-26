@@ -38,13 +38,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from asl_workbench import controls as control_rules
 
 from . import (
+    clock,
     intervention,
     redirect_admission,
     redirect_cli,
@@ -460,12 +460,10 @@ def _bounded_strings(values: Any, *, limit: int) -> list[str]:
 
 
 def _epoch(value: Any) -> float | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        return datetime.fromisoformat(value).timestamp()
-    except ValueError:
-        return None
+    # Naive is UTC, as everywhere ASL reads its own stamps back; `.timestamp()`
+    # on a naive datetime would read it as this host's local time instead.
+    parsed = clock.parse_datetime(value)
+    return parsed.timestamp() if parsed is not None else None
 
 
 def encode_frame(payload: Mapping[str, Any]) -> bytes:

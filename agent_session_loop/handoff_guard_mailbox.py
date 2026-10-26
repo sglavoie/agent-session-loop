@@ -148,7 +148,7 @@ def _enforce_mailbox_completion_guard(
     with persistence.lock:
         payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
         turn_payload["mailbox_completion_guard"] = guard
-        durability.write_json_file(paths["result"], turn_payload)
+        durability.write_json_file(paths["result"], turn_payload, durable=True)
     turn_execution_commit.record_turn_rejected(
         event_path=event_path,
         payload=payload,

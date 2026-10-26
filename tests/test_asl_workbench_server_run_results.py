@@ -14,6 +14,7 @@ from agent_session_loop import (
     plans_registry,
     workbench_summary_helpers,
 )
+from asl_workbench import details
 from tests.asl_workbench_server_support import (
     WorkbenchArtifactReadTestCase,
 )
@@ -104,6 +105,27 @@ class WorkbenchServerRunResultTests(WorkbenchArtifactReadTestCase):
         status, body, _ = _http_request(f"{self._base_url(server)}/api/result?{query}")
         self.assertEqual(200, status)
         self.assertEqual(redacted_argv, body["result"]["argv"])
+
+    def test_result_endpoint_bounds_an_oversized_result(self) -> None:
+        # Bounded like the last message and the final review: past the cap the
+        # file is not read whole, and a JSON prefix does not parse, so the
+        # answer says it was too large instead of carrying a partial result.
+        result_path = self.plan_state_dir / "result.json"
+        oversized = json.dumps({"pad": "x" * details.MAX_READ_BYTES})
+        result_path.write_text(oversized, encoding="utf-8")
+        self._write_state(
+            {
+                "active_turn": self._make_turn(result_path=str(result_path)),
+                "active_verification": None,
+            }
+        )
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/result?{query}")
+        self.assertEqual(200, status)
+        self.assertIsNone(body["result"])
+        self.assertTrue(body["truncated"])
+        self.assertEqual(len(oversized), body["size"])
 
     def test_result_endpoint_404_when_missing(self) -> None:
         server = self._start_server()

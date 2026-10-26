@@ -70,7 +70,7 @@ def _record_redirect_continuation(
     with ctx.persistence.lock:
         turn_payload[redirect_continuation.TURN_PAYLOAD_KEY] = redirect.to_payload()
         turn_payload["redirect_continuation"] = continuation_record
-        durability.write_json_file(paths["result"], turn_payload)
+        durability.write_json_file(paths["result"], turn_payload, durable=True)
         ctx.persistence.append_event(
             ctx.event_path,
             events.REDIRECT_CONTINUATION_EVENT,

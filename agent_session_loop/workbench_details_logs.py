@@ -1,6 +1,13 @@
 # ruff: noqa: F403, F405
+import gzip
+import zlib
+
 from .workbench_details_models import *
 from .workbench_details_models import _JSONDict
+
+#: How much decompressed output one read of a gzip stream asks for. A window
+#: is assembled from these, so a read holds at most the window plus one chunk.
+_GZIP_CHUNK_BYTES = 64 * 1024
 
 
 def is_gzip_artifact(path: Path) -> bool:
@@ -64,28 +71,69 @@ def _window_error(
     }
 
 
+def _read_gzip_slice(
+    path: Path, *, offset: int | None, max_bytes: int
+) -> tuple[bytes, int, int]:
+    """Stream a gzip artifact and keep only the window a read asked for.
+
+    Returns ``(data, size, read_offset)`` exactly as slicing the fully
+    decompressed bytes would: ``offset`` keeps ``[offset, offset + max_bytes)``
+    and ``None`` keeps the trailing ``max_bytes``. The stream is still read to
+    its end, because ``size`` (and so ``truncated_tail``) is the decompressed
+    length and a corrupt trailer is still refused, but memory stays bounded by
+    the window: the bytes outside it are counted and dropped.
+
+    Raises :class:`artifacts.ArtifactError` worded as
+    :func:`artifacts.read_gzip` words it, so callers cannot tell the two apart.
+    """
+    kept = bytearray()
+    size = 0
+    try:
+        with gzip.open(path, "rb") as stream:
+            while chunk := stream.read(_GZIP_CHUNK_BYTES):
+                chunk_start = size
+                size += len(chunk)
+                if offset is None:
+                    kept += chunk
+                    excess = len(kept) - max_bytes
+                    if excess > 0:
+                        del kept[:excess]
+                    continue
+                low = max(offset, chunk_start)
+                high = min(offset + max_bytes, size)
+                if low < high:
+                    kept += chunk[low - chunk_start : high - chunk_start]
+    except (EOFError, gzip.BadGzipFile, zlib.error) as error:
+        raise artifacts.ArtifactError(
+            f"artifact {path} is not valid gzip data: {error}"
+        ) from error
+    except OSError as error:
+        raise artifacts.ArtifactError(
+            f"could not read artifact {path}: {error}"
+        ) from error
+    read_offset = offset if offset is not None else max(0, size - max_bytes)
+    return bytes(kept), size, min(read_offset, size)
+
+
 def _read_gzip_window(path: Path, window: Window) -> _JSONDict | None:
     """Bounded-window read over a gzip artifact.
 
-    Gzip cannot be seeked, so the artifact is decompressed fully and the same
-    offset/tail/max_bytes windowing is applied to the decompressed bytes. The
-    payload shape matches :func:`read_log_window` so callers are agnostic to
-    the on-disk encoding.
+    Gzip cannot be seeked, so the artifact is streamed and the same
+    offset/tail/max_bytes windowing is applied to the decompressed bytes as
+    they pass. The payload shape matches :func:`read_log_window` so callers
+    are agnostic to the on-disk encoding.
     """
     try:
-        data = artifacts.read_gzip(path)
+        data, size, read_offset = _read_gzip_slice(
+            path, offset=window.offset, max_bytes=window.max_bytes
+        )
     except artifacts.ArtifactError as error:
         if not path.exists():
             return None
         return _window_error(path, error, exists=True, window=window)
-    size = len(data)
-    read_offset = (
-        window.offset if window.offset is not None else max(0, size - window.max_bytes)
-    )
-    read_offset = min(read_offset, size)
     return _window_payload(
         path,
-        data[read_offset : read_offset + window.max_bytes],
+        data,
         size=size,
         read_offset=read_offset,
         tail_lines=window.tail_lines,
@@ -141,12 +189,12 @@ def read_log_window(path: Path, window: Window) -> _JSONDict | None:
 def read_bounded_text(path: Path, *, max_bytes: int) -> _JSONDict | None:
     """Read up to ``max_bytes`` from the start of ``path`` as text.
 
-    Gzip artifacts are decompressed transparently before the byte bound is
-    applied so plain and gzip logs read through the same API.
+    Gzip artifacts are decompressed transparently, with the byte bound applied
+    as they stream, so plain and gzip logs read through the same API.
     """
     if is_gzip_artifact(path):
         try:
-            data = artifacts.read_gzip(path)
+            raw, size, _ = _read_gzip_slice(path, offset=0, max_bytes=max_bytes)
         except artifacts.ArtifactError as error:
             if not path.exists():
                 return None
@@ -158,12 +206,11 @@ def read_bounded_text(path: Path, *, max_bytes: int) -> _JSONDict | None:
                 "truncated": False,
                 "text": "",
             }
-        raw = data[:max_bytes]
         return {
             "path": str(path),
             "exists": True,
-            "size": len(data),
-            "truncated": len(raw) < len(data),
+            "size": size,
+            "truncated": len(raw) < size,
             "text": raw.decode("utf-8", errors="replace"),
         }
     try:

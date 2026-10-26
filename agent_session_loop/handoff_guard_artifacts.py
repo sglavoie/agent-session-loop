@@ -141,7 +141,7 @@ def _enforce_plan_artifact_guard(
                 **disposition,
                 **adjudication,
             }
-            durability.write_json_file(paths["result"], turn_payload)
+            durability.write_json_file(paths["result"], turn_payload, durable=True)
         return False
 
     reason = events.PAUSE_REASON_PLAN_ARTIFACT_TAMPERED
@@ -168,7 +168,7 @@ def _enforce_plan_artifact_guard(
             adjudicated_record["deferred_to_pause_reason"] = primary_reason
         with persistence.lock:
             turn_payload["plan_artifact_guard"] = adjudicated_record
-            durability.write_json_file(paths["result"], turn_payload)
+            durability.write_json_file(paths["result"], turn_payload, durable=True)
             # The primary pause was published before this verdict existed, so
             # its live details are amended in place -- ``payload["details"]`` is
             # the same object -- rather than republished under a reason that
@@ -214,7 +214,7 @@ def _enforce_plan_artifact_guard(
     with persistence.lock:
         payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
         turn_payload["plan_artifact_guard"] = guard_record
-        durability.write_json_file(paths["result"], turn_payload)
+        durability.write_json_file(paths["result"], turn_payload, durable=True)
     turn_execution_commit.record_turn_rejected(
         event_path=event_path,
         payload=payload,

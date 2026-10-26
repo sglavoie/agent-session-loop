@@ -60,7 +60,7 @@ Reject malformed inputs and stop without changes:
 
 Parse the argument list. Verify the plan directory exists and contains `manifest.md`, `context.md`, and at least one canonical `session-<ID>.md` file. If the directory is missing or unreadable, print an error and stop — this skill repairs an existing split plan; it does not create one.
 
-Record the optional `--cwd`, `--harness`, `--commit-mode`, `--state-dir`, and `--max-pending-sessions` values. They will be forwarded verbatim to every `asl preflight` invocation so that the same set of checks runs on every iteration.
+Record the optional `--cwd`, `--harness`, `--commit-per-session` / `--commit-at-end`, `--state-dir`, and `--max-pending-sessions` values. They will be forwarded verbatim to every `asl preflight` invocation so that the same set of checks runs on every iteration.
 
 Take `--cwd` from preflight's `workspace_root` when the payload reports one. An
 existing binding mismatch is not an invocation typo that this skill may paper

@@ -71,6 +71,7 @@ class Application:
             return messages.Response.json(
                 refusal.status,
                 refusal.to_payload(),
+                headers=refusal.headers,
                 close=refusal.status in messages._CLOSING,
             )
         except DetailError as error:
@@ -179,6 +180,7 @@ class Application:
                 "method-not-allowed",
                 f"method {request.method} not supported on {request.path}",
                 extra={"allow": list(allowed)},
+                headers={"Allow": ", ".join(allowed)},
             )
         raise auth.HttpRefusal(404, "not-found", f"unknown route {request.path}")
 

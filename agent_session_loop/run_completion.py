@@ -10,7 +10,7 @@ next session, and this module is the ordered decision between them.
   complete, so selection and status disagree. Nothing here can repair that, so
   the run pauses on ``no-pending-but-incomplete`` with the snapshot attached.
 * **The plan has work left that is not a session.** Under
-  ``--commit-mode end`` the run still owes one commit, and under
+  ``--commit-at-end`` the run still owes one commit, and under
   ``--review-harness`` it still owes a final review — and a review that finds
   something owes repair children, which are sessions, which puts pending work
   back on a plan that had none. Each of those grows the run rather than ending

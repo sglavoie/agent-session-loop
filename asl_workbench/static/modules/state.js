@@ -91,6 +91,8 @@ export const state = {
   },
   detailTimer: null,
   detailInFlight: false,
+  // A detail refresh asked for while one was in flight, run when it settles.
+  detailRefreshPending: false,
   detailPlan: null,
   detailRegistry: null,
   recoveryPanelPlanId: null,

@@ -72,7 +72,9 @@ def skill_sources(repo_root: Path) -> list[Path]:
         if not (path / "SKILL.md").is_file() and path.name not in SUPPORT_DIRS:
             raise InstallError(
                 f"missing SKILL.md in {path.relative_to(repo_root)}; add one, or "
-                "add the directory to SUPPORT_DIRS if it is shared support content"
+                "add the directory to SUPPORT_DIRS in "
+                "agent_session_loop/install_verify_common.py if it is shared "
+                "support content"
             )
         sources.append(path)
     return sources
@@ -101,16 +103,20 @@ def conflict(destination: Path) -> str | None:
 
 
 def link(source: Path, destination: Path, *, dry_run: bool) -> str | None:
-    """Point ``destination`` at ``source`` atomically; return what changed."""
+    """Point ``destination`` at ``source`` atomically; return what changed.
+
+    A dry run reports the same change as ``would link``/``would relink``, so
+    its output cannot be mistaken for a record of links that were placed.
+    """
     target = os.fspath(source)
     if destination.is_symlink():
         if os.readlink(destination) == target:
             return None
-        action = "relinked"
+        action = "would relink" if dry_run else "relinked"
     elif problem := conflict(destination):
         raise InstallError(problem)
     else:
-        action = "linked"
+        action = "would link" if dry_run else "linked"
     if not dry_run:
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -135,19 +141,28 @@ def link(source: Path, destination: Path, *, dry_run: bool) -> str | None:
 
 
 def prune(install_root: Path, repo_root: Path, *, dry_run: bool) -> list[str]:
-    """Remove links into this checkout's skills whose source is gone."""
+    """Remove links into this checkout's skills whose source is gone.
+
+    A link counts as into this checkout by where it points, not by how its
+    target is spelled: a relative (stow-style) target is read against the
+    link's own directory, and both sides are resolved, so a doubled ``/`` or
+    an aliased spelling of the checkout (``/tmp`` for ``/private/tmp``) is
+    still recognized as stale.
+    """
     if not install_root.is_dir():
         return []
-    skills_root = os.fspath(repo_root / "skills") + os.sep
+    skills_root = Path(os.path.realpath(repo_root / "skills"))
+    action = "would remove stale link" if dry_run else "removed stale link"
     removed = []
     for entry in sorted(install_root.iterdir()):
         if not entry.is_symlink():
             continue
-        target = os.readlink(entry)
-        if target.startswith(skills_root) and not Path(target).is_dir():
+        target = Path(os.path.realpath(entry.parent / os.readlink(entry)))
+        inside = target != skills_root and target.is_relative_to(skills_root)
+        if inside and not target.is_dir():
             if not dry_run:
                 entry.unlink()
-            removed.append(f"removed stale link: {entry}")
+            removed.append(f"{action}: {entry}")
     return removed
 
 
@@ -225,7 +240,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     discovery = discover_harness_roots(args.home)
-    print(discovery.note())
+    # Flushed, because the warnings below go to stderr and an interleaved
+    # capture (`2>&1 | less`, a CI log) must still show the note first.
+    print(discovery.note(), flush=True)
     if not discovery.found:
         print(
             "install: no harness root exists; skills are linked only into "
@@ -242,10 +259,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     except InstallError as error:
         for change in error.changes:
-            print(change)
+            print(change, flush=True)
         if error.changes:
+            made = "would have been made" if args.dry_run else "were made"
             print(
-                f"install: {len(error.changes)} change(s) above were made "
+                f"install: {len(error.changes)} change(s) above {made} "
                 "before the error",
                 file=sys.stderr,
             )
@@ -259,6 +277,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print("install: nothing to link")
     if not args.skills_only:
+        sys.stdout.flush()
         _warn_if_wrapper_dir_off_path(args.home / WRAPPER_DIR)
     return 0
 

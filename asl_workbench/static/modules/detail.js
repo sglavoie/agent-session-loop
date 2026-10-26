@@ -106,17 +106,35 @@ export async function refreshDetail() {
   // take. Keep every refresh, including visibility refreshes, on the exact
   // question selected by the route.
   if (state.route.questionId) return loadAndRenderReply();
-  if (state.detailInFlight) return;
+  if (state.detailInFlight) {
+    // A route change (or a poll) arrived while a read is on the wire. That
+    // read may be for another plan, so dropping this one would leave the
+    // previous plan's answer on screen until the next poll; it is run once
+    // the read in flight settles instead.
+    state.detailRefreshPending = true;
+    return;
+  }
   if (liveReplyFormIsInteractive()) return;
   state.detailInFlight = true;
+  state.detailRefreshPending = false;
   setRefreshStatus("loading", "refreshing…");
   const scrollSnapshot = captureDetailScroll();
   const pendingFocus = state.route.focus;
+  // The plan this read is about. The panels below read the current route, so
+  // an answer that arrives after the route moved on describes a plan that is
+  // no longer on screen and must not be drawn beside the new one's panels.
+  const requestedPlanId = routePlanId();
+  const superseded = () => {
+    if (routePlanId() === requestedPlanId) return false;
+    state.detailRefreshPending = true;
+    return true;
+  };
   try {
     const [detailBody, registryBody] = await Promise.all([
       apiRequest(planUrl("/api/plan")),
       apiRequest("/api/registry"),
     ]);
+    if (superseded()) return;
     if (!detailBody || detailBody.ok !== true) {
       renderDetailError((detailBody && detailBody.error) || "failed to load plan");
       return;
@@ -153,13 +171,19 @@ export async function refreshDetail() {
       loadAndRenderReply(),
     ];
     await Promise.all(tasks);
+    if (superseded()) return;
     const ts = new Date().toLocaleTimeString();
     setRefreshStatus("idle", "updated " + ts);
   } catch (err) {
+    if (superseded()) return;
     setRefreshStatus("error", "error: " + describeError(err));
   } finally {
     state.detailInFlight = false;
-    if (state.reply.scrollToTopAfterDelivery) {
+    if (state.detailRefreshPending) {
+      // The follow-up read restores scroll and focus for whatever it draws.
+      state.detailRefreshPending = false;
+      refreshDetail();
+    } else if (state.reply.scrollToTopAfterDelivery) {
       state.reply.scrollToTopAfterDelivery = false;
       window.scrollTo(window.scrollX || 0, 0);
     } else if (pendingFocus) {

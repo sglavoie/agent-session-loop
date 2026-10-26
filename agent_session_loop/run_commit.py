@@ -188,7 +188,7 @@ def _write_commit_artifacts(
 ) -> None:
     durability.write_text(paths["stdout"], stdout)
     durability.write_text(paths["stderr"], stderr)
-    durability.write_json_file(paths["result"], payload)
+    durability.write_json_file(paths["result"], payload, durable=True)
 
 
 @dataclass(frozen=True)

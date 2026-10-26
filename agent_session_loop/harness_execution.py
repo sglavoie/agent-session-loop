@@ -149,6 +149,10 @@ def run_adapter(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # A harness that prints one byte which is not UTF-8 must not kill
+            # the reader thread draining its pipe, and with it the turn.
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             # Its own session, so every descendant that inherits the turn's
             # process group can be killed at once on timeout and enumerated

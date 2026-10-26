@@ -314,6 +314,28 @@ class ProgressCliTests(unittest.TestCase):
             self.assertEqual([], payload["entries"])
             self.assertEqual(0, payload["entry_count"])
 
+    def test_progress_fails_alike_in_both_modes_when_plan_dir_is_missing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "missing"
+
+            code, out, err = self._run_progress(plan_dir, json_output=True)
+            self.assertEqual(1, code)
+            self.assertEqual("", err)
+            payload = json.loads(out)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("plan-not-found", payload["reason"])
+            self.assertIn("plan directory does not exist", payload["error"])
+            self.assertIn("details", payload)
+
+            code, out, err = self._run_progress(plan_dir)
+            self.assertEqual(1, code)
+            self.assertEqual("", out)
+            self.assertIn("plan directory does not exist", err)
+            # Backfilling cannot help a directory that is not there.
+            self.assertNotIn("backfill-progress", err)
+
     def test_progress_json_errors_on_malformed_journal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"

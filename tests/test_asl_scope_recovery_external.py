@@ -42,6 +42,15 @@ class ExternalRecoveryTests(ExternalRecoveryTestCase):
             )
         )
 
+    def test_blank_and_torn_event_lines_do_not_abort_the_preview(self):
+        # A crash mid-append leaves a torn tail; it names no incident.
+        with self.event_path.open("a", encoding="utf-8") as handle:
+            handle.write('\n\n{"name": "run_st')
+        code, preview = self.invoke()
+        self.assertEqual(0, code, preview)
+        self.assertEqual([], preview["remaining_blockers"])
+        self.assertEqual("rejected", preview["original_run_id"])
+
     def test_stale_and_drift_refused(self):
         _, preview = self.invoke()
         (self.repos["pi"] / "independent.txt").write_text("new evidence\n")

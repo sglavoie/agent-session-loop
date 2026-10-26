@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from . import (
+    cli_common,
     plans_errors,
     plans_files,
     plans_models,
@@ -169,12 +170,41 @@ def follow_progress(
 
 def progress_from_args(args: argparse.Namespace) -> int:
     """Print, JSON-dump, or follow ``progress.md`` for a plan directory."""
+    if not cli_common.resolve_plan_dir_argument(
+        args, command_name="progress", text_label="progress"
+    ):
+        return 1
     plan_dir_arg = args.plan_dir
     want_json: bool = args.json
     follow: bool = args.tail
 
     plan_dir = plans_files.canonicalize_path(plan_dir_arg)
     progress_file = plans_progress.progress_path(plan_dir)
+
+    # A missing plan is an error in both modes: JSON must not report an empty
+    # journal for a directory that is not there, and the text-mode hint to
+    # `asl backfill-progress` is only useful once the directory exists.
+    try:
+        plans_snapshot.require_plan_directory(plan_dir)
+    except plans_errors.PlanError as error:
+        if want_json:
+            responses.print_json(
+                responses.error_payload(
+                    "progress",
+                    reason=(
+                        "plan-not-found"
+                        if isinstance(error, plans_errors.PlanNotFoundError)
+                        else "malformed-plan"
+                    ),
+                    error=str(error),
+                    paused=False,
+                    plan_dir=str(plan_dir),
+                    progress_path=str(progress_file),
+                )
+            )
+        else:
+            print(f"{program_name()} progress: {error}", file=sys.stderr)
+        return 1
 
     if want_json:
         try:

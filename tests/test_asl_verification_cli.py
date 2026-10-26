@@ -410,6 +410,28 @@ class VerifyCliTests(unittest.TestCase):
             self.assertEqual("invalid-session", payload["reason"])
             self.assertEqual("not-a-session", payload["session"])
 
+    def test_verify_reports_a_missing_plan_directory_before_its_sessions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            missing = tmp_dir / "missing-plan"
+
+            completed = self._run_verify(missing, session="1", cwd=repo_root)
+            self.assertEqual(1, completed.returncode)
+            payload = json.loads(completed.stdout)
+            self.assertEqual("plan-not-found", payload["reason"])
+            self.assertIn("plan directory does not exist", payload["error"])
+            self.assertNotIn("session file", payload["error"])
+
+            text = self._run_verify(
+                missing, session="1", cwd=repo_root, json_output=False
+            )
+            self.assertEqual(1, text.returncode)
+            self.assertIn("asl verify: plan directory does not exist", text.stderr)
+
     def test_verify_text_output_shows_per_check_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)

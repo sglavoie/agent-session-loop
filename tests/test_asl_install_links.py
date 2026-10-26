@@ -258,6 +258,51 @@ class InstallLinksTests(unittest.TestCase):
         self.assertFalse((self.home / ".local/bin/asl").exists())
         self.assertTrue((self.home / ".claude/skills/asl").is_symlink())
 
+    def test_prunes_stale_links_however_their_target_is_spelled(self) -> None:
+        # A stow-style relative target, a doubled separator, and an aliased
+        # spelling of the checkout (the /tmp vs /private/tmp case) all name a
+        # skill in this checkout that has gone.
+        alias = self.root / "alias"
+        alias.symlink_to(self.repo)
+        skills = self.home / ".claude/skills"
+        skills.mkdir()
+        stale = {
+            "relative": os.path.relpath(self.repo / "skills/gone-a", skills),
+            "doubled": f"{self.repo}//skills/gone-b",
+            "aliased": os.fspath(alias / "skills/gone-c"),
+        }
+        for name, target in stale.items():
+            (skills / name).symlink_to(target)
+        live = skills / "live-relative"
+        live.symlink_to(os.path.relpath(self.repo / "skills/asl", skills))
+        outside = skills / "outside"
+        outside.symlink_to(os.path.relpath(self.root / "dotfiles/skills/x", skills))
+
+        changes = self.install()
+
+        for name in stale:
+            self.assertFalse((skills / name).is_symlink(), name)
+            self.assertIn(f"removed stale link: {skills / name}", changes)
+        self.assertTrue(live.is_symlink(), "a live link is not stale")
+        self.assertTrue(outside.is_symlink(), "a link outside the checkout stays")
+
+    def test_dry_run_says_would_for_every_change(self) -> None:
+        (self.home / ".claude/skills").mkdir()
+        stale = self.home / ".claude/skills/gone"
+        stale.symlink_to(self.repo / "skills/gone")
+
+        changes = self.install(dry_run=True)
+
+        self.assertTrue(all(change.startswith("would ") for change in changes), changes)
+        self.assertIn(
+            f"would link: {self.home / '.local/bin/asl'} -> "
+            f"{self.repo / 'bin/.local/bin/asl'}",
+            changes,
+        )
+        self.assertIn(f"would remove stale link: {stale}", changes)
+        self.assertTrue(stale.is_symlink())
+        self.assertFalse((self.home / ".claude/skills/asl").exists())
+
     def test_dry_run_touches_nothing(self) -> None:
         changes = self.install(dry_run=True)
 

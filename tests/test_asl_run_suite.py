@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
 import os
 import sys
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from tests import run_suite
@@ -30,7 +35,20 @@ def _alive(pid: int) -> bool:
     return True
 
 
-class ShardTimeoutTests(unittest.TestCase):
+class _TempLogsMixin(unittest.TestCase):
+    """Point the driver's log directory at a scratch one for each test."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        logs = tempfile.TemporaryDirectory()
+        self.addCleanup(logs.cleanup)
+        self.logs = Path(logs.name) / "run_suite_logs"
+        patcher = mock.patch.object(run_suite, "LOGS_DIR", self.logs)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class ShardTimeoutTests(_TempLogsMixin):
     def test_an_overrunning_shard_and_its_group_are_killed(self) -> None:
         result = run_suite._run_shard(
             "hang", [sys.executable, "-c", _HANGING_SHARD], timeout=2
@@ -72,8 +90,29 @@ class ShardTimeoutTests(unittest.TestCase):
         ):
             run_suite._env_timeout()
 
+    def test_a_negative_or_unbounded_timeout_is_rejected(self) -> None:
+        for raw in ("-1", "-0.5", "inf", "nan"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    run_suite.shard_timeout(raw)
+                with (
+                    mock.patch.dict(os.environ, {run_suite.TIMEOUT_ENV: raw}),
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    run_suite._env_timeout()
+                self.assertIn(run_suite.TIMEOUT_ENV, str(raised.exception))
+                self.assertIn("non-negative", str(raised.exception))
+        self.assertEqual(run_suite.shard_timeout("0"), 0.0)
+        with (
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit) as raised,
+        ):
+            run_suite.main(["--fast", "--shard-timeout", "-5"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--shard-timeout", stderr.getvalue())
 
-class ShardReportTests(unittest.TestCase):
+
+class ShardReportTests(_TempLogsMixin):
     def test_a_signal_return_code_is_named(self) -> None:
         self.assertEqual(run_suite.describe_returncode(-9), "rc=-9 (SIGKILL)")
         self.assertEqual(run_suite.describe_returncode(-15), "rc=-15 (SIGTERM)")
@@ -114,6 +153,28 @@ class ShardReportTests(unittest.TestCase):
 
         self.assertIn("line 0", report)
         self.assertNotIn("omitted", report)
+
+    def test_every_failure_keeps_its_full_log(self) -> None:
+        # Short or long, verbose or not: CI uploads the log directory from a
+        # failed job, so a failure missing from it would read as a pass.
+        for lines, verbose in ((3, False), (3, True), (250, False)):
+            with self.subTest(lines=lines, verbose=verbose):
+                result = self._failed(lines)
+                report = run_suite.failure_report(result, verbose=verbose)
+                log = run_suite._log_path("tests.test_example")
+                self.assertEqual(log.read_text(encoding="utf-8"), result["output"])
+                self.assertIn(f"--- full output kept in: {log}", report)
+                log.unlink()
+
+    def test_a_passing_shard_clears_its_old_log(self) -> None:
+        run_suite._keep_log(self._failed(3))
+        log = run_suite._log_path("tests.test_example")
+        self.assertTrue(log.is_file())
+
+        run_suite._clear_log({"name": "tests.test_example"})
+        run_suite._clear_log({"name": "tests.test_example"})
+
+        self.assertFalse(log.exists())
 
 
 class ShardSliceTests(unittest.TestCase):

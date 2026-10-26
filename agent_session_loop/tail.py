@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    cli_common,
     events,
     plans_errors,
     plans_snapshot,
@@ -525,6 +526,10 @@ def tail_plan_json(
 def tail_from_args(args: argparse.Namespace) -> int:
     """Tail plan activity from CLI arguments."""
     as_json = bool(getattr(args, "json", False))
+    if not cli_common.resolve_plan_dir_argument(
+        args, command_name="tail", text_label="tail"
+    ):
+        return 1
     try:
         (tail_plan_json if as_json else tail_plan)(
             args.plan_dir,

@@ -402,6 +402,28 @@ class JsonDoctorUnlockSessionsCliTests(JsonCliHelpers, unittest.TestCase):
             self.assertIn("plan directory does not exist", payload["error"])
             self.assertFalse(state_dir.exists())
 
+    def test_unlock_refuses_a_directory_that_is_not_a_split_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            not_a_plan = Path(tmp) / "empty"
+            not_a_plan.mkdir()
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "unlock",
+                    str(not_a_plan),
+                    "--state-dir",
+                    str(Path(tmp) / "state"),
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(1, completed.returncode)
+            self.assertIn("asl unlock: missing context.md", completed.stderr)
+
     def test_unlock_json_active_lock_failure_goes_to_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"

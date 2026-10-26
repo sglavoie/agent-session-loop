@@ -14,7 +14,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import durability, plans_files, plans_snapshot, process_tree, state
+from . import (
+    durability,
+    plans_files,
+    plans_snapshot,
+    process_sampling,
+    process_tree,
+    state,
+)
 from .state import (
     LockInfo,
     StateError,
@@ -144,8 +151,9 @@ def _owner_gone_reason(pid: int, raw: dict[str, Any]) -> str | None:
     A live pid alone is not the owner: after a SIGKILL or a reboot the pid can
     be reused by an unrelated process, which would hold the plan locked
     forever. A recorded ``process_start`` that differs from the live
-    process's is that proof; an unknown start time on either side proves
-    nothing and leaves the owner alive.
+    process's is that proof; an unknown start time on either side, or one
+    that differs only by a time-zone offset, proves nothing and leaves the
+    owner alive.
     """
     if not state.is_pid_running(pid):
         return f"pid {pid} is not running"
@@ -153,7 +161,9 @@ def _owner_gone_reason(pid: int, raw: dict[str, Any]) -> str | None:
     if not isinstance(recorded, str) or not recorded:
         return None
     current = process_tree.process_birth(pid)
-    if current is None or current == recorded:
+    # A start time recorded before births were pinned to UTC can differ from
+    # the live one by its writer's time-zone offset alone; that proves nothing.
+    if current is None or process_sampling.birth_may_match(recorded, current):
         return None
     return f"pid {pid} was reused by a process started at {current}"
 
@@ -195,7 +205,11 @@ def _read_lock_path(
     elif pid is None:
         stale = True
         reason = "lock has no valid pid"
-    elif hostname is not None and hostname != socket.gethostname():
+    elif (
+        hostname is not None
+        and hostname != socket.gethostname()
+        and not _recorded_as_this_process(raw)
+    ):
         # The local process table describes local pids only, so it can neither
         # confirm nor refute this owner. Stale here means "not usable by this
         # host", never "dead".
@@ -431,7 +445,26 @@ def _lock_names_this_process(raw: dict[str, Any] | None) -> bool:
     if raw is None or _coerce_pid(raw.get("pid")) != os.getpid():
         return False
     hostname = _nonempty_str(raw.get("hostname"))
-    return hostname is None or hostname == socket.gethostname()
+    if hostname is None or hostname == socket.gethostname():
+        return True
+    return _recorded_as_this_process(raw)
+
+
+def _recorded_as_this_process(raw: dict[str, Any]) -> bool:
+    """Say whether ``raw`` names this very process despite its hostname.
+
+    macOS renames the host when DHCP hands it a new name, so a run's own lock
+    can carry a hostname this process no longer reports. Its pid and recorded
+    start time still identify it: another host's process would have to share
+    both, to the second. Equality is exact because this process wrote the
+    value itself, under the same pinned ``ps`` environment.
+    """
+    if _coerce_pid(raw.get("pid")) != os.getpid():
+        return False
+    recorded = raw.get("process_start")
+    if not isinstance(recorded, str) or not recorded:
+        return False
+    return process_tree.process_birth(os.getpid()) == recorded
 
 
 def _no_lock_result(lock_path: Path) -> UnlockResult:

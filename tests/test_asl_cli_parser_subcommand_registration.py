@@ -541,5 +541,71 @@ class ParserSubcommandRegistrationTests(unittest.TestCase):
         self.assertTrue(args.mark_loop_ready)
 
 
+class ParserFlagSpellingTests(unittest.TestCase):
+    """Long options never match by prefix, and wait timeouts share spellings."""
+
+    def _parse_error(self, argv: list[str]) -> str:
+        parser = cli.build_parser(prog="asl")
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(argv)
+        self.assertEqual(2, raised.exception.code)
+        return stderr.getvalue()
+
+    def test_unique_prefix_of_a_long_option_is_refused(self) -> None:
+        for argv, prefix in (
+            (["gc", "--app"], "--app"),
+            (["unlock", "/tmp/plan", "--for"], "--for"),
+            (["status", "/tmp/plan", "--js"], "--js"),
+        ):
+            with self.subTest(argv=argv):
+                self.assertIn(
+                    f"unrecognized arguments: {prefix}", self._parse_error(argv)
+                )
+
+    def test_wait_timeout_spellings_are_aliases_everywhere(self) -> None:
+        parser = cli.build_parser(prog="asl")
+        cases = (
+            (["inbox", "guidance", "/p", "--text", "t"], "wait_timeout"),
+            (["inbox", "reply", "/p", "--to", "q", "--text", "t"], "wait_timeout"),
+            (
+                ["inbox", "resolve", "/p", "--to", "q", "--action", "continue"],
+                "wait_timeout",
+            ),
+            (["ask", "/p", "text"], "wait_timeout"),
+            (["control", "stop-after-current", "/p"], "wait_timeout"),
+            (["outbox", "wait", "/p"], "timeout"),
+            (
+                ["outbox", "supervise", "/p", "--supervision-id", "s"],
+                "timeout",
+            ),
+            (["overseer", "watch", "--watcher-id", "w"], "timeout"),
+        )
+        for argv, dest in cases:
+            for flag in ("--timeout", "--wait-timeout"):
+                with self.subTest(argv=argv, flag=flag):
+                    args = parser.parse_args([*argv, flag, "7"])
+                    self.assertEqual(7.0, getattr(args, dest))
+
+    def test_wait_timeout_help_shows_both_spellings_with_seconds(self) -> None:
+        for argv in (
+            ["inbox", "reply"],
+            ["outbox", "wait"],
+            ["overseer", "act"],
+        ):
+            parser = cli.build_parser(prog="asl")
+            stdout = io.StringIO()
+            with (
+                redirect_stdout(stdout),
+                self.assertRaises(SystemExit),
+            ):
+                parser.parse_args([*argv, "--help"])
+            help_text = " ".join(stdout.getvalue().split())
+            with self.subTest(argv=argv):
+                self.assertIn("--timeout SECONDS", help_text)
+                self.assertIn("--wait-timeout SECONDS", help_text)
+                self.assertNotIn("TIMEOUT,", help_text)
+
+
 if __name__ == "__main__":
     unittest.main()

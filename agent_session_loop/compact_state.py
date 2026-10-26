@@ -36,6 +36,7 @@ from . import (
     plans_snapshot,
     run_persistence,
     state,
+    state_locks,
     turn_execution_constants,
 )
 from .cli_defaults import program_name
@@ -166,7 +167,7 @@ def _compact_check_streams(
                 stats.artifact_bytes_added += len(compressed) - existing_size
                 if apply:
                     artifact_dir.mkdir(parents=True, exist_ok=True)
-                    artifacts.atomic_write_bytes(target, compressed)
+                    artifacts.atomic_write_bytes(target, compressed, durable=True)
                 check[f"{stream}_artifact_path"] = str(target)
         else:
             check.setdefault(f"{stream}_artifact_path", None)
@@ -253,7 +254,7 @@ def _rewrite(
     stats.files_rewritten += 1
     stats.rewritten_paths.append(str(path))
     if apply:
-        artifacts.atomic_write_bytes(path, compact)
+        artifacts.atomic_write_bytes(path, compact, durable=True)
 
 
 def _compact_state_file(path: Path, *, apply: bool, stats: _Stats) -> None:
@@ -306,9 +307,22 @@ def compact_plan_state(
     state_dir: str | Path | None = None,
     apply: bool = False,
 ) -> CompactionReport:
-    """Compact the state, events, and result records for one plan directory."""
+    """Compact the state, events, and result records for one plan directory.
+
+    ``apply`` refuses while a live run holds the plan lock: that run appends
+    to ``events.jsonl`` and rewrites ``state.json`` and the replace here would
+    drop whatever it wrote since this read. A dry run writes nothing and so
+    reports on a live plan freely.
+    """
     canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
     plan_state = state.plan_state_dir(canonical_plan_dir, state_dir)
+    if apply:
+        lock = state_locks.inspect_lock_info(canonical_plan_dir, state_dir)
+        if lock is not None and lock.active:
+            raise state.StateError(
+                f"plan is locked by pid {lock.pid} at {lock.path}; "
+                "compact its state once that run has stopped"
+            )
     stats = _Stats()
 
     state_path = plan_state / events.STATE_FILE_NAME
@@ -371,7 +385,9 @@ def _print_report(report: CompactionReport) -> None:
 def compact_state_from_args(args: argparse.Namespace) -> int:
     """CLI handler for ``asl compact-state``."""
     try:
-        plans_snapshot.require_plan_directory(args.plan_dir)
+        # The same validation `asl status` runs, so a directory that is not a
+        # plan fails here instead of reporting on a state dir nothing owns.
+        plans_snapshot.inspect_plan(args.plan_dir)
         report = compact_plan_state(
             args.plan_dir,
             state_dir=getattr(args, "state_dir", None),
@@ -382,6 +398,7 @@ def compact_state_from_args(args: argparse.Namespace) -> int:
         ValueError,
         artifacts.ArtifactError,
         plans_errors.PlanError,
+        state.StateError,
     ) as error:
         if getattr(args, "json", False):
             print(

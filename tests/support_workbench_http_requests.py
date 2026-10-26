@@ -145,6 +145,8 @@ class AuthenticatorTests(unittest.TestCase):
             )
         )
         self.assertEqual(response.status, 401)
+        # RFC 9110 section 11.6.1: a 401 names the scheme that would succeed.
+        self.assertEqual(response.headers.get("WWW-Authenticate"), "Bearer")
         self.assertEqual(provider.calls, [])
 
     def test_the_token_is_read_at_request_time(self) -> None:
@@ -218,6 +220,7 @@ class AuthenticatorTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.status, 401)
         self.assertEqual(caught.exception.reason, "unauthorized")
+        self.assertEqual(caught.exception.headers, {"WWW-Authenticate": "Bearer"})
 
     def test_a_public_route_does_not_examine_a_credential_at_all(self) -> None:
         """The route a monitor polls answers the same way to everyone.

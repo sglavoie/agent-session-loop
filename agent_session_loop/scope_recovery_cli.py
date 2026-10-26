@@ -1,6 +1,6 @@
 # ruff: noqa: F403, F405
 from .scope_recovery_common import *
-from .scope_recovery_common import _digest
+from .scope_recovery_common import _digest, _event_records
 from .scope_recovery_external_changes import *
 from .scope_recovery_external_changes import (
     _capture_recovery,
@@ -36,7 +36,11 @@ def acknowledge_external_changes(
         state_root = state.plan_state_dir(plan_dir, state_dir)
         event_path = state_root / events.EVENTS_FILE_NAME
         journal = state_root / RECOVERY_FILE_NAME
-        progress = json.loads(journal.read_text()) if journal.exists() else None
+        progress = (
+            json.loads(journal.read_text(encoding="utf-8"))
+            if journal.exists()
+            else None
+        )
         if progress is not None and progress.get("complete"):
             progress = None
         if progress is None:
@@ -50,9 +54,7 @@ def acknowledge_external_changes(
                 == events.WORKSPACE_EXTERNAL_CHANGES_ACKNOWLEDGED_EVENT
                 and record.get("payload", {}).get("details", {}).get("acceptance")
                 == proposal
-                for record in (
-                    json.loads(line) for line in event_path.read_text().splitlines()
-                )
+                for record in _event_records(event_path)
             )
             _check_recovery_authority(proposal, event_path, completed=completed_event)
         resume = [
@@ -355,7 +357,7 @@ def recovery_journal_projection(
     if not path.exists():
         return {}
     try:
-        progress = json.loads(path.read_text())
+        progress = json.loads(path.read_text(encoding="utf-8"))
     except ValueError, OSError:
         return {"progress": {"error": "recovery journal is unreadable"}}
     proposal = progress.get("proposal") if isinstance(progress, dict) else None

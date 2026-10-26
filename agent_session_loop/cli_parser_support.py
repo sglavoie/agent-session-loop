@@ -180,6 +180,11 @@ def _reconcile_plan_dir_alias(
 
 class _AgentSessionLoopArgumentParser(argparse.ArgumentParser):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # Python 3.15 turns typo suggestions on by default; 3.14 needs asking.
+        kwargs.setdefault("suggest_on_error", True)
+        # A unique prefix must not stand in for a long option: ``gc --app``
+        # would otherwise run as ``--apply``. Subparsers inherit this class.
+        kwargs.setdefault("allow_abbrev", False)
         super().__init__(*args, **kwargs)
         # Nested ``add_subparsers`` calls build children of this same class,
         # so every level inherits the described-subparser registry.
@@ -322,8 +327,8 @@ def _add_plan_reference_args(parser: argparse.ArgumentParser) -> None:
         "plan_dir",
         metavar="PLAN_DIR_OR_ID",
         help=(
-            "Split plan directory to control, or the compact plan label "
-            "printed after 'plan' by 'asl sessions'"
+            "Split plan directory or plan label (the compact plan label "
+            "printed after 'plan' by 'asl sessions')"
         ),
     )
     parser.add_argument(

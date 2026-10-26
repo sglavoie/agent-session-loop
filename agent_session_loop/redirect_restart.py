@@ -67,9 +67,11 @@ def predecessor_blocker(directory: Path) -> dict[str, Any] | None:
     """Revalidate the original group and each tracked escaped descendant."""
     try:
         stopped = directory / "stopped.json"
-        if stopped.exists() and json.loads(stopped.read_text()) == {"stopped": True}:
+        if stopped.exists() and json.loads(stopped.read_text(encoding="utf-8")) == {
+            "stopped": True
+        }:
             return None
-        payload = json.loads((directory / "evidence.json").read_text())
+        payload = json.loads((directory / "evidence.json").read_text(encoding="utf-8"))
         worker = payload["worker"]
         evidence = payload["evidence"]
         if not isinstance(worker, dict) or not isinstance(evidence, dict):
@@ -130,7 +132,9 @@ def resolution_for(
     state_dir: str | Path | None = None,
 ) -> dict[str, Any] | None:
     try:
-        payload = json.loads(_resolution_path(plan_dir, request, state_dir).read_text())
+        payload = json.loads(
+            _resolution_path(plan_dir, request, state_dir).read_text(encoding="utf-8")
+        )
         continuation = request.continuation or request.released_from
         if (
             continuation is not None

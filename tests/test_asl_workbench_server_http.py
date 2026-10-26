@@ -4,7 +4,9 @@ Split from tests/test_asl_workbench_server.py."""
 
 from __future__ import annotations
 
+import contextlib
 import http.client
+import io
 import json
 import socket
 import urllib.parse
@@ -58,7 +60,7 @@ class WorkbenchServerHTTPTests(WorkbenchServerTestCase):
 
     def test_mutating_endpoint_rejects_missing_token(self) -> None:
         server = self._start_server()
-        status, body, _ = _http_request(
+        status, body, headers = _http_request(
             f"{self._base_url(server)}/api/registry/pin",
             method="POST",
             body={"plan_dir": str(self.canonical_plan_dir)},
@@ -66,6 +68,7 @@ class WorkbenchServerHTTPTests(WorkbenchServerTestCase):
         self.assertEqual(401, status)
         self.assertFalse(body["ok"])
         self.assertEqual("unauthorized", body["reason"])
+        self.assertEqual("Bearer", headers.get("WWW-Authenticate"))
 
     def test_mutating_endpoint_rejects_wrong_token(self) -> None:
         server = self._start_server(token="correct-token")
@@ -164,6 +167,7 @@ class WorkbenchServerHTTPTests(WorkbenchServerTestCase):
         self.assertEqual(405, status)
         self.assertEqual("method-not-allowed", body["reason"])
         self.assertIn("GET", body["allow"])
+        self.assertEqual(", ".join(body["allow"]), headers.get("Allow"))
 
     def test_response_has_no_store_cache_control(self) -> None:
         server = self._start_server()
@@ -211,6 +215,27 @@ class WorkbenchServerHTTPTests(WorkbenchServerTestCase):
         payload = json.loads(body)
         self.assertEqual("not-implemented", payload["reason"])
         self.assertNotIn("BREW", payload["error"])
+
+    def test_an_unparseable_target_is_a_refusal_rather_than_a_dropped_connection(
+        self,
+    ) -> None:
+        # `urllib.parse` raises on an unclosed IPv6 literal, before the
+        # application's refusal exit: the answer has to come from the transport,
+        # and nothing about the target may reach the log or the reply.
+        server = self._start_server()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            status, _, body = self._raw_exchange(
+                server, b"GET http://[::1/secret-plan HTTP/1.0"
+            )
+        self.assertEqual(400, status)
+        payload = json.loads(body)
+        self.assertEqual("invalid-request", payload["reason"])
+        self.assertNotIn("secret-plan", payload["error"])
+        self.assertEqual("", stderr.getvalue())
+        # The server is still answering.
+        status, _, _ = _http_request(f"{self._base_url(server)}/api/health")
+        self.assertEqual(200, status)
 
     def test_a_nul_in_a_static_path_is_a_refusal_rather_than_a_crash(self) -> None:
         server = self._start_server()
