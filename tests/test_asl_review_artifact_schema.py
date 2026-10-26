@@ -92,7 +92,7 @@ class ReviewArtifactSchemaTests(unittest.TestCase):
         self.assertEqual([], artifact["findings"])
 
     def test_parse_review_artifact_rejects_unsupported_version(self) -> None:
-        for version in (None, 1, 4, "2"):
+        for version in (None, 1, 4, "2", 2.0, 3.0):
             with self.assertRaisesRegex(
                 review.ReviewArtifactError, "'version' must be"
             ):

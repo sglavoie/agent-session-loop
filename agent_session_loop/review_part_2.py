@@ -117,7 +117,12 @@ def parse_review_artifact(
             f"{', '.join(sorted(unknown))}"
         )
     version = payload.get("version")
-    if version not in SUPPORTED_REVIEW_ARTIFACT_VERSIONS:
+    # ``2.0 == 2``, so membership alone would accept a float version.
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version not in SUPPORTED_REVIEW_ARTIFACT_VERSIONS
+    ):
         raise ReviewArtifactError(
             f"{FINAL_REVIEW_ARTIFACT_FILENAME} 'version' must be one of "
             f"{', '.join(str(item) for item in SUPPORTED_REVIEW_ARTIFACT_VERSIONS)}; "
