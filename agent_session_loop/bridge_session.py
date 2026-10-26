@@ -22,6 +22,7 @@ from .bridge_protocol import (
     ERROR_UNSUPPORTED_PROTOCOL,
     EVENT_NAMES,
     MAX_FRAME_BYTES,
+    MAX_REQUEST_ID_CHARS,
     METHOD_HANDSHAKE,
     METHOD_RECOVER_CONVERSATION,
     METHOD_REDIRECT_STATUS,
@@ -98,6 +99,17 @@ class BridgeSession(RedirectHandlers):
             )
 
         raw_id = decoded.get("id")
+        if isinstance(raw_id, str) and len(raw_id) > MAX_REQUEST_ID_CHARS:
+            # Refused before dispatch and answered uncorrelated: echoing it
+            # could cost the response, and nothing may run unanswered.
+            return _error_response(
+                None,
+                BridgeError(
+                    ERROR_INVALID_REQUEST,
+                    f"request id exceeds {MAX_REQUEST_ID_CHARS} characters",
+                    details={"max_id_chars": str(MAX_REQUEST_ID_CHARS)},
+                ),
+            )
         request_id = raw_id if isinstance(raw_id, str) and raw_id else None
         try:
             return _response(request_id, self._dispatch(decoded, request_id))

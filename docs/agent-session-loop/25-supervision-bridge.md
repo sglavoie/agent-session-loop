@@ -87,8 +87,11 @@ handshake against a moved projection still opens it.
 
 A request is `{"type":"request","protocol":1,"id":"<non-empty>",
 "method":"<name>","params":{}}`. `params` must be an object when
-present. The response echoes `id` and carries `ok` plus exactly one of
-`result` or `error`:
+present. `id` is at most 64 characters: the response echoes it, so a
+longer one is refused `invalid-request` with a `null` `id` before
+anything runs, rather than letting an oversize echo drop the answer to a
+mutation that landed. The response echoes `id` and carries `ok` plus
+exactly one of `result` or `error`:
 
 ```json
 {"type":"response","id":"req-1","ok":true,"result":{...}}
@@ -102,7 +105,7 @@ Error codes are a closed set — branch on `code`, not on `message`:
 | Code | Meaning | `retryable` |
 | --- | --- | --- |
 | `malformed-json` | Frame was not parseable JSON. `id` is `null`. | no |
-| `invalid-request` | Missing/empty `id`, missing `method`, non-object `params`, or a frame nested too deeply to decode (`id` is `null`). | no |
+| `invalid-request` | Missing/empty/over-64-character `id`, missing `method`, non-object `params`, or a frame nested too deeply to decode (`id` is `null`). | no |
 | `unsupported-protocol` | `protocol` is not 1. `details.supported` lists accepted versions. | no |
 | `unknown-method` | Method not in the capability list. | no |
 | `frame-too-large` | Inbound line exceeded `max_frame_bytes`. | no |

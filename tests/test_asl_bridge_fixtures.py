@@ -538,6 +538,13 @@ class MutationGateTests(unittest.TestCase):
             },
         )
 
+    def test_the_request_id_bound_is_the_corpus_bound(self) -> None:
+        """Every id the bridge echoes must be one the response schema accepts."""
+        self.assertEqual(
+            schema()["definitions"]["RequestId"]["maxLength"],
+            bridge_protocol.MAX_REQUEST_ID_CHARS,
+        )
+
     def test_methods_outside_the_mutation_list_are_the_reads(self) -> None:
         readable = set(bridge_session.CAPABILITIES) - set(
             bridge_protocol.MUTATION_METHODS

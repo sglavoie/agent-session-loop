@@ -116,6 +116,31 @@ class BridgeSessionTests(unittest.TestCase):
         self.assertEqual("invalid-request", response["error"]["code"])
         self.assertTrue(session.handle_frame(_request("req-2", "runs.snapshot"))["ok"])
 
+    def test_an_oversize_request_id_is_refused_before_anything_runs(self) -> None:
+        """An echoed megabyte id would drop the answer to work that ran."""
+        session = self._session()
+        calls: list[Any] = []
+
+        def record(
+            session: bridge_session.BridgeSession, params: Any
+        ) -> dict[str, Any]:
+            calls.append(params)
+            return {}
+
+        limit = bridge_protocol.MAX_REQUEST_ID_CHARS
+        with mock.patch.dict(bridge_session.METHOD_HANDLERS, {"runs.snapshot": record}):
+            refused = session.handle_frame(_request("r" * (1 << 20), "runs.snapshot"))
+            over = session.handle_frame(_request("r" * (limit + 1), "runs.snapshot"))
+            at_limit = session.handle_frame(_request("r" * limit, "runs.snapshot"))
+
+        for response in (refused, over):
+            self.assertIsNone(response["id"])
+            self.assertFalse(response["ok"])
+            self.assertEqual("invalid-request", response["error"]["code"])
+        self.assertTrue(at_limit["ok"])
+        self.assertEqual("r" * limit, at_limit["id"])
+        self.assertEqual(1, len(calls))
+
     def test_an_unexpected_handler_failure_costs_only_its_own_frame(self) -> None:
         session = self._session()
 

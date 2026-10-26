@@ -397,6 +397,13 @@ MAX_PATH_CHARS = 1024
 MAX_ID_CHARS = 128
 
 
+# The request id is echoed verbatim on the response, so it is bounded on the
+# way in: an id the size of a frame would push its own answer past the ceiling,
+# and a mutation could land with its response dropped. Mirrors the corpus
+# ``RequestId`` bound, so every id this bridge echoes is one the schema accepts.
+MAX_REQUEST_ID_CHARS = 64
+
+
 MAX_WARNINGS = 8
 
 
