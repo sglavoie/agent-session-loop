@@ -79,7 +79,7 @@ class PlanLintTests(PlanAuthoringBase):
     def test_lint_plan_document_categorizes_every_malformed_heading(self) -> None:
         cases = (
             (
-                "## Session nope: Bad id",
+                "## Session #1: Bad id",
                 authoring_source_models.LINT_NON_NUMERIC_SESSION_ID,
             ),
             (
@@ -89,8 +89,8 @@ class PlanLintTests(PlanAuthoringBase):
             ("## Session 0: Zero", authoring_source_models.LINT_ZERO_ID_COMPONENT),
             ("## Session 1.0: Zero", authoring_source_models.LINT_ZERO_ID_COMPONENT),
             ("## Session 1a: Glued", authoring_source_models.LINT_SESSION_ID_SUFFIX),
-            ("## Session: No id", authoring_source_models.LINT_MISSING_ID_WHITESPACE),
-            ("## Session ", authoring_source_models.LINT_MISSING_SESSION_ID),
+            ("## Session1: Glued", authoring_source_models.LINT_MISSING_ID_WHITESPACE),
+            ("## Session:2: Colon", authoring_source_models.LINT_MISSING_ID_WHITESPACE),
             ("## Session 1:", authoring_source_models.LINT_DANGLING_TITLE_SEPARATOR),
             (
                 "## Session 1 -   ###",
@@ -188,9 +188,6 @@ class PlanLintTests(PlanAuthoringBase):
         suggestable = {
             "## Session 1 Missing punctuation": "## Session 1: Missing punctuation",
             "## Session 2 / Unsupported": "## Session 2: Unsupported",
-            # A prose heading, not a session with the ID "plan". Original
-            # spacing and any ATX closing marker are preserved.
-            "## Session plan ##": "## Plan overview ##",
             # Original spacing and any ATX closing marker are preserved.
             "##  Session   3 No colon ##": "##  Session   3: No colon ##",
         }
@@ -205,37 +202,40 @@ class PlanLintTests(PlanAuthoringBase):
             "## Session 1a: Glued",
             "## Session 1.0: Zero",
             "## Session 1:",
-            "## Session nope: Bad id",
-            "## Session roadmap",
+            "## Session #1: Bad id",
+            "## Session1: Glued",
             "## Session 1 /",
         ):
             with self.subTest(source=source):
                 finding = authoring_lint.lint_plan_document(source + "\n").findings[0]
                 self.assertIsNone(finding.suggested_line)
 
-    def test_lint_suggests_a_safe_rename_for_a_stray_session_plan_heading(
-        self,
-    ) -> None:
+    def test_headings_whose_next_word_is_not_an_id_are_prose(self) -> None:
+        prose = (
+            "## Session plan",
+            "### Session cookies",
+            "#### Session-based auth notes",
+            "## Session",
+            "## Session: overview",
+            "## Sessions 1 and 2",
+            "## Session - 2024 recap",
+        )
         text = (
-            "# Plan\n\n## Session plan\n\nOverview body stays intact.\n\n"
-            "## Session 1: First\n\nDo one.\n\n"
-            "## Session 2: Second\n\nDo two.\n"
+            "# Plan\n\n"
+            + "\n\n".join(prose[:2])
+            + "\n\n## Session 1: Login\n\n"
+            + "\n\n".join(prose[2:])
+            + "\n\n## Session 2: Logout\n\nDo b.\n"
         )
-        finding = authoring_lint.lint_plan_document(text).findings[0]
-        self.assertEqual(
-            authoring_source_models.LINT_NON_NUMERIC_SESSION_ID, finding.category
-        )
-        self.assertEqual("## Plan overview", finding.suggested_line)
 
-        lines = text.splitlines()
-        lines[finding.line - 1] = str(finding.suggested_line)
-        repaired = "\n".join(lines) + "\n"
+        result = authoring_lint.lint_plan_document(text)
+        parsed = authoring_parse.parse_plan_document(text)
 
-        self.assertEqual((), authoring_lint.lint_plan_document(repaired).findings)
-        parsed = authoring_parse.parse_plan_document(repaired)
+        self.assertEqual((), result.findings)
         self.assertEqual(("1", "2"), parsed.session_ids)
-        self.assertIn("## Plan overview", parsed.context_lines)
-        self.assertIn("Overview body stays intact.", parsed.context_lines)
+        self.assertIn("### Session cookies", parsed.context_lines)
+        for heading in prose[2:]:
+            self.assertIn(heading, parsed.sessions[0].lines)
 
     def test_lint_suggestions_parse_when_applied(self) -> None:
         text = "## Session 1 No colon\n\none\n\n### Session 2 | Bad sep\n\ntwo\n"

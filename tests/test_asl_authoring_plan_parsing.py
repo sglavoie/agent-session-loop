@@ -131,7 +131,7 @@ class PlanParsingTests(PlanAuthoringBase):
         self,
     ) -> None:
         cases = (
-            ("## Session nope: Bad id", "invalid session id"),
+            ("## Session #1: Bad id", "invalid session id"),
             ("## Session 1..2: Bad id", "invalid session id"),
             ("## Session 0: Zero", "zero-valued session id component"),
             ("## Session 1.0: Zero", "zero-valued session id component"),

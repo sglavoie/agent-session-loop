@@ -26,11 +26,14 @@ SESSION_HEADING_RE = re.compile(
     r"[ \t]*$",
     re.IGNORECASE,
 )
-#: Detects H2--H6 ATX lines whose content begins with the ``Session`` token.
-#: A detected line that does not match ``SESSION_HEADING_RE`` is malformed,
-#: rather than ordinary plan content.
+#: Detects H2--H6 ATX lines that start a session id after the ``Session``
+#: token: a digit after optional horizontal whitespace and at most one ``#``,
+#: ``:``, ``.``, or ``-`` (``Session 1``, ``Session1``, ``Session #1``). A
+#: detected line that does not match ``SESSION_HEADING_RE`` is malformed rather
+#: than ordinary plan content. A heading whose next word is not an id
+#: (``### Session cookies``, ``## Session plan``) is prose and stays content.
 _SESSION_HEADING_CANDIDATE_RE = re.compile(
-    r"^ {0,3}#{2,6}[ \t]+Session\b",
+    r"^ {0,3}#{2,6}[ \t]+Session[ \t]*[#:.-]?[0-9]",
     re.IGNORECASE,
 )
 _SESSION_HEADING_PREFIX_RE = re.compile(
@@ -81,11 +84,6 @@ LINT_SUGGESTABLE_CATEGORIES = frozenset(
         LINT_UNSUPPORTED_TITLE_SEPARATOR,
     )
 )
-
-#: A prose heading that would otherwise be mistaken for a malformed session
-#: marker. The exact ``Session plan`` phrase has one safe interpretation: it
-#: is a plan-overview section, not a session with an ID.
-_NON_SESSION_PLAN_HEADING_RE = re.compile(r"^plan[ \t]*$", re.IGNORECASE)
 
 
 class SourceHeadingError(PlanError):

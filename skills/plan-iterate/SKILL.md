@@ -61,7 +61,7 @@ Parse the plan to identify:
 
 Track fenced code blocks (``` or ~~~) to avoid treating code content as plan structure.
 
-For H2-H6 lines outside fences whose content begins with the `Session` token, surface malformed-candidate parser errors directly; do not treat them as ordinary content or as an absence of markers. Existing headings accepted by the shared grammar count immediately without a normalization question or source rewrite. Reserve `session-split`'s boundary-proposal workflow for a plan that canonical parsing confirms has no explicit session headings.
+For H2-H6 lines outside fences whose content begins with the `Session` token followed by a digit (after optional whitespace and at most one `#`, `:`, `.`, or `-`), surface malformed-candidate parser errors directly; do not treat them as ordinary content or as an absence of markers. Existing headings accepted by the shared grammar count immediately without a normalization question or source rewrite. Reserve `session-split`'s boundary-proposal workflow for a plan that canonical parsing confirms has no explicit session headings.
 
 ### Step 2: Assess Completeness
 

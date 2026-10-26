@@ -116,7 +116,7 @@ class SplitCommandTests(SplitCliHelpers, unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             plan = tmp_dir / "PLAN.md"
-            plan.write_text("# Plan\n\n## Session foo\n\nBody\n", encoding="utf-8")
+            plan.write_text("# Plan\n\n## Session 1a\n\nBody\n", encoding="utf-8")
             contracts_file = tmp_dir / "contracts.json"
             self._write_contracts(contracts_file, ("1",))
 

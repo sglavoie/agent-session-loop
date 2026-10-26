@@ -23,11 +23,9 @@ from .authoring_parse import (
 from .authoring_render import _contract_file_targets
 from .authoring_source_models import (
     _ATX_CLOSING_MARKER_RE,
-    _NON_SESSION_PLAN_HEADING_RE,
     _SESSION_HEADING_PREFIX_RE,
     LINT_DUPLICATE_SESSION_ID,
     LINT_MISSING_REPOSITORY_REGISTRY,
-    LINT_NON_NUMERIC_SESSION_ID,
     LINT_SUGGESTABLE_CATEGORIES,
     LINT_UNSUPPORTED_TITLE_SEPARATOR,
     PlanLintFinding,
@@ -53,17 +51,6 @@ def _suggest_heading_repair(error: SourceHeadingError) -> str | None:
     after_token = prefix.group("rest")
     payload = after_token.lstrip(" \t")
     gap = after_token[: len(after_token) - len(payload)]
-
-    # ``## Session plan`` is ordinary prose whose first word happens to be the
-    # reserved session marker. It cannot describe a valid session (IDs are
-    # numeric), and rewriting it to a stable overview heading leaves its body
-    # untouched. Keep this deliberately narrow: other non-numeric values may
-    # be an intended session whose ID was omitted.
-    if (
-        error.category == LINT_NON_NUMERIC_SESSION_ID
-        and _NON_SESSION_PLAN_HEADING_RE.fullmatch(payload) is not None
-    ):
-        return f"{head[: -len('Session')]}Plan overview{closing_marker}"
 
     if error.category not in LINT_SUGGESTABLE_CATEGORIES:
         return None

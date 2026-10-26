@@ -95,8 +95,11 @@ and canonical, however, so `Session 03.004` produces ID `3.4`,
 `session-3.4.md`, and unpadded manifest and completion-contract IDs. The
 general-purpose `SessionId` API remains strict; zero padding is tolerated only
 while parsing the source heading. An H2-H6 line outside a fence that begins
-with the `Session` token but has a zero component, unsupported or dangling
-separator, or another malformed suffix raises a line-specific `PlanError`.
+with the `Session` token followed by a digit (after optional whitespace and at
+most one `#`, `:`, `.`, or `-`) but has a zero component, unsupported or
+dangling separator, or another malformed suffix raises a line-specific
+`PlanError`. A heading whose next word is not an id, such as
+`### Session cookies`, is ordinary content.
 The grammar-neutral structure gate surfaces that diagnostic as
 `needs-plan-iteration` before authoring any output rather than treating the
 candidate as body text or as a plan with no boundaries.
