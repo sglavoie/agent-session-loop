@@ -121,6 +121,32 @@ class _FrameReader:
         return item
 
 
+def _discard_closed_writer(writer: TextIO) -> None:
+    """Point a writer whose reader went away at the null device.
+
+    The frame that hit the broken pipe is still in the writer's buffer, and the
+    interpreter flushes ``sys.stdout`` again on the way out: that second flush
+    fails too, prints ``Exception ignored ... BrokenPipeError``, and turns the
+    clean exit 0 a closed client is owed into 120. Redirecting the descriptor
+    lets that flush succeed into nothing. A writer with no descriptor (a test's
+    in-memory sink) has no exit-time flush to defuse.
+    """
+    try:
+        fd = writer.fileno()
+    except AttributeError, OSError, ValueError:
+        return
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        return
+    try:
+        os.dup2(devnull, fd)
+    except OSError:
+        pass
+    finally:
+        os.close(devnull)
+
+
 def serve_stdio(
     *,
     reader: BinaryIO,
@@ -175,9 +201,11 @@ def serve_stdio(
             writer.write(frame.decode("utf-8"))
             writer.flush()
         except BrokenPipeError:
+            _discard_closed_writer(writer)
             return False
         except OSError as error:
             if error.errno in {errno.EPIPE, errno.ESHUTDOWN}:
+                _discard_closed_writer(writer)
                 return False
             raise
         return True
