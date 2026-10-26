@@ -295,7 +295,13 @@ class Application:
         policy = self.policy
         length = self._body_length(request, route)
         if length == 0:
-            if policy.require_content_length:
+            # 411 is for a request that declared nothing. An explicit
+            # ``Content-Length: 0`` did declare its length -- an empty body --
+            # and is refused, if at all, for what that empty body lacks.
+            if (
+                policy.require_content_length
+                and request.header("content-length") is None
+            ):
                 raise auth.HttpRefusal(
                     411, "length-required", "request body must declare Content-Length"
                 )

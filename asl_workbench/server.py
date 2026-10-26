@@ -132,6 +132,23 @@ class ApplicationRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._serve("POST")
 
+    # The application owns the method decision: a known path asked with a
+    # method it does not serve answers 405 with ``Allow``, which only reaches
+    # the client if the stdlib dispatches the request here instead of
+    # answering 501 on its own. Unknown verbs still get the stdlib's 501.
+
+    def do_PUT(self) -> None:
+        self._serve("PUT")
+
+    def do_PATCH(self) -> None:
+        self._serve("PATCH")
+
+    def do_DELETE(self) -> None:
+        self._serve("DELETE")
+
+    def do_OPTIONS(self) -> None:
+        self._serve("OPTIONS")
+
     def _serve(self, method: str) -> None:
         self._body_read = False
         try:

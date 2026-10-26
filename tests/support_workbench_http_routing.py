@@ -354,6 +354,21 @@ class PolicyTests(unittest.TestCase):
         )
         self.assertEqual(response.status, 411)
 
+    def test_an_explicit_zero_length_is_a_declared_empty_body(self) -> None:
+        # `Content-Length: 0` declares its length; answering "must declare"
+        # would tell the client to fix something it already did.
+        provider = RecordingProvider()
+        response = self.remote(provider=provider).handle(
+            build(
+                "POST",
+                "/api/unlock",
+                headers=self.signed(**{"Content-Length": "0"}),
+            )
+        )
+        self.assertNotEqual(response.status, 411)
+        self.assertEqual(response.status, 200, document(response))
+        self.assertEqual(provider.calls[0].body, {})
+
     def test_loopback_keeps_its_historic_answer_to_an_empty_post(self) -> None:
         """No length on loopback is an empty body, not a framing refusal.
 

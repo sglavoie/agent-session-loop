@@ -257,6 +257,20 @@ class WorkbenchServerHTTPTests(WorkbenchServerTestCase):
         self.assertEqual(b"", body)
         self.assertIn("application/json", headers.get("content-type", ""))
 
+    def test_other_standard_methods_get_the_applications_405_not_501(
+        self,
+    ) -> None:
+        server = self._start_server()
+        for method in (b"OPTIONS", b"PUT", b"DELETE", b"PATCH"):
+            with self.subTest(method=method):
+                status, headers, body = self._raw_exchange(
+                    server, method + b" /api/queue HTTP/1.0"
+                )
+                self.assertEqual(405, status)
+                payload = json.loads(body)
+                self.assertEqual("method-not-allowed", payload["reason"])
+                self.assertIn("GET", headers.get("allow", ""))
+
     def test_a_stdlib_refusal_names_its_own_status(self) -> None:
         server = self._start_server()
         status, _, body = self._raw_exchange(server, b"BREW / HTTP/1.0")
