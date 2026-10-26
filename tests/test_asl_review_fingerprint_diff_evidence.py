@@ -231,21 +231,59 @@ class ReviewFingerprintDiffEvidenceTests(ReviewFingerprintBase):
         changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(["README.md"], changed["tracked"])
 
+    def test_non_utf8_content_is_fingerprinted_rather_than_unavailable(
+        self,
+    ) -> None:
+        before = self._fingerprint()
+        (self.repo_root / "README.md").write_bytes(b"caf\xe9\n")
+        self._git("add", "README.md")
+        after = self._fingerprint()
+
+        self.assertIsNone(review_guard._review_guard_unavailable_detail(after))
+        self.assertEqual(["README.md"], after["index_changed"])
+        (self.repo_root / "README.md").write_bytes(b"caf\xe8\n")
+        self._git("add", "README.md")
+        later = self._fingerprint()
+        # The undecodable byte is part of the evidence, not replaced away.
+        self.assertNotEqual(after["index_diff_sha256"], later["index_diff_sha256"])
+        changed = review_guard._review_guard_changed_paths(before, later)
+        self.assertEqual(["README.md"], changed["tracked"])
+
+    def test_unusual_untracked_names_are_fingerprinted_not_unavailable(
+        self,
+    ) -> None:
+        before = self._fingerprint()
+        self._write("café.md", "one\n")
+        self._write('say "hi".txt', "two\n")
+        self._write("tab\there.txt", "three\n")
+        after = self._fingerprint()
+
+        self.assertIsNone(review_guard._review_guard_unavailable_detail(after))
+        self.assertEqual(
+            ["café.md", 'say "hi".txt', "tab\there.txt"],
+            [entry[0] for entry in after["untracked"]],
+        )
+        changed = review_guard._review_guard_changed_paths(before, after)
+        self.assertEqual(
+            ["café.md", 'say "hi".txt', "tab\there.txt"],
+            changed["untracked_added"],
+        )
+
     def test_a_named_path_git_renders_no_patch_for_fails_closed(self) -> None:
         self._write("README.md", "mutated\n")
-        real_run_git = review_guard_git._run_git
+        real_run_git_bytes = review_guard_git._run_git_bytes
 
-        def fake_run_git(cwd, args):
-            result = real_run_git(cwd, args)
+        def fake_run_git_bytes(cwd, args):
+            result = real_run_git_bytes(cwd, args)
             if tuple(args[:3]) == ("diff", "HEAD", "--patch-with-raw"):
                 # Keep the raw entry that names the path; drop its patch.
-                raw, _, _patch = result.stdout.partition("\n\n")
+                raw, _, _patch = result.stdout.partition(b"\n\n")
                 return subprocess.CompletedProcess(
-                    args=result.args, returncode=0, stdout=raw + "\n\n", stderr=""
+                    args=result.args, returncode=0, stdout=raw + b"\n\n", stderr=b""
                 )
             return result
 
-        with mock.patch.object(review_guard_git, "_run_git", fake_run_git):
+        with mock.patch.object(review_guard_git, "_run_git_bytes", fake_run_git_bytes):
             fingerprint = self._fingerprint()
 
         # A named path with no patch carries no content, so pairing short would
@@ -257,20 +295,20 @@ class ReviewFingerprintDiffEvidenceTests(ReviewFingerprintBase):
 
     def test_a_raw_entry_without_its_fields_fails_closed(self) -> None:
         self._write("README.md", "mutated\n")
-        real_run_git = review_guard_git._run_git
+        real_run_git_bytes = review_guard_git._run_git_bytes
 
-        def fake_run_git(cwd, args):
-            result = real_run_git(cwd, args)
+        def fake_run_git_bytes(cwd, args):
+            result = real_run_git_bytes(cwd, args)
             if tuple(args[:3]) == ("diff", "HEAD", "--patch-with-raw"):
                 return subprocess.CompletedProcess(
                     args=result.args,
                     returncode=0,
-                    stdout=":100644 M\tREADME.md\n\n" + result.stdout,
-                    stderr="",
+                    stdout=b":100644 M\tREADME.md\n\n" + result.stdout,
+                    stderr=b"",
                 )
             return result
 
-        with mock.patch.object(review_guard_git, "_run_git", fake_run_git):
+        with mock.patch.object(review_guard_git, "_run_git_bytes", fake_run_git_bytes):
             fingerprint = self._fingerprint()
 
         detail = review_guard._review_guard_unavailable_detail(fingerprint)

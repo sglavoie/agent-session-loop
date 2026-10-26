@@ -148,7 +148,7 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
             payload = json.loads(completed.stdout)
             self.assertFalse(payload["ok"])
             self.assertEqual("status", payload["command"])
-            self.assertEqual("malformed-plan", payload["reason"])
+            self.assertEqual("plan-not-found", payload["reason"])
             self.assertEqual("no-such-label-xyz", payload["plan_reference"])
             self.assertNotIn("plan_dir", payload)
             self.assertIn(
@@ -164,6 +164,16 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
             self.assertEqual(1, completed.returncode)
             self.assertIn("plan directory does not exist", completed.stderr)
             self.assertNotIn("asl sessions", completed.stderr)
+
+    def test_a_missing_plan_path_is_not_found_rather_than_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing-plan"
+
+            completed = self._run_status([str(missing), "--json"], check=False)
+            self.assertEqual(1, completed.returncode)
+            payload = json.loads(completed.stdout)
+            self.assertEqual("plan-not-found", payload["reason"])
+            self.assertEqual(str(missing), payload["plan_reference"])
 
     def test_file_argument_reports_not_a_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

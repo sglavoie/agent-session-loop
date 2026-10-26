@@ -268,7 +268,7 @@ def status_from_args(args: argparse.Namespace) -> int:
             args.plan_dir, state_root(args.state_dir)
         )
         if is_bare_label(str(args.plan_dir)) and not resolved_plan_dir.exists():
-            raise plans_errors.PlanError(
+            raise plans_errors.PlanNotFoundError(
                 f"plan directory does not exist: {resolved_plan_dir}, and no "
                 f"plan label from `{program_name()} sessions` matches "
                 f"{args.plan_dir!r}"
@@ -301,11 +301,7 @@ def status_from_args(args: argparse.Namespace) -> int:
         return 1
     except (plans_errors.PlanError, StateError) as error:
         if args.json:
-            reason = (
-                "malformed-plan"
-                if isinstance(error, plans_errors.PlanError)
-                else "state-error"
-            )
+            reason = plans_errors_reason(error)
             responses.print_json(
                 responses.error_payload(
                     "status",
@@ -324,3 +320,12 @@ def status_from_args(args: argparse.Namespace) -> int:
     else:
         _print_text_status(payload)
     return 0
+
+
+def plans_errors_reason(error: Exception) -> str:
+    """The JSON ``reason`` for a plan reference that could not be inspected."""
+    if isinstance(error, plans_errors.PlanNotFoundError):
+        return "plan-not-found"
+    if isinstance(error, plans_errors.PlanError):
+        return "malformed-plan"
+    return "state-error"

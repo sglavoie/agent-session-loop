@@ -48,8 +48,9 @@ asl prepare PLAN_DIR --resume --cwd NEW_WORKSPACE --rebind-workspace
 
 ## Progress heartbeats
 
-`--json` emits a single machine-readable result on stdout; progress heartbeats
-go to stderr. Each heartbeat carries live progress — the running session label,
+`--json` emits a single machine-readable result — into the `result.json` at the
+handshake's `result_path` under `--detach`, on stdout otherwise; progress
+heartbeats go to stderr (the handshake's `stderr_path` under `--detach`). Each heartbeat carries live progress — the running session label,
 `(n/total)`, and `idle <n>s` since the child last emitted output — and escalates
 to a `WARN possibly stalled` line once idle time crosses the stall threshold.
 The WARN is soft: supervision keeps waiting. Above it sit two hard hang bars

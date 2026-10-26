@@ -16,7 +16,7 @@ asl plans [--state-dir DIR] [--stale-days N] [--never-run] [--readiness STATE] [
 asl status PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl questions PLAN_DIR [--state-dir DIR] [--json]
 asl review-verdict PLAN_DIR [--state-dir DIR] [--json]
-asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
+asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow] [--json]
 asl sessions [--running] [--recent] [--limit N] [--state-dir DIR] [--verbose] [--json]
 asl doctor (PLAN_DIR | --plan-dir PLAN_DIR) --harness codex|claude|copilot [--harness-model MODEL] [--effort EFFORT] [--cwd ROOT] [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl supervisor-guide [--harness auto|codex|claude|copilot] [--json]
@@ -46,7 +46,7 @@ asl control set-model PLAN_DIR_OR_ID [--harness codex|claude|copilot] [--harness
 asl control guard add PLAN_DIR_OR_ID [--deny-command "CMD ARG ..."] [--protect-path ALIAS:PATH] [--reason TEXT] [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control guard remove PLAN_DIR_OR_ID --id GUARD_ID [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control guard list PLAN_DIR_OR_ID [--state-dir DIR] [--json]
-asl control redirect PLAN_DIR_OR_ID (--text TEXT | --text-stdin) [--session N] [--turn N] [--run-id RUN_ID] [--operation-id OPERATION_ID] [--ttl SECONDS] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control redirect PLAN_DIR_OR_ID (--text TEXT | --text-stdin) [--session SESSION_ID] [--turn N] [--run-id RUN_ID] [--operation-id OPERATION_ID] [--ttl SECONDS] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control redirect-status PLAN_DIR_OR_ID [--redirect-id OPERATION_ID ...] [--wait-acknowledged] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control recover-conversation PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl control resolve-redirect PLAN_DIR_OR_ID --operation-id OPERATION_ID --outcome submitted|not-submitted --reason TEXT [--state-dir DIR] [--json]
@@ -54,7 +54,7 @@ asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 asl acknowledge-external-changes PLAN_DIR --session ID --repository ALIAS [--accept DIGEST] [--reason TEXT] [--checkpoint-retained] [--state-dir DIR] [--json]
 asl accept-ref-updates PLAN_DIR --session ID [--accept DIGEST] [--reason TEXT] [--state-dir DIR] [--json]
 asl progress PLAN_DIR [--tail] [--json]
-asl backfill-progress PLAN_DIR [--force] [--dry-run]
+asl backfill-progress PLAN_DIR [--force] [--dry-run] [--json]
 asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
 asl gc [PLAN_DIR] [--state-dir DIR] [--max-age-days DAYS] [--dry-run|--apply] [--json]
 asl maintenance install [--executable PATH] [--state-dir DIR] [--hour HOUR] [--minute MINUTE] [--max-runtime-seconds SECONDS] [--no-bootstrap] [--json]
@@ -75,10 +75,26 @@ asl overseer act PLAN_DIR --watcher-id ID --operation reply|guidance|verify|comm
 asl overseer reconcile PLAN_DIR [--timeout SEC] [--state-dir DIR] [--json]
 asl workbench serve [--host HOST] [--port PORT] [--state-dir DIR] [--plan-root DIR] [--open] [--json]
 asl workbench connect --target-id ID --origin URL --token-file FILE [--connector-id ID] [--state-dir DIR] [--plan-root DIR] [--heartbeat-interval SECONDS] [--observation-interval SECONDS] [--allow-remote-actions] [--json]
-asl workbench pin PLAN_DIR [--cwd ROOT] [--label LABEL]
-asl workbench unpin PLAN_DIR
+asl workbench pin PLAN_DIR [--cwd ROOT] [--label LABEL] [--json]
+asl workbench unpin PLAN_DIR [--json]
 asl workbench registry [--json]
 ```
+
+### Flag conventions
+
+Three spellings recur across the commands above, and each means one thing:
+
+- **A wait the caller opts into** is a `--wait…` flag naming what it waits
+  for — `--wait` (a control receipt or an `ask` answer), `--wait-consumed`,
+  `--wait-delivered`, or `--wait-acknowledged` — bounded by `--wait-timeout
+  SECONDS`. The control commands also accept that bound as `--timeout`, the
+  spelling they shipped with.
+- **A command whose whole job is to wait or to run something** takes
+  `--timeout SECONDS` as its entire budget: `asl outbox wait`, `asl outbox
+  supervise`, the `asl overseer` leaves, `asl commit`, `asl assurance plan`,
+  and `asl run` (per session).
+- **One session** is `--session SESSION_ID`; session IDs may be dotted (`2.1`).
+  `asl overseer act` also accepts its original `--session-id`.
 
 ### Overseer
 

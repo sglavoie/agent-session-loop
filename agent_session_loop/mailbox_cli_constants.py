@@ -43,6 +43,12 @@ DEFAULT_ASK_WAIT_TIMEOUT_SECONDS = 90.0
 DEFAULT_GUIDANCE_DELIVERED_TIMEOUT_SECONDS = 30.0
 DEFAULT_OUTBOX_WAIT_TIMEOUT_SECONDS = 300.0
 DEFAULT_OUTBOX_SUPERVISE_TIMEOUT_SECONDS = 550.0
+# A question an earlier call already reported, still open when this one
+# starts, is reported again after at most this long instead of IDLE: the
+# cursor has moved past it, and a supervisor whose reply never landed would
+# otherwise see IDLE until the question expired. Not immediately, so a
+# supervisor reissuing while a human considers the question does not spin.
+SUPERVISE_CARRIED_QUESTION_DELAY_SECONDS = 30.0
 MAX_WAIT_TIMEOUT_SECONDS = 30.0 * 60.0
 LEASE_RENEW_INTERVAL_SECONDS = 30.0
 ASK_WAIT_POLL_INTERVAL_SECONDS = 2.0

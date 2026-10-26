@@ -97,6 +97,7 @@ class ReviewFingerprintIndexAndGitFailureTests(ReviewFingerprintBase):
             "untracked": ("ls-files", "--others"),
         }
         real_run_git = review_guard._run_git
+        real_run_git_bytes = review_guard_git._run_git_bytes
         for label, prefix in failing.items():
             with self.subTest(probe=label):
 
@@ -110,7 +111,24 @@ class ReviewFingerprintIndexAndGitFailureTests(ReviewFingerprintBase):
                         )
                     return real_run_git(cwd, args)
 
-                with mock.patch.object(review_guard_git, "_run_git", fake_run_git):
+                # The diff probes read bytes so a non-UTF-8 patch stays
+                # evidence; fail them on that runner.
+                def fake_run_git_bytes(cwd, args, _prefix=prefix):
+                    if tuple(args[: len(_prefix)]) == _prefix:
+                        return subprocess.CompletedProcess(
+                            args=["git", *args],
+                            returncode=128,
+                            stdout=b"",
+                            stderr=b"fatal: broken index\n",
+                        )
+                    return real_run_git_bytes(cwd, args)
+
+                with (
+                    mock.patch.object(review_guard_git, "_run_git", fake_run_git),
+                    mock.patch.object(
+                        review_guard_git, "_run_git_bytes", fake_run_git_bytes
+                    ),
+                ):
                     fingerprint = self._fingerprint()
 
                 detail = review_guard._review_guard_unavailable_detail(fingerprint)
@@ -155,7 +173,7 @@ class ReviewFingerprintIndexAndGitFailureTests(ReviewFingerprintBase):
                 return subprocess.CompletedProcess(
                     args=["git", *args],
                     returncode=0,
-                    stdout="vanished.txt\n",
+                    stdout="vanished.txt\0",
                     stderr="",
                 )
             return real_run_git(cwd, args)

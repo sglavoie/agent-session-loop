@@ -178,6 +178,86 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         self.assertEqual(0, code)
         self.assertEqual("ACTION questions=1", other[0])
 
+    def test_outbox_supervise_reports_again_a_question_left_unanswered(
+        self,
+    ) -> None:
+        # The first call moved the cursor past the question before any reply
+        # landed; a supervisor whose reply failed must not be told IDLE while
+        # the run waits on it.
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        question = mailbox_appenders.append_question(
+            self.plan_dir,
+            "Which shape?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        launch = mailbox_validation.new_supervision_id()
+
+        code, first = self.supervise_lines(supervision_id=launch)
+        self.assertEqual(0, code)
+        self.assertEqual("ACTION questions=1", first[0])
+        self.assertEqual(question.seq, self.cursor_on_disk(launch))
+
+        code, second = self.supervise_lines(supervision_id=launch)
+        self.assertEqual(0, code)
+        self.assertEqual("ACTION questions=1", second[0])
+        self.assertIn(f"Question {question.id} (seq {question.seq}):", second)
+
+        mailbox_appenders.append_reply(
+            self.plan_dir, question.id, "answered", state_dir=self.state_dir
+        )
+        code, third = self.supervise_lines(supervision_id=launch)
+        self.assertEqual(0, code)
+        self.assertEqual(["IDLE"], third)
+
+    def test_outbox_supervise_waits_before_reporting_a_carried_question(
+        self,
+    ) -> None:
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        mailbox_appenders.append_question(
+            self.plan_dir,
+            "Which shape?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        launch = mailbox_validation.new_supervision_id()
+        self.supervise_lines(supervision_id=launch)
+
+        # The repeat waits out the carried-question delay, not the whole
+        # timeout, and never returns at once: a supervisor reissuing while a
+        # human considers the question must not spin.
+        timeouts: list[float] = []
+        real_wait = mailbox_cli_waits.wait_for_questions
+
+        def recording_wait(*args, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            return real_wait(*args, **{**kwargs, "timeout": 0})
+
+        with mock.patch.object(mailbox_cli_waits, "wait_for_questions", recording_wait):
+            code, lines = self.supervise_lines(supervision_id=launch, timeout=550)
+        self.assertEqual(0, code)
+        self.assertEqual("ACTION questions=1", lines[0])
+        self.assertLessEqual(
+            timeouts[0],
+            mailbox_cli_constants.SUPERVISE_CARRIED_QUESTION_DELAY_SECONDS,
+        )
+        self.assertGreater(timeouts[0], 0)
+
+    def test_outbox_supervise_never_carries_another_runs_question(self) -> None:
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        mailbox_appenders.append_question(
+            self.plan_dir,
+            "Left open by a crashed run",
+            state_dir=self.state_dir,
+            run_id="run-crashed",
+        )
+        launch = mailbox_validation.new_supervision_id()
+        self.supervise_lines(supervision_id=launch)
+
+        code, lines = self.supervise_lines(supervision_id=launch)
+        self.assertEqual(0, code)
+        self.assertEqual(["IDLE"], lines)
+
     def test_outbox_supervise_absorbs_a_foreign_supervision_end(self) -> None:
         foreign = mailbox_appenders.append_supervision_end(
             self.plan_dir,

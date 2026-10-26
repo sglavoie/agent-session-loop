@@ -134,6 +134,11 @@ def _add_workbench_commands(
         default=None,
         help="Human-readable label for the pin",
     )
+    workbench_pin_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
     workbench_pin_parser.set_defaults(
         handler_ref="workbench_archive:workbench_pin_from_args",
     )
@@ -146,6 +151,11 @@ def _add_workbench_commands(
         "plan_dir",
         metavar="PLAN_DIR",
         help="Plan directory to unpin",
+    )
+    workbench_unpin_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
     )
     workbench_unpin_parser.set_defaults(
         handler_ref="workbench_archive:workbench_unpin_from_args",

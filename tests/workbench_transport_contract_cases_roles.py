@@ -206,6 +206,25 @@ class TheCredentialFileIsTheCompanionsFile(unittest.TestCase):
         self.assertEqual(original.as_document(), reloaded.as_document())
         self.assertIsNotNone(reloaded.authenticate(token))
 
+    def test_a_leftover_temporary_from_a_killed_save_does_not_block_saving(
+        self,
+    ) -> None:
+        # A pid-derived temporary name collided with a crashed save's leftover
+        # once a restarted service got the same pid; every save then failed.
+        leftover = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
+        leftover.write_text("{}", encoding="utf-8")
+        credential, token = credentials.issue(
+            credentials.ROLE_CONNECTOR, created_at=NOW, subject=CONNECTOR_ID
+        )
+        credentials.CredentialStore([credential]).save(self.path)
+        self.assertIsNotNone(
+            credentials.CredentialStore.load(self.path).authenticate(token)
+        )
+        self.assertEqual(
+            {self.path.name, leftover.name},
+            {entry.name for entry in self.path.parent.iterdir()},
+        )
+
     def test_a_file_anyone_can_read_is_refused_rather_than_used(self) -> None:
         credential, _ = credentials.issue(
             credentials.ROLE_SUMMARY, created_at=NOW, label="kuma"

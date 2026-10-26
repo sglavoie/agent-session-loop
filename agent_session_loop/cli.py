@@ -52,7 +52,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
     _add_run_commands(subparsers)
     _add_run_inspection_commands(subparsers)

@@ -426,13 +426,15 @@ example `session 2.1`), which names one session inside a plan and is not
 accepted here. Existing absolute or relative directories always take
 precedence, and only a bare, nonexistent argument (no directory component)
 triggers a state-root lookup honoring `--state-dir`. Matching is exact and
-case-sensitive against existing plan directories: zero matches keep the current
-`malformed-plan` error, while multiple matches fail with `reason:
+case-sensitive against existing plan directories: zero matches fail with
+`reason: plan-not-found`, while multiple matches fail with `reason:
 ambiguous-plan`. Bare-label resolution is available to `status`, `asl control`,
 and all eight mailbox commands. They are `asl inbox guidance`,
 `asl inbox reply`, `asl inbox resolve`, `asl inbox read`, `asl ask`,
-`asl notify`, `asl outbox wait`, and `asl outbox supervise`. `run`,
-`tail`, `unlock`, and other plan-taking commands remain path-only. Successful
+`asl notify`, `asl outbox wait`, and `asl outbox supervise`, plus
+`asl inbox acknowledge` — filed under `asl inbox` but the worker's receipt in
+the redirect journal rather than a mailbox command. `run`, `tail`, `unlock`,
+and other plan-taking commands remain path-only. Successful
 text and JSON output continue to report the canonical resolved `plan_dir`.
 
 `tail` prints recent activity for the latest run and follows `events.jsonl`

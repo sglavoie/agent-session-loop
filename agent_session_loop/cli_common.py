@@ -123,11 +123,7 @@ def resolve_plan_context(
             args,
             command_name=command_name,
             text_label=text_label,
-            reason=(
-                "malformed-plan"
-                if isinstance(error, plans_errors.PlanError)
-                else "state-error"
-            ),
+            reason=state_status.plans_errors_reason(error),
             error=str(error),
         )
         return None

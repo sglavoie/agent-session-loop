@@ -80,7 +80,9 @@ class StaleLockReclamationTests(unittest.TestCase):
         plan_state.mkdir(parents=True, exist_ok=True)
         self.lock_path = plan_state / state.LOCK_FILE_NAME
 
-    def write_lock(self, *, pid: int, hostname: str | None) -> None:
+    def write_lock(
+        self, *, pid: int, hostname: str | None, process_start: str | None = None
+    ) -> None:
         payload: dict[str, object] = {
             "version": 1,
             "owner": "agent-session-loop",
@@ -90,6 +92,8 @@ class StaleLockReclamationTests(unittest.TestCase):
         }
         if hostname is not None:
             payload["hostname"] = hostname
+        if process_start is not None:
+            payload["process_start"] = process_start
         self.lock_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
     def read_lock_info(self) -> tuple[state.LockInfo, str]:
@@ -110,6 +114,46 @@ class StaleLockReclamationTests(unittest.TestCase):
         self.assertFalse(self.lock_path.exists())
         self.assertIn("reclaimed stale lock", stderr)
         self.assertIn(str(self.lock_path), stderr)
+
+    def test_a_reused_pid_on_this_host_is_reclaimed(self) -> None:
+        # The owner died without cleanup and an unrelated process now holds
+        # its pid: a live pid alone would keep the plan locked forever.
+        self.write_lock(
+            pid=os.getpid(),
+            hostname=socket.gethostname(),
+            process_start="Thu Jan  1 00:00:00 1970",
+        )
+
+        with mock.patch.object(
+            state_locks.process_tree,
+            "process_birth",
+            return_value="Sun Oct 25 10:00:00 2026",
+        ):
+            lock_info, stderr = self.read_lock_info()
+
+        self.assertTrue(lock_info.stale)
+        self.assertIn(f"pid {os.getpid()} was reused", lock_info.reason)
+        self.assertFalse(self.lock_path.exists())
+        self.assertIn("reclaimed stale lock", stderr)
+
+    def test_a_live_owner_with_a_matching_or_unknown_birth_stays_active(
+        self,
+    ) -> None:
+        for current in ("Sun Oct 25 10:00:00 2026", None):
+            with self.subTest(current=current):
+                self.write_lock(
+                    pid=os.getpid(),
+                    hostname=socket.gethostname(),
+                    process_start="Sun Oct 25 10:00:00 2026",
+                )
+                with mock.patch.object(
+                    state_locks.process_tree, "process_birth", return_value=current
+                ):
+                    lock_info, stderr = self.read_lock_info()
+
+                self.assertFalse(lock_info.stale)
+                self.assertTrue(self.lock_path.exists())
+                self.assertEqual("", stderr)
 
     def test_dead_pid_from_another_host_is_refused(self) -> None:
         self.write_lock(pid=self.DEAD_PID, hostname="some-other-host")

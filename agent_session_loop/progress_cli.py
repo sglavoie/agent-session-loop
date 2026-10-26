@@ -35,6 +35,9 @@ from .cli_defaults import program_name
 DEFAULT_POLL_INTERVAL_SECONDS = tail.POLL_INTERVAL_SECONDS
 
 
+BACKFILL_COMMAND_NAME = "backfill-progress"
+
+
 def _entry_to_json(entry: plans_models.ProgressEntry) -> dict[str, Any]:
     return {
         "session_id": entry.session_id.value,
@@ -53,43 +56,74 @@ def backfill_progress_from_args(args: argparse.Namespace) -> int:
     plan_dir_arg = args.plan_dir
     force: bool = args.force
     dry_run: bool = args.dry_run
+    as_json = bool(getattr(args, "json", False))
+
+    def refuse(reason: str, error: object) -> int:
+        if as_json:
+            responses.print_json(
+                responses.error_payload(
+                    BACKFILL_COMMAND_NAME, reason=reason, error=str(error)
+                )
+            )
+        else:
+            print(f"{program_name()} backfill-progress: {error}", file=sys.stderr)
+        return 1
 
     try:
         snapshot = plans_snapshot.inspect_plan(plan_dir_arg)
         entries = progress_repair.build_backfill_entries(snapshot)
+    except plans_errors.PlanNotFoundError as error:
+        return refuse("plan-not-found", error)
     except plans_errors.PlanError as error:
-        print(
-            f"{program_name()} backfill-progress: {error}",
-            file=sys.stderr,
-        )
-        return 1
+        return refuse("malformed-plan", error)
 
     progress_file = plans_progress.progress_path(snapshot.plan_dir)
     rendered = plans_progress.render_progress_journal(tuple(entries))
 
     if dry_run:
-        sys.stdout.write(rendered)
+        if as_json:
+            responses.print_json(
+                responses.success_payload(
+                    BACKFILL_COMMAND_NAME,
+                    reason="dry-run",
+                    plan_dir=str(snapshot.plan_dir),
+                    progress_path=str(progress_file),
+                    entries=[_entry_to_json(entry) for entry in entries],
+                    journal=rendered,
+                )
+            )
+        else:
+            sys.stdout.write(rendered)
         return 0
 
     if progress_file.exists() and not force:
-        print(
-            f"{program_name()} backfill-progress: "
+        return refuse(
+            "progress-exists",
             f"{progress_file} already exists; pass --force to overwrite",
-            file=sys.stderr,
         )
-        return 1
 
     try:
         result = progress_repair.repair_progress_journal(
             snapshot.plan_dir, snapshot=snapshot
         )
-    except (plans_errors.PlanError, OSError) as error:
-        print(
-            f"{program_name()} backfill-progress: {error}",
-            file=sys.stderr,
-        )
-        return 1
+    except plans_errors.PlanError as error:
+        return refuse("malformed-plan", error)
+    except OSError as error:
+        return refuse("os-error", error)
 
+    if as_json:
+        responses.print_json(
+            responses.success_payload(
+                BACKFILL_COMMAND_NAME,
+                reason="written",
+                plan_dir=str(snapshot.plan_dir),
+                progress_path=str(result.path),
+                entries_written=result.entries_written,
+                completed_session_ids=list(result.completed_session_ids),
+                journal_replaced=result.journal_replaced,
+            )
+        )
+        return 0
     print(
         f"{program_name()} backfill-progress: wrote {result.entries_written} "
         f"entries to {result.path}"

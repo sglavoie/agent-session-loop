@@ -16,7 +16,7 @@ file, which is the change that repository then commits. The bundled reference
 is the one file this checkout owns.
 
 Only harness roots that already exist are rendered into (``~/.claude``,
-``~/.codex``, plus any Claude profile named by ``$CLAUDE_CONFIG_DIR`` or
+``~/.codex``, ``~/.copilot``, plus any Claude profile named by ``$CLAUDE_CONFIG_DIR`` or
 ``$ASL_CLAUDE_CONFIG_DIRS``); a missing harness directory is reported as
 skipped and never created.
 """
@@ -179,8 +179,9 @@ def _orphan_span_end(lines: Sequence[str], start: int) -> int:
 
     A damaged or missing card heading is recoverable when the following prose
     still carries a card-specific structural signal. The candidate runs to the
-    last non-blank line before the next heading or HTML comment, so neighbouring
-    generated blocks and unrelated sections are never absorbed. When the body
+    last card-specific line before the next heading or HTML comment, so
+    neighbouring generated blocks, unrelated sections, and the operator's own
+    prose written directly after the card are never absorbed. When the body
     cannot be identified the span is the marker line alone and any recognizable
     residue is left for ``block_problem`` to reject.
     """
@@ -191,24 +192,21 @@ def _orphan_span_end(lines: Sequence[str], start: int) -> int:
     end = start
     scan_start = candidate_start
     if lines[candidate_start].startswith("#"):
-        end = candidate_start
+        # A heading directly under the marker is the card's, damaged or not,
+        # once card prose below it confirms that.
         scan_start += 1
     elif _is_boundary(lines[candidate_start]):
         return start
 
-    for index in range(scan_start, len(lines)):
+    for index in range(candidate_start, len(lines)):
         line = lines[index]
-        if _is_boundary(line):
+        if index >= scan_start and _is_boundary(line):
             break
-        if line.strip():
+        if _is_card_residue(line):
             end = index
     if end == start:
         return start
-    return (
-        end
-        if any(_is_card_residue(line) for line in lines[candidate_start : end + 1])
-        else start
-    )
+    return end
 
 
 def _span_end(lines: Sequence[str], start: int) -> int:
@@ -373,6 +371,21 @@ def _replace_file(path: Path, text: str) -> None:
     durability.replace_text(target, text, permissions=permissions)
 
 
+def _with_line_endings_of(path: Path, text: str) -> str:
+    """Return ``text`` in the line endings ``path`` already uses.
+
+    ``read_text`` translates CRLF, so every comparison here runs on LF text;
+    writing that back as-is would silently convert an operator's CRLF file.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return text
+    if raw.count(b"\r\n") * 2 > raw.count(b"\n"):
+        return text.replace("\n", "\r\n")
+    return text
+
+
 def _file_record(path: Path, root: Path, current: str, desired: str) -> dict[str, Any]:
     return {
         "path": str(path.relative_to(root)),
@@ -406,7 +419,7 @@ def sync(
         desired = apply_block(current, render_block(target.harness))
         files.append(_file_record(path, home_root, current, desired))
         if not check and current != desired:
-            _replace_file(path, desired)
+            _replace_file(path, _with_line_endings_of(path, desired))
 
     reference = root / REFERENCE_PATH
     current = reference.read_text(encoding="utf-8") if reference.is_file() else ""

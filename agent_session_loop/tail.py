@@ -14,6 +14,7 @@ from . import (
     events,
     plans_errors,
     plans_snapshot,
+    responses,
     state,
     tail_event_messages,
     tail_logs,
@@ -470,16 +471,85 @@ def tail_plan(
     follow_loop.run()
 
 
+def tail_plan_json(
+    plan_dir: str | Path,
+    *,
+    state_dir: str | Path | None = None,
+    lines: int = tail_models.DEFAULT_LINES,
+    follow: bool = True,
+    out: tail_models.TextSink = sys.stdout,
+    poll_interval: float = tail_models.POLL_INTERVAL_SECONDS,
+    stop_event: threading.Event | None = None,
+) -> None:
+    """Print the latest run's event records as JSON lines, then follow them.
+
+    The structured twin of :func:`tail_plan`: one ``events.jsonl`` record per
+    line, the last ``lines`` of the run first, then each new one until the run
+    finishes. Harness log lines are text and stay with the text form. The
+    first batch of :func:`follow_events` is the initial read, so no record
+    lands between reading the journal and starting to follow it.
+    """
+    if lines <= 0:
+        raise tail_models.TailError("--lines must be a positive integer")
+
+    snapshot = plans_snapshot.inspect_plan(plan_dir)
+    plan_state = state.plan_state_dir(snapshot.plan_dir, state_dir)
+    state_path = plan_state / events.STATE_FILE_NAME
+    batches = follow_events(plan_state / events.EVENTS_FILE_NAME)
+    records = next(batches)
+    run_id = tail_records._latest_run_id(
+        tail_records._read_json_file(state_path), records
+    )
+
+    def emit(batch: list[dict[str, Any]]) -> bool:
+        finished = False
+        for record in batch:
+            if not tail_records._matches_run(record, run_id):
+                continue
+            out.write(json.dumps(record, sort_keys=True) + "\n")
+            finished = finished or record.get("name") == "run_finished"
+        out.flush()
+        return finished
+
+    recent = [record for record in records if tail_records._matches_run(record, run_id)]
+    finished = emit(recent[-lines:]) or _has_run_finished(records, run_id)
+    stop = stop_event or threading.Event()
+    while follow and not finished and not stop.is_set():
+        if stop.wait(poll_interval):
+            break
+        finished = emit(next(batches)) or _state_run_finished(
+            tail_records._read_json_file(state_path)
+        )
+
+
 def tail_from_args(args: argparse.Namespace) -> int:
     """Tail plan activity from CLI arguments."""
+    as_json = bool(getattr(args, "json", False))
     try:
-        tail_plan(
+        (tail_plan_json if as_json else tail_plan)(
             args.plan_dir,
             state_dir=args.state_dir,
             lines=args.lines,
             follow=not args.no_follow,
         )
     except (plans_errors.PlanError, tail_models.TailError, OSError) as error:
-        print(f"{program_name()} tail: {error}", file=sys.stderr)
+        if as_json:
+            responses.print_json(
+                responses.error_payload(
+                    "tail",
+                    reason=(
+                        "plan-not-found"
+                        if isinstance(error, plans_errors.PlanNotFoundError)
+                        else "malformed-plan"
+                        if isinstance(error, plans_errors.PlanError)
+                        else "tail-error"
+                        if isinstance(error, tail_models.TailError)
+                        else "os-error"
+                    ),
+                    error=str(error),
+                )
+            )
+        else:
+            print(f"{program_name()} tail: {error}", file=sys.stderr)
         return 1
     return 0

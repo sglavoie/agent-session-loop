@@ -69,6 +69,16 @@ def _fingerprint_repo_node(
     return [rel, kind, hashlib.sha256(data).hexdigest()]
 
 
+def _listed_paths(listing_text: str) -> list[str]:
+    """Split ``git ls-files -z`` output into its records.
+
+    Without ``-z`` git C-quotes any path holding a quote, a tab, a newline, or
+    (under the default ``core.quotePath``) a non-ASCII byte, so ``café.md``
+    arrives as ``"caf\\303\\251.md"`` and names no file on disk.
+    """
+    return [record for record in listing_text.split("\0") if record]
+
+
 def _review_guard_skips_path(
     rel: str,
     *,
@@ -106,7 +116,7 @@ def _fingerprint_untracked_nodes(
     :func:`_fingerprint_repo_node` and fails the capture closed there.
     """
     payload: list[list[str]] = []
-    for rel in sorted(untracked_text.splitlines()):
+    for rel in sorted(_listed_paths(untracked_text)):
         if not rel:
             continue
         if _review_guard_skips_path(
@@ -132,7 +142,7 @@ def _index_flagged_paths(listing_text: str) -> list[str]:
     diff — including the guard's.
     """
     flagged: list[str] = []
-    for line in listing_text.splitlines():
+    for line in _listed_paths(listing_text):
         if len(line) < 3 or line[1] != " ":
             continue
         tag, rel = line[0], line[2:]

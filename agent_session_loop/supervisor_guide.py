@@ -69,6 +69,7 @@ LEAF_HELP: tuple[str, ...] = (
     "asl control redirect --help",
     "asl control redirect-status --help",
     "asl control recover-conversation --help",
+    "asl control guard add --help",
     "asl bridge serve --help",
 )
 

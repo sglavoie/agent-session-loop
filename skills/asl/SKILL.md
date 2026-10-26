@@ -161,14 +161,15 @@ asl outbox supervise <plan-dir> --supervision-id <launch-identity> [--state-dir 
 
 - Pass the same `--supervision-id` on every call; the command is reissued
   verbatim and no `--since` is ever threaded by hand.
-- Exactly one of four tokens is printed, always with exit code 0.
+- One of four tokens prints with exit code 0; an error exits nonzero instead.
 - `IDLE` means nothing actionable happened: print nothing and reissue the
   identical command.
 - `ACTION questions=<n>` carries `<n>` question records that no closure has
-  answered yet, framed below the token. Surface them.
+  answered yet, framed below the token. Surface them; one still open later
+  is reported again, never hidden behind `IDLE`.
 - `DONE outcome=<outcome> seq=<n>` carries this launch's own terminal record:
   stop the loop and do not reissue. `outcome: error` means the helper died
-  abnormally, so its stdout may be missing or truncated: recover run state
+  abnormally, so its result may be missing or truncated: recover run state
   with `asl status <plan-dir> --json` and report the abnormal exit.
 - `LOST reason=<reason>` means this launch's supervising helper is gone without
   a terminal record. Stop the loop, run `asl status <plan-dir> --json`, and

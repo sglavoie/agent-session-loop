@@ -178,6 +178,35 @@ class DetailContainmentTests(_DetailFixture, unittest.TestCase):
         self.assertEqual("invalid-request", body["reason"])
         self.assertNotIn("not an artifact", json.dumps(body))
 
+    def test_a_dotdot_path_out_of_the_plan_state_is_refused(self) -> None:
+        plan_dir = self.seed_plan()
+        secret = self.workbench_root / "secret.txt"
+        secret.write_text("not an artifact\n", encoding="utf-8")
+        plan_state = state.plan_state_dir(plan_dir, self.state_dir)
+        hops = "/".join([".."] * len(plan_state.relative_to(plan_state.anchor).parts))
+        escaping = f"{plan_state}/{hops}{secret}"
+        server = self.start_workbench_server()
+        status, body, _ = self.get(
+            server, "/api/logs", plan_dir=str(plan_dir), path=escaping
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-request", body["reason"])
+        self.assertNotIn("not an artifact", json.dumps(body))
+
+    def test_a_symlink_out_of_the_plan_state_is_refused(self) -> None:
+        plan_dir = self.seed_plan()
+        secret = self.workbench_root / "secret.txt"
+        secret.write_text("not an artifact\n", encoding="utf-8")
+        link = state.plan_state_dir(plan_dir, self.state_dir) / "innocent.log"
+        link.symlink_to(secret)
+        server = self.start_workbench_server()
+        status, body, _ = self.get(
+            server, "/api/logs", plan_dir=str(plan_dir), path=str(link)
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-request", body["reason"])
+        self.assertNotIn("not an artifact", json.dumps(body))
+
     def test_another_plans_log_is_refused(self) -> None:
         first = self.seed_plan("alpha")
         second = self.seed_plan("beta")

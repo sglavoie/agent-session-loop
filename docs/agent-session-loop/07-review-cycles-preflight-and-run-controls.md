@@ -363,9 +363,13 @@ mutated — the runner alone owns `state.json`.
   queue. See [Run-scoped guards](09-run-scoped-guards.md#run-scoped-guards).
 
 Enqueueing succeeds for a readable plan even with no runner attached; the
-command simply waits in the queue for the next drain. All four subcommands
+command simply waits in the queue for the next drain. Every control leaf whose
+receipt or acceptance wait takes `--timeout` also accepts it as
+`--wait-timeout`, the spelling the mailbox commands use, so a supervisor need
+not remember which family a wait belongs to. All four subcommands
 accept the same `PLAN_DIR_OR_ID` compact-label resolution as `status` and reuse
-its `ambiguous-plan` / `malformed-plan` / `state-error` failure reasons. A queue
+its `ambiguous-plan` / `plan-not-found` / `malformed-plan` / `state-error`
+failure reasons. A queue
 the process cannot create or append to — an unwritable or non-directory state
 root — fails with `reason: os-error` and a `details.queue_path`, still as exactly
 one JSON object under `--json` (a single stderr line otherwise), never a

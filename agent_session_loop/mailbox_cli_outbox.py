@@ -7,9 +7,11 @@ import sys
 import time
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from . import (
+    mailbox,
     mailbox_cli_agent_mux,
     mailbox_cli_args,
     mailbox_cli_constants,
@@ -201,13 +203,43 @@ def _open_questions_in(
     )
 
 
+def _carried_question_ids(
+    plan_dir: Path, state_dir: str | None, since: int
+) -> frozenset[str]:
+    """The current run's open questions an earlier call already moved past.
+
+    The cursor advances on every wake, before anyone has replied, so a reply
+    that failed or a call that was cut off would leave the question behind the
+    cursor and every later call IDLE. Scoped to the current run, so a question
+    a crashed run left open never returns.
+    """
+    from . import intervention_facts
+
+    open_ids = set(
+        intervention_facts.unanswered_question_ids(plan_dir, state_dir=state_dir)
+    )
+    if not open_ids or since <= 0:
+        return frozenset()
+    try:
+        view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+    except OSError, ValueError, mailbox_models.MailboxError:
+        return frozenset()
+    return frozenset(
+        message.id
+        for message in view.unanswered_questions
+        if message.id in open_ids and message.seq <= since
+    )
+
+
 def outbox_supervise_from_args(args: argparse.Namespace) -> int:
     """Long-poll one launch's supervision cursor and print a single token.
 
     Every wakeup that a supervisor cannot act on — another launch's terminal
     record, or a question batch that already closed — advances the persisted
     cursor and re-enters the wait on the remaining budget instead of returning.
-    Absorbing them here is what keeps a healthy run silent.
+    Absorbing them here is what keeps a healthy run silent. A question already
+    behind the cursor that is still open is reported again after
+    :data:`~.mailbox_cli_constants.SUPERVISE_CARRIED_QUESTION_DELAY_SECONDS`.
     """
     supervision_id, supervision_id_ok = mailbox_cli_args.validated_supervision_id(
         args,
@@ -275,6 +307,13 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
     )
     cursor = since
     deadline = time.monotonic() + timeout
+    carried_ids = _carried_question_ids(plan_dir, args.state_dir, since)
+    if carried_ids:
+        deadline = min(
+            deadline,
+            time.monotonic()
+            + mailbox_cli_constants.SUPERVISE_CARRIED_QUESTION_DELAY_SECONDS,
+        )
     renewal_failures = 0
     renewal_recoveries = 0
     lease_degraded = False
@@ -326,6 +365,19 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
             break
         if time.monotonic() >= deadline:
             break
+
+    if (
+        carried_ids
+        and not own_supervision_ends
+        and not open_questions
+        and wait_result.lost_reason is None
+        and wait_result.mailbox_view is not None
+    ):
+        open_questions = tuple(
+            question
+            for question in wait_result.mailbox_view.unanswered_questions
+            if question.id in carried_ids
+        )
 
     run_evidence: dict[str, Any] | None = None
     if own_supervision_ends:

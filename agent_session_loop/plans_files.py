@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import re
+import sys
 from pathlib import Path
 from typing import NoReturn
 
@@ -17,9 +19,49 @@ PLAN_TITLE_RE = re.compile(r"^#\s+(.+?)\s*$")
 
 
 def canonicalize_path(path: str | os.PathLike[str]) -> Path:
-    """Return a filesystem-canonical path without requiring it to exist."""
+    """Return a filesystem-canonical path without requiring it to exist.
+
+    ``realpath`` resolves links but keeps the caller's letter case, so on a
+    case-insensitive volume ``~/p/Plan`` and ``~/p/plan`` would name one plan
+    yet hash to two state directories -- two locks, two mailboxes. On Darwin
+    the deepest existing directory is respelled as the volume stores it.
+    """
     expanded = os.path.expanduser(os.fspath(path))
-    return Path(os.path.realpath(os.path.abspath(expanded)))
+    resolved = os.path.realpath(os.path.abspath(expanded))
+    if sys.platform == "darwin":
+        resolved = _darwin_stored_case(resolved)
+    return Path(resolved)
+
+
+def _darwin_stored_case(resolved: str) -> str:
+    """Respell the deepest existing directory of ``resolved`` as stored on disk.
+
+    Only a directory is asked: ``F_GETPATH`` on a hard-linked file may answer
+    with another of its links. Whatever lies below that directory keeps the
+    caller's spelling, and any failure keeps ``resolved`` unchanged.
+    """
+    head, tail = resolved, ""
+    while not os.path.isdir(head):
+        parent, name = os.path.split(head)
+        if parent == head:
+            return resolved
+        head, tail = parent, os.path.join(name, tail) if tail else name
+    try:
+        descriptor = os.open(head, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return resolved
+    try:
+        raw = fcntl.fcntl(
+            descriptor, fcntl.F_GETPATH, bytes(os.pathconf(head, "PC_PATH_MAX"))
+        )
+    except OSError, ValueError, AttributeError:
+        return resolved
+    finally:
+        os.close(descriptor)
+    stored = os.fsdecode(raw.split(b"\0", 1)[0])
+    if not stored or stored.casefold() != head.casefold():
+        return resolved
+    return os.path.join(stored, tail) if tail else stored
 
 
 def plan_title_from_markdown(content: str) -> str | None:

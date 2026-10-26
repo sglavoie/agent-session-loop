@@ -344,7 +344,8 @@ def _compute_review_delta_context(
         # output; see :data:`review_session_body._DELTA_DIFF_FLAGS` for what
         # each flag rules out.
         names = review_guard_git._run_git(
-            cwd, ["diff", "--name-only", *review_session_body._DELTA_DIFF_FLAGS, base]
+            cwd,
+            ["diff", "--name-only", "-z", *review_session_body._DELTA_DIFF_FLAGS, base],
         )
         if names.returncode != 0:
             return degraded, "base-diff-failed"
@@ -354,6 +355,7 @@ def _compute_review_delta_context(
                 "diff",
                 "--cached",
                 "--name-only",
+                "-z",
                 *review_session_body._DELTA_DIFF_FLAGS,
                 base,
             ],
@@ -375,6 +377,7 @@ def _compute_review_delta_context(
                 "--others",
                 "--exclude-standard",
                 "--full-name",
+                "-z",
                 "--",
                 ":(top)",
             ],
@@ -387,7 +390,7 @@ def _compute_review_delta_context(
         # blindness that hides the repair also makes it impossible to tell
         # which flagged entries moved.
         index_flags = review_guard_git._run_git(
-            cwd, ["ls-files", "-v", "--full-name", "--", ":(top)"]
+            cwd, ["ls-files", "-v", "--full-name", "-z", "--", ":(top)"]
         )
         if index_flags.returncode != 0:
             return degraded, "index-flags-scan-failed"
@@ -402,9 +405,9 @@ def _compute_review_delta_context(
                 {
                     line
                     for line in (
-                        *names.stdout.splitlines(),
-                        *index_names.stdout.splitlines(),
-                        *untracked.stdout.splitlines(),
+                        *names.stdout.split("\0"),
+                        *index_names.stdout.split("\0"),
+                        *untracked.stdout.split("\0"),
                         *review_guard._index_flagged_paths(index_flags.stdout),
                         *baseline_dirty,
                     )
@@ -476,7 +479,13 @@ def _compute_registered_review_delta_context(
             )
             names = review_guard_git._run_git(
                 repository.root,
-                ["diff", "--name-only", *review_session_body._DELTA_DIFF_FLAGS, base],
+                [
+                    "diff",
+                    "--name-only",
+                    "-z",
+                    *review_session_body._DELTA_DIFF_FLAGS,
+                    base,
+                ],
             )
             index_names = review_guard_git._run_git(
                 repository.root,
@@ -484,6 +493,7 @@ def _compute_registered_review_delta_context(
                     "diff",
                     "--cached",
                     "--name-only",
+                    "-z",
                     *review_session_body._DELTA_DIFF_FLAGS,
                     base,
                 ],
@@ -495,13 +505,14 @@ def _compute_registered_review_delta_context(
                     "--others",
                     "--exclude-standard",
                     "--full-name",
+                    "-z",
                     "--",
                     ":(top)",
                 ],
             )
             index_flags = review_guard_git._run_git(
                 repository.root,
-                ["ls-files", "-v", "--full-name", "--", ":(top)"],
+                ["ls-files", "-v", "--full-name", "-z", "--", ":(top)"],
             )
         except RunError:
             return degraded, f"git-unavailable:{repository.alias}"
@@ -520,9 +531,9 @@ def _compute_registered_review_delta_context(
             {
                 line
                 for line in (
-                    *names.stdout.splitlines(),
-                    *index_names.stdout.splitlines(),
-                    *untracked.stdout.splitlines(),
+                    *names.stdout.split("\0"),
+                    *index_names.stdout.split("\0"),
+                    *untracked.stdout.split("\0"),
                     *review_guard._index_flagged_paths(index_flags.stdout),
                     *baseline_dirty,
                 )

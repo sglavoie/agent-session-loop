@@ -273,6 +273,51 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
             self.assertEqual(1, rc)
             self.assertIn("workbench pin", stderr.getvalue())
 
+    def test_pin_and_unpin_report_json_when_asked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            with patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                    rc = workbench_archive.workbench_pin_from_args(
+                        argparse.Namespace(
+                            plan_dir=str(plan_dir), cwd=None, label="A", json=True
+                        )
+                    )
+                self.assertEqual(0, rc)
+                pinned = json.loads(stdout.getvalue())
+                self.assertTrue(pinned["ok"])
+                self.assertEqual("workbench-pin", pinned["command"])
+                self.assertEqual(str(plan_dir), pinned["plan_dir"])
+                self.assertEqual("A", pinned["label"])
+                self.assertEqual(
+                    str(workbench_registry.default_registry_path()),
+                    pinned["registry_path"],
+                )
+
+                stdout = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                    rc = workbench_archive.workbench_unpin_from_args(
+                        argparse.Namespace(plan_dir=str(plan_dir), json=True)
+                    )
+                self.assertEqual(0, rc)
+                self.assertEqual("unpinned", json.loads(stdout.getvalue())["reason"])
+
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    rc = workbench_archive.workbench_pin_from_args(
+                        argparse.Namespace(
+                            plan_dir="   ", cwd=None, label=None, json=True
+                        )
+                    )
+                self.assertEqual(1, rc)
+                refused = json.loads(stdout.getvalue())
+                self.assertFalse(refused["ok"])
+                self.assertTrue(refused["reason"])
+                self.assertEqual("", stderr.getvalue())
+
     def test_unpin_handler_removes_pin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp).resolve()

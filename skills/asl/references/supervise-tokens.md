@@ -20,18 +20,24 @@ later exit from this one's.
   to this launch and keys the persisted cursor, so the command is reissued
   verbatim and no `--since` is ever threaded by hand. The cursor starts at 0, so
   questions that were already open before the launch stay visible.
-- Exactly one of four tokens is printed, always with exit code 0.
+- Exactly one of four tokens is printed, always with exit code 0. A command
+  error is not a token: it exits nonzero with a `reason:` payload instead (see
+  the last item below).
 - `IDLE` means nothing actionable happened: print nothing and reissue the
   identical command.
 - `ACTION questions=<n>` carries `<n>` question records that no closure has
-  answered yet, framed below the token. Surface them.
+  answered yet, framed below the token. Surface them. A question an earlier
+  call already reported that is still open — the reply failed, or the call
+  was cut off before it landed — is reported again after a 30-second wait
+  instead of `IDLE`, so a lost reply cannot leave the run waiting unseen.
 - `DONE outcome=<outcome> seq=<n>` carries this launch's own terminal record:
-  stop the loop and do not reissue. Read that `outcome` before trusting stdout.
-  Every outcome except `error` means the helper wrote and flushed its complete
-  `--json` result before appending the record, so it is already parseable when
-  the token returns.
+  stop the loop and do not reissue. Read that `outcome` before trusting the
+  helper's result. Every outcome except `error` means the helper wrote and
+  flushed its complete `--json` result before appending the record — the
+  `result.json` at the handshake's `result_path` under `--detach`, stdout
+  otherwise — so it is already parseable when the token returns.
 - `outcome: error` means the helper died abnormally — a raised exception or a
-  termination signal — so its stdout may be missing, truncated mid-write, or
+  termination signal — so its result may be missing, truncated mid-write, or
   complete but unproven. Never require parseable JSON there: take the
   termination detail from the record's `text`, recover run state with
   `asl status <plan-dir> --json`, and report the abnormal exit instead of a
@@ -75,8 +81,10 @@ later exit from this one's.
   because its lock proves it is alive.
 - Absence of `DONE` is **not** proof that the helper is alive: `--no-mailbox`,
   SIGKILL, and a machine crash leave nothing behind. Keep both fallbacks — the
-  bounded stdout tail below, and the loop itself as the backstop.
-- An error keeps the ordinary contract: a `reason:` payload and a nonzero exit.
+  bounded tail of the helper's output below, and the loop itself as the
+  backstop.
+- A command error keeps the ordinary contract: a `reason:` payload and a
+  nonzero exit. It is the only way this command exits nonzero.
 
 Cadence matters because the runner's first wait is five minutes: any polling
 interval near or above 300 seconds can let a question open and expire entirely

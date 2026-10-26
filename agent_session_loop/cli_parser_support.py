@@ -6,8 +6,9 @@ import argparse
 import os
 import sys
 import weakref
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, TypeVar, overload
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, overload
 
 from .cli_defaults import (
     _CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS,
@@ -184,6 +185,48 @@ class _AgentSessionLoopArgumentParser(argparse.ArgumentParser):
         # so every level inherits the described-subparser registry.
         self.register("action", "parsers", _DescribedSubParsersAction)
 
+    def show_as_alternatives(self, *actions: argparse.Action) -> None:
+        """Render ``actions`` as ``[A | B]`` in usage without enforcing it.
+
+        For a pair the handler already validates itself -- so a conflict keeps
+        its JSON ``reason`` instead of argparse's plain-text exit 2 -- while
+        the usage line still tells the reader that the two are alternatives.
+        """
+        group = argparse._MutuallyExclusiveGroup(self)
+        group._group_actions.extend(actions)
+        self._display_only_groups.append(group)
+
+    @property
+    def _display_only_groups(self) -> list[argparse._MutuallyExclusiveGroup]:
+        groups = self.__dict__.setdefault("_display_groups", [])
+        return groups
+
+    @contextmanager
+    def _with_display_groups(self) -> Iterator[None]:
+        added = self._display_only_groups
+        self._mutually_exclusive_groups.extend(added)
+        try:
+            yield
+        finally:
+            for group in added:
+                self._mutually_exclusive_groups.remove(group)
+
+    def format_usage(self) -> str:
+        with self._with_display_groups():
+            return super().format_usage()
+
+    def format_help(self) -> str:
+        with self._with_display_groups():
+            return super().format_help()
+
+    def error(self, message: str) -> NoReturn:
+        # A mistyped command already gets argparse's "maybe you meant" hint;
+        # the forty-name list after it buries that hint, and `--help` has it.
+        if "maybe you meant" in message:
+            message, _, _ = message.partition(" (choose from ")
+            message += f" Run `{self.prog} --help` for the full list."
+        super().error(message)
+
     @overload
     def parse_args(
         self, args: Iterable[str] | None = None, namespace: None = None
@@ -225,7 +268,10 @@ def _add_workbench_serve_args(
         dest=_workbench_dest("host", child_parser=child_parser),
         default=_workbench_default(_WORKBENCH_DEFAULT_HOST, child_parser=child_parser),
         metavar="HOST",
-        help=(f"Host interface to bind (default: {_WORKBENCH_DEFAULT_HOST})"),
+        help=(
+            "Loopback interface to bind; other addresses are refused "
+            f"(default: {_WORKBENCH_DEFAULT_HOST})"
+        ),
     )
     parser.add_argument(
         "--port",
@@ -300,8 +346,11 @@ def _add_control_wait_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--timeout",
-        # Bound to the same dest the mailbox wait uses, so the value is never
-        # confused with an unrelated `timeout` on a shared namespace.
+        # Spelled as the mailbox waits spell it too, and bound to the same
+        # dest, so the value is never confused with an unrelated `timeout` on
+        # a shared namespace and a supervisor need not remember which family
+        # a wait belongs to.
+        "--wait-timeout",
         dest="wait_timeout",
         type=float,
         default=None,

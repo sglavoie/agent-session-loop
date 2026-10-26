@@ -90,7 +90,14 @@ def _pair_diff_names_with_patches(
     for rel, count in zip(changed, section_counts, strict=False):
         section = "".join(patches[cursor : cursor + count])
         cursor += count
-        paired.append([rel, hashlib.sha256(section.encode("utf-8")).hexdigest()])
+        paired.append(
+            [
+                rel,
+                hashlib.sha256(
+                    section.encode("utf-8", evidence_git.GUARD_TEXT_ERRORS)
+                ).hexdigest(),
+            ]
+        )
     return changed, paired
 
 
@@ -232,7 +239,7 @@ def _capture_review_repo_fingerprint(
             *pathspecs,
         ]
         names_text, diff_text = _split_raw_from_patch(
-            evidence_git._review_guard_git(cwd_path, diff_argv).stdout,
+            evidence_git._review_guard_git_output(cwd_path, diff_argv),
             argv=diff_argv,
         )
         index_diff_argv = [
@@ -245,7 +252,7 @@ def _capture_review_repo_fingerprint(
             *pathspecs,
         ]
         index_names_text, index_diff_text = _split_raw_from_patch(
-            evidence_git._review_guard_git(cwd_path, index_diff_argv).stdout,
+            evidence_git._review_guard_git_output(cwd_path, index_diff_argv),
             argv=index_diff_argv,
         )
         # ``--full-name`` keeps the reported paths repo-root-relative when
@@ -262,6 +269,7 @@ def _capture_review_repo_fingerprint(
             "--others",
             "--full-name",
             *(() if include_ignored else ("--exclude-standard",)),
+            "-z",
             "--",
             ":(top)",
         ]
@@ -301,6 +309,7 @@ def _capture_review_repo_fingerprint(
             "ls-files",
             "-v",
             "--full-name",
+            "-z",
             "--",
             ":(top)",
         ]
@@ -337,11 +346,13 @@ def _capture_review_repo_fingerprint(
         "git": True,
         "head": head_sha,
         "refs": refs_payload,
-        "diff_sha256": hashlib.sha256(diff_text.encode("utf-8")).hexdigest(),
+        "diff_sha256": hashlib.sha256(
+            diff_text.encode("utf-8", evidence_git.GUARD_TEXT_ERRORS)
+        ).hexdigest(),
         "tracked_changed": sorted(tracked_changed),
         "tracked_patches": tracked_patches,
         "index_diff_sha256": hashlib.sha256(
-            index_diff_text.encode("utf-8")
+            index_diff_text.encode("utf-8", evidence_git.GUARD_TEXT_ERRORS)
         ).hexdigest(),
         "index_changed": sorted(index_changed),
         "index_patches": index_patches,

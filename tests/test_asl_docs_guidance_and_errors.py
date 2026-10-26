@@ -250,6 +250,7 @@ class GuidanceAndErrorDocsTests(unittest.TestCase):
                 "invalid-target",
                 "malformed-plan",
                 "os-error",
+                "plan-not-found",
                 "question-already-answered",
                 "question-not-found",
                 "state-error",

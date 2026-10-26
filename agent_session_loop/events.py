@@ -7,6 +7,7 @@ in the plan directory's `session-N.md` handoff status lines.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -372,11 +373,26 @@ class Event:
 
 
 def append_event(path: str | Path, event: Event) -> None:
-    """Append one event record and issue a platform device-level fullsync."""
+    """Append one event record and issue a platform device-level fullsync.
+
+    A crash or a full disk can leave the journal ending mid-record. Appending
+    straight after it would glue this record onto the fragment, and both would
+    fail to parse -- often the synthetic ``run_finished`` that tells a follower
+    the run is over. A missing final newline is supplied first; readers skip
+    the blank line a concurrent writer making the same repair could add.
+    """
     event_path = Path(path)
     event_path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(event.to_dict(), sort_keys=True) + "\n"
-    with _EVENT_WRITE_LOCK, event_path.open("a", encoding="utf-8") as event_file:
-        event_file.write(line)
-        event_file.flush()
-        durability.fullsync(event_file.fileno())
+    line = (json.dumps(event.to_dict(), sort_keys=True) + "\n").encode("utf-8")
+    with _EVENT_WRITE_LOCK:
+        fd = os.open(event_path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o666)
+        try:
+            size = os.fstat(fd).st_size
+            if size and os.pread(fd, 1, size - 1) != b"\n":
+                line = b"\n" + line
+            view = memoryview(line)
+            while view:
+                view = view[os.write(fd, view) :]
+            durability.fullsync(fd)
+        finally:
+            os.close(fd)

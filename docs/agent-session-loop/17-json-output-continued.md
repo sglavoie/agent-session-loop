@@ -117,8 +117,9 @@ block with `stale_unfinished` (boolean) and `stale_reason` (string or `null`).
 `abandoned` block to `runner_state` and printing
 `Run state: abandoned (<detected_at> by <trigger>: <lock reason>)`.
 `status --json` error
-payloads echo the original argument in `plan_reference`: an uninspectable plan
-(or an unresolved label) reports `reason: malformed-plan`, an unreadable state
+payloads echo the original argument in `plan_reference`: a plan directory that
+does not exist (or an unresolved label) reports `reason: plan-not-found`, one
+that exists but cannot be inspected reports `reason: malformed-plan`, an unreadable state
 root reports `reason: state-error`, and a bare label matching more than one
 existing plan directory reports `reason: ambiguous-plan` with
 `details.state_root` and a sorted `details.candidates` list of canonical paths.

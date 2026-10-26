@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from . import startup_context
-from .install_verify_common import HarnessRoot, failure, success
+from .install_verify_common import SUPPORT_DIRS, HarnessRoot, failure, success
 
 ASL_SKILL_REQUIRED_TEXT = (
     "Read `references/supervisor-context.md` in this skill directory before"
@@ -27,12 +27,19 @@ SESSION_RUN_FORBIDDEN_TEXT = (
 
 
 def _expected_skill_dirs(repo_root: Path) -> list[Path]:
+    """Every linked skill-directory entry: each skill, and each support dir.
+
+    A missing ``references`` link breaks every skill's relative reference
+    read, so it is verified like a skill rather than skipped for lacking a
+    ``SKILL.md``.
+    """
     skills_root = repo_root / "skills"
     return sorted(
         (
             path
             for path in skills_root.iterdir()
-            if path.is_dir() and (path / "SKILL.md").is_file()
+            if path.is_dir()
+            and ((path / "SKILL.md").is_file() or path.name in SUPPORT_DIRS)
         ),
         key=lambda path: path.name,
     )

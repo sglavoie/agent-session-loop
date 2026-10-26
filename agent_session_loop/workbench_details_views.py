@@ -25,10 +25,34 @@ def read_logs(
     resolved = Path(
         reader.scope.log_target(stream=stream, artifact=artifact, path=path)
     )
+    if path is not None:
+        _refuse_escaping_symlink(reader, resolved)
     payload = read_log_window(resolved, window or Window())
     if payload is None:
         raise _missing(resolved, "log file")
     return {"plan_dir": str(reader.plan_dir), **payload}
+
+
+def _refuse_escaping_symlink(reader: PlanReader, candidate: Path) -> None:
+    """Refuse a contained ``path=`` that a symlink points outside the state.
+
+    The portable half proved the path lexically inside the plan state; only
+    this half can follow the links in it.
+    """
+    try:
+        target = candidate.resolve(strict=True)
+        state_root = reader.plan_state_dir.resolve(strict=True)
+    except OSError:
+        raise _missing(candidate, "log file") from None
+    if not target.is_relative_to(state_root):
+        raise DetailError(
+            details.REASON_INVALID_REQUEST,
+            "path must be inside the plan state directory",
+            details={
+                "path": str(candidate),
+                "plan_state_dir": reader.scope.plan_state_dir,
+            },
+        )
 
 
 def read_last_message(

@@ -45,11 +45,13 @@ class SupervisionDocsTests(unittest.TestCase):
             "closure has answered yet",
             "`DONE outcome=<outcome> seq=<n>` carries this launch's own "
             "terminal record: stop the loop and do not reissue. Read that "
-            "`outcome` before trusting stdout",
+            "`outcome` before trusting the helper's result",
+            "the `result.json` at the handshake's `result_path` under "
+            "`--detach`, stdout otherwise",
             "Every outcome except `error` means the helper wrote and flushed "
             "its complete `--json` result before appending the record",
             "`outcome: error` means the helper died abnormally",
-            "its stdout may be missing, truncated mid-write, or complete but unproven",
+            "its result may be missing, truncated mid-write, or complete but unproven",
             "Never require parseable JSON there: take the termination detail "
             "from the record's `text`, recover run state with "
             "`asl status <plan-dir> --json`",
@@ -60,8 +62,9 @@ class SupervisionDocsTests(unittest.TestCase):
             "So is a batch whose questions have all already closed. Neither "
             "ever reaches stdout",
             "Absence of `DONE` is **not** proof that the helper is alive",
-            "Keep both fallbacks — the bounded stdout tail below, and the "
-            "loop itself as the backstop",
+            "Keep both fallbacks — the bounded tail of the helper's output "
+            "below, and the loop itself as the backstop",
+            "is reported again after a 30-second wait instead of `IDLE`",
             "when no terminal record can ever arrive (`--no-mailbox`, "
             "SIGKILL, machine crash)",
         ):

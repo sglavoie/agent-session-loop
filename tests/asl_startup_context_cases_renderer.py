@@ -229,6 +229,57 @@ class StartupContextRendererTests(unittest.TestCase):
             self.assertNotIn("asl obsolete-command", rendered)
             self.assertTrue(rendered.endswith("## My Notes\n\nKeep me.\n"), rendered)
 
+    def test_orphaned_start_marker_keeps_prose_written_directly_after_the_card(
+        self,
+    ) -> None:
+        # No heading separates the operator's own rule from the card, so the
+        # next boundary is not where the card ends: its last card line is.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = self.build_repo(temp_dir)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
+            codex = repo_root / ".codex/AGENTS.md"
+            orphaned = codex.read_text(encoding="utf-8").replace(
+                f"\n{startup_context.END_MARKER}", ""
+            )
+            codex.write_text(
+                orphaned + "\nMy own rule: never push.\n", encoding="utf-8"
+            )
+
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
+
+            rendered = codex.read_text(encoding="utf-8")
+            self.assertEqual(
+                startup_context.managed_blocks(rendered),
+                [startup_context.render_block("codex")],
+                rendered,
+            )
+            self.assertTrue(
+                rendered.endswith("\n\nMy own rule: never push.\n"), rendered
+            )
+
+    def test_a_crlf_context_file_keeps_its_line_endings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = self.build_repo(temp_dir)
+            codex = repo_root / ".codex/AGENTS.md"
+            codex.write_bytes(CODEX_DEFAULTS.replace("\n", "\r\n").encode("utf-8"))
+
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
+
+            raw = codex.read_bytes()
+            self.assertEqual(raw.count(b"\n"), raw.count(b"\r\n"), raw)
+            self.assertIsNone(
+                startup_context.block_problem(
+                    codex.read_text(encoding="utf-8"),
+                    startup_context.render_block("codex"),
+                )
+            )
+            self.assertEqual(
+                [],
+                startup_context.sync(
+                    repo_root, home=repo_root, env=HARNESS_ENV, check=True
+                )["stale"],
+            )
+
     def test_unrelated_trailing_bytes_including_blank_lines_are_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = self.build_repo(temp_dir)
@@ -298,6 +349,19 @@ class StartupContextRendererTests(unittest.TestCase):
                 rendered,
             )
             self.assertNotIn("asl nonexistent-command", rendered)
+
+    def test_copilot_receives_the_card_in_its_user_instructions(self) -> None:
+        # Copilot CLI loads ~/.copilot/copilot-instructions.md in every repo.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = self.build_repo(temp_dir)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
+            rendered = (repo_root / ".copilot/copilot-instructions.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(
+                [startup_context.render_block("copilot")],
+                startup_context.managed_blocks(rendered),
+            )
 
     def test_personal_claude_file_receives_only_the_card(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -428,6 +428,10 @@ def _add_overseer_commands(
     )
     overseer_act_parser.add_argument(
         "--session-id",
+        # `--session` is how every other command names one session.
+        "--session",
+        dest="session_id",
+        metavar="SESSION_ID",
         help="For resume: the session to resume (default the run's own next)",
     )
     overseer_act_parser.add_argument(

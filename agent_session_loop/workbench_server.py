@@ -61,6 +61,7 @@ submission, and a server killed mid-launch leaves a record that says either
 
 from __future__ import annotations
 
+import ipaddress
 import secrets
 import threading
 import webbrowser
@@ -236,6 +237,22 @@ class WorkbenchHTTPServer(ApplicationServer):
         self.launches.forget_pid(plan_dir)
 
 
+def is_loopback_host(host: str) -> bool:
+    """Whether binding ``host`` keeps the server reachable from this machine only.
+
+    :data:`asl_workbench.http_policy.LOCAL_POLICY` answers reads without the
+    bearer token because the bind address is the access control; an interface
+    other peers can reach would hand them every plan.
+    """
+    name = host.strip().strip("[]").lower()
+    if name == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+
 def create_server(
     *,
     host: str = DEFAULT_HOST,
@@ -313,9 +330,27 @@ def workbench_serve_from_args(
     install_handlers = install_signal_handlers or _install_shutdown_handlers
 
     plan_roots = tuple(getattr(args, "plan_root", None) or ())
+    host = getattr(args, "host", None) or DEFAULT_HOST
+    if not is_loopback_host(host):
+        error = (
+            f"--host {host} is not a loopback address; the local Workbench serves "
+            "reads without a token, so it only binds loopback"
+        )
+        if args.json:
+            responses.print_json(
+                responses.error_payload(
+                    COMMAND_NAME,
+                    reason="non-loopback-host",
+                    error=error,
+                    paused=False,
+                )
+            )
+        else:
+            print(f"{program_name()} workbench serve: {error}", file=sys.stderr)
+        return 1
     try:
         server = create_server(
-            host=getattr(args, "host", None) or DEFAULT_HOST,
+            host=host,
             port=args.port,
             state_dir=args.state_dir,
             plan_roots=plan_roots,

@@ -401,6 +401,38 @@ class WorkbenchHardeningTests(support_static.WorkbenchHardeningCase):
         # asserting result==0 confirms the finally branch executed.)
         self.assertIn("port", bound_port_holder)
 
+    def test_serve_from_args_refuses_a_non_loopback_host(self) -> None:
+        # Local reads need no token, so the bind address is the access control:
+        # a LAN-reachable interface would serve every plan to any peer.
+        served: list[object] = []
+        args = argparse.Namespace(
+            host="0.0.0.0",
+            port=0,
+            state_dir=str(self.state_dir),
+            plan_root=None,
+            open=False,
+            json=True,
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            result = workbench_server.workbench_serve_from_args(
+                args,
+                open_browser=lambda url: True,
+                serve_forever=served.append,
+                install_signal_handlers=lambda srv: lambda: None,
+            )
+        self.assertEqual(1, result)
+        self.assertEqual([], served)
+        self.assertEqual("non-loopback-host", json.loads(stdout.getvalue())["reason"])
+
+    def test_loopback_hosts_are_recognised(self) -> None:
+        for host in ("127.0.0.1", "127.0.0.2", "::1", "[::1]", "localhost"):
+            with self.subTest(host=host):
+                self.assertTrue(workbench_server.is_loopback_host(host))
+        for host in ("0.0.0.0", "::", "192.168.1.5", "example.com", ""):
+            with self.subTest(host=host):
+                self.assertFalse(workbench_server.is_loopback_host(host))
+
 
 if __name__ == "__main__":
     unittest.main()

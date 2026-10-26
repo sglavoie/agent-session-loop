@@ -17,7 +17,10 @@ def _add_inbox_commands(
     """The nested `asl inbox` group."""
     inbox_parser = subparsers.add_parser(
         "inbox",
-        help="Write supervisor messages or read pending worker guidance.",
+        help=(
+            "Write supervisor messages, read pending worker guidance, or "
+            "receipt an urgent correction."
+        ),
         epilog=_group_epilogue("inbox", "asl inbox reply --help", guide=True),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -31,11 +34,15 @@ def _add_inbox_commands(
         help="Append implementation guidance for the active worker.",
     )
     _add_plan_reference_args(inbox_guidance_parser)
-    inbox_guidance_parser.add_argument("--text", help="Guidance body")
-    inbox_guidance_parser.add_argument(
-        "--text-stdin",
-        action="store_true",
-        help="Read the guidance body from standard input",
+    inbox_guidance_parser.show_as_alternatives(
+        inbox_guidance_parser.add_argument(
+            "--text", help="Guidance body (this or --text-stdin, exactly one)"
+        ),
+        inbox_guidance_parser.add_argument(
+            "--text-stdin",
+            action="store_true",
+            help="Read the guidance body from standard input instead of --text",
+        ),
     )
     inbox_guidance_parser.add_argument(
         "--wait-delivered",
@@ -64,11 +71,15 @@ def _add_inbox_commands(
         metavar="QUESTION_ID",
         help="Question UUID to answer",
     )
-    inbox_reply_parser.add_argument("--text", help="Reply body")
-    inbox_reply_parser.add_argument(
-        "--text-stdin",
-        action="store_true",
-        help="Read the reply body from standard input",
+    inbox_reply_parser.show_as_alternatives(
+        inbox_reply_parser.add_argument(
+            "--text", help="Reply body (this or --text-stdin, exactly one)"
+        ),
+        inbox_reply_parser.add_argument(
+            "--text-stdin",
+            action="store_true",
+            help="Read the reply body from standard input instead of --text",
+        ),
     )
     inbox_reply_parser.add_argument(
         "--wait-consumed",
@@ -108,6 +119,11 @@ def _add_inbox_commands(
         "--note",
         help="Optional resolution note (not an operator reply)",
     )
+    resolution_note.add_argument(
+        "--note-stdin",
+        action="store_true",
+        help="Read the optional resolution note from standard input",
+    )
     inbox_resolve_parser.add_argument(
         "--wait-consumed",
         action="store_true",
@@ -119,11 +135,6 @@ def _add_inbox_commands(
         default=None,
         metavar="SECONDS",
         help="Consumption wait timeout in seconds (default: 90; maximum: 1800)",
-    )
-    resolution_note.add_argument(
-        "--note-stdin",
-        action="store_true",
-        help="Read the optional resolution note from standard input",
     )
     inbox_resolve_parser.set_defaults(
         handler_ref="mailbox_cli_replies:inbox_resolve_from_args",
@@ -210,15 +221,17 @@ def _add_worker_message_commands(
         help="Publish a nonblocking notice from the active worker turn.",
     )
     _add_plan_reference_args(notify_parser)
-    notify_parser.add_argument(
-        "text",
-        nargs="?",
-        help="Notice body",
-    )
-    notify_parser.add_argument(
-        "--text-stdin",
-        action="store_true",
-        help="Read the notice body from standard input",
+    notify_parser.show_as_alternatives(
+        notify_parser.add_argument(
+            "text",
+            nargs="?",
+            help="Notice body (this or --text-stdin, exactly one)",
+        ),
+        notify_parser.add_argument(
+            "--text-stdin",
+            action="store_true",
+            help="Read the notice body from standard input instead",
+        ),
     )
     notify_parser.set_defaults(handler_ref="mailbox_cli_notify:notify_from_args")
 
@@ -282,6 +295,13 @@ def _add_outbox_commands(
     outbox_supervise_parser = outbox_sub.add_parser(
         "supervise",
         help=("Wait on a resumable per-launch cursor and print one supervision token."),
+        description=(
+            "Wait on a resumable per-launch cursor and print one supervision "
+            "token: IDLE, ACTION questions=<n>, DONE outcome=<outcome> seq=<n>, "
+            "or LOST reason=<reason>. Every token exits 0; only a command "
+            "error exits nonzero, with a reason. Reissue the identical command "
+            "after IDLE; stop on DONE or LOST."
+        ),
     )
     _add_plan_reference_args(outbox_supervise_parser)
     outbox_supervise_parser.add_argument(

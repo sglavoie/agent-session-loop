@@ -153,6 +153,7 @@ _WORKTREE_IGNORE_ARGV: tuple[str, ...] = (
     "--exclude-standard",
     "-x",
     f"!{_WORKTREE_IGNORE_FILE}",
+    "-z",
     "--",
     f":(top,glob)**/{_WORKTREE_IGNORE_FILE}",
 )
@@ -201,6 +202,30 @@ def _review_guard_git(cwd: Path, argv: list[str]) -> subprocess.CompletedProcess
     if result.returncode != 0:
         raise _ReviewGuardUnavailable("git-command-failed", argv, result=result)
     return result
+
+
+def _review_guard_git_output(cwd: Path, argv: list[str]) -> str:
+    """Run a guard probe whose output may hold non-UTF-8 bytes, failing closed.
+
+    A patch carries file content verbatim, so a Latin-1 file in the diff would
+    raise from text-mode decoding and pause every review as ``git-unrunnable``.
+    The bytes are read raw and decoded with ``surrogateescape``, which keeps
+    every undecodable byte (and every ``\r``, which text mode would translate)
+    recoverable: :data:`GUARD_TEXT_ERRORS` re-encodes it to exactly the bytes
+    git printed.
+    """
+    try:
+        result = _run_git_bytes(cwd, argv)
+    except Exception as error:
+        raise _ReviewGuardUnavailable("git-unrunnable", argv, error=error) from error
+    if result.returncode != 0:
+        raise _ReviewGuardUnavailable("git-command-failed", argv, result=result)
+    return result.stdout.decode("utf-8", GUARD_TEXT_ERRORS)
+
+
+#: The codec error handler for text read by :func:`_review_guard_git_output`;
+#: hashing with it reproduces git's bytes.
+GUARD_TEXT_ERRORS = "surrogateescape"
 
 
 def _review_guard_diff_base(cwd: Path) -> tuple[str, str]:

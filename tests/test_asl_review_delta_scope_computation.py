@@ -107,6 +107,36 @@ class ReviewDeltaScopeComputationTests(ReviewDeltaScopeBase):
         self.assertEqual(["src/base.py", "src/collateral.py"], delta["changed_files"])
         self.assertIn("src/collateral.py", self._scope_section(delta))
 
+    def test_unusual_path_names_reach_the_scope_unquoted(self) -> None:
+        # Without -z git C-quotes these, and the reviewer would be told to
+        # reread files that do not exist.
+        base = self._commit("src/café.md", "base\n")
+        self._commit('src/say "hi".txt', "base\n")
+        self._commit("src/flagged é.py", "base\n")
+        base = self._git("rev-parse", "HEAD")
+        self._git("update-index", "--assume-unchanged", "src/flagged é.py")
+        self._record_repair_cycle(repo_head=base)
+        (self.repo_root / "src" / "café.md").write_text("tracked\n", encoding="utf-8")
+        (self.repo_root / "src" / 'say "hi".txt').write_text(
+            "staged\n", encoding="utf-8"
+        )
+        self._git("add", 'src/say "hi".txt')
+        (self.repo_root / "src" / "naïve.py").write_text("new\n", encoding="utf-8")
+
+        delta, fallback_reason = self._compute()
+
+        self.assertIsNone(fallback_reason)
+        assert delta is not None
+        self.assertEqual(
+            [
+                "src/café.md",
+                "src/flagged é.py",
+                "src/naïve.py",
+                'src/say "hi".txt',
+            ],
+            delta["changed_files"],
+        )
+
     def test_ignored_repair_file_stays_out_of_scope(self) -> None:
         base = self._commit(".gitignore", "generated/\n")
         self._record_repair_cycle(repo_head=base)

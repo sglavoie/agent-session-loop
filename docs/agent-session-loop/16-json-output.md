@@ -228,6 +228,16 @@ asl unlock ~/.local/share/agent-plans/example-plan/ --json
 
 All parsed subcommands that support `--json` print JSON errors to stdout. Common
 error fields are `ok`, `command`, `reason`, `error`, `paused`, and `details`.
+`asl tail --json` is a stream rather than one object: it prints the latest
+run's `events.jsonl` records one per line — the last `--lines` of them, then
+each new one until `run_finished` (or only the first part with `--no-follow`)
+— and leaves harness log lines to the text form; a failure is still one error
+object. `asl backfill-progress --json` answers `reason: dry-run` with the
+parsed `entries` and the rendered `journal` under `--dry-run`, `reason:
+written` with `entries_written`, `completed_session_ids`, and `progress_path`
+otherwise, and refuses an existing journal without `--force` as `reason:
+progress-exists`. `asl workbench pin` and `asl workbench unpin` accept `--json`
+like `asl workbench registry`, answering `plan_dir` and `registry_path`.
 `run --json` preserves its existing fields and adds the common `command` and
 `details` fields; important run fields include `paused`, `reason`,
 `pause_reason`, `pause_details`, `harness`, `harness_config`, `model`,

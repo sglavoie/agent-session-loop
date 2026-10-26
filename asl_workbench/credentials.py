@@ -45,6 +45,7 @@ import json
 import os
 import secrets
 import stat
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
@@ -403,23 +404,35 @@ class CredentialStore:
         }
 
     def save(self, path: str | os.PathLike[str]) -> None:
-        """Write the file owner-readable only, and atomically.
+        """Write the file owner-readable only, atomically and durably.
 
-        Created through ``O_EXCL`` at mode 0600 and renamed into place, so the
-        file never exists briefly with a permissive mode -- the window in which
-        a file like this is worth stealing is exactly that brief.
+        ``mkstemp`` creates the temporary at mode 0600 under a name no earlier
+        save can have left behind -- a pid-derived name collides once a killed
+        save's leftover meets a restarted service with the same pid, and every
+        save after that fails. It is renamed into place, so the file never
+        exists briefly with a permissive mode -- the window in which a file
+        like this is worth stealing is exactly that brief -- and both the file
+        and its directory are fsynced, so a power cut cannot leave it empty.
         """
         location = Path(path)
-        temporary = location.with_name(f"{location.name}.{os.getpid()}.tmp")
-        descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        descriptor, name = tempfile.mkstemp(
+            dir=location.parent, prefix=f".{location.name}.", suffix=".tmp"
+        )
+        temporary = Path(name)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                 json.dump(self.as_document(), handle, indent=2, sort_keys=True)
                 handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(temporary, location)
-        except BaseException:
+            directory = os.open(location.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
             temporary.unlink(missing_ok=True)
-            raise
 
 
 def owner_matches(configured: Any, presented: Any) -> bool:

@@ -39,6 +39,86 @@ class ParserDefaultsAndSupervisorGuideTests(unittest.TestCase):
         self.assertEqual(2, raised.exception.code)
         self.assertIn("not allowed with argument", stderr.getvalue())
 
+    def test_a_mistyped_command_gets_the_suggestion_without_the_full_list(
+        self,
+    ) -> None:
+        parser = cli.build_parser()
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(["statsu"])
+
+        self.assertEqual(2, raised.exception.code)
+        message = stderr.getvalue()
+        self.assertIn("maybe you meant 'status'?", message)
+        self.assertIn("--help` for the full list", message)
+        self.assertNotIn("choose from", message)
+        self.assertNotIn("supervisor-guide", message)
+
+    def test_an_unrecognizable_command_still_lists_the_choices(self) -> None:
+        parser = cli.build_parser()
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr), self.assertRaises(SystemExit):
+            parser.parse_args(["inbox", "zzz"])
+
+        self.assertIn("choose from", stderr.getvalue())
+
+    def test_control_receipt_waits_accept_the_mailbox_timeout_spelling(
+        self,
+    ) -> None:
+        parser = cli.build_parser()
+        for argv in (
+            ["control", "abort", "/tmp/plan", "--wait"],
+            ["control", "redirect", "/tmp/plan", "--text", "x"],
+            ["control", "redirect-status", "/tmp/plan", "--wait-acknowledged"],
+        ):
+            for spelling in ("--timeout", "--wait-timeout"):
+                with self.subTest(command=argv[1], spelling=spelling):
+                    args = parser.parse_args([*argv, spelling, "5"])
+                    self.assertEqual(5.0, args.wait_timeout)
+
+    def test_text_sources_read_as_alternatives_but_conflict_in_the_handler(
+        self,
+    ) -> None:
+        parser = cli.build_parser()
+        for leaf, alternatives in (
+            (["inbox", "reply"], "[--text TEXT | --text-stdin]"),
+            (["inbox", "guidance"], "[--text TEXT | --text-stdin]"),
+            (["notify"], "[--text-stdin | text]"),
+        ):
+            with self.subTest(leaf=leaf):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout), self.assertRaises(SystemExit):
+                    parser.parse_args([*leaf, "--help"])
+                self.assertIn(alternatives, " ".join(stdout.getvalue().split()))
+        # Display only: argparse lets both through, so the handler can answer
+        # the conflict as JSON `invalid-text-source` rather than exit 2.
+        args = parser.parse_args(
+            ["inbox", "reply", "/tmp/plan", "--to", "q", "--text", "a", "--text-stdin"]
+        )
+        self.assertEqual("a", args.text)
+        self.assertTrue(args.text_stdin)
+
+    def test_one_session_is_spelled_session_everywhere(self) -> None:
+        parser = cli.build_parser()
+        base = [
+            "overseer", "act", "/tmp/plan", "--watcher-id", "w",
+            "--operation", "resume", "--run-id", "r", "--incident-id", "1",
+            "--token", "t", "--scope", "s",
+        ]  # fmt: skip
+        for spelling in ("--session", "--session-id"):
+            with self.subTest(spelling=spelling):
+                args = parser.parse_args([*base, spelling, "2.1"])
+                self.assertEqual("2.1", args.session_id)
+
+    def test_tail_and_backfill_accept_json(self) -> None:
+        parser = cli.build_parser()
+        self.assertTrue(parser.parse_args(["tail", "/tmp/plan", "--json"]).json)
+        self.assertTrue(
+            parser.parse_args(["backfill-progress", "/tmp/plan", "--json"]).json
+        )
+
     def test_run_and_doctor_default_cwd_to_current_directory(self) -> None:
         parser = cli.build_parser()
 

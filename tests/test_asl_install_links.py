@@ -193,6 +193,38 @@ class InstallLinksTests(unittest.TestCase):
         self.assertIn("2 change(s) above were made", stderr.getvalue())
         self.assertIn("disk on fire", stderr.getvalue())
 
+    def test_a_leftover_staging_directory_does_not_stop_a_relink(self) -> None:
+        # A killed install of an older version left its fixed-name staging
+        # entry behind as a directory; the preflight never looks there.
+        self.install()
+        skills = self.home / ".claude/skills"
+        (skills / ".asl.asl-install").mkdir()
+        (skills / "asl").unlink()
+        (skills / "asl").symlink_to(self.root / "elsewhere")
+
+        self.install()
+
+        self.assertEqual(
+            os.fspath(self.repo / "skills/asl"), os.readlink(skills / "asl")
+        )
+        self.assertEqual(
+            [".asl.asl-install"],
+            sorted(
+                entry.name for entry in skills.iterdir() if entry.name.startswith(".")
+            ),
+        )
+
+    def test_a_failed_swap_leaves_no_staging_link_behind(self) -> None:
+        destination = self.home / ".claude/skills/asl"
+        with (
+            mock.patch.object(
+                install_links.os, "replace", side_effect=OSError(5, "EIO")
+            ),
+            self.assertRaises(OSError),
+        ):
+            install_links.link(self.repo / "skills/asl", destination, dry_run=False)
+        self.assertEqual([], list(destination.parent.iterdir()))
+
     def test_prunes_links_whose_skill_is_gone(self) -> None:
         self.install()
         (self.repo / "skills/session-run/SKILL.md").unlink()

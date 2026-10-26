@@ -365,8 +365,9 @@ repair plan.
 
 ### Final helper statuses
 
-The helper emits a single JSON result on stdout whose `reason` field is the
-terminal verdict (`ok` is `true` only for a clean completion):
+The helper emits a single JSON result — the `result.json` at the launch
+handshake's `result_path` under `--detach`, stdout otherwise — whose `reason`
+field is the terminal verdict (`ok` is `true` only for a clean completion):
 
 - `complete` (`ok: true`): every session finished. With `--review-harness`, an
   all-clear review is attached under `review.outcome: all-clear`.

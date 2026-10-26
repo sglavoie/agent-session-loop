@@ -17,7 +17,8 @@
 - `skills/<name>/SKILL.md` is the source of truth for skills. Run
   `just sync-skills` after any change there: it re-links the skills and runs
   `agent_session_loop/startup_context.py`, which re-renders the marked ASL
-  startup card in each discovered root's `AGENTS.md` / `CLAUDE.md` and in
+  startup card in each discovered root's `AGENTS.md` / `CLAUDE.md` /
+  `copilot-instructions.md` and in
   `skills/asl/references/supervisor-context.md`.
   Never hand-edit inside `<!-- ASL_CONTEXT_START ... -->`;
   `just check-startup-context` reports a stale block without rewriting it.
@@ -43,7 +44,9 @@
   governs ASL behavior changes.
 - The repo is indexed by CodeGraph (`.codegraph/`, gitignored). Prefer
   `codegraph explore "<symbols or question>"` over grep.
-- Planning front door: `plan-iterate`, then `asl prepare` / `asl preflight` (with
-  `plan-preflight-iterate` for repairs), then the split, then the `asl` skill to
-  supervise `asl run`. This moves preflight defects to before the run instead of
-  surfacing them as review findings during it.
+- Planning front door: `plan-iterate`, then `asl prepare` (which itself splits,
+  expands, baselines and runs the final preflight; `session-split` then
+  `session-expand` is the by-hand route), then `plan-preflight-iterate` while
+  `asl preflight` is not green, then the `asl` skill to supervise `asl run`.
+  This moves preflight defects to before the run instead of surfacing them as
+  review findings during it.

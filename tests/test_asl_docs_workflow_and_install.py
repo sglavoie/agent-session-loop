@@ -239,7 +239,11 @@ class InstallVerificationTests(unittest.TestCase):
         skill_dirs = [
             path
             for path in (REPO_ROOT / "skills").iterdir()
-            if path.is_dir() and (path / "SKILL.md").exists()
+            if path.is_dir()
+            and (
+                (path / "SKILL.md").exists()
+                or path.name in install_verify_common.SUPPORT_DIRS
+            )
         ]
         for root, _harness in install_verify_common.DEFAULT_HARNESS_ROOTS:
             install_root = home / root / "skills"
@@ -279,6 +283,30 @@ class InstallVerificationTests(unittest.TestCase):
                 check for check in checks if check["name"] == "status-smoke"
             )
             self.assertIn("omitted parallel_validation_path", status_smoke["detail"])
+
+    def test_verify_install_reports_a_missing_references_link(self) -> None:
+        # Every skill's relative ``../references/<file>`` read goes through it.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            fake_bin = self._install_fake_home_links(home)
+            (home / ".claude/skills/references").unlink()
+
+            payload = install_verify.verify_install(
+                repo_root=REPO_ROOT,
+                home=home,
+                path_env=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                env={},
+            )
+
+            self.assertFalse(payload["ok"])
+            self.assertTrue(
+                any(
+                    failure["name"] == "skill-link"
+                    and ".claude/skills/references is missing" in failure["detail"]
+                    for failure in payload["failures"]
+                ),
+                payload["failures"],
+            )
 
     def test_verify_install_accepts_stow_folded_skill_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

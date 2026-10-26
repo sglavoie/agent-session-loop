@@ -249,6 +249,20 @@ class EventPersistenceTests(unittest.TestCase):
             self.assertEqual(b"{}\n", artifact_path.read_bytes())
             self.assertEqual(3, fsync.call_count)
 
+    def test_append_event_starts_a_new_line_after_a_torn_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / events.EVENTS_FILE_NAME
+            events.append_event(event_path, events.Event(name="first", payload={}))
+            with event_path.open("ab") as handle:
+                handle.write(b'{"created_at": "2026-10-25T00:00:00+00:00", "na')
+
+            events.append_event(event_path, events.Event(name="after", payload={}))
+
+            lines = event_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(3, len(lines))
+            self.assertEqual("first", json.loads(lines[0])["name"])
+            self.assertEqual("after", json.loads(lines[2])["name"])
+
     def test_append_event_writes_complete_json_lines_under_concurrency(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             event_path = Path(tmp) / events.EVENTS_FILE_NAME

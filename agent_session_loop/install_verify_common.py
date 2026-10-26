@@ -31,11 +31,19 @@ DEFAULT_HARNESS_ROOTS: tuple[tuple[str, str], ...] = (
     (".copilot", "copilot"),
 )
 
-#: The startup-context file each harness loads at session start. A harness
-#: missing here (Copilot) receives skills but no rendered card.
+#: Skill-directory entries that carry no ``SKILL.md`` but are linked like a
+#: skill, so a skill's relative ``../references/<file>`` read resolves in the
+#: installed layout. ``install.py`` links them and verification checks them.
+SUPPORT_DIRS: tuple[str, ...] = ("references",)
+
+
+#: The startup-context file each harness loads at session start. Copilot CLI
+#: reads ``~/.copilot/copilot-instructions.md`` as its user-level instructions
+#: in every repository.
 CONTEXT_FILES: Mapping[str, str] = {
     "claude": "CLAUDE.md",
     "codex": "AGENTS.md",
+    "copilot": "copilot-instructions.md",
 }
 
 

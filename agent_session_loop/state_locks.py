@@ -121,7 +121,7 @@ def _reclaim_dead_local_lock(lock_path: Path, expected_raw: dict[str, Any]) -> N
         with _plan_lock_mutex(lock_path) as held:
             if held and _read_json_object_safe(lock_path) == expected_raw:
                 pid = _coerce_pid(expected_raw.get("pid"))
-                if pid is not None and not state.is_pid_running(pid):
+                if pid is not None and _owner_gone_reason(pid, expected_raw):
                     try:
                         lock_path.unlink()
                     except OSError:
@@ -133,9 +133,29 @@ def _reclaim_dead_local_lock(lock_path: Path, expected_raw: dict[str, Any]) -> N
     if reclaimed:
         print(
             f"agent-session-loop: reclaimed stale lock at {lock_path} "
-            f"(pid {expected_raw.get('pid')} is not running on this host)",
+            f"(pid {expected_raw.get('pid')} no longer holds it on this host)",
             file=sys.stderr,
         )
+
+
+def _owner_gone_reason(pid: int, raw: dict[str, Any]) -> str | None:
+    """Say why this host's ``pid`` cannot be the lock's owner, or ``None``.
+
+    A live pid alone is not the owner: after a SIGKILL or a reboot the pid can
+    be reused by an unrelated process, which would hold the plan locked
+    forever. A recorded ``process_start`` that differs from the live
+    process's is that proof; an unknown start time on either side proves
+    nothing and leaves the owner alive.
+    """
+    if not state.is_pid_running(pid):
+        return f"pid {pid} is not running"
+    recorded = raw.get("process_start")
+    if not isinstance(recorded, str) or not recorded:
+        return None
+    current = process_tree.process_birth(pid)
+    if current is None or current == recorded:
+        return None
+    return f"pid {pid} was reused by a process started at {current}"
 
 
 def _read_lock_path(
@@ -181,9 +201,9 @@ def _read_lock_path(
         # host", never "dead".
         stale = True
         reason = f"lock was recorded on host {hostname}"
-    elif not state.is_pid_running(pid):
+    elif (gone := _owner_gone_reason(pid, raw)) is not None:
         stale = True
-        reason = f"pid {pid} is not running"
+        reason = gone
         if reclaim and hostname is not None:
             # Reaching here with a hostname means it is this host's, so the
             # local process table is the one that owns the pid and its absence

@@ -626,6 +626,32 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.assertNotIn("Traceback", message)
         self.assertIsNone(self.persisted_state()["run_finished_at"])
 
+    def test_the_atomic_writers_own_refusal_is_an_expected_failure(self) -> None:
+        # What an unwritable state directory actually raises: the writer wraps
+        # the OSError in its own error type, which is not a defect.
+        self.write_unfinished_state(run_id="run-artifact-error")
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                state_abandonment.artifacts,
+                "atomic_write_bytes",
+                side_effect=state_abandonment.artifacts.ArtifactError(
+                    "cannot write state.json: Permission denied"
+                ),
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertFalse(
+                state_abandonment.mark_run_abandoned(
+                    self.plan_state, lock_info=None, trigger="test"
+                )
+            )
+
+        message = stderr.getvalue()
+        self.assertIn("could not record the abandoned run", message)
+        self.assertNotIn("unexpected error", message)
+        self.assertNotIn("Traceback", message)
+
     def test_a_defect_still_fails_open_but_is_reported_with_its_traceback(
         self,
     ) -> None:

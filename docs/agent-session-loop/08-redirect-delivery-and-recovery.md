@@ -393,7 +393,7 @@ before anything is renamed, the same way an unreadable conversation ledger
 already does.
 
 ```
-asl control redirect PLAN_DIR_OR_ID (--text TEXT | --text-stdin) [--session N] [--turn N] [--run-id RUN_ID] [--operation-id ID] [--ttl SECONDS] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control redirect PLAN_DIR_OR_ID (--text TEXT | --text-stdin) [--session SESSION_ID] [--turn N] [--run-id RUN_ID] [--operation-id ID] [--ttl SECONDS] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control redirect-status PLAN_DIR_OR_ID [--redirect-id ID ...] [--wait-acknowledged] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control recover-conversation PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 ```

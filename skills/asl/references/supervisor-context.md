@@ -81,6 +81,7 @@ Leaf help (these groups list leaves only; asl workbench is the exception and sho
   asl control redirect --help
   asl control redirect-status --help
   asl control recover-conversation --help
+  asl control guard add --help
   asl bridge serve --help
 
 Placeholders: PLAN_DIR, SUPERVISION_ID, QUESTION_ID, SESSION_ID, NEW_SUPERVISION_ID, REPLY_TEXT, GUIDANCE_TEXT, REDIRECT_TEXT, RESULT_PATH

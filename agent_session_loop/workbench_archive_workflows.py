@@ -13,6 +13,7 @@ from asl_workbench import archive as portable_archive
 from . import (
     plans_errors,
     plans_files,
+    responses,
     state,
     state_locks,
     workbench_registry,
@@ -289,8 +290,7 @@ def workbench_pin_from_args(args: Any) -> int:
             else None,
         )
     except ArchiveRefused as error:
-        print(f"{program_name()} workbench pin: {error.message}", file=sys.stderr)
-        return 1
+        return _print_refusal(args, "pin", error)
     # Echo the pin as stored rather than as typed: `upsert_pin` canonicalizes,
     # and reporting the raw argument would hide a symlink or a relative path
     # having resolved somewhere the operator did not mean.
@@ -302,6 +302,17 @@ def workbench_pin_from_args(args: Any) -> int:
         (pin for pin in update.registry.pins if pin.plan_dir == canonical), None
     )
     resolved = matching.plan_dir if matching is not None else plan_dir
+    if getattr(args, "json", False):
+        responses.print_json(
+            responses.success_payload(
+                "workbench-pin",
+                reason="pinned",
+                plan_dir=resolved,
+                label=matching.label if matching is not None else None,
+                registry_path=str(update.path),
+            )
+        )
+        return 0
     print(f"Pinned {resolved} in {update.path}")
     return 0
 
@@ -312,10 +323,35 @@ def workbench_unpin_from_args(args: Any) -> int:
     try:
         update = unpin_plan(plan_dir)
     except ArchiveRefused as error:
-        print(f"{program_name()} workbench unpin: {error.message}", file=sys.stderr)
-        return 1
+        return _print_refusal(args, "unpin", error)
+    if getattr(args, "json", False):
+        responses.print_json(
+            responses.success_payload(
+                "workbench-unpin",
+                reason="unpinned",
+                plan_dir=plan_dir,
+                registry_path=str(update.path),
+            )
+        )
+        return 0
     print(f"Unpinned {plan_dir} from {update.path}")
     return 0
+
+
+def _print_refusal(args: Any, leaf: str, error: ArchiveRefused) -> int:
+    """Report a refused pin or unpin as one JSON object or one stderr line."""
+    if getattr(args, "json", False):
+        responses.print_json(
+            responses.error_payload(
+                f"workbench-{leaf}",
+                reason=error.reason,
+                error=error.message,
+                details=error.details,
+            )
+        )
+    else:
+        print(f"{program_name()} workbench {leaf}: {error.message}", file=sys.stderr)
+    return 1
 
 
 def unlock_payload(plan_dir: str, result: state.UnlockResult) -> dict[str, Any]:

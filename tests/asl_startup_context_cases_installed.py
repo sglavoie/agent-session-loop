@@ -12,7 +12,11 @@ class InstalledStartupContextTests(unittest.TestCase):
         skill_dirs = [
             path
             for path in (REPO_ROOT / "skills").iterdir()
-            if path.is_dir() and (path / "SKILL.md").exists()
+            if path.is_dir()
+            and (
+                (path / "SKILL.md").exists()
+                or path.name in install_verify_common.SUPPORT_DIRS
+            )
         ]
         for root in HARNESS_ROOT_DIRS:
             install_root = home / root / "skills"

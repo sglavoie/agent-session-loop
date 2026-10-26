@@ -18,7 +18,7 @@ def _add_run_commands(
     """`asl run`, the loop itself."""
     run_parser = subparsers.add_parser(
         "run",
-        help="Run pending session IDs from a split plan directory.",
+        help="Run a split plan's pending sessions, one harness turn at a time.",
     )
     run_flags.add_run_arguments(run_parser, mode="cli")
     run_parser.set_defaults(handler_ref="runner:run_from_args")
@@ -105,7 +105,7 @@ def _add_run_inspection_commands(
 
     status_parser = subparsers.add_parser(
         "status",
-        help="Show session ID and operational runner status.",
+        help="Show a plan's sessions, their handoff status, and the runner's state.",
     )
     status_parser.add_argument(
         "plan_dir",
@@ -129,7 +129,7 @@ def _add_run_inspection_commands(
 
     tail_parser = subparsers.add_parser(
         "tail",
-        help="Show and follow live run events and harness logs by session ID.",
+        help="Show and follow a plan's run events and harness logs.",
     )
     tail_parser.add_argument(
         "plan_dir", metavar="PLAN_DIR", help="Split plan directory to tail"
@@ -149,6 +149,14 @@ def _add_run_inspection_commands(
         "--no-follow",
         action="store_true",
         help="Print recent activity and exit without waiting",
+    )
+    tail_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Print the run's event records as JSON lines, one per line, "
+            "instead of formatted activity and harness logs"
+        ),
     )
     tail_parser.set_defaults(handler_ref="tail:tail_from_args")
 
@@ -245,6 +253,7 @@ def _add_check_commands(
     verify_parser.add_argument(
         "--session",
         required=True,
+        metavar="SESSION_ID",
         help="Session ID whose completion contract should be verified",
     )
     verify_parser.add_argument(
@@ -283,6 +292,7 @@ def _add_check_commands(
     contract_check_parser.add_argument(
         "--session",
         default=None,
+        metavar="SESSION_ID",
         help=(
             "Restrict the check to a single session id (single-file mode; "
             "default: every session in the plan)"

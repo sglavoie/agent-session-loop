@@ -134,7 +134,9 @@ def _add_workspace_recovery_commands(
     external_parser.add_argument(
         "plan_dir", metavar="PLAN_DIR", help="Split plan directory"
     )
-    external_parser.add_argument("--session", required=True, help="Pending session ID")
+    external_parser.add_argument(
+        "--session", required=True, metavar="SESSION_ID", help="Pending session ID"
+    )
     external_parser.add_argument(
         "--repository",
         action="append",
@@ -180,7 +182,7 @@ def _add_workspace_recovery_commands(
         "plan_dir", metavar="PLAN_DIR", help="Split plan directory"
     )
     accept_refs_parser.add_argument(
-        "--session", required=True, help="Pending session ID"
+        "--session", required=True, metavar="SESSION_ID", help="Pending session ID"
     )
     accept_refs_parser.add_argument(
         "--state-dir", metavar="DIR", help="Override operational state directory"
@@ -254,6 +256,14 @@ def _add_progress_commands(
         "--dry-run",
         action="store_true",
         help="Print the would-be journal contents to stdout without writing",
+    )
+    backfill_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Print machine-readable JSON output (with --dry-run, the entries "
+            "and the rendered journal)"
+        ),
     )
     backfill_parser.set_defaults(handler_ref="progress_cli:backfill_progress_from_args")
 

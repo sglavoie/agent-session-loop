@@ -34,7 +34,8 @@ A violation rejects the turn, retains every filesystem change, returns the sessi
 
 ### Run control without the Workbench
 
-The same two control-queue commands are also available without the Workbench: `asl control stop-after-current PLAN_DIR_OR_ID [--state-dir DIR] [--json]` and `asl control select-harness PLAN_DIR_OR_ID --harness codex|claude|copilot [--state-dir DIR] [--json]` are the programmatic equivalents of the interactive `p` and `1`/`2`/`3` run-control keys, which are disabled for `run --json`, `run --dry-run`, and non-TTY runs; each validates the plan, enqueues onto the durable per-plan control queue, and reports `enqueued`, `command_id`, `run_active`, and a `note` (plus `pending_after_current` for stop-after-current and `harness` for select-harness).
+The Workbench's run controls are also available without it. `asl control stop-after-current PLAN_DIR_OR_ID [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]` and `asl control select-harness PLAN_DIR_OR_ID --harness codex|claude|copilot [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]` are the programmatic equivalents of the interactive `p` and `1`/`2`/`3` run-control keys, which are disabled for `run --json`, `run --dry-run`, and non-TTY runs; each validates the plan, enqueues onto the durable per-plan control queue, and reports `enqueued`, `command_id`, `run_active`, and a `note` (plus `pending_after_current` for stop-after-current and `harness` for select-harness).
+The rest of `asl control` — `abort`, `set-model`, `guard`, and the `redirect`, `redirect-status`, `resolve-redirect` and `recover-conversation` leaves for correcting a live turn — is listed with its flags in the [command reference](agent-session-loop/02-commands.md); every receipt wait there takes `--wait` with `--timeout` (also spelled `--wait-timeout`).
 A honored stop lets the current session finish and, when any session is still pending, exits the run successfully with `reason: stopped` so the next run resumes from the remainder (a stop requested during the last session is a no-op that still ends `all-complete`).
 
 ### Autopilot skill
@@ -111,7 +112,9 @@ help shows them and its epilogue says the bare `asl workbench` form runs
 
 The eight mailbox commands are `asl inbox guidance`, `asl inbox reply`,
 `asl inbox resolve`, `asl inbox read`, `asl ask`, `asl notify`,
-`asl outbox wait`, and `asl outbox supervise`. `asl outbox supervise` is the
+`asl outbox wait`, and `asl outbox supervise`. (`asl inbox acknowledge` sits
+under `asl inbox` too, but it is the worker's redirect receipt, not a mailbox
+command.) `asl outbox supervise` is the
 supervision loop: it wakes only on questions and terminal `supervision-end`
 records, persists its own `--since` cursor per launch, absorbs non-actionable
 wakes, and prints one of `IDLE`, `ACTION questions=<n>`,

@@ -16,6 +16,7 @@ from .plans_discovery import (
 )
 from .plans_errors import (
     PlanError,
+    PlanNotFoundError,
 )
 from .plans_files import (
     _is_file,
@@ -59,7 +60,7 @@ def require_plan_directory(plan_dir: str | Path) -> Path:
     if not canonical_dir.is_dir():
         if canonical_dir.exists():
             raise PlanError(f"plan path is not a directory: {canonical_dir}")
-        raise PlanError(f"plan directory does not exist: {canonical_dir}")
+        raise PlanNotFoundError(f"plan directory does not exist: {canonical_dir}")
     return canonical_dir
 
 

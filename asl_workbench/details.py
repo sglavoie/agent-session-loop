@@ -384,8 +384,17 @@ class DetailScope:
     # -- Containment -------------------------------------------------------
 
     def contains(self, candidate: str) -> bool:
-        """Whether an already-resolved path lies inside this plan's state."""
-        return PurePath(candidate).is_relative_to(PurePath(self.plan_state_dir))
+        """Whether ``candidate`` names a path inside this plan's state.
+
+        The comparison is lexical, so a relative path or one with a ``..``
+        component is refused outright: ``is_relative_to`` compares parts and
+        would otherwise accept ``<state>/../../elsewhere``. Symlinks are the
+        provider's to resolve, since this half opens no file.
+        """
+        path = PurePath(candidate)
+        if not path.is_absolute() or ".." in path.parts:
+            return False
+        return path.is_relative_to(PurePath(self.plan_state_dir))
 
     def contained_path(self, candidate: str) -> str:
         """Accept a caller-supplied path only when this plan contains it."""

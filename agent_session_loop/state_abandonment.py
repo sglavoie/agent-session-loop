@@ -327,13 +327,19 @@ def mark_run_abandoned(
                     ),
                 )
             return True
-    except (OSError, ValueError, TypeError, StateError) as error:
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        StateError,
+        artifacts.ArtifactError,
+    ) as error:
         # Death has already cost the caller its run; refusing to record that
         # is strictly better than raising into a lock acquire or a status read.
         # These are the failures the claim and the writes can actually raise:
-        # an unwritable state directory, a payload that will not encode, a
-        # state helper refusing. Say so, so a run that stays "running" forever
-        # has a trail.
+        # an unwritable state directory (which the atomic writer reports as an
+        # ``ArtifactError``), a payload that will not encode, a state helper
+        # refusing. Say so, so a run that stays "running" forever has a trail.
         _report_unrecorded_abandonment(plan_state, trigger, error)
         return False
     except Exception as error:  # noqa: BLE001

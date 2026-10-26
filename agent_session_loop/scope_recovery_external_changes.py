@@ -310,7 +310,11 @@ def _finish_checkpoint(progress: dict[str, Any], current: dict[str, Any]) -> Non
         git("show", "-s", "--format=%P", head) != intent["head_before"]
         or git("show", "-s", "--format=%B", head).strip() != progress["message"].strip()
         or sorted(
-            git("diff-tree", "--no-commit-id", "--name-only", "-r", head).splitlines()
+            path
+            for path in git(
+                "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", head
+            ).split("\0")
+            if path
         )
         != sorted(target["paths"])
         or _dirty_paths(current[key])

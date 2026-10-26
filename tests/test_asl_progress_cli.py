@@ -58,11 +58,13 @@ class ProgressCliTests(unittest.TestCase):
         *,
         force: bool = False,
         dry_run: bool = False,
+        as_json: bool = False,
     ) -> tuple[int, str, str]:
         args = argparse.Namespace(
             plan_dir=str(plan_dir),
             force=force,
             dry_run=dry_run,
+            json=as_json,
         )
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
@@ -192,6 +194,31 @@ class ProgressCliTests(unittest.TestCase):
             self.assertIn("## Session 1 — complete", out)
             self.assertIn("## Session 2 — complete", out)
             self.assertFalse(plans_progress.progress_path(plan_dir).exists())
+
+    def test_backfill_json_reports_each_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1", "2"))
+            progress_file = plans_progress.progress_path(plan_dir)
+
+            code, out, err = self._run_backfill(plan_dir, dry_run=True, as_json=True)
+            self.assertEqual((0, ""), (code, err))
+            preview = json.loads(out)
+            self.assertEqual("dry-run", preview["reason"])
+            self.assertEqual(["1", "2"], [e["session_id"] for e in preview["entries"]])
+            self.assertIn("1", preview["journal"])
+            self.assertFalse(progress_file.exists())
+
+            code, out, err = self._run_backfill(plan_dir, as_json=True)
+            self.assertEqual((0, ""), (code, err))
+            written = json.loads(out)
+            self.assertEqual("written", written["reason"])
+            self.assertEqual(2, written["entries_written"])
+            self.assertEqual(str(progress_file), written["progress_path"])
+
+            code, out, err = self._run_backfill(plan_dir, as_json=True)
+            self.assertEqual((1, ""), (code, err))
+            self.assertEqual("progress-exists", json.loads(out)["reason"])
 
     def test_backfill_with_no_completed_sessions_writes_header_only(
         self,

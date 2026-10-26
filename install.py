@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -41,6 +42,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from agent_session_loop.install_verify_common import (  # noqa: E402 - needs REPO_ROOT
+    SUPPORT_DIRS,
     HarnessRoot,
     discover_harness_roots,
 )
@@ -48,8 +50,6 @@ from agent_session_loop.install_verify_common import (  # noqa: E402 - needs REP
 WRAPPERS = ("agent-session-loop", "asl")
 
 WRAPPER_DIR = ".local/bin"
-
-SUPPORT_DIRS = ("references",)
 
 
 #: What every conflict tells the operator to do about it.
@@ -119,11 +119,18 @@ def link(source: Path, destination: Path, *, dry_run: bool) -> str | None:
                 f"cannot create {destination.parent}: {error.strerror or error}; "
                 f"{RESOLUTION}"
             ) from error
-        staging = destination.with_name(f".{destination.name}.asl-install")
-        if staging.is_symlink() or staging.exists():
-            staging.unlink()
+        # Unique per call, so neither a leftover from a killed install (which
+        # may even be a directory) nor a concurrent install can collide with it
+        # after the preflight has passed and other links have already moved.
+        staging = destination.with_name(
+            f".{destination.name}.asl-install.{os.getpid()}.{secrets.token_hex(4)}"
+        )
         os.symlink(target, staging)
-        os.replace(staging, destination)
+        try:
+            os.replace(staging, destination)
+        except BaseException:
+            staging.unlink(missing_ok=True)
+            raise
     return f"{action}: {destination} -> {target}"
 
 

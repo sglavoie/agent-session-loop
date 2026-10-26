@@ -263,6 +263,18 @@ class ScopeContainmentTests(unittest.TestCase):
             str(self.plan_state), raised.exception.details["plan_state_dir"]
         )
 
+    def test_a_dotdot_path_that_leaves_the_plan_state_is_refused(self) -> None:
+        outsider = self.root / "elsewhere.log"
+        outsider.write_text("not yours\n", encoding="utf-8")
+        escaping = f"{self.plan_state}/../../elsewhere.log"
+        with self.assertRaises(details.DetailError) as raised:
+            self.scope.contained_path(escaping)
+        self.assertEqual(details.REASON_INVALID_REQUEST, raised.exception.reason)
+
+    def test_a_relative_path_is_refused(self) -> None:
+        with self.assertRaises(details.DetailError):
+            self.scope.contained_path("stdout.log")
+
     def test_a_path_inside_the_plan_state_is_accepted(self) -> None:
         self.assertEqual(str(self.log), self.scope.contained_path(str(self.log)))
 

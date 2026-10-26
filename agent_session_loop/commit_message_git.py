@@ -97,8 +97,8 @@ def _deletion_already_staged(cwd: Path, path: str) -> bool:
     in_index = _git(cwd, ["ls-files", "--", path])
     if in_index.returncode != 0 or in_index.stdout.strip():
         return False
-    in_head = _git(cwd, ["ls-tree", "--name-only", "HEAD", "--", path])
-    return in_head.returncode == 0 and in_head.stdout.strip() == path
+    in_head = _git(cwd, ["ls-tree", "--name-only", "-z", "HEAD", "--", path])
+    return in_head.returncode == 0 and in_head.stdout.rstrip("\0") == path
 
 
 def dequalify_paths(qualified: Sequence[str]) -> list[str]:

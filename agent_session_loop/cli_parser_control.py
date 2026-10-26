@@ -148,6 +148,8 @@ def _add_control_commands(
             "Add, remove, or list run-scoped guards: commands denied through "
             "the worker's PATH, and paths that must end the turn unchanged."
         ),
+        epilog=_group_epilogue("control guard", "asl control guard add --help"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     control_guard_sub = control_guard_parser.add_subparsers(
         dest="control_guard_command",
@@ -159,6 +161,11 @@ def _add_control_commands(
         help=(
             "Deny a command, or protect a path, for the remainder of the run "
             "holding this plan."
+        ),
+        description=(
+            "Deny a command, or protect a path, for the remainder of the run "
+            "holding this plan. Give at least one --deny-command or "
+            "--protect-path; both repeat, and one call may mix them."
         ),
     )
     _add_plan_reference_args(control_guard_add_parser)
@@ -286,6 +293,7 @@ def _add_control_commands(
     )
     control_redirect_parser.add_argument(
         "--timeout",
+        "--wait-timeout",
         dest="wait_timeout",
         type=float,
         default=None,
@@ -351,6 +359,7 @@ def _add_control_commands(
     )
     control_redirect_status_parser.add_argument(
         "--timeout",
+        "--wait-timeout",
         dest="wait_timeout",
         type=float,
         default=None,
