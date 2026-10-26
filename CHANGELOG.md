@@ -24,6 +24,27 @@ A polish and hardening round after the public release.
   numeric input is refused.
 - Install checks every destination before linking and writes context files
   atomically.
+- Run loop: SIGTERM and SIGHUP tear a run down like Ctrl-C; the host-rename
+  rule applies to every foreign-host check; a run whose lock pid was reused is
+  recorded as abandoned; a failed harness spawn answers a pending abort; turn
+  idle time uses the monotonic clock.
+- Readers tolerate bytes that are not UTF-8 and pathologically nested JSON:
+  verification checks, last-message files, control, metrics, recovery and
+  queue-drain readers; the control queue drain now fullsyncs its truncate.
+- Workbench: one outstanding mutation per plan holds under concurrent
+  requests; a reply or correction stays with the plan it was sent for; the
+  connector lock is published atomically; malformed, stalled, short or
+  over-deep request bodies, bad `Content-Length` values and out-of-range
+  reads get 4xx instead of 500; unsupported standard methods get 405;
+  offset-less times read as UTC in the browser; keyboard focus and refresh
+  announcements are kept where they belong.
+- CLI: `asl workbench` group flags no longer vanish before a non-serve leaf;
+  `split` reports a missing source as a JSON `input-error`; refusals read as
+  sentences, numeric refusals share one wording and refused flag values report
+  `input-error`; help placeholders name the kind of value; `progress` accepts
+  `--state-dir`.
+- Supervision cursors are written with mode `0600` like the other mailbox
+  files, and `install.py --home` names the renderer for that home.
 
 ### Changed
 
@@ -35,6 +56,11 @@ A polish and hardening round after the public release.
   workflow is pinned to a named runner image and triggers on the code its
   fixture server imports, and Dependabot covers GitHub Actions, the browser
   harness's npm pins and the `dev` Python dependency group.
+- Documentation agrees with the code on mailbox counts, Autopilot's
+  `worker_hung` stop, `--strict` exit codes, the harness config path and the
+  bridge's interventions; CI checkouts drop their persisted token, Playwright
+  browsers are cached, and the harness-compatibility job triggers on every
+  module its verdict depends on.
 
 ## [0.2.0] - 2026-10-23
 
