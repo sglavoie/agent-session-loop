@@ -422,6 +422,13 @@ class ReviewArtifactSchemaTests(unittest.TestCase):
             self.assertFalse(contradictory["ok"])
             self.assertEqual("contradictory-review-artifact", contradictory["reason"])
 
+            # Deep enough that the decoder raises RecursionError instead.
+            artifact_path.write_text("[" * 1_000_000, encoding="utf-8")
+            nested = review.load_review_verdict(plan_dir)
+            self.assertFalse(nested["ok"])
+            self.assertEqual("malformed-review-artifact", nested["reason"])
+            self.assertIn("nested too deeply", nested["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

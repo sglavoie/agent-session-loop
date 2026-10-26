@@ -100,6 +100,12 @@ def parse_review_artifact(
             f"{FINAL_REVIEW_ARTIFACT_FILENAME} is not valid JSON: "
             f"{error.msg} at line {error.lineno} column {error.colno}"
         ) from error
+    except RecursionError as error:
+        # Pathological nesting overflows the decoder's stack rather than
+        # failing its grammar, which is no less a malformed artifact.
+        raise ReviewArtifactError(
+            f"{FINAL_REVIEW_ARTIFACT_FILENAME} is nested too deeply to parse"
+        ) from error
     if not isinstance(payload, dict):
         raise ReviewArtifactError(
             f"{FINAL_REVIEW_ARTIFACT_FILENAME} must be a top-level JSON object"
