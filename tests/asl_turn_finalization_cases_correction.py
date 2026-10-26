@@ -72,6 +72,20 @@ class HandoffCorrectionAttemptTests(unittest.TestCase):
                 2, handoff_correction._handoff_correction_attempt(path, "1")
             )
 
+    def test_undecodable_and_over_deep_lines_are_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            path.write_bytes(
+                b"\xff\xfe not utf-8\n"
+                + b"[" * 1_000_000
+                + b"\n"
+                + json.dumps(self.correction("1")).encode("utf-8")
+                + b"\n"
+            )
+            self.assertEqual(
+                2, handoff_correction._handoff_correction_attempt(path, "1")
+            )
+
     def test_correction_note_names_the_defect_and_the_repair(self) -> None:
         defect = handoff_correction._HandoffDefect(
             code=handoff_correction.HANDOFF_DEFECT_MISSING_FILES,

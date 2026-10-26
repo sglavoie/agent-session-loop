@@ -262,17 +262,19 @@ def _preserved_review_artifact_evidence(plan_dir: Path) -> dict[str, Any] | None
 def _handoff_correction_attempt(event_path: str | Path, session_id: str) -> int:
     """Return the 1-indexed attempt number the next correction would be."""
     try:
-        text = Path(event_path).read_text(encoding="utf-8")
+        data = Path(event_path).read_bytes()
     except OSError:
         return 1
     priors = 0
-    for line in text.splitlines():
+    # Bytes, decoded line by line: a stray non-UTF-8 byte or a pathologically
+    # nested line spoils only its own line, the way a torn line does.
+    for line in data.splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
+            record = json.loads(line.decode("utf-8"))
+        except ValueError, RecursionError:
             continue
         if not isinstance(record, dict):
             continue
