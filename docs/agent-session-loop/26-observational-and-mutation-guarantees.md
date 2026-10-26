@@ -442,7 +442,7 @@ Supervision bridge:
   elsewhere, or let the run finish), then submit the stale token. Confirm the
   refusal names the specific race, and that no mailbox record, control-queue
   entry, or spawned process resulted.
-- Request `--protocol 2` and confirm exit code 2 with a stderr diagnostic and
-  nothing on stdout.
+- Request the retired `--protocol 1` and confirm exit code 2 with a stderr
+  diagnostic and nothing on stdout.
 
 Workbench browser workflow:
