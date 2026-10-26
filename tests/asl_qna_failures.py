@@ -30,6 +30,24 @@ class QnAFailureTests(_QnAContextFixture):
             self.assertEqual(qna.REASON_NO_PAUSED_RUN, ctx.exception.reason)
             self.assertEqual(str(state_path), ctx.exception.details["state_path"])
 
+    def test_load_qna_context_raises_no_paused_run_when_state_undecodable(
+        self,
+    ) -> None:
+        for label, content in (
+            ("non-utf8", b"\xff" + json.dumps({"paused": True}).encode()),
+            # Deep enough that the decoder raises RecursionError instead.
+            ("deeply nested", b"[" * 1_000_000),
+        ):
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                plan_dir, state_dir, state_path = self._seed_plan(Path(tmp))
+                state_path.write_bytes(content)
+
+                with self.assertRaises(qna.QnAError) as ctx:
+                    qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+                self.assertEqual(qna.REASON_NO_PAUSED_RUN, ctx.exception.reason)
+                self.assertEqual(str(state_path), ctx.exception.details["state_path"])
+
     def test_load_qna_context_raises_no_paused_run_when_not_paused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -91,6 +109,24 @@ class QnAFailureTests(_QnAContextFixture):
                 qna.load_qna_context(plan_dir, state_dir=state_dir)
 
             self.assertEqual(qna.REASON_MISSING_QUESTION_CONTEXT, ctx.exception.reason)
+
+    def test_load_qna_context_raises_missing_question_context_when_artifact_undecodable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
+            last_message_path = tmp_dir / "binary.txt"
+            last_message_path.write_bytes(b"Should we \xff\xfe use 1a?\n")
+            self._write_state(state_path, last_message_path=str(last_message_path))
+
+            with self.assertRaises(qna.QnAError) as ctx:
+                qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            self.assertEqual(qna.REASON_MISSING_QUESTION_CONTEXT, ctx.exception.reason)
+            self.assertEqual(
+                str(last_message_path), ctx.exception.details["last_message_path"]
+            )
 
     def test_load_qna_context_raises_missing_question_context_when_path_unset(
         self,

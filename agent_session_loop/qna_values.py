@@ -87,7 +87,7 @@ def _read_state_payload(state_path: Path) -> dict[str, Any]:
         )
     try:
         raw = state_path.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         raise QnAError(
             REASON_NO_PAUSED_RUN,
             f"runner state file is unreadable: {error}",
@@ -95,7 +95,7 @@ def _read_state_payload(state_path: Path) -> dict[str, Any]:
         ) from error
     try:
         payload = json.loads(raw)
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, RecursionError) as error:
         raise QnAError(
             REASON_NO_PAUSED_RUN,
             f"runner state file is not valid JSON: {error}",
@@ -270,7 +270,7 @@ def _read_last_message(path: Path, *, session_id: str) -> str:
         )
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         raise QnAError(
             REASON_MISSING_QUESTION_CONTEXT,
             f"last-message artifact is unreadable: {error}",
