@@ -92,7 +92,9 @@ def _read_repository_review_bases(
             }
             rows[alias] = current
             continue
-        dirty_match = re.fullmatch(r"    - `([^`]+)`", line)
+        # The renderer wraps the path in one pair of backticks whatever it
+        # holds, so only the outermost pair delimits it.
+        dirty_match = re.fullmatch(r"    - `(.+)`", line)
         if dirty_match is not None and current is not None:
             current["worktree_dirty"] = True
             current["dirty_paths"].append(dirty_match.group(1))

@@ -234,6 +234,41 @@ class ReviewRepairRegisteredRepositoryTests(MaterializationFixtures, unittest.Te
             ["OAK:staged.txt"], recovered["repositories"][1]["dirty_paths"]
         )
 
+    def test_a_dirty_base_path_holding_a_backtick_is_read_back(self) -> None:
+        # The renderer wraps each path in one pair of backticks whatever it
+        # holds; a path the reader dropped would leave the base reading clean.
+        finding = self._make_registered_finding("F1", "runner", "SVC")
+        self._register_plan([finding])
+        review_path = self.plan_dir / "session-2.md"
+        review_text = review_path.read_text(encoding="utf-8").replace(
+            review.review_session_version_marker(),
+            review.review_session_version_marker(
+                review.REPOSITORY_AWARE_GENERATED_REVIEW_SESSION_VERSION
+            ),
+        )
+        base_section = (
+            "## Ordered repository review base\n\n"
+            "- `SVC`: path `tundra_svc`; origin `github.com/tundra/SVC`; "
+            "HEAD `1111111111111111111111111111111111111111`.\n"
+            "  - Pre-existing dirty paths: (none)\n"
+            "- `OAK`: path `tundra_OAK`; origin `github.com/tundra/OAK`; "
+            "HEAD `2222222222222222222222222222222222222222`.\n"
+            "  - Pre-existing dirty paths:\n"
+            "    - `OAK:it`s.txt`\n\n"
+        )
+        review_path.write_text(
+            review_text.replace(
+                "## Instructions\n", base_section + "## Instructions\n"
+            ),
+            encoding="utf-8",
+        )
+
+        planned = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(planned.ok, planned.error)
+        self.assertTrue(planned.repository_bases[1]["worktree_dirty"])
+        self.assertEqual(["OAK:it`s.txt"], planned.repository_bases[1]["dirty_paths"])
+
     def test_narrowed_pending_repair_child_blocks_until_scope_is_regenerated(
         self,
     ) -> None:
