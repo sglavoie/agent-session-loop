@@ -6,6 +6,7 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 
+from .contract_models import fenced_line_flags
 from .plans_errors import (
     PlanError,
 )
@@ -74,19 +75,12 @@ def parse_repository_registry_manifest(
 ) -> RepositoryRegistry | None:
     """Parse the exact authoritative repository table from rendered manifest text."""
     lines = manifest_text.splitlines()
-    headings: list[int] = []
-    fence: str | None = None
-    for index, line in enumerate(lines):
-        match = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
-        if match is not None:
-            delimiter = match.group(1)[0]
-            if fence is None:
-                fence = delimiter
-            elif fence == delimiter:
-                fence = None
-            continue
-        if fence is None and line == "## Repositories":
-            headings.append(index)
+    fenced = fenced_line_flags(lines)
+    headings = [
+        index
+        for index, line in enumerate(lines)
+        if not fenced[index] and line == "## Repositories"
+    ]
     if not headings:
         return None
     if len(headings) != 1:
