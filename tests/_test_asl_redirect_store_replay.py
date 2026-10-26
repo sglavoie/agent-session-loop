@@ -129,6 +129,21 @@ class ReplayTests(RedirectStoreTestCase):
         )
         self.assertEqual([2], [r.seq for r in view.rejected])
 
+    def test_a_line_nested_past_the_decoder_is_one_rejected_line(self) -> None:
+        """It used to raise out of every reader of the journal."""
+        request = self.submit()
+        self.append_raw("[" * 1_000_000 + "]" * 1_000_000)
+
+        view = self.read()
+
+        self.assertEqual(
+            [request.operation_id], [r.operation_id for r in view.requests]
+        )
+        self.assertEqual(
+            [(2, redirect_store_vocab.REJECT_INVALID_JSON)],
+            [(r.seq, r.reason) for r in view.rejected],
+        )
+
     def test_a_rejected_line_is_reported_without_its_bytes(self) -> None:
         """A malformed submission still carries the operator's words."""
         self.append_raw(
