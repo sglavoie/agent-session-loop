@@ -352,7 +352,9 @@ def _external_write_evidence(
     candidates: list[repository_intent.IntentCandidate] = []
     for path in artifact_paths:
         try:
-            text = path.read_text(encoding="utf-8")
+            # A stray non-UTF-8 byte in a worker's message must neither crash
+            # the guard nor hide the paths the rest of the message names.
+            text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             # Unreadable artifacts name nothing. The turn is still judged on
             # every artifact that can be read.

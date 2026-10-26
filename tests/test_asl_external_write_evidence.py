@@ -570,6 +570,22 @@ class UnclassifiedLaneTests(unittest.TestCase):
         self.assertEqual({}, evidence["paths"])
         self.assertEqual({}, evidence["unclassified"])
 
+    def test_a_non_utf8_artifact_still_names_its_paths(self) -> None:
+        started = time.time_ns()
+        os.utime(self.foreign_record, ns=(started + 10**9, started + 10**9))
+        raw_artifact = self.root / "raw-message.txt"
+        raw_artifact.write_bytes(
+            b"\xff\xfe Recorded a disposition in "
+            + str(self.foreign_record).encode("utf-8")
+            + b".\n"
+        )
+
+        evidence = self._evidence(
+            "unused\n", artifact_paths=(raw_artifact,), turn_started_ns=started
+        )
+
+        self.assertIn(self._canonical(self.foreign_record), evidence["unclassified"])
+
     def test_the_counts_cover_the_whole_vocabulary(self) -> None:
         evidence = self._evidence(f"Wrote {self.foreign_record}.\n")
 
