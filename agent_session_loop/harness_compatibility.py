@@ -276,7 +276,10 @@ def probe_executable(
         completed = subprocess.run(
             argv,
             capture_output=True,
-            text=True,
+            # A CLI may print bytes that are not UTF-8; quote them rather than
+            # raising, because this probe must never fail.
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout_seconds,
             check=False,
         )

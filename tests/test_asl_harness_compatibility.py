@@ -182,6 +182,15 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual("unparseable-version", result.reason)
         self.assertIn("who knows", result.detail)
 
+    def test_non_utf8_version_output_is_quoted_not_raised(self) -> None:
+        exe = _write_fake_cli(
+            self.tmp_path, "codex", "#!/bin/sh\nprintf 'codex-cli 0.149.1 \\377\\n'\n"
+        )
+        result = compat.check_executable("codex", str(exe), use_cache=False)
+        self.assertEqual("0.149.1", result.version)
+        probe = compat.probe_executable("codex", str(exe), use_cache=False)
+        self.assertIn("\ufffd", probe.raw_output)
+
     def test_timeout_degrades_to_unknown(self) -> None:
         exe = _write_fake_cli(self.tmp_path, "codex", "#!/bin/sh\nsleep 30\n")
         result = compat.check_executable(
