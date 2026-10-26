@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import shutil
 import unittest
+from typing import Any
+from unittest import mock
 
 from agent_session_loop import (
     overseer_cli_claims,
@@ -49,6 +52,58 @@ class PlanResolutionTests(_OverseerCase):
 
         self.assertEqual("plan_identity_ambiguous", caught.exception.reason)
         self.assertIn(str(own), caught.exception.message)
+
+
+class ClaimsInputTests(_OverseerCase):
+    """Claims of the wrong shape or encoding are a usage error, not a crash."""
+
+    def _decide(self, *extra: str) -> tuple[int, dict[str, Any]]:
+        return self.fleet.invoke(
+            "decide", str(self.plan), "--operation", "guidance", *extra
+        )
+
+    def _refused(self, status: int, payload: dict[str, Any]) -> None:
+        self.assertEqual(2, status, payload)
+        self.assertEqual("claims_invalid", payload["reason"])
+
+    def test_a_non_utf8_claims_file_is_refused(self) -> None:
+        path = self.fleet.root / "claims-bad.json"
+        path.write_bytes(b'[{"statement_id": "\xff"}]')
+
+        self._refused(*self._decide("--claims-file", str(path)))
+
+    def test_non_utf8_claims_on_stdin_are_refused(self) -> None:
+        stdin = io.TextIOWrapper(io.BytesIO(b"[\xff]"), encoding="utf-8")
+        with mock.patch("sys.stdin", stdin):
+            self._refused(*self._decide("--claims-stdin"))
+
+    def test_claims_nested_too_deeply_are_refused(self) -> None:
+        path = self.fleet.root / "claims-deep.json"
+        path.write_text("[" * 1_000_000, encoding="utf-8")
+
+        self._refused(*self._decide("--claims-file", str(path)))
+
+    def test_operations_and_corroborating_must_be_lists_of_strings(self) -> None:
+        for key, value in (
+            ("operations", 7),
+            ("operations", "guidance"),
+            ("operations", [1]),
+            ("corroborating", 7),
+            ("corroborating", "abc"),
+        ):
+            with self.subTest(key=key, value=value):
+                claim = {
+                    "statement_id": "s1",
+                    "topic": "operations",
+                    "stance": "allow",
+                    key: value,
+                }
+                path = self.fleet.claims_file(self, [claim])
+
+                status, payload = self._decide("--claims-file", path)
+
+                self._refused(status, payload)
+                self.assertIn(key, payload["error"])
 
 
 if __name__ == "__main__":
