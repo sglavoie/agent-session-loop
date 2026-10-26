@@ -14,11 +14,14 @@ checkable: the only argv this module ever builds is ``<exe> --version``.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fnmatch
 import io
 import json
 import os
+import signal
 import tempfile
+import time
 import unittest
 import unittest.mock
 from contextlib import redirect_stdout
@@ -198,6 +201,40 @@ class ProbeTests(unittest.TestCase):
         )
         self.assertEqual("unknown", result.status)
         self.assertEqual("probe-timeout", result.reason)
+
+    def test_background_child_holding_stdout_does_not_time_the_probe_out(
+        self,
+    ) -> None:
+        pid_file = self.tmp_path / "child.pid"
+        exe = _write_fake_cli(
+            self.tmp_path,
+            "codex",
+            "#!/bin/sh\n"
+            f"sleep 30 &\necho $! > {str(pid_file)!r}\n"
+            "printf 'codex-cli 0.149.1\\n'\n",
+        )
+        self.addCleanup(self._kill_pid_file, pid_file)
+        started = time.monotonic()
+        result = compat.check_executable(
+            "codex", str(exe), timeout_seconds=10, use_cache=False
+        )
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual("0.149.1", result.version)
+
+    def test_timeout_keeps_the_output_printed_so_far(self) -> None:
+        exe = _write_fake_cli(
+            self.tmp_path, "codex", "#!/bin/sh\nprintf 'starting\\n'\nsleep 30\n"
+        )
+        probe = compat.probe_executable(
+            "codex", str(exe), timeout_seconds=0.5, use_cache=False
+        )
+        self.assertEqual("probe-timeout", probe.reason)
+        self.assertEqual("starting", probe.raw_output)
+
+    @staticmethod
+    def _kill_pid_file(pid_file: Path) -> None:
+        with contextlib.suppress(OSError, ValueError):
+            os.kill(int(pid_file.read_text().strip()), signal.SIGKILL)
 
     def test_unrunnable_executable_degrades_to_unknown(self) -> None:
         missing = self.tmp_path / "absent"
