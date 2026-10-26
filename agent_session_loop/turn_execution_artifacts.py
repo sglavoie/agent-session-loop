@@ -58,8 +58,13 @@ def live_stream_callback(
     live_turn: turn_execution_live.LiveTurn,
 ) -> harnesses.StreamCallback:
     def stream_callback(stream_name: harnesses.StreamName, text: str) -> None:
-        log_stream_callback(stream_name, text)
-        live_turn.record_activity(stream_name, text)
+        try:
+            log_stream_callback(stream_name, text)
+        finally:
+            # The live log is provisional; a failed append still reports its
+            # error, but must not hide the output from the idle clock and the
+            # live pause and approval watch.
+            live_turn.record_activity(stream_name, text)
 
     return stream_callback
 

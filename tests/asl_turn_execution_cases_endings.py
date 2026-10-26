@@ -243,6 +243,22 @@ class TurnExecutorEndingTests(unittest.TestCase):
                     self.harness.paths[name].read_text(encoding="utf-8"),
                 )
 
+    def test_a_failed_log_append_still_counts_as_activity(self) -> None:
+        # The log is provisional (rewritten at finalize); the live turn's idle
+        # clock and its pause/approval watch must not go blind with it.
+        live_turn = self.harness.live_turn(self.harness.active_turn())
+
+        def full_disk(stream_name: str, text: str) -> None:
+            raise OSError("No space left on device")
+
+        callback = turn_execution_artifacts.live_stream_callback(full_disk, live_turn)
+        with silent_delivery(), self.assertRaises(OSError):
+            callback("stdout", "still working\n")
+
+        active = self.harness.payload["active_turn"]
+        self.assertEqual("stdout", active["last_activity_stream"])
+        self.assertEqual(len("still working\n"), active["stdout_chars"])
+
     def test_unreadable_plan_is_carried_rather_than_raised(self) -> None:
         execution = self.harness.run(harness_result())
         # A harness that removed the manifest leaves a plan the runner cannot
