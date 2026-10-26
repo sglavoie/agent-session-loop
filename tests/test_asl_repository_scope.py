@@ -271,6 +271,21 @@ class SuggestionTests(unittest.TestCase):
             list(repository_scope_registry.registry_table_lines(registry))[:2],
         )
 
+    def test_aliases_differing_only_in_case_are_made_distinct(self) -> None:
+        repositories = init_multi_repo_workspace(
+            self.workspace / "cased",
+            specs=(
+                ("A", "a/svc", "git@github.com:tundra/a.git"),
+                ("B", "b/SVC", "git@github.com:tundra/b.git"),
+            ),
+        )
+
+        registry = repository_scope_registry.suggest_registry(
+            self.workspace / "cased", tuple(repositories.values())
+        )
+
+        self.assertEqual(("svc", "SVC_2"), registry.aliases)
+
     def test_a_repository_without_an_origin_still_yields_a_row(self) -> None:
         local = self.workspace / "local_only"
         init_git_repo(local)

@@ -132,10 +132,12 @@ def _unique_alias(repo_root: Path, used: set[str]) -> str:
         base = f"repo_{base}" if base else "repo"
     alias = validate_repository_alias(base)
     suffix = 2
-    while alias in used:
+    # Folded, because a registry refuses aliases that differ only in case:
+    # `svc` and `SVC` checkouts would otherwise derive a table it rejects.
+    while alias.casefold() in used:
         alias = f"{base}_{suffix}"
         suffix += 1
-    used.add(alias)
+    used.add(alias.casefold())
     return alias
 
 
