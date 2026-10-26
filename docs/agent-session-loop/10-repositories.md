@@ -145,8 +145,10 @@ an unattended sweeper should make. A pass that suffered a partial failure
 reports `partial-failure` and suppresses the over-budget verdict, because a
 corpus that failed to shrink has not proven that policy cannot shrink it.
 
-Each pass fsyncs a `maintenance.json` manifest under the state root holding the
-full last result plus a bounded 10-entry history. `asl maintenance status` reads
+Each `--apply` pass (the scheduled job always passes it) fsyncs a
+`maintenance.json` manifest under the state root holding the full last result
+plus a bounded 10-entry history; a dry run writes nothing, the manifest
+included. `asl maintenance status` reads
 it back and reports job presence, whether the installed definition still matches
 what this version would render, whether launchd has it loaded, and the last run's
 outcome, reclaimed bytes, and failures; it exits nonzero only when that last
