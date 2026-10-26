@@ -366,7 +366,7 @@ class ExportCommandTests(ExportTestBase):
             "\nasl diagnostics export: error: no export profile selected", err
         )
 
-    def test_failed_write_names_the_command(self) -> None:
+    def test_failed_write_names_the_command_and_leaves_no_temp_file(self) -> None:
         self.seed_full_plan()
         target = self.tmp_path / "already-a-dir"
         target.mkdir()
@@ -381,6 +381,7 @@ class ExportCommandTests(ExportTestBase):
         )
         self.assertEqual(code, 1)
         self.assertTrue(err.startswith("asl diagnostics export: could not write"))
+        self.assertFalse((self.tmp_path / ".already-a-dir.tmp").exists())
 
     def test_json_envelope_wraps_the_export(self) -> None:
         self.seed_full_plan()

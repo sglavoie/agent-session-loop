@@ -27,11 +27,15 @@ def _write_output(path: str, payload: bytes) -> None:
     """Write the export beside its destination and rename it into place."""
     target = Path(path)
     temp = target.with_name(f".{target.name}.tmp")
-    with temp.open("wb") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temp, target)
+    try:
+        with temp.open("wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, target)
+    finally:
+        # A failed write or rename must not leave the partial file behind.
+        temp.unlink(missing_ok=True)
 
 
 def export_from_args(args: argparse.Namespace) -> int:
