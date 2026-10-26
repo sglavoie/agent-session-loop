@@ -48,6 +48,20 @@ class GroupAttemptCapStateTests(unittest.TestCase):
                 )
             )
 
+    def test_an_over_deep_state_yields_no_recorded_cap(self) -> None:
+        # Deep enough that the decoder raises RecursionError, not a JSON error.
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / events.EVENTS_FILE_NAME
+            event_path.with_name(events.STATE_FILE_NAME).write_text(
+                "[" * 1_000_000, encoding="utf-8"
+            )
+
+            self.assertIsNone(
+                review_continuation_state._selected_group_attempt_cap_from_history(
+                    (), event_path
+                )
+            )
+
 
 class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
     def setUp(self) -> None:
