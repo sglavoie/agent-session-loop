@@ -113,9 +113,11 @@ class LockIdentityTests(unittest.TestCase):
         )
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def write_lock(self, *, hostname: str, process_start: str | None) -> None:
+    def write_lock(
+        self, *, hostname: str, process_start: str | None, pid: int | None = None
+    ) -> None:
         payload = {
-            "pid": os.getpid(),
+            "pid": os.getpid() if pid is None else pid,
             "hostname": hostname,
             "plan_dir": str(state_locks.plans_files.canonicalize_path(self.plan_dir)),
             "created_at": "2026-10-25T00:00:00+00:00",
@@ -153,6 +155,42 @@ class LockIdentityTests(unittest.TestCase):
         assert info is not None
         self.assertTrue(info.active)
         self.assertFalse(self.lock_path.exists())
+
+    def test_another_live_local_run_survives_a_host_rename(self) -> None:
+        # A status reader is not the run itself; before the fix it reported
+        # the live run stale ("recorded on host ...") after a DHCP rename.
+        self.write_lock(
+            hostname="before-dhcp.local", process_start=_UTC_BIRTH, pid=os.getppid()
+        )
+        with mock.patch.object(
+            state_locks.process_tree, "process_birth", return_value=_UTC_BIRTH
+        ):
+            info = state_locks.read_lock_info(self.plan_dir, self.state_dir)
+
+        assert info is not None
+        self.assertTrue(info.active)
+        self.assertTrue(self.lock_path.exists())
+
+    def test_a_renamed_host_lock_needs_an_exact_birth_to_count_as_local(
+        self,
+    ) -> None:
+        # A legacy-offset birth or none at all cannot confirm the owner, so
+        # the lock stays foreign rather than weakening cross-host safety.
+        for process_start in (_LEGACY_LOCAL_BIRTH, None):
+            with self.subTest(process_start=process_start):
+                self.write_lock(
+                    hostname="other-host",
+                    process_start=process_start,
+                    pid=os.getppid(),
+                )
+                with mock.patch.object(
+                    state_locks.process_tree, "process_birth", return_value=_UTC_BIRTH
+                ):
+                    info = state_locks.read_lock_info(self.plan_dir, self.state_dir)
+
+                assert info is not None
+                self.assertEqual("lock was recorded on host other-host", info.reason)
+                self.assertTrue(self.lock_path.exists())
 
     def test_another_hosts_lock_with_a_different_birth_is_not_ours(self) -> None:
         self.write_lock(hostname="other-host", process_start=_LEGACY_LOCAL_BIRTH)
