@@ -146,6 +146,14 @@ A polish and hardening round after the public release.
   `migration.json` or staging directory; a malformed legacy project list no
   longer rolls back the store upgrade; an overflowing history time or
   duration is left unplaced instead of ending the import.
+- Follow-ups: the Claude, Codex and Copilot readers share one JSON-line
+  decoder that turns lone surrogates into U+FFFD and treats over-deep lines as
+  plain text; `status`, `preflight`, `baseline`, `contract-check`, `verify`
+  and `doctor` refuse an empty PLAN_DIR; `split --inline-stdin` refuses
+  non-UTF-8 input like `--plan-file`; Ctrl-D declines `asl commit`'s prompt;
+  oversized transport numbers and counts are refused fields rather than 500s;
+  a repository path holding `|` is refused; a CRLF review session keeps its
+  line endings when re-scoped.
 
 ### Changed
 
