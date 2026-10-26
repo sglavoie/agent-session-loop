@@ -44,6 +44,24 @@ class DiffParsingTests(unittest.TestCase):
         self.assertEqual(commit_message._parse_diff_into_files("   \n\n"), [])
         self.assertEqual(commit_message._parse_diff_into_files("not a diff\n"), [])
 
+    def test_pure_rename_takes_its_name_from_the_rename_to_line(self) -> None:
+        # Two unquoted names with spaces cannot be split on the header alone:
+        # here the old name holds " b/", which a boundary guess would cut at.
+        raw = (
+            "diff --git a/x b/y.txt b/z w.txt\n"
+            "similarity index 100%\n"
+            "rename from x b/y.txt\n"
+            "rename to z w.txt\n"
+            "diff --git a/src.txt b/dst copy.txt\n"
+            "similarity index 100%\n"
+            "copy from src.txt\n"
+            "copy to dst copy.txt\n"
+        )
+
+        files = commit_message._parse_diff_into_files(raw)
+
+        self.assertEqual([f.path for f in files], ["z w.txt", "dst copy.txt"])
+
     def test_c_quoted_names_open_their_own_sections(self) -> None:
         # git quotes a name holding a tab, a quote, or (under the default
         # `core.quotePath`) non-ASCII bytes; such a header used to match

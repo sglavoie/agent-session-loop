@@ -37,6 +37,7 @@ _SIDE_PREFIX = re.compile(r"^\w/")
 
 
 _UNQUOTED_HEADER_SPLIT = re.compile(r"^(\w/.+?) (\w/.+)$")
+_RENAME_TO_PATTERN = re.compile(r"^(?:rename|copy) to (.+)$", re.MULTILINE)
 
 
 def _read_c_quoted(text: str, start: int) -> tuple[str, int] | None:
@@ -131,10 +132,25 @@ def _plus_path(content: str) -> str | None:
     return _strip_side_prefix(name)
 
 
+def _rename_target(content: str) -> str | None:
+    """The new name a ``rename to`` or ``copy to`` extended header carries.
+
+    These lines hold the bare name with no side prefix, so a pure rename of
+    unquoted names with spaces needs no guess at where the old name ends.
+    """
+    hunk = models._HUNK_PATTERN.search(content)
+    header = content[: hunk.start()] if hunk else content
+    match = _RENAME_TO_PATTERN.search(header)
+    return None if match is None else _whole_name(match.group(1))
+
+
 def _section_path(header_rest: str, content: str) -> str:
     plus = _plus_path(content)
     if plus is not None:
         return plus
+    target = _rename_target(content)
+    if target is not None:
+        return target
     names = _header_names(header_rest)
     if names is None:
         return header_rest
