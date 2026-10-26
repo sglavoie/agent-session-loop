@@ -12,6 +12,7 @@ from agent_session_loop import (
     harness_claude,
     harness_codex,
     harness_copilot,
+    harness_transport,
     harnesses,
     turn_execution_signals,
 )
@@ -335,6 +336,19 @@ class HarnessAdapterCommandTests(unittest.TestCase):
                 "claude text: RUNNER_PAUSE: unsafe - wait\n",
             ),
         )
+
+    def test_a_last_message_cut_inside_a_multibyte_character_still_reads(
+        self,
+    ) -> None:
+        # A harness killed mid-write can truncate the file inside a UTF-8
+        # sequence; a strict decode raised and lost the turn's result.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "last-message.txt"
+            path.write_bytes("Runner status: caf\u00e9".encode()[:-1])
+
+            text = harness_transport._read_last_message(path)
+
+        self.assertEqual("Runner status: caf\ufffd", text)
 
 
 if __name__ == "__main__":

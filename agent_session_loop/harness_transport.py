@@ -128,6 +128,9 @@ def _read_last_message(path: Path | None) -> str:
     if path is None or not path.exists():
         return ""
     try:
-        return path.read_text(encoding="utf-8")
+        # Decoded with replacement rather than strictly: a harness killed
+        # mid-write can leave the file cut inside a multibyte character, and a
+        # strict decode would lose the whole aborted turn's result over it.
+        return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
