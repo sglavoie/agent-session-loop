@@ -129,11 +129,22 @@ def open_ledger(
     try:
         connection = sqlite3.connect(str(path), isolation_level=None)
     except sqlite3.Error as error:
-        raise LedgerError(f"could not open overseer ledger {path}: {error}") from error
+        raise LedgerError(
+            f"could not open overseer ledger {path}: {error}",
+            reason="ledger_unreadable",
+        ) from error
     connection.row_factory = sqlite3.Row
     try:
         apply_pragmas(connection)
         migrate(connection, path)
+    except sqlite3.Error as error:
+        # ``connect`` is lazy: a file that is not a database at all only says so
+        # at the first statement, which is the first pragma.
+        connection.close()
+        raise LedgerError(
+            f"overseer ledger {path} is unreadable: {error}",
+            reason="ledger_unreadable",
+        ) from error
     except BaseException:
         connection.close()
         raise

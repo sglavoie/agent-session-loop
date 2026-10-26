@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import functools
 import json
+import sqlite3
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -234,6 +235,17 @@ def leaf(command: str) -> Callable[[Leaf], Leaf]:
                 return _failure(
                     command,
                     OverseerCliError(error.reason, str(error)),
+                    as_json=bool(getattr(args, "json", False)),
+                )
+            except sqlite3.DatabaseError as error:
+                # The ledger is the only database a leaf touches, and a page
+                # corrupted past the header only says so at the query that
+                # reaches it, long after the open succeeded.
+                return _failure(
+                    command,
+                    OverseerCliError(
+                        "ledger_unreadable", f"overseer ledger is unreadable: {error}"
+                    ),
                     as_json=bool(getattr(args, "json", False)),
                 )
 

@@ -306,7 +306,8 @@ def migrate(connection: sqlite3.Connection, path: Path) -> None:
         raise LedgerError(
             f"overseer ledger {path} is schema version {version}, newer than the "
             f"version {SCHEMA_VERSION} this build understands; upgrade ASL rather "
-            "than letting an older build write into it"
+            "than letting an older build write into it",
+            reason="ledger_unsupported",
         )
     for index in range(version, SCHEMA_VERSION):
         migration = MIGRATIONS[index]
@@ -320,7 +321,8 @@ def migrate(connection: sqlite3.Connection, path: Path) -> None:
                 connection.execute("ROLLBACK")
             raise LedgerError(
                 f"overseer ledger {path} could not be migrated to schema "
-                f"version {index + 1}: {error}"
+                f"version {index + 1}: {error}",
+                reason="ledger_unreadable",
             ) from error
 
 

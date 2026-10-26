@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import shutil
+import sqlite3
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
@@ -152,6 +153,38 @@ class DomainRefusalTests(_OverseerCase):
 
                     self.assertEqual(2, status, payload)
                     self.assertEqual("ledger_error", payload["reason"])
+
+    def test_a_corrupt_ledger_is_refused_ledger_unreadable(self) -> None:
+        path = overseer_store_ledger.ledger_path(self.fleet.state_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not a database " * 512)
+
+        with self.assertRaises(overseer_store_models.LedgerError) as caught:
+            overseer_store_ledger.open_ledger(state_dir=self.fleet.state_root)
+        self.assertEqual("ledger_unreadable", caught.exception.reason)
+
+        for argv in (
+            ("watch", "--watcher-id", WATCHER),
+            ("watch", "--watcher-id", WATCHER, "--release"),
+            ("inspect", str(self.plan)),
+            ("reconcile", str(self.plan)),
+        ):
+            with self.subTest(argv=argv):
+                status, payload = self.fleet.invoke(*argv)
+
+                self.assertEqual(2, status, payload)
+                self.assertEqual("ledger_unreadable", payload["reason"])
+
+    def test_a_database_error_past_the_open_is_ledger_unreadable(self) -> None:
+        def corrupt(**_: Any) -> overseer_store_ledger.Ledger:
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        seams = dataclasses.replace(self.fleet.seams(), open_ledger=corrupt)
+        with mock.patch.object(self.fleet, "seams", return_value=seams):
+            status, payload = self.fleet.invoke("watch", "--watcher-id", WATCHER)
+
+        self.assertEqual(2, status, payload)
+        self.assertEqual("ledger_unreadable", payload["reason"])
 
     def test_a_blank_watcher_id_is_refused_by_the_parser(self) -> None:
         for value in ("", "   "):
