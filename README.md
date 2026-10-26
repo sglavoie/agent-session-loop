@@ -78,6 +78,34 @@ Workbench connector) are labelled `com.sglavoie.*`. Set
 to use your own prefix; uninstall an existing job before changing it, or the
 old one is left behind.
 
+## First run
+
+Check the installed harness CLI, prepare a plan, check the prepared plan's
+prerequisites, then run the command `prepare` printed:
+
+```bash
+asl harness-compat --harness claude
+asl prepare PLAN.md --cwd "$PWD" --harness claude
+asl doctor PLAN_DIR --harness claude
+asl run PLAN_DIR --harness claude
+```
+
+`asl harness-compat` classifies the installed `claude` CLI against the tested
+version window without using any model; `asl doctor` needs a plan directory, so
+it runs once one exists, and checks the working directory, the harness
+executable, the next pending session and the prompt it would send.
+
+`asl prepare` splits the source plan into a plan directory, `PLAN_DIR` above (under
+`~/.local/share/agent-plans/` by default), validates and baselines it, runs the
+final preflight that marks it loop-ready, and prints the exact `asl run`
+command for that directory; use the printed one rather than retyping it. Add
+`--review-harness codex` (any harness other than `--harness`) to end the run
+with a review session under a second harness. If
+preflight is not green, repair the plan and rerun
+`asl prepare --resume PLAN_DIR`. To have an agent supervise the run, hand that
+command to the `asl` skill (`/asl asl run ...` in Claude Code). The
+[ASL operator guide](docs/asl-guide.md) covers each step.
+
 ## Documentation
 
 - [docs/asl-guide.md](docs/asl-guide.md) — ASL operator guide: command families, live supervision, assurance, Agent Mux integration, releasing, and testing

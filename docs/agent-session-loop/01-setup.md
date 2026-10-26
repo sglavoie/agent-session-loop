@@ -1,6 +1,21 @@
 ## Setup
 
-Run from this repository, or add `bin/.local/bin` to `PATH`:
+Install from the checkout with `just all` (the same as `just install`; see the
+repository README for what it links). It puts `asl` in `~/.local/bin`, which
+must be on your `PATH`, and installs the skills into every harness root that
+already exists:
+
+```bash
+just all
+asl harness-compat --harness codex
+```
+
+`asl harness-compat` checks the installed harness CLI against the tested
+version window without using any model; `asl doctor` (below) needs a plan
+directory, so it comes after `asl prepare`.
+
+To try the CLI without installing anything, put the wrapper directory of this
+checkout on `PATH` instead (the skills are then not installed):
 
 ```bash
 export PATH="$PWD/bin/.local/bin:$PATH"
@@ -45,10 +60,36 @@ Both `run` and `doctor` default to the current directory. Pass `--cwd ROOT` to
 select the repository root for a legacy plan or the common workspace root for
 a registered plan.
 
-## Workflow: Split, Expand, Repair, Verify, Run
+## Workflow: Prepare, Repair, Run
 
-The canonical loop-ready lifecycle is **split → expand → repair if needed →
-run**. In directory mode, `session-expand` validates the split plan and then
+The front door is `asl prepare`. Given a source plan, it splits it, runs the
+read-only validators and ingests their expansions, records baseline evidence,
+and runs the final preflight that marks the plan `loop-ready`, all in one
+deterministic pipeline; on success it prints the exact `asl run` command for
+the prepared plan directory:
+
+```bash
+asl prepare PLAN.md --cwd "$PWD" --harness codex
+```
+
+Pass `--review-harness` (it must differ from `--harness`) to have the printed
+command append a final review session. When final preflight is not green, repair
+the plan (by hand, or with `plan-preflight-iterate`) and rerun the remaining
+steps on the existing directory with `asl prepare --resume PLAN_DIR`. Then run
+the command `prepare` printed, for example:
+
+```bash
+asl run ~/.local/share/agent-plans/example-plan/ --harness codex
+```
+
+Refine a rough source plan with `plan-iterate` before preparing it, and
+supervise the run with the `asl` skill.
+
+### By hand: Split, Expand, Repair, Verify, Run
+
+`asl prepare` automates this route; drive it step by step when you want to
+inspect or edit the plan between stages. It is **split → expand → repair if
+needed → run**. In directory mode, `session-expand` validates the split plan and then
 runs final preflight with `--mark-loop-ready`; a clean plan is left ready for
 `session-run`. `asl run` hard-gates on the `loop-ready` readiness state, but
 self-heals derived progress/readiness drift (stale or missing `progress.md`
