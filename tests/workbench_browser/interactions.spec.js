@@ -1337,6 +1337,8 @@ for (const deployment of DEPLOYMENTS) {
         return {
           seconds: time.toEpochSeconds("1789466400.0"),
           iso: time.toEpochSeconds("2026-09-15T08:00:00Z"),
+          unzoned: time.toEpochSeconds("2026-09-15T08:00:00"),
+          unzonedSpace: time.toEpochSeconds("2026-09-15 08:00:00.5"),
           sortKey: queue.parseActivityTimestamp("1789466400.0"),
           idle: preview.formatIdle(plan, 1789466400000 + 90000),
           age: preview.formatActivityAge("1789466400", 1789466400000 + 120000),
@@ -1345,6 +1347,9 @@ for (const deployment of DEPLOYMENTS) {
       });
       expect(read.seconds).toBe(1789466400);
       expect(read.iso).toBe(Date.parse("2026-09-15T08:00:00Z") / 1000);
+      // Offset-less means UTC, as the Python half reads it, not local time.
+      expect(read.unzoned).toBe(read.iso);
+      expect(read.unzonedSpace).toBe(read.iso + 0.5);
       expect(read.sortKey).toBe(1789466400000);
       expect(read.idle).toBe("1m");
       expect(read.age).toBe("2m ago");

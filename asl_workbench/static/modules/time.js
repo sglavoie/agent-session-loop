@@ -27,8 +27,24 @@ export function toEpochSeconds(value) {
   const text = value.trim();
   const numeric = Number(text);
   if (Number.isFinite(numeric)) return numeric;
-  const parsed = Date.parse(text);
+  const parsed = Date.parse(asUtcWhenUnzoned(text));
   return Number.isFinite(parsed) ? parsed / 1000 : null;
+}
+
+/** An ISO date-time with a clock but no offset, which `Date.parse` reads as local. */
+const UNZONED_DATE_TIME = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
+
+/**
+ * Read an offset-less date-time as UTC, as the Python half does.
+ *
+ * `Date.parse` treats "2026-09-15T08:00:00" as local time while ASL's parser
+ * coerces it to UTC, so without this the same row sat on different sides of
+ * the eight-hour window in the browser and on the server by the viewer's
+ * offset. Strings with an offset, a `Z`, or no clock at all pass unchanged.
+ */
+function asUtcWhenUnzoned(text) {
+  if (!UNZONED_DATE_TIME.test(text)) return text;
+  return text.replace(" ", "T") + "Z";
 }
 
 /** The same moment in epoch milliseconds, the unit `Date` works in. */
