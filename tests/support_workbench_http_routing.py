@@ -23,6 +23,7 @@ from .support_workbench_http_base import (
     Application,
     LocalTokenAuthenticator,
     RecordingProvider,
+    Request,
     RequestPolicy,
     application,
     build,
@@ -415,6 +416,43 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(body=raw):
                 response = application().handle(build("POST", "/api/unlock", body=raw))
                 self.assertEqual(response.status, 400)
+
+    def test_a_body_that_never_arrives_is_a_request_timeout(self) -> None:
+        def stalled(length: int) -> bytes:
+            raise TimeoutError("timed out")
+
+        request = Request.build(
+            "POST",
+            "/api/unlock",
+            {
+                "Host": "127.0.0.1:4321",
+                "Content-Type": "application/json",
+                "Content-Length": "2",
+            },
+            read=stalled,
+        )
+        response = application().handle(request)
+        self.assertEqual(response.status, 408)
+        payload = document(response)
+        self.assertEqual(payload["reason"], "request-timeout")
+        self.assertNotIn("timed out", payload["error"])
+        self.assertTrue(response.close, "the stream is at an unknown offset")
+
+    def test_a_body_shorter_than_declared_is_refused_not_parsed(self) -> None:
+        provider = RecordingProvider()
+        response = application(provider=provider).handle(
+            build(
+                "POST",
+                "/api/unlock",
+                headers={"Content-Length": "40"},
+                body=b"{}",
+            )
+        )
+        self.assertEqual(response.status, 400)
+        payload = document(response)
+        self.assertEqual(payload["reason"], "invalid-request")
+        self.assertIn("2 of 40", payload["error"])
+        self.assertEqual(provider.calls, [])
 
     def test_a_body_nested_past_the_decoders_depth_is_a_bad_request(self) -> None:
         # Deep enough to exhaust the decoder on every supported Python, small

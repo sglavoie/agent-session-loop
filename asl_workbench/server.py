@@ -165,12 +165,17 @@ class ApplicationRequestHandler(http.server.BaseHTTPRequestHandler):
         """Read the body the application already decided may exist."""
         self._body_read = True
         try:
-            return self.rfile.read(length)
+            raw = self.rfile.read(length)
         except OSError:
             # A timeout or a reset mid-body leaves the stream at an unknown
             # offset, so nothing after it on this connection can be framed.
             self.close_connection = True
             raise
+        if len(raw) != length:
+            # The client stopped short of what it declared; the stream is at
+            # an offset nothing after this answer could frame from.
+            self.close_connection = True
+        return raw
 
     def send_error(
         self,

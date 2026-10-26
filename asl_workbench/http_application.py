@@ -297,9 +297,20 @@ class Application:
                 )
             return {}
         self._check_content_type(request)
-        raw = request.read(length)
-        if not raw:
-            return {}
+        try:
+            raw = request.read(length)
+        except TimeoutError as error:
+            # The client declared a body and stopped sending it. That is a
+            # framing failure of theirs, not a fault of this server's.
+            raise auth.HttpRefusal(
+                408, "request-timeout", "the request body was not received in time"
+            ) from error
+        if len(raw) != length:
+            # A short body is a truncated one: parsing what arrived could act
+            # on a prefix the client never meant as a whole request.
+            raise auth.invalid_request(
+                f"request body ended after {len(raw)} of {length} declared bytes"
+            )
         try:
             decoded = raw.decode("utf-8")
         except UnicodeDecodeError as error:
