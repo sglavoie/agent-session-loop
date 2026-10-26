@@ -92,6 +92,26 @@ jobs:
           path: .cache/run_suite_logs/
           if-no-files-found: ignore
 
+  workbench-portable-py313:
+    name: Linux (portable Workbench, Python 3.13)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # The portable Workbench is deployed to a host documented at Python 3.13
+      # (see `[tool.ruff.per-file-target-version]` in pyproject.toml), so its
+      # portable lane has to import and pass there, not only on 3.14+.
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      # The exact command the deployment contract names; it needs no tooling
+      # beyond the interpreter.
+      - name: Portable Workbench tests on Python 3.13
+        run: python3.13 -m unittest -q tests.test_workbench_portable
+
   macos-full:
     name: macOS (full ${{ matrix.slice }}/4)
     # What `macos-latest` resolves to today, named so it cannot move under us.

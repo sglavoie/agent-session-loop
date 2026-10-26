@@ -12,20 +12,41 @@ name: Workbench browser
 # developed and read from (desktop Safari and, via mobile-webkit, the phone).
 #
 # Third-party actions are pinned to commit SHAs (the tag they resolved from is
-# in the trailing comment), as in check.yml.
+# in the trailing comment), and the runner to an explicit image, as in check.yml.
+#
+# The path filters name what the fixture server actually loads: it imports
+# `tests.workbench_support` (and so `tests/__init__.py` and the
+# `tests/workbench_support_*.py` sections), which seeds both deployments through
+# `asl_workbench` and the `agent_session_loop` modules listed below. Those reach
+# much of the CLI transitively; the Python suite's own Workbench shell tests,
+# which share the same seeding, cover that wider surface on every push.
 on:
   push:
     branches: [main]
     paths:
       - "tests/workbench_browser/**"
+      - "tests/__init__.py"
+      - "tests/workbench_support*.py"
       - "asl_workbench/**"
+      - "agent_session_loop/workbench_*.py"
+      - "agent_session_loop/cli.py"
+      - "agent_session_loop/events.py"
+      - "agent_session_loop/plans_files.py"
+      - "agent_session_loop/state.py"
       - "justfile"
       - ".github/workflows/workbench-browser.yml"
   pull_request:
     branches: [main]
     paths:
       - "tests/workbench_browser/**"
+      - "tests/__init__.py"
+      - "tests/workbench_support*.py"
       - "asl_workbench/**"
+      - "agent_session_loop/workbench_*.py"
+      - "agent_session_loop/cli.py"
+      - "agent_session_loop/events.py"
+      - "agent_session_loop/plans_files.py"
+      - "agent_session_loop/state.py"
       - "justfile"
       - ".github/workflows/workbench-browser.yml"
   workflow_dispatch:
@@ -40,7 +61,8 @@ concurrency:
 jobs:
   browser:
     name: Workbench browser (Playwright)
-    runs-on: macos-latest
+    # What `macos-latest` resolves to today, named so it cannot move under us.
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

@@ -28,7 +28,8 @@ extend-include = ["bin/.local/bin/agent-session-loop"]
 [tool.ruff.per-file-target-version]
 "asl_workbench/**/*.py" = "py313"
 # The portable test lane runs under the Pi's interpreter too -- the contract
-# invokes `python3.13 -m unittest -q tests.test_workbench_portable` -- so the
+# invokes `python3.13 -m unittest -q tests.test_workbench_portable`, which CI's
+# `workbench-portable-py313` job in check.yml runs -- so the
 # module and the `tests` package initializer it loads through are pinned to the
 # same floor. Without this the formatter rewrites their `except` groups into
 # 3.14 grammar and the lane fails to import before a single test runs.
