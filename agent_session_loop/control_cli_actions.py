@@ -146,6 +146,9 @@ def control_abort_from_args(args: argparse.Namespace) -> int:
         terminal_actions=(
             events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
             events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
+            # Sent between turns there is nothing to kill: the abort becomes
+            # stop-after-current, and the wait then follows the run to its end.
+            events.RUN_CONTROL_ACTION_ABORT_TURN_DEGRADED,
             # An abort sent while the run is already finalizing has no turn to
             # end, so this is the only outcome its `--wait` can be answered by.
             events.RUN_CONTROL_ACTION_FINALIZATION_ABORT_HONORED,

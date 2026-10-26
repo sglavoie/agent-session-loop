@@ -131,11 +131,13 @@ def _load_resume_state(
     state_path = plan_state / events.STATE_FILE_NAME
     try:
         raw = state_path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError, ValueError:
+        # ValueError rather than only OSError: bytes that are not UTF-8 raise
+        # UnicodeDecodeError while reading, before any JSON is parsed.
         return None
     try:
         payload = json.loads(raw)
-    except json.JSONDecodeError, ValueError:
+    except ValueError, RecursionError:
         return None
     return payload if isinstance(payload, dict) else None
 

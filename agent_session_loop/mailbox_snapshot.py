@@ -14,6 +14,8 @@ from .mailbox_constants import (
     MAILBOX_MIN_GUIDANCE_DELIVERY_BYTES,
     MAILBOX_MIN_REPLY_BYTES,
     MAILBOX_MIN_RESOLUTION_BYTES,
+    MAILBOX_RECEIPT_RESERVE_BYTES,
+    MAILBOX_WAIT_END_RESERVE_BYTES,
     MAILBOX_WAIT_SCHEMA_VERSION,
 )
 from .mailbox_models import MailboxCounts, MailboxMessage, RejectedMailboxRecord
@@ -292,6 +294,20 @@ class MailboxView:
     @property
     def accepts_resolutions(self) -> bool:
         return self.size_bytes + MAILBOX_MIN_RESOLUTION_BYTES <= MAILBOX_MAX_BYTES
+
+    @property
+    def accepts_wait_closures(self) -> bool:
+        # A closure for a question with a live wait stops below both lifecycle
+        # reserves (see ``_append_record``), so once even the smallest one no
+        # longer fits, no answer can close the wait. Gating the wait on this
+        # rather than on ``full`` also keeps the wait-end it then writes inside
+        # its own cap, which sits a whole wait-end reserve above this one.
+        return (
+            self.size_bytes + MAILBOX_MIN_REPLY_BYTES
+            <= MAILBOX_MAX_BYTES
+            - MAILBOX_WAIT_END_RESERVE_BYTES
+            - MAILBOX_RECEIPT_RESERVE_BYTES
+        )
 
     @property
     def accepts_questions(self) -> bool:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import tempfile
@@ -18,6 +19,8 @@ from agent_session_loop import (
     plans_metadata,
     plans_registry,
     plans_snapshot,
+    run_control,
+    run_coordination_control_drain,
     run_loop,
     state,
     state_locks,
@@ -274,6 +277,68 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
             payload["pause_reason"],
         )
         self.assertEqual([], payload["turns"])
+
+    def _state(self) -> dict[str, Any]:
+        state_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir) / events.STATE_FILE_NAME
+        )
+        return json.loads(state_path.read_text(encoding="utf-8"))
+
+    def test_harness_crash_writes_a_terminal_run_error_record(self) -> None:
+        # Before the fix the crash handler re-raised without finishing the
+        # run, so state.json kept an unfinished record that every reader
+        # reported as abandoned.
+        with (
+            mock.patch.object(
+                harnesses,
+                "run_harness",
+                side_effect=RuntimeError("synthetic harness crash"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "synthetic harness crash"),
+        ):
+            self._invoke("crash-record-run")
+
+        recorded = self._state()
+        self.assertIsNotNone(recorded["run_finished_at"])
+        self.assertFalse(recorded["ok"])
+        self.assertFalse(recorded["paused"])
+        self.assertEqual("run-error", recorded["reason"])
+        self.assertIn("synthetic harness crash", recorded["error"])
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        finished = [
+            record["payload"]
+            for record in read_jsonl(event_path)
+            if record["name"] == events.RUN_FINISHED_EVENT
+        ]
+        self.assertEqual(["run-error"], [record["reason"] for record in finished])
+
+    def test_setup_crash_still_stops_the_keyboard_listener(self) -> None:
+        # The pre-run control drain sits in setup, outside the loop's crash
+        # handler; a raise there used to leave the listener running and the
+        # terminal in cbreak mode.
+        listener = mock.MagicMock(spec=run_control.RunControlListener)
+        listener.state = run_control.RunControlState(current_harness="codex")
+        with (
+            mock.patch.object(
+                run_control.RunControlListener, "for_run", return_value=listener
+            ),
+            mock.patch.object(
+                run_coordination_control_drain,
+                "drain_external_control_queue",
+                side_effect=OSError("synthetic drain failure"),
+            ),
+            self.assertRaisesRegex(OSError, "synthetic drain failure"),
+        ):
+            self._invoke("setup-crash-run")
+
+        listener.start.assert_called_once_with()
+        listener.stop.assert_called()
+        recorded = self._state()
+        self.assertEqual("run-error", recorded["reason"])
+        self.assertIsNotNone(recorded["run_finished_at"])
 
     def test_unregistered_sibling_write_does_not_pause_the_run(self) -> None:
         sibling = self.workspace_root / "unrelated-active-work"

@@ -128,6 +128,9 @@ RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CONSUMED = "stop-after-current-consumed"
 RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED = "abort-turn-requested"
 RUN_CONTROL_ACTION_ABORT_TURN_HONORED = "abort-turn-honored"
 RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER = "abort-turn-satisfied-by-worker"
+# An abort observed with no turn in flight. Nothing is killed: the request is
+# consumed and becomes stop-after-current, so it must not read as a kill.
+RUN_CONTROL_ACTION_ABORT_TURN_DEGRADED = "abort-turn-degraded"
 # An abort that arrived while the run was finalizing, after the last turn had
 # already ended. It cancels the terminal work in flight rather than a turn.
 RUN_CONTROL_ACTION_FINALIZATION_ABORT_HONORED = "finalization-abort-honored"
@@ -153,6 +156,7 @@ RUN_CONTROL_ACTIONS: tuple[str, ...] = (
     RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
     RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
     RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
+    RUN_CONTROL_ACTION_ABORT_TURN_DEGRADED,
     RUN_CONTROL_ACTION_FINALIZATION_ABORT_HONORED,
     RUN_CONTROL_ACTION_COMMAND_OBSERVED,
     RUN_CONTROL_ACTION_TAIL_ENABLED,

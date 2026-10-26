@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from . import (
     clock,
+    commit_settlement,
     handoff_correction,
     handoff_guards,
     harnesses,
     plans_errors,
     plans_payloads,
+    readiness_gate,
     review_cycle,
     review_transitions,
     run_inputs,
+    run_termination_shared,
     session_verification,
     turn_execution_constants,
     write_guards,
@@ -180,11 +183,80 @@ def _handle_run_crash(frame: RunFrame, error: BaseException) -> RunResult | None
                 details=dict(frame.ctx.last_session_details),
             )
     else:
+        # The terminal record and the shutdown of the controls belong to
+        # ``run_locked``, which sees every exception that ends a run, not only
+        # the ones that escape the loop.
         _expire_run_guards(frame.ctx)
-        frame.ctx.run_controls.stop()
-        frame.ctx.inline_tail.stop()
         raise
     return None
+
+
+#: The terminal reason a run records when an exception, rather than one of its
+#: own decisions, ended it. The same reason ``run_entry`` prints for it.
+RUN_ERROR_REASON = "run-error"
+
+
+def _record_run_crash(frame: RunFrame, error: BaseException) -> None:
+    """Best-effort terminal record for a run an exception is ending.
+
+    Without it ``state.json`` keeps the unfinished record of a run whose
+    process is gone, and every reader reports it abandoned instead of saying
+    it failed. An interrupt is recorded as the ``interrupted`` pause the loop's
+    own handler writes; anything else fails the run with ``run-error`` and
+    keeps a pause the run had already taken. The record is skipped when the
+    run has already finished, and a failure to write it is attached to the
+    original error as a note so the error itself still propagates intact.
+    """
+    ctx = getattr(frame, "ctx", None)
+    if ctx is None:
+        return
+    try:
+        with ctx.persistence.lock:
+            if ctx.payload.get("run_finished_at") is not None:
+                return
+        if isinstance(error, KeyboardInterrupt):
+            if not ctx.payload.get("paused"):
+                ctx.pause(
+                    reason="interrupted",
+                    message="run interrupted by user",
+                    details=dict(ctx.last_session_details),
+                )
+        else:
+            with ctx.persistence.lock:
+                ctx.payload["ok"] = False
+                ctx.payload["error"] = f"{type(error).__name__}: {error}"
+                if not ctx.payload.get("paused"):
+                    ctx.payload["reason"] = RUN_ERROR_REASON
+        _expire_run_guards(ctx)
+        commit_settlement._finish_run(
+            ctx.event_path,
+            ctx.payload,
+            ctx.progress,
+            persistence=ctx.persistence,
+            finalize_readiness=run_termination_shared.readiness_finalizer(
+                readiness_gate.write_readiness_state
+            ),
+        )
+    except Exception as record_error:  # noqa: BLE001
+        error.add_note(f"recording the run's terminal state failed: {record_error}")
+
+
+def _stop_run_controls(frame: RunFrame) -> None:
+    """Stop the keyboard listener and the inline tail, whatever ended the run.
+
+    The one shutdown of both, called from ``run_locked``'s ``finally`` so it
+    also covers the exits that never reach ``_finalize_run`` -- a setup step or
+    the settlement ahead of its ``try`` raising -- which used to leave the
+    listener thread running and the terminal in cbreak mode.
+    """
+    ctx = getattr(frame, "ctx", None)
+    if ctx is None:
+        return
+    try:
+        if ctx.run_controls is not None:
+            ctx.run_controls.stop()
+    finally:
+        ctx.inline_tail.stop()
 
 
 def _finalize_run(frame: RunFrame) -> RunResult | None:
@@ -275,7 +347,7 @@ def _finalize_run(frame: RunFrame) -> RunResult | None:
             poll=frame.mailbox_poll,
         )
     finally:
+        # The listener and inline tail are stopped by `run_locked`'s own
+        # `finally`, the one shutdown every exit reaches, this one included.
         frame.mailbox_poll.set_abort(None)
         _expire_run_guards(frame.ctx)
-        frame.ctx.run_controls.stop()
-        frame.ctx.inline_tail.stop()

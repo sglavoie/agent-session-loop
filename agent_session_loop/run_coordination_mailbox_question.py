@@ -157,13 +157,26 @@ def ensure_mailbox_question(
             and view.active_wait_for(existing.id) is None
             and view.closure_for(existing.id) is None
         ):
-            mailbox_waits.append_wait_start(
-                plan_dir, existing.id, state_dir=state_dir_arg
-            )
+            # A refused wait start is a wait that cannot begin, which the
+            # caller already turns into an ordinary pause; raising past it
+            # would crash the run over a full or unwritable mailbox.
+            try:
+                mailbox_waits.append_wait_start(
+                    plan_dir, existing.id, state_dir=state_dir_arg
+                )
+            except (OSError, mailbox_models.MailboxError) as error:
+                reason = (
+                    error.reason
+                    if isinstance(error, mailbox_models.MailboxError)
+                    else mailbox_constants.ERROR_MAILBOX_WRITE
+                )
+                raise run_coordination_wait_models.MailboxWaitUnavailable(
+                    reason
+                ) from error
         return existing
     # A question append is refused at the reduced question cap, not the file
-    # cap; the wait loop's own guard stays on ``view.full`` because there the
-    # question is whether the *reply* can still land.
+    # cap; the wait loop's own guard is ``view.accepts_wait_closures`` because
+    # there the question is whether the *reply* can still land.
     if not view.accepts_questions:
         raise run_coordination_wait_models.MailboxWaitUnavailable(
             mailbox_constants.ERROR_MAILBOX_FULL

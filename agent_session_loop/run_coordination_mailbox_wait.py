@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace as dataclass_replace
@@ -222,7 +223,7 @@ def wait_for_mailbox_reply(
                     pending_outbox=pending_outbox,
                     resolution=closure,
                 )
-            if view.full:
+            if not view.accepts_wait_closures:
                 return run_coordination_wait_models.MailboxWaitResult.unclosed(
                     mailbox_constants.ERROR_MAILBOX_FULL,
                     pending_outbox=pending_outbox,
@@ -432,6 +433,7 @@ class MailboxWaitCoordinator:
                 question_text=prepared.question.text,
             )
         result: run_coordination_wait_models.MailboxWaitResult | None = None
+        lifecycle_ended = False
         try:
             result = self._wait_for_reply(
                 plan_dir=self._plan_dir,
@@ -444,14 +446,28 @@ class MailboxWaitCoordinator:
                 poll_controls=self._poll_controls,
                 started_monotonic=prepared.started_monotonic,
             )
-            result = self._finish_lifecycle(
-                plan_dir=self._plan_dir,
-                state_dir_arg=self._state_dir_arg,
-                question_id=prepared.question.id,
-                wait_id=prepared.wait_start.id,
-                result=result,
-            )
+            try:
+                result = self._finish_lifecycle(
+                    plan_dir=self._plan_dir,
+                    state_dir_arg=self._state_dir_arg,
+                    question_id=prepared.question.id,
+                    wait_id=prepared.wait_start.id,
+                    result=result,
+                )
+            except mailbox_models.MailboxError as error:
+                # The wait-end could not be committed -- most often because the
+                # mailbox is full. That is a wait that ended without an answer,
+                # so it becomes the reason the caller pauses on rather than an
+                # exception that crashes the run. The poll's own answer is
+                # dropped with it: an answer whose receipt was never written
+                # was not consumed, and acting on it would deliver it twice.
+                result = dataclass_replace(
+                    result, reason=error.reason, reply=None, resolution=None
+                )
+            lifecycle_ended = True
         finally:
+            if not lifecycle_ended:
+                self._end_abandoned_wait()
             reason = self._store.clear(result)
             if self._notifier is not None:
                 self._notifier.wait_ended(
@@ -460,3 +476,23 @@ class MailboxWaitCoordinator:
                     closure_id=None if result is None else result.closure_id,
                 )
         return result
+
+    def _end_abandoned_wait(self) -> None:
+        """Best-effort close of a wait the poll left by raising.
+
+        An interrupt or a state-write failure leaves the poll without a result,
+        and without this the mailbox keeps the question waiting for a run that
+        has stopped listening: ``asl inbox reply`` would accept an answer no
+        one will consume and ``--wait-consumed`` would hang on it. An answer
+        that already arrived is left unconsumed rather than receipted, because
+        this run never delivered it.
+        """
+        with contextlib.suppress(OSError, mailbox_models.MailboxError):
+            mailbox_waits.finish_wait(
+                self._plan_dir,
+                self._prepared.question.id,
+                self._prepared.wait_start.id,
+                reason=mailbox_vocabulary.WAIT_END_REASON_ERROR,
+                state_dir=self._state_dir_arg,
+                consume_closure=False,
+            )

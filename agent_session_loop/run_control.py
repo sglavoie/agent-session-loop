@@ -8,6 +8,7 @@ re-exported here, so this module remains the public entry point.
 from __future__ import annotations
 
 import codecs
+import contextlib
 import os
 import select
 import sys
@@ -158,6 +159,7 @@ class RunControlListener:
         self._thread: threading.Thread | None = None
         self._fd: int | None = None
         self._original_settings: Any | None = None
+        self._key_error_reported = False
 
     @classmethod
     def for_run(
@@ -306,7 +308,26 @@ class RunControlListener:
             # tail can contain digits that would otherwise select a harness.
             text = text.split("\x1b", 1)[0]
             for key in text:
-                self.handle_key(key)
+                # A raising callback (a failed state write behind ``on_action``,
+                # say) is one lost keypress, not the end of the listener: an
+                # uncaught error here would end the thread silently and leave
+                # every later key unanswered for the rest of the run.
+                try:
+                    self.handle_key(key)
+                except Exception as error:  # noqa: BLE001
+                    self._report_key_error(key, error)
+
+    def _report_key_error(self, key: str, error: Exception) -> None:
+        # Once per run: a callback that fails on every key would otherwise
+        # repeat the same line on each press.
+        if self._key_error_reported:
+            return
+        self._key_error_reported = True
+        with contextlib.suppress(Exception):
+            self._emit_line(
+                f"control: key {key!r} failed: {type(error).__name__}: {error}; "
+                "controls stay active"
+            )
 
     def _emit_line(self, message: str) -> None:
         print(f"[{self._timestamp()}] {message}", file=self._stderr, flush=True)
