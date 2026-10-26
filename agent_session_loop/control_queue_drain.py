@@ -148,7 +148,10 @@ def drain_queue(
             continue
         try:
             payload = json.loads(stripped)
-        except json.JSONDecodeError as error:
+        except (ValueError, RecursionError) as error:
+            # RecursionError is not a ValueError: a pathologically nested line
+            # raises it from the decoder. The queue is already truncated, so it
+            # must reject this one line rather than lose the whole batch.
             rejected.append(
                 RejectedCommand(
                     line_number=line_number,

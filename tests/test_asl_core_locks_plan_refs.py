@@ -311,6 +311,15 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             # Directory component present: keep path-only behavior.
             self.assertEqual(plans_files.canonicalize_path("foo/bar"), resolved)
 
+    def test_unreadable_metadata_reads_as_absent(self) -> None:
+        # Bytes that are not UTF-8 and nesting deep enough that the decoder
+        # raises RecursionError, not a JSON error, are both just unusable.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "plan.json"
+            for raw in (b'{"plan_dir": "\xff"}', b"[" * 1_000_000):
+                path.write_bytes(raw)
+                self.assertIsNone(state_plan_refs._read_json_object_safe(path))
+
     def test_missing_state_root_retains_original(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_root = Path(tmp) / "absent"

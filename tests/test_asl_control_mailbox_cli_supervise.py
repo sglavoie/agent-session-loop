@@ -354,6 +354,8 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
 
         for content in (
             "{not json",
+            # Deep enough that the decoder raises RecursionError instead.
+            "[" * 1_000_000,
             json.dumps({"version": 99, "next_since": 5}),
             json.dumps(
                 {
@@ -363,7 +365,7 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
                 }
             ),
         ):
-            with self.subTest(content=content):
+            with self.subTest(content=content[:80]):
                 cursor_path.write_text(content, encoding="utf-8")
                 self.assertEqual(0, self.cursor_on_disk(launch))
                 code, lines = self.supervise_lines(supervision_id=launch)

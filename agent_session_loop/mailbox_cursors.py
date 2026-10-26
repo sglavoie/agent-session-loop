@@ -77,7 +77,9 @@ def _read_supervision_cursor_payload(
             state_dir,
         )
         payload = json.loads(cursor_path.read_text(encoding="utf-8"))
-    except OSError, ValueError:
+    except OSError, ValueError, RecursionError:
+        # RecursionError is not a ValueError: pathologically nested JSON raises
+        # it from the decoder instead of a decode error.
         return None
     if not isinstance(payload, dict):
         return None
