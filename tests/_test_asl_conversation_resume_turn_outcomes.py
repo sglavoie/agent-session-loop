@@ -94,6 +94,26 @@ class TurnOutcomeTests(ContinuationTestBase):
         self.assertFalse(outcome.confirmed)
         self.assertIsNone(outcome.conversation)
 
+    def test_a_capture_the_ledger_refused_reports_why(self) -> None:
+        # The mismatched-id refusal already names itself; a ledger that could
+        # not record the conversation must too, or the run's continuation event
+        # is never written for the turn it abandoned.
+        capture = conversation_resume.ConversationCapture(
+            self.plan_state, binding=self.binding()
+        )
+        failure = conversations.ConversationError(
+            conversations.ERROR_LEDGER_FULL, "append would exceed the limit"
+        )
+        with (
+            mock.patch.object(conversations, "open_conversation", side_effect=failure),
+            self.assertRaises(conversations.ConversationError),
+        ):
+            capture("thread-7")
+        self.assertIn("append would exceed the limit", capture.error)
+        outcome = self.record(capture, conversation_error=capture.error)
+        self.assertFalse(outcome.confirmed)
+        self.assertIn("append would exceed the limit", outcome.error)
+
     def test_a_failed_confirmation_is_reported_rather_than_raised(self) -> None:
         capture = self.opened_capture()
         with mock.patch.object(

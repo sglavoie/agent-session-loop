@@ -66,16 +66,22 @@ class ConversationCapture:
             raise harnesses.ConversationCaptureError(self._error)
         if self._reference is not None and self._reference.native_id == native_id:
             return
-        reference = conversations.ConversationReference(
-            binding=self._binding, native_id=native_id
-        )
-        if self._expected is None:
-            # A conversation the run is meeting for the first time has to be
-            # durable before the work that will use it is submitted; that
-            # ordering is the whole contract of `open_conversation`. A resumed
-            # one is already recorded, so re-opening it would add a record
-            # saying nothing.
-            conversations.open_conversation(self._plan_state, reference)
+        try:
+            reference = conversations.ConversationReference(
+                binding=self._binding, native_id=native_id
+            )
+            if self._expected is None:
+                # A conversation the run is meeting for the first time has to
+                # be durable before the work that will use it is submitted;
+                # that ordering is the whole contract of `open_conversation`. A
+                # resumed one is already recorded, so re-opening it would add a
+                # record saying nothing.
+                conversations.open_conversation(self._plan_state, reference)
+        except (conversations.ConversationError, OSError) as error:
+            # Kept for the turn's continuation event, which is written from
+            # this error alone when no reference was captured.
+            self._error = f"could not record conversation {native_id}: {error}"
+            raise
         self._reference = reference
 
 
