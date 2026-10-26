@@ -316,6 +316,28 @@ class RejectionTests(LedgerTestCase):
         self.assertEqual((), view.records)
         self.assertEqual(ledger.REJECT_INVALID_RECORD, view.rejected[0].reason)
 
+    def test_a_mistyped_version_or_kind_is_rejected_not_raised(self) -> None:
+        self.write_ledger_text(
+            "\n".join(
+                [
+                    json.dumps({"version": [1], "kind": "audit_pending"}),
+                    json.dumps({"version": 1.0, "kind": "audit_pending"}),
+                    json.dumps({"version": 1, "kind": ["audit_pending"]}),
+                    json.dumps({"version": 1, "kind": {}}),
+                ]
+            )
+            + "\n"
+        )
+        self.assertEqual(
+            [
+                ledger.REJECT_UNSUPPORTED_VERSION,
+                ledger.REJECT_UNSUPPORTED_VERSION,
+                ledger.REJECT_UNKNOWN_KIND,
+                ledger.REJECT_UNKNOWN_KIND,
+            ],
+            [item.reason for item in self.read().rejected],
+        )
+
     def test_an_over_deep_line_is_rejected_not_raised(self) -> None:
         self.write_ledger_text("[" * 1_000_000 + "]" * 1_000_000 + "\n")
         view = self.read()

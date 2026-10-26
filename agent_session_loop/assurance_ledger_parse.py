@@ -145,7 +145,13 @@ def parse_ledger_bytes(data: bytes, path: Path) -> LedgerView:
             _reject(rejected, seq=seq, reason=REJECT_NOT_OBJECT, raw=raw)
             continue
         version = envelope.get("version")
-        if isinstance(version, bool) or version not in SUPPORTED_LEDGER_SCHEMA_VERSIONS:
+        # Type first: a list or object is unhashable and would raise out of
+        # the set lookup, and ``1.0`` is not the integer version 1 spelled.
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version not in SUPPORTED_LEDGER_SCHEMA_VERSIONS
+        ):
             _reject(
                 rejected,
                 seq=seq,
@@ -154,15 +160,15 @@ def parse_ledger_bytes(data: bytes, path: Path) -> LedgerView:
                 detail=f"version {version!r} is not one this build reads",
             )
             continue
-        if envelope.get("kind") not in KINDS_BY_SCHEMA_VERSION[version]:
+        kind = envelope.get("kind")
+        if not isinstance(kind, str) or kind not in KINDS_BY_SCHEMA_VERSION[version]:
             _reject(
                 rejected,
                 seq=seq,
                 reason=REJECT_UNKNOWN_KIND,
                 raw=raw,
                 detail=(
-                    f"kind {envelope.get('kind')!r} is not a ledger record kind "
-                    f"at schema v{version}"
+                    f"kind {kind!r} is not a ledger record kind at schema v{version}"
                 ),
             )
             continue
