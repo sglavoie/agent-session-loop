@@ -36,6 +36,16 @@ from .workbench_summary_model import (
 )
 
 
+def _text_or_none(value: Any) -> str | None:
+    """A state field that should be text, as text: numbers and booleans are
+    spelled out, anything else (a mapping, a list) is treated as absent."""
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return str(value)
+    return None
+
+
 @dataclass
 class SummaryContext:
     """Everything the state classifiers read, gathered once per plan."""
@@ -302,8 +312,10 @@ def gather_context(
         final_review_path=_final_review_path_if_exists(snapshot.plan_dir),
         active_turn=active_turn,
         active_verification=runner_state.get("active_verification"),
-        base_run_id=runner_state.get("run_id"),
-        base_harness=runner_state.get("harness"),
+        # Coerced rather than trusted: state.json is a file on disk, and a
+        # number where an id belongs must not fail every summary built from it.
+        base_run_id=_text_or_none(runner_state.get("run_id")),
+        base_harness=_text_or_none(runner_state.get("harness")),
         artifact_dir=artifact_dir,
         stdout_path=stdout_path,
         stderr_path=stderr_path,

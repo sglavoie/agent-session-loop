@@ -18,7 +18,6 @@ from . import (
     mailbox,
     mailbox_models,
     mailbox_snapshot,
-    plans_errors,
     redirect_recovery,
     state,
     state_locks,
@@ -350,9 +349,10 @@ def build_runs_snapshot(
             if summary.primary_state not in ACTIVE_PRIMARY_STATES:
                 continue
             rows.append(project_row(summary, state_dir=state_dir))
-        except (plans_errors.PlanError, OSError, ValueError) as error:
-            # A plan that vanishes or turns unreadable mid-scan is news, not a
-            # reason to drop every other row in the queue.
+        except Exception as error:  # noqa: BLE001 - one plan never fails the walk
+            # A plan that vanishes, turns unreadable mid-scan, or carries a
+            # value of the wrong type in its state file is news, not a reason
+            # to drop every other row in the queue.
             warnings.append(
                 f"plan projection failed for {discovered.plan_dir}: {error}"
             )
