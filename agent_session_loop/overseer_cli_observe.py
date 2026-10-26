@@ -69,7 +69,14 @@ def scan_from_args(
         detail: str = candidate.lifecycle
         if candidate.ineligible_reasons:
             detail = f"{detail}: {', '.join(candidate.ineligible_reasons)}"
-        lines.append(f"  {mark} {candidate.plan_dir} [{detail}]")
+        # A state directory with no readable record names no plan; show the
+        # state directory it was found under rather than a bare ``None``.
+        label = (
+            candidate.plan_dir
+            if candidate.plan_dir is not None
+            else f"(unknown plan; state {candidate.state_dir})"
+        )
+        lines.append(f"  {mark} {label} [{detail}]")
     for warning in inventory.warnings:
         lines.append(f"  ! {warning}")
     common_module._emit(payload, lines, as_json=as_json)

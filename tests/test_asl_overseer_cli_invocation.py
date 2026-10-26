@@ -445,6 +445,39 @@ class ExitStatusTests(_OverseerCase):
         self.assertEqual(1, status)
         self.assertFalse(payload["complete"])
 
+    def test_text_scan_labels_a_record_it_could_not_read(self) -> None:
+        """A state dir with no record names no plan; it must not print None."""
+        unobserved = overseer_discovery._unobserved(
+            Path("/tmp/state/plan-key"), overseer_discovery.Ownership.unowned()
+        )
+
+        def build_inventory(**kwargs: Any) -> overseer_discovery.Inventory:
+            inventory = overseer_discovery.build_inventory(**kwargs)
+            return overseer_discovery.Inventory(
+                state_root=inventory.state_root,
+                candidates=(unobserved,),
+                warnings=(),
+                complete=False,
+            )
+
+        seams = self._partial_seams()
+        seams = overseer_cli.Seams(
+            **{
+                field.name: getattr(seams, field.name)
+                for field in fields(seams)
+                if field.name != "build_inventory"
+            },
+            build_inventory=build_inventory,
+        )
+        with mock.patch.object(self.fleet, "seams", return_value=seams):
+            _status, text = self.fleet.render("scan")
+
+        self.assertNotIn("None", text)
+        self.assertIn(
+            "- (unknown plan; state /tmp/state/plan-key) [unknown: record_unobserved]",
+            text,
+        )
+
     def _partial_seams(self) -> overseer_cli.Seams:
         def build_inventory(**kwargs: Any) -> overseer_discovery.Inventory:
             inventory = overseer_discovery.build_inventory(**kwargs)
