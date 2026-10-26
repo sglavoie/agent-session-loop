@@ -294,6 +294,22 @@ class ResolveIntentTests(unittest.TestCase):
         self.assertEqual("unresolved", exemptions["verify.parallel"])
         self.assertEqual((), intent.git_roots)
 
+    def test_a_value_holding_a_nul_names_no_location(self) -> None:
+        intent = self._resolve(
+            repository_intent.IntentCandidate(
+                value="src/a\0b.py", surface="backtick-path"
+            ),
+            repository_intent.IntentCandidate(
+                value=f"{self.second}/a\0b.py", surface="absolute-path"
+            ),
+            repository_intent.IntentCandidate(
+                value=str(self.first / "README.md"), surface="absolute-path"
+            ),
+        )
+
+        self.assertEqual((self.first,), intent.git_roots)
+        self.assertFalse(intent.registry_required)
+
     def test_workspace_symlink_resolving_into_system_toolchain_is_exempt(
         self,
     ) -> None:

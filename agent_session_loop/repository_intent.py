@@ -546,6 +546,9 @@ def resolve_intent(
 
 
 def _absolute(value: str, root: Path) -> Path | None:
+    # No filesystem path holds a NUL, and every stat of one raises ValueError.
+    if "\0" in value:
+        return None
     expanded = os.path.expanduser(value)
     if not expanded:
         return None
