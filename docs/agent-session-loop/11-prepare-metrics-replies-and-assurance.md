@@ -110,8 +110,10 @@ and forwarded into both the emitted `asl run` command and any emitted
 `--review-harness`. Preparation deliberately has no validator-model flag:
 `--validator-harness` always uses that harness's native or configured default.
 Stable JSON reasons: `ok`, `needs-plan-iteration`, `validation-failed`,
-`baseline-unsatisfied`, `not-loop-ready`, `input-error`, `cwd-error`, and
-`plan-structure`.
+`baseline-unsatisfied`, `not-loop-ready`, `input-error`, `cwd-error`,
+`plan-structure`, and `already-split` (the source plan already has a split
+directory, listed in `details.existing_outputs`; rerun with `--resume` on it,
+or pass `--force-new` for an intentional second split).
 
 `metrics` aggregates workflow reliability and storage numbers from the
 persisted state corpus, defaulting to the last 7 days (`--since-days N`

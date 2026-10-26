@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from . import responses
+from .authoring_paths import DuplicateSplitError
 from .cli_defaults import program_name
 from .plans_errors import InputReadError, PlanError
 from .prepare import prepare_plan
@@ -18,6 +19,7 @@ from .prepare_models import (
 )
 from .prepare_rebind import _workspace_rebind_payload
 from .prepare_results import (
+    PREPARE_EXIT_REASON_ALREADY_SPLIT,
     PREPARE_EXIT_REASON_CWD_ERROR,
     PREPARE_EXIT_REASON_INPUT_ERROR,
     PREPARE_EXIT_REASON_OK,
@@ -141,6 +143,7 @@ def prepare_from_args(args: Any) -> int:
         error: str,
         *,
         workspace_rebind: dict[str, Any] | None = None,
+        details: dict[str, Any] | None = None,
     ) -> int:
         if want_json:
             extra_fields: dict[str, Any] = {}
@@ -152,6 +155,7 @@ def prepare_from_args(args: Any) -> int:
                     reason=reason,
                     error=error,
                     paused=False,
+                    details=details,
                     **common_fields,
                     **extra_fields,
                 )
@@ -267,6 +271,18 @@ def prepare_from_args(args: Any) -> int:
         )
     except InputReadError as error:
         return _emit_input_error(PREPARE_EXIT_REASON_INPUT_ERROR, str(error))
+    except DuplicateSplitError as error:
+        return _emit_input_error(
+            PREPARE_EXIT_REASON_ALREADY_SPLIT,
+            (
+                f"{error}; rerun with --resume on that directory, or pass "
+                "--force-new for an intentional second split"
+            ),
+            details={
+                "plan_id": error.plan_id,
+                "existing_outputs": list(error.existing_outputs),
+            },
+        )
     except PlanError as error:
         return _emit_input_error(
             (
