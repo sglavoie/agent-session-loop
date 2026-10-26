@@ -86,6 +86,26 @@ class IncrementalReadTests(HistoryTestCase):
         self.assertEqual(result.entries, ())
         self.assertEqual(result.malformed, 1)
 
+    def test_an_overflowing_number_is_unplaced_rather_than_ending_the_pass(
+        self,
+    ) -> None:
+        path = self.write_events([_started("run-1", at=10)])
+        huge = "1" + "0" * 400
+        with path.open("a", encoding="utf-8") as handle:
+            for run_id, number in (("run-1", huge), ("run-2", "1e999")):
+                handle.write(
+                    f'{{"created_at": {number}, "name": "run_finished", '
+                    f'"version": 2, "payload": {{"run_id": "{run_id}", '
+                    '"ok": true, "paused": false, "reason": "all-complete", '
+                    f'"run_finished_at": "{_at(20)}", '
+                    f'"duration_seconds": {number}}}}}\n'
+                )
+        result = self.run_import()
+        self.assertEqual([entry.run_id for entry in result.entries], ["run-1", "run-2"])
+        for entry in result.entries:
+            self.assertEqual(entry.recorded_at, _T0.timestamp() + 20)
+            self.assertIsNone(entry.duration_seconds)
+
     def test_an_unsupported_event_version_is_skipped_not_guessed(self) -> None:
         record = _finished("run-1", at=20)
         record["version"] = 99

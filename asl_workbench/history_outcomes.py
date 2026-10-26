@@ -115,7 +115,10 @@ def _duration(payload: Mapping[str, object]) -> float | None:
     value = payload.get("duration_seconds")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
     # A negative or non-finite duration is a clock fault, not a duration. It is
     # dropped rather than clamped: zero would read as an instantaneous run.
     if not math.isfinite(number) or number < 0:

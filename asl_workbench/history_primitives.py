@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from collections.abc import Mapping
 
@@ -312,7 +313,13 @@ def epoch(value: object) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value) if value >= 0 else None
+        # `1e999` parses as infinity and a 400-digit integer does not fit a
+        # float at all; neither is a moment, and neither may end the pass.
+        try:
+            number = float(value)
+        except OverflowError:
+            return None
+        return number if math.isfinite(number) and number >= 0 else None
     stamp = iso_epoch(value)
     return stamp if stamp is not None and stamp >= 0 else None
 
