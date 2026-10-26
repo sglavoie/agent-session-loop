@@ -235,7 +235,7 @@ def read_completion_contract(
         raise PlanError(
             f"missing session file for session {canonical_id.value}: {session_path}"
         ) from error
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         raise PlanError(f"cannot read {session_path}: {error}") from error
     registry = read_repository_registry(canonical_dir)
     return parse_completion_contract(

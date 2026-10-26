@@ -376,6 +376,30 @@ class VerifyCliTests(unittest.TestCase):
             self.assertEqual("1", payload["session"])
             self.assertIn("Verify JSON is invalid", payload["error"])
 
+    def test_verify_json_reports_a_non_utf8_session_file_as_unreadable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            contract = _contract_block('{"type": "file_exists", "path": "a"}')
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+            session_file = plan_dir / "session-1.md"
+            with session_file.open("ab") as handle:
+                handle.write(b"\nnotes \xff\xfe\n")
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("malformed-contract", payload["reason"])
+            self.assertIn("cannot read", payload["error"])
+            self.assertIn("utf-8", payload["error"])
+
     def test_verify_json_invalid_session_id_reports_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
