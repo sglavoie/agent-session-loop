@@ -234,6 +234,8 @@ class ExternalRecoveryResumptionTests(ExternalRecoveryTestCase):
         with mock.patch.object(run_commit, "_run_asl_commit", side_effect=fail_second):
             code, result = self.invoke(*self.accept_args(preview))
         self.assertEqual(1, code, result)
+        self.assertEqual("recovery-interrupted", result["reason"])
+        self.assertIn("--accept", result["resume_argv"])
         sha = git_stdout(self.repos["notes"], "rev-parse", "HEAD")
         self.assertEqual(sha, result["checkpoints"]["notes"])
         code, result = self.invoke(*self.accept_args(preview))

@@ -205,7 +205,10 @@ def pin_plan(
     return _mutate(
         registry_path,
         lambda current: workbench_registry.upsert_pin(
-            current, plan_dir, label=label, profile=profile
+            current,
+            workbench_registry.require_pinnable_plan_dir(plan_dir),
+            label=label,
+            profile=profile,
         ),
         reason=portable_archive.REASON_INVALID_PLAN,
         details={"plan_dir": plan_dir},

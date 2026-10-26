@@ -34,7 +34,7 @@ import {
   renderOperationReceipts,
 } from "./operations.js";
 import { describeAction, formatRepositoryAliases } from "./preview.js";
-import { renderProfileForm } from "./profile.js";
+import { renderProfileForm, resetProfileForm } from "./profile.js";
 import { setRefreshStatus } from "./queue.js";
 import { loadAndRenderRecovery } from "./recovery.js";
 import { loadAndRenderRedirect } from "./redirect.js";
@@ -106,17 +106,35 @@ export async function refreshDetail() {
   // take. Keep every refresh, including visibility refreshes, on the exact
   // question selected by the route.
   if (state.route.questionId) return loadAndRenderReply();
-  if (state.detailInFlight) return;
+  if (state.detailInFlight) {
+    // A route change (or a poll) arrived while a read is on the wire. That
+    // read may be for another plan, so dropping this one would leave the
+    // previous plan's answer on screen until the next poll; it is run once
+    // the read in flight settles instead.
+    state.detailRefreshPending = true;
+    return;
+  }
   if (liveReplyFormIsInteractive()) return;
   state.detailInFlight = true;
+  state.detailRefreshPending = false;
   setRefreshStatus("loading", "refreshing…");
   const scrollSnapshot = captureDetailScroll();
   const pendingFocus = state.route.focus;
+  // The plan this read is about. The panels below read the current route, so
+  // an answer that arrives after the route moved on describes a plan that is
+  // no longer on screen and must not be drawn beside the new one's panels.
+  const requestedPlanId = routePlanId();
+  const superseded = () => {
+    if (routePlanId() === requestedPlanId) return false;
+    state.detailRefreshPending = true;
+    return true;
+  };
   try {
     const [detailBody, registryBody] = await Promise.all([
       apiRequest(planUrl("/api/plan")),
       apiRequest("/api/registry"),
     ]);
+    if (superseded()) return;
     if (!detailBody || detailBody.ok !== true) {
       renderDetailError((detailBody && detailBody.error) || "failed to load plan");
       return;
@@ -153,13 +171,19 @@ export async function refreshDetail() {
       loadAndRenderReply(),
     ];
     await Promise.all(tasks);
+    if (superseded()) return;
     const ts = new Date().toLocaleTimeString();
     setRefreshStatus("idle", "updated " + ts);
   } catch (err) {
+    if (superseded()) return;
     setRefreshStatus("error", "error: " + describeError(err));
   } finally {
     state.detailInFlight = false;
-    if (state.reply.scrollToTopAfterDelivery) {
+    if (state.detailRefreshPending) {
+      // The follow-up read restores scroll and focus for whatever it draws.
+      state.detailRefreshPending = false;
+      refreshDetail();
+    } else if (state.reply.scrollToTopAfterDelivery) {
       state.reply.scrollToTopAfterDelivery = false;
       window.scrollTo(window.scrollX || 0, 0);
     } else if (pendingFocus) {
@@ -196,10 +220,90 @@ export function renderDetailPending(runKey) {
 }
 
 export function renderDetailError(message) {
-  const labelEl = document.getElementById("wb-detail-label");
-  if (labelEl) labelEl.textContent = "(error)";
+  // Nothing about the previous plan survives an error: a path, workspace or
+  // state left under "(error)" reads as the plan the error is about.
+  blankDetailHeader("(error)");
   const hintEl = document.getElementById("wb-detail-hint");
   if (hintEl) hintEl.textContent = String(message);
+}
+
+/** Empty every header field and put `label` where the plan's name goes. */
+export function blankDetailHeader(label) {
+  const labelEl = document.getElementById("wb-detail-label");
+  if (labelEl) labelEl.textContent = label;
+  [
+    "wb-detail-path",
+    "wb-detail-workspace",
+    "wb-detail-action-hint",
+    "wb-detail-hint",
+  ].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = "";
+  });
+  const stateEl = document.getElementById("wb-detail-state");
+  if (stateEl) {
+    stateEl.textContent = "unknown";
+    stateEl.setAttribute("data-state", "unknown");
+  }
+}
+
+/* What each detail panel shows before its first read, as index.html ships
+ * it. Restored on a plan change so the next plan never opens under the last
+ * plan's sessions, events or logs. */
+const DETAIL_PANEL_PLACEHOLDERS = [
+  ["wb-detail-sessions", "li", "loading…"],
+  ["wb-detail-events", "li", "no events yet"],
+  ["wb-detail-progress", "li", "no entries"],
+  ["wb-detail-artifacts", "li", "no artifacts yet"],
+  ["wb-detail-verification", "p", "no active verification"],
+];
+
+function blankDetailPanels() {
+  DETAIL_PANEL_PLACEHOLDERS.forEach(([id, tag, text]) => {
+    const host = document.getElementById(id);
+    if (!host) return;
+    const empty = document.createElement(tag);
+    empty.className = "wb-empty";
+    empty.textContent = text;
+    host.replaceChildren(empty);
+  });
+  ["wb-detail-stdout", "wb-detail-stderr"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = "(no log)";
+  });
+  const active = document.getElementById("wb-detail-active");
+  if (active) {
+    active.querySelectorAll("dd[data-field]").forEach((dd) => {
+      dd.textContent = "-";
+    });
+  }
+}
+
+/**
+ * Forget the plan that was on screen, because the route now names another.
+ *
+ * Everything below is about one plan, and several readers prefer it to the
+ * route: the run key a mutation carries, whether a control is stale, the path
+ * an archive is confirmed against. Left in place until the next read lands,
+ * any of them would describe the previous plan while addressing this one.
+ */
+export function resetDetailForPlan() {
+  state.detailPlan = null;
+  state.detailRegistry = null;
+  state.detailOutstanding = null;
+  // A waiting question belongs to the plan it was asked in; left behind, it
+  // would hold the next plan's poll still as if its reply form were in use.
+  state.detailReplyContext = null;
+  blankDetailHeader("(loading)");
+  blankDetailPanels();
+  resetProfileForm();
+  const harnessSelect = document.getElementById("wb-control-harness");
+  if (harnessSelect) {
+    harnessSelect.removeAttribute("data-dirty");
+    harnessSelect.removeAttribute("data-plan-id");
+  }
+  renderOperationReceipts(null);
+  applyActionAvailability(document.getElementById("wb-detail"));
 }
 
 export function renderDetailHeader(plan) {
@@ -248,14 +352,41 @@ export function renderDetailHeader(plan) {
       unpinButton.setAttribute("data-blocked-reason", "this plan is not pinned");
     }
   }
-  const harnessSelect = document.getElementById("wb-control-harness");
-  if (harnessSelect && plan.harness) {
-    if (HARNESS_NAMES.indexOf(plan.harness) !== -1) {
-      harnessSelect.value = plan.harness;
-    }
-  }
+  syncHarnessSelect(plan);
   // The plan's own state is half of what decides whether a control can do
   // anything, so every header render re-asks. A stop offered against a plan
   // that finished during the last poll is a button with nothing behind it.
   applyActionAvailability(document.getElementById("wb-detail"));
+}
+
+/**
+ * Show the plan's harness in the picker, unless the operator is choosing one.
+ *
+ * The header renders on every poll. Writing the plan's harness back each time
+ * undid a pick made since the last poll, and "apply" then queued the harness
+ * the plan already had. So the plan's value is written when the plan on
+ * screen changes, and otherwise only while the picker is neither focused nor
+ * holding a pick that has not been applied (`data-dirty`, set on change and
+ * cleared once an apply lands or the plan changes).
+ */
+export function syncHarnessSelect(plan) {
+  const select = document.getElementById("wb-control-harness");
+  if (!select || !plan) return;
+  const planId = planIdOf(plan);
+  if (select.getAttribute("data-plan-id") !== planId) {
+    select.setAttribute("data-plan-id", planId);
+    select.removeAttribute("data-dirty");
+  } else if (
+    select.getAttribute("data-dirty") === "true" ||
+    document.activeElement === select
+  ) {
+    return;
+  }
+  if (
+    plan.harness &&
+    HARNESS_NAMES.indexOf(plan.harness) !== -1 &&
+    select.value !== plan.harness
+  ) {
+    select.value = plan.harness;
+  }
 }

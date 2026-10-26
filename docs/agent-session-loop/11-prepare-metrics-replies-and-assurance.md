@@ -243,7 +243,8 @@ resume guidance. Both JSON shapes include `ok`, `command: "questions"`,
 `session_id`, `next_pending_id`, verbatim `last_message`, assembled
 `rendered_prompt`, and `state_path`. If neither context exists, `--json`
 produces `ok: false` with a stable `reason` (`no-paused-run`,
-`missing-question-context`, or `malformed-plan`) and exits cleanly. These
+`missing-question-context`, `plan-not-found`, or `malformed-plan`) and exits
+cleanly. These
 external operator-facing prompts remain distinct from the in-harness
 `## ASL reply context` and `## ASL resolution context` blocks.
 

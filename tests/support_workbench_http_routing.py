@@ -192,6 +192,8 @@ class PipelineTests(unittest.TestCase):
         payload = document(response)
         self.assertEqual(payload["reason"], "method-not-allowed")
         self.assertEqual(payload["allow"], ["GET"])
+        # RFC 9110 section 15.5.6: a 405 carries the methods in a header too.
+        self.assertEqual(response.headers.get("Allow"), "GET")
 
     def test_an_unknown_path_is_not_found(self) -> None:
         response = application().handle(build("GET", "/api/nothing"))

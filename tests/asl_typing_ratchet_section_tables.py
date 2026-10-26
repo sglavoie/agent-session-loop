@@ -297,6 +297,8 @@ class GlobalSuppressionRatchetTests(unittest.TestCase):
                 "tests",
                 "skills/asl/scripts",
                 "skills/session-resplit/scripts",
+                "install.py",
+                "bin/.local/bin/agent-session-loop",
             ],
         )
 

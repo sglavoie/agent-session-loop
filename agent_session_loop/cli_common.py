@@ -91,6 +91,79 @@ def print_error(
     print(message, file=sys.stderr)
 
 
+def resolve_plan_dir_argument(
+    args: argparse.Namespace,
+    *,
+    command_name: str,
+    text_label: str,
+) -> bool:
+    """Resolve a ``PLAN_DIR_OR_ID`` positional in place, before the handler runs.
+
+    For commands that read the plan through their own loaders rather than
+    :func:`resolve_plan_context`: a bare compact label from ``asl sessions``
+    is rewritten into ``args.plan_dir`` as the plan directory it names, and an
+    existing directory or path-like argument is left exactly as given. Reports
+    an ambiguous label, or a bare label that names no directory and no plan,
+    under the common envelope and returns ``False``; ``True`` means the
+    handler may proceed with ``args.plan_dir``.
+    """
+    raw_value = str(args.plan_dir)
+    if not hasattr(args, "json"):
+        args.json = False
+    try:
+        resolved = state_plan_refs.resolve_plan_reference(
+            raw_value, state.state_root(getattr(args, "state_dir", None))
+        )
+    except state.AmbiguousPlanError as error:
+        print_error(
+            args,
+            command_name=command_name,
+            text_label=text_label,
+            reason="ambiguous-plan",
+            error=str(error),
+            details={
+                "state_root": str(error.state_root),
+                "candidates": [str(candidate) for candidate in error.candidates],
+            },
+            hint="pass a full plan directory path to disambiguate",
+        )
+        return False
+    except state.StateError as error:
+        print_error(
+            args,
+            command_name=command_name,
+            text_label=text_label,
+            reason=state_status.plans_errors_reason(error),
+            error=str(error),
+        )
+        return False
+    except (OSError, ValueError) as error:
+        print_error(
+            args,
+            command_name=command_name,
+            text_label=text_label,
+            reason="os-error",
+            error=str(error),
+        )
+        return False
+    if not state_plan_refs.is_bare_label(raw_value):
+        return True
+    if not resolved.exists():
+        print_error(
+            args,
+            command_name=command_name,
+            text_label=text_label,
+            reason="plan-not-found",
+            error=(
+                f"plan directory does not exist: {resolved}, and no plan label "
+                f"from `{program_name()} sessions` matches {raw_value!r}"
+            ),
+        )
+        return False
+    args.plan_dir = str(resolved)
+    return True
+
+
 def resolve_plan_context(
     args: argparse.Namespace,
     *,

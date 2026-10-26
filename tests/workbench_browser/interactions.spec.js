@@ -857,6 +857,299 @@ for (const deployment of DEPLOYMENTS) {
       expect(selected).toContain("candidate-200");
     });
 
+    test("select candidates walks every page this deployment really serves", async ({
+      page,
+    }) => {
+      // Not mocked: the pages come from the deployment itself, cut one plan
+      // at a time so the fixture's handful of plans spans several. Each page
+      // has to name the total it was cut from and one revision, or the walk
+      // stops at the first page (no total) or refuses the second (no
+      // revision) -- which is what the local provider used to do.
+      await openQueue(page, deployment);
+      const pages = [];
+      await page.route("**/api/queue?**", async (route) => {
+        const url = new URL(route.request().url());
+        url.searchParams.set("limit", "1");
+        pages.push(Number(url.searchParams.get("offset") || 0));
+        await route.continue({ url: url.toString() });
+      });
+      await page.locator("#wb-cleanup-toggle").click();
+      pages.length = 0;
+      await page.locator("#wb-cleanup-select-candidates").click();
+      const feedback = page.locator("#wb-cleanup-feedback");
+      await expect(feedback).toContainText(/selected from \d+ matching plans/);
+      const matched = Number(
+        /from (\d+) matching plans/.exec(await feedback.textContent())[1],
+      );
+      expect(matched).toBeGreaterThan(1);
+      for (let offset = 0; offset < matched; offset += 1) {
+        expect(pages).toContain(offset);
+      }
+    });
+
+    test("select candidates accepts pages that carry no revision at all", async ({
+      page,
+    }) => {
+      // A provider that publishes no revision publishes none on any page.
+      // Missing on both sides is agreement, not a catalog that changed.
+      await openQueue(page, deployment);
+      await page.route("**/api/queue?**", async (route) => {
+        const url = new URL(route.request().url());
+        const offset = Number(url.searchParams.get("offset") || 0);
+        const plan = {
+          plan_key: `unrevised-${offset}`,
+          display_label: `Unrevised ${offset}`,
+          primary_state: "ready",
+          archivable: true,
+          last_activity_at: null,
+        };
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ ok: true, plans: [plan], catalog_matched: 2 }),
+        });
+      });
+      await page.locator("#wb-cleanup-toggle").click();
+      await page.locator("#wb-cleanup-select-candidates").click();
+      await expect(page.locator("#wb-cleanup-feedback")).toContainText(
+        "2 old plans selected from 2 matching plans",
+      );
+    });
+
+    test("a detail poll leaves the operator's edits and errors alone", async ({
+      page,
+    }) => {
+      await openDetail(page, deployment, "bravo");
+      const stopPolling = () =>
+        page.evaluate(async () => {
+          const detail = await import("/static/modules/detail.js");
+          detail.stopDetailTimer();
+        });
+      const poll = () =>
+        page.evaluate(async () => {
+          const detail = await import("/static/modules/detail.js");
+          await detail.refreshDetail();
+          detail.stopDetailTimer();
+        });
+      await stopPolling();
+
+      // The harness picker: a pick not yet applied survives the poll, so
+      // "apply" sends what the operator chose rather than what the plan had.
+      const harness = page.locator("#wb-control-harness");
+      const options = await harness
+        .locator("option")
+        .evaluateAll((nodes) => nodes.map((node) => node.value).filter(Boolean));
+      const current = await harness.inputValue();
+      const pick = options.find((value) => value !== current);
+      expect(pick, "the picker offers another harness").toBeTruthy();
+      await harness.selectOption(pick);
+      await harness.evaluate((el) => el.blur());
+      await poll();
+      await expect(harness).toHaveValue(pick);
+
+      // The launch profile only exists where launching does.
+      const form = page.locator("#wb-profile-form");
+      if (!(await form.isVisible())) return;
+      const label = page.locator("#wb-profile-label");
+      await label.fill("draft label nobody saved");
+      await label.evaluate((el) => el.blur());
+      await page.locator("#wb-profile-max-review-fix-cycles").fill("-1");
+      await form.evaluate((el) => el.requestSubmit());
+      const errors = page.locator("#wb-profile-form-errors");
+      await expect(errors).toBeVisible();
+      await expect(errors).toContainText("max review-fix cycles");
+
+      await poll();
+      await expect(label).toHaveValue("draft label nobody saved");
+      await expect(errors).toBeVisible();
+      await expect(errors).toContainText("max review-fix cycles");
+    });
+
+    test("opening another plan forgets the last one before the read lands", async ({
+      page,
+    }) => {
+      const alpha = await openDetail(page, deployment, "alpha");
+      const bravo = rowFor(await catalog(page), "bravo");
+      // Hold bravo's read so the window between the route change and the
+      // first answer is wide enough to look into.
+      let release;
+      const held = new Promise((resolve) => {
+        release = resolve;
+      });
+      await page.route("**/api/plan?**", async (route) => {
+        await held;
+        await route.continue();
+      });
+      const during = await page.evaluate(async (hash) => {
+        await new Promise((resolve) => {
+          window.addEventListener("hashchange", resolve, { once: true });
+          window.location.hash = hash;
+        });
+        const { state } = await import("/static/modules/state.js");
+        const identity = await import("/static/modules/identity.js");
+        return {
+          detailPlan: state.detailPlan,
+          detailRegistry: state.detailRegistry,
+          detailOutstanding: state.detailOutstanding,
+          runKey: identity.routeRunKey(),
+          path: document.getElementById("wb-detail-path").textContent,
+          workspace: document.getElementById("wb-detail-workspace").textContent,
+          state: document.getElementById("wb-detail-state").textContent.trim(),
+        };
+      }, detailHash(bravo));
+      expect(during.detailPlan).toBeNull();
+      expect(during.detailRegistry).toBeNull();
+      expect(during.detailOutstanding).toBeNull();
+      expect(during.runKey).not.toBe(alpha.run_key);
+      expect(during.path).toBe("");
+      expect(during.workspace).toBe("");
+      expect(during.state).toBe("unknown");
+      release();
+      await expect(page.locator("#wb-detail-state")).toHaveAttribute(
+        "data-state",
+        PLAN_STATES.bravo.primary_state,
+      );
+    });
+
+    test("a detail error leaves nothing of the plan behind it", async ({
+      page,
+    }) => {
+      await openDetail(page, deployment, "alpha");
+      await page.evaluate(async () => {
+        const detail = await import("/static/modules/detail.js");
+        detail.stopDetailTimer();
+        detail.renderDetailError("plan not found");
+      });
+      await expect(page.locator("#wb-detail-label")).toHaveText("(error)");
+      await expect(page.locator("#wb-detail-hint")).toHaveText("plan not found");
+      await expect(page.locator("#wb-detail-path")).toHaveText("");
+      await expect(page.locator("#wb-detail-workspace")).toHaveText("");
+      await expect(page.locator("#wb-detail-state")).toHaveAttribute(
+        "data-state",
+        "unknown",
+      );
+    });
+
+    test("closing a plan routes back to the queue exactly once", async ({
+      page,
+    }) => {
+      await openDetail(page, deployment, "bravo");
+      await page.evaluate(async () => {
+        const detail = await import("/static/modules/detail.js");
+        detail.stopDetailTimer();
+      });
+      await page.waitForFunction(async () => {
+        const { state } = await import("/static/modules/state.js");
+        return !state.fetchInFlight && !state.detailInFlight;
+      });
+      // Each time the queue route runs it reads the queue; a second run while
+      // the first read is on the wire queues a second read behind it.
+      const reads = [];
+      page.on("request", (request) => {
+        if (new URL(request.url()).pathname === "/api/queue") reads.push(request);
+      });
+      await page.evaluate(async () => {
+        const router = await import("/static/modules/router.js");
+        router.navigateToQueue();
+      });
+      await expect(page.locator("#wb-shell")).toHaveAttribute(
+        "data-route",
+        "queue",
+      );
+      await expect(page.locator("#wb-refresh-status")).toHaveAttribute(
+        "data-state",
+        "idle",
+      );
+      await page.waitForTimeout(500);
+      expect(reads.length).toBe(1);
+    });
+
+    test("the archive reloads after a refresh asked for mid-read", async ({
+      page,
+    }) => {
+      await openArchive(page, deployment);
+      let release;
+      const held = new Promise((resolve) => {
+        release = resolve;
+      });
+      let reads = 0;
+      await page.route("**/api/archive", async (route) => {
+        reads += 1;
+        if (reads === 1) await held;
+        await route.continue();
+      });
+      await page.evaluate(async () => {
+        const archive = await import("/static/modules/archive.js");
+        archive.loadArchiveView();
+        archive.loadArchiveView();
+      });
+      await expect.poll(() => reads).toBe(1);
+      release();
+      await expect.poll(() => reads).toBe(2);
+    });
+
+    test("an unchanged poll writes nothing into the preview", async ({
+      page,
+    }) => {
+      await openQueue(page, deployment);
+      const preview = page.locator("#wb-shell-preview");
+      await expect(preview).not.toHaveAttribute("aria-live", /.*/);
+      const writes = await page.evaluate(async () => {
+        const { state } = await import("/static/modules/state.js");
+        const preview = await import("/static/modules/preview.js");
+        const plan = state.previewPlan || state.lastVisiblePlans[0];
+        const realNow = Date.now;
+        const frozen = realNow();
+        Date.now = () => frozen;
+        try {
+          preview.renderPreview(plan);
+          const panel = document.getElementById("wb-shell-preview");
+          const observer = new MutationObserver(() => {});
+          observer.observe(panel, {
+            subtree: true,
+            childList: true,
+            characterData: true,
+          });
+          preview.renderPreview(plan);
+          const records = observer.takeRecords();
+          observer.disconnect();
+          return records.length;
+        } finally {
+          Date.now = realNow;
+        }
+      });
+      expect(writes).toBe(0);
+    });
+
+    test("every view reads an epoch spelled as text as a moment", async ({
+      page,
+    }) => {
+      // The Pi's TEXT columns hand back "1789466400.0". The overview window
+      // always read it as a number; the sort, the idle cell, the preview and
+      // the cleanup age now read it the same way.
+      await openQueue(page, deployment);
+      const read = await page.evaluate(async () => {
+        const queue = await import("/static/modules/queue.js");
+        const preview = await import("/static/modules/preview.js");
+        const time = await import("/static/modules/time.js");
+        const plan = { primary_state: "ready", last_activity_at: "1789466400.0" };
+        return {
+          seconds: time.toEpochSeconds("1789466400.0"),
+          iso: time.toEpochSeconds("2026-09-15T08:00:00Z"),
+          sortKey: queue.parseActivityTimestamp("1789466400.0"),
+          idle: preview.formatIdle(plan, 1789466400000 + 90000),
+          age: preview.formatActivityAge("1789466400", 1789466400000 + 120000),
+          garbage: queue.parseActivityTimestamp("not a time"),
+        };
+      });
+      expect(read.seconds).toBe(1789466400);
+      expect(read.iso).toBe(Date.parse("2026-09-15T08:00:00Z") / 1000);
+      expect(read.sortKey).toBe(1789466400000);
+      expect(read.idle).toBe("1m");
+      expect(read.age).toBe("2m ago");
+      expect(read.garbage).toBeNull();
+    });
+
     test("the archive is either browsable or explained, never blank", async ({
       page,
     }) => {

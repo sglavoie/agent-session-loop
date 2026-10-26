@@ -8,22 +8,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 from . import (
+    clock,
     events,
     workspaces,
 )
 
 
-def _parse_datetime(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
-
-
 def _format_local_datetime(value: Any) -> str:
-    parsed = _parse_datetime(value)
+    parsed = clock.parse_datetime(value)
     if parsed is None:
         return "none"
     return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
@@ -105,11 +97,9 @@ _ABORT_TERMINAL_ACTIONS = frozenset(
 
 
 def _abort_grace_remaining(deadline: Any) -> str:
-    parsed = _parse_datetime(deadline)
+    parsed = clock.parse_datetime(deadline)
     if parsed is None:
         return "grace not started" if deadline is None else "remaining unknown"
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
     remaining = (parsed - datetime.now(UTC)).total_seconds()
     if remaining <= 0:
         return "grace expired"

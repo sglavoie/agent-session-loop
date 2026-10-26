@@ -10,6 +10,7 @@ otherwise break by reclaiming a lock it proved dead.
 from __future__ import annotations
 
 import json
+import math
 import os
 import socket
 import unittest
@@ -130,6 +131,30 @@ class RetentionSelectionTests(RetentionTestBase):
             self._report(max_age_days=-1.0)
         with self.assertRaises(ValueError):
             retention_projection.corpus_retention(self.state_root, max_age_days=-1.0)
+
+    def test_non_finite_max_age_is_rejected(self) -> None:
+        # NaN compares false against zero, so it used to pass the sign check;
+        # infinity passed it and then overflowed ``timedelta``.
+        for value in (math.nan, math.inf):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "finite, non-negative"):
+                    self._report(max_age_days=value)
+                with self.assertRaisesRegex(ValueError, "finite, non-negative"):
+                    retention_projection.corpus_retention(
+                        self.state_root, max_age_days=value
+                    )
+
+    def test_max_age_beyond_the_calendar_reclaims_nothing(self) -> None:
+        self._write_run(RUN_OLD, finished_at=_stamp(120))
+        self._write_run(RUN_NEW, finished_at=_stamp(90))
+
+        runs = self._runs_by_id(self._report(max_age_days=1e12))
+        corpus = retention_projection.corpus_retention(
+            self.state_root, max_age_days=1e12, now=NOW
+        )
+
+        self.assertFalse(any(run.reclaimable for run in runs.values()))
+        self.assertEqual(corpus.reclaimable_bytes, 0)
 
     def test_report_serializes_for_the_cli(self) -> None:
         self._write_run(RUN_OLD, finished_at=_stamp(45))

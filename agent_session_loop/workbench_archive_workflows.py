@@ -13,6 +13,7 @@ from asl_workbench import archive as portable_archive
 from . import (
     plans_errors,
     plans_files,
+    plans_snapshot,
     responses,
     state,
     state_locks,
@@ -281,6 +282,28 @@ def workbench_pin_from_args(args: Any) -> int:
     """
     plan_dir = args.plan_dir
     cwd = getattr(args, "cwd", None)
+    # The terminal names a plan by typing its path, so a typo would otherwise
+    # pin a directory that is not there; refuse it with the reason every other
+    # plan-scoped command reports for a missing PLAN_DIR. (Unpin still accepts
+    # one, so a pin whose plan has since gone away can be dropped.)
+    try:
+        if isinstance(plan_dir, str) and plan_dir.strip():
+            plans_snapshot.require_plan_directory(plan_dir.strip())
+    except plans_errors.PlanNotFoundError as error:
+        return _print_refusal(
+            args,
+            "pin",
+            ArchiveRefused(
+                plans_errors.PLAN_NOT_FOUND_REASON,
+                str(error),
+                scope=portable_archive.SCOPE_MISSING,
+                details={"plan_dir": str(plan_dir)},
+            ),
+        )
+    except plans_errors.PlanError, OSError, ValueError:
+        # Anything else (a file, a blank path) is `pin_plan`'s to refuse, with
+        # the reason it shares with the HTTP route.
+        pass
     try:
         update = pin_plan(
             plan_dir,
@@ -320,6 +343,14 @@ def workbench_pin_from_args(args: Any) -> int:
 def workbench_unpin_from_args(args: Any) -> int:
     """``asl workbench unpin`` -- the terminal's spelling of :func:`unpin_plan`."""
     plan_dir = args.plan_dir
+    # Unpinning is idempotent, so a path with no pin still exits 0; it just
+    # says so instead of claiming to have removed something.
+    try:
+        was_pinned = workbench_registry.is_pinned(
+            workbench_registry.load_registry(), plan_dir
+        )
+    except workbench_registry_models.WorkbenchError:
+        was_pinned = True
     try:
         update = unpin_plan(plan_dir)
     except ArchiveRefused as error:
@@ -328,13 +359,16 @@ def workbench_unpin_from_args(args: Any) -> int:
         responses.print_json(
             responses.success_payload(
                 "workbench-unpin",
-                reason="unpinned",
+                reason="unpinned" if was_pinned else "not-pinned",
                 plan_dir=plan_dir,
                 registry_path=str(update.path),
             )
         )
         return 0
-    print(f"Unpinned {plan_dir} from {update.path}")
+    if was_pinned:
+        print(f"Unpinned {plan_dir} from {update.path}")
+    else:
+        print(f"{plan_dir} was not pinned in {update.path}; nothing to unpin")
     return 0
 
 

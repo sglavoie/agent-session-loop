@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from . import artifacts, process_tree, state
+from . import artifacts, process_sampling, process_tree, state
 
 SUPERVISION_LIVENESS_FILE_TEMPLATE = "supervision-liveness-{supervision_id}.json"
 SUPERVISION_LIVENESS_GLOB = "supervision-liveness-*.json"
@@ -254,6 +254,7 @@ def probe(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=process_sampling.ps_environment(),
             timeout=timeout,
             check=False,
         )
@@ -264,7 +265,9 @@ def probe(
     birth = _parse_birth(completed.stdout)
     if birth is None or not record.birth:
         return UNVERIFIED
-    return ALIVE if birth == record.birth else DEAD
+    # A record written before births were pinned to UTC can disagree by a
+    # time-zone offset without the pid having been reused.
+    return ALIVE if process_sampling.birth_may_match(record.birth, birth) else DEAD
 
 
 def _parse_birth(stdout: str | None) -> str | None:

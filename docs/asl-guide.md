@@ -376,19 +376,37 @@ just test-fast
 just test-portable
 just test-all
 just reliability-stress
+just test-browser   # Workbench browser tests; needs Node and npm
 ```
 
 `just test-fast` runs the unit/schema/parser test modules; `just test-all` runs
 the complete suite (including helper-script tests under `skills/`) as isolated
-parallel shards. Both use stdlib `unittest` only — see the Verification section
-of `docs/agent-session-loop.md`.
+parallel shards. Both use stdlib `unittest` only — see
+[Verification](agent-session-loop/26-observational-and-mutation-guarantees.md#verification)
+in the ASL reference.
 
 `just test-portable` runs the subset that spawns no external process — no `git`,
 no shell script, no launchd, no harness executable — so it can run on a machine
 (such as Linux) without those tools. `just test-all` runs against the real
 tools, so nothing is reported as passing on a machine that does not have them.
-The workflows in `.github/workflows/` (a Linux/macOS test lane and a scheduled,
-no-model-use `asl harness-compat` smoke) are disabled; run the recipes locally.
+The workflows in `.github/workflows/` are active: `check.yml` runs on every push
+to `main` and every pull request against it -- a Linux lane (lint plus
+`just test-portable`, on Python 3.14 and 3.15) and a macOS lane (lint plus
+`just test-all`, sliced across parallel jobs); `workbench-browser.yml` runs
+`just test-browser` for changes under `tests/workbench_browser/` or
+`asl_workbench/`; and `harness-compatibility.yml` is a no-model-use
+`asl harness-compat` smoke that runs weekly and for changes to
+`agent_session_loop/harness_compatibility.py`. A failed test job uploads
+`.cache/run_suite_logs/`, the full output of every failed shard. The same
+recipes run locally, and CI installs its linters from the `dev` dependency
+group in `pyproject.toml` (`python3 -m pip install --group dev`), so install
+that group to lint with the versions CI gates on.
+
+`just test-browser` drives the Workbench shell in real browsers through the
+development-only Playwright harness in `tests/workbench_browser/`, which is no
+dependency of either Workbench deployment. It needs Node and npm; it runs
+`npm ci` whenever `package-lock.json` is newer than the installed tree, then
+installs the pinned Chromium and WebKit engines before the tests.
 
 `just reliability-stress [reps] [shards]` re-runs the load- and calendar-sensitive
 scenarios in isolation, then across a spread of timezone offsets, then as

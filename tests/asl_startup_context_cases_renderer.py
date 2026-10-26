@@ -1,4 +1,6 @@
 # mypy: ignore-errors
+import contextlib
+import io
 import stat
 from unittest import mock
 
@@ -407,6 +409,48 @@ class StartupContextRendererTests(unittest.TestCase):
             self.assertEqual(payload["stale"], [".codex/AGENTS.md"])
             self.assertEqual(payload["written"], [])
             self.assertEqual(codex.read_text(encoding="utf-8"), stale)
+
+    def test_check_reports_a_missing_context_file_as_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = self.build_repo(temp_dir)
+            startup_context.sync(repo_root, home=repo_root, env=HARNESS_ENV)
+            copilot = repo_root / ".copilot/copilot-instructions.md"
+            copilot.unlink()
+            codex = repo_root / ".codex/AGENTS.md"
+            codex.write_text(
+                codex.read_text(encoding="utf-8").replace(
+                    "## ASL Supervision", "## Outdated Heading"
+                ),
+                encoding="utf-8",
+            )
+
+            payload = startup_context.sync(
+                repo_root, home=repo_root, env=HARNESS_ENV, check=True
+            )
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(
+                    startup_context.install_verify_common.os,
+                    "environ",
+                    HARNESS_ENV,
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = startup_context.main(
+                    ["--check", "--repo-root", str(repo_root), "--home", str(repo_root)]
+                )
+
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["missing"], [".copilot/copilot-instructions.md"])
+            self.assertIn(".copilot/copilot-instructions.md", payload["stale"])
+            self.assertEqual(payload["remedy"], "just sync-skills")
+            self.assertFalse(copilot.exists(), "--check never creates a file")
+            self.assertEqual(code, 1)
+            output = stdout.getvalue()
+            self.assertIn("missing: .copilot/copilot-instructions.md", output)
+            self.assertNotIn("stale: .copilot/copilot-instructions.md", output)
+            self.assertIn("stale: .codex/AGENTS.md", output)
+            self.assertIn("just sync-skills", output)
 
     def test_checked_in_generated_blocks_are_current(self) -> None:
         payload = startup_context.sync(REPO_ROOT, check=True, reference_only=True)

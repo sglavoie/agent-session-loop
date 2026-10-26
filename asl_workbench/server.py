@@ -134,15 +134,24 @@ class ApplicationRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _serve(self, method: str) -> None:
         self._body_read = False
-        request = Request.build(
-            method,
-            self.path,
-            # `.items()` rather than the message itself: `http.client` hands
-            # over an `email.message.Message`, which answers like a mapping
-            # without being one, and the application takes pairs.
-            self.headers.items(),
-            read=self._read_exactly,
-        )
+        try:
+            request = Request.build(
+                method,
+                self.path,
+                # `.items()` rather than the message itself: `http.client`
+                # hands over an `email.message.Message`, which answers like a
+                # mapping without being one, and the application takes pairs.
+                self.headers.items(),
+                read=self._read_exactly,
+            )
+        except ValueError:
+            # A target `urllib.parse` cannot split -- `http://[::1/x`, an
+            # unclosed IPv6 literal -- raises before the application's own
+            # refusal exit exists. Left to `socketserver` it would drop the
+            # connection unanswered and print a traceback quoting the target,
+            # so it gets the same fixed 400 a malformed request line gets.
+            self.send_error(400)
+            return
         response = self.application().handle(request)
         if not self._body_read and _declares_body(request):
             # Refused (or answered) before the body was read: authentication,

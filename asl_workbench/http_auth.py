@@ -80,6 +80,7 @@ class HttpRefusal(Exception):
         *,
         details: Mapping[str, Any] | None = None,
         extra: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
@@ -87,6 +88,9 @@ class HttpRefusal(Exception):
         self.message = message
         self.details: dict[str, Any] = dict(details or {})
         self.extra: dict[str, Any] = dict(extra or {})
+        # Response headers the status itself calls for: ``Allow`` on a 405 and
+        # ``WWW-Authenticate`` on a 401 are part of the refusal, not the body.
+        self.headers: dict[str, str] = dict(headers or {})
 
     def to_payload(self) -> dict[str, Any]:
         return payloads.error_payload(
@@ -97,6 +101,16 @@ class HttpRefusal(Exception):
             details=self.details,
             **self.extra,
         )
+
+
+#: The challenge every 401 carries (RFC 9110 section 11.6.1): both
+#: boundaries accept a bearer credential in ``Authorization``.
+BEARER_CHALLENGE: Mapping[str, str] = {"WWW-Authenticate": "Bearer"}
+
+
+def unauthorized(message: str) -> HttpRefusal:
+    """The refusal a missing or unusable credential gets, challenge included."""
+    return HttpRefusal(401, "unauthorized", message, headers=BEARER_CHALLENGE)
 
 
 def invalid_request(message: str, **details: Any) -> HttpRefusal:
@@ -129,9 +143,7 @@ class LocalTokenAuthenticator:
         expected = self._token()
         if presented and secrets.compare_digest(presented, expected):
             return Principal(role=ROLE_OWNER)
-        raise HttpRefusal(
-            401, "unauthorized", "missing or invalid Authorization bearer token"
-        )
+        raise unauthorized("missing or invalid Authorization bearer token")
 
 
 class OwnerIdentityAuthenticator:
@@ -188,7 +200,7 @@ class OwnerIdentityAuthenticator:
             and authorization.role == ROLE_PUBLIC
             and parse_authorization(presented) is not None
         ):
-            raise HttpRefusal(401, "unauthorized", "the credential was not accepted")
+            raise unauthorized("the credential was not accepted")
         return Principal(
             role=authorization.role,
             credential_id=authorization.credential_id,

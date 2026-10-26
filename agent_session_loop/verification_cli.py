@@ -7,7 +7,7 @@ import sys
 from dataclasses import asdict
 from typing import Any
 
-from . import plans_errors, plans_session_ids, responses
+from . import plans_errors, plans_session_ids, plans_snapshot, responses
 from .cli_defaults import program_name
 from .contracts import CompletionContract, read_completion_contract
 from .plans_session_ids import SessionId
@@ -237,6 +237,25 @@ def verify_from_args(args: argparse.Namespace) -> int:
             error=str(error),
             plan_dir=str(plan_dir_arg),
             session=str(raw_session),
+            cwd=None,
+        )
+        return 1
+
+    # A missing plan directory is the root cause; checking it first keeps the
+    # report from naming a session file inside a directory that is not there.
+    try:
+        plans_snapshot.require_plan_directory(plan_dir_arg)
+    except plans_errors.PlanError as error:
+        _emit_verify_error(
+            want_json=want_json,
+            reason=(
+                "plan-not-found"
+                if isinstance(error, plans_errors.PlanNotFoundError)
+                else "malformed-plan"
+            ),
+            error=str(error),
+            plan_dir=str(plan_dir_arg),
+            session=session_id.value,
             cwd=None,
         )
         return 1

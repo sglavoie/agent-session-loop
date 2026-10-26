@@ -153,7 +153,12 @@ def upsert_pin(
     label: str | None = None,
     profile: LaunchProfile | None = None,
 ) -> WorkbenchRegistry:
-    """Return a new registry with ``plan_dir`` pinned or updated."""
+    """Return a new registry with ``plan_dir`` pinned or updated.
+
+    A primitive: it records whatever path it is given, so a pin whose plan
+    has since vanished can still be relabelled. A new pin from an operator
+    goes through :func:`require_pinnable_plan_dir` first.
+    """
     canonical = _canonical_plan_dir(str(plan_dir))
     if canonical is None:
         raise WorkbenchError(f"invalid plan_dir for pin: {plan_dir!r}")
@@ -169,6 +174,30 @@ def upsert_pin(
             return replace(registry, pins=tuple(existing))
     existing.append(new_pin)
     return replace(registry, pins=tuple(existing))
+
+
+def require_pinnable_plan_dir(plan_dir: str | Path) -> str:
+    """Return the canonical ``plan_dir``, refusing one that is not on disk.
+
+    A pin for a path that is not there would sit in the registry as a plan the
+    Workbench can never read, so operator-facing pins refuse it up front.
+    """
+    canonical = _canonical_plan_dir(str(plan_dir))
+    if canonical is None:
+        raise WorkbenchError(f"invalid plan_dir for pin: {plan_dir!r}")
+    if not Path(canonical).is_dir():
+        if Path(canonical).exists():
+            raise WorkbenchError(f"plan path is not a directory: {canonical}")
+        raise WorkbenchError(f"plan directory does not exist: {canonical}")
+    return canonical
+
+
+def is_pinned(registry: WorkbenchRegistry, plan_dir: str | Path) -> bool:
+    """Whether ``registry`` holds a pin for ``plan_dir`` (canonicalized)."""
+    canonical = _canonical_plan_dir(str(plan_dir))
+    return canonical is not None and any(
+        pin.plan_dir == canonical for pin in registry.pins
+    )
 
 
 def remove_pin(registry: WorkbenchRegistry, plan_dir: str | Path) -> WorkbenchRegistry:

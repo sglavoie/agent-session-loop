@@ -1,0 +1,65 @@
+name: Workbench browser
+
+# The development-only Playwright harness in tests/workbench_browser drives the
+# Workbench shell in Chromium and WebKit against both deployments. It is a
+# workflow of its own, triggered by path, rather than a job in check.yml: it
+# needs Node and two browser engines, and it has nothing to say about a change
+# that touches neither the shell nor the harness. Dependabot bumps the harness's
+# npm pins weekly, and this is what checks those bumps.
+#
+# macOS rather than Linux: WebKit on an Ubuntu runner needs a set of system
+# libraries Playwright installs with sudo, and macOS is where the Workbench is
+# developed and read from (desktop Safari and, via mobile-webkit, the phone).
+#
+# Third-party actions are pinned to commit SHAs (the tag they resolved from is
+# in the trailing comment), as in check.yml.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tests/workbench_browser/**"
+      - "asl_workbench/**"
+      - "justfile"
+      - ".github/workflows/workbench-browser.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "tests/workbench_browser/**"
+      - "asl_workbench/**"
+      - "justfile"
+      - ".github/workflows/workbench-browser.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  browser:
+    name: Workbench browser (Playwright)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # The fixture server Playwright starts is `python3 fixture_server.py`.
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tests/workbench_browser/package-lock.json
+
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+
+      - name: Workbench browser tests
+        run: just test-browser

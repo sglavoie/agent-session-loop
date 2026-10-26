@@ -97,7 +97,7 @@ from . import (
     workbench_remote_reads,
 )
 
-COMMAND_NAME = "workbench connect"
+COMMAND_NAME = "workbench-connect"
 
 #: The Pi service route that accepts an upward frame. One route for all five
 #: envelope kinds: the kind is inside the envelope, and a service that routed

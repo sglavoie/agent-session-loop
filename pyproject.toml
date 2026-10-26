@@ -1,6 +1,15 @@
 # Repository tooling configuration. This repo is not a distributable package,
-# so it carries only tool tables and no PEP 621 packaging metadata: the suite
-# runs as `python3 -m tests.run_suite`.
+# so it carries only tool tables, the lint toolchain's dependency group, and no
+# PEP 621 packaging metadata: the suite runs as `python3 -m tests.run_suite`.
+
+# The exact linter and type-checker releases `just lint` is held to, in one
+# place. CI installs them with `python3 -m pip install --group dev` (pip 25.1 or
+# later) and keys its pip cache on this file; install the same group locally,
+# or the versions `ruff --version` and `mypy --version` report will drift from
+# what CI gates on. The mypy counts quoted under [tool.mypy] are measured with
+# this mypy.
+[dependency-groups]
+dev = ["ruff==0.16.9", "mypy==2.3.1"]
 
 [tool.ruff]
 line-length = 88
@@ -126,6 +135,12 @@ files = [
     "tests",
     "skills/asl/scripts",
     "skills/session-resplit/scripts",
+    # The installer and the `asl` wrapper run before the package does, so
+    # nothing else type-checks them. The wrapper has no `.py` suffix; mypy
+    # accepts a file named explicitly here whatever its suffix (directory
+    # entries above only pick up `*.py`).
+    "install.py",
+    "bin/.local/bin/agent-session-loop",
 ]
 # Disposable repositories written by the opt-in live-worker evaluator. Each
 # trial is a copy of the same fixture repository, so leaving them in scope

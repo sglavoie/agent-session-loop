@@ -71,7 +71,7 @@ from .baseline_models import BaselineStatus as BaselineStatus
 from .baseline_report import _print_text_baseline, _run_result_payload
 from .baseline_run import run_baseline as run_baseline
 from .cli_defaults import program_name
-from .plans_errors import PlanError
+from .plans_errors import PlanError, plan_error_reason
 from .verification_models import verification_context_from_plan
 
 
@@ -110,7 +110,7 @@ def baseline_from_args(args: Any) -> int:
     except (PlanError, OSError) as error:
         _emit_baseline_error(
             want_json=want_json,
-            reason=BASELINE_EXIT_REASON_CWD_ERROR,
+            reason=plan_error_reason(error, BASELINE_EXIT_REASON_CWD_ERROR),
             error=str(error),
             **common_fields,
         )
@@ -125,10 +125,11 @@ def baseline_from_args(args: Any) -> int:
             context=verification_context,
         )
     except PlanError as error:
-        reason = (
+        reason = plan_error_reason(
+            error,
             BASELINE_EXIT_REASON_MALFORMED_CONTRACT
             if "contract" in str(error).lower()
-            else BASELINE_EXIT_REASON_PLAN_STRUCTURE
+            else BASELINE_EXIT_REASON_PLAN_STRUCTURE,
         )
         _emit_baseline_error(
             want_json=want_json,

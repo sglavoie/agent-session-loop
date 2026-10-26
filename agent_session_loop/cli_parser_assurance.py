@@ -18,8 +18,7 @@ def _add_assurance_commands(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     assurance_sub = assurance_parser.add_subparsers(
-        dest="assurance_command",
-        required=True,
+        dest="assurance_command", required=True, metavar="COMMAND"
     )
 
     assurance_list_parser = assurance_sub.add_parser(

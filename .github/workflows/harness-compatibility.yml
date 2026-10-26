@@ -1,6 +1,8 @@
 name: Harness compatibility
 
-# Scheduled compatibility smoke for the three harness CLIs ASL launches.
+# Compatibility smoke for the three harness CLIs ASL launches: weekly, on
+# demand, and on any push or pull request that changes the policy module or this
+# workflow, so a moved pin is smoked before it lands rather than a week after.
 #
 # No model is used and no provider is contacted. The only subprocess the
 # compatibility module ever builds is `<executable> --version`, and
@@ -28,13 +30,26 @@ on:
     # every other cron on the runner fleet.
     - cron: "17 6 * * 1"
   workflow_dispatch:
+  # A change to POLICY (or to how it is smoked) is exactly what this workflow
+  # judges; nothing else in the tree can change its verdict.
+  push:
+    branches: [main]
+    paths:
+      - "agent_session_loop/harness_compatibility.py"
+      - ".github/workflows/harness-compatibility.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "agent_session_loop/harness_compatibility.py"
+      - ".github/workflows/harness-compatibility.yml"
 
 permissions:
   contents: read
 
-# Runs on one ref queue instead of overlapping. Only a pull_request run would
-# cancel one in progress, and this workflow has no pull_request trigger, so a
-# manual dispatch never cuts a scheduled verdict short.
+# Runs on one ref queue instead of overlapping. Only a pull_request run cancels
+# the one in progress, and that is a superseded run for the same pull request;
+# a scheduled, manual or push run on main always finishes, so a manual dispatch
+# never cuts a scheduled verdict short.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

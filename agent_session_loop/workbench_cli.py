@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -14,13 +15,14 @@ from . import (
     responses,
 )
 from .cli_defaults import program_name
+from .cli_parser_support import NON_NEGATIVE_NUMBER
 from .workbench_discovery import discover_plans
 from .workbench_registry import load_registry
 from .workbench_registry_models import WorkbenchError
 from .workbench_summary import build_workbench_summaries
 from .workbench_summary_model import WorkbenchSummary
 
-WORKBENCH_COMMAND_NAME = "workbench"
+WORKBENCH_COMMAND_NAME = "workbench-registry"
 PLANS_COMMAND_NAME = "plans"
 
 
@@ -156,7 +158,11 @@ def _plan_matches_stale_days(
         return False
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
-    return now - parsed >= timedelta(days=stale_days)
+    try:
+        return now - parsed >= timedelta(days=stale_days)
+    except OverflowError:
+        # More days than ``timedelta`` holds: nothing is that stale.
+        return False
 
 
 def _print_plan_listing(
@@ -212,11 +218,13 @@ def plans_from_args(args: Any, *, now: datetime | None = None) -> int:
     """
     moment = datetime.now(UTC) if now is None else now
     stale_days = getattr(args, "stale_days", None)
-    if stale_days is not None and stale_days < 0:
+    # NaN compares false against zero and infinity overflows the cutoff, so
+    # finiteness is checked as well as the sign.
+    if stale_days is not None and (not math.isfinite(stale_days) or stale_days < 0):
         return _plans_error(
             args,
             reason="invalid-argument",
-            error="--stale-days must be non-negative",
+            error=f"--stale-days {NON_NEGATIVE_NUMBER}; got {stale_days}",
         )
 
     readiness_filter = getattr(args, "readiness", None)

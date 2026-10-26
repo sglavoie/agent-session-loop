@@ -9,14 +9,30 @@ import { OUTCOME_RESULT } from "./api.js";
 import { COMMIT_MODES, HARNESS_NAMES } from "./constants.js";
 import { showControlsFeedback } from "./controls.js";
 import { renderDetailHeader } from "./detail.js";
-import { planBody, routePlanId } from "./identity.js";
+import { planBody, planIdOf, routePlanId } from "./identity.js";
 import { runMutation } from "./operations.js";
 import { findPin } from "./panels.js";
 import { state } from "./state.js";
 
+/**
+ * Fill the form from the plan, unless the operator is using it.
+ *
+ * The detail poll calls this every few seconds. Rewriting every field each
+ * time reverted an edit in progress, so the form is only (re)populated when
+ * the plan on screen is a different plan, or when nobody has touched it since
+ * it was last filled: `data-dirty` is set by the first edit and cleared by a
+ * save that landed or by moving to another plan, and a focused field is left
+ * alone even before it is edited. Errors are never cleared from here -- a
+ * refusal stays against the form until the operator submits again.
+ */
 export function renderProfileForm(plan, registry) {
   const form = document.getElementById("wb-profile-form");
   if (!form || !plan) return;
+  const planId = planIdOf(plan);
+  const samePlan = form.getAttribute("data-plan-id") === planId;
+  if (samePlan && profileFormIsInteractive(form)) return;
+  form.setAttribute("data-plan-id", planId);
+  form.removeAttribute("data-dirty");
   const pin = findPin(plan.plan_dir);
   const profile = (pin && pin.profile) || plan.profile || {};
   setInputValue(form, "label", pin ? pin.label || "" : plan.label || "");
@@ -53,6 +69,34 @@ export function renderProfileForm(plan, registry) {
     profile.allow_not_loop_ready
   );
   setInputValue(form, "note", profile.note || "");
+}
+
+/** True while the operator has unsaved edits in the form or is in a field. */
+export function profileFormIsInteractive(form) {
+  if (!form) return false;
+  if (form.getAttribute("data-dirty") === "true") return true;
+  // A field, not a button: focus left on "save" is not an edit in progress.
+  const active = document.activeElement;
+  return Boolean(
+    active &&
+      form.contains(active) &&
+      typeof active.matches === "function" &&
+      active.matches("input, select, textarea")
+  );
+}
+
+/**
+ * Forget the form's edits and errors because the plan on screen changed.
+ *
+ * Both belonged to the plan they were written against; carrying either to the
+ * next plan would save one plan's profile onto another.
+ */
+export function resetProfileForm() {
+  const form = document.getElementById("wb-profile-form");
+  if (form) {
+    form.removeAttribute("data-dirty");
+    form.removeAttribute("data-plan-id");
+  }
   clearFormErrors("wb-profile-form-errors");
 }
 
@@ -191,6 +235,9 @@ export function validateLaunchPayload(payload) {
 export function wireProfileForm() {
   const form = document.getElementById("wb-profile-form");
   if (!form) return;
+  const markDirty = () => form.setAttribute("data-dirty", "true");
+  form.addEventListener("input", markDirty);
+  form.addEventListener("change", markDirty);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     clearFormErrors("wb-profile-form-errors");
@@ -220,6 +267,9 @@ export function wireProfileForm() {
     });
     if (answer && answer.outcome === OUTCOME_RESULT) {
       if (answer.payload.registry) state.detailRegistry = answer.payload.registry;
+      // Saved, so the edits are now the pin's: the next fill reads them back
+      // from the registry rather than from the fields.
+      form.removeAttribute("data-dirty");
       renderDetailHeader(state.detailPlan);
     }
   });

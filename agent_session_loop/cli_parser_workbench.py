@@ -8,6 +8,7 @@ from .cli_parser_support import (
     _add_workbench_serve_args,
     _AgentSessionLoopArgumentParser,
     _group_epilogue,
+    positive_float,
 )
 
 
@@ -31,7 +32,7 @@ def _add_workbench_commands(
         handler_ref="workbench_server:workbench_serve_from_args",
     )
     workbench_sub = workbench_parser.add_subparsers(
-        dest="workbench_command",
+        dest="workbench_command", metavar="COMMAND"
     )
 
     workbench_serve_parser = workbench_sub.add_parser(
@@ -86,14 +87,14 @@ def _add_workbench_commands(
     )
     workbench_connect_parser.add_argument(
         "--heartbeat-interval",
-        type=float,
+        type=positive_float,
         default=None,
         metavar="SECONDS",
         help="How often to publish liveness (default: 15)",
     )
     workbench_connect_parser.add_argument(
         "--observation-interval",
-        type=float,
+        type=positive_float,
         default=None,
         metavar="SECONDS",
         help="How often to walk the corpus (default: 30)",

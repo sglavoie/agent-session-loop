@@ -168,7 +168,7 @@ def _enforce_review_verdict(
                 "passed": True,
                 **{key: value for key, value in verdict.items() if key != "ok"},
             }
-            durability.write_json_file(paths["result"], turn_payload)
+            durability.write_json_file(paths["result"], turn_payload, durable=True)
         return ("pass", None)
 
     error = verdict.get("error", "invalid review verdict")
@@ -198,7 +198,7 @@ def _enforce_review_verdict(
             "failure_reason": verdict.get("reason"),
             **repair_payload,
         }
-        durability.write_json_file(paths["result"], turn_payload)
+        durability.write_json_file(paths["result"], turn_payload, durable=True)
     turn_execution_commit.record_turn_rejected(
         event_path=event_path,
         payload=payload,
@@ -314,7 +314,7 @@ def _enforce_session_verification(
         with persistence.lock:
             payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
             turn_payload["verification"] = refusal.turn_verification(session_id)
-            durability.write_json_file(paths["result"], turn_payload)
+            durability.write_json_file(paths["result"], turn_payload, durable=True)
         turn_execution_commit.record_turn_rejected(
             event_path=event_path,
             payload=payload,
@@ -357,7 +357,7 @@ def _enforce_session_verification(
         # turn records that nothing was enforced and the loop continues.
         with persistence.lock:
             turn_payload["verification"] = schedule.turn_verification(session_id)
-            durability.write_json_file(paths["result"], turn_payload)
+            durability.write_json_file(paths["result"], turn_payload, durable=True)
         return False
 
     # `schedule.runs` is `state == "contract-ready"`, which
@@ -507,7 +507,7 @@ def _enforce_session_verification(
 
     with persistence.lock:
         turn_payload["verification"] = graded.turn_verification(session_id)
-        durability.write_json_file(paths["result"], turn_payload)
+        durability.write_json_file(paths["result"], turn_payload, durable=True)
         for check in result.checks:
             run_persistence._append_process_sweep_event(
                 event_path=event_path,
@@ -552,7 +552,7 @@ def _enforce_session_verification(
     with persistence.lock:
         payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
         turn_payload["verification"].update(repair_payload)
-        durability.write_json_file(paths["result"], turn_payload)
+        durability.write_json_file(paths["result"], turn_payload, durable=True)
     turn_execution_commit.record_turn_rejected(
         event_path=event_path,
         payload=payload,

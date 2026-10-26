@@ -57,10 +57,10 @@ class ServiceQueries(ServiceState):
         now = self._clock()
         counts = self._store.counts(now=now)
         statuses = self._store.connector_statuses(now=now)
-        by_state: dict[str, int] = {}
-        for row in self._store.runs(now=now, limit=MAX_READ_LIMIT, include_absent=True):
-            state = str(row.get("primary_state") or "unknown")
-            by_state[state] = by_state.get(state, 0) + 1
+        # Counted by the database over every present plan, the same set
+        # ``counts.plans`` counts, so the histogram sums to the total instead
+        # of describing whichever rows fit under one read limit.
+        by_state = self._store.catalog_states()
         completeness = aggregate_completeness(
             [status.completeness for status in statuses]
         )
@@ -208,13 +208,12 @@ class ServiceQueries(ServiceState):
             if record is None or record.get("plan_key") != plan_key:
                 raise HttpRefusal(404, "not-found", "operation not found for this plan")
             return Response.success(reason="ok", operation=export_operation(record))
-        entries = [
-            entry
-            for entry in self._store.catalog(
-                now=now, include_absent=True, limit=MAX_READ_LIMIT
-            )
-            if str(entry.get("plan_key")) == plan_key
-        ]
+        # Narrowed in SQL rather than over a bounded page: a low-urgency plan
+        # sorts past any read limit, and filtering that page here would answer
+        # "not found" for a plan the catalog holds.
+        entries = self._store.catalog(
+            now=now, include_absent=True, plan_key=plan_key, limit=MAX_READ_LIMIT
+        )
         if not entries:
             raise HttpRefusal(
                 404,

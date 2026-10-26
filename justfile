@@ -28,6 +28,13 @@ check-startup-context:
 verify-asl-install:
     python3 -m agent_session_loop.install_verify
 
+# Run chosen test modules, classes or ids directly, without the shard driver:
+# `just test -q tests.test_asl_run_suite`. With no arguments, unittest runs its
+# own discovery in one process, which is no substitute for `test-all`.
+[doc("Run unittest on the given modules or test ids (e.g. tests.test_asl_run_suite)")]
+test *ARGS:
+    python3 -m unittest {{ ARGS }}
+
 # Run fast unit/schema/parser tests
 test-fast:
     python3 -m tests.run_suite --fast
@@ -45,11 +52,14 @@ test-all:
 
 # Development-only: the harness lives in tests/workbench_browser and is no
 # dependency of either Workbench deployment. Needs Node and npm; the first run
-# installs the pinned Playwright and its Chromium and WebKit engines.
+# installs the pinned Playwright and its Chromium and WebKit engines. npm ci
+# runs again whenever package-lock.json is newer than the installed tree's own
+# record of it, so a lockfile bump (a Dependabot pin move, say) is installed
+# rather than tested against the old pin.
 [doc("Run the Workbench browser tests (Playwright; needs Node and npm)")]
 [working-directory("tests/workbench_browser")]
 test-browser:
-    test -d node_modules || npm ci
+    if [ ! -f node_modules/.package-lock.json ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then npm ci; fi
     npm run test:install
     npm test
 
@@ -83,6 +93,7 @@ lint-py:
     ruff check .
     ruff format --check .
     mypy
+    mypy --platform linux
 
 # Run all linters
 lint: lint-shell lint-py

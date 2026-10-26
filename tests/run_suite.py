@@ -44,7 +44,8 @@ Each shard runs in its own session under a timeout (``--shard-timeout``, or
 overruns has its whole process group killed and is reported as ``TIMEOUT``
 with the output it produced. A failed shard's output is shown as its last
 200 lines unless ``--verbose`` (or ``$ASL_TEST_VERBOSE=1``) asks for all of
-it; the full output is kept under ``.cache/run_suite_logs/``.
+it; the full output is always kept under ``.cache/run_suite_logs/``, which is
+what CI uploads from a failed job, and a shard that passes clears its own.
 
 Usage:
     python3 -m tests.run_suite --fast
@@ -61,6 +62,7 @@ import collections
 import concurrent.futures
 import contextlib
 import json
+import math
 import os
 import re
 import shlex
@@ -393,6 +395,12 @@ def _keep_log(result: dict[str, Any]) -> Path | None:
     return path
 
 
+def _clear_log(result: dict[str, Any]) -> None:
+    """Drop a passing shard's log, so what is left describes this run only."""
+    with contextlib.suppress(OSError):
+        _log_path(result["name"]).unlink(missing_ok=True)
+
+
 def failure_report(
     result: dict[str, Any], *, verbose: bool, timeout: float | None = None
 ) -> str:
@@ -410,17 +418,39 @@ def failure_report(
     lines = result["output"].rstrip().splitlines()
     shown = lines if verbose else lines[-FAILED_OUTPUT_LINES:]
     parts = [header]
+    # Kept whether or not the tail below is cut short: a CI job uploads the
+    # log directory, and a shard missing from it reads as one that passed.
+    log = _keep_log(result)
     if len(shown) < len(lines):
-        log = _keep_log(result)
         where = f"full output: {log}; " if log else ""
         parts.append(
             f"... {len(lines) - len(shown)} earlier lines omitted ({where}"
             f"--verbose or {VERBOSE_ENV}=1 shows all)"
         )
     parts.extend(shown)
+    if log:
+        parts.append(f"--- full output kept in: {log}")
     if command := result.get("command"):
         parts.append(f"--- rerun this shard: {shlex.join(command)}")
     return "\n".join(parts)
+
+
+def shard_timeout(raw: str) -> float:
+    """``--shard-timeout``: a finite, non-negative number of seconds (0 disables).
+
+    A negative timeout would otherwise reach ``communicate`` as an instant
+    expiry and kill every shard on start.
+    """
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = math.nan
+    if not seconds >= 0 or math.isinf(seconds):
+        raise argparse.ArgumentTypeError(
+            f"must be a finite, non-negative number of seconds (0 disables), "
+            f"not {raw!r}"
+        )
+    return seconds
 
 
 def _env_timeout() -> float:
@@ -428,11 +458,9 @@ def _env_timeout() -> float:
     if not raw:
         return DEFAULT_SHARD_TIMEOUT
     try:
-        return float(raw)
-    except ValueError as error:
-        raise SystemExit(
-            f"{TIMEOUT_ENV} must be a number of seconds, not {raw!r}"
-        ) from error
+        return shard_timeout(raw)
+    except argparse.ArgumentTypeError as error:
+        raise SystemExit(f"{TIMEOUT_ENV} {error}") from error
 
 
 def _test_ids(suite: Any) -> set[str]:
@@ -548,7 +576,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--shard-timeout",
-        type=float,
+        type=shard_timeout,
         default=None,
         metavar="SECONDS",
         help=(
@@ -603,6 +631,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"{result['duration']:6.1f}s  {result['tests']:4d} tests{suffix}",
                 flush=True,
             )
+            if verdict == "ok":
+                _clear_log(result)
             results.append(result)
     except BaseException:
         pool.shutdown(wait=False, cancel_futures=True)

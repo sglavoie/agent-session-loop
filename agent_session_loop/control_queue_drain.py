@@ -9,7 +9,7 @@ import os
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
-from . import harnesses, run_control
+from . import durability, harnesses, run_control
 from .control_queue_fields import (
     _abort_fields,
     _guard_fields,
@@ -72,6 +72,12 @@ def requeue_lines(queue_path: Path, lines: Sequence[str]) -> None:
     it those commands would be gone although their producers were told they
     were queued. They go back in front of whatever was appended since, under the
     same exclusive lock producers take, so queue order is preserved.
+
+    The rewrite happens in place because producers lock the queue path itself,
+    so swapping the inode would let an append land in the orphaned file. A
+    rewrite that fails after the truncate therefore restores the bytes that were
+    there before re-raising: the requeued lines are lost, but nothing a producer
+    appended since is.
     """
     if not lines:
         return
@@ -86,16 +92,32 @@ def requeue_lines(queue_path: Path, lines: Sequence[str]) -> None:
             if not chunk:
                 break
             chunks.append(chunk)
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.ftruncate(fd, 0)
-        data = memoryview(restored.encode("utf-8") + b"".join(chunks))
-        while data:
-            data = data[os.write(fd, data) :]
-        os.fsync(fd)
+        original = b"".join(chunks)
+        try:
+            _rewrite(fd, restored.encode("utf-8") + original)
+        except BaseException as error:
+            try:
+                _rewrite(fd, original)
+            except OSError as restore_error:
+                error.add_note(
+                    f"restoring the control queue {queue_path} also failed: "
+                    f"{restore_error}"
+                )
+            raise
     finally:
         with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+def _rewrite(fd: int, payload: bytes) -> None:
+    """Replace the whole content of ``fd`` with ``payload`` and flush it."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.ftruncate(fd, 0)
+    data = memoryview(payload)
+    while data:
+        data = data[os.write(fd, data) :]
+    durability.fullsync(fd)
 
 
 def drain_queue(

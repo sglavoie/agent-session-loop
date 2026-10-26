@@ -64,6 +64,20 @@ def require_plan_directory(plan_dir: str | Path) -> Path:
     return canonical_dir
 
 
+def require_split_plan_directory(plan_dir: str | Path) -> Path:
+    """Return the canonical ``plan_dir``, refusing one that is not a split plan.
+
+    :func:`require_plan_directory` plus the two files that make a directory a
+    split plan, with the messages :func:`inspect_plan` reports for them, for
+    commands (``gc``, ``unlock``) that never read the sessions themselves.
+    """
+    canonical_dir = require_plan_directory(plan_dir)
+    for name in ("context.md", "manifest.md"):
+        if not _is_file(canonical_dir / name):
+            raise PlanError(f"missing {name} in plan directory: {canonical_dir}")
+    return canonical_dir
+
+
 def inspect_plan(
     plan_dir: str | Path,
     *,
@@ -73,14 +87,9 @@ def inspect_plan(
 ) -> PlanSnapshot:
     """Inspect a split plan directory and return durable session state."""
     recover_pending_plan_transaction(plan_dir)
-    canonical_dir = require_plan_directory(plan_dir)
-
+    canonical_dir = require_split_plan_directory(plan_dir)
     context_path = canonical_dir / "context.md"
     manifest_path = canonical_dir / "manifest.md"
-    if not _is_file(context_path):
-        raise PlanError(f"missing context.md in plan directory: {canonical_dir}")
-    if not _is_file(manifest_path):
-        raise PlanError(f"missing manifest.md in plan directory: {canonical_dir}")
 
     try:
         manifest_text = manifest_path.read_text(encoding="utf-8")

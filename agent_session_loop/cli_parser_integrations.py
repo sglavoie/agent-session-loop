@@ -18,7 +18,9 @@ def _add_bridge_commands(
         epilog=_group_epilogue("bridge", "asl bridge serve --help"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    bridge_sub = bridge_parser.add_subparsers(dest="bridge_command", required=True)
+    bridge_sub = bridge_parser.add_subparsers(
+        dest="bridge_command", required=True, metavar="COMMAND"
+    )
     bridge_serve_parser = bridge_sub.add_parser(
         "serve",
         help="Stream hello, run snapshots, and change events over stdio.",
@@ -65,7 +67,7 @@ def _add_agent_mux_commands(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     agent_mux_sub = agent_mux_parser.add_subparsers(
-        dest="agent_mux_command", required=True
+        dest="agent_mux_command", required=True, metavar="COMMAND"
     )
     pairing_parser = agent_mux_sub.add_parser(
         "pairing",
@@ -112,7 +114,7 @@ def _add_diagnostics_commands(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     diagnostics_sub = diagnostics_parser.add_subparsers(
-        dest="diagnostics_command", required=True
+        dest="diagnostics_command", required=True, metavar="COMMAND"
     )
     diagnostics_export_parser = diagnostics_sub.add_parser(
         "export",

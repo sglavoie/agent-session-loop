@@ -319,8 +319,11 @@ class CliTests(unittest.TestCase):
             os.environ, {"PATH": str(self.tmp_path)}, clear=False
         ):
             code, out = self._run(harness=["codex"])
+        # One compact line, named like every other `--json` command.
+        self.assertEqual(1, len(out.splitlines()))
         payload = json.loads(out)
         self.assertEqual(0, code)
+        self.assertEqual("harness-compat", payload["command"])
         self.assertEqual(compat.SCHEMA_VERSION, payload["schema_version"])
         self.assertEqual(1, len(payload["harnesses"]))
         self.assertEqual("supported", payload["harnesses"][0]["status"])

@@ -57,19 +57,22 @@ links it into every harness skill directory alongside the other ASL skills. Run
 skill links resolve to this checkout. See [Setup](../../README.md#setup).
 
 `just sync-skills` also renders the always-loaded ASL startup card, which is
-how a fresh Codex or Claude session learns the supervisor route without loading
+how a fresh Codex, Claude or Copilot session learns the supervisor route without loading
 the whole skill. `agent_session_loop/startup_context.py` builds the card from
 `supervisor_guide.guide_payload`, so the card cannot drift from
 `asl supervisor-guide`, and maintains it as one marked block in the context file of every harness root
-that exists (`~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`, and the `CLAUDE.md`
-of any extra profile named by `CLAUDE_CONFIG_DIR` or `ASL_CLAUDE_CONFIG_DIRS`),
+that exists (`~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`, the `CLAUDE.md`
+of any extra profile named by `CLAUDE_CONFIG_DIR` or `ASL_CLAUDE_CONFIG_DIRS`,
+and `~/.copilot/copilot-instructions.md`, created when it does not exist yet),
 and in the generated skill reference
 `skills/asl/references/supervisor-context.md`. Everything outside the markers
 is preserved byte for byte. The start marker carries a digest of the block
 body: `python3 -m agent_session_loop.startup_context --check` (also
-`just check-startup-context`) reports stale blocks without rewriting them, and
-`just verify-asl-install` fails when an installed context file carries a marker
-other than the current one, when the installed ASL skill has lost its
+`just check-startup-context`) reports stale blocks without rewriting them
+(listing a context file that does not exist yet as `missing:`), and
+`just verify-asl-install` fails when an installed context file is missing or
+carries a marker other than the current one, naming `just sync-skills` as the
+remedy, when the installed ASL skill has lost its
 reference-loading instruction, or when its bundled helper does not resolve to
 this checkout.
 

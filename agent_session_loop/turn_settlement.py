@@ -28,7 +28,7 @@ The sequence, in the one order it may run in:
 * **The progress journal, then the derived ledgers.** In that order and no
   other: only verified work reaches ``progress.md``, and the journal row lands
   before the ledgers it describes are re-synced.
-* **The per-session commit.** Under ``--commit per-session``, or owed by a
+* **The per-session commit.** Under ``--commit-per-session``, or owed by a
   repair child that owns its own commit. A commit that fails does not end the
   run: it is recorded on the turn and soft-failed onto the run's owed group.
 * **The turn commit.** The publication that turns the executed turn into an
@@ -292,7 +292,7 @@ def settle_turn(
         turn_payload["progress_appended"] = progress_appended
         if progress_error is not None:
             turn_payload["progress_error"] = progress_error
-        durability.write_json_file(paths["result"], turn_payload)
+        durability.write_json_file(paths["result"], turn_payload, durable=True)
 
     try:
         ledger_updates = plans_status_tables.sync_derived_status_ledgers(after)
@@ -344,7 +344,7 @@ def settle_turn(
         with ctx.persistence.lock:
             turn_payload["ledger_updates"] = [str(path) for path in ledger_updates]
             turn_payload["after"] = plans_payloads.snapshot_payload(after)
-            durability.write_json_file(paths["result"], turn_payload)
+            durability.write_json_file(paths["result"], turn_payload, durable=True)
 
     readiness_gate._refresh_active_readiness_state(
         ctx.payload, after.plan_dir, ctx.persistence

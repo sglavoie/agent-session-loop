@@ -105,7 +105,7 @@ class StorageFailureTests(FullStackCase):
         self.publish()
         with mock.patch.object(
             WorkbenchStore,
-            "runs",
+            "catalog_states",
             side_effect=StoreError("the database is gone"),
             autospec=True,
         ):

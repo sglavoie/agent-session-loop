@@ -34,6 +34,7 @@ never becomes a row a remote cockpit retains."""
 
 from __future__ import annotations
 
+import gzip
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,6 +44,7 @@ from agent_session_loop import (
     intervention,
     qna,
     workbench_details,
+    workbench_details_logs,
 )
 from asl_workbench import catalog, details
 
@@ -107,6 +109,90 @@ class WindowTests(unittest.TestCase):
         self.assertIsNone(window.offset)
         self.assertIsNone(window.tail_lines)
         self.assertEqual(details.DEFAULT_LOG_BYTES, window.max_bytes)
+
+
+class GzipWindowTests(unittest.TestCase):
+    """A gzip log is streamed into its window, answering as a full read would."""
+
+    PAYLOAD = b"".join(b"line %04d of the verification log\n" % n for n in range(600))
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "c1-stdout.gz"
+        self.path.write_bytes(gzip.compress(self.PAYLOAD))
+
+    def _reference(self, window: details.Window) -> dict[str, object]:
+        """The answer slicing the whole decompressed artifact gives."""
+        data = self.PAYLOAD
+        size = len(data)
+        read_offset = (
+            window.offset
+            if window.offset is not None
+            else max(0, size - window.max_bytes)
+        )
+        read_offset = min(read_offset, size)
+        return workbench_details_logs._window_payload(
+            self.path,
+            data[read_offset : read_offset + window.max_bytes],
+            size=size,
+            read_offset=read_offset,
+            tail_lines=window.tail_lines,
+        )
+
+    def test_every_window_matches_slicing_the_whole_artifact(self) -> None:
+        size = len(self.PAYLOAD)
+        windows = [
+            details.Window(),
+            details.Window(max_bytes=0),
+            details.Window(max_bytes=size),
+            details.Window(max_bytes=size + 10),
+            details.Window(tail_lines=3, max_bytes=500),
+            details.Window(tail_lines=0, max_bytes=500),
+        ]
+        for offset in (0, 1, 999, 1000, 1001, size - 1, size, size + 50):
+            for max_bytes in (0, 1, 7, 1000, 4096, size):
+                windows.append(details.Window(offset=offset, max_bytes=max_bytes))
+        # A chunk smaller than most windows puts their edges inside a chunk, on
+        # a boundary, and across several.
+        with mock.patch.object(workbench_details_logs, "_GZIP_CHUNK_BYTES", 1000):
+            for window in windows:
+                with self.subTest(window=window):
+                    self.assertEqual(
+                        self._reference(window),
+                        workbench_details.read_log_window(self.path, window),
+                    )
+
+    def test_bounded_text_matches_the_head_of_the_artifact(self) -> None:
+        with mock.patch.object(workbench_details_logs, "_GZIP_CHUNK_BYTES", 1000):
+            for max_bytes in (0, 10, 1000, 2500, len(self.PAYLOAD), 10**6):
+                with self.subTest(max_bytes=max_bytes):
+                    payload = workbench_details.read_bounded_text(
+                        self.path, max_bytes=max_bytes
+                    )
+                    assert payload is not None
+                    self.assertEqual(len(self.PAYLOAD), payload["size"])
+                    self.assertEqual(
+                        max_bytes < len(self.PAYLOAD), payload["truncated"]
+                    )
+                    self.assertEqual(
+                        self.PAYLOAD[:max_bytes].decode("utf-8"), payload["text"]
+                    )
+
+    def test_a_corrupt_or_missing_artifact_answers_as_before(self) -> None:
+        self.path.write_bytes(gzip.compress(self.PAYLOAD)[:-12])
+        window = details.Window(offset=0, max_bytes=10)
+        payload = workbench_details.read_log_window(self.path, window)
+        assert payload is not None
+        self.assertTrue(payload["exists"])
+        self.assertIn("is not valid gzip data", payload["error"])
+        self.assertEqual("", payload["text"])
+        text = workbench_details.read_bounded_text(self.path, max_bytes=10)
+        assert text is not None
+        self.assertIn("is not valid gzip data", text["error"])
+        self.path.unlink()
+        self.assertIsNone(workbench_details.read_log_window(self.path, window))
+        self.assertIsNone(workbench_details.read_bounded_text(self.path, max_bytes=1))
 
 
 class PaginationTests(unittest.TestCase):

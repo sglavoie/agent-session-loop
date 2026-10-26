@@ -12,12 +12,13 @@ import {
   planLabel,
   shortenHome,
 } from "./identity.js";
-import { setField } from "./panels.js";
+import { setField, setText } from "./panels.js";
 import { setSelectedPlan } from "./prefs.js";
 import { matchesFilter } from "./queue.js";
 import { handleRowAction, navigateToDetail } from "./router.js";
 import { applyShellLayout } from "./shell.js";
 import { state } from "./state.js";
+import { toEpochMs } from "./time.js";
 
 export const ACTIVITY_SOURCE_LABELS = {
   "active-verification": "active verification",
@@ -58,29 +59,29 @@ export function renderPreview(plan) {
 
   const labelEl = document.getElementById("wb-preview-label");
   if (labelEl) {
-    labelEl.textContent = planLabel(plan);
+    setText(labelEl, planLabel(plan));
   }
   const pathEl = document.getElementById("wb-preview-path");
   // The Pi has no path to show, so it shows the digest it addresses by --
   // blank here would read as "this plan is nowhere".
   if (pathEl) {
-    pathEl.textContent = shortenHome(plan.plan_dir) || planIdOf(plan);
+    setText(pathEl, shortenHome(plan.plan_dir) || planIdOf(plan));
     pathEl.title = plan.plan_dir || planIdOf(plan);
   }
 
   const stateEl = document.getElementById("wb-preview-state");
   if (stateEl) {
-    stateEl.textContent = plan.primary_state || "unknown";
+    setText(stateEl, plan.primary_state || "unknown");
     stateEl.setAttribute("data-state", plan.primary_state || "unknown");
   }
   const activityEl = document.getElementById("wb-preview-activity");
   if (activityEl) {
     if (typeof plan.activity_label === "string" && plan.activity_label) {
       activityEl.hidden = false;
-      activityEl.textContent = plan.activity_label;
+      setText(activityEl, plan.activity_label);
     } else {
       activityEl.hidden = true;
-      activityEl.textContent = "";
+      setText(activityEl, "");
     }
   }
   const sourceEl = document.getElementById("wb-preview-activity-source");
@@ -90,11 +91,11 @@ export function renderPreview(plan) {
       sourceEl.hidden = false;
       sourceEl.setAttribute("data-source", source);
       const label = ACTIVITY_SOURCE_LABELS[source] || source;
-      sourceEl.textContent = "from " + label;
+      setText(sourceEl, "from " + label);
     } else {
       sourceEl.hidden = true;
       sourceEl.setAttribute("data-source", "");
-      sourceEl.textContent = "";
+      setText(sourceEl, "");
     }
   }
   const reasonEl = document.getElementById("wb-preview-reason");
@@ -105,10 +106,10 @@ export function renderPreview(plan) {
       "";
     if (reason) {
       reasonEl.hidden = false;
-      reasonEl.textContent = reason;
+      setText(reasonEl, reason);
     } else {
       reasonEl.hidden = true;
-      reasonEl.textContent = "";
+      setText(reasonEl, "");
     }
   }
   const actionEl = document.getElementById("wb-preview-action");
@@ -123,10 +124,10 @@ export function renderPreview(plan) {
     const text = parts.join(" — ");
     if (text) {
       actionEl.hidden = false;
-      actionEl.textContent = text;
+      setText(actionEl, text);
     } else {
       actionEl.hidden = true;
-      actionEl.textContent = "";
+      setText(actionEl, "");
     }
   }
 
@@ -160,10 +161,10 @@ export function renderPreview(plan) {
     pauseSection.hidden = !hasPause;
   }
   if (pauseReasonEl) {
-    pauseReasonEl.textContent = plan.pause_reason || "";
+    setText(pauseReasonEl, plan.pause_reason || "");
   }
   if (pauseMessageEl) {
-    pauseMessageEl.textContent = plan.pause_message || "";
+    setText(pauseMessageEl, plan.pause_message || "");
   }
 
   const lastSection = document.getElementById(
@@ -178,7 +179,7 @@ export function renderPreview(plan) {
     lastSection.hidden = !lastPreview;
   }
   if (lastBody) {
-    lastBody.textContent = plainPreview(lastPreview);
+    setText(lastBody, plainPreview(lastPreview));
   }
 
   const openEl = document.getElementById("wb-preview-open");
@@ -208,8 +209,8 @@ function setFieldTitle(root, name, title) {
  * The absolute time goes in the cell's tooltip, as it does on the card.
  */
 export function formatActivityAge(value, now) {
-  const parsed = typeof value === "string" ? Date.parse(value) : NaN;
-  if (!Number.isFinite(parsed)) return formatLastActivity(value);
+  const parsed = toEpochMs(value);
+  if (parsed === null) return formatLastActivity(value);
   const reference = typeof now === "number" ? now : Date.now();
   return formatAge(Math.max(0, (reference - parsed) / 1000)) + " ago";
 }
@@ -260,13 +261,15 @@ export function plainPreview(text) {
 }
 
 export function formatLastActivity(value) {
-  if (typeof value !== "string" || !value) return "no recent activity";
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) return value;
+  if (value === null || value === undefined || value === "") {
+    return "no recent activity";
+  }
+  const parsed = toEpochMs(value);
+  if (parsed === null) return String(value);
   try {
     return new Date(parsed).toLocaleString();
   } catch (err) {
-    return value;
+    return String(value);
   }
 }
 
@@ -297,10 +300,8 @@ export function setRowFact(row, field, value, title) {
  */
 export function formatIdle(plan, now) {
   if (!plan || plan.primary_state === "complete") return null;
-  const value = plan.last_activity_at;
-  if (typeof value !== "string" || !value) return null;
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) return null;
+  const parsed = toEpochMs(plan.last_activity_at);
+  if (parsed === null) return null;
   const reference = typeof now === "number" ? now : Date.now();
   return formatAge(Math.max(0, (reference - parsed) / 1000));
 }
@@ -323,13 +324,13 @@ export function formatCompletedAt(plan) {
   // "not recorded" so the empty state is distinguishable from a real time.
   if (!plan || plan.primary_state !== "complete") return "-";
   const value = plan.completed_at;
-  if (typeof value !== "string" || !value) return "not recorded";
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) return value;
+  if (value === null || value === undefined || value === "") return "not recorded";
+  const parsed = toEpochMs(value);
+  if (parsed === null) return String(value);
   try {
     return new Date(parsed).toLocaleString();
   } catch (err) {
-    return value;
+    return String(value);
   }
 }
 

@@ -1,4 +1,4 @@
-"""The end-of-run commit owed under ``--commit-mode end``."""
+"""The end-of-run commit owed under ``--commit-at-end``."""
 
 from __future__ import annotations
 

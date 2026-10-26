@@ -11,7 +11,13 @@ from .cli_defaults import (
     _METRICS_DEFAULT_SINCE_DAYS,
     _RETENTION_DEFAULT_MAX_AGE_DAYS,
 )
-from .cli_parser_support import _AgentSessionLoopArgumentParser, _group_epilogue
+from .cli_parser_support import (
+    _AgentSessionLoopArgumentParser,
+    _group_epilogue,
+    int_in_range,
+    non_negative_float,
+    positive_float,
+)
 
 
 def _add_storage_commands(
@@ -110,7 +116,7 @@ def _add_maintenance_commands(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     maintenance_sub = maintenance_parser.add_subparsers(
-        dest="maintenance_command", required=True
+        dest="maintenance_command", required=True, metavar="COMMAND"
     )
 
     maintenance_install_parser = maintenance_sub.add_parser(
@@ -139,21 +145,21 @@ def _add_maintenance_commands(
     )
     maintenance_install_parser.add_argument(
         "--hour",
-        type=int,
+        type=int_in_range(0, 23),
         default=_MAINTENANCE_DEFAULT_HOUR,
         metavar="HOUR",
-        help=f"Local hour to run at (default: {_MAINTENANCE_DEFAULT_HOUR})",
+        help=f"Local hour to run at, 0-23 (default: {_MAINTENANCE_DEFAULT_HOUR})",
     )
     maintenance_install_parser.add_argument(
         "--minute",
-        type=int,
+        type=int_in_range(0, 59),
         default=_MAINTENANCE_DEFAULT_MINUTE,
         metavar="MINUTE",
-        help=f"Local minute to run at (default: {_MAINTENANCE_DEFAULT_MINUTE})",
+        help=(f"Local minute to run at, 0-59 (default: {_MAINTENANCE_DEFAULT_MINUTE})"),
     )
     maintenance_install_parser.add_argument(
         "--max-runtime-seconds",
-        type=float,
+        type=positive_float,
         default=_MAINTENANCE_DEFAULT_MAX_RUNTIME_SECONDS,
         metavar="SECONDS",
         help=(
@@ -214,7 +220,7 @@ def _add_maintenance_commands(
     )
     maintenance_run_parser.add_argument(
         "--max-age-days",
-        type=float,
+        type=non_negative_float,
         default=_RETENTION_DEFAULT_MAX_AGE_DAYS,
         metavar="DAYS",
         help=(
@@ -224,7 +230,7 @@ def _add_maintenance_commands(
     )
     maintenance_run_parser.add_argument(
         "--max-runtime-seconds",
-        type=float,
+        type=positive_float,
         default=_MAINTENANCE_DEFAULT_MAX_RUNTIME_SECONDS,
         metavar="SECONDS",
         help=(
@@ -373,6 +379,7 @@ def _add_state_commands(
     )
     metrics_parser.add_argument(
         "--since-days",
+        # Validated by the handler, which reports it in the JSON envelope.
         type=int,
         default=_METRICS_DEFAULT_SINCE_DAYS,
         help=(

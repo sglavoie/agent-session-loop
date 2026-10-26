@@ -6,9 +6,16 @@ import argparse
 import json
 import sys
 
-from . import retention, retention_projection
+from . import responses, retention, retention_projection
+from .cli_defaults import program_name
 from .maintenance_job import JobStatus, install_job, job_status, uninstall_job
-from .maintenance_models import MaintenanceResult
+from .maintenance_models import (
+    COMMAND_INSTALL,
+    COMMAND_RUN,
+    COMMAND_STATUS,
+    COMMAND_UNINSTALL,
+    MaintenanceResult,
+)
 from .maintenance_policy import (
     COMPACTION_AGE_DAYS,
     CORPUS_BUDGET_BYTES,
@@ -40,12 +47,29 @@ def _print_run(result: MaintenanceResult) -> None:
         f"(floor {usage.min_free_fraction * 100:.0f}%)"
     )
     print(f"Trigger: {result.trigger}")
+    if not _print_declined(result):
+        _print_plan_and_outcome(result)
+    # Failures and health findings are reported whatever the outcome: a pass
+    # that declined to plan can still have failed (an unreadable corpus, a
+    # claim it could not take), and its exit status says so.
+    for failure in result.failures:
+        print(
+            f"  FAILED {failure.kind} {failure.target}: {failure.error} "
+            f"({format_bytes(failure.bytes_still_allocated)} still allocated)"
+        )
+    for finding in result.health:
+        prefix = "HEALTH" if finding.strict else "note"
+        print(f"{prefix} {finding.code}: {finding.detail}")
+
+
+def _print_declined(result: MaintenanceResult) -> bool:
+    """Explain an outcome that planned nothing; ``False`` when one did."""
     if result.outcome == OUTCOME_UNDER_THRESHOLD:
         print("Both thresholds are satisfied; nothing was planned or touched.")
-        return
+        return True
     if result.outcome == OUTCOME_LOCK_UNAVAILABLE:
         print("Another maintenance pass holds the claim; this one declined.")
-        return
+        return True
     if result.outcome == OUTCOME_PRESSURE_RELIEVED:
         at_claim = result.usage_at_claim
         if at_claim is not None:
@@ -58,7 +82,11 @@ def _print_run(result: MaintenanceResult) -> None:
             "Both thresholds were satisfied by the time this pass held the "
             "claim; nothing was touched. Use --force to maintain anyway."
         )
-        return
+        return True
+    return False
+
+
+def _print_plan_and_outcome(result: MaintenanceResult) -> None:
     plan = result.plan
     if plan is not None:
         print(
@@ -96,14 +124,6 @@ def _print_run(result: MaintenanceResult) -> None:
             f"  dropped {drop['run_id']} ({drop['lane']}) under the claim: "
             f"{drop['reason']}"
         )
-    for failure in result.failures:
-        print(
-            f"  FAILED {failure.kind} {failure.target}: {failure.error} "
-            f"({format_bytes(failure.bytes_still_allocated)} still allocated)"
-        )
-    for finding in result.health:
-        prefix = "HEALTH" if finding.strict else "note"
-        print(f"{prefix} {finding.code}: {finding.detail}")
 
 
 def _print_status(status: JobStatus) -> None:
@@ -150,15 +170,29 @@ def _print_status(status: JobStatus) -> None:
 
 
 def _fail(command: str, error: Exception, args: argparse.Namespace) -> int:
+    """Report a leaf that could not run, in the common error envelope.
+
+    ``command`` is the hyphenated JSON identifier (``maintenance-run``); the
+    text form names the leaf the way it was typed (``asl maintenance run:``).
+    """
     if getattr(args, "json", False):
-        print(
-            json.dumps(
-                {"ok": False, "command": command, "error": str(error)}, sort_keys=True
+        responses.print_json(
+            responses.error_payload(
+                command, reason=_failure_reason(error), error=str(error)
             )
         )
     else:
-        print(f"{command} failed: {error}", file=sys.stderr)
+        leaf = command.replace("-", " ", 1)
+        print(f"{program_name()} {leaf}: {error}", file=sys.stderr)
     return 1
+
+
+def _failure_reason(error: Exception) -> str:
+    if isinstance(error, MaintenanceError):
+        return "maintenance-error"
+    if isinstance(error, OSError):
+        return "os-error"
+    return "input-error"
 
 
 def run_from_args(args: argparse.Namespace) -> int:
@@ -183,7 +217,7 @@ def run_from_args(args: argparse.Namespace) -> int:
             min_free_fraction=MIN_FREE_FRACTION,
         )
     except (MaintenanceError, OSError, ValueError) as error:
-        return _fail("maintenance run", error, args)
+        return _fail(COMMAND_RUN, error, args)
     if getattr(args, "json", False):
         print(json.dumps(result.to_dict(), sort_keys=True))
     else:
@@ -205,7 +239,7 @@ def install_from_args(args: argparse.Namespace) -> int:
             bootstrap=not getattr(args, "no_bootstrap", False),
         )
     except (MaintenanceError, OSError, ValueError) as error:
-        return _fail("maintenance install", error, args)
+        return _fail(COMMAND_INSTALL, error, args)
     if getattr(args, "json", False):
         print(json.dumps(payload, sort_keys=True))
     else:
@@ -227,7 +261,7 @@ def uninstall_from_args(args: argparse.Namespace) -> int:
             bootstrap=not getattr(args, "no_bootstrap", False),
         )
     except (MaintenanceError, OSError, ValueError) as error:
-        return _fail("maintenance uninstall", error, args)
+        return _fail(COMMAND_UNINSTALL, error, args)
     if getattr(args, "json", False):
         print(json.dumps(payload, sort_keys=True))
     else:
@@ -250,7 +284,7 @@ def status_from_args(args: argparse.Namespace) -> int:
             probe=not getattr(args, "no_probe", False),
         )
     except (MaintenanceError, OSError, ValueError) as error:
-        return _fail("maintenance status", error, args)
+        return _fail(COMMAND_STATUS, error, args)
     if getattr(args, "json", False):
         print(json.dumps(status.to_dict(), sort_keys=True))
     else:

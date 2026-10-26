@@ -236,6 +236,39 @@ class ControlSignalTests(unittest.TestCase):
             control_signal._deliver_wakeup(endpoint),
         )
 
+    def test_a_refused_stop_pipe_leaks_neither_descriptors_nor_the_node(
+        self,
+    ) -> None:
+        real_open = os.open
+        opened: list[int] = []
+
+        def record_open(path, *args, **kwargs):
+            fd = real_open(path, *args, **kwargs)
+            opened.append(fd)
+            return fd
+
+        with (
+            mock.patch.object(control_signal.os, "open", side_effect=record_open),
+            mock.patch.object(
+                control_signal.os,
+                "pipe",
+                side_effect=OSError(errno.EMFILE, "Too many open files"),
+            ),
+            self.assertRaises(OSError),
+            control_signal.open_wakeup_endpoint(self.state_dir, threading.Event()),
+        ):
+            self.fail("the endpoint must not be served without its stop pipe")
+
+        if not opened:
+            self.skipTest("this filesystem cannot host a wakeup FIFO")
+        # Both the read end and the keepalive writer were open when the pipe
+        # was refused; neither may outlive the failure, nor may the node.
+        self.assertEqual(2, len(opened))
+        for descriptor in opened:
+            with self.subTest(descriptor=descriptor), self.assertRaises(OSError):
+                os.fstat(descriptor)
+        self.assertEqual([], list(self.state_dir.rglob("*.fifo")))
+
     def test_a_filesystem_that_cannot_host_a_fifo_yields_no_endpoint(
         self,
     ) -> None:

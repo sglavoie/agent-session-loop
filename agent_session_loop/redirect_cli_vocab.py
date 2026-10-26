@@ -97,6 +97,11 @@ ERROR_INVALID_TEXT_SOURCE = "invalid-text-source"
 ERROR_STDIN_READ = "stdin-read-error"
 ERROR_INVALID_TIMEOUT = "invalid-timeout"
 ERROR_INVALID_TARGET = "invalid-target"
+ERROR_INVALID_OUTCOME = "invalid-outcome"
+
+#: The decisions `asl control resolve-redirect --outcome` records; the same
+#: pair ``redirect_restart.resolve_submission`` accepts.
+RESOLUTION_OUTCOMES = ("submitted", "not-submitted")
 
 #: Stage vocabulary. One string per answer to "where is my correction?".
 STAGE_SUBMITTED = "submitted"

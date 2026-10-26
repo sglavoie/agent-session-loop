@@ -129,7 +129,7 @@ def _enforce_review_mutation_guard(
             repo_state = review_guard._review_repo_state(fingerprint_after)
             if repo_state is not None:
                 turn_payload["review_repo_state"] = repo_state
-            durability.write_json_file(paths["result"], turn_payload)
+            durability.write_json_file(paths["result"], turn_payload, durable=True)
         return False
 
     # Leaving the review complete would make an unguarded review permanent
@@ -151,7 +151,7 @@ def _enforce_review_mutation_guard(
     with persistence.lock:
         payload["final_snapshot"] = plans_payloads.snapshot_payload(snapshot_after)
         turn_payload["review_mutation_guard"] = guard_record
-        durability.write_json_file(paths["result"], turn_payload)
+        durability.write_json_file(paths["result"], turn_payload, durable=True)
     turn_execution_commit.record_turn_rejected(
         event_path=event_path,
         payload=payload,

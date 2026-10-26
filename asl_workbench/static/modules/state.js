@@ -60,6 +60,8 @@ export const state = {
   cleanupSelectionRevision: null,
   cleanupReviewOpen: false,
   archiveInFlight: false,
+  // An archive reload asked for while one was in flight, run when it settles.
+  archivePending: false,
   archiveEntries: [],
   archiveSelection: new Set(),
   archiveRetentionDays: null,
@@ -91,6 +93,8 @@ export const state = {
   },
   detailTimer: null,
   detailInFlight: false,
+  // A detail refresh asked for while one was in flight, run when it settles.
+  detailRefreshPending: false,
   detailPlan: null,
   detailRegistry: null,
   recoveryPanelPlanId: null,

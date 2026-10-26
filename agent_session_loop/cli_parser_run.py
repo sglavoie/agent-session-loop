@@ -9,6 +9,7 @@ from .cli_parser_support import (
     _add_plan_dir_with_option_alias,
     _add_unsafe_bypass_flags,
     _AgentSessionLoopArgumentParser,
+    positive_float,
 )
 
 
@@ -63,8 +64,11 @@ def _add_run_inspection_commands(
     )
     questions_parser.add_argument(
         "plan_dir",
-        metavar="PLAN_DIR",
-        help="Split plan directory whose paused run to inspect",
+        metavar="PLAN_DIR_OR_ID",
+        help=(
+            "Split plan directory whose paused run to inspect, or the compact "
+            "plan label printed after 'plan' by 'asl sessions'"
+        ),
     )
     questions_parser.add_argument(
         "--state-dir",
@@ -88,8 +92,11 @@ def _add_run_inspection_commands(
     )
     review_verdict_parser.add_argument(
         "plan_dir",
-        metavar="PLAN_DIR",
-        help="Split plan directory whose review verdict to inspect",
+        metavar="PLAN_DIR_OR_ID",
+        help=(
+            "Split plan directory whose review verdict to inspect, or the compact "
+            "plan label printed after 'plan' by 'asl sessions'"
+        ),
     )
     review_verdict_parser.add_argument(
         "--state-dir",
@@ -132,7 +139,12 @@ def _add_run_inspection_commands(
         help="Show and follow a plan's run events and harness logs.",
     )
     tail_parser.add_argument(
-        "plan_dir", metavar="PLAN_DIR", help="Split plan directory to tail"
+        "plan_dir",
+        metavar="PLAN_DIR_OR_ID",
+        help=(
+            "Split plan directory to tail, or the compact plan label "
+            "printed after 'plan' by 'asl sessions'"
+        ),
     )
     tail_parser.add_argument(
         "--state-dir",
@@ -385,7 +397,7 @@ def _add_check_commands(
     baseline_parser.add_argument(
         "--per-check-timeout",
         dest="per_check_timeout",
-        type=float,
+        type=positive_float,
         default=None,
         metavar="SECONDS",
         help=(
@@ -397,7 +409,7 @@ def _add_check_commands(
     baseline_parser.add_argument(
         "--total-timeout",
         dest="total_timeout",
-        type=float,
+        type=positive_float,
         default=None,
         metavar="SECONDS",
         help=(

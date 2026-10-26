@@ -333,12 +333,18 @@ def inline_suppression_codes(path: Path) -> frozenset[str]:
 
 
 def mypy_checked_files() -> list[Path]:
-    """Every ``.py`` file the mypy configuration checks."""
+    """Every file the mypy configuration checks.
+
+    A directory entry contributes its ``*.py`` files; a file entry (the
+    installer, the extensionless ``asl`` wrapper) contributes itself.
+    """
     config = load_mypy_config()
     exclude = re.compile(config["exclude"])
     checked: list[Path] = []
     for entry in config["files"]:
-        for path in sorted((REPO_ROOT / entry).rglob("*.py")):
+        root = REPO_ROOT / entry
+        candidates = [root] if root.is_file() else sorted(root.rglob("*.py"))
+        for path in candidates:
             relative = path.relative_to(REPO_ROOT).as_posix()
             if "__pycache__" in path.parts or exclude.search(relative):
                 continue

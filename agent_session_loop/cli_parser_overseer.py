@@ -4,7 +4,31 @@ from __future__ import annotations
 
 import argparse
 
-from .cli_parser_support import _AgentSessionLoopArgumentParser, _group_epilogue
+from .cli_parser_support import (
+    _AgentSessionLoopArgumentParser,
+    _group_epilogue,
+    non_negative_float,
+    positive_float,
+    positive_int,
+)
+
+# overseer_decisions.HUMAN_TOPICS, restated: this parser imports no overseer
+# module. `--raises` shows TOPIC as its metavar, which hides argparse's own
+# choice listing, so the help text names them instead.
+_HUMAN_TOPICS = ("acceptance", "scope", "design", "safety")
+_HUMAN_TOPICS_HELP = ", ".join(_HUMAN_TOPICS)
+
+# Every overseer leaf exits 0, 1 or 2 by its own contract (overseer_cli_common),
+# which differs from the rest of `asl` in the one case a script is most likely
+# to branch on: a plan nobody can see.
+_OVERSEER_EXIT_STATUS = (
+    "\n\nExit status: 0 when the leaf answered and found nothing wrong;\n"
+    "1 for a substantive refusal (a withheld packet, a partial sweep,\n"
+    "an unsettled action); 2 for a malformed invocation or unreadable input.\n"
+    "A plan directory discovery has no record of, including one that does not\n"
+    "exist, exits 2 with the snake_case reason `plan_unobserved`, unlike the\n"
+    "`plan-not-found` exit 1 that other `asl` commands report."
+)
 
 
 def _add_overseer_commands(
@@ -14,11 +38,12 @@ def _add_overseer_commands(
     overseer_parser = subparsers.add_parser(
         "overseer",
         help="Watch authorized runs on behalf of an invoked overseer host agent.",
-        epilog=_group_epilogue("overseer", "asl overseer scan --help"),
+        epilog=_group_epilogue("overseer", "asl overseer scan --help")
+        + _OVERSEER_EXIT_STATUS,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     overseer_sub = overseer_parser.add_subparsers(
-        dest="overseer_command", required=True
+        dest="overseer_command", required=True, metavar="COMMAND"
     )
 
     overseer_scan_parser = overseer_sub.add_parser(
@@ -50,7 +75,8 @@ def _add_overseer_commands(
     )
     overseer_scan_parser.add_argument(
         "--pause-window-hours",
-        type=float,
+        type=non_negative_float,
+        metavar="HOURS",
         help="How far back a pause still counts as recent (default 24)",
     )
     overseer_scan_parser.add_argument(
@@ -101,30 +127,35 @@ def _add_overseer_commands(
     )
     overseer_watch_parser.add_argument(
         "--for-seconds",
-        type=float,
+        type=non_negative_float,
+        metavar="SECONDS",
         help="Keep sweeping for this long instead of running a single sweep",
     )
     overseer_watch_parser.add_argument(
         "--interval-seconds",
-        type=float,
+        type=non_negative_float,
+        metavar="SECONDS",
         default=15.0,
         help="Wait this long between sweeps under --for-seconds (default 15)",
     )
     overseer_watch_parser.add_argument(
         "--sweep-seconds",
-        type=float,
+        type=positive_float,
+        metavar="SECONDS",
         default=60.0,
         help="Budget for one sweep; plans not reached are reported deferred",
     )
     overseer_watch_parser.add_argument(
         "--lease-seconds",
-        type=float,
+        type=positive_float,
+        metavar="SECONDS",
         default=300.0,
         help="How long each watch lease is held before it expires (default 300)",
     )
     overseer_watch_parser.add_argument(
         "--pause-window-hours",
-        type=float,
+        type=non_negative_float,
+        metavar="HOURS",
         help="How far back a pause still counts as recent (default 24)",
     )
     overseer_watch_parser.add_argument(
@@ -134,8 +165,11 @@ def _add_overseer_commands(
     )
     overseer_watch_parser.add_argument(
         "--timeout",
-        type=float,
+        "--wait-timeout",
+        dest="timeout",
+        type=positive_float,
         default=10.0,
+        metavar="SECONDS",
         help="Seconds to wait for each Agent Mux authorization (default 10)",
     )
     overseer_watch_parser.add_argument(
@@ -181,7 +215,8 @@ def _add_overseer_commands(
     )
     overseer_inspect_parser.add_argument(
         "--incident-id",
-        type=int,
+        type=positive_int,
+        metavar="ID",
         help="Reload this existing incident instead of opening a new one",
     )
     overseer_inspect_parser.add_argument(
@@ -201,14 +236,18 @@ def _add_overseer_commands(
     )
     overseer_inspect_parser.add_argument(
         "--limit",
-        type=int,
+        type=positive_int,
+        metavar="CHARS",
         default=4000,
         help="Character ceiling for each expansion (default 4000)",
     )
     overseer_inspect_parser.add_argument(
         "--timeout",
-        type=float,
+        "--wait-timeout",
+        dest="timeout",
+        type=positive_float,
         default=10.0,
+        metavar="SECONDS",
         help="Seconds to wait for the Agent Mux authorization (default 10)",
     )
     overseer_inspect_parser.add_argument(
@@ -255,21 +294,21 @@ def _add_overseer_commands(
     )
     overseer_decide_parser.add_argument(
         "--incident-id",
-        type=int,
+        type=positive_int,
+        metavar="ID",
         help="Narrow the scope to one open incident",
     )
     overseer_decide_parser.add_argument(
         "--raises",
         action="append",
         metavar="TOPIC",
-        # overseer_decisions.HUMAN_TOPICS, restated: this parser imports no
-        # overseer module.
-        choices=("acceptance", "scope", "design", "safety"),
+        choices=_HUMAN_TOPICS,
         help=(
             "A human question this operation depends on; repeat per topic. A "
             "topic no in-scope decision settles refuses `human_decision` "
             "however the operation itself was allowed. Topics some claimed "
-            "in-scope decision already names are raised anyway"
+            "in-scope decision already names are raised anyway. "
+            f"TOPIC is one of: {_HUMAN_TOPICS_HELP}"
         ),
     )
     overseer_decide_parser.add_argument(
@@ -321,8 +360,11 @@ def _add_overseer_commands(
     )
     overseer_decide_parser.add_argument(
         "--timeout",
-        type=float,
+        "--wait-timeout",
+        dest="timeout",
+        type=positive_float,
         default=10.0,
+        metavar="SECONDS",
         help="Seconds to wait for the Agent Mux authorization (default 10)",
     )
     overseer_decide_parser.add_argument(
@@ -383,7 +425,8 @@ def _add_overseer_commands(
     )
     overseer_act_parser.add_argument(
         "--incident-id",
-        type=int,
+        type=positive_int,
+        metavar="ID",
         required=True,
         help="The incident this action answers",
     )
@@ -401,13 +444,12 @@ def _add_overseer_commands(
         "--raises",
         action="append",
         metavar="TOPIC",
-        # overseer_decisions.HUMAN_TOPICS, restated: this parser imports no
-        # overseer module.
-        choices=("acceptance", "scope", "design", "safety"),
+        choices=_HUMAN_TOPICS,
         help=(
             "A human question this action depends on; repeat per topic. It is "
             "carried into every authority recheck, and a claimed in-scope hold "
-            "on any human topic is carried whether or not it is named here"
+            "on any human topic is carried whether or not it is named here. "
+            f"TOPIC is one of: {_HUMAN_TOPICS_HELP}"
         ),
     )
     overseer_act_parser.add_argument(
@@ -478,8 +520,11 @@ def _add_overseer_commands(
     )
     overseer_act_parser.add_argument(
         "--timeout",
-        type=float,
+        "--wait-timeout",
+        dest="timeout",
+        type=positive_float,
         default=10.0,
+        metavar="SECONDS",
         help="Seconds to wait for each Agent Mux authorization (default 10)",
     )
     overseer_act_parser.add_argument(
@@ -511,8 +556,11 @@ def _add_overseer_commands(
     )
     overseer_reconcile_parser.add_argument(
         "--timeout",
-        type=float,
+        "--wait-timeout",
+        dest="timeout",
+        type=positive_float,
         default=10.0,
+        metavar="SECONDS",
         help="Seconds to wait for each Agent Mux authorization (default 10)",
     )
     overseer_reconcile_parser.add_argument(

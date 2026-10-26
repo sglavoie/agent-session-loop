@@ -159,8 +159,14 @@ def _check_startup_context(
     checks: list[dict[str, Any]] = []
     for target in startup_context.context_targets(roots):
         path = home / target.installed_path
+        remedy = f"run `{startup_context.SYNC_REMEDY}` to render the startup card"
         try:
             text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            checks.append(
+                failure("startup-context", f"{path} is missing; {remedy}"),
+            )
+            continue
         except OSError as error:
             checks.append(
                 failure("startup-context", f"cannot read {path}: {error}"),
@@ -176,7 +182,7 @@ def _check_startup_context(
             )
             continue
 
-        checks.append(failure("startup-context", f"{path} {problem}"))
+        checks.append(failure("startup-context", f"{path} {problem}; {remedy}"))
     return checks
 
 

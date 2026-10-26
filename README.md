@@ -21,7 +21,7 @@ interpreter with a message naming the one it found. The install links `asl`
 into `~/.local/bin`, so that directory must be on your `PATH`
 (`export PATH="$HOME/.local/bin:$PATH"`).
 
-`just all` (the same as `just install`) links:
+`just all` (the same as `just install`) runs `install.py`, which links:
 
 - `~/.local/bin/agent-session-loop` and `~/.local/bin/asl` to the wrapper in
   `bin/.local/bin/`
@@ -33,7 +33,13 @@ into `~/.local/bin`, so that directory must be on your `PATH`
   does not exist is reported as skipped and never created, and a root outside
   your home directory is ignored.
 
-Each is an absolute symlink into this checkout, replaced atomically, so a
+It then renders the ASL startup card into the context file of each discovered
+harness root (see `just sync-skills` below), creating that file when it does
+not exist yet, for example `~/.copilot/copilot-instructions.md`. Running
+`./install.py` on its own only links; it names any context file that is still
+missing so you can render it with `just sync-skills`.
+
+Each link is an absolute symlink into this checkout, replaced atomically, so a
 running companion, bridge or supervisor that execs `asl` mid-install never
 finds it missing. An existing symlink (say, one a different checkout
 installed) is retargeted; a real file or directory is never overwritten.
@@ -42,16 +48,23 @@ were found and which startup cards are stale, without touching anything.
 
 Every directory under `skills/` needs a `SKILL.md`. Shared support directories
 that intentionally have none (such as `skills/references/`) must be listed in
-`SUPPORT_DIRS` in `install.py`; any other directory without a `SKILL.md` fails
-the install as a malformed skill.
+`SUPPORT_DIRS` in `agent_session_loop/install_verify_common.py`, which
+`install.py` and `just verify-asl-install` share. A directory holding nothing
+but cache residue (`__pycache__/`, `*.pyc`, `.DS_Store`), which is what
+removing a skill from git leaves behind, is skipped with a note and any
+installed link to it is pruned; delete it to silence the note. Any other
+directory without a `SKILL.md` fails the install as a malformed skill.
 
 `just sync-skills` re-links the skills and renders the ASL startup card into
 the context file of each discovered harness root (`~/.codex/AGENTS.md`,
-`~/.claude/CLAUDE.md`, and `CLAUDE.md` in every extra Claude profile) and into
+`~/.claude/CLAUDE.md`, `CLAUDE.md` in every extra Claude profile, and
+`~/.copilot/copilot-instructions.md`) and into
 `skills/asl/references/supervisor-context.md`. The card lives inside
 `<!-- ASL_CONTEXT_START ... -->` / `<!-- ASL_CONTEXT_END -->` markers, so any
 other startup instruction in those files is left untouched. Run
-`just check-startup-context` to report stale blocks without rewriting them.
+`just check-startup-context` to report stale blocks without rewriting them;
+it lists a context file that does not exist yet as `missing:` rather than
+`stale:`.
 
 After changing ASL or its skills, run `just verify-asl-install` to confirm
 the active `asl` wrapper, the installed skill links, the installed ASL skill
@@ -92,7 +105,8 @@ just test-browser   # Workbench browser tests; needs Node and npm
 ```
 
 Stdlib `unittest` only. CI (`.github/workflows/`) runs a portable Linux lane
-and the full suite on macOS. See [Testing in the ASL guide](docs/asl-guide.md#testing)
+and the full suite on macOS, plus `just test-browser` when the Workbench shell
+or its browser harness changes. See [Testing in the ASL guide](docs/asl-guide.md#testing)
 for what each recipe covers.
 
 ### Linting

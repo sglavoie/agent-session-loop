@@ -267,7 +267,7 @@ class ManifestTests(MaintenanceTestBase):
 
         payload = json.loads(json.dumps(self._run(apply=True).to_dict()))
 
-        self.assertEqual(payload["command"], "maintenance run")
+        self.assertEqual(payload["command"], "maintenance-run")
         self.assertIn("usage", payload)
         self.assertIn("plan", payload)
 

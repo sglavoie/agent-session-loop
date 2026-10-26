@@ -5,6 +5,7 @@ Split from tests/test_asl_maintenance.py."""
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import io
 import json
 import os
@@ -12,12 +13,13 @@ import plistlib
 import subprocess
 import unittest
 import unittest.mock
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 
 from agent_session_loop import (
     maintenance_cli,
     maintenance_job,
+    maintenance_models,
     maintenance_policy,
     maintenance_run,
     retention,
@@ -99,6 +101,23 @@ class LaunchdJobTests(MaintenanceTestBase):
         self.assertTrue(maintenance_job.plist_path(self.home).is_file())
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["bootstrapped"])
+        self.assertEqual(self.calls, [])
+
+    def test_install_refuses_a_schedule_launchd_cannot_honor(self) -> None:
+        for fields in (
+            {"hour": 24},
+            {"hour": -1},
+            {"minute": 60},
+            {"minute": -1},
+            {"max_runtime_seconds": float("nan")},
+            {"max_runtime_seconds": 0.0},
+        ):
+            with (
+                self.subTest(**fields),
+                self.assertRaises(maintenance_policy.MaintenanceError),
+            ):
+                self._install(bootstrap=False, **fields)
+        self.assertFalse(maintenance_job.plist_path(self.home).exists())
         self.assertEqual(self.calls, [])
 
     def test_a_failed_bootstrap_is_reported_rather_than_swallowed(self) -> None:
@@ -252,7 +271,7 @@ class CommandTests(MaintenanceTestBase):
 
         self.assertEqual(code, 0)
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["command"], "maintenance run")
+        self.assertEqual(payload["command"], "maintenance-run")
 
     def test_run_exits_non_zero_on_a_strict_health_finding(self) -> None:
         self._write_run(
@@ -294,6 +313,83 @@ class CommandTests(MaintenanceTestBase):
         self.assertEqual(code, 1)
         self.assertFalse(payload["ok"])
         self.assertIn("volume vanished", payload["error"])
+        # The common error envelope, not a bespoke three-key one.
+        self.assertEqual(payload["command"], "maintenance-run")
+        self.assertEqual(payload["reason"], "maintenance-error")
+        self.assertFalse(payload["paused"])
+        self.assertEqual(payload["details"], {})
+
+    def test_run_error_text_names_the_leaf_with_the_program_prefix(self) -> None:
+        stderr = io.StringIO()
+        with (
+            unittest.mock.patch.object(
+                maintenance_run,
+                "measure_corpus",
+                side_effect=maintenance_policy.MaintenanceError("volume vanished"),
+            ),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(stderr),
+        ):
+            code = maintenance_cli.run_from_args(self._args(json=False))
+
+        self.assertEqual(code, 1)
+        self.assertRegex(stderr.getvalue(), r"^\S+ maintenance run: volume vanished\n$")
+
+    def test_status_error_json_reports_a_hyphenated_command(self) -> None:
+        with unittest.mock.patch.object(
+            maintenance_cli, "job_status", side_effect=OSError("unreadable")
+        ):
+            code, payload = self._capture(
+                maintenance_cli.status_from_args,
+                self._args(executable=None, no_probe=True),
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["command"], "maintenance-status")
+        self.assertEqual(payload["reason"], "os-error")
+
+    def test_declined_pass_text_still_lists_failures_and_health(self) -> None:
+        """An under-threshold pass that failed must not read as a clean no-op."""
+        declined = self._run(force=False)
+        self.assertEqual(declined.outcome, maintenance_policy.OUTCOME_UNDER_THRESHOLD)
+        failed = dataclasses.replace(
+            declined,
+            ok=False,
+            failures=(
+                maintenance_models.MaintenanceFailure(
+                    kind="manifest",
+                    target="maintenance.json",
+                    error="disk full",
+                    bytes_still_allocated=0,
+                ),
+            ),
+            health=(
+                maintenance_models.HealthFinding(
+                    code="manifest-unwritten", strict=True, detail="disk full"
+                ),
+            ),
+        )
+        for outcome in (
+            maintenance_policy.OUTCOME_UNDER_THRESHOLD,
+            maintenance_policy.OUTCOME_LOCK_UNAVAILABLE,
+            maintenance_policy.OUTCOME_PRESSURE_RELIEVED,
+        ):
+            with self.subTest(outcome=outcome):
+                buffer = io.StringIO()
+                with (
+                    unittest.mock.patch.object(
+                        maintenance_cli,
+                        "run_maintenance",
+                        return_value=dataclasses.replace(failed, outcome=outcome),
+                    ),
+                    redirect_stdout(buffer),
+                ):
+                    code = maintenance_cli.run_from_args(self._args(json=False))
+
+                text = buffer.getvalue()
+                self.assertEqual(code, 1)
+                self.assertIn("FAILED manifest maintenance.json: disk full", text)
+                self.assertIn("HEALTH manifest-unwritten: disk full", text)
 
     def test_status_renders_a_human_summary_without_json(self) -> None:
         self._write_run(RUN_NEWEST, finished_at=_stamp(1))
@@ -323,7 +419,7 @@ class CommandTests(MaintenanceTestBase):
 
         self.assertEqual(code, 1)
         self.assertFalse(payload["ok"])
-        self.assertEqual(payload["command"], "maintenance install")
+        self.assertEqual(payload["command"], "maintenance-install")
 
 
 class LaunchdLabelPrefixTests(unittest.TestCase):

@@ -5,6 +5,7 @@ Split from tests/test_asl_control.py."""
 from __future__ import annotations
 
 import ast
+import fcntl
 import inspect
 import io
 import json
@@ -436,6 +437,36 @@ class StaleLockReclamationTests(unittest.TestCase):
         # Not contention, so nothing waited out the mutex bound.
         self.assertLess(waited, state_locks.LOCK_MUTEX_WAIT_SECONDS)
         self.assertTrue(self.lock_path.exists())
+
+    def test_an_interrupt_while_waiting_for_the_mutex_closes_its_descriptor(
+        self,
+    ) -> None:
+        mutex_path = self.lock_path.parent / state_locks.LOCK_MUTEX_FILE_NAME
+        holder = os.open(mutex_path, os.O_RDWR | os.O_CREAT, 0o644)
+        self.addCleanup(os.close, holder)
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        real_open = os.open
+        opened: list[int] = []
+
+        def record_open(path, *args, **kwargs):
+            fd = real_open(path, *args, **kwargs)
+            if Path(path) == mutex_path:
+                opened.append(fd)
+            return fd
+
+        with (
+            mock.patch.object(state_locks.os, "open", side_effect=record_open),
+            mock.patch.object(state_locks.time, "sleep", side_effect=KeyboardInterrupt),
+            self.assertRaises(KeyboardInterrupt),
+            state_locks._plan_lock_mutex(self.lock_path, wait_seconds=5.0),
+        ):
+            self.fail("the contended mutex must not be entered")
+
+        # The poll sleep is where a contended claim spends its time, so it is
+        # where an interrupt lands; the descriptor must not outlive it.
+        self.assertEqual(1, len(opened))
+        with self.assertRaises(OSError):
+            os.fstat(opened[0])
 
     def test_every_lock_mutation_path_branches_on_the_mutex_claim(self) -> None:
         tree = ast.parse(inspect.getsource(state_locks))

@@ -1,6 +1,6 @@
 """The per-session commit of the settlement pass.
 
-Under ``--commit per-session``, or owed by a repair child that owns its own
+Under ``--commit-per-session``, or owed by a repair child that owns its own
 commit. A commit that fails does not end the run: it is recorded on the turn
 and soft-failed onto the run's owed group.
 """
@@ -85,7 +85,7 @@ def commit_session_if_owed(
                 ),
                 "commit_group": commit_group,
             }
-            durability.write_json_file(paths["result"], turn_payload)
+            durability.write_json_file(paths["result"], turn_payload, durable=True)
     if failed_commit is not None or commit_error is not None:
         # The turn itself stands: it executed, it verified, and the
         # session it completed is still complete. Only the commit
@@ -104,7 +104,7 @@ def commit_session_if_owed(
                 "commit_group": commit_group,
                 "commit": failed_commit,
             }
-            durability.write_json_file(paths["result"], turn_payload)
+            durability.write_json_file(paths["result"], turn_payload, durable=True)
         soft_fail_commit(
             scope="session",
             session_id=session_id,

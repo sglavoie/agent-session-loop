@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from . import (
     plans_session_scope,
     plans_snapshot,
     repository_evidence,
+    responses,
     state,
     state_locks,
     workspace_evidence,
@@ -32,6 +34,66 @@ from . import (
 
 class RecoveryError(ValueError):
     """The retained evidence cannot support this narrow acceptance."""
+
+
+def _event_records(event_path: Path) -> Iterator[dict[str, Any]]:
+    """Yield each event record that parses as an object, in journal order.
+
+    A blank line or one torn by an interrupted append says nothing about any
+    incident, so it is skipped rather than failing the whole recovery.
+    """
+    for line in event_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            yield record
+
+
+#: ``reason`` for a recovery the evidence refused or that stopped partway.
+RECOVERY_REASON_REFUSED = "recovery-refused"
+RECOVERY_REASON_INTERRUPTED = "recovery-interrupted"
+
+
+def recovery_error_reason(error: Exception) -> str:
+    """The JSON ``reason`` for a recovery command that raised ``error``."""
+    if isinstance(error, plans_errors.PlanNotFoundError):
+        return "plan-not-found"
+    if isinstance(error, plans_errors.PlanError):
+        return "malformed-plan"
+    if isinstance(error, state.StateError):
+        return "state-error"
+    if isinstance(error, workspaces.WorkspaceError):
+        return "workspace-error"
+    if isinstance(error, repository_evidence.RepositoryEvidenceError):
+        return "repository-evidence-error"
+    if isinstance(error, OSError):
+        return "os-error"
+    return RECOVERY_REASON_REFUSED
+
+
+def recovery_failure(
+    command: str, error: Exception | str, *, reason: str | None = None, **fields: Any
+) -> dict[str, Any]:
+    """A refused recovery in the common error envelope, keeping ``accepted``."""
+    if reason is None:
+        reason = (
+            RECOVERY_REASON_REFUSED
+            if isinstance(error, str)
+            else recovery_error_reason(error)
+        )
+    return responses.error_payload(
+        command, reason=reason, error=str(error), accepted=False, **fields
+    )
+
+
+def print_recovery_result(command: str, result: dict[str, Any]) -> int:
+    """Print one recovery result as compact JSON; exit 0 only when it succeeded."""
+    responses.print_json({"command": command, **result})
+    return 0 if result["ok"] else 1
 
 
 def _digest(value: Any) -> str:

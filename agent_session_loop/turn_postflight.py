@@ -282,7 +282,9 @@ def enforce_post_turn_guards(
             else:
                 with ctx.persistence.lock:
                     turn_payload["review_repository_bases"] = review_bases
-                    durability.write_json_file(paths["result"], turn_payload)
+                    durability.write_json_file(
+                        paths["result"], turn_payload, durable=True
+                    )
     elif legacy_snapshot_before is not None:
         disarm_exception_guard()
         if write_guards_legacy._enforce_legacy_implementation_write_guard(
@@ -359,7 +361,7 @@ def enforce_post_turn_guards(
         if cumulative is not None:
             with ctx.persistence.lock:
                 turn_payload["workspace_write_guard"] = cumulative
-                durability.write_json_file(paths["result"], turn_payload)
+                durability.write_json_file(paths["result"], turn_payload, durable=True)
 
     # After the general write guard and before every result branch, for the same
     # reason the write guard sits there: a retryable pause would otherwise

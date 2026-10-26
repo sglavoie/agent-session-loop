@@ -118,6 +118,47 @@ class MetricsCliTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("since-days", payload["error"])
 
+    def test_metrics_invalid_since_days_uses_the_common_error_shape(self) -> None:
+        exit_code, stdout, _ = self._run_cli(
+            [
+                "metrics",
+                "--state-dir",
+                str(self.state_root),
+                "--since-days",
+                "0",
+                "--json",
+            ]
+        )
+        self.assertEqual(1, exit_code)
+        payload = json.loads(stdout)
+        self.assertEqual("invalid-since-days", payload["reason"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual({}, payload["details"])
+
+        exit_code, _, stderr = self._run_cli(
+            ["metrics", "--state-dir", str(self.state_root), "--since-days", "0"]
+        )
+        self.assertEqual(1, exit_code)
+        self.assertTrue(stderr.startswith("asl metrics: --since-days"), stderr)
+
+    def test_metrics_reports_a_window_past_the_calendar_instead_of_crashing(
+        self,
+    ) -> None:
+        exit_code, stdout, _ = self._run_cli(
+            [
+                "metrics",
+                "--state-dir",
+                str(self.state_root),
+                "--since-days",
+                "99999999999",
+                "--json",
+            ]
+        )
+        self.assertEqual(1, exit_code)
+        payload = json.loads(stdout)
+        self.assertFalse(payload["ok"])
+        self.assertIn("since-days", payload["error"])
+
 
 class CliInvocationsCliTests(unittest.TestCase):
     def setUp(self) -> None:

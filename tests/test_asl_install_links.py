@@ -246,17 +246,147 @@ class InstallLinksTests(unittest.TestCase):
 
     def test_rejects_a_skill_directory_without_skill_md(self) -> None:
         (self.repo / "skills/stray").mkdir()
+        (self.repo / "skills/stray/notes.md").write_text("x\n")
+
+        with self.assertRaises(install_links.InstallError) as raised:
+            self.install()
+
+        self.assertFalse((self.home / ".claude/skills").exists())
+        message = str(raised.exception)
+        self.assertIn("SUPPORT_DIRS", message)
+        self.assertIn("delete it if it is left over from a removed skill", message)
+
+    def make_leftover(self, name: str) -> Path:
+        """What removing a skill from git leaves: ignored cache residue only."""
+        leftover = self.repo / "skills" / name
+        (leftover / "scripts/__pycache__").mkdir(parents=True)
+        (leftover / "scripts/__pycache__/helper.cpython-314.pyc").write_bytes(b"x")
+        (leftover / ".DS_Store").write_bytes(b"x")
+        return leftover
+
+    def test_a_cache_only_leftover_directory_is_skipped_not_fatal(self) -> None:
+        self.make_leftover("removed")
+        (self.repo / "skills/empty").mkdir()
+
+        self.install()
+
+        self.assertTrue((self.home / ".claude/skills/asl").is_symlink())
+        for install_dir in DEFAULT_SKILL_DIRS:
+            for name in ("removed", "empty"):
+                self.assertFalse((self.home / install_dir / name).is_symlink())
+
+    def test_a_leftover_with_real_content_is_still_rejected(self) -> None:
+        leftover = self.make_leftover("half")
+        (leftover / "scripts/helper.py").write_text("x\n")
 
         with self.assertRaises(install_links.InstallError):
             self.install()
 
-        self.assertFalse((self.home / ".claude/skills").exists())
+    def test_prunes_links_to_a_skill_reduced_to_cache_residue(self) -> None:
+        self.install()
+        skill = self.repo / "skills/session-run"
+        (skill / "SKILL.md").unlink()
+        (skill / "__pycache__").mkdir()
+        (skill / "__pycache__/x.cpython-314.pyc").write_bytes(b"x")
+
+        changes = self.install()
+
+        for install_dir in DEFAULT_SKILL_DIRS:
+            link = self.home / install_dir / "session-run"
+            self.assertFalse(link.is_symlink())
+            self.assertIn(f"removed stale link: {link}", changes)
+        self.assertTrue((self.home / ".claude/skills/asl").is_symlink())
+
+    def run_main(self, *argv: str) -> tuple[int, str, str]:
+        environ = {
+            name: value
+            for name, value in os.environ.items()
+            if name not in ("CLAUDE_CONFIG_DIR", "ASL_CLAUDE_CONFIG_DIRS")
+        }
+        environ["PATH"] = str(self.home / ".local/bin")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(install_links, "REPO_ROOT", self.repo),
+            mock.patch.dict(os.environ, environ, clear=True),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = install_links.main(["--home", str(self.home), *argv])
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_main_notes_a_skipped_leftover_directory(self) -> None:
+        self.make_leftover("removed")
+
+        code, _stdout, stderr = self.run_main("--dry-run")
+
+        self.assertEqual(code, 0)
+        self.assertIn("skipped skills/removed", stderr)
+        self.assertIn("delete it", stderr)
+
+    def test_main_names_sync_skills_for_a_missing_context_file(self) -> None:
+        (self.home / ".claude/CLAUDE.md").write_text("x\n")
+        (self.home / ".codex/AGENTS.md").write_text("x\n")
+
+        code, _stdout, stderr = self.run_main("--dry-run")
+
+        self.assertEqual(code, 0)
+        missing = self.home / ".copilot/copilot-instructions.md"
+        self.assertIn(f"{missing} does not exist yet", stderr)
+        self.assertIn("just sync-skills", stderr)
+        self.assertNotIn("CLAUDE.md does not exist", stderr)
+        self.assertNotIn("AGENTS.md does not exist", stderr)
+        self.assertFalse(missing.exists(), "install.py never renders the card")
 
     def test_skills_only_leaves_the_wrappers_alone(self) -> None:
         self.install(skills_only=True)
 
         self.assertFalse((self.home / ".local/bin/asl").exists())
         self.assertTrue((self.home / ".claude/skills/asl").is_symlink())
+
+    def test_prunes_stale_links_however_their_target_is_spelled(self) -> None:
+        # A stow-style relative target, a doubled separator, and an aliased
+        # spelling of the checkout (the /tmp vs /private/tmp case) all name a
+        # skill in this checkout that has gone.
+        alias = self.root / "alias"
+        alias.symlink_to(self.repo)
+        skills = self.home / ".claude/skills"
+        skills.mkdir()
+        stale = {
+            "relative": os.path.relpath(self.repo / "skills/gone-a", skills),
+            "doubled": f"{self.repo}//skills/gone-b",
+            "aliased": os.fspath(alias / "skills/gone-c"),
+        }
+        for name, target in stale.items():
+            (skills / name).symlink_to(target)
+        live = skills / "live-relative"
+        live.symlink_to(os.path.relpath(self.repo / "skills/asl", skills))
+        outside = skills / "outside"
+        outside.symlink_to(os.path.relpath(self.root / "dotfiles/skills/x", skills))
+
+        changes = self.install()
+
+        for name in stale:
+            self.assertFalse((skills / name).is_symlink(), name)
+            self.assertIn(f"removed stale link: {skills / name}", changes)
+        self.assertTrue(live.is_symlink(), "a live link is not stale")
+        self.assertTrue(outside.is_symlink(), "a link outside the checkout stays")
+
+    def test_dry_run_says_would_for_every_change(self) -> None:
+        (self.home / ".claude/skills").mkdir()
+        stale = self.home / ".claude/skills/gone"
+        stale.symlink_to(self.repo / "skills/gone")
+
+        changes = self.install(dry_run=True)
+
+        self.assertTrue(all(change.startswith("would ") for change in changes), changes)
+        self.assertIn(
+            f"would link: {self.home / '.local/bin/asl'} -> "
+            f"{self.repo / 'bin/.local/bin/asl'}",
+            changes,
+        )
+        self.assertIn(f"would remove stale link: {stale}", changes)
+        self.assertTrue(stale.is_symlink())
+        self.assertFalse((self.home / ".claude/skills/asl").exists())
 
     def test_dry_run_touches_nothing(self) -> None:
         changes = self.install(dry_run=True)

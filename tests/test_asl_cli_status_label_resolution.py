@@ -283,5 +283,83 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
         )
 
 
+class ReadCommandLabelResolutionTests(unittest.TestCase):
+    """``tail``, ``questions``, ``review-verdict``, ``progress`` and ``unlock``
+    accept the compact label the way ``status`` does."""
+
+    COMMANDS: tuple[tuple[str, ...], ...] = (
+        ("tail", "--no-follow", "--json"),
+        ("questions", "--json"),
+        ("review-verdict", "--json"),
+        ("progress", "--json"),
+        ("unlock", "--json"),
+    )
+
+    def _run(self, argv: list[str], *, xdg_state: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-m", "agent_session_loop", *argv],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            env={**os.environ, "XDG_STATE_HOME": str(xdg_state)},
+        )
+
+    def test_label_answers_exactly_as_the_canonical_path_does(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plans" / "0a1b2c3d4e5f-abcdef012345"
+            xdg_state = tmp_dir / "xdg-state"
+            write_plan(plan_dir, ("pending",))
+            _register_plan_in_state(xdg_state / "agent-session-loop", plan_dir)
+            canonical = str(plans_files.canonicalize_path(plan_dir))
+
+            for command, *flags in self.COMMANDS:
+                with self.subTest(command=command):
+                    by_path = self._run(
+                        [command, canonical, *flags], xdg_state=xdg_state
+                    )
+                    by_label = self._run(
+                        [command, plan_dir.name, *flags], xdg_state=xdg_state
+                    )
+                    self.assertEqual(by_path.returncode, by_label.returncode)
+                    self.assertEqual(by_path.stdout, by_label.stdout)
+                    # `tail --no-follow` on a plan that never ran prints nothing.
+                    if by_label.stdout:
+                        self.assertIn(canonical, by_label.stdout)
+
+    def test_unknown_label_is_reported_as_plan_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            xdg_state = Path(tmp) / "xdg-state"
+            for command, *flags in self.COMMANDS:
+                with self.subTest(command=command):
+                    completed = self._run(
+                        [command, "no-such-label-here", *flags], xdg_state=xdg_state
+                    )
+                    self.assertEqual(1, completed.returncode)
+                    payload = json.loads(completed.stdout)
+                    self.assertFalse(payload["ok"])
+                    self.assertEqual("plan-not-found", payload["reason"])
+                    self.assertEqual("no-such-label-here", payload["plan_reference"])
+
+    def test_help_advertises_plan_dir_or_id(self) -> None:
+        parser = cli.build_parser(prog="asl")
+        for command, *_flags in self.COMMANDS:
+            with self.subTest(command=command):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout), self.assertRaises(SystemExit):
+                    parser.parse_args([command, "--help"])
+                self.assertIn("PLAN_DIR_OR_ID", stdout.getvalue())
+
+    def test_shared_plan_reference_help_is_neutral(self) -> None:
+        parser = cli.build_parser(prog="asl")
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), self.assertRaises(SystemExit):
+            parser.parse_args(["inbox", "read", "--help"])
+        help_text = " ".join(stdout.getvalue().split())
+        self.assertIn("Split plan directory or plan label", help_text)
+        self.assertNotIn("to control", help_text)
+
+
 if __name__ == "__main__":
     unittest.main()

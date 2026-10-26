@@ -211,7 +211,12 @@ def _add_workspace_recovery_commands(
         help="Remove an operational lock for a plan directory.",
     )
     unlock_parser.add_argument(
-        "plan_dir", metavar="PLAN_DIR", help="Split plan directory to unlock"
+        "plan_dir",
+        metavar="PLAN_DIR_OR_ID",
+        help=(
+            "Split plan directory to unlock, or the compact plan label "
+            "printed after 'plan' by 'asl sessions'"
+        ),
     )
     unlock_parser.add_argument(
         "--state-dir",
@@ -273,8 +278,11 @@ def _add_progress_commands(
     )
     progress_parser.add_argument(
         "plan_dir",
-        metavar="PLAN_DIR",
-        help="Split plan directory whose progress journal to inspect",
+        metavar="PLAN_DIR_OR_ID",
+        help=(
+            "Split plan directory whose progress journal to inspect, or the compact "
+            "plan label printed after 'plan' by 'asl sessions'"
+        ),
     )
     progress_parser.add_argument(
         "--tail",

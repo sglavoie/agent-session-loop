@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    cli_common,
     events,
     plans_errors,
     plans_snapshot,
@@ -29,7 +30,6 @@ from .tail_control_messages import (
     _format_local_datetime,
     _format_session_label,
     _mailbox_message,
-    _parse_datetime,
     _progress_commit_label,
     _run_control_message,
     _run_started_message,
@@ -80,7 +80,6 @@ __all__ = [
     "_format_local_datetime",
     "_format_session_label",
     "_mailbox_message",
-    "_parse_datetime",
     "_progress_commit_label",
     "_run_control_message",
     "_run_started_message",
@@ -525,6 +524,10 @@ def tail_plan_json(
 def tail_from_args(args: argparse.Namespace) -> int:
     """Tail plan activity from CLI arguments."""
     as_json = bool(getattr(args, "json", False))
+    if not cli_common.resolve_plan_dir_argument(
+        args, command_name="tail", text_label="tail"
+    ):
+        return 1
     try:
         (tail_plan_json if as_json else tail_plan)(
             args.plan_dir,

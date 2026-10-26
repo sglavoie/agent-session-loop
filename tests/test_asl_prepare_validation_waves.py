@@ -238,9 +238,16 @@ class PrepareValidationWaveAndBlockerTests(PrepareEndToEndFixtures):
 
     def test_validator_heartbeats_stay_on_stderr(self) -> None:
         source = self._write_source()
+        stderr = io.StringIO()
 
         def slow_validator(packet: prepare_packet.ValidationTaskPacket) -> object:
-            time.sleep(1.1)
+            # Stay in flight until a heartbeat has been written rather than
+            # sleeping just past one interval, which a loaded machine can miss.
+            deadline = time.monotonic() + 30
+            while "validator heartbeat" not in stderr.getvalue():
+                if time.monotonic() > deadline:
+                    break
+                time.sleep(0.05)
             return _prepare_pipeline_payload(
                 packet.codebase_root,
                 packet.session_ids,
@@ -249,7 +256,6 @@ class PrepareValidationWaveAndBlockerTests(PrepareEndToEndFixtures):
                 session_repositories=packet.session_read_repositories,
             )
 
-        stderr = io.StringIO()
         with redirect_stderr(stderr):
             result = self._prepare(
                 source,

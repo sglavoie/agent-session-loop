@@ -8,6 +8,15 @@ set -euo pipefail
 
 reps="${1:-10}"
 shards="${2:-4}"
+# A non-number would make the loops below run zero times and report ok, and
+# `seq 1 0` counts down on macOS, so anything but a positive integer is a
+# usage error rather than a vacuous pass.
+for count in "$reps" "$shards"; do
+    if [[ ! "$count" =~ ^[1-9][0-9]*$ ]]; then
+        echo "usage: $0 [REPS] [SHARDS] (positive integers; got '$count')" >&2
+        exit 2
+    fi
+done
 export ASL_CLI_TRACE=0
 
 # Scenarios that were observed failing under load or as the calendar moved,

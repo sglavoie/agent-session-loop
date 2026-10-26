@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from . import (
+    cli_common,
     mailbox,
     mailbox_appenders,
     mailbox_cli_args,
@@ -176,11 +177,21 @@ def wait_for_reply(
 def ask_from_args(args: argparse.Namespace) -> int:
     """Append or resume a worker question, optionally waiting for closure."""
     text = getattr(args, "text", None)
+    from_stdin = bool(getattr(args, "text_stdin", False))
     question_id_value = getattr(args, "question_id", None)
     # `--question-id` is a plain string option, so this is identity; spelling it
     # is what keeps the id a `str` rather than `Any` all the way to the lookup.
     question_id = None if question_id_value is None else str(question_id_value)
-    if (text is None) == (question_id is None):
+    if from_stdin and text is not None:
+        mailbox_cli_output.print_input_error(
+            args,
+            command_name=mailbox_cli_constants.COMMAND_ASK,
+            text_label="ask",
+            reason=mailbox_cli_constants.ERROR_INVALID_TEXT_SOURCE,
+            error="exactly one of TEXT and --text-stdin is required",
+        )
+        return 1
+    if (text is None and not from_stdin) == (question_id is None):
         mailbox_cli_output.print_input_error(
             args,
             command_name=mailbox_cli_constants.COMMAND_ASK,
@@ -189,6 +200,20 @@ def ask_from_args(args: argparse.Namespace) -> int:
             error="exactly one of question text and --question-id is required",
         )
         return 1
+    if from_stdin:
+        # Read only once the sources are known to be coherent, so a refused
+        # invocation never consumes the caller's stdin.
+        try:
+            text = cli_common.read_stdin_text()
+        except (OSError, TypeError, UnicodeError, ValueError) as error:
+            cli_common.print_error(
+                args,
+                command_name=mailbox_cli_constants.COMMAND_ASK,
+                text_label="ask",
+                reason=mailbox_cli_constants.ERROR_STDIN_READ,
+                error=f"cannot read question text from stdin: {error}",
+            )
+            return 1
     if text is not None and (not isinstance(text, str) or text.strip() == ""):
         mailbox_cli_output.print_input_error(
             args,

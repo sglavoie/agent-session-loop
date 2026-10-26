@@ -425,6 +425,22 @@ class WorkbenchHardeningTests(support_static.WorkbenchHardeningCase):
         self.assertEqual([], served)
         self.assertEqual("non-loopback-host", json.loads(stdout.getvalue())["reason"])
 
+    def test_the_server_itself_refuses_a_non_loopback_host(self) -> None:
+        # Not only the CLI: any caller that builds a server gets the same rule,
+        # and it is refused before a socket is bound.
+        for host in ("0.0.0.0", "::", "192.168.1.5"):
+            with self.subTest(host=host):
+                with (
+                    mock.patch.object(
+                        workbench_server.WorkbenchHTTPServer, "server_bind"
+                    ) as bind,
+                    self.assertRaises(ValueError),
+                ):
+                    workbench_server.create_server(
+                        host=host, port=0, state_dir=self.state_dir
+                    )
+                bind.assert_not_called()
+
     def test_loopback_hosts_are_recognised(self) -> None:
         for host in ("127.0.0.1", "127.0.0.2", "::1", "[::1]", "localhost"):
             with self.subTest(host=host):

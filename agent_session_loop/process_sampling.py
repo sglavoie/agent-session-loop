@@ -11,6 +11,7 @@ import subprocess
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from collections.abc import Set as AbstractSet
+from datetime import datetime
 from typing import Any
 
 PS_COMMAND: tuple[str, ...] = ("ps", "-axo", "pid=,ppid=,state=,time=,lstart=,command=")
@@ -48,6 +49,54 @@ _CPU_TIME_RE = re.compile(
 _BIRTH_PATTERN = r"\S+\s+\S+\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s+\d{4}"
 _BIRTH_RE = re.compile(rf"^(?P<birth>{_BIRTH_PATTERN})\s+(?P<command>\S.*)$")
 _LSTART_RE = re.compile(rf"^{_BIRTH_PATTERN}$")
+
+# ``lstart`` is rendered in the caller's time zone and locale, so two readers
+# with different ``TZ`` or ``LC_*`` would print different births for the same
+# process and each would read the other's record as pid reuse. Every ``ps``
+# this package runs pins both, which makes a birth a host-wide identity.
+PS_ENV_OVERRIDES: Mapping[str, str] = {"TZ": "UTC0", "LC_ALL": "C"}
+_LSTART_FORMAT = "%a %b %d %H:%M:%S %Y"
+
+# Births recorded before :data:`PS_ENV_OVERRIDES` existed are wall-clock times
+# in whatever zone their writer had. Real UTC offsets are whole quarter hours
+# within this span, so a recorded birth that differs from the live one by such
+# an offset may still name the same process.
+_LEGACY_OFFSET_STEP_SECONDS = 15 * 60
+_LEGACY_OFFSET_MAX_SECONDS = 14 * 3600
+
+
+def ps_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return the environment every ``ps`` invocation runs with.
+
+    ``base`` defaults to :data:`os.environ`; only the time zone and locale are
+    overridden, so ``PATH`` and the rest still resolve ``ps`` as before.
+    """
+    env = dict(os.environ if base is None else base)
+    env.update(PS_ENV_OVERRIDES)
+    return env
+
+
+def birth_may_match(recorded: str, current: str) -> bool:
+    """Say whether a recorded birth could describe the live ``current`` one.
+
+    ``current`` comes from :func:`process_birth` and is UTC. ``recorded`` may
+    predate the pinned environment and be another zone's wall clock, or a
+    locale's month names; such a value cannot prove pid reuse, so only a birth
+    that is no time-zone shift of ``current`` counts as a mismatch. Callers
+    that *reclaim* on a mismatch use this; a caller that kills on a match must
+    keep comparing for equality.
+    """
+    if recorded == current:
+        return True
+    try:
+        recorded_at = datetime.strptime(recorded, _LSTART_FORMAT)
+        current_at = datetime.strptime(current, _LSTART_FORMAT)
+    except ValueError:
+        return True
+    delta = abs((recorded_at - current_at).total_seconds())
+    return (
+        delta <= _LEGACY_OFFSET_MAX_SECONDS and delta % _LEGACY_OFFSET_STEP_SECONDS == 0
+    )
 
 
 def _split_birth(column: str) -> tuple[str | None, str]:
@@ -125,6 +174,7 @@ def sample_process_tree(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=ps_environment(),
             timeout=timeout,
             check=False,
         )
@@ -170,7 +220,7 @@ def process_birth(
     run_command: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     timeout: float = SAMPLE_TIMEOUT_SECONDS,
 ) -> str | None:
-    """Return ``pid``'s start time as ``ps`` reports it, or ``None``.
+    """Return ``pid``'s start time as ``ps`` reports it in UTC, or ``None``.
 
     A start time is fixed for the life of a process, so a ``(pid, birth)`` pair
     is an identity a reused pid cannot forge. ``None`` means the identity could
@@ -187,6 +237,7 @@ def process_birth(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=ps_environment(),
             timeout=timeout,
             check=False,
         )
@@ -306,6 +357,7 @@ def sample_process_table(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=ps_environment(),
             timeout=timeout,
             check=False,
         )

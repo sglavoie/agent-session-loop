@@ -4,7 +4,10 @@ Split from tests/test_asl_compaction.py."""
 
 from __future__ import annotations
 
+import argparse
+import contextlib
 import hashlib
+import io
 import json
 import tempfile
 import unittest
@@ -18,6 +21,7 @@ from agent_session_loop import (
     plans_snapshot,
     run_persistence,
     state,
+    state_locks,
     state_status,
 )
 from tests.support import (
@@ -504,3 +508,47 @@ class StateCompactionTests(unittest.TestCase):
         self.assertEqual(0, report.files_scanned)
         self.assertEqual(0, report.files_rewritten)
         self.assertEqual(0, report.projected_bytes_reclaimed)
+
+    def test_apply_refuses_while_a_live_run_holds_the_lock(self) -> None:
+        state_path = self._write_state(
+            {"run_id": "r", "harness": "codex", "turns": [self._v1_turn()]}
+        )
+        before = state_path.read_bytes()
+        state_locks.acquire_lock(self.plan_dir, self.state_dir)
+        self.addCleanup(state_locks.release_lock, self.plan_dir, self.state_dir)
+
+        with self.assertRaisesRegex(state.StateError, "plan is locked by pid"):
+            compact_state.compact_plan_state(
+                self.plan_dir, state_dir=self.state_dir, apply=True
+            )
+        self.assertEqual(before, state_path.read_bytes())
+
+        # A dry run writes nothing, so a live plan can still be measured.
+        report = compact_state.compact_plan_state(
+            self.plan_dir, state_dir=self.state_dir, apply=False
+        )
+        self.assertEqual(1, report.files_rewritten)
+        self.assertEqual(before, state_path.read_bytes())
+
+    def test_cli_refuses_a_directory_that_is_not_a_plan(self) -> None:
+        not_a_plan = self.tmp_path / "not-a-plan"
+        not_a_plan.mkdir()
+        for as_json in (False, True):
+            with self.subTest(as_json=as_json):
+                args = argparse.Namespace(
+                    plan_dir=str(not_a_plan),
+                    state_dir=str(self.state_dir),
+                    apply=False,
+                    json=as_json,
+                )
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with (
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    code = compact_state.compact_state_from_args(args)
+                self.assertEqual(1, code)
+                text = stdout.getvalue() if as_json else stderr.getvalue()
+                self.assertIn("missing context.md", text)
+                if as_json:
+                    self.assertFalse(json.loads(text)["ok"])

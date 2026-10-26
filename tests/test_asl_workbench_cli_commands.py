@@ -161,6 +161,30 @@ class WorkbenchServeCliTests(unittest.TestCase):
         self.assertEqual("0.0.0.0", args.host)
         self.assertEqual(5678, args.port)
 
+    def test_serve_reports_an_out_of_range_port_as_bind_failed(self) -> None:
+        """``socket.bind`` raises OverflowError, not OSError, past 65535.
+
+        The parser refuses such a port; a direct caller still gets the JSON
+        envelope rather than a traceback.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                host="127.0.0.1",
+                port=99999,
+                state_dir=tmp,
+                plan_root=[],
+                open=False,
+                json=True,
+            )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                code = workbench_server.workbench_serve_from_args(
+                    args, serve_forever=lambda _server: None
+                )
+        self.assertEqual(1, code)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual("bind-failed", payload["reason"])
+
     def test_parser_registers_workbench_pin_subcommand(self) -> None:
         parser = cli.build_parser()
         args = parser.parse_args(
@@ -272,6 +296,47 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
                 rc = workbench_archive.workbench_pin_from_args(args)
             self.assertEqual(1, rc)
             self.assertIn("workbench pin", stderr.getvalue())
+
+    def test_pin_handler_refuses_a_plan_dir_that_does_not_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp).resolve() / "plans" / "missing"
+            with patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                    rc = workbench_archive.workbench_pin_from_args(
+                        argparse.Namespace(
+                            plan_dir=str(missing), cwd=None, label=None, json=True
+                        )
+                    )
+                self.assertEqual(1, rc)
+                refused = json.loads(stdout.getvalue())
+                self.assertFalse(refused["ok"])
+                self.assertIn("plan directory does not exist", refused["error"])
+                self.assertEqual((), workbench_registry.load_registry().pins)
+
+    def test_unpin_of_a_path_that_was_never_pinned_says_so(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))),
+        ):
+            plan_dir = str(Path(tmp) / "nothing")
+            stdout = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                rc = workbench_archive.workbench_unpin_from_args(
+                    argparse.Namespace(plan_dir=plan_dir)
+                )
+            self.assertEqual(0, rc)
+            self.assertIn("was not pinned", stdout.getvalue())
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                rc = workbench_archive.workbench_unpin_from_args(
+                    argparse.Namespace(plan_dir=plan_dir, json=True)
+                )
+            self.assertEqual(0, rc)
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertEqual("not-pinned", payload["reason"])
 
     def test_pin_and_unpin_report_json_when_asked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -385,7 +450,7 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
                 self.assertEqual(0, rc)
             payload = json.loads(stdout.getvalue())
             self.assertTrue(payload["ok"])
-            self.assertEqual("workbench", payload["command"])
+            self.assertEqual("workbench-registry", payload["command"])
             self.assertEqual("ok", payload["reason"])
             self.assertEqual(1, len(payload["registry"]["pins"]))
             self.assertEqual(str(plan_dir), payload["registry"]["pins"][0]["plan_dir"])

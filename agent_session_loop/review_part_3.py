@@ -81,8 +81,12 @@ def review_verdict_from_args(args: argparse.Namespace) -> int:
     malformed plan or any stable non-ok verdict (missing, malformed, or
     contradictory review), so shell automation can gate on the exit status.
     """
-    from . import responses
+    from . import cli_common, responses
 
+    if not cli_common.resolve_plan_dir_argument(
+        args, command_name=REVIEW_VERDICT_COMMAND, text_label="review-verdict"
+    ):
+        return 1
     plan_dir_arg = args.plan_dir
     want_json = bool(args.json)
     try:
@@ -92,7 +96,7 @@ def review_verdict_from_args(args: argparse.Namespace) -> int:
             responses.print_json(
                 responses.error_payload(
                     REVIEW_VERDICT_COMMAND,
-                    reason="malformed-plan",
+                    reason=plans_errors.plan_error_reason(error, "malformed-plan"),
                     error=str(error),
                     paused=False,
                     plan_dir=str(plan_dir_arg),

@@ -419,7 +419,9 @@ def _settle_paused_retained_work(ctx: RunContext, *, commit_mode: str | None) ->
         payload[commit_settlement.PAUSED_WORK_COMMIT_KEY] = record
         details[commit_settlement.PAUSED_WORK_COMMIT_KEY] = record
         ctx.persistence.write_state(payload)
-        durability.write_json_file(retained.result_path, retained.turn_payload)
+        durability.write_json_file(
+            retained.result_path, retained.turn_payload, durable=True
+        )
     # Outside the lock, like every other reporter call: the settlement is the
     # last thing the run does before it prints its verdict, and a slow terminal
     # must not hold the state lock open across it.

@@ -147,6 +147,30 @@ class TailFollowerEventsTests(TailFollowerTestCase):
         self.assertIn("grace expired", message)
         self.assertNotIn("remaining", message)
 
+    def test_a_naive_timestamp_is_read_as_utc_not_local_time(self) -> None:
+        # Every other reader takes a zone-less persisted timestamp as UTC; the
+        # tail must not shift the same record by the reader's local offset.
+        previous = os.environ.get("TZ")
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous
+            time.tzset()
+
+        self.addCleanup(restore)
+
+        expected = (
+            datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
+            .astimezone()
+            .strftime("%Y-%m-%d %H:%M:%S")
+        )
+        self.assertEqual("2024-01-01 22:04:05", expected)
+        self.assertEqual(expected, tail._format_local_datetime("2024-01-02T03:04:05"))
+
     def test_run_control_status_line_reports_unarmed_abort(self) -> None:
         # A main-thread checkpoint observes the abort with no turn to kill, so
         # nothing stamps a deadline before the action is recorded.

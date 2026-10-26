@@ -1,4 +1,33 @@
+import hashlib
+import json
+
 from .workbench_local_core import *
+
+
+def _catalog_revision(scan: workbench_catalog.CatalogScan) -> str:
+    """Stable identity for the plans one scan found, across paged reads.
+
+    The remote provider names its catalog by connector generation; the Mac has
+    no upload to name, so it digests what a selection depends on: which plans
+    exist, which run each is on, what state each is in, and whether the scan
+    was complete. Activity timestamps are left out on purpose: a running plan
+    moves every few seconds, and a revision that moved with it would discard
+    a cleanup selection on every poll for a change that selection never
+    covered (running plans are not archivable).
+    """
+    material = [
+        [
+            record.entry.plan_key,
+            record.entry.run_key,
+            record.entry.primary_state,
+            record.entry.completed_at,
+        ]
+        for record in scan.catalog.records
+    ]
+    encoded = json.dumps(
+        [scan.catalog.complete, material], separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:24]
 
 
 class _ReadOperations(_LocalProviderOperations):
@@ -98,6 +127,10 @@ class _ReadOperations(_LocalProviderOperations):
             discovery_warnings=list(scan.discovery.warnings),
             catalog_warnings=list(scan.projection_warnings),
             catalog_generation=scan.catalog.generation,
+            # The identity a multi-page read checks every page against, in the
+            # remote provider's shape: without it a cleanup selection could not
+            # tell page two of this catalog from page two of a later one.
+            catalog_revision=_catalog_revision(scan),
             catalog_complete=scan.catalog.complete,
             # The same fact in the shared vocabulary. A scan that did not cover
             # every root covered part of the catalog; the Mac is never in the
