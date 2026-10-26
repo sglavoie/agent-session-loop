@@ -179,6 +179,8 @@ class Application:
         if route is not None:
             return route
         allowed = routes.methods_for_path(request.path)
+        if allowed and self._conceals(request):
+            raise auth.HttpRefusal(404, "not-found", f"unknown route {request.path}")
         if allowed:
             raise auth.HttpRefusal(
                 405,
@@ -188,6 +190,31 @@ class Application:
                 headers={"Allow": ", ".join(allowed)},
             )
         raise auth.HttpRefusal(404, "not-found", f"unknown route {request.path}")
+
+    def _conceals(self, request: messages.Request) -> bool:
+        """Whether a wrong method on this path must answer as an unknown path.
+
+        Routing runs before authentication, so a 405 and its ``Allow`` header
+        would confirm an owner-only path to the very caller :meth:`_check_role`
+        answers 404 for. The path is concealed exactly when that caller could
+        reach none of its routes. A credential the authenticator refuses is
+        not concealed: that caller is told the path exists by the 401 a
+        correct method gets, so hiding it here would only add a contradiction.
+        """
+        if not self.policy.conceal_forbidden:
+            return False
+        for route in routes.ROUTES:
+            if route.path != request.path:
+                continue
+            try:
+                principal = self.authenticator.authenticate(request, route)
+            except auth.HttpRefusal:
+                return False
+            if principal.role != ROLE_PUBLIC or auth.role_satisfies(
+                principal.role, route.role
+            ):
+                return False
+        return True
 
     def _check_role(self, route: routes.Route, principal: auth.Principal) -> None:
         if auth.role_satisfies(principal.role, route.role):
