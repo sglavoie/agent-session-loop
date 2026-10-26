@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 import unittest
 
 from agent_session_loop import (
+    bridge_protocol,
     events,
     mailbox,
     qna,
@@ -342,6 +344,38 @@ class LiveContractDocsTests(unittest.TestCase):
             "affect only the next implementation invocation",
         ):
             self.assertIn(marker, skill)
+
+
+class SupervisionBridgeDocsTests(unittest.TestCase):
+    def test_every_frame_example_speaks_the_served_protocol(self) -> None:
+        """The request, snapshot, and error-table examples still said 1."""
+        docs = read_repo_text("docs/agent-session-loop/25-supervision-bridge.md")
+        normalized = " ".join(docs.split())
+        version = bridge_protocol.PROTOCOL_VERSION
+
+        stated = re.findall(r'"protocol":\s*(\d+)', docs)
+        self.assertTrue(stated)
+        self.assertEqual({str(version)}, set(stated))
+        self.assertIn(f"`protocol` is not {version}.", normalized)
+
+    def test_the_bridge_doc_states_the_round_four_guarantees(self) -> None:
+        normalized = " ".join(
+            read_repo_text("docs/agent-session-loop/25-supervision-bridge.md").split()
+        )
+
+        for marker in (
+            # workbench.ensure hands out an owner token, so it is gated.
+            "refused with the same `contract-set-mismatch` an unhandshaken "
+            "mutation gets until a handshake has matched the contract set",
+            # A reused operation id is a conflict, not a replay.
+            '`details.reason: "redirect-replay-conflict"`, the same refusal '
+            "`run.redirect` gives",
+            # The echoed id is bounded.
+            f"`id` is at most {bridge_protocol.MAX_REQUEST_ID_CHARS} characters",
+            # A closed stdout exits 0.
+            "points stdout at the null device before returning",
+        ):
+            self.assertIn(marker, normalized)
 
 
 if __name__ == "__main__":

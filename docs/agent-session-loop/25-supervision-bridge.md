@@ -85,17 +85,18 @@ handshake against a moved projection still opens it.
 
 ### Requests and responses
 
-A request is `{"type":"request","protocol":1,"id":"<non-empty>",
+A request is `{"type":"request","protocol":2,"id":"<non-empty>",
 "method":"<name>","params":{}}`. `params` must be an object when
-present. `id` is at most 64 characters: the response echoes it, so a
+present; a frame naming any other `protocol` is refused
+`unsupported-protocol`. `id` is at most 64 characters: the response echoes it, so a
 longer one is refused `invalid-request` with a `null` `id` before
 anything runs, rather than letting an oversize echo drop the answer to a
 mutation that landed. The response echoes `id` and carries `ok` plus
 exactly one of `result` or `error`:
 
 ```json
-{"type":"response","id":"req-1","ok":true,"result":{...}}
-{"type":"response","id":"req-1","ok":false,
+{"type":"response","protocol":2,"id":"req-1","ok":true,"result":{...}}
+{"type":"response","protocol":2,"id":"req-1","ok":false,
  "error":{"code":"unknown-method","message":"...",
           "retryable":false,"details":{"method":"runs.explode"}}}
 ```
@@ -106,7 +107,7 @@ Error codes are a closed set — branch on `code`, not on `message`:
 | --- | --- | --- |
 | `malformed-json` | Frame was not parseable JSON. `id` is `null`. | no |
 | `invalid-request` | Missing/empty/over-64-character `id`, missing `method`, non-object `params`, or a frame nested too deeply to decode (`id` is `null`). | no |
-| `unsupported-protocol` | `protocol` is not 1. `details.supported` lists accepted versions. | no |
+| `unsupported-protocol` | `protocol` is not 2. `details.supported` lists accepted versions. | no |
 | `unknown-method` | Method not in the capability list. | no |
 | `frame-too-large` | Inbound line exceeded `max_frame_bytes`. | no |
 | `internal-error` | Projection raised, or a handler failed unexpectedly. | yes |
@@ -132,14 +133,18 @@ with the CLI and the Workbench so a client sees one vocabulary:
 
 None of these end the server loop. An oversize frame has its remainder
 drained so the next line still parses. Only end-of-stream on stdin or a
-broken stdout ends the process, and both exit 0.
+broken stdout ends the process, and both exit 0. A broken stdout leaves
+the frame that hit it buffered, so the bridge points stdout at the null
+device before returning; otherwise the interpreter's exit-time flush
+would fail again and turn that 0 into 120.
 
 ### `runs.snapshot`
 
 Returns the deterministic projection of every active or actionable plan:
 
 ```json
-{"protocol":1,"rows":[...],"row_count":1,
+{"protocol":2,"contract_set_id":"asl-amx-1.<16 hex>",
+ "rows":[...],"row_count":1,
  "warnings":[],"truncated":false,"digest":"<hex>",
  "projection":{"interval_seconds":1.0,"observed_interval_seconds":9.8,
    "build_seconds":9.8,"age_seconds":0.4,
@@ -214,7 +219,8 @@ The server polls the projection at least once per second and emits an
 event only when the snapshot digest actually changed:
 
 ```json
-{"type":"event","seq":1,"event":"runs.changed","data":{"digest":"<hex>"}}
+{"type":"event","protocol":2,"seq":1,"event":"runs.changed",
+ "data":{"digest":"<hex>","row_count":1}}
 ```
 
 `seq` is monotonic across the session. An idle corpus produces no
