@@ -89,7 +89,7 @@ def _read_index_file(path: Path) -> LedgerIndex | None:
         return None
     try:
         payload = json.loads(raw.decode("utf-8"))
-    except ValueError, UnicodeDecodeError:
+    except ValueError, UnicodeDecodeError, RecursionError:
         return None
     return _parse_index_payload(payload, path=path)
 

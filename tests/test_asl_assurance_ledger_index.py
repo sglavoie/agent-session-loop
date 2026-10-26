@@ -33,6 +33,12 @@ class IndexTests(LedgerTestCase):
         self.assertEqual(1, index.record_count)
         self.assertTrue(index.matches(self.ledger_path.read_bytes()))
 
+    def test_an_over_deep_cache_is_rebuilt(self) -> None:
+        ledger.append_issue_observation(_observation(), state_dir=self.state_dir)
+        self.index_path.write_text("[" * 1_000_000 + "]" * 1_000_000, encoding="utf-8")
+        index = ledger.read_index(state_dir=self.state_dir)
+        self.assertEqual(1, index.record_count)
+
     def test_a_cache_from_another_version_is_rebuilt(self) -> None:
         ledger.append_issue_observation(_observation(), state_dir=self.state_dir)
         payload = json.loads(self.index_path.read_text(encoding="utf-8"))
