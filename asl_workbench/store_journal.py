@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from .operations import (
@@ -42,25 +42,71 @@ class OperationJournal(StoreBase):
         that resends the form all converge on one row rather than on three
         mutations of one run.
         """
-        projected = persist_operation(record)
         with self.transaction() as connection:
-            existing = self._operation_row(str(projected["operation_id"]))
-            if existing is not None:
-                return _operation_record(existing)
-            values = {column: projected.get(column) for column in _OPERATION_COLUMNS}
-            values["connector_id"] = connector_id
-            values["received_at"] = received_at
-            values["updated_at"] = received_at
-            connection.execute(
-                "INSERT INTO operation ({columns}) VALUES ({marks})".format(
-                    columns=", ".join(_OPERATION_COLUMNS),
-                    marks=", ".join("?" * len(_OPERATION_COLUMNS)),
-                ),
-                [values[column] for column in _OPERATION_COLUMNS],
+            return self._insert_operation(
+                connection, record, connector_id=connector_id, received_at=received_at
             )
-            return _operation_record(
-                self._operation_row(str(projected["operation_id"]))
+
+    def admit_operation(
+        self,
+        operation_id: str,
+        plan_key: str,
+        decide: Callable[[list[dict[str, Any]]], Mapping[str, Any] | None],
+        *,
+        connector_id: str,
+        received_at: float,
+    ) -> dict[str, Any] | None:
+        """Look up, decide, and journal one submission in one transaction.
+
+        ``decide`` receives the row this operation id already names and the
+        plan's outstanding operation (each only when present) and returns the
+        record to write, or ``None`` to write nothing; it refuses by raising,
+        which rolls the transaction back. Reading and writing under one
+        ``BEGIN IMMEDIATE`` is what keeps "one outstanding mutation per plan"
+        true when two submissions arrive together: the second reads the
+        first's row rather than a snapshot taken before it was written.
+        """
+        with self.transaction() as connection:
+            recorded = [
+                record
+                for record in (
+                    self.operation(operation_id),
+                    self.outstanding_operation(plan_key),
+                )
+                if record is not None
+            ]
+            decided = decide(recorded)
+            if decided is None:
+                return None
+            return self._insert_operation(
+                connection, decided, connector_id=connector_id, received_at=received_at
             )
+
+    def _insert_operation(
+        self,
+        connection: sqlite3.Connection,
+        record: Mapping[str, Any],
+        *,
+        connector_id: str,
+        received_at: float,
+    ) -> dict[str, Any]:
+        """Insert one row inside the caller's transaction, or return the existing."""
+        projected = persist_operation(record)
+        existing = self._operation_row(str(projected["operation_id"]))
+        if existing is not None:
+            return _operation_record(existing)
+        values = {column: projected.get(column) for column in _OPERATION_COLUMNS}
+        values["connector_id"] = connector_id
+        values["received_at"] = received_at
+        values["updated_at"] = received_at
+        connection.execute(
+            "INSERT INTO operation ({columns}) VALUES ({marks})".format(
+                columns=", ".join(_OPERATION_COLUMNS),
+                marks=", ".join("?" * len(_OPERATION_COLUMNS)),
+            ),
+            [values[column] for column in _OPERATION_COLUMNS],
+        )
+        return _operation_record(self._operation_row(str(projected["operation_id"])))
 
     def advance_operation(
         self,

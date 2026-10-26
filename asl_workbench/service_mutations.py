@@ -55,39 +55,41 @@ class ServiceMutations(ServiceState):
             target = OperationTarget(
                 plan_key=request.plan_key, selector=_selector(request, method)
             )
-            recorded = [
-                _rehydrate(record)
-                for record in (
-                    self._store.operation(request.operation_id),
-                    self._store.outstanding_operation(request.plan_key),
+            decided: list[Any] = []
+
+            def decide(rows: list[dict[str, Any]]) -> Mapping[str, Any] | None:
+                admission = admit(
+                    [_rehydrate(row) for row in rows],
+                    operation_id=request.operation_id,
+                    method=method,
+                    target=target,
+                    now=now,
+                    deliver_by=request.deliver_by,
+                    command_id=request.command_id,
+                    run_key=request.run_key or request.plan_key,
+                    question_id=request.question_id,
                 )
-                if record is not None
-            ]
-            admission = admit(
-                recorded,
-                operation_id=request.operation_id,
-                method=method,
-                target=target,
-                now=now,
-                deliver_by=request.deliver_by,
-                command_id=request.command_id,
-                run_key=request.run_key or request.plan_key,
-                question_id=request.question_id,
-            )
-            if admission.refused:
-                raise admission.error()
-            if admission.replayed:
-                # The first submission's own row, handed back untouched. Handing it
-                # down again would be a second delivery of one command.
-                record = admission.record or {}
-                if staged and self._bodies is not None:
-                    self._bodies.discard_body(request.operation_id)
-                return _accepted(record, replay=True)
-            record = self._store.record_operation(
-                admission.record or {},
+                if admission.refused:
+                    raise admission.error()
+                decided.append(admission)
+                return None if admission.replayed else (admission.record or {})
+
+            # The lookups, the decision, and the write share one store
+            # transaction: two tabs submitting at once must not both read "no
+            # outstanding operation" and both journal a pending row.
+            record = self._store.admit_operation(
+                request.operation_id,
+                request.plan_key,
+                decide,
                 connector_id=self._connector_id,
                 received_at=now,
             )
+            if record is None:
+                # The first submission's own row, handed back untouched. Handing it
+                # down again would be a second delivery of one command.
+                if staged and self._bodies is not None:
+                    self._bodies.discard_body(request.operation_id)
+                return _accepted(decided[0].record or {}, replay=True)
             lane.hand_down(_submission(request, method), now=now)
             return _accepted(record, replay=False)
         except Exception:
