@@ -156,7 +156,8 @@ def _diagnose_contract_check(
                 CONTRACT_CHECK_ISSUE_FILE_MISSING,
                 f"file does not exist: {check.path}",
             )
-        except OSError as error:
+        except (OSError, ValueError) as error:
+            # ValueError covers UnicodeDecodeError, as the runtime check does.
             return (
                 CONTRACT_CHECK_ROW_FACTUAL_ISSUE,
                 CONTRACT_CHECK_ISSUE_FILE_MISSING,

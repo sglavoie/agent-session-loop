@@ -319,6 +319,26 @@ class ContractCheckCliTests(unittest.TestCase):
             row = payload["checks"][0]
             self.assertEqual("regex-not-matched", row["reason"])
 
+    def test_non_utf8_regex_target_is_factual_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            (repo_root / "target.txt").write_bytes(b"WANTED \xff\xfe\n")
+            contract = _contract_block(
+                '{"type": "regex_in_file", "path": "target.txt", '
+                '"pattern": "WANTED", "name": "r"}'
+            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+
+            code, payload = self._run(plan_dir, repo_root)
+
+            self.assertEqual(1, code)
+            row = payload["checks"][0]
+            self.assertEqual("factual-issue", row["status"])
+            self.assertIn("cannot read target.txt", row["detail"])
+
     def test_command_not_runnable_is_factual_issue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
