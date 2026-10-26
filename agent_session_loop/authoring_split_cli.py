@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    cli_common,
     harnesses,
     repository_intent,
     responses,
@@ -123,7 +124,17 @@ def check_from_args(args: Any) -> int:
     if args.inline_stdin:
         source_path = "<stdin>"
         try:
-            text = extract_inline_plan(sys.stdin.read())
+            # Strict, like --plan-file: a surrogateescaped plan would be linted
+            # as text no file could hold.
+            raw = cli_common.read_stdin_text()
+        except (OSError, TypeError, UnicodeError, ValueError) as error:
+            return _emit_split_error(
+                SPLIT_REASON_INPUT_ERROR,
+                f"cannot read source plan from stdin: {error}",
+                want_json=want_json,
+            )
+        try:
+            text = extract_inline_plan(raw)
         except ValueError as error:
             return _emit_split_error(
                 SPLIT_REASON_INPUT_ERROR, str(error), want_json=want_json
@@ -277,7 +288,14 @@ def split_from_args(args: Any) -> int:
 
     # Resolve the source plan (inline stdin capture or an explicit file).
     if args.inline_stdin:
-        raw_input = sys.stdin.read()
+        try:
+            # Strict, like --plan-file: the capture persists what it is given.
+            raw_input = cli_common.read_stdin_text()
+        except (OSError, TypeError, UnicodeError, ValueError) as error:
+            return _emit_error(
+                SPLIT_REASON_INPUT_ERROR,
+                f"cannot read source plan from stdin: {error}",
+            )
         try:
             captured = capture_inline_plan(raw_input, base_dir)
         except ValueError as error:

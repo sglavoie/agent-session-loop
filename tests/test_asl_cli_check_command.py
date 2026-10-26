@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
-from agent_session_loop import cli, plans_content_hash
+from agent_session_loop import authoring_split_cli, cli, plans_content_hash
 from tests.support_asl_cli_split import SplitCliHelpers
 
 
@@ -192,6 +195,31 @@ class SplitCheckCommandTests(SplitCliHelpers, unittest.TestCase):
             self.assertEqual("<stdin>", payload["source_path"])
             self.assertEqual(3, len(payload["findings"]))
             self.assertFalse(base.exists())
+
+    def test_non_utf8_inline_stdin_is_an_input_error_like_a_file(self) -> None:
+        for check in (True, False):
+            with self.subTest(check=check), tempfile.TemporaryDirectory() as tmp:
+                base = Path(tmp) / "base"
+                stdin = io.TextIOWrapper(
+                    io.BytesIO(self._TWO_SESSION_PLAN.encode() + b"\xff\n"), "utf-8"
+                )
+                stdout = io.StringIO()
+                contracts = Path(tmp) / "contracts.json"
+                self._write_contracts(contracts, ("1", "2"))
+                args = self._split_args(
+                    inline_stdin=True,
+                    check=check,
+                    base_dir=str(base),
+                    contracts_file=None if check else str(contracts),
+                )
+                with redirect_stdout(stdout), mock.patch("sys.stdin", stdin):
+                    code = authoring_split_cli.split_from_args(args)
+
+                self.assertEqual(1, code)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual("input-error", payload["reason"])
+                self.assertIn("cannot read source plan from stdin", payload["error"])
+                self.assertFalse(base.exists())
 
     def test_check_text_mode_prints_findings_and_suggestions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
