@@ -429,6 +429,15 @@ class VolatileBodyTests(UplinkCase):
                 now=NOW + 2,
             )
         self.assertEqual("invalid-action-token", raised.exception.reason)
+        with self.assertRaises(UplinkRefusal) as raised:
+            self.uplink.redeem_body(
+                "reply-1",
+                reply_ref,
+                "jeton-é",
+                connector_id=CONNECTOR,
+                now=NOW + 2,
+            )
+        self.assertEqual("invalid-action-token", raised.exception.reason)
 
     def test_a_settled_command_forgets_its_reply(self) -> None:
         reply_ref, action_token = self._dispatch("reply-2", "Continue.")

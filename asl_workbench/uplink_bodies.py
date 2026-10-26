@@ -74,8 +74,11 @@ class UplinkBodiesMixin(UplinkState):
                 raise UplinkRefusal(
                     409, "not-dispatched", "the command body is no longer available"
                 )
+            # Bytes, as in http_auth: a non-ASCII ``str`` makes compare_digest
+            # raise rather than answer, which would surface as a 500.
             if held.reply_ref != reply_ref or not hmac.compare_digest(
-                held.action_token, action_token
+                held.action_token.encode("utf-8", "surrogatepass"),
+                action_token.encode("utf-8", "surrogatepass"),
             ):
                 raise UplinkRefusal(
                     403, "invalid-action-token", "the command capability does not match"
