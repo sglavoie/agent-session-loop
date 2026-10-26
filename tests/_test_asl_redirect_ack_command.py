@@ -258,12 +258,28 @@ class AcknowledgeCommandTests(RedirectAckTestCase):
         self.assertFalse(self.read().request(self.request.operation_id).acknowledged)
 
     def test_a_live_attempt_carrying_nothing_reports_an_empty_receipt(self) -> None:
-        code, payload = self.run_command(live=target(3, harness="codex"))
+        live = target(3, harness="codex")
+        code, payload = self.run_command(
+            live=live, attempt=redirect_ack_attempt.attempt_token(live)
+        )
 
         self.assertEqual(0, code)
         self.assertEqual([], payload["requested"])
         self.assertEqual([], payload["acknowledged"])
         self.assertEqual([], payload["refused"])
+
+    def test_a_mismatched_token_refuses_even_when_nothing_is_carried(self) -> None:
+        # An empty receipt would tell a stale worker its token was accepted.
+        live = target(3, harness="codex")
+        code, payload = self.run_command(live=live, attempt="bogus")
+
+        self.assertEqual(1, code)
+        self.assertEqual(redirect_ack_attempt.ERROR_ATTEMPT_MISMATCH, payload["reason"])
+        self.assertEqual("bogus", payload["details"]["attempt"])
+        self.assertEqual(
+            redirect_ack_attempt.attempt_token(live),
+            payload["details"]["live_attempt"],
+        )
 
     def test_an_unknown_id_does_not_suppress_the_receipt_beside_it(self) -> None:
         code, payload = self.run_command(
