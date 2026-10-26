@@ -419,6 +419,58 @@ class SplitCommandTests(SplitCliHelpers, unittest.TestCase):
             self.assertIn("01, 3", payload["error"])
             self.assertFalse(base.exists())
 
+    def test_split_reports_non_utf8_inputs_as_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text(self._TWO_SESSION_PLAN, encoding="utf-8")
+            bad_plan = tmp_dir / "BAD.md"
+            bad_plan.write_bytes(b"# P\n\n## Session 1: a\n\n\xff\n")
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1", "2"))
+            bad_contracts = tmp_dir / "bad.json"
+            bad_contracts.write_bytes(b'{"1": "\xff"}')
+            bad_analysis = tmp_dir / "analysis.md"
+            bad_analysis.write_bytes(b"\xfe\xff")
+            cases = (
+                ("check", {"plan_file": str(bad_plan), "check": True}),
+                (
+                    "split source",
+                    {"plan_file": str(bad_plan), "contracts_file": str(contracts_file)},
+                ),
+                (
+                    "split source with cwd",
+                    {
+                        "plan_file": str(bad_plan),
+                        "contracts_file": str(contracts_file),
+                        "cwd": str(tmp_dir),
+                    },
+                ),
+                (
+                    "contracts",
+                    {"plan_file": str(plan), "contracts_file": str(bad_contracts)},
+                ),
+                (
+                    "analysis",
+                    {
+                        "plan_file": str(plan),
+                        "contracts_file": str(contracts_file),
+                        "analysis_file": str(bad_analysis),
+                    },
+                ),
+            )
+            for label, overrides in cases:
+                with self.subTest(label):
+                    code, out, _ = self._run_split(
+                        self._split_args(base_dir=str(tmp_dir / "out"), **overrides)
+                    )
+
+                    self.assertEqual(1, code)
+                    payload = json.loads(out)
+                    self.assertEqual("input-error", payload["reason"])
+                    self.assertIn("can't decode byte", payload["error"])
+            self.assertFalse((tmp_dir / "out").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

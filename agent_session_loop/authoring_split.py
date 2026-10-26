@@ -24,6 +24,7 @@ from .authoring_render import (
 )
 from .authoring_transaction import PlanTransaction, refresh_readiness_metadata
 from .plans_errors import PlanError
+from .plans_files import read_input_text
 from .plans_models import ReadinessMetadata
 from .workspaces import (
     RepositoryRegistry,
@@ -146,12 +147,7 @@ def split_plan(
     canonical_source = os.path.realpath(
         os.path.abspath(os.path.expanduser(os.fspath(plan_file)))
     )
-    try:
-        text = Path(canonical_source).read_text(encoding="utf-8-sig")
-    except OSError as error:
-        raise PlanError(
-            f"cannot read source plan {canonical_source}: {error}"
-        ) from error
+    text = read_input_text(canonical_source, label="source plan")
 
     parsed = parse_plan_document(text)
     if len(parsed.sessions) < 2:

@@ -165,6 +165,20 @@ class ExpandIngestCliTests(unittest.TestCase):
             body = json.loads(stdout)
             self.assertEqual("input-error", body["reason"])
 
+    def test_non_utf8_batch_file_is_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_prepare_plan(plan_dir, ("1",))
+            batch = Path(tmp) / "batch.json"
+            batch.write_bytes(b'{"version": "\xff"}')
+            code, stdout, _stderr = self._run_cli(
+                str(plan_dir), "--batch-file", str(batch), "--json"
+            )
+            self.assertEqual(1, code)
+            body = json.loads(stdout)
+            self.assertEqual("input-error", body["reason"])
+            self.assertIn("can't decode byte", body["error"])
+
     def test_late_render_failure_leaves_no_partial_mutation(self) -> None:
         """A valid-schema batch that fails during expansion rendering (a session
         with no ``> **Before starting**:`` anchor) commits nothing: the

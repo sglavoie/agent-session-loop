@@ -9,7 +9,7 @@ from typing import Any
 
 from . import responses
 from .cli_defaults import program_name
-from .plans_errors import PlanError
+from .plans_errors import InputReadError, PlanError
 from .prepare import prepare_plan
 from .prepare_models import (
     DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
@@ -265,6 +265,8 @@ def prepare_from_args(args: Any) -> int:
                 error=str(error),
             ),
         )
+    except InputReadError as error:
+        return _emit_input_error(PREPARE_EXIT_REASON_INPUT_ERROR, str(error))
     except PlanError as error:
         return _emit_input_error(
             (

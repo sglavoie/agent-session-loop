@@ -102,6 +102,19 @@ class PrepareCliTests(unittest.TestCase):
         self.assertEqual("input-error", payload["reason"])
         self.assertIn("must differ", payload["error"])
 
+    def test_non_utf8_source_plan_is_input_error(self) -> None:
+        source = self.tmp_path / "bad-plan.md"
+        source.write_bytes(b"# P\n\n## Session 1: a\n\n\xff\n")
+
+        code, stdout, _stderr = self._run_cli(
+            str(source), "--cwd", str(self.repo), "--json"
+        )
+
+        self.assertEqual(1, code)
+        payload = json.loads(stdout)
+        self.assertEqual("input-error", payload["reason"])
+        self.assertIn("can't decode byte", payload["error"])
+
     def test_rebind_workspace_requires_resume(self) -> None:
         source = self._write_source()
         code, stdout, _stderr = self._run_cli(

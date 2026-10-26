@@ -195,7 +195,7 @@ def normalize_generated_review_handoff_artifacts(
     for session in discover_session_files(canonical_dir):
         try:
             text = session.path.read_text(encoding="utf-8")
-        except OSError as error:
+        except (OSError, UnicodeDecodeError) as error:
             _raise_read_error(session.path, error)
         projection = _project_generated_review_handoff_artifacts(text)
         if not projection.exclusive or projection.text == text:
@@ -233,7 +233,7 @@ def read_session_handoff(
     recover_pending_plan_transaction(session.path.parent)
     try:
         text = session.path.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         _raise_read_error(session.path, error)
     lines = _project_generated_review_handoff_artifacts(text).text.splitlines()
 
