@@ -285,6 +285,15 @@ class PlanLintTests(PlanAuthoringBase):
             authoring_render.normalize_heading_levels(body, 3),
         )
 
+    def test_normalize_heading_levels_keeps_long_fence_open_past_short_run(
+        self,
+    ) -> None:
+        body = ["````", "```", "#### fenced", "```", "````", "#### Real"]
+        self.assertEqual(
+            ["````", "```", "#### fenced", "```", "````", "## Real"],
+            authoring_render.normalize_heading_levels(body, 3),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

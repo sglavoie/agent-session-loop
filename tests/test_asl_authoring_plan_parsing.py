@@ -49,6 +49,27 @@ class PlanParsingTests(PlanAuthoringBase):
                 self.assertIn("###### Session 009 — fake", parsed.sessions[0].lines)
                 self.assertIn("### Session nope / malformed", parsed.sessions[0].lines)
 
+    def test_parse_plan_document_closes_fence_only_on_matching_run(self) -> None:
+        text = (
+            "# Plan\n\n## Session 1: Teach\n\n"
+            "````markdown\n"
+            "```text\n"
+            "## Session 9: Example inside an example\n"
+            "```\n"
+            "## Session 8: Still quoted\n"
+            "~~~~\n"
+            "```python\n"
+            "````\n\n"
+            "## Session 2: Real work\n\nDo it.\n"
+        )
+        parsed = authoring_parse.parse_plan_document(text)
+
+        self.assertEqual(("1", "2"), parsed.session_ids)
+        self.assertIn(
+            "## Session 9: Example inside an example", parsed.sessions[0].lines
+        )
+        self.assertIn("## Session 8: Still quoted", parsed.sessions[0].lines)
+
     def test_parse_plan_document_rejects_duplicate_ids(self) -> None:
         text = "## Session 1: A\n\nx\n\n## Session 01: B\n\ny\n"
         with self.assertRaises(plans_errors.PlanError) as raised:

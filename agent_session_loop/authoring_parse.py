@@ -42,8 +42,8 @@ from .authoring_source_models import (
     SourceHeadingError,
     SourceRegistryError,
     SourceScopeError,
-    _fence_delimiter,
 )
+from .contract_models import fenced_line_flags
 from .plans_session_ids import SessionId
 from .workspaces import (
     Repository,
@@ -222,21 +222,13 @@ def _iter_structural_lines(
     parser and the accumulating linter can never disagree about which lines are
     structure and which are content.
     """
-    fence: str | None = None
+    fenced = fenced_line_flags(lines)
     for index, line in enumerate(lines):
-        delimiter = _fence_delimiter(line)
-        if delimiter is not None:
-            if fence is None:
-                fence = delimiter
-            elif fence == delimiter:
-                fence = None
-            # A different fence family inside an open fence is content; ignore.
-
         is_candidate = (
-            fence is None and _SESSION_HEADING_CANDIDATE_RE.match(line) is not None
+            not fenced[index] and _SESSION_HEADING_CANDIDATE_RE.match(line) is not None
         )
         is_repositories = (
-            fence is None
+            not fenced[index]
             and _REPOSITORIES_HEADING_CANDIDATE_RE.fullmatch(line) is not None
         )
         yield index + 1, line, is_candidate, is_repositories

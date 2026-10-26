@@ -13,7 +13,8 @@ from . import (
     plans_session_scope,
     repository_scope_targets,
 )
-from .authoring_source_models import _fence_delimiter, _trim_body
+from .authoring_source_models import _trim_body
+from .contract_models import fenced_line_flags
 from .plans_errors import PlanError
 from .plans_session_ids import SessionId, parse_session_id
 from .workspaces import (
@@ -111,17 +112,9 @@ def normalize_heading_levels(lines: list[str], heading_level: int) -> list[str]:
 
     shift = 1 - heading_level  # e.g. level 3 -> -2
     out: list[str] = []
-    fence: str | None = None
-    for line in lines:
-        delimiter = _fence_delimiter(line)
-        if delimiter is not None:
-            if fence is None:
-                fence = delimiter
-            elif fence == delimiter:
-                fence = None
-            out.append(line)
-            continue
-        if fence is None:
+    fenced = fenced_line_flags(lines)
+    for index, line in enumerate(lines):
+        if not fenced[index]:
             level = _heading_level(line)
             if level > 0:
                 new_level = max(1, level + shift)

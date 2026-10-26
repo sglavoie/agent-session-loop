@@ -40,8 +40,6 @@ _SESSION_HEADING_PREFIX_RE = re.compile(
 _SOURCE_SESSION_ID_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
 _ATX_CLOSING_MARKER_RE = re.compile(r"[ \t]+#+[ \t]*$")
 _TITLE_SEPARATORS = frozenset((":", "-", "–", "—"))
-#: Matches an opening/closing fenced-code delimiter (``` or ~~~, 3+ chars).
-_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 
 #: Stable machine-readable categories for malformed source-heading diagnostics.
 #: They are the repair vocabulary shared by ``asl split --check`` and the
@@ -192,13 +190,6 @@ class PlanLintResult:
     session_ids: tuple[str, ...]
     registry: RepositoryRegistry | None = None
     repository_footprint: dict[str, Any] | None = None
-
-
-def _fence_delimiter(line: str) -> str | None:
-    match = _FENCE_RE.match(line)
-    if match is None:
-        return None
-    return match.group(1)[0] * 3  # normalize to the 3-char family marker
 
 
 # ---------------------------------------------------------------------------

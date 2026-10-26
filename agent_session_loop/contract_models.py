@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -18,6 +19,40 @@ VERIFY_HEADING = "### Verify"
 
 
 _FENCE_RE = re.compile(r"^\s*(?P<run>`{3,}|~{3,})(?P<rest>.*)$")
+
+
+def fenced_line_flags(lines: Sequence[str]) -> list[bool]:
+    """Return, per line, whether it belongs to a fenced code block.
+
+    A fence opens on a run of at least three backticks or tildes and closes only
+    on a run of the same character, at least as long as the opener, followed by
+    nothing but whitespace. A shorter run, a different character, or an info
+    string is content, so a nested example never closes the block quoting it.
+    """
+    flags = [False] * len(lines)
+    fence_char: str | None = None
+    fence_length = 0
+    for index, line in enumerate(lines):
+        match = _FENCE_RE.match(line)
+        if fence_char is None:
+            if match is not None:
+                run = match.group("run")
+                fence_char = run[0]
+                fence_length = len(run)
+                flags[index] = True
+            continue
+        flags[index] = True
+        if match is None:
+            continue
+        run = match.group("run")
+        if (
+            run[0] == fence_char
+            and len(run) >= fence_length
+            and match.group("rest").strip() == ""
+        ):
+            fence_char = None
+            fence_length = 0
+    return flags
 
 
 CommandKind = Literal["command"]
