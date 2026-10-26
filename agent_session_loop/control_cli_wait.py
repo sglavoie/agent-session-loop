@@ -86,16 +86,18 @@ def _read_wait_records(events_path: Path) -> list[dict[str, Any]]:
     those records belong to has actually released the lock.
     """
     try:
-        text = events_path.read_text(encoding="utf-8")
+        # Bytes, decoded line by line below: a stray non-UTF-8 byte then
+        # spoils only its own line, the way a torn line does, not the file.
+        data = events_path.read_bytes()
     except OSError:
         return []
     records: list[dict[str, Any]] = []
-    for line in text.splitlines():
+    for line in data.splitlines():
         if not line.strip():
             continue
         try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
+            record = json.loads(line.decode("utf-8"))
+        except ValueError:
             # A line being appended right now is read whole on the next poll.
             continue
         if isinstance(record, dict) and record.get("name") in _WAIT_RECORD_NAMES:
@@ -171,7 +173,8 @@ def _active_finalization(
     state_path = state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
     try:
         raw = json.loads(state_path.read_text(encoding="utf-8"))
-    except OSError, json.JSONDecodeError:
+    except OSError, ValueError:
+        # ValueError covers both a torn document and bytes that are not UTF-8.
         return None
     if not isinstance(raw, dict):
         return None

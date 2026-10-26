@@ -235,17 +235,19 @@ def _parse_timestamp(value: Any) -> datetime | None:
 
 def _read_event_records(events_path: Path) -> list[dict[str, Any]]:
     try:
-        text = events_path.read_text(encoding="utf-8")
+        # Bytes, decoded line by line below: a stray non-UTF-8 byte then
+        # spoils only its own line, the way a torn line does, not the file.
+        data = events_path.read_bytes()
     except OSError:
         return []
     records: list[dict[str, Any]] = []
-    for line in text.splitlines():
+    for line in data.splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
+            record = json.loads(line.decode("utf-8"))
+        except ValueError:
             continue
         if isinstance(record, dict):
             records.append(record)
@@ -255,7 +257,8 @@ def _read_event_records(events_path: Path) -> list[dict[str, Any]]:
 def _read_result_payload(result_path: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads(result_path.read_text(encoding="utf-8"))
-    except OSError, json.JSONDecodeError:
+    except OSError, ValueError:
+        # ValueError covers both a torn document and bytes that are not UTF-8.
         return None
     return payload if isinstance(payload, dict) else None
 

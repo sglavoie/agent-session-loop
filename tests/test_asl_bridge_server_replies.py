@@ -12,10 +12,13 @@ from typing import Any
 
 from agent_session_loop import (
     bridge_protocol,
+    control_queue,
+    events,
     intervention,
     mailbox_appenders,
     mailbox_cursors,
     mailbox_vocabulary,
+    state,
     workbench_launch,
 )
 
@@ -443,6 +446,47 @@ class BridgeStaleRequestTests(unittest.TestCase):
             self.assertEqual(
                 frozenset(),
                 intervention.pending_command_ids(plan_dir, state_dir=corpus.state_root),
+            )
+
+
+class UndecodableControlRecordTests(unittest.TestCase):
+    # Bytes that are not UTF-8 used to escape as UnicodeDecodeError instead of
+    # spoiling only their own line, as a torn line already did.
+
+    def test_a_non_utf8_queue_line_hides_only_itself(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            queue_path = control_queue.queue_path_for_plan(plan_dir, state_dir)
+            queue_path.parent.mkdir(parents=True, exist_ok=True)
+            queue_path.write_bytes(b'{"id": "\xff"}\n{"id": "kept"}\n')
+
+            self.assertEqual(
+                frozenset({"kept"}),
+                intervention.pending_command_ids(plan_dir, state_dir=state_dir),
+            )
+
+    def test_a_non_utf8_event_line_does_not_hide_a_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            events_path = (
+                state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME
+            )
+            events_path.parent.mkdir(parents=True, exist_ok=True)
+            receipt = json.dumps(
+                {
+                    "name": events.RUN_CONTROL_EVENT,
+                    "payload": {
+                        "action": events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                        "command_id": "op-1",
+                    },
+                }
+            )
+            events_path.write_bytes(b'{"name": "\xff"}\n' + receipt.encode() + b"\n")
+
+            self.assertTrue(
+                intervention.command_observed(plan_dir, "op-1", state_dir=state_dir)
             )
 
 

@@ -326,7 +326,8 @@ def _selected_group_attempt_cap_from_history(
     state_path = Path(event_path).with_name(events.STATE_FILE_NAME)
     try:
         raw = json.loads(state_path.read_text(encoding="utf-8"))
-    except FileNotFoundError, OSError, json.JSONDecodeError:
+    except OSError, ValueError:
+        # ValueError covers both a torn document and bytes that are not UTF-8.
         return None
     if not isinstance(raw, dict):
         return None

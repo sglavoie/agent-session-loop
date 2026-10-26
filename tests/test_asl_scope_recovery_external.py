@@ -144,3 +144,12 @@ class ExternalRecoveryTests(ExternalRecoveryTestCase):
         self.assertEqual(
             "independent dirt\n", (self.repos["pi"] / "independent.txt").read_text()
         )
+
+    def test_an_unreadable_run_state_is_refused_rather_than_crashing(self):
+        # Bytes that are not UTF-8 used to escape as UnicodeDecodeError.
+        state_path = self.event_path.parent / events.STATE_FILE_NAME
+        for raw in (b'{"run_config": "\xff\xfe"}', b"{not json", b"[]"):
+            state_path.write_bytes(raw)
+            code, preview = self.invoke()
+            self.assertEqual(1, code, preview)
+            self.assertIn("recorded run state is unreadable", json.dumps(preview))
