@@ -42,6 +42,9 @@ _ARTIFACT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 ISSUE_ID_PREFIX = "ASI-"
 
+#: Longest decimal an issue id may carry.
+MAX_ISSUE_ID_DIGITS = 18
+
 #: An identity key is the durable, machine-facing name of one canonical issue.
 #: It is minted from an ID the ledger allocated, so the key space is ASL's and
 #: cannot be entered by describing a defect differently.
@@ -227,8 +230,8 @@ def parse_issue_id(value: object) -> str:
     if isinstance(value, int):
         if value < 1:
             raise AssuranceError(f"issue id must be a positive integer; got {value}")
-        return f"{ISSUE_ID_PREFIX}{value}"
-    if not isinstance(value, str):
+        value = str(value)
+    elif not isinstance(value, str):
         raise AssuranceError(
             f"issue id must be {ISSUE_ID_PREFIX}N or a positive integer; got {value!r}"
         )
@@ -238,7 +241,15 @@ def parse_issue_id(value: object) -> str:
             f"issue id must be {ISSUE_ID_PREFIX}N or a positive decimal without "
             f"leading zeros; got {value!r}"
         )
-    return f"{ISSUE_ID_PREFIX}{match.group(1)}"
+    digits = match.group(1)
+    if len(digits) > MAX_ISSUE_ID_DIGITS:
+        # Far past any number the ledger allocates, and short of the length at
+        # which ``int()`` refuses the string, so ``issue_id_number`` cannot raise.
+        raise AssuranceError(
+            f"issue id must have at most {MAX_ISSUE_ID_DIGITS} digits; got "
+            f"{len(digits)}"
+        )
+    return f"{ISSUE_ID_PREFIX}{digits}"
 
 
 def issue_id_number(value: object) -> int:

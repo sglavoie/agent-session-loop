@@ -338,6 +338,16 @@ class RejectionTests(LedgerTestCase):
             [item.reason for item in self.read().rejected],
         )
 
+    def test_an_issue_id_too_long_to_number_is_rejected_not_raised(self) -> None:
+        ledger.append_issue_observation(_observation(), state_dir=self.state_dir)
+        text = self.ledger_path.read_text(encoding="utf-8")
+        self.write_ledger_text(text.replace('"ASI-1"', f'"ASI-{"9" * 5000}"'))
+        view = self.read()
+        self.assertEqual((), view.records)
+        self.assertEqual(
+            [ledger.REJECT_INVALID_RECORD], [item.reason for item in view.rejected]
+        )
+
     def test_an_over_deep_line_is_rejected_not_raised(self) -> None:
         self.write_ledger_text("[" * 1_000_000 + "]" * 1_000_000 + "\n")
         view = self.read()

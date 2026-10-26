@@ -14,7 +14,20 @@ class IssueIdTests(unittest.TestCase):
         self.assertEqual(42, assurance_models_primitives.issue_id_number("ASI-42"))
 
     def test_ambiguous_and_invalid_forms_are_rejected(self) -> None:
-        for value in ("ASI-0", "0", "-1", "ASI-007", "asi-42", "ASI-", "", 0, True):
+        for value in (
+            "ASI-0",
+            "0",
+            "-1",
+            "ASI-007",
+            "asi-42",
+            "ASI-",
+            "",
+            0,
+            True,
+            # Past the digits int() converts, which raised ValueError.
+            "9" * 5000,
+            2**70,
+        ):
             with (
                 self.subTest(value=value),
                 self.assertRaises(AssuranceError),
