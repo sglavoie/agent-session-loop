@@ -411,6 +411,19 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(response.status, 400)
         self.assertEqual(document(response)["reason"], "invalid-request")
 
+    def test_a_content_length_is_ascii_digits_and_nothing_else(self) -> None:
+        # Each of these is an integer to `int()`, and none is a length another
+        # parser on the path would be guaranteed to read the same way.
+        for raw in ("-5", "+2", "1_0", "٢", " ", "2 2", "0x2"):
+            with self.subTest(content_length=raw):
+                provider = RecordingProvider()
+                response = application(provider=provider).handle(
+                    build("POST", "/api/unlock", headers={"Content-Length": raw})
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(document(response)["reason"], "invalid-request")
+                self.assertEqual(provider.calls, [])
+
     def test_a_body_that_is_not_a_json_object_is_refused(self) -> None:
         for raw in (b"[1, 2]", b'"text"', b"not json"):
             with self.subTest(body=raw):

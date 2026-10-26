@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -38,6 +39,9 @@ from .details import DetailError
 from .history_primitives import refuse_non_finite
 from .operations import OperationError
 from .uplink import UplinkRefusal
+
+#: The only spelling of a body length this application reads.
+_CONTENT_LENGTH = re.compile(r"[0-9]+", re.ASCII)
 
 
 class Application:
@@ -343,15 +347,19 @@ class Application:
                 details={"transfer_encoding": encoding},
             )
         raw = request.header("content-length")
-        if not raw:
+        if raw is None:
             return 0
-        try:
-            length = int(raw)
-        except ValueError as error:
+        # ASCII digits and nothing else (RFC 9110 section 8.6). ``int()`` would
+        # also take a sign, an underscore and non-ASCII digits, and a framing
+        # number two parsers can read differently is one they will.
+        declared = raw.strip(" \t")
+        if not _CONTENT_LENGTH.fullmatch(declared):
             raise auth.invalid_request(
-                f"Content-Length is not an integer: {error}"
-            ) from error
-        if length <= 0:
+                "Content-Length must be a non-negative decimal integer",
+                content_length=raw[:32],
+            )
+        length = int(declared)
+        if length == 0:
             return 0
         if length > limit:
             raise auth.HttpRefusal(
