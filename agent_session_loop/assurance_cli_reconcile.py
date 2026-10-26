@@ -56,9 +56,11 @@ def _read_manifest(args: argparse.Namespace) -> ReconciliationManifest:
         raw = path.read_text(encoding="utf-8")
     except OSError as error:
         raise AssuranceError(f"cannot read manifest {path}: {error}") from error
+    except UnicodeDecodeError as error:
+        raise AssuranceError(f"manifest {path} is not UTF-8 text: {error}") from error
     try:
         payload = json.loads(raw)
-    except ValueError as error:
+    except (ValueError, RecursionError) as error:
         raise AssuranceError(f"manifest {path} is not valid JSON: {error}") from error
     return parse_reconciliation_manifest(payload)
 

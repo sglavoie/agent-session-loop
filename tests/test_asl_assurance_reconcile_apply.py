@@ -357,6 +357,17 @@ class ApplyTests(ReconcileTestCase):
         self.assertEqual("manifest-read-failed", payload["reason"])
         self.assertEqual(before, self.ledger_path.read_bytes())
 
+    def test_a_non_utf8_or_over_deep_manifest_is_refused_not_raised(self) -> None:
+        path = Path(self._tmp.name) / "manifest.json"
+        for body in (b'{"decisions": "\xff"}', b"[" * 1_000_000 + b"]" * 1_000_000):
+            with self.subTest(body=body[:20]):
+                path.write_bytes(body)
+                code, payload, err = self.run_json(
+                    ["assurance", "reconcile", "--apply", str(path), "--yes"]
+                )
+                self.assertEqual(1, code)
+                self.assertEqual("manifest-read-failed", payload["reason"])
+
     def test_apply_reports_the_same_counts_in_text_and_json(self) -> None:
         self.open_unbound_twins()
         path = self.write_manifest(
