@@ -505,8 +505,9 @@ def check_all(
     timeout_seconds: float = PROBE_TIMEOUT_SECONDS,
     use_cache: bool = True,
 ) -> tuple[Compatibility, ...]:
-    """Classify every requested harness, in :data:`HARNESS_NAMES` order."""
-    requested = tuple(harnesses_to_check or HARNESS_NAMES)
+    """Classify every requested harness once, in :data:`HARNESS_NAMES` order."""
+    wanted = set(harnesses_to_check or HARNESS_NAMES)
+    requested = tuple(name for name in HARNESS_NAMES if name in wanted)
     return tuple(
         check_harness(
             harness,

@@ -296,6 +296,16 @@ class ResolutionTests(unittest.TestCase):
         results = compat.check_all(resolver=lambda _name: None)
         self.assertEqual(list(HARNESS_NAMES), [r.harness for r in results])
 
+    def test_check_all_dedupes_and_orders_the_requested_harnesses(self) -> None:
+        from agent_session_loop.harnesses import HARNESS_NAMES
+
+        requested = [HARNESS_NAMES[-1], HARNESS_NAMES[0], HARNESS_NAMES[-1]]
+        results = compat.check_all(requested, resolver=lambda _name: None)
+        self.assertEqual(
+            [HARNESS_NAMES[0], HARNESS_NAMES[-1]], [r.harness for r in results]
+        )
+        self.assertEqual(2, sum(compat.report_payload(results)["counts"].values()))
+
 
 class ReportTests(unittest.TestCase):
     def _results(self, *statuses: str) -> tuple[compat.Compatibility, ...]:
