@@ -126,9 +126,12 @@ class ControlSignalTests(unittest.TestCase):
         self.assertEqual(before, lock_path.read_bytes())
 
     def test_other_host_reports_remote_host(self) -> None:
+        # A live local pid with its exact birth is this host renamed, so the
+        # other host's run is given a start time no local process has.
         self.write_lock(
             pid=os.getpid(),
             hostname="some-other-host",
+            process_start="Thu Jan  1 00:00:00 1970",
             wakeup_endpoint=self.abandoned_endpoint(),
         )
 

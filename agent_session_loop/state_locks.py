@@ -208,10 +208,8 @@ def _read_lock_path(
     elif pid is None:
         stale = True
         reason = "lock has no valid pid"
-    elif (
-        hostname is not None
-        and hostname != socket.gethostname()
-        and not _recorded_as_live_local_process(raw)
+    elif state.recorded_on_foreign_host(
+        hostname, pid=pid, process_start=raw.get("process_start")
     ):
         # The local process table describes local pids only, so it can neither
         # confirm nor refute this owner. Stale here means "not usable by this
@@ -447,34 +445,9 @@ def release_lock(plan_dir: str | Path, state_dir: str | Path | None = None) -> N
 def _lock_names_this_process(raw: dict[str, Any] | None) -> bool:
     if raw is None or _coerce_pid(raw.get("pid")) != os.getpid():
         return False
-    hostname = _nonempty_str(raw.get("hostname"))
-    if hostname is None or hostname == socket.gethostname():
-        return True
-    return _recorded_as_live_local_process(raw)
-
-
-def _recorded_as_live_local_process(raw: dict[str, Any]) -> bool:
-    """Say whether ``raw`` names a live process on this host despite its hostname.
-
-    macOS renames the host when DHCP hands it a new name, so a live run's lock
-    can carry a hostname no process here reports any more -- the run's own, or
-    the one a status reader or `asl inbox reply` is checking. Its pid and
-    recorded start time still identify it: another host's process would have to
-    share both, to the second, with a live local pid. Equality is exact rather
-    than :func:`process_sampling.birth_may_match`, because a match here makes a
-    foreign lock usable, and every lock with a ``process_start`` was written by
-    a runner under the same pinned ``ps`` environment. A lock recording no start
-    time cannot be confirmed and stays foreign.
-    """
-    pid = _coerce_pid(raw.get("pid"))
-    if pid is None:
-        return False
-    recorded = raw.get("process_start")
-    if not isinstance(recorded, str) or not recorded:
-        return False
-    if pid != os.getpid() and not state.is_pid_running(pid):
-        return False
-    return process_tree.process_birth(pid) == recorded
+    return not state.recorded_on_foreign_host(
+        raw.get("hostname"), pid=os.getpid(), process_start=raw.get("process_start")
+    )
 
 
 def _no_lock_result(lock_path: Path) -> UnlockResult:

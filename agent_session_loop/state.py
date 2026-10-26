@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import config, plans_files
+from . import config, plans_files, process_tree
 
 LOCK_FILE_NAME = "lock.json"
 
@@ -130,10 +130,15 @@ class LockInfo:
         """Whether ``pid`` belongs to another host's process table.
 
         Nothing this host can observe says anything about such a lock's owner,
-        so it is never proof of death and never safe to steal.
+        so it is never proof of death and never safe to steal. A lock whose
+        hostname predates a rename of this host is still local while its pid
+        and recorded start time name a live process here.
         """
-        hostname = self.owner_hostname
-        return hostname is not None and hostname != socket.gethostname()
+        return recorded_on_foreign_host(
+            self.raw.get("hostname"),
+            pid=self.raw.get("pid"),
+            process_start=self.raw.get("process_start"),
+        )
 
     @property
     def repository_roots(self) -> tuple[str, ...]:
@@ -205,6 +210,43 @@ def _coerce_pid(value: Any) -> int | None:
     except TypeError, ValueError:
         return None
     return pid if pid > 0 else None
+
+
+def recorded_as_live_local_process(pid: Any, process_start: Any) -> bool:
+    """Say whether ``pid`` and ``process_start`` name a live process on this host.
+
+    macOS renames the host when DHCP hands it a new name, so a live run's
+    record can carry a hostname no process here reports any more -- the run's
+    own, or the one a status reader or `asl inbox reply` is checking. Its pid
+    and recorded start time still identify it: another host's process would
+    have to share both, to the second, with a live local pid. Equality is exact
+    rather than :func:`process_sampling.birth_may_match`, because a match here
+    makes a foreign record usable, and every record with a start time was
+    written under the same pinned ``ps`` environment. A record naming no start
+    time cannot be confirmed and stays foreign.
+    """
+    coerced = _coerce_pid(pid)
+    if coerced is None:
+        return False
+    if not isinstance(process_start, str) or not process_start:
+        return False
+    if coerced != os.getpid() and not is_pid_running(coerced):
+        return False
+    return process_tree.process_birth(coerced) == process_start
+
+
+def recorded_on_foreign_host(hostname: Any, *, pid: Any, process_start: Any) -> bool:
+    """Say whether a record naming ``hostname`` belongs to another host.
+
+    The one rule every reader applies: a record with no hostname predates the
+    field and is local, a matching hostname is local, and a mismatched one is
+    local only when :func:`recorded_as_live_local_process` proves this host was
+    merely renamed under a live owner.
+    """
+    recorded_host = _nonempty_str(hostname)
+    if recorded_host is None or recorded_host == socket.gethostname():
+        return False
+    return not recorded_as_live_local_process(pid, process_start)
 
 
 def _dump_state_bytes(payload: dict[str, Any]) -> bytes:

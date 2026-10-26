@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import socket
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -431,7 +430,7 @@ def recover_stale_lock(
     if (
         lock_info.pid is None
         or hostname is None
-        or hostname != socket.gethostname()
+        or lock_info.foreign_host
         or state.is_pid_running(lock_info.pid)
     ):
         return Recovery(

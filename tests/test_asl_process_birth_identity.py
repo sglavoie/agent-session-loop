@@ -14,7 +14,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import process_sampling, state_locks, supervision_liveness
+from agent_session_loop import (
+    overseer_discovery,
+    process_sampling,
+    state_locks,
+    supervision_liveness,
+)
 
 _UTC_BIRTH = "Sun Oct 25 14:30:05 2026"
 # The same instant as a writer in UTC-4 recorded it before births were pinned.
@@ -206,6 +211,80 @@ class LockIdentityTests(unittest.TestCase):
         self.assertEqual("lock was recorded on host other-host", info.reason)
         self.assertIn("left the lock", stderr.getvalue())
         self.assertTrue(self.lock_path.exists())
+
+    def test_every_reader_agrees_a_renamed_live_owner_is_local(self) -> None:
+        # Before the fix the lock read active yet foreign_host, so redirect
+        # admission, control signals and the overseer still refused the run.
+        self.write_lock(
+            hostname="before-dhcp.local", process_start=_UTC_BIRTH, pid=os.getppid()
+        )
+        with mock.patch.object(
+            state_locks.process_tree, "process_birth", return_value=_UTC_BIRTH
+        ):
+            info = state_locks.inspect_lock_info(self.plan_dir, self.state_dir)
+            assert info is not None
+            self.assertTrue(info.active)
+            self.assertFalse(info.foreign_host)
+            ownership = overseer_discovery._read_ownership(
+                self.lock_path.parent, warnings=[]
+            )
+            self.assertFalse(ownership.foreign_host)
+            self.assertTrue(ownership.alive)
+
+    def test_a_renamed_host_lock_without_an_exact_birth_stays_foreign(self) -> None:
+        for process_start in (_LEGACY_LOCAL_BIRTH, None):
+            with self.subTest(process_start=process_start):
+                self.write_lock(
+                    hostname="other-host",
+                    process_start=process_start,
+                    pid=os.getppid(),
+                )
+                with mock.patch.object(
+                    state_locks.process_tree, "process_birth", return_value=_UTC_BIRTH
+                ):
+                    info = state_locks.inspect_lock_info(self.plan_dir, self.state_dir)
+                    assert info is not None
+                    self.assertTrue(info.foreign_host)
+                    ownership = overseer_discovery._read_ownership(
+                        self.lock_path.parent, warnings=[]
+                    )
+                    self.assertTrue(ownership.foreign_host)
+
+
+class LivenessProbeHostRenameTests(unittest.TestCase):
+    def record(self, *, host: str) -> supervision_liveness.LivenessRecord:
+        return supervision_liveness.LivenessRecord(
+            supervision_id="00000000-0000-4000-8000-000000000000",
+            pid=os.getppid(),
+            birth=_UTC_BIRTH,
+            host=host,
+            argv=(),
+            command={},
+            plan_dir="/tmp/plan",
+            started_at="2026-10-25T00:00:00+00:00",
+        )
+
+    def test_a_renamed_host_record_of_a_live_process_is_probed(self) -> None:
+        with mock.patch.object(
+            state_locks.process_tree, "process_birth", return_value=_UTC_BIRTH
+        ):
+            verdict = supervision_liveness.probe(
+                self.record(host="before-dhcp.local"),
+                run_command=lambda *args, **kwargs: _ps_result(_UTC_BIRTH + "\n"),
+            )
+        self.assertEqual(supervision_liveness.ALIVE, verdict)
+
+    def test_another_hosts_record_stays_unverified(self) -> None:
+        with mock.patch.object(
+            state_locks.process_tree,
+            "process_birth",
+            return_value="Mon Oct 26 09:00:01 2026",
+        ):
+            verdict = supervision_liveness.probe(
+                self.record(host="other-host"),
+                run_command=lambda *args, **kwargs: _ps_result(_UTC_BIRTH + "\n"),
+            )
+        self.assertEqual(supervision_liveness.UNVERIFIED, verdict)
 
 
 if __name__ == "__main__":
