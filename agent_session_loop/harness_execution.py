@@ -6,7 +6,8 @@ import contextlib
 import dataclasses
 import signal
 import subprocess
-from collections.abc import Callable, Mapping
+import sys
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +23,27 @@ from . import (
 
 if TYPE_CHECKING:
     from . import harness_adapter
+
+
+def _report_stream_errors(
+    harness_name: str, reader_errors: Sequence[BaseException]
+) -> tuple[str, ...]:
+    """Describe what went wrong while the turn's output was being read.
+
+    A failed stream callback -- one ``ENOSPC`` appending to the provisional
+    ``stdout.log`` -- used to raise here and discard a turn that had already
+    finished, exit code and all. The readers keep their own copy of every
+    chunk, so the turn's result is still whole; the failure is recorded on it
+    and announced on stderr once instead.
+    """
+    errors = tuple(f"{type(error).__name__}: {error}" for error in reader_errors)
+    if errors:
+        print(
+            f"agent-session-loop: {harness_name} stream reading degraded "
+            f"({len(errors)} error(s)); first: {errors[0]}",
+            file=sys.stderr,
+        )
+    return errors
 
 
 def run_adapter(
@@ -316,20 +338,27 @@ def run_adapter(
                 process, prior_snapshot
             )
         except KeyboardInterrupt:
+            # The turn runs in a session of its own, so the terminal's SIGINT
+            # never reached it or anything it spawned. It is taken down the
+            # way a timeout or abort takes it down: the descendants are
+            # snapshotted while the root still lives, then the whole group is
+            # killed, so a helper that left the group is still in reach of the
+            # sweep below rather than reparented out of it.
+            interrupt_snapshot: tuple[Mapping[str, Any], ...] = ()
             if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+                interrupt_snapshot = harness_process._snapshot_descendants(
+                    process.pid, harness_process._sweep_process_table()
+                )
+                harness_process._kill_process_group(process)
+                process.wait()
             stdout_thread.join(timeout=1)
             stderr_thread.join(timeout=1)
             abandon_readers()
             # This branch returns early, so it needs its own sweep: the one on
-            # the normal path is never reached from here. Explicit signalling
-            # above is unchanged; the sweep only reaches what it left behind.
-            interrupt_sweep = harness_process._sweep_turn_descendants(process)
+            # the normal path is never reached from here.
+            interrupt_sweep = harness_process._sweep_turn_descendants(
+                process, interrupt_snapshot
+            )
             return harness_types.HarnessResult(
                 name=self.name,
                 argv=invocation.argv,
@@ -344,6 +373,7 @@ def run_adapter(
                 ),
                 interrupted=True,
                 process_sweep=interrupt_sweep,
+                stream_errors=_report_stream_errors(self.name, reader_errors),
                 observed_model=output_processor.observed_model,
                 stream_io=dict(stream_io),
                 conversation_id=lifecycle.conversation.native_id,
@@ -351,11 +381,7 @@ def run_adapter(
                 prompt_submitted=lifecycle.prompt_submitted,
             )
 
-        if reader_errors:
-            raise harness_types.HarnessError(
-                "stream callback failed"
-            ) from reader_errors[0]
-
+        stream_errors = _report_stream_errors(self.name, reader_errors)
         stdout = "".join(stdout_chunks)
         stderr = "".join(stderr_chunks)
         if aborted:
@@ -375,6 +401,7 @@ def run_adapter(
                 ),
                 aborted=True,
                 process_sweep=process_sweep,
+                stream_errors=stream_errors,
                 observed_model=output_processor.observed_model,
                 stream_io=dict(stream_io),
                 conversation_id=lifecycle.conversation.native_id,
@@ -396,6 +423,7 @@ def run_adapter(
                 ),
                 timed_out=True,
                 process_sweep=process_sweep,
+                stream_errors=stream_errors,
                 observed_model=output_processor.observed_model,
                 stream_io=dict(stream_io),
                 conversation_id=lifecycle.conversation.native_id,
@@ -418,6 +446,7 @@ def run_adapter(
             ),
             interrupted=interrupted,
             process_sweep=process_sweep,
+            stream_errors=stream_errors,
             observed_model=output_processor.observed_model,
             stream_io=dict(stream_io),
             conversation_id=lifecycle.conversation.native_id,

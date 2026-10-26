@@ -266,8 +266,8 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
 
         return mock.patch.object(subprocess, "Popen", popen)
 
-    def test_interrupt_path_stays_intact_and_sweeps_the_group(self) -> None:
-        """Explicit signalling is unchanged; the sweep takes what it left."""
+    def test_interrupt_kills_the_whole_process_group(self) -> None:
+        """Ctrl-C takes the group down the way a timeout does."""
         fake_harness = self._fake_harness(detached=False, tail=("time.sleep(60)",))
         spawn_pids: list[int] = []
         ready = self.root / "grandchildren" / "turn"
@@ -290,14 +290,40 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
         self.assertEqual(
             spawn_pids, [result.process_sweep["enumeration"]["expected_pgid"]]
         )
-        # terminate() only signalled the direct child, so the grandchild was
-        # still in the group when the sweep enumerated it.
-        lingering = self._grandchild_pid()
-        self.assertEqual(
-            [lingering], result.process_sweep["enumeration"]["pgid_members"]
+        # The group kill took the grandchild with its parent, so it never saw
+        # itself orphaned and nothing was left in the group for the sweep.
+        assert_marked_pids_exited(
+            self.root / "grandchildren", label="in-group grandchild"
         )
-        self.assertEqual([lingering], result.process_sweep["killed"])
+        self.assertEqual([], list((self.root / "late").iterdir()))
+        self.assertEqual([], result.process_sweep["enumeration"]["pgid_members"])
         self.assertEqual([], result.process_sweep["survivors_after"])
+
+    def test_interrupt_sweeps_a_setsid_escapee_through_the_pre_kill_snapshot(
+        self,
+    ) -> None:
+        fake_harness = self._fake_harness(detached=True, tail=("time.sleep(60)",))
+        ready = self.root / "grandchildren" / "turn"
+
+        with self._interrupting_popen(ready):
+            result = _PythonScriptCopilotAdapter(fake_harness).run(
+                cwd=self.tmp_dir,
+                plan_dir=self.tmp_dir,
+                prompt="noop",
+            )
+
+        self.assertTrue(result.interrupted)
+        escapee = self._grandchild_pid()
+        # Out of the group, so only the snapshot taken before the kill could
+        # still name it once its parent was gone.
+        self.assertEqual(
+            [escapee], result.process_sweep["enumeration"]["snapshot_verified"]
+        )
+        self.assertEqual([escapee], result.process_sweep["killed"])
+        self.assertEqual([], result.process_sweep["survivors_after"])
+        assert_marked_pids_exited(
+            self.root / "grandchildren", label="detached grandchild"
+        )
         assert_marked_pids_exited(
             self.root / "grandchildren", label="in-group grandchild"
         )
