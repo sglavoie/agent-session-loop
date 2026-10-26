@@ -124,8 +124,11 @@ def migrate_plan_state(
             {"from_plan_dir": str(old_plan_dir)},
         )
 
-    # Refuse to migrate a live run out from under itself.
-    old_lock = _read_lock_path(old_state_dir / LOCK_FILE_NAME, old_plan_dir)
+    # Refuse to migrate a live run out from under itself. Only --apply may
+    # reclaim a lock this host has proven dead: a dry run writes nothing.
+    old_lock = _read_lock_path(
+        old_state_dir / LOCK_FILE_NAME, old_plan_dir, reclaim=apply
+    )
     if old_lock is not None and old_lock.active:
         raise MigrationError(
             "active-lock",

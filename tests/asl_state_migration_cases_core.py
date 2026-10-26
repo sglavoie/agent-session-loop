@@ -174,6 +174,25 @@ class MigrateStateTests(StateMigrationTestBase):
         self.assertTrue(self.old_state_dir.is_dir())
         self.assertFalse(self.new_state_dir.exists())
 
+    def test_dry_run_leaves_a_dead_owner_lock_in_place(self) -> None:
+        # The dry run read the source lock with reclaim on, so a lock whose
+        # owner had died was deleted ("reclaimed stale lock") by a command
+        # documented to write nothing.
+        self._write_orphan_state()
+        lock_path = self._write_dead_owner_lock(self.old_state_dir, self.old_plan)
+        before = lock_path.read_bytes()
+        with redirect_stderr(io.StringIO()) as stderr:
+            report = state_migration.migrate_plan_state(
+                self.new_plan,
+                from_plan_dir=self.old_plan,
+                state_dir=self.state_dir,
+                apply=False,
+            )
+        self.assertFalse(report.applied)
+        self.assertEqual(before, lock_path.read_bytes())
+        self.assertNotIn("reclaimed stale lock", stderr.getvalue())
+        self.assertFalse(self.new_state_dir.exists())
+
     def test_refuses_occupied_destination(self) -> None:
         self._write_orphan_state()
         self.new_state_dir.mkdir(parents=True, exist_ok=True)

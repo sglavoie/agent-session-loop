@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import socket
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -112,6 +113,25 @@ class StateMigrationTestBase(unittest.TestCase):
                     "pid": os.getpid(),
                     "plan_dir": str(self.old_plan),
                     "created_at": "2026-07-23T00:00:00+00:00",
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return lock_path
+
+    def _write_dead_owner_lock(self, state_dir: Path, plan_dir: Path) -> Path:
+        """Seed a lock this host recorded for a pid that is not running."""
+        state_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = state_dir / state.LOCK_FILE_NAME
+        lock_path.write_text(
+            json.dumps(
+                {
+                    # Above every platform's pid ceiling, so never running.
+                    "pid": 4_242_424,
+                    "plan_dir": str(plan_dir),
+                    "created_at": "2026-07-23T00:00:00+00:00",
+                    "hostname": socket.gethostname(),
                 },
                 sort_keys=True,
             ),
