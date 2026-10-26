@@ -527,3 +527,13 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                     plans_errors.PlanError, "'type' must be one of"
                 ):
                     contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_bounds_an_integer_too_large_for_float(
+        self,
+    ) -> None:
+        text = _contract_text(
+            '{"checks": [{"type": "command", "argv": ["true"], '
+            '"timeout_seconds": ' + "9" * 400 + "}]}"
+        )
+        with self.assertRaisesRegex(plans_errors.PlanError, "must be <= 3600"):
+            contracts.parse_completion_contract(text, session_id="1")

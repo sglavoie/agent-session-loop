@@ -42,7 +42,12 @@ def _require_positive_number(
             f"session {session_id.value} contract field {label!r} must be a "
             "positive number"
         )
-    numeric = float(value)
+    try:
+        numeric = float(value)
+    except OverflowError:
+        # An integer too large for a float is still a positive number; the
+        # caller's upper bound refuses it by name.
+        numeric = float("inf") if value > 0 else float("-inf")
     if numeric != numeric or numeric <= 0:
         raise PlanError(
             f"session {session_id.value} contract field {label!r} must be a "
