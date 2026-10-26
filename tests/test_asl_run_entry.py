@@ -398,6 +398,18 @@ class ResumeOverlayTests(unittest.TestCase):
         path = fixture.write_state_payload({})
         path.write_text("{not json", encoding="utf-8")
         self.assertIsNone(run_entry_resume._load_resume_state(plan_dir, state_dir))
+        # Bytes that are not UTF-8 fail while reading, before any JSON parse,
+        # and used to escape as UnicodeDecodeError instead of reading as absent.
+        path.write_bytes(b'{"run_config": "\xff\xfe"}')
+        self.assertIsNone(run_entry_resume._load_resume_state(plan_dir, state_dir))
+
+    def test_a_non_utf8_state_is_reported_as_resume_unavailable(self) -> None:
+        fixture = _EntryFixture(self, ("pending",))
+        fixture.write_state_payload({}).write_bytes(b"\xff\xfe\x00")
+        code, payload = fixture.run("--resume")
+        self.assertEqual(1, code)
+        self.assertEqual("resume-unavailable", payload["reason"])
+        self.assertEqual([], fixture.calls)
 
     def test_a_resume_with_no_usable_config_hands_back_a_runnable_command(
         self,
