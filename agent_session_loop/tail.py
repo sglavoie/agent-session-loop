@@ -365,7 +365,9 @@ class TailFollower:
         state_path = plan_state / events.STATE_FILE_NAME
         # The first batch is the initial read, so no record lands between
         # reading the journal and starting to follow it.
-        batches = follow_events(plan_state / events.EVENTS_FILE_NAME)
+        events_path = plan_state / events.EVENTS_FILE_NAME
+        tail_records._require_readable_events(events_path)
+        batches = follow_events(events_path)
         records = next(batches)
         state_payload = tail_records._read_json_file(state_path)
         run_id = tail_records._latest_run_id(state_payload, records)
@@ -435,7 +437,9 @@ def tail_plan(
     snapshot = plans_snapshot.inspect_plan(plan_dir)
     plan_state = state.plan_state_dir(snapshot.plan_dir, state_dir)
     state_path = plan_state / events.STATE_FILE_NAME
-    batches = follow_events(plan_state / events.EVENTS_FILE_NAME)
+    events_path = plan_state / events.EVENTS_FILE_NAME
+    tail_records._require_readable_events(events_path)
+    batches = follow_events(events_path)
     records = next(batches)
     state_payload = tail_records._read_json_file(state_path)
     run_id = tail_records._latest_run_id(state_payload, records)
@@ -498,7 +502,9 @@ def tail_plan_json(
     snapshot = plans_snapshot.inspect_plan(plan_dir)
     plan_state = state.plan_state_dir(snapshot.plan_dir, state_dir)
     state_path = plan_state / events.STATE_FILE_NAME
-    batches = follow_events(plan_state / events.EVENTS_FILE_NAME)
+    events_path = plan_state / events.EVENTS_FILE_NAME
+    tail_records._require_readable_events(events_path)
+    batches = follow_events(events_path)
     records = next(batches)
     run_id = tail_records._latest_run_id(
         tail_records._read_json_file(state_path), records

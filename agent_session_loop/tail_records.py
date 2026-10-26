@@ -23,6 +23,22 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
     return raw
 
 
+def _require_readable_events(path: Path) -> None:
+    """Refuse an events file that exists but cannot be opened.
+
+    ``follow_events`` reads an unopenable file as "nothing yet", which suits a
+    poll but would let the first read of a tail report no activity for a
+    journal it could not read at all.
+    """
+    if not path.exists():
+        return
+    try:
+        with path.open("rb"):
+            pass
+    except OSError as error:
+        raise tail_models.TailError(f"cannot read {path}: {error}") from error
+
+
 def _read_event_records(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []

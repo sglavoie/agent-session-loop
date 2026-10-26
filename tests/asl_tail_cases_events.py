@@ -245,6 +245,23 @@ class TailFollowerEventsTests(TailFollowerTestCase):
 
             self.assertIn("run finished: run run-1", out.getvalue())
 
+    def test_tail_reports_an_unopenable_events_file_instead_of_no_activity(
+        self,
+    ) -> None:
+        # The follower reads an unopenable file as "nothing yet", which made
+        # the first read print "No activity yet." for a journal it never read.
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, _state_path, events_path = self.setup_tail_files(
+                Path(tmp)
+            )
+            events_path.unlink(missing_ok=True)
+            events_path.mkdir()
+
+            with self.assertRaisesRegex(tail_models.TailError, "cannot read"):
+                tail.tail_plan(
+                    plan_dir, state_dir=state_dir, follow=False, out=io.StringIO()
+                )
+
     def test_recent_activity_ends_on_the_run_outcome_not_the_last_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
