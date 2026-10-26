@@ -144,8 +144,15 @@ class AuthoritativeCliDocsTests(unittest.TestCase):
 
     def test_commands_block_lists_current_flag_surfaces(self) -> None:
         self.assertIn(
-            "asl metrics [--since-days N] [--state-dir DIR] [--json]", self.docs
+            "asl metrics [--since-days DAYS] [--state-dir DIR] [--json]", self.docs
         )
+        subparsers = next(
+            action
+            for action in cli.build_parser()._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        metrics_usage = subparsers.choices["metrics"].format_usage()
+        self.assertIn("[--since-days DAYS]", metrics_usage)
         self.assertIn("[--artifact-dir DIR]", self.docs)
         self.assertIn("asl prepare --resume PLAN_DIR", self.docs)
         self.assertIn("[--max-review-fix-cycles N]", self.docs)

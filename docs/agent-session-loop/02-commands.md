@@ -62,7 +62,7 @@ asl maintenance run [--state-dir DIR] [--dry-run|--apply] [--force] [--max-age-d
 asl maintenance status [--state-dir DIR] [--executable PATH] [--no-probe] [--json]
 asl maintenance uninstall [--state-dir DIR] [--no-bootstrap] [--json]
 asl migrate-state PLAN_DIR [--from OLD_PLAN_PATH] [--state-dir DIR] [--apply] [--json]
-asl metrics [--since-days N] [--state-dir DIR] [--json]
+asl metrics [--since-days DAYS] [--state-dir DIR] [--json]
 asl commit [PATH] [--yes] [--verify|--no-verify] [--staged] [--dry-run] [--guidance TEXT] [--from-id SHA] [--pathspec PATH ...] [--expect-snapshot TOKEN] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SECONDS] [--prepare-only] [--message-file PATH] [--json]
 asl bridge serve [--stdio] [--protocol VERSION] [--state-dir DIR] [--plan-root DIR]
 asl agent-mux pairing [--state-dir DIR] [--migrate] [--json]
