@@ -110,6 +110,8 @@ def finalize_turn_execution(
         "result_path": str(paths["result"]),
         "plan_readable": after is not None,
     }
+    if result.stream_errors:
+        execution_payload["stream_errors"] = list(result.stream_errors)
     if result.stream_io is not None:
         execution_payload["stream_io"] = dict(result.stream_io)
     if "harness_shutdown" in live_turn:

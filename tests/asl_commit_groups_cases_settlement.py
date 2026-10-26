@@ -139,3 +139,49 @@ class DurableLedgerTests(unittest.TestCase):
             self.assertEqual(2, fullsync.call_count)
             persisted = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual("g1", persisted["commit_groups"][0]["group_id"])
+
+
+class CommitGroupInterruptionTests(unittest.TestCase):
+    """A Git failure after a group is durable must still leave it owed."""
+
+    def test_a_run_error_mid_group_returns_the_group_failed(self) -> None:
+        persisted: list[tuple[str, dict[str, object]]] = []
+        with (
+            mock.patch.object(
+                commit_settlement,
+                "_persist_commit_group",
+                side_effect=lambda **kwargs: persisted.append(
+                    (kwargs["phase"], dict(kwargs["group"]))
+                ),
+            ),
+            mock.patch.object(
+                commit_settlement_groups, "_commit_target_head", return_value="h0"
+            ),
+            mock.patch.object(run_commit, "_commit_started_payload", return_value={}),
+            mock.patch.object(
+                run_commit,
+                "_run_asl_commit",
+                side_effect=RunError("git rev-parse HEAD timed out"),
+            ),
+        ):
+            group, failed_commit = commit_settlement._run_commit_group(
+                event_path=Path("events.jsonl"),
+                payload={"commits": []},
+                progress=mock.Mock(),
+                verification_context=mock.Mock(),
+                run_dir=Path("run"),
+                run_id="r1",
+                session_id="12",
+                targets=[target("SVC"), target("OAK")],
+                generation=mock.Mock(),
+                persistence=mock.MagicMock(),
+            )
+
+        self.assertEqual(commit_groups.GROUP_STATUS_FAILED, group["status"])
+        self.assertEqual("SVC", group["failed_alias"])
+        self.assertEqual(["SVC", "OAK"], group["remaining_aliases"])
+        self.assertEqual(("repository-failed", group), persisted[-1])
+        self.assertIsNotNone(failed_commit)
+        assert failed_commit is not None
+        self.assertFalse(failed_commit["success"])
+        self.assertIn("timed out", failed_commit["error"])

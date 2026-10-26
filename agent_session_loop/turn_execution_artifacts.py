@@ -265,6 +265,8 @@ def write_turn_artifacts(
     }
     if termination_note is not None:
         payload["last_harness_activity_preview"] = last_activity_preview
+    if result.stream_errors:
+        payload["stream_errors"] = list(result.stream_errors)
     if result.stream_io is not None:
         payload["stream_io"] = dict(result.stream_io)
     if (

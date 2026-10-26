@@ -174,6 +174,39 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         self.assertEqual(2, result.stream_io["stderr_chunks"])
         self.assertGreaterEqual(result.stream_io["callback_seconds"], 0.01)
 
+    def test_a_failing_stream_callback_keeps_the_completed_turn(self) -> None:
+        # One ENOSPC appending to the provisional stdout.log must not discard
+        # a turn that already exited 0 with its whole output captured.
+        fake_harness = self._write_executable(
+            "fake-copilot-callback-failure",
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "print('turn done', flush=True)",
+                    "",
+                ]
+            ),
+        )
+
+        def failing_callback(stream_name: harnesses.StreamName, text: str) -> None:
+            del stream_name, text
+            raise OSError(28, "No space left on device")
+
+        with mock.patch("sys.stderr") as stderr:
+            result = _PythonScriptCopilotAdapter(fake_harness).run(
+                cwd=self.tmp_dir,
+                plan_dir=self.tmp_dir,
+                prompt="noop",
+                stream_callback=failing_callback,
+            )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("turn done", result.stdout)
+        self.assertEqual(
+            ("OSError: [Errno 28] No space left on device",), result.stream_errors
+        )
+        self.assertIn("stream reading degraded", str(stderr.write.call_args_list))
+
     def test_reader_join_bounded_despite_pipe_holding_grandchild(self) -> None:
         root = self.tmp_dir / "trees"
         _parent_script, grandchild_script = write_process_tree_scripts(root)

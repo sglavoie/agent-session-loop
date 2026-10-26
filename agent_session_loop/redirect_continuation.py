@@ -426,9 +426,18 @@ class TurnRedirect:
         time for the reason ``OwnedWorker`` gives: a controller that looked the
         pid up at its deadline would be aiming at whatever that number means by
         then.
+
+        A turn can spawn more than once: Codex falls back from its app server
+        to ``codex exec`` and reports the new pid through the same callback,
+        after the first process has exited. Until a correction has armed the
+        controller, nothing has been promised about the first worker, so the
+        gate rebinds to the live one rather than leave a redirect aimed at a
+        dead pid. An armed controller keeps the worker it was armed against.
         """
+        replaced: TurnController | None = None
         with self._lock:
-            if self._controller is None and not self._settled:
+            if not self._settled and not self._armed:
+                replaced = self._controller
                 self._controller = self._build_controller(
                     redirect_control.OwnedWorker.session_leader(pid)
                 )
@@ -439,6 +448,9 @@ class TurnRedirect:
                             self._plan_dir, self._target, self._state_dir
                         )
                     )
+        if replaced is not None:
+            # Never armed, so releasing it stands it down without a report.
+            replaced.release()
         self._bound.set()
 
     def settle(self) -> bool:

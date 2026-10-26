@@ -222,6 +222,10 @@ class HarnessResult:
     process_sweep: dict[str, Any] | None = None
     observed_model: str | None = None
     stream_io: dict[str, int | float] | None = None
+    #: Every error a stream reader or its callback raised while the turn ran,
+    #: as ``"<Type>: <message>"``. Recorded rather than raised: the readers keep
+    #: their own copy of the output, so the turn's result stands without them.
+    stream_errors: tuple[str, ...] = ()
     transport: str = TRANSPORT_EXEC
     #: The native conversation this turn actually ran on, when its transport
     #: reported one, or ``None`` for a turn that never named one — because its
