@@ -191,7 +191,11 @@ def parse_review_verdict(text: str) -> dict[str, Any]:
     if match is None:
         return _verdict_error("malformed Status line")
 
-    total, high, med, low = (int(value) for value in match.groups())
+    try:
+        total, high, med, low = (int(value) for value in match.groups())
+    except ValueError:
+        # Past the interpreter's integer-string limit ``int()`` refuses.
+        return _verdict_error("finding counts are too large")
     if total <= 0:
         return _verdict_error("finding total must be greater than zero")
     if high + med + low != total:

@@ -187,6 +187,17 @@ class ReviewSessionHelperTests(unittest.TestCase):
                 "## Findings\nStatus: 5 Findings (2 high, 2 med, 0 low)\n"
             )
 
+    def test_parse_review_verdict_rejects_a_count_too_long_to_convert(self) -> None:
+        # Past Python's integer-string limit ``int()`` raises ValueError, which
+        # escaped the parser as a traceback instead of a malformed verdict.
+        digits = "1" * 5000
+        with self.assertRaisesRegex(
+            review_session_contract.ReviewVerdictError, "too large"
+        ):
+            review_session_contract.parse_review_verdict(
+                f"Status: {digits} Findings ({digits} high, 0 med, 0 low)\n"
+            )
+
     def test_next_top_level_session_id_returns_one_for_empty_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp)
