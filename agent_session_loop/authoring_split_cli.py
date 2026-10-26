@@ -28,6 +28,7 @@ from .authoring_split import (
     InvalidContractError,
     MissingContractError,
     SingleSessionError,
+    UnknownContractError,
     split_plan,
 )
 from .cli_defaults import program_name
@@ -130,7 +131,7 @@ def check_from_args(args: Any) -> int:
                 want_json=want_json,
             )
         try:
-            text = Path(source_path).read_text(encoding="utf-8")
+            text = Path(source_path).read_text(encoding="utf-8-sig")
         except OSError as error:
             return _emit_split_error(
                 SPLIT_REASON_INPUT_ERROR,
@@ -288,7 +289,7 @@ def split_from_args(args: Any) -> int:
     # Load the Step 7 contracts keyed by canonical session id.
     try:
         contracts_text = Path(os.path.expanduser(str(args.contracts_file))).read_text(
-            encoding="utf-8"
+            encoding="utf-8-sig"
         )
     except OSError as error:
         return _emit_error(
@@ -312,7 +313,7 @@ def split_from_args(args: Any) -> int:
     split_cwd = getattr(args, "cwd", None)
     if split_cwd is not None:
         try:
-            plan_text = Path(source_path).read_text(encoding="utf-8")
+            plan_text = Path(source_path).read_text(encoding="utf-8-sig")
         except OSError as error:
             return _emit_error(
                 SPLIT_REASON_INPUT_ERROR,
@@ -384,6 +385,12 @@ def split_from_args(args: Any) -> int:
         return _emit_error(f"missing-contract:{error.session_id}", str(error))
     except InvalidContractError as error:
         return _emit_error(f"invalid-contract:{error.session_id}", str(error))
+    except UnknownContractError as error:
+        return _emit_error(
+            SPLIT_REASON_INPUT_ERROR,
+            str(error),
+            unknown_session_ids=list(error.session_ids),
+        )
     except PlanError as error:
         return _emit_error(SPLIT_REASON_MALFORMED_PLAN, str(error))
 

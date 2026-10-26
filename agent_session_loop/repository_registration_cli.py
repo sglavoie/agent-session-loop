@@ -169,7 +169,7 @@ def _register_source_plan_from_args(args: Any) -> int:
                 "replaces its source",
             )
         try:
-            text = Path(source_path).read_text(encoding="utf-8")
+            text = Path(source_path).read_text(encoding="utf-8-sig")
         except OSError as error:
             return _emit_error(
                 REGISTER_REASON_INPUT_ERROR,

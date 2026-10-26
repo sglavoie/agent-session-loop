@@ -197,7 +197,7 @@ def prepare_plan(
             os.path.abspath(os.path.expanduser(os.fspath(source)))
         )
         try:
-            text = Path(source_path).read_text(encoding="utf-8")
+            text = Path(source_path).read_text(encoding="utf-8-sig")
         except OSError as error:
             raise PlanError(
                 f"cannot read source plan {source_path}: {error}"

@@ -169,7 +169,7 @@ Contract authoring rules (validated by `agent_session_loop.authoring_render.cont
 
 When the source plan already carries an inline `## Completion Contract` per session (which `plan-iterate` Step I8 requires), the `contracts_file` entry supersedes it: `asl split` drops the inline copy so each generated session file carries exactly one contract, and a session file holding two is refused by the parser instead of being gated on the first.
 
-A session listed in the plan but missing from `contracts_file` makes `asl split` fail with reason `missing-contract:<id>` before any file lands; supply every session's contract. A present-but-malformed entry (not a JSON object, or missing `done_when`/`verify`) fails the same way with reason `invalid-contract:<id>`, also before any file lands.
+A session listed in the plan but missing from `contracts_file` makes `asl split` fail with reason `missing-contract:<id>` before any file lands; supply every session's contract. A present-but-malformed entry (not a JSON object, or missing `done_when`/`verify`) fails the same way with reason `invalid-contract:<id>`, also before any file lands. A `contracts_file` key that names no session in the plan fails with reason `input-error` and lists the strays in `unknown_session_ids`; a heading the parser did not read as a session is the usual cause.
 
 Optionally, also write an analysis markdown file and pass it as `--analysis-file`. It holds the `## Token Budget` and `## Execution Weight` sections computed from the Step 3 surface scan (omit Execution Weight if the scan was skipped) and is appended verbatim to the manifest. Do not include parallel-execution sections of any kind.
 
