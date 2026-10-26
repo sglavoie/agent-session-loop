@@ -289,15 +289,20 @@ def _add_progress_commands(
         metavar="DIR",
         help="Override operational state directory (used to resolve a plan label)",
     )
-    progress_parser.add_argument(
-        "--tail",
-        action="store_true",
-        help="Follow the journal and print new entries as they appear",
-    )
-    progress_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print machine-readable JSON output of the parsed entries",
+    progress_parser.show_as_alternatives(
+        progress_parser.add_argument(
+            "--tail",
+            action="store_true",
+            help=(
+                "Follow the journal and print new entries as they appear "
+                "(text only; not with --json)"
+            ),
+        ),
+        progress_parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Print machine-readable JSON output of the parsed entries",
+        ),
     )
     progress_parser.set_defaults(handler_ref="progress_cli:progress_from_args")
 

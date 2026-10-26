@@ -194,9 +194,11 @@ a session — the schema-versioned `<!-- agent-session-loop progress-journal v1 
 header is what the runner uses to refuse stale or malformed journals.
 
 To inspect the journal without opening the file, use
-`asl progress PLAN_DIR_OR_ID [--state-dir DIR] [--tail] [--json]`:
-it prints the runner-managed journal, follows it live with `--tail`, and emits
-parsed entries with `--json`.
+`asl progress PLAN_DIR_OR_ID [--state-dir DIR] [--tail | --json]`: it prints
+the runner-managed journal, follows it live with `--tail` (announcing a
+journal rewritten in place, such as by `backfill-progress --force`, then
+printing it from its start), and emits parsed entries with `--json`. The two
+flags are refused together as an `input-error`.
 
 ### Accepting remote-ref updates after a paused review
 

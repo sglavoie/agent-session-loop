@@ -53,7 +53,7 @@ asl control resolve-redirect PLAN_DIR_OR_ID --operation-id OPERATION_ID --outcom
 asl unlock PLAN_DIR_OR_ID [--state-dir DIR] [--force] [--json]
 asl acknowledge-external-changes PLAN_DIR --session ID --repository ALIAS [--accept DIGEST] [--reason TEXT] [--checkpoint-retained] [--state-dir DIR] [--json]
 asl accept-ref-updates PLAN_DIR --session ID [--accept DIGEST] [--reason TEXT] [--state-dir DIR] [--json]
-asl progress PLAN_DIR_OR_ID [--state-dir DIR] [--tail] [--json]
+asl progress PLAN_DIR_OR_ID [--state-dir DIR] [--tail | --json]
 asl backfill-progress PLAN_DIR [--force] [--dry-run] [--json]
 asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
 asl gc [PLAN_DIR] [--state-dir DIR] [--max-age-days DAYS] [--dry-run|--apply] [--json]

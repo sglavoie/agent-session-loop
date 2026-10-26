@@ -382,6 +382,61 @@ class ProgressCliTests(unittest.TestCase):
             self.assertTrue(journal["present"])
             self.assertIn("not valid UTF-8", journal["error"])
 
+    def test_progress_refuses_tail_with_json_as_an_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+
+            code, out, err = self._run_progress(plan_dir, tail=True, json_output=True)
+
+            self.assertEqual(1, code)
+            self.assertEqual("", err)
+            payload = json.loads(out)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("input-error", payload["reason"])
+            self.assertIn("--tail", payload["error"])
+
+    def test_follow_progress_reprints_a_journal_rewritten_shorter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            journal = plans_progress.progress_path(plan_dir)
+            journal.write_text("# Progress\n" + "old entry\n" * 20, encoding="utf-8")
+            stop = threading.Event()
+            seen = threading.Event()
+
+            class WaitableStringIO(io.StringIO):
+                def write(self, value: str) -> int:
+                    written = super().write(value)
+                    if "appended after" in self.getvalue():
+                        seen.set()
+                    return written
+
+            buffer = WaitableStringIO()
+            thread = threading.Thread(
+                target=progress_cli.follow_progress,
+                args=(plan_dir,),
+                kwargs={"out": buffer, "poll_interval": 0.01, "stop_event": stop},
+                daemon=True,
+            )
+            thread.start()
+            try:
+                # A forced backfill replaces the journal whole, shorter.
+                replacement = journal.with_name("progress.md.tmp")
+                replacement.write_text("# Progress\nrebuilt\n", encoding="utf-8")
+                os.replace(replacement, journal)
+                with journal.open("a", encoding="utf-8") as handle:
+                    handle.write("appended after\n")
+                self.assertTrue(seen.wait(timeout=2.0), buffer.getvalue())
+            finally:
+                stop.set()
+                thread.join(timeout=2.0)
+
+            output = buffer.getvalue()
+            self.assertIn("--- progress.md rewritten ---\n", output)
+            self.assertIn("rebuilt\n", output)
+            self.assertNotIn("old entry", output)
+
     def test_follow_progress_streams_newly_appended_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
