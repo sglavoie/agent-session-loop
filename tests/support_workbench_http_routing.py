@@ -442,6 +442,15 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(remote_response.status, 404)
         self.assertEqual(document(remote_response)["reason"], "not-found")
 
+    def test_head_is_answered_by_the_get_route(self) -> None:
+        provider = RecordingProvider()
+        response = application(provider=provider).handle(build("HEAD", "/api/queue"))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(provider.calls[0].route.key, ("GET", "/api/queue"))
+        # HEAD stands in for GET only: it does not reach a mutation.
+        refused = application().handle(build("HEAD", "/api/launch"))
+        self.assertEqual(refused.status, 405)
+
     def test_loopback_refuses_a_host_some_other_name_resolved_to(self) -> None:
         """DNS rebinding: a page's own name re-pointed at 127.0.0.1.
 

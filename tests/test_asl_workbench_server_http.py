@@ -200,13 +200,12 @@ class WorkbenchServerHTTPTests(WorkbenchServerTestCase):
         self.assertEqual(b"", body)
         self.assertIn("text/html", headers.get("content-type", ""))
 
-    def test_head_on_an_api_route_is_method_not_allowed_rather_than_501(
-        self,
-    ) -> None:
+    def test_head_on_an_api_route_answers_like_get_without_a_body(self) -> None:
         server = self._start_server()
-        status, _, body = self._raw_exchange(server, b"HEAD /api/health HTTP/1.0")
-        self.assertEqual(405, status)
+        status, headers, body = self._raw_exchange(server, b"HEAD /api/health HTTP/1.0")
+        self.assertEqual(200, status)
         self.assertEqual(b"", body)
+        self.assertIn("application/json", headers.get("content-type", ""))
 
     def test_a_stdlib_refusal_names_its_own_status(self) -> None:
         server = self._start_server()

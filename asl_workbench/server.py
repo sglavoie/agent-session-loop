@@ -124,8 +124,8 @@ class ApplicationRequestHandler(http.server.BaseHTTPRequestHandler):
         self._serve("GET")
 
     def do_HEAD(self) -> None:
-        # HEAD is a safe method: the shell and its assets answer it as GET does,
-        # an API route answers 405, and `_write` drops the body either way.
+        # HEAD is a safe method: the shell, its assets and every GET route
+        # answer it as GET does, and `_write` drops the body.
         # Without this entry point the stdlib answers 501 on its own.
         self._serve("HEAD")
 

@@ -171,7 +171,11 @@ class Application:
         )
 
     def _route(self, request: messages.Request) -> routes.Route:
-        route = routes.ROUTES_BY_KEY.get((request.method, request.path))
+        # HEAD is GET without a body (RFC 9110 section 9.3.2), and the server
+        # already drops the body, so it is answered by the GET route rather
+        # than by a second table entry that could drift from it.
+        method = "GET" if request.method == "HEAD" else request.method
+        route = routes.ROUTES_BY_KEY.get((method, request.path))
         if route is not None:
             return route
         allowed = routes.methods_for_path(request.path)
