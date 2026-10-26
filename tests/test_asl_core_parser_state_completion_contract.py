@@ -537,3 +537,24 @@ class ParserAndStateTests(ParserAndStateTestsBase):
         )
         with self.assertRaisesRegex(plans_errors.PlanError, "must be <= 3600"):
             contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_accepts_tilde_and_longer_fences(
+        self,
+    ) -> None:
+        block = '{"checks": [{"type": "file_exists", "path": "a"}]}'
+        for fence in ("~~~", "````", "~~~~~"):
+            with self.subTest(fence=fence):
+                contract = contracts.parse_completion_contract(
+                    _contract_text(block, fence=fence), session_id="1"
+                )
+                assert contract is not None
+                self.assertEqual("a", contract.verify.checks[0].path)
+
+    def test_parse_completion_contract_keeps_a_shorter_inner_fence_as_content(
+        self,
+    ) -> None:
+        # A ``` line inside a ```` block is content, so the block runs on to
+        # the matching closer instead of ending early on invalid JSON.
+        text = _contract_text("```", fence="````")
+        with self.assertRaisesRegex(plans_errors.PlanError, "Verify JSON is invalid"):
+            contracts.parse_completion_contract(text, session_id="1")

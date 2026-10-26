@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .contract_models import COMPLETION_CONTRACT_HEADING
+from .contract_models import _FENCE_RE, COMPLETION_CONTRACT_HEADING
 from .contract_models import fenced_line_flags as fenced_line_flags
 from .plans_errors import PlanError
 from .plans_handoff import HANDOFF_HEADING
@@ -108,25 +108,47 @@ def _extract_bullets(lines: list[str]) -> list[str]:
     return [bullet for bullet in bullets if bullet]
 
 
-def _extract_json_block(lines: list[str], session_id: SessionId) -> str:
+def _locate_json_block(lines: list[str], session_id: SessionId) -> tuple[int, int]:
+    """Return the ``[start, end)`` indices of the Verify block's JSON body.
+
+    The fence follows :func:`fenced_line_flags`: it opens on a run of at least
+    three backticks or tildes and closes only on a run of the same character,
+    at least as long, with nothing after it.
+    """
     fence_start: int | None = None
+    fence_char = ""
+    fence_length = 0
     fence_language: str | None = None
     for index, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped.startswith("```"):
+        match = _FENCE_RE.match(line)
+        if match is None:
             continue
+        run = match.group("run")
         if fence_start is None:
-            fence_language = stripped[3:].strip().lower()
+            fence_char = run[0]
+            fence_length = len(run)
+            fence_language = match.group("rest").strip().lower()
             fence_start = index + 1
+            continue
+        if (
+            run[0] != fence_char
+            or len(run) < fence_length
+            or match.group("rest").strip() != ""
+        ):
             continue
         if fence_language not in {"", "json"}:
             raise PlanError(
                 f"session {session_id.value} Verify block must be a ```json``` "
                 f"fenced code block; found language {fence_language!r}"
             )
-        return "\n".join(lines[fence_start:index])
+        return fence_start, index
 
     raise PlanError(
         f"session {session_id.value} Verify block is missing a ```json``` "
         "fenced code block"
     )
+
+
+def _extract_json_block(lines: list[str], session_id: SessionId) -> str:
+    start, end = _locate_json_block(lines, session_id)
+    return "\n".join(lines[start:end])
