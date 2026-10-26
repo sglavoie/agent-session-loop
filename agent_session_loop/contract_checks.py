@@ -407,7 +407,7 @@ def _parse_check(
             "must be a JSON object"
         )
     raw_type = payload.get("type")
-    if raw_type not in CHECK_PARSERS:
+    if not isinstance(raw_type, str) or raw_type not in CHECK_PARSERS:
         allowed = ", ".join(sorted(CHECK_PARSERS))
         raise PlanError(
             f"session {session_id.value} contract check #{index + 1} "

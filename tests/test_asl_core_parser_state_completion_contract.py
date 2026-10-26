@@ -13,6 +13,26 @@ from agent_session_loop import (
 from tests.asl_core_support import ParserAndStateTestsBase
 
 
+def _contract_text(json_block: str, *, fence: str = "```") -> str:
+    return "\n".join(
+        [
+            "## Completion Contract",
+            "",
+            "### Done when",
+            "- something",
+            "",
+            "### Verify",
+            "",
+            f"{fence}json",
+            json_block,
+            fence,
+            "",
+            "## Handoff",
+            "- **Status**: pending",
+        ]
+    )
+
+
 class ParserAndStateTests(ParserAndStateTestsBase):
     def test_parse_completion_contract_requires_json_fenced_block(self) -> None:
         text = "\n".join(
@@ -491,4 +511,19 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                     ]
                 )
                 with self.assertRaisesRegex(plans_errors.PlanError, pattern):
+                    contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_refuses_an_unhashable_check_type(
+        self,
+    ) -> None:
+        # A list or object 'type' cannot be looked up in the parser table; it
+        # is a malformed contract, never a TypeError traceback.
+        for raw_type in ('["command"]', '{"t": 1}'):
+            with self.subTest(raw_type=raw_type):
+                text = _contract_text(
+                    '{"checks": [{"type": ' + raw_type + ', "path": "a"}]}'
+                )
+                with self.assertRaisesRegex(
+                    plans_errors.PlanError, "'type' must be one of"
+                ):
                     contracts.parse_completion_contract(text, session_id="1")
