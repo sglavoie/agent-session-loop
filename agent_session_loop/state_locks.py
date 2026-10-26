@@ -179,9 +179,10 @@ def _read_lock_path(
 
     try:
         raw = json.loads(lock_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, RecursionError) as error:
         # ValueError covers both JSONDecodeError and the UnicodeDecodeError
-        # that bytes which are not UTF-8 raise before any JSON is parsed.
+        # that bytes which are not UTF-8 raise before any JSON is parsed;
+        # RecursionError is what nesting too deep for the decoder raises.
         return LockInfo(
             path=lock_path,
             pid=None,
