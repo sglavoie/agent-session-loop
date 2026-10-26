@@ -66,6 +66,10 @@ def normalize_repository_path(path: str | PurePosixPath) -> str:
         raise WorkspaceError("repository path must not contain control characters")
     if "\\" in value or PureWindowsPath(value).is_absolute():
         raise WorkspaceError("repository path must use relative POSIX syntax")
+    if "|" in value:
+        # The registry is a Markdown table whose cells are never unescaped, so
+        # a pipe would split this path's row instead of being stored in it.
+        raise WorkspaceError("repository path must not contain '|'")
     pure = PurePosixPath(value)
     if pure.is_absolute():
         raise WorkspaceError("repository path must be relative to the workspace")

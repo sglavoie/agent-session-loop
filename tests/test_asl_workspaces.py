@@ -74,6 +74,7 @@ class RepositoryValueTests(unittest.TestCase):
             "repo\\nested",
             "repo\x00nested",
             "group/repo\nother",
+            "group/a|b",
         ):
             with (
                 self.subTest(path=invalid),
