@@ -71,6 +71,19 @@ class AssuranceMergeTests(fixtures.AssuranceCliTestCase):
         self.assertIn("cancelled", err)
         self.assertEqual(3, len(self.inbox().issues))
 
+    def test_end_of_input_at_the_prompt_cancels_the_merge(self) -> None:
+        self.open_three_issues()
+
+        with (
+            mock.patch.object(assurance_cli, "_is_tty", return_value=True),
+            mock.patch("builtins.input", side_effect=EOFError),
+        ):
+            code, out, err = self.run_cli(["assurance", "merge", "2", "1"])
+
+        self.assertEqual(1, code)
+        self.assertIn("cancelled", err)
+        self.assertEqual(3, len(self.inbox().issues))
+
     def test_confirming_the_prompt_performs_the_merge(self) -> None:
         self.open_three_issues()
 
