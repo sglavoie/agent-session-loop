@@ -8,6 +8,7 @@ import json
 import tempfile
 import time
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -17,6 +18,7 @@ from agent_session_loop import (
     run_commit,
     turn_execution_constants,
     turn_execution_hang_sentinel,
+    turn_execution_live,
     turn_execution_protocols,
 )
 from tests.asl_control_hang_sentinel_support import (
@@ -371,6 +373,43 @@ class HangSentinelTestsPart2(HangSentinelTestsBase):
             live_turn._stop.clear()
             live_turn._record_heartbeat()
             self.assertEqual([123], calls)
+
+    def test_idle_time_ignores_a_wall_clock_step(self) -> None:
+        # The sentinel schedules on the monotonic clock; an idle reading taken
+        # from the wall clock let an NTP step or a wake from sleep fake a hang.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            readings = {"now": 1000.0}
+            sentinel = turn_execution_hang_sentinel.HangSentinel(
+                sample_tree=lambda pid: [], monotonic=lambda: readings["now"]
+            )
+            live_turn = run_commit._LiveTurn(
+                payload={"state_path": str(tmp_dir / "state.json")},
+                event_path=tmp_dir / "events.jsonl",
+                progress=mock.Mock(),
+                active_turn=live_active_turn(),
+                monotonic=lambda: readings["now"],
+                hang_sentinel=sentinel,
+            )
+            live_turn.record_activity("stdout", "working")
+            readings["now"] += 5.0
+            stepped = turn_execution_live.clock.utc_now() + timedelta(hours=3)
+
+            with (
+                mock.patch.object(
+                    turn_execution_live.clock, "utc_now", return_value=stepped
+                ),
+                mock.patch.object(turn_execution_protocols, "notify_turn_heartbeat"),
+                mock.patch.object(
+                    sentinel, "evaluate", wraps=sentinel.evaluate
+                ) as evaluate,
+            ):
+                heartbeat = live_turn._record_heartbeat()
+                finished = live_turn.finish(stepped)
+
+            self.assertEqual(5.0, evaluate.call_args.kwargs["idle_seconds"])
+            self.assertEqual(5.0, heartbeat["idle_seconds"])
+            self.assertEqual(5.0, finished["idle_seconds"])
 
 
 if __name__ == "__main__":
