@@ -131,7 +131,11 @@ def _add_overseer_commands(
         "--for-seconds",
         type=non_negative_float,
         metavar="SECONDS",
-        help="Keep sweeping for this long instead of running a single sweep",
+        help=(
+            "Keep sweeping for this long instead of running a single sweep; "
+            "leases stay held afterwards until --release or --lease-seconds "
+            "runs out"
+        ),
     )
     overseer_watch_parser.add_argument(
         "--interval-seconds",

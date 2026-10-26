@@ -107,6 +107,14 @@ def _payload_for(args: argparse.Namespace, operation: str) -> overseer_dispatch.
     return overseer_dispatch.Resume(session_id=args.session_id or "")
 
 
+#: Refusals that are a mechanical condition of this watcher rather than a
+#: question: the lease lapsed, was never taken, or is another watcher's. The
+#: answer is to watch again and retry -- or, when the lease is someone else's,
+#: to leave the plan to them -- so asking a human would be asking them to do
+#: the overseer's bookkeeping.
+REWATCH_REFUSALS: frozenset[str] = frozenset({"ownership_lost"})
+
+
 @common.leaf("overseer-act")
 def act_from_args(
     args: argparse.Namespace,
@@ -247,7 +255,8 @@ def act_from_args(
         timeout=timeout,
     )
     escalation: common.Escalation | None = None
-    if dispatch.escalated or not dispatch.performed:
+    rewatch = dispatch.refusal in REWATCH_REFUSALS
+    if (dispatch.escalated or not dispatch.performed) and not rewatch:
         escalation = common.Escalation(
             reason=dispatch.refusal or "outcome_uncertain",
             question=(
@@ -274,6 +283,7 @@ def act_from_args(
             "bound": bound,
         },
         escalation=None if escalation is None else escalation.payload(),
+        rewatch=rewatch,
     )
     lines = [
         f"{args.operation} on {candidate.plan_dir}: "
@@ -299,6 +309,11 @@ def act_from_args(
     if dispatch.recoveries:
         lines.append(
             f"  recoveries: {dispatch.recoveries}/{overseer_dispatch.RECOVERY_LIMIT}"
+        )
+    if rewatch:
+        lines.append(
+            "  not a question for a human: re-run `asl overseer watch "
+            f"--watcher-id {args.watcher_id}` to take the lease, then act again"
         )
     if escalation is not None:
         lines.append(f"  ask a human: {escalation.question}")

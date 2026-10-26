@@ -95,9 +95,12 @@ def watch_from_args(
     One sweep by default. ``--for-seconds`` keeps sweeping until the deadline,
     which is what "watch while invoked" means: newly started runs and eligible
     pauses join on a later sweep without the operator re-invoking anything.
-    ``--release`` gives the leases back, which is what ending an invocation
-    means -- an abandoned lease expires on its own, but only after it has kept
-    another watcher out for the rest of its term.
+    Its leases are still held when it returns -- a bounded watch is one step of
+    the host's invocation, and the ``act`` after it needs them -- so they end
+    at their term or at ``--release``. ``--release`` gives the leases back,
+    which is what ending an invocation means -- an abandoned lease expires on
+    its own, but only after it has kept another watcher out for the rest of its
+    term.
     """
     as_json = bool(getattr(args, "json", False))
     state_dir = common_module._state_dir(args)
@@ -136,6 +139,7 @@ def watch_from_args(
             sleep=seams.sleep,
             sweep_seconds=float(args.sweep_seconds),
             interval_seconds=float(args.interval_seconds),
+            release_on_return=False,
             **common,
         )
         sweeps = list(invocation.sweeps)
