@@ -85,7 +85,7 @@ class ParserDefaultsAndSupervisorGuideTests(unittest.TestCase):
         for leaf, alternatives in (
             (["inbox", "reply"], "[--text TEXT | --text-stdin]"),
             (["inbox", "guidance"], "[--text TEXT | --text-stdin]"),
-            (["notify"], "[--text-stdin | text]"),
+            (["notify"], "[--text-stdin | TEXT]"),
         ):
             with self.subTest(leaf=leaf):
                 stdout = io.StringIO()

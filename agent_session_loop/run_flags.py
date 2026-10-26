@@ -97,6 +97,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
     RunFlag(
         dest="harness_model",
         option_strings=("--harness-model",),
+        metavar="MODEL",
         help="Implementation baseline/fallback harness model to request",
     ),
     RunFlag(
@@ -121,6 +122,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
     RunFlag(
         dest="review_harness_model",
         option_strings=("--review-harness-model",),
+        metavar="MODEL",
         help="Generated review harness model to request",
     ),
     RunFlag(
@@ -131,6 +133,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
     RunFlag(
         dest="timeout",
         option_strings=("--timeout",),
+        metavar="SECONDS",
         type=int,
         help="Per-session harness timeout in seconds",
     ),
@@ -147,6 +150,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
     RunFlag(
         dest="audit_harness_model",
         option_strings=("--audit-harness-model",),
+        metavar="MODEL",
         help=(
             "Supervisor audit model to request; wins over a model inherited "
             "from the review role and over the audit harness native default"
@@ -163,6 +167,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
     RunFlag(
         dest="audit_timeout",
         option_strings=("--audit-timeout",),
+        metavar="SECONDS",
         type=int,
         cli_default=600,
         help=(
@@ -307,6 +312,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
     RunFlag(
         dest="note",
         option_strings=("--note",),
+        metavar="TEXT",
         help="Reference note to show in run status and final output",
     ),
     RunFlag(

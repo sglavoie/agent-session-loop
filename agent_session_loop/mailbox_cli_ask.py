@@ -197,7 +197,7 @@ def ask_from_args(args: argparse.Namespace) -> int:
             command_name=mailbox_cli_constants.COMMAND_ASK,
             text_label="ask",
             reason="invalid-question-source",
-            error="exactly one of question text and --question-id is required",
+            error="exactly one of TEXT, --text-stdin, or --question-id is required",
         )
         return 1
     if from_stdin:

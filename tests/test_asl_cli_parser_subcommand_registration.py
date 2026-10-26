@@ -607,6 +607,63 @@ class ParserFlagSpellingTests(unittest.TestCase):
                 self.assertIn("--wait-timeout SECONDS", help_text)
                 self.assertNotIn("TIMEOUT,", help_text)
 
+    def _help(self, argv: list[str]) -> str:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), self.assertRaises(SystemExit):
+            cli.build_parser(prog="asl").parse_args([*argv, "--help"])
+        return " ".join(stdout.getvalue().split())
+
+    def test_help_names_values_by_kind_not_by_dest(self) -> None:
+        cases = (
+            (["notify"], ("TEXT",), ()),
+            (["ask"], ("TEXT",), ()),
+            (["prepare"], ("PLAN", "--cwd DIR", "--validator-jobs N"), ("CWD",)),
+            (
+                ["split"],
+                ("--plan-file PATH", "--base-dir DIR", "--cwd DIR"),
+                ("PLAN_FILE", "BASE_DIR"),
+            ),
+            (["register-repositories"], ("--output PATH",), ("OUTPUT",)),
+            (["inbox", "resolve"], ("--note TEXT",), ("NOTE",)),
+            (["tail"], ("--lines N", "(default: 40)"), ("LINES",)),
+            (
+                ["run"],
+                (
+                    "--timeout SECONDS",
+                    "--audit-timeout SECONDS",
+                    "--audit-harness-model MODEL",
+                    "--note TEXT",
+                ),
+                ("AUDIT_TIMEOUT", "AUDIT_HARNESS_MODEL", "NOTE"),
+            ),
+        )
+        for argv, present, absent in cases:
+            help_text = self._help(argv)
+            with self.subTest(argv=argv):
+                for text in present:
+                    self.assertIn(text, help_text)
+                for text in absent:
+                    self.assertNotIn(text, help_text)
+
+    def test_wait_timeout_help_names_the_flag_it_needs(self) -> None:
+        for argv, needed in (
+            (["inbox", "reply"], "--wait-consumed"),
+            (["inbox", "resolve"], "--wait-consumed"),
+            (["inbox", "guidance"], "--wait-delivered"),
+        ):
+            with self.subTest(argv=argv):
+                # argparse may wrap at the hyphen, so compare without spaces.
+                self.assertIn(
+                    f"requires {needed}".replace(" ", ""),
+                    self._help(argv).replace(" ", ""),
+                )
+
+    def test_progress_accepts_a_state_dir_for_label_resolution(self) -> None:
+        args = cli.build_parser().parse_args(
+            ["progress", "label", "--state-dir", "/tmp/state"]
+        )
+        self.assertEqual("/tmp/state", args.state_dir)
+
 
 class NumericFlagValidationTests(unittest.TestCase):
     """Numeric flags refuse NaN, infinity and out-of-range values at parse time.

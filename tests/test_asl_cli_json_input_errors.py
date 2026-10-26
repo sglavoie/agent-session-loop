@@ -95,6 +95,13 @@ class InputErrorWordingTests(unittest.TestCase):
                 self.assertEqual(1, code)
                 self.assertIn(message, stderr)
 
+    def test_ask_without_a_source_names_all_three(self) -> None:
+        payload = self._json_refusal(
+            "ask", str(self.plan_dir), "--state-dir", str(self.state_dir)
+        )
+        self.assertEqual("invalid-question-source", payload["reason"])
+        self.assertIn("TEXT, --text-stdin, or --question-id", payload["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

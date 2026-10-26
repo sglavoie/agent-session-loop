@@ -285,6 +285,11 @@ def _add_progress_commands(
         ),
     )
     progress_parser.add_argument(
+        "--state-dir",
+        metavar="DIR",
+        help="Override operational state directory (used to resolve a plan label)",
+    )
+    progress_parser.add_argument(
         "--tail",
         action="store_true",
         help="Follow the journal and print new entries as they appear",
