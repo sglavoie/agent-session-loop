@@ -134,6 +134,8 @@ class RecordStorageTests(unittest.TestCase):
         good = json.loads(path.read_text(encoding="utf-8"))
         cases = {
             "not-json": "{",
+            # Deep enough that the decoder raises RecursionError instead.
+            "deeply-nested": "[" * 1_000_000,
             "not-an-object": json.dumps([good]),
             "wrong-version": json.dumps({**good, "version": 99}),
             "other-launch": json.dumps({**good, "supervision_id": str(uuid.uuid4())}),
