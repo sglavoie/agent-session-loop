@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import artifacts, events, plans_files, plans_models, state
+from . import artifacts, events, plans_files, plans_models
 from .state import (
     LOCK_FILE_NAME,
     LockInfo,
@@ -137,7 +137,11 @@ def _abandonment_is_proven(
         return not lock_path.exists()
     if lock_info.active or lock_info.pid is None or lock_info.foreign_host:
         return False
-    return not state.is_pid_running(lock_info.pid)
+    from .state_locks import _owner_gone_reason  # local: state_locks imports us
+
+    # The same proof the lock reader used to call it stale: a pid that a later
+    # process reused is as gone as one that is not running at all.
+    return _owner_gone_reason(lock_info.pid, lock_info.raw) is not None
 
 
 def _abandoned_event_payload(
