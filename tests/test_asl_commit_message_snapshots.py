@@ -166,6 +166,30 @@ class CommitHandlerTests(fixtures.CommitHandlerCase):
         # The unrelated staged edit is neither committed nor unstaged.
         self.assertIn("M  src/beta.py", self.porcelain())
 
+    def test_drifted_paths_are_reported_verbatim(self) -> None:
+        # Plain porcelain C-quotes a non-ASCII name and writes a rename as
+        # `old -> new`, so the refusal named `"\303\274n..."` and split a name
+        # that itself holds ` -> ` at the wrong arrow.
+        names = ["ün.txt", "a -> b.txt"]
+        for name in names:
+            self.write(name, "seed\n")
+        self.write("old.txt", "seed\n")
+        commit_message.stage_paths(self.repo, [*names, "old.txt"])
+        git_stdout(self.repo, "commit", "-qm", "seed", "--no-verify")
+        git_stdout(self.repo, "mv", "old.txt", "x -> new.txt")
+        for name in [*names, "x -> new.txt"]:
+            self.write(name, "edited after staging\n")
+        scope = [*names, "old.txt", "x -> new.txt"]
+        snapshot = commit_message.pathspec_snapshot(self.repo, scope)
+
+        with self.assertRaises(commit_message.CommitMessageError) as caught:
+            commit_message.assert_pathspec_snapshot(self.repo, scope, snapshot)
+
+        self.assertEqual(
+            sorted([*names, "x -> new.txt"]),
+            caught.exception.details["paths"],
+        )
+
     def _submodule_commit(self, sub: Path, name: str) -> None:
         (sub / name).write_text(f"{name}\n", encoding="utf-8")
         git_stdout(sub, "add", name)

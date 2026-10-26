@@ -405,7 +405,8 @@ def worktree_drifted_paths(cwd: Path, pathspec: Sequence[str]) -> list[str]:
         cwd,
         [
             "status",
-            "--porcelain",
+            "--porcelain=v1",
+            "-z",
             "-uall",
             "--ignore-submodules=dirty",
             *_pathspec_args(pathspec),
@@ -416,16 +417,19 @@ def worktree_drifted_paths(cwd: Path, pathspec: Sequence[str]) -> list[str]:
             f"failed to probe the worktree: {result.stderr.strip()}",
             reason=models.REASON_DIFF_FAILED,
         )
+    # `-z` writes each name verbatim (never C-quoted) as `XY <path>\0`; a rename
+    # or copy names its new path there and its source in the next record,
+    # which is skipped: the new name is the one a commit would carry.
     drifted: list[str] = []
-    for line in result.stdout.splitlines():
-        if len(line) < 4:
+    records = iter(result.stdout.split("\0"))
+    for record in records:
+        if len(record) < 4:
             continue
-        if line.startswith("??") or line[1] != " ":
-            path = line[3:]
-            # A rename entry reads `R  old -> new`; the new name is the one a
-            # commit would carry.
-            _, arrow, renamed = path.partition(" -> ")
-            drifted.append(renamed if arrow else path)
+        status = record[:2]
+        if "R" in status or "C" in status:
+            next(records, None)
+        if status == "??" or status[1] != " ":
+            drifted.append(record[3:])
     return drifted
 
 
