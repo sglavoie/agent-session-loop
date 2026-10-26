@@ -70,6 +70,13 @@ def register_repositories_from_args(args: Any) -> int:
             f"cwd is not a directory: {args.cwd}",
             want_json=bool(args.json),
         )
+    if isinstance(args.plan_dir, str) and not args.plan_dir.strip():
+        # ``Path("")`` is ``.``: an empty argument would migrate the cwd.
+        return _emit_register_error(
+            REGISTER_REASON_INPUT_ERROR,
+            "PLAN_DIR must not be empty",
+            want_json=bool(args.json),
+        )
     if source_mode:
         return _register_source_plan_from_args(args)
     return _register_plan_dir_from_args(args)

@@ -231,6 +231,16 @@ class RegisterRepositoriesCommandTests(unittest.TestCase):
         self.assertIn("cwd is not a directory", payload["error"])
         self.assertIsNone(plans_registry.read_repository_registry(self.plan_dir))
 
+    def test_empty_plan_dir_is_refused_rather_than_naming_the_cwd(self) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            code = cli.main(["register-repositories", "", "--json"])
+
+        self.assertEqual(1, code)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual("input-error", payload["reason"])
+        self.assertEqual("PLAN_DIR must not be empty", payload["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
