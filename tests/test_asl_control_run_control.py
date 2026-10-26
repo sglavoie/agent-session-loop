@@ -433,6 +433,39 @@ class RunControlTests(unittest.TestCase):
         self.assertFalse(thread.is_alive(), "the listener kept running after EOF")
         self.assertEqual(["p", "t"], handled)
 
+    def test_listener_survives_a_raising_key_callback(self) -> None:
+        # The first callback error used to end the listener thread, leaving
+        # every later key unanswered. It is now reported once and skipped.
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        stderr = TTYText()
+        listener = run_control.RunControlListener(
+            enabled=False,
+            state=run_control.RunControlState(current_harness="codex"),
+            stderr=stderr,
+            poll_interval=0.01,
+            timestamp=lambda: "2026-06-11 12:00:00",
+        )
+        handled: list[str] = []
+
+        def handle(key: str) -> None:
+            handled.append(key)
+            if key != "t":
+                raise OSError("state write failed")
+
+        listener._fd = read_fd
+        with mock.patch.object(listener, "handle_key", side_effect=handle):
+            os.write(write_fd, b"pst")
+            os.close(write_fd)
+            thread = threading.Thread(target=listener._listen, daemon=True)
+            thread.start()
+            thread.join(timeout=5)
+        self.assertFalse(thread.is_alive(), "the listener kept running after EOF")
+        self.assertEqual(["p", "s", "t"], handled)
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(1, len(lines))
+        self.assertIn("state write failed", lines[0])
+
     def test_run_control_status_callback_does_not_record_action(self) -> None:
         state = run_control.RunControlState()
         stderr = TTYText()
