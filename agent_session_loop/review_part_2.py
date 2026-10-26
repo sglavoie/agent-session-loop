@@ -7,6 +7,7 @@ globals().update(
 )
 from .review_shared import *
 from .review_part_1 import *
+from .formatting import count_noun
 
 
 def _validate_finding(
@@ -201,7 +202,7 @@ def ensure_review_consistency(
     if artifact["total_findings"] != verdict["total_findings"]:
         raise ReviewConsistencyError(
             f"{FINAL_REVIEW_ARTIFACT_FILENAME} carries "
-            f"{artifact['total_findings']} findings but the "
+            f"{count_noun(artifact['total_findings'], 'finding')} but the "
             f"{FINAL_REVIEW_FILENAME} status line declares "
             f"{verdict['total_findings']}"
         )

@@ -322,6 +322,15 @@ class ReviewArtifactSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(review.ReviewConsistencyError, "severity totals"):
             review.ensure_review_consistency(wrong_severity, artifact)
 
+        wrong_total = review.parse_review_verdict(
+            "body\nStatus: 2 Findings (2 high, 0 med, 0 low)\n"
+        )
+        with self.assertRaisesRegex(
+            review.ReviewConsistencyError,
+            "carries 1 finding but the final-review.md status line declares 2",
+        ):
+            review.ensure_review_consistency(wrong_total, artifact)
+
     def test_review_session_marker_versions(self) -> None:
         self.assertIsNone(review.review_session_marker_version("# Session 1"))
         self.assertEqual(
