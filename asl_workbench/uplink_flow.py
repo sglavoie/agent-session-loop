@@ -7,18 +7,25 @@ from typing import Any
 
 from .operations import (
     DETAIL_DEADLINE_PASSED,
+    OPERATION_DETAIL_CODES,
     OPERATION_DISPATCHED,
     OPERATION_EXPIRED,
     OPERATION_PENDING,
+    OPERATION_REJECTED,
+    OPERATION_UNCONFIRMED,
 )
 from .remote_reads import RemoteReadError
 from .store_types import IngestInvalid, IngestRefused
 from .transport import (
+    CAPABILITY_MUTATE,
     DIRECTION_UP,
     KIND_DETAIL,
     KIND_OBSERVATION,
     KIND_OPERATION,
     KIND_RECEIPT,
+    RECEIPT_EXPIRED,
+    RECEIPT_REFUSED,
+    RECEIPT_UNCONFIRMED,
     REQUEST_MUTATE,
     VIEW_CATALOG_PAGE,
     VIEW_HEARTBEAT,
@@ -86,6 +93,9 @@ class UplinkFlowMixin(UplinkBodiesMixin):
         if kind == KIND_OPERATION:
             self._settle_operation(envelope, now=now)
             return
+        if kind == KIND_RECEIPT and envelope.get("capability") == CAPABILITY_MUTATE:
+            self._settle_refusal(envelope, now=now)
+            return
         if kind in (KIND_DETAIL, KIND_RECEIPT):
             try:
                 answer = self.reads.accept(envelope, now=now)
@@ -138,6 +148,41 @@ class UplinkFlowMixin(UplinkBodiesMixin):
             detail_code=payload.get("detail_code"),
             dispatched_at=payload.get("dispatched_at"),
             settled_at=payload.get("settled_at"),
+        )
+        self.discard_body(operation_id)
+
+    def _settle_refusal(self, envelope: Mapping[str, Any], *, now: float) -> None:
+        """A receipt the connector sent instead of taking a submission.
+
+        The connector refuses a submission it will not queue -- a closed
+        window, a full queue, a missing token -- with a receipt rather than an
+        operation frame, because nothing was attempted. That receipt is the
+        only report the dispatched row will ever get, so it settles the row
+        here: left ``dispatched``, the plan would refuse every later mutation
+        as still outstanding.
+        """
+        status = {
+            RECEIPT_REFUSED: OPERATION_REJECTED,
+            RECEIPT_EXPIRED: OPERATION_EXPIRED,
+            RECEIPT_UNCONFIRMED: OPERATION_UNCONFIRMED,
+        }.get(str(envelope["payload"]["outcome"]))
+        request_id = envelope.get("request_id")
+        if status is None or not isinstance(request_id, str):
+            return
+        operation_id = envelope["payload"].get("operation_id")
+        if not isinstance(operation_id, str):
+            operation_id = request_id.removeprefix("submit-")
+        row = self.store.operation(operation_id)
+        if row is None or row.get("status") != OPERATION_DISPATCHED:
+            return
+        detail_code = envelope["payload"].get("detail_code")
+        self.store.advance_operation(
+            operation_id,
+            status,
+            now=now,
+            # A receipt may cite a transport code the journal has no word for.
+            detail_code=detail_code if detail_code in OPERATION_DETAIL_CODES else None,
+            settled_at=None if status == OPERATION_UNCONFIRMED else now,
         )
         self.discard_body(operation_id)
 

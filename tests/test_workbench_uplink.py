@@ -28,6 +28,7 @@ from asl_workbench.operations import (
     OPERATION_DISPATCHED,
     OPERATION_EXPIRED,
     OPERATION_PENDING,
+    OPERATION_REJECTED,
 )
 from asl_workbench.store_workbench import WorkbenchStore
 from asl_workbench.transport import (
@@ -238,6 +239,48 @@ class UploadTests(UplinkCase):
         assert row is not None
         self.assertEqual(row["status"], OPERATION_ACCEPTED)
         self.assertEqual(row["settled_at"], NOW + 5)
+
+    def test_a_receipt_refusing_a_submission_settles_its_row(self) -> None:
+        """The connector refuses a submission it will not queue with a receipt.
+
+        That receipt is the only report the row will ever get; left
+        `dispatched`, the plan would refuse every later mutation.
+        """
+        for operation_id, outcome, detail_code, status in (
+            ("op-refused", "refused", "forbidden-method", OPERATION_REJECTED),
+            ("op-late", "expired", "deadline-passed", OPERATION_EXPIRED),
+        ):
+            with self.subTest(outcome=outcome):
+                self.store.record_operation(
+                    operation_record(operation_id),
+                    connector_id=CONNECTOR,
+                    received_at=NOW,
+                )
+                self.store.advance_operation(
+                    operation_id, OPERATION_DISPATCHED, now=NOW, dispatched_at=NOW
+                )
+                receipt = receipt_envelope(
+                    payload={
+                        "outcome": outcome,
+                        "observed_at": NOW + 1,
+                        "detail_code": detail_code,
+                    },
+                    capability="mutate",
+                    connector_id=CONNECTOR,
+                    target_id=TARGET,
+                    sent_at=NOW + 1,
+                    request_id=f"submit-{operation_id}",
+                )
+                self.uplink.ingest(receipt, now=NOW + 1, subject=CONNECTOR)
+                row = self.store.operation(operation_id)
+                assert row is not None
+                self.assertEqual(row["status"], status)
+                self.assertEqual(row["settled_at"], NOW + 1)
+                self.assertEqual(
+                    row.get("detail_code"),
+                    "deadline-passed" if outcome == "expired" else None,
+                )
+                self.assertIsNone(self.store.outstanding_operation(PLAN_KEY))
 
 
 class CarriageTests(UplinkCase):
