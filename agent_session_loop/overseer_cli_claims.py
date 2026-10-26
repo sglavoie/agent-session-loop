@@ -21,14 +21,38 @@ from . import (
 def _resolve_candidate(
     inventory: overseer_discovery.Inventory, plan_dir: str
 ) -> overseer_discovery.Candidate:
+    """The one record that speaks for ``plan_dir``.
+
+    A state directory copied aside still names the plan it was copied from, so
+    several records can claim one plan. Only a record whose directory is the
+    plan's own hash is that plan's; a stray copy sorting earlier must not
+    shadow it. When no record proves its identity the first claimant is
+    returned, and its ``plan_identity_mismatch`` refuses it downstream. Two
+    records that both prove it are ambiguous, and that fails closed.
+    """
     wanted = common.canonical_plan(plan_dir)
-    for candidate in inventory.candidates:
-        if common.canonical_plan(candidate.plan_dir) == wanted:
-            return candidate
-    raise common.OverseerCliError(
-        "plan_unobserved",
-        f"discovery has no record of {wanted}; run `asl overseer scan` first",
-    )
+    claimants = [
+        candidate
+        for candidate in inventory.candidates
+        if common.canonical_plan(candidate.plan_dir) == wanted
+    ]
+    if not claimants:
+        raise common.OverseerCliError(
+            "plan_unobserved",
+            f"discovery has no record of {wanted}; run `asl overseer scan` first",
+        )
+    proven = [
+        candidate
+        for candidate in claimants
+        if "plan_identity_mismatch" not in candidate.ineligible_reasons
+    ]
+    if len(proven) > 1:
+        raise common.OverseerCliError(
+            "plan_identity_ambiguous",
+            f"{len(proven)} state records each claim {wanted}: "
+            + ", ".join(str(candidate.state_dir) for candidate in proven),
+        )
+    return proven[0] if proven else claimants[0]
 
 
 def _independent_plans(
