@@ -57,6 +57,9 @@ def _read_and_truncate(queue_path: Path) -> str | None:
             chunks.append(chunk)
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)
+        # Flushed like every other queue write: an unsynced truncate can be
+        # undone by a crash and replay commands this drain already consumed.
+        durability.fullsync(fd)
     finally:
         with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
