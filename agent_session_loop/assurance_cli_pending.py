@@ -226,10 +226,11 @@ def assurance_plan_from_args(args: argparse.Namespace) -> int:
         )
     except draft.DraftError as error:
         return refuse(error.reason, str(error))
+    except ledger.LedgerError as error:
+        # Ahead of its base class, or a ledger failure reads as a bad issue id.
+        return refuse(error.reason, str(error))
     except AssuranceError as error:
         return refuse(REASON_INVALID_ISSUE_ID, str(error))
-    except ledger.LedgerError as error:
-        return refuse(error.reason, str(error))
     except OSError as error:
         return refuse(REASON_LEDGER_READ_FAILED, str(error))
 

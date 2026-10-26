@@ -28,6 +28,17 @@ class AssurancePlanTests(fixtures.AssurancePlanCase):
         self.assertEqual("invalid-issue-id", payload["reason"])
         self.assertEqual([], calls)
 
+    def test_an_unreadable_ledger_is_reported_as_a_ledger_failure(self) -> None:
+        # A directory where the ledger file belongs fails the read itself.
+        self.ledger_path.mkdir(parents=True)
+
+        with self.drafting() as calls:
+            code, payload, _ = self.run_json(self.plan_argv())
+
+        self.assertEqual(1, code)
+        self.assertEqual("ledger-read-failed", payload["reason"])
+        self.assertEqual([], calls)
+
     def test_an_existing_output_path_is_never_overwritten(self) -> None:
         self.open_three_issues()
         self.output.write_text("a proposal a human is reading\n", encoding="utf-8")
