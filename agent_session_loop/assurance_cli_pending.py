@@ -62,6 +62,7 @@ def assurance_process_pending_from_args(args: argparse.Namespace) -> int:
     # harness machinery, and every other command in this module reads the
     # ledger without ever launching anything.
     from . import assurance_catchup as catchup
+    from .harnesses import HARNESS_NAMES
 
     def refuse(reason: str, error: str, hint: str | None = None, **fields: Any) -> int:
         return _print_error(
@@ -83,6 +84,14 @@ def assurance_process_pending_from_args(args: argparse.Namespace) -> int:
         return refuse(
             REASON_INPUT_ERROR,
             flag_refusal("--audit-timeout", POSITIVE_INTEGER, args.audit_timeout),
+        )
+    # Checked here, as `assurance plan` checks --harness: left to the audit
+    # role, a typo marked every run unusable after archiving its leftovers.
+    if args.audit_harness is not None and args.audit_harness not in HARNESS_NAMES:
+        return refuse(
+            REASON_INPUT_ERROR,
+            f"--audit-harness must be one of {', '.join(HARNESS_NAMES)}; "
+            f"got {args.audit_harness!r}",
         )
 
     plan_dir = None

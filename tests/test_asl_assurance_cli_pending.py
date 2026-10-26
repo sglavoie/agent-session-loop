@@ -172,6 +172,17 @@ class AssuranceProcessPendingTests(fixtures.AssuranceCliTestCase):
             [row["run_id"] for row in payload["results"]],
         )
 
+    def test_an_unknown_audit_harness_is_refused_before_any_run(self) -> None:
+        self.seed_pending_run("alpha", fixtures.RUN_ID, skip=None)
+
+        code, payload, _ = self.run_json(
+            ["assurance", "process-pending", "--audit-harness", "cluade"]
+        )
+
+        self.assertEqual(1, code)
+        self.assertEqual("input-error", payload["reason"])
+        self.assertIn("--audit-harness must be one of", payload["error"])
+
     def test_a_plan_label_that_names_no_plan_is_refused(self) -> None:
         self.seed_pending_run("alpha", fixtures.RUN_ID)
 
