@@ -40,7 +40,8 @@ class ManifestSession:
 
 def render_manifest_session_row(session: ManifestSession) -> str:
     return (
-        f"| {session.session_id.value} | {session.title} | "
+        f"| {session.session_id.value} | "
+        f"{plans_registry.escape_table_cell(session.title)} | "
         f"{session.status} | {session.filename} |"
     )
 
@@ -210,7 +211,8 @@ def _replace_status_table_rows(
             )
             if title_index is not None and title_index < len(new_cells):
                 new_cells[title_index] = _replace_cell_content(
-                    new_cells[title_index], replacement.title
+                    new_cells[title_index],
+                    plans_registry.escape_table_cell(replacement.title),
                 )
             if file_index is not None and file_index < len(new_cells):
                 new_cells[file_index] = _replace_cell_content(

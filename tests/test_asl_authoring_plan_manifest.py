@@ -24,6 +24,7 @@ from agent_session_loop import (
     plans_readiness,
     plans_session_ids,
     plans_snapshot,
+    plans_status_tables,
     plans_transaction,
     workspaces,
 )
@@ -75,6 +76,44 @@ class PlanManifestTransactionTests(PlanAuthoringBase):
         )
         self.assertIn("| 3 | Third | pending | session-3.md |", updated)
         self.assertLess(updated.index("| 2 | Second"), updated.index("| 3 | Third"))
+
+    def test_pipe_in_session_title_stays_inside_its_cell(self) -> None:
+        spec = self._manifest_spec()
+        piped = dataclasses.replace(
+            spec,
+            sessions=(
+                dataclasses.replace(spec.sessions[0], title="Parse a | b tokens"),
+                *spec.sessions[1:],
+            ),
+        )
+        rendered = authoring_manifest.render_manifest(piped)
+        self.assertIn("| 1 | Parse a \\| b tokens | pending | session-1.md |", rendered)
+
+        synced, changed = plans_status_tables._sync_status_tables_in_text(
+            rendered, {"1": "complete"}
+        )
+        self.assertTrue(changed)
+        self.assertIn("| 1 | Parse a \\| b tokens | complete | session-1.md |", synced)
+
+        added = authoring_manifest.add_manifest_session_row(
+            rendered,
+            authoring_manifest.ManifestSession(
+                session_id=plans_session_ids.parse_session_id("3"), title="x | y"
+            ),
+        )
+        replaced, changed = authoring_manifest.replace_session_status_rows(
+            added,
+            "3",
+            (
+                authoring_manifest.ManifestSession(
+                    session_id=plans_session_ids.parse_session_id("3.1"),
+                    title="c | d",
+                ),
+            ),
+        )
+        self.assertTrue(changed)
+        self.assertIn("| 3.1 | c \\| d | pending | session-3.1.md |", replaced)
+        self.assertNotIn("x | y", replaced)
 
     def test_add_manifest_session_row_without_table_raises(self) -> None:
         with self.assertRaises(plans_errors.PlanError):
