@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -105,6 +106,23 @@ class MetricsCollectionTests(MetricsCollectionBase):
         self.assertEqual(1, report.first_pass["sessions_completed"])
         self.assertEqual(0, report.first_pass["sessions_completed_first_pass"])
         self.assertEqual(0.0, report.first_pass["first_pass_rate"])
+
+    def test_non_finite_or_boolean_durations_add_no_runtime(self) -> None:
+        state_dir = _make_state_dir(self.state_root, self.tmp_path / "plan-e")
+        for index, duration in enumerate((float("inf"), float("nan"), True), 1):
+            _write_turn_result(
+                state_dir,
+                run_id="run-1",
+                turn_index=index,
+                session_id=str(index),
+                started_at=_iso(self.now, hours_ago=3),
+                finished_at=_iso(self.now, hours_ago=2.9),
+                duration_seconds=duration,
+            )
+        report = self._collect()
+        self.assertEqual(3, report.turns["total"])
+        self.assertEqual(0.0, report.turns["successful_runtime_seconds"])
+        json.dumps(report.turns, allow_nan=False)
 
     def test_review_turns_do_not_count_toward_first_pass(self) -> None:
         state_dir = _make_state_dir(self.state_root, self.tmp_path / "plan-b")

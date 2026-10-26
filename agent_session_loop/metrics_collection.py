@@ -12,6 +12,7 @@ from . import (
     compact_state,
     events,
     execution_timing,
+    execution_timing_models,
     metrics_invocations,
     metrics_models,
     metrics_timing,
@@ -190,8 +191,10 @@ def collect_metrics(
                 continue
             active = True
             turns_total += 1
-            duration = payload.get("duration_seconds")
-            duration = float(duration) if isinstance(duration, (int, float)) else 0.0
+            duration = (
+                execution_timing_models._finite_seconds(payload.get("duration_seconds"))
+                or 0.0
+            )
             successful = payload.get("status_result") == metrics_models._COMPLETE_STATUS
             if successful:
                 turns_successful += 1
