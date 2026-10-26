@@ -331,6 +331,41 @@ function focusDetailHeading() {
   }
 }
 
+/**
+ * Give the keyboard back to the queue after leaving a plan.
+ *
+ * The "← queue" button lives in the detail pane, so pressing it hides the
+ * very control that has focus and the browser drops the keyboard on the
+ * body. The plan just left is the natural place to land; without a row for
+ * it, the queue region itself. Only when focus was actually lost: on the
+ * two-pane shell an operator may be somewhere that is still on screen.
+ */
+function focusQueueAfterLeavingPlan() {
+  const active = document.activeElement;
+  const lost =
+    !active ||
+    active === document.body ||
+    (typeof active.getClientRects === "function" &&
+      active.getClientRects().length === 0);
+  if (!lost) return;
+  const queue = document.getElementById("wb-queue");
+  if (!queue) return;
+  const row = queue.querySelector('.wb-row[aria-current="true"]');
+  let target =
+    row && row.getClientRects().length > 0 && typeof row.focus === "function"
+      ? row
+      : null;
+  if (!target) {
+    if (!queue.hasAttribute("tabindex")) queue.setAttribute("tabindex", "-1");
+    target = queue;
+  }
+  try {
+    target.focus({ preventScroll: target === queue });
+  } catch (err) {
+    target.focus();
+  }
+}
+
 export function applyRoute() {
   const navigated = routedOnce && !quietRoute;
   routedOnce = true;
@@ -411,6 +446,7 @@ export function applyRoute() {
     }
   } else {
     stopDetailTimer();
+    if (navigated && previous.name === "detail") focusQueueAfterLeavingPlan();
     refresh();
     scheduleRefresh();
   }

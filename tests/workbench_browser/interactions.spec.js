@@ -1438,6 +1438,11 @@ for (const deployment of DEPLOYMENTS) {
           `#wb-archive-entries [data-archive-id="${ARCHIVE.expired.archive_id}"]`,
         ),
       ).toBeVisible();
+      // Hiding the review took the focused button with it; the keyboard goes
+      // back to the control that opened it, as the cleanup review does.
+      await expect
+        .poll(async () => page.evaluate(() => document.activeElement.id))
+        .toBe("wb-archive-purge-selected");
     });
 
     test("a restore stays shut until its receipt settles", async ({ page }) => {

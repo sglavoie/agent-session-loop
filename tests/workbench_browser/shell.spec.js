@@ -659,9 +659,15 @@ for (const deployment of DEPLOYMENTS) {
       await openQueue(page, deployment);
       const status = page.locator("#wb-refresh-status");
       await expect(status).toHaveAttribute("role", "status");
+      // Permanently polite: toggling it on in the same tick as the error text
+      // left the announcement to each screen reader's timing.
+      await expect(status).toHaveAttribute("aria-live", "polite");
       // Every poll rewrites "refreshing…" and "updated …"; announcing those
-      // would talk over everything else, so only an error is spoken.
-      await expect(status).toHaveAttribute("aria-live", "off");
+      // would talk over everything else, so routine text is aria-hidden.
+      const routine = page.locator("#wb-refresh-routine");
+      const spoken = page.locator("#wb-refresh-error");
+      await expect(routine).toHaveAttribute("aria-hidden", "true");
+      await expect(spoken).toHaveText("");
       await page.evaluate(async () => {
         const queue = await import("/static/modules/queue.js");
         queue.stopQueueTimer();
@@ -669,6 +675,47 @@ for (const deployment of DEPLOYMENTS) {
       });
       await expect(status).toHaveAttribute("aria-live", "polite");
       await expect(status).toHaveText("error: unreachable");
+      await expect(spoken).toHaveText("error: unreachable");
+      await page.evaluate(async () => {
+        const queue = await import("/static/modules/queue.js");
+        queue.setRefreshStatus("idle", "updated now");
+      });
+      await expect(status).toHaveText("updated now");
+      await expect(spoken).toHaveText("");
+    });
+
+    test("leaving a plan gives the keyboard back to the queue", async ({
+      page,
+    }) => {
+      // On the stacked shell "← queue" hides itself when pressed; on the
+      // two-pane shell it may too. Either way focus must not fall to the body.
+      await openQueue(page, deployment);
+      const bravo = rowFor(await catalog(page), "bravo");
+      await page.goto(deployment.baseURL + "/" + detailHash(bravo));
+      await expect(page.locator("#wb-shell")).toHaveAttribute(
+        "data-route",
+        "detail",
+      );
+      const back = page.locator("#wb-detail-back");
+      if (!(await back.isVisible())) {
+        test.skip(true, "this shell shows no back button");
+      }
+      await back.focus();
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#wb-shell")).not.toHaveAttribute(
+        "data-route",
+        "detail",
+      );
+      await expect
+        .poll(async () =>
+          page.evaluate(() => {
+            const active = document.activeElement;
+            if (!active || active === document.body) return "body";
+            if (active.id === "wb-queue") return "queue";
+            return active.classList.contains("wb-row") ? "row" : active.id;
+          }),
+        )
+        .toMatch(/^(row|queue)$/);
     });
 
     test("a row itself selects its plan from the keyboard", async ({ page }) => {

@@ -140,12 +140,31 @@ export async function refresh() {
 export function setRefreshStatus(stateName, text) {
   const el = document.getElementById("wb-refresh-status");
   if (!el) return;
-  // The line is a live region so a failed read is announced, but the
-  // "refreshing…" / "updated" pair repeats on every poll and would talk over
-  // everything else; only an error is spoken.
-  el.setAttribute("aria-live", stateName === "error" ? "polite" : "off");
+  // The line is a permanent polite live region so a failed read is announced,
+  // but the "refreshing…" / "updated" pair repeats on every poll and would
+  // talk over everything else. Routine text goes to an aria-hidden child, so
+  // only an error -- written to the exposed child -- is spoken. Toggling
+  // aria-live in the same tick as the text change instead would leave the
+  // announcement to each screen reader's timing.
   el.setAttribute("data-state", stateName);
-  el.textContent = text;
+  let routine = document.getElementById("wb-refresh-routine");
+  let error = document.getElementById("wb-refresh-error");
+  if (!routine || !error) {
+    el.textContent = "";
+    routine = document.createElement("span");
+    routine.id = "wb-refresh-routine";
+    routine.setAttribute("aria-hidden", "true");
+    error = document.createElement("span");
+    error.id = "wb-refresh-error";
+    el.append(routine, error);
+  }
+  if (stateName === "error") {
+    routine.textContent = "";
+    error.textContent = text;
+  } else {
+    error.textContent = "";
+    routine.textContent = text;
+  }
 }
 
 /**
