@@ -152,6 +152,17 @@ class RefRecoveryTests(unittest.TestCase):
         self.pause()
         self.assertIsNotNone(self.retained())
 
+    def test_torn_and_blank_lines_before_the_failure_do_not_abort(self):
+        # append_event writes a blank repair line after a torn append; the
+        # binding check used to refuse the whole history over either.
+        lines = self.event_path.read_bytes().splitlines(keepends=True)
+        self.event_path.write_bytes(
+            lines[0] + b'{"name": "run_st\n' + b"\n" + b"".join(lines[1:])
+        )
+        code, preview = self.invoke()
+        self.assertEqual(0, code, preview)
+        self.assertNotIn("unreadable event history", json.dumps(preview))
+
     def test_missing_reason_and_wrong_digest_never_clear_failure(self):
         _, preview = self.invoke()
         for args in (

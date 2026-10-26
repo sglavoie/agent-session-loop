@@ -51,6 +51,18 @@ class ExternalRecoveryTests(ExternalRecoveryTestCase):
         self.assertEqual([], preview["remaining_blockers"])
         self.assertEqual("rejected", preview["original_run_id"])
 
+    def test_torn_and_blank_lines_before_the_failure_do_not_abort(self):
+        # Lines between the run start and its failure, not only after it, are
+        # what the original-binding check reads.
+        lines = self.event_path.read_bytes().splitlines(keepends=True)
+        self.event_path.write_bytes(
+            lines[0] + b'{"name": "run_st\n' + b"\n" + b"".join(lines[1:])
+        )
+        code, preview = self.invoke()
+        self.assertEqual(0, code, preview)
+        self.assertEqual([], preview["remaining_blockers"])
+        self.assertEqual("rejected", preview["original_run_id"])
+
     def test_missing_plan_directory_reports_plan_not_found(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
