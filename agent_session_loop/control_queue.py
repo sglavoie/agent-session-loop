@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import harnesses, run_control
+from . import durability, harnesses, run_control
 from .control_queue_drain import (
     _read_and_truncate as _read_and_truncate,
 )
@@ -310,7 +310,7 @@ def append_command(
                 view = view[os.write(fd, view) :]
             # The caller is told the command is queued once this returns, so
             # the line has to survive a crash from here on.
-            os.fsync(fd)
+            durability.fullsync(fd)
         except OSError:
             # A failed append must not leave a fragment for the next writer to
             # repair: the caller is told nothing was queued.

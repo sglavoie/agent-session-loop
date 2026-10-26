@@ -121,7 +121,7 @@ def questions_from_args(args: argparse.Namespace) -> int:
     except plans_errors.PlanError as error:
         return _emit_questions_error(
             want_json=want_json,
-            reason="malformed-plan",
+            reason=plans_errors.plan_error_reason(error, "malformed-plan"),
             error=str(error),
             plan_dir=plan_dir_arg,
             details={"plan_dir": str(plan_dir_arg)},

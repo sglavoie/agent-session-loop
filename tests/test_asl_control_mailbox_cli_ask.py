@@ -539,6 +539,48 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
             sleep.call_args_list,
         )
 
+    def test_ask_reads_a_multiline_question_from_stdin(self) -> None:
+        body = "Which schema wins?\n\n- `v1` keeps the column\n- `v2` drops it\n"
+        with mock.patch("sys.stdin", io.StringIO(body)):
+            code, payload = self.payload_from(
+                mailbox_cli_ask.ask_from_args,
+                self.args(text_stdin=True),
+            )
+        self.assertEqual(0, code, payload)
+        self.assertTrue(payload["created"])
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual(1, view.counts.questions)
+        question = mailbox_cli_ask._question_from_view(view, payload["question_id"])
+        self.assertEqual(body, question.text)
+
+    def test_ask_text_stdin_conflicts_keep_their_json_reasons(self) -> None:
+        stdin = io.StringIO("unread")
+        cases = (
+            (
+                {"text": "inline", "text_stdin": True},
+                mailbox_cli_constants.ERROR_INVALID_TEXT_SOURCE,
+            ),
+            (
+                {"question_id": str(uuid.uuid4()), "text_stdin": True},
+                "invalid-question-source",
+            ),
+        )
+        for overrides, reason in cases:
+            with self.subTest(**overrides), mock.patch("sys.stdin", stdin):
+                code, payload = self.payload_from(
+                    mailbox_cli_ask.ask_from_args, self.args(**overrides)
+                )
+                self.assertEqual(1, code)
+                self.assertEqual(reason, payload["reason"])
+        # A refused invocation never consumed the caller's stdin.
+        self.assertEqual("unread", stdin.read())
+        with mock.patch("sys.stdin", io.StringIO("   \n")):
+            code, payload = self.payload_from(
+                mailbox_cli_ask.ask_from_args, self.args(text_stdin=True)
+            )
+        self.assertEqual(1, code)
+        self.assertEqual(mailbox_constants.REJECT_MISSING_TEXT, payload["reason"])
+
     def test_ask_resume_requires_an_existing_question(self) -> None:
         code, payload = self.payload_from(
             mailbox_cli_ask.ask_from_args,

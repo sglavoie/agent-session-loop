@@ -35,6 +35,7 @@ from .credentials import (
     ROLE_PUBLIC,
 )
 from .details import DetailError
+from .history_primitives import refuse_non_finite
 from .operations import OperationError
 from .uplink import UplinkRefusal
 
@@ -275,8 +276,11 @@ class Application:
                 f"request body must be utf-8: {error}"
             ) from error
         try:
-            parsed = json.loads(decoded)
-        except json.JSONDecodeError as error:
+            # ``NaN`` and the infinities are not JSON, and a body carrying one
+            # would reach a bound or a store that cannot hold it. Refused here,
+            # with the same answer any other malformed body gets.
+            parsed = json.loads(decoded, parse_constant=refuse_non_finite)
+        except ValueError as error:
             raise auth.invalid_request(
                 f"request body must be valid JSON: {error}"
             ) from error

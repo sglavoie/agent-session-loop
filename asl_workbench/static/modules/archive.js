@@ -94,11 +94,21 @@ export function wireArchiveControls() {
 }
 
 export async function loadArchiveView() {
-  if (state.archiveInFlight) return;
+  if (state.archiveInFlight) {
+    // A reload asked for while one is on the wire -- after a restore, a
+    // purge, a settings change -- asks about an archive the read in flight may
+    // have answered before that change. Dropping it would leave the view
+    // describing the old archive, so it runs once the current read settles.
+    state.archivePending = true;
+    return;
+  }
   state.archiveInFlight = true;
+  state.archivePending = false;
   setRefreshStatus("loading", "refreshing…");
   try {
     const body = await apiRequest("/api/archive");
+    // Superseded while on the wire: the follow-up read draws instead.
+    if (state.archivePending) return;
     if (!body || body.ok !== true) {
       renderArchiveError((body && body.error) || "failed to load archive");
       setRefreshStatus("error", "error: archive");
@@ -114,10 +124,17 @@ export async function loadArchiveView() {
     renderArchiveView(body);
     setRefreshStatus("idle", "updated " + new Date().toLocaleTimeString());
   } catch (err) {
+    if (state.archivePending) return;
     renderArchiveError(describeError(err));
     setRefreshStatus("error", "error: " + describeError(err));
   } finally {
     state.archiveInFlight = false;
+    if (state.archivePending) {
+      state.archivePending = false;
+      // Only while the archive is still what is on screen: a reload asked for
+      // before the operator left is not a reason to read it from the queue.
+      if (state.route && state.route.name === "archive") loadArchiveView();
+    }
   }
 }
 

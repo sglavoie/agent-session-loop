@@ -314,6 +314,34 @@ class ObservationalReadTests(WorkbenchAPIFixture, unittest.TestCase):
         )
         self.assertEqual(expected.generation, body["catalog_generation"])
 
+    def test_every_queue_page_names_the_match_total_and_one_revision(self) -> None:
+        # The cleanup selection walks every page of the matched set and refuses
+        # to mix pages from two catalogs. Both checks need the local queue to
+        # publish what the remote one does: the total it matched and a revision
+        # that stays put while nothing it covers has changed.
+        for name in ("plan-alpha", "plan-beta", "plan-gamma"):
+            write_plan(self.plans_root / name, ("pending",))
+        server = self.start_workbench_server(plan_roots=(str(self.plans_root),))
+        base = self.base_url(server)
+
+        revisions = set()
+        seen = []
+        for offset in range(3):
+            status, body, _ = _http_request(f"{base}/api/queue?limit=1&offset={offset}")
+            self.assertEqual(200, status)
+            self.assertEqual(3, body["catalog_matched"])
+            self.assertIsInstance(body["catalog_revision"], str)
+            revisions.add(body["catalog_revision"])
+            seen.extend(row["plan_dir"] for row in body["plans"])
+        self.assertEqual(1, len(revisions))
+        self.assertEqual(3, len(set(seen)))
+
+        write_plan(self.plans_root / "plan-delta", ("pending",))
+        status, body, _ = _http_request(f"{base}/api/queue?limit=1")
+        self.assertEqual(200, status)
+        self.assertEqual(4, body["catalog_matched"])
+        self.assertNotIn(body["catalog_revision"], revisions)
+
     def _seed_expired_archive_entry(self) -> str:
         # The seeder builds the same `state/` + `workbench.json` layout the
         # fixture did, under the same root, so the server reads what it wrote.

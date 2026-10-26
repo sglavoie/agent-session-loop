@@ -81,17 +81,20 @@ def _plan_lock_mutex(
         raise LockMutexOpenError(
             f"could not open the lock mutex at {mutex_path}: {error}"
         ) from error
-    deadline = time.monotonic() + max(bound, 0.0)
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            held = True
-            break
-        except OSError:
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(LOCK_MUTEX_POLL_SECONDS)
+    # Guarded from the open on: an interrupt during the poll sleep, or between
+    # a successful flock and the yield, must still close the descriptor, and
+    # closing it is what drops a lock that ``held`` never got to record.
     try:
+        deadline = time.monotonic() + max(bound, 0.0)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(LOCK_MUTEX_POLL_SECONDS)
         yield held
     finally:
         if held:

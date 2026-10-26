@@ -285,6 +285,10 @@ async function openDetail(page, deployment, plan, extra) {
     "detail",
   );
   await expect(page.locator("#wb-detail")).toBeVisible();
+  // A hash-only change keeps the document, so the refresh status can still
+  // read idle from the previous plan while the header shows the placeholder
+  // the route change put there; wait for this plan's read to have landed.
+  await expect(page.locator("#wb-detail-label")).not.toHaveText("(loading)");
   await expect(page.locator("#wb-refresh-status")).toHaveAttribute(
     "data-state",
     "idle",

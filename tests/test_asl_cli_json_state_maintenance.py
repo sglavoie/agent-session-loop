@@ -199,6 +199,12 @@ class JsonStateMaintenanceCliTests(JsonCliHelpers, unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertEqual("compact-state", payload["command"])
             self.assertIn("plan directory does not exist", payload["error"])
+            # The common error envelope, so a script branches on `reason`
+            # here the way it does for every other plan-scoped command.
+            self.assertEqual("plan-not-found", payload["reason"])
+            self.assertIs(False, payload["paused"])
+            self.assertEqual({}, payload["details"])
+            self.assertEqual(str(missing), payload["plan_reference"])
             self.assertFalse(state_dir.exists())
 
     def test_gc_cli_refuses_a_missing_plan_directory(self) -> None:
@@ -235,6 +241,8 @@ class JsonStateMaintenanceCliTests(JsonCliHelpers, unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertEqual("gc", payload["command"])
             self.assertIn("plan directory does not exist", payload["error"])
+            self.assertEqual("plan-not-found", payload["reason"])
+            self.assertEqual(str(missing), payload["plan_dir"])
             self.assertFalse(state_dir.exists())
 
     def test_gc_cli_refuses_a_directory_that_is_not_a_split_plan(self) -> None:
@@ -280,6 +288,13 @@ class JsonStateMaintenanceCliTests(JsonCliHelpers, unittest.TestCase):
             self.assertIn("--max-age-days must be non-negative", payload["error"])
             self.assertFalse(payload["paused"])
             self.assertEqual({}, payload["details"])
+
+            for value in ("nan", "inf"):
+                with self.subTest(value=value):
+                    refused = _gc("--max-age-days", value, "--json")
+                    self.assertEqual(1, refused.returncode)
+                    payload = json.loads(refused.stdout)
+                    self.assertEqual("invalid-max-age-days", payload["reason"])
 
     def test_gc_cli_dry_run_then_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

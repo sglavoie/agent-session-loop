@@ -28,6 +28,7 @@ from .assurance_cli_common import (
 )
 from .assurance_models_primitives import AssuranceError, parse_issue_id
 from .assurance_models_vocab import CLOSEOUT_OUTCOMES
+from .cli_parser_support import NON_NEGATIVE_NUMBER
 
 
 def _report_write_failure(
@@ -327,7 +328,7 @@ def assurance_closeout_from_args(args: argparse.Namespace) -> int:
     if minutes is not None and (not math.isfinite(minutes) or minutes < 0):
         return refuse(
             REASON_INPUT_ERROR,
-            f"--rework-minutes must be a finite, non-negative number; got {minutes}",
+            f"--rework-minutes {NON_NEGATIVE_NUMBER}; got {minutes}",
         )
     try:
         issue_ids = tuple(parse_issue_id(item) for item in args.issue)

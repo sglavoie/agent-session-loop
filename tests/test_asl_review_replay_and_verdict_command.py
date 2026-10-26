@@ -342,7 +342,20 @@ class ReviewVerdictCommandTests(unittest.TestCase):
             self.assertEqual(1, code)
             err_payload = json.loads(err_out.getvalue())
             self.assertFalse(err_payload["ok"])
-            self.assertEqual("malformed-plan", err_payload["reason"])
+            self.assertEqual("plan-not-found", err_payload["reason"])
+
+            # A plan that exists but cannot be read keeps its own reason.
+            (Path(tmp) / "empty").mkdir()
+            malformed = argparse.Namespace(
+                plan_dir=str(Path(tmp) / "empty"),
+                state_dir=str(state_dir),
+                json=True,
+            )
+            err_out = io.StringIO()
+            with redirect_stdout(err_out):
+                code = review.review_verdict_from_args(malformed)
+            self.assertEqual(1, code)
+            self.assertEqual("malformed-plan", json.loads(err_out.getvalue())["reason"])
 
     def test_from_args_exit_status_tracks_verdict_validity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -96,7 +96,7 @@ def review_verdict_from_args(args: argparse.Namespace) -> int:
             responses.print_json(
                 responses.error_payload(
                     REVIEW_VERDICT_COMMAND,
-                    reason="malformed-plan",
+                    reason=plans_errors.plan_error_reason(error, "malformed-plan"),
                     error=str(error),
                     paused=False,
                     plan_dir=str(plan_dir_arg),

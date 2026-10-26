@@ -225,10 +225,10 @@ def acknowledge_external_changes(
                 ok=True, accepted=True, **proposal, checkpoints=progress["checkpoints"]
             )
         except (RecoveryError, OSError) as error:
-            return dict(
-                ok=False,
-                accepted=False,
-                error=str(error),
+            return recovery_failure(
+                "acknowledge-external-changes",
+                error,
+                reason=RECOVERY_REASON_INTERRUPTED,
                 checkpoints=progress["checkpoints"],
                 resume_argv=resume,
             )
@@ -258,9 +258,8 @@ def acknowledge_external_changes_from_args(args: argparse.Namespace) -> int:
         KeyError,
         TypeError,
     ) as error:
-        result = dict(ok=False, accepted=False, error=str(error))
-    print(json.dumps(result, indent=2))
-    return 0 if result["ok"] else 1
+        result = recovery_failure("acknowledge-external-changes", error)
+    return print_recovery_result("acknowledge-external-changes", result)
 
 
 def recovery_diagnostics(

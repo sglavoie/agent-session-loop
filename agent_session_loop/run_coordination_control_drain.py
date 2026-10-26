@@ -233,16 +233,26 @@ def drain_external_control_queue(
                 finalization=finalization,
                 guard_controller=guard_controller,
             )
-    except BaseException:
+    except BaseException as error:
         # The queue was truncated before anything was applied, so the commands
         # this drain never reached would otherwise be lost although their
         # producers were told they were queued. The one that raised is not put
         # back: how far it got is unknown, and the error surfaces regardless.
-        if result.queue_path is not None:
-            with contextlib.suppress(OSError):
+        # A requeue that fails must not mask that error, but the dropped
+        # commands are named rather than lost silently.
+        if result.queue_path is not None and pending:
+            try:
                 control_queue.requeue_lines(
                     result.queue_path, [command.raw for command in pending]
                 )
+            except OSError as requeue_error:
+                dropped = ", ".join(command.id for command in pending)
+                message = (
+                    f"asl: could not requeue {len(pending)} unapplied control "
+                    f"command(s) ({dropped}) to {result.queue_path}: {requeue_error}"
+                )
+                print(message, file=sys.stderr, flush=True)
+                error.add_note(message)
         raise
     return result
 

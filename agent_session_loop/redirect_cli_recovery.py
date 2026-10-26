@@ -169,6 +169,18 @@ def control_resolve_redirect_from_args(args: argparse.Namespace) -> int:
 
     command = "control-resolve-redirect"
     label = "control resolve-redirect"
+    if args.outcome not in RESOLUTION_OUTCOMES:
+        cli_common.print_error(
+            args,
+            command_name=command,
+            text_label=label,
+            reason=ERROR_INVALID_OUTCOME,
+            error=(
+                f"--outcome must be one of {', '.join(RESOLUTION_OUTCOMES)}; "
+                f"got {args.outcome!r}"
+            ),
+        )
+        return EXIT_REFUSED
     context = cli_common.resolve_plan_context(
         args, command_name=command, text_label=label
     )

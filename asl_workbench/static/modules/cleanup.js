@@ -144,7 +144,7 @@ export async function selectCandidates() {
       params.set("offset", String(offset));
       const page = await apiRequest("/api/queue?" + params.toString());
       if (!page || page.ok !== true || !Array.isArray(page.plans) ||
-          page.plans.length === 0 || page.catalog_revision !== revision ||
+          page.plans.length === 0 || (page.catalog_revision || null) !== revision ||
           page.catalog_matched !== matched) {
         throw new Error("the catalog changed while candidates were loading; select again");
       }

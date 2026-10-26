@@ -336,7 +336,7 @@ and `rendered_prompt` is the same resolver prompt `asl questions` would emit
 the same fields under `ok: true` (`session_id`, `next_pending_id`,
 `last_message`, `rendered_prompt`, `state_path`); failures use stable
 `reason` strings (`no-paused-run`, `missing-question-context`,
-`malformed-plan`). The reply turn itself is identifiable from
+`plan-not-found`, `malformed-plan`). The reply turn itself is identifiable from
 `turns[*].prompt_kind` (`"session"` for plain session prompts,
 `"reply"` for the one-shot resume); reply turns also carry a `reply_source`
 summary (`run_id`, `session_id`, `turn_index`, `last_message_path`,

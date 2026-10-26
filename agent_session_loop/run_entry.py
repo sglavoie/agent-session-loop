@@ -4,10 +4,10 @@ Everything else in this package runs *inside* a run. This boundary owns the
 outside of it — the stretch between the CLI handing over a parsed namespace and
 the loop taking the plan's lock, plus the single line that returns its exit
 code. It is the package's public entry: ``cli.py`` reaches it by the string
-``handler_ref="runner:run_from_args"``, and ``workbench_launch.py``,
-``maintenance.py`` and ``skills/asl/scripts/asl_autopilot.py`` call the runner's
-delegating shim by name, so the name and the signature are a contract, not an
-implementation detail.
+``handler_ref="runner:run_from_args"``, and ``workbench_launch.py`` and
+``skills/asl/scripts/asl_autopilot.py`` start an ``asl run`` child process that
+arrives through that same string, so the name and the signature are a contract,
+not an implementation detail.
 
 Two halves, in three modules.
 
@@ -209,11 +209,14 @@ def run_from_args(
     try:
         initial_snapshot = plans_snapshot.inspect_plan(args.plan_dir)
     except plans_errors.PlanError as error:
+        # A plan directory that is not there is an input error, not a pause:
+        # nothing ran, and there is no plan a reply or a resume could reach.
+        missing = isinstance(error, plans_errors.PlanNotFoundError)
         payload = run_outcome._error_payload(
             args,
-            reason="malformed-plan",
+            reason=plans_errors.plan_error_reason(error, "malformed-plan"),
             message=str(error),
-            paused=True,
+            paused=not missing,
             cwd=cwd,
         )
         run_outcome._emit_run_payload(args, payload)

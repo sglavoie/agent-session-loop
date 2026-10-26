@@ -157,7 +157,7 @@ class PortableControlRulesTests(unittest.TestCase):
                 None, default=1.0, maximum=30.0, label="wait_seconds"
             ),
         )
-        for raw in (True, "5", -1.0, 31.0):
+        for raw in (True, "5", -1.0, 31.0, float("nan"), float("inf")):
             with (
                 self.subTest(raw=raw),
                 self.assertRaises(controls.ControlRequestError),

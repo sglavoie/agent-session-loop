@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from asl_workbench.store_types import MAX_READ_LIMIT
+
 from .support_workbench_http_base import (
     CAPABILITY_OPERATION,
     COMMAND_REDEEM_PATH,
@@ -35,6 +37,7 @@ from .support_workbench_http_base import (
     unittest,
     workbench_service,
 )
+from .support_workbench_store import catalog_entry, catalog_payload, envelope
 
 
 class RemoteProviderTests(unittest.TestCase):
@@ -120,6 +123,56 @@ class RemoteProviderTests(unittest.TestCase):
         response = self.remote_app().handle(build("GET", "/api/plan?plan_key=absent"))
         self.assertEqual(response.status, 404)
         self.assertEqual(document(response)["reason"], "not-found")
+
+    def seed_catalog_past_the_read_limit(self) -> int:
+        """More plans than one read can hold, the quietest sorting last."""
+        entries = [
+            catalog_entry(
+                f"busy{index:06d}",
+                primary_state="running",
+                urgency_rank=10,
+            )
+            for index in range(MAX_READ_LIMIT)
+        ]
+        entries.append(
+            catalog_entry(
+                "zzz-quiet",
+                primary_state="complete",
+                recommended_action="view",
+                urgency_rank=90,
+                urgency_group="complete",
+            )
+        )
+        self.store.ingest_catalog(
+            envelope(
+                "catalog_page",
+                catalog_payload(
+                    observed_at=NOW - 10,
+                    generation="gen-large",
+                    entries=entries,
+                ),
+            ),
+            received_at=NOW - 10,
+        )
+        return len(entries)
+
+    def test_a_plan_past_the_read_limit_is_still_found(self) -> None:
+        self.seed_catalog_past_the_read_limit()
+        response = self.remote_app().handle(
+            build("GET", "/api/plan?plan_key=zzz-quiet")
+        )
+        self.assertEqual(response.status, 200, document(response))
+        self.assertEqual(document(response)["plan"]["plan_key"], "zzz-quiet")
+
+    def test_the_summary_histogram_counts_every_plan(self) -> None:
+        total = self.seed_catalog_past_the_read_limit()
+        payload = document(self.remote_app().handle(build("GET", "/api/summary")))
+        self.assertEqual(payload["counts"]["plans"], total)
+        self.assertEqual(
+            payload["counts"]["by_state"],
+            {"running": MAX_READ_LIMIT, "complete": 1},
+        )
+        self.assertEqual(sum(payload["counts"]["by_state"].values()), total)
 
     def test_a_path_is_refused_rather_than_guessed_at(self) -> None:
         response = self.remote_app().handle(
@@ -286,6 +339,26 @@ class RemoteProviderTests(unittest.TestCase):
         )
         self.assertEqual(response.status, 400)
         self.assertIn("run_key", document(response)["error"])
+        self.assertEqual(self.mutations.handed, [])
+
+    def test_a_non_finite_number_is_not_json(self) -> None:
+        for constant in (b"NaN", b"Infinity", b"-Infinity"):
+            with self.subTest(constant=constant):
+                response = self.remote_app().handle(
+                    build(
+                        "POST",
+                        "/api/control/stop-after-current",
+                        headers=self.signed(),
+                        body=(
+                            b'{"operation_id": "op-0", "plan_key": "plan-abc",'
+                            b' "run_key": "run-1", "wait_seconds": ' + constant + b"}"
+                        ),
+                    )
+                )
+                self.assertEqual(response.status, 400)
+                payload = document(response)
+                self.assertEqual(payload["reason"], "invalid-request")
+                self.assertIn("valid JSON", payload["error"])
         self.assertEqual(self.mutations.handed, [])
 
     def test_a_mutation_is_journalled_admitted_and_handed_down(self) -> None:

@@ -4,14 +4,19 @@ Split from tests/test_asl_control.py."""
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_session_loop import (
     control_queue,
+    control_queue_drain,
+    durability,
 )
 from tests.support import (
     read_jsonl,
@@ -509,6 +514,68 @@ class ControlQueueTests(unittest.TestCase):
         result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual(sorted(ids), sorted(cmd.id for cmd in result.accepted))
         self.assertEqual((), result.rejected)
+
+    def test_requeue_puts_lines_ahead_of_newer_appends(self) -> None:
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+            command_id="unreached",
+        )
+        drained = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+            command_id="newer",
+        )
+
+        control_queue.requeue_lines(
+            self.queue_path(), [command.raw for command in drained.accepted]
+        )
+
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual(("unreached", "newer"), result.consumed_ids)
+
+    def test_a_failed_requeue_restores_the_commands_appended_since(self) -> None:
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+            command_id="newer",
+        )
+        before = self.queue_path().read_bytes()
+        real_write = os.write
+        calls = 0
+
+        def fail_first(fd: int, data: bytes) -> int:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_write(fd, data)
+
+        with (
+            mock.patch.object(control_queue_drain.os, "write", side_effect=fail_first),
+            self.assertRaises(OSError) as raised,
+        ):
+            control_queue.requeue_lines(self.queue_path(), ['{"id": "unreached"}'])
+
+        # The rewrite failed after the truncate; what producers had appended
+        # must still be queued rather than lost with the requeued lines.
+        self.assertEqual(errno.ENOSPC, raised.exception.errno)
+        self.assertEqual(before, self.queue_path().read_bytes())
+
+    def test_queue_writes_use_the_full_device_barrier(self) -> None:
+        with mock.patch.object(durability, "fullsync") as fullsync:
+            control_queue.append_command(
+                self.plan_dir,
+                control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+                state_dir=self.state_dir,
+                command_id="first",
+            )
+            control_queue.requeue_lines(self.queue_path(), ['{"id": "second"}'])
+        self.assertEqual(2, fullsync.call_count)
 
 
 if __name__ == "__main__":

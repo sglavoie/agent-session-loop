@@ -95,7 +95,10 @@ def _register_plan_dir_from_args(args: Any) -> int:
     try:
         result = register_repositories(plan_dir, cwd=args.cwd)
     except plans_errors.PlanError as error:
-        return _emit_error(REGISTER_REASON_PLAN_STRUCTURE, str(error))
+        return _emit_error(
+            plans_errors.plan_error_reason(error, REGISTER_REASON_PLAN_STRUCTURE),
+            str(error),
+        )
 
     payload = result_payload(result)
     if result.status == "refused":

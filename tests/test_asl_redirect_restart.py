@@ -244,6 +244,35 @@ class EvidenceTests(unittest.TestCase):
                 ["control", "resolve-redirect", "/tmp/plan", "--operation-id", "op"]
             )
 
+    def test_resolution_cli_reports_an_unknown_outcome_in_the_json_envelope(self):
+        import contextlib
+        import io
+
+        from agent_session_loop import redirect_cli
+
+        args = cli.build_parser().parse_args(
+            [
+                "control",
+                "resolve-redirect",
+                "/nonexistent/plan",
+                "--operation-id",
+                "op",
+                "--outcome",
+                "maybe",
+                "--reason",
+                "unsure",
+                "--json",
+            ]
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = redirect_cli.control_resolve_redirect_from_args(args)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(1, code)
+        self.assertEqual("control-resolve-redirect", payload["command"])
+        self.assertEqual("invalid-outcome", payload["reason"])
+        self.assertIn("submitted, not-submitted", payload["error"])
+
 
 class ResolutionTests(unittest.TestCase):
     def setUp(self):

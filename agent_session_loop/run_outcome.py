@@ -405,6 +405,9 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
                     )
         else:
             print(f"Run failed: {payload['reason']}", file=sys.stderr)
+            error = payload.get("error")
+            if error:
+                print(f"Error: {error}", file=sys.stderr)
         if payload["turns"]:
             turn = payload["turns"][-1]
             print(f"Stdout: {turn['stdout_path']}", file=sys.stderr)

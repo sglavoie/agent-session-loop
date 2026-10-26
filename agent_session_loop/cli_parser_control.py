@@ -38,8 +38,7 @@ def _add_control_commands(
     # Unlike `workbench`, the bare `asl control` form has no sensible default
     # action, so a subcommand is required.
     control_sub = control_parser.add_subparsers(
-        dest="control_command",
-        required=True,
+        dest="control_command", required=True, metavar="COMMAND"
     )
 
     control_stop_parser = control_sub.add_parser(
@@ -152,8 +151,7 @@ def _add_control_commands(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     control_guard_sub = control_guard_parser.add_subparsers(
-        dest="control_guard_command",
-        required=True,
+        dest="control_guard_command", required=True, metavar="COMMAND"
     )
 
     control_guard_add_parser = control_guard_sub.add_parser(
@@ -321,8 +319,11 @@ def _add_control_commands(
     )
     resolve_redirect_parser.add_argument(
         "--outcome",
-        choices=("submitted", "not-submitted"),
         required=True,
+        # Validated by the handler, like `inbox resolve --action`, so a bad
+        # value keeps its JSON ``reason`` under --json instead of argparse's
+        # plain-text exit 2.
+        metavar="submitted|not-submitted",
         help="Whether the correction reached the worker",
     )
     resolve_redirect_parser.add_argument(

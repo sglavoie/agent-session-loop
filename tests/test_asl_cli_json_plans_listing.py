@@ -392,6 +392,28 @@ class JsonPlansListingCliTests(JsonCliHelpers, unittest.TestCase):
                     ),
                 )
 
+    def test_plans_stale_days_refuses_non_finite_values_in_json(self) -> None:
+        """NaN slipped past ``< 0`` and infinity overflowed ``timedelta``."""
+        with tempfile.TemporaryDirectory() as tmp:
+            for value in ("nan", "inf", "-inf", "-1"):
+                with self.subTest(value=value):
+                    code, stdout, stderr = self._run_plans(
+                        "--state-dir", tmp, f"--stale-days={value}", "--json"
+                    )
+                    self.assertEqual(1, code, stderr)
+                    payload = json.loads(stdout)
+                    self.assertEqual("invalid-argument", payload["reason"])
+                    self.assertIn("finite, non-negative number", payload["error"])
+
+    def test_plans_stale_days_beyond_the_calendar_keeps_nothing(self) -> None:
+        self.assertFalse(
+            self._stale_days_verdict(
+                checked_at="2020-01-01T00:00:00+00:00",
+                now=datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
+                stale_days="1e12",
+            )
+        )
+
     def test_plans_stale_filter_defaults_to_the_wall_clock(self) -> None:
         """Omitting the injected clock still filters against the real now."""
         with tempfile.TemporaryDirectory() as tmp:

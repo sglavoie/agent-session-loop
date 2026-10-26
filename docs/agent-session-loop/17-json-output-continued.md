@@ -123,6 +123,14 @@ that exists but cannot be inspected reports `reason: malformed-plan`, an unreada
 root reports `reason: state-error`, and a bare label matching more than one
 existing plan directory reports `reason: ambiguous-plan` with
 `details.state_root` and a sorted `details.candidates` list of canonical paths.
+The missing-directory case is the same on every plan-scoped command: `run`,
+`doctor`, `questions`, `review-verdict`, `contract-check`, `baseline`,
+`register-repositories`, `compact-state`, `gc`, `unlock`, `workbench pin`,
+`acknowledge-external-changes` and `accept-ref-updates` all report a `PLAN_DIR`
+that does not exist as `reason: plan-not-found` with `paused: false` (a `run`
+that never started is not a pause), while each keeps its own reason
+(`malformed-plan`, `plan-error`, `plan-structure`, ...) for a plan that exists
+but cannot be read.
 Error payloads omit `plan_dir`, reserving that key for canonical paths in
 successful payloads. In text mode an ambiguous label prints a concise stderr
 error instructing the operator to pass a full plan directory path. `doctor

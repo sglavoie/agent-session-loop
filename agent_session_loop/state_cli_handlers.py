@@ -42,7 +42,7 @@ def _unlock_payload(
 
 def _unlock_error_reason(error: Exception) -> str:
     if isinstance(error, plans_errors.PlanError):
-        return "malformed-plan"
+        return plans_errors.plan_error_reason(error, "malformed-plan")
     if isinstance(error, OSError):
         return "os-error"
     if "active lock" in str(error).lower():

@@ -6,6 +6,9 @@ each discovered harness skill directory, all as absolute symlinks into this
 checkout. A skill is a directory with a ``SKILL.md``; the support directories
 named in ``SUPPORT_DIRS`` carry none and are linked the same way, so a skill's
 relative read of ``../references/<file>`` resolves in the installed layout too.
+A directory holding nothing but cache residue (``__pycache__``, ``*.pyc``,
+``.DS_Store``) is what removing a skill from git leaves behind; it is skipped
+with a note, and an installed link to it is pruned like any other stale link.
 
 Harness roots are discovered, never invented: ``~/.claude``, ``~/.codex`` and
 ``~/.copilot`` are managed only when the directory already exists, and further
@@ -55,6 +58,12 @@ WRAPPER_DIR = ".local/bin"
 #: What every conflict tells the operator to do about it.
 RESOLUTION = "move it aside or delete it, then re-run"
 
+#: Entries git ignores and nothing installs: what keeps a removed skill's
+#: directory alive. A directory holding only these is residue.
+LEFTOVER_DIR_NAMES = frozenset({"__pycache__"})
+LEFTOVER_FILE_NAMES = frozenset({".DS_Store"})
+LEFTOVER_FILE_SUFFIXES = (".pyc", ".pyo")
+
 
 class InstallError(Exception):
     """The install cannot proceed; ``changes`` lists what it already did."""
@@ -64,17 +73,52 @@ class InstallError(Exception):
         self.changes = list(changes)
 
 
+def is_leftover(directory: Path) -> bool:
+    """Whether ``directory`` holds nothing but cache residue (or nothing at all).
+
+    A plain filesystem walk rather than a git query, so it behaves the same in
+    a checkout, an export, or a test fixture.
+    """
+    for parent, dirs, files in os.walk(directory):
+        if os.path.basename(parent) in LEFTOVER_DIR_NAMES:
+            continue
+        for name in files:
+            if name not in LEFTOVER_FILE_NAMES and not name.endswith(
+                LEFTOVER_FILE_SUFFIXES
+            ):
+                return False
+        for name in dirs:
+            if os.path.islink(os.path.join(parent, name)):
+                return False
+    return True
+
+
+def leftover_skill_dirs(repo_root: Path) -> list[Path]:
+    """Directories under ``skills/`` without a ``SKILL.md`` that are residue."""
+    return [
+        path
+        for path in sorted((repo_root / "skills").iterdir())
+        if path.is_dir()
+        and not path.is_symlink()
+        and not (path / "SKILL.md").is_file()
+        and path.name not in SUPPORT_DIRS
+        and is_leftover(path)
+    ]
+
+
 def skill_sources(repo_root: Path) -> list[Path]:
+    leftovers = set(leftover_skill_dirs(repo_root))
     sources = []
     for path in sorted((repo_root / "skills").iterdir()):
-        if not path.is_dir():
+        if not path.is_dir() or path in leftovers:
             continue
         if not (path / "SKILL.md").is_file() and path.name not in SUPPORT_DIRS:
             raise InstallError(
-                f"missing SKILL.md in {path.relative_to(repo_root)}; add one, or "
+                f"missing SKILL.md in {path.relative_to(repo_root)}; add one, "
                 "add the directory to SUPPORT_DIRS in "
                 "agent_session_loop/install_verify_common.py if it is shared "
-                "support content"
+                "support content, or delete it if it is left over from a removed "
+                "skill"
             )
         sources.append(path)
     return sources
@@ -147,11 +191,15 @@ def prune(install_root: Path, repo_root: Path, *, dry_run: bool) -> list[str]:
     target is spelled: a relative (stow-style) target is read against the
     link's own directory, and both sides are resolved, so a doubled ``/`` or
     an aliased spelling of the checkout (``/tmp`` for ``/private/tmp``) is
-    still recognized as stale.
+    still recognized as stale. A source that survives only as cache residue
+    (see ``is_leftover``) counts as gone.
     """
     if not install_root.is_dir():
         return []
     skills_root = Path(os.path.realpath(repo_root / "skills"))
+    leftovers = {
+        Path(os.path.realpath(path)) for path in leftover_skill_dirs(repo_root)
+    }
     action = "would remove stale link" if dry_run else "removed stale link"
     removed = []
     for entry in sorted(install_root.iterdir()):
@@ -159,7 +207,7 @@ def prune(install_root: Path, repo_root: Path, *, dry_run: bool) -> list[str]:
             continue
         target = Path(os.path.realpath(entry.parent / os.readlink(entry)))
         inside = target != skills_root and target.is_relative_to(skills_root)
-        if inside and not target.is_dir():
+        if inside and (not target.is_dir() or target in leftovers):
             if not dry_run:
                 entry.unlink()
             removed.append(f"{action}: {entry}")
@@ -243,6 +291,12 @@ def main(argv: list[str] | None = None) -> int:
     # Flushed, because the warnings below go to stderr and an interleaved
     # capture (`2>&1 | less`, a CI log) must still show the note first.
     print(discovery.note(), flush=True)
+    for leftover in leftover_skill_dirs(REPO_ROOT):
+        print(
+            f"install: skipped {leftover.relative_to(REPO_ROOT)}: no SKILL.md and "
+            "only cache residue left (a removed skill?); delete it to silence this",
+            file=sys.stderr,
+        )
     if not discovery.found:
         print(
             "install: no harness root exists; skills are linked only into "
@@ -279,7 +333,29 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skills_only:
         sys.stdout.flush()
         _warn_if_wrapper_dir_off_path(args.home / WRAPPER_DIR)
+    _note_missing_context_files(args.home, discovery.found)
     return 0
+
+
+def missing_context_files(home: Path, roots: Iterable[HarnessRoot]) -> list[Path]:
+    """Context files of discovered roots that do not exist yet."""
+    paths = (home / root.context_file for root in roots if root.context_file)
+    return [path for path in paths if not path.is_file()]
+
+
+def _note_missing_context_files(home: Path, roots: Iterable[HarnessRoot]) -> None:
+    """Say which context files the startup card has yet to be rendered into.
+
+    This script links; it never renders the card. ``just install`` and
+    ``just sync-skills`` run the renderer after it and create these files.
+    """
+    for path in missing_context_files(home, roots):
+        print(
+            f"install: {path} does not exist yet; this script does not render "
+            "the ASL startup card, so run `just sync-skills` (or `just install`) "
+            "to create it",
+            file=sys.stderr,
+        )
 
 
 def _warn_if_wrapper_dir_off_path(wrapper_dir: Path) -> None:

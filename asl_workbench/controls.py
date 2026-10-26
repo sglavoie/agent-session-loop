@@ -30,6 +30,7 @@ control it cannot itself carry out.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -317,7 +318,9 @@ def bounded_wait_seconds(
         return default
     if isinstance(raw, bool) or not isinstance(raw, int | float):
         raise ControlRequestError(REASON_INVALID_REQUEST, f"{label} must be a number")
-    if raw < 0 or raw > maximum:
+    # ``NaN`` compares false against both bounds, so it is refused by name
+    # rather than slipping between them as an unbounded wait.
+    if (isinstance(raw, float) and not math.isfinite(raw)) or raw < 0 or raw > maximum:
         raise ControlRequestError(
             REASON_INVALID_REQUEST,
             f"{label} is outside the permitted range",

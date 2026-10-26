@@ -379,6 +379,37 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         )
         self.assertEqual(("third",), result.consumed_ids)
 
+    def test_a_failed_requeue_is_reported_without_masking_the_error(self) -> None:
+        for command_id in ("first", "second"):
+            control_queue.append_command(
+                self.plan_dir,
+                control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+                state_dir=self.state_dir,
+                command_id=command_id,
+            )
+
+        with (
+            mock.patch.object(
+                run_coordination_control,
+                "record_control_command_observed",
+                side_effect=RuntimeError("record failed"),
+            ),
+            mock.patch.object(
+                control_queue, "requeue_lines", side_effect=OSError("disk full")
+            ),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            self.drain(run_control.RunControlState(current_harness="codex"))
+
+        # The record failure still surfaces; the command it never reached is
+        # named on stderr and on the error instead of vanishing silently.
+        self.assertIn("could not requeue 1 unapplied control", stderr.getvalue())
+        self.assertIn("second", stderr.getvalue())
+        self.assertTrue(
+            any("could not requeue" in note for note in raised.exception.__notes__)
+        )
+
     def test_rejected_lines_are_reported_on_stderr(self) -> None:
         queue_path = control_queue.queue_path_for_plan(self.plan_dir, self.state_dir)
         queue_path.parent.mkdir(parents=True, exist_ok=True)

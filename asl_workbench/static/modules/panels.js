@@ -81,8 +81,23 @@ export function renderActive(payload) {
 export function setField(root, name, value) {
   const el = root.querySelector('[data-field="' + name + '"]');
   if (!el) return;
-  el.textContent =
-    value === null || value === undefined || value === "" ? "-" : String(value);
+  setText(
+    el,
+    value === null || value === undefined || value === "" ? "-" : String(value)
+  );
+}
+
+/**
+ * Write text only when it differs from what is already there.
+ *
+ * A poll redraws the same facts every few seconds. Rewriting an unchanged
+ * node is not free: it replaces the text node, drops a selection the operator
+ * was making, and is a mutation assistive technology may announce.
+ */
+export function setText(el, text) {
+  if (!el) return;
+  const next = text === null || text === undefined ? "" : String(text);
+  if (el.textContent !== next) el.textContent = next;
 }
 
 export function renderVerification(payload) {

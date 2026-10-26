@@ -101,6 +101,29 @@ class InstalledStartupContextTests(unittest.TestCase):
                 payload["failures"],
             )
 
+    def test_missing_copilot_context_file_is_named_missing_with_remedy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home, fake_bin = self.build_home(temp_dir)
+            missing = home / ".copilot/copilot-instructions.md"
+            missing.unlink()
+
+            payload = self.verify(home, fake_bin)
+
+            self.assertFalse(payload["ok"])
+            detail = next(
+                failure["detail"]
+                for failure in payload["failures"]
+                if failure["name"] == "startup-context"
+            )
+            self.assertTrue(
+                detail.endswith(
+                    ".copilot/copilot-instructions.md is missing; run "
+                    "`just sync-skills` to render the startup card"
+                ),
+                detail,
+            )
+            self.assertNotIn("Errno", detail)
+
     def test_stale_context_marker_fails_verification(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             home, fake_bin = self.build_home(temp_dir)

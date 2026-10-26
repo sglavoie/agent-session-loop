@@ -161,6 +161,30 @@ class WorkbenchServeCliTests(unittest.TestCase):
         self.assertEqual("0.0.0.0", args.host)
         self.assertEqual(5678, args.port)
 
+    def test_serve_reports_an_out_of_range_port_as_bind_failed(self) -> None:
+        """``socket.bind`` raises OverflowError, not OSError, past 65535.
+
+        The parser refuses such a port; a direct caller still gets the JSON
+        envelope rather than a traceback.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                host="127.0.0.1",
+                port=99999,
+                state_dir=tmp,
+                plan_root=[],
+                open=False,
+                json=True,
+            )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                code = workbench_server.workbench_serve_from_args(
+                    args, serve_forever=lambda _server: None
+                )
+        self.assertEqual(1, code)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual("bind-failed", payload["reason"])
+
     def test_parser_registers_workbench_pin_subcommand(self) -> None:
         parser = cli.build_parser()
         args = parser.parse_args(
@@ -426,7 +450,7 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
                 self.assertEqual(0, rc)
             payload = json.loads(stdout.getvalue())
             self.assertTrue(payload["ok"])
-            self.assertEqual("workbench", payload["command"])
+            self.assertEqual("workbench-registry", payload["command"])
             self.assertEqual("ok", payload["reason"])
             self.assertEqual(1, len(payload["registry"]["pins"]))
             self.assertEqual(str(plan_dir), payload["registry"]["pins"][0]["plan_dir"])

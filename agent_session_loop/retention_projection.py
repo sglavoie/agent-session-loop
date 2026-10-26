@@ -30,6 +30,7 @@ a deliberate ``asl unlock``.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -288,6 +289,27 @@ def pinned_run_ids(
     return assurance_report.open_issue_run_ids(state_dir)
 
 
+def _require_max_age_days(max_age_days: float) -> None:
+    # NaN compares false against everything, so a bare ``< 0`` lets it through
+    # to ``timedelta``; infinity overflows it. Both are refused here.
+    if not math.isfinite(max_age_days) or max_age_days < 0:
+        raise ValueError(
+            f"max_age_days must be a finite, non-negative number; got {max_age_days}"
+        )
+
+
+def _age_cutoff(now: datetime, max_age_days: float) -> datetime:
+    """The instant a run must have finished by; the earliest one representable.
+
+    An age past what ``datetime`` can subtract reclaims nothing, which is what
+    the earliest representable instant means here, rather than an overflow.
+    """
+    try:
+        return now - timedelta(days=max_age_days)
+    except OverflowError:
+        return datetime.min.replace(tzinfo=UTC)
+
+
 def _plan_report(
     *,
     plan_dir: Path,
@@ -298,7 +320,7 @@ def _plan_report(
     live_runs: frozenset[tuple[str, str]],
     pinned: assurance_report.OpenIssueRuns,
 ) -> PlanRetention:
-    cutoff = now - timedelta(days=max_age_days)
+    cutoff = _age_cutoff(now, max_age_days)
     locked = lock_blocker(lock_info)
     entries: list[tuple[Path, datetime | None, tuple[str, str]]] = []
     for run_dir in session_overview._iter_run_dirs(plan_state):
@@ -371,8 +393,7 @@ def plan_retention(
     its run IDs, so a caller cannot hand over the pins without the fact that
     reading them succeeded.
     """
-    if max_age_days < 0:
-        raise ValueError("max_age_days must be non-negative")
+    _require_max_age_days(max_age_days)
     canonical_plan_dir = plans_files.canonicalize_path(plan_dir)
     return _plan_report(
         plan_dir=canonical_plan_dir,
@@ -416,8 +437,7 @@ def corpus_retention(
     rather than judged, since neither their lock nor their identity can be
     trusted.
     """
-    if max_age_days < 0:
-        raise ValueError("max_age_days must be non-negative")
+    _require_max_age_days(max_age_days)
     root = state.state_root(state_dir)
     moment = now if now is not None else datetime.now(UTC)
     live = live_run_keys(root)
@@ -444,7 +464,7 @@ def corpus_retention(
     return CorpusRetention(
         state_root=str(root),
         max_age_days=max_age_days,
-        cutoff_at=(moment - timedelta(days=max_age_days)).isoformat(),
+        cutoff_at=_age_cutoff(moment, max_age_days).isoformat(),
         plans=tuple(reports),
         unresolved_state_dirs=tuple(sorted(unresolved)),
     )

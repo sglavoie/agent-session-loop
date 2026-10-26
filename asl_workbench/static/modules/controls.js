@@ -14,7 +14,7 @@
  * drawn from `body.ok` in exactly the case where `ok` does not mean done.
  */
 
-import { OUTCOME_RESULT } from "./api.js";
+import { OUTCOME_PENDING, OUTCOME_RESULT } from "./api.js";
 import {
   ABORT_DEFAULT_GRACE_SECONDS,
   ABORT_MAX_GRACE_SECONDS,
@@ -59,6 +59,12 @@ export function wireControls() {
   const abort = document.getElementById("wb-control-abort");
   if (abort) {
     abort.addEventListener("click", handleAbortClick);
+  }
+  const harnessSelect = document.getElementById("wb-control-harness");
+  if (harnessSelect) {
+    harnessSelect.addEventListener("change", () =>
+      harnessSelect.setAttribute("data-dirty", "true")
+    );
   }
   const harnessApply = document.getElementById("wb-control-harness-apply");
   if (harnessApply) {
@@ -208,13 +214,22 @@ export async function handleHarnessSelectClick() {
     return;
   }
   showControlsFeedback("", "");
-  await runMutation({
+  const answer = await runMutation({
     action: "harness",
     path: "/api/control/select-harness",
     body: planBody({ harness: harness }),
     subject: "harness " + harness,
     feedback: showControlsFeedback,
   });
+  // Carried out or durably queued, so the pick is no longer the operator's to
+  // keep: the picker goes back to following the plan. A refusal or an
+  // unreachable service keeps the pick for a retry.
+  if (
+    answer &&
+    (answer.outcome === OUTCOME_RESULT || answer.outcome === OUTCOME_PENDING)
+  ) {
+    select.removeAttribute("data-dirty");
+  }
 }
 
 export async function handleUnlockClick() {

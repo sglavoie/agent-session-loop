@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 import weakref
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, overload
 
@@ -29,6 +30,90 @@ _WORKBENCH_SERVE_CHILD_DESTS = {
 #: The namespace type ``parse_args`` fills and returns, matching the overloads
 #: ``argparse.ArgumentParser.parse_args`` declares.
 _NamespaceT = TypeVar("_NamespaceT")
+
+
+#: The wording every numeric flag uses to refuse a value, shared with the
+#: handler-side checks (``assurance closeout --rework-minutes``) so a refusal
+#: reads the same whether argparse or the handler reports it.
+NON_NEGATIVE_NUMBER = "must be a finite, non-negative number"
+POSITIVE_NUMBER = "must be a finite, positive number"
+NON_NEGATIVE_INTEGER = "must be a non-negative integer"
+POSITIVE_INTEGER = "must be a positive integer"
+PORT_NUMBER = "must be a TCP port number from 0 to 65535"
+
+_MAX_PORT = 65535
+
+
+def _parse_float(text: str, requirement: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{requirement}; got {text!r}") from None
+    # ``float`` accepts "nan" and "inf"; neither is a usable duration, count,
+    # or age, and NaN would reach JSON output as a bare, invalid ``NaN``.
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError(f"{requirement}; got {text!r}")
+    return value
+
+
+def _parse_int(text: str, requirement: str) -> int:
+    try:
+        return int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{requirement}; got {text!r}") from None
+
+
+def non_negative_float(text: str) -> float:
+    """``type=`` for a finite number of seconds, days or minutes, zero allowed."""
+    value = _parse_float(text, NON_NEGATIVE_NUMBER)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"{NON_NEGATIVE_NUMBER}; got {text!r}")
+    return value
+
+
+def positive_float(text: str) -> float:
+    """``type=`` for a finite number that must be strictly above zero."""
+    value = _parse_float(text, POSITIVE_NUMBER)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"{POSITIVE_NUMBER}; got {text!r}")
+    return value
+
+
+def non_negative_int(text: str) -> int:
+    """``type=`` for a count or index where zero is meaningful."""
+    value = _parse_int(text, NON_NEGATIVE_INTEGER)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"{NON_NEGATIVE_INTEGER}; got {text!r}")
+    return value
+
+
+def positive_int(text: str) -> int:
+    """``type=`` for a count, limit or timeout that must be at least one."""
+    value = _parse_int(text, POSITIVE_INTEGER)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"{POSITIVE_INTEGER}; got {text!r}")
+    return value
+
+
+def port_number(text: str) -> int:
+    """``type=`` for a TCP port; 0 asks the kernel for an ephemeral one."""
+    value = _parse_int(text, PORT_NUMBER)
+    if not 0 <= value <= _MAX_PORT:
+        raise argparse.ArgumentTypeError(f"{PORT_NUMBER}; got {text!r}")
+    return value
+
+
+def int_in_range(low: int, high: int) -> Callable[[str], int]:
+    """``type=`` for an integer in ``low..high`` inclusive, such as an hour."""
+    requirement = f"must be an integer from {low} to {high}"
+
+    def parse(text: str) -> int:
+        value = _parse_int(text, requirement)
+        if not low <= value <= high:
+            raise argparse.ArgumentTypeError(f"{requirement}; got {text!r}")
+        return value
+
+    return parse
 
 
 def _workbench_dest(name: str, *, child_parser: bool) -> str:
@@ -281,7 +366,7 @@ def _add_workbench_serve_args(
     parser.add_argument(
         "--port",
         dest=_workbench_dest("port", child_parser=child_parser),
-        type=int,
+        type=port_number,
         default=_workbench_default(_WORKBENCH_DEFAULT_PORT, child_parser=child_parser),
         metavar="PORT",
         help=(

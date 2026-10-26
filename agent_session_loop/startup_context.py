@@ -75,6 +75,10 @@ REFERENCE_HARNESS = supervisor_guide.AUTO_HARNESS
 #: pure function of the guide model.
 RENDER_ENV: Mapping[str, str] = {}
 
+#: The command that creates a missing context file and refreshes a stale one.
+#: ``./install.py`` alone links skills but never renders the card.
+SYNC_REMEDY = "just sync-skills"
+
 
 @dataclass(frozen=True)
 class ContextTarget:
@@ -386,10 +390,13 @@ def _with_line_endings_of(path: Path, text: str) -> str:
     return text
 
 
-def _file_record(path: Path, root: Path, current: str, desired: str) -> dict[str, Any]:
+def _file_record(
+    path: Path, root: Path, current: str, desired: str, *, missing: bool = False
+) -> dict[str, Any]:
     return {
         "path": str(path.relative_to(root)),
         "stale": current != desired,
+        "missing": missing,
     }
 
 
@@ -415,21 +422,29 @@ def sync(
 
     for target in () if reference_only else context_targets(discovery.found):
         path = home_root / target.installed_path
-        current = path.read_text(encoding="utf-8") if path.is_file() else ""
+        exists = path.is_file()
+        current = path.read_text(encoding="utf-8") if exists else ""
         desired = apply_block(current, render_block(target.harness))
-        files.append(_file_record(path, home_root, current, desired))
+        files.append(
+            _file_record(path, home_root, current, desired, missing=not exists)
+        )
         if not check and current != desired:
             _replace_file(path, _with_line_endings_of(path, desired))
 
     reference = root / REFERENCE_PATH
-    current = reference.read_text(encoding="utf-8") if reference.is_file() else ""
+    exists = reference.is_file()
+    current = reference.read_text(encoding="utf-8") if exists else ""
     desired = render_reference()
-    files.append(_file_record(reference, root, current, desired))
+    files.append(_file_record(reference, root, current, desired, missing=not exists))
     if not check and current != desired:
         reference.parent.mkdir(parents=True, exist_ok=True)
         _replace_file(reference, desired)
 
+    # A missing file is also stale (its desired content differs from nothing),
+    # so ``stale`` keeps naming every file a sync would write; ``missing`` is
+    # the subset that does not exist yet and that a sync would create.
     stale = [record["path"] for record in files if record["stale"]]
+    missing = [record["path"] for record in files if record["missing"]]
     return {
         "ok": not (check and stale),
         "command": COMMAND_NAME,
@@ -438,6 +453,8 @@ def sync(
         "checked": check,
         "files": files,
         "stale": stale,
+        "missing": missing,
+        "remedy": SYNC_REMEDY,
         "written": [] if check else stale,
         "harness_roots": {**discovery.payload(), "note": discovery.note()},
     }
@@ -488,8 +505,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(payload["harness_roots"]["note"])
     if args.check:
         if payload["stale"]:
+            missing = set(payload["missing"])
             for path in payload["stale"]:
-                print(f"stale: {path}")
+                print(f"missing: {path}" if path in missing else f"stale: {path}")
+            print(f"run `{SYNC_REMEDY}` to render the startup card")
         else:
             print("startup context is up to date")
     else:

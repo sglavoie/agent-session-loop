@@ -35,7 +35,12 @@ def collect_metrics(
         raise ValueError("--since-days must be a positive integer")
     state_root = state.state_root(state_dir)
     now = now or datetime.now(UTC)
-    cutoff = now - timedelta(days=since_days)
+    try:
+        cutoff = now - timedelta(days=since_days)
+    except OverflowError:
+        raise ValueError(
+            f"--since-days {since_days} reaches back past the earliest date"
+        ) from None
 
     turns_total = 0
     turns_successful = 0

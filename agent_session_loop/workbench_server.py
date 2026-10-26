@@ -362,7 +362,9 @@ def workbench_serve_from_args(
             state_dir=args.state_dir,
             plan_roots=plan_roots,
         )
-    except OSError as error:
+    except (OSError, OverflowError) as error:
+        # ``socket.bind`` raises OverflowError, not OSError, for a port past
+        # 65535; the parser refuses one, but a direct caller can still pass it.
         if args.json:
             responses.print_json(
                 responses.error_payload(

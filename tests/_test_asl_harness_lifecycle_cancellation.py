@@ -341,3 +341,45 @@ class PromptSubmissionBoundaryTests(_TurnTestCase):
         # The turn is over and its carry has already been settled against what
         # the turn reported. A straggling transport thread may not reopen that.
         self.assertEqual([1], self.submitted)
+
+
+class PostHandshakeEscapeTests(_TurnTestCase):
+    """A failure between the handshake and the stream readers kills the turn."""
+
+    def test_an_interrupt_in_the_transport_callback_does_not_orphan_the_harness(
+        self,
+    ) -> None:
+        adapter = _LifecycleAdapter()
+        process = _FakeProcess()
+        transports: list[Any] = []
+
+        def interrupt(transport: Any) -> None:
+            transports.append(transport)
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_turn(adapter, process, on_transport=interrupt)
+
+        # The harness runs in a session of its own, so nothing else would ever
+        # stop it once the run gave up the plan lock.
+        self.assertEqual([process.pid], self.killed_groups)
+        self.assertTrue(process.killed)
+        self.assertFalse(process.wait_timed_out)
+        self.assertEqual(1, transports[0].shutdown_calls)
+
+    def test_a_stream_start_failure_does_not_orphan_the_harness(self) -> None:
+        adapter = _LifecycleAdapter()
+        process = _FakeProcess()
+
+        with (
+            mock.patch.object(
+                harness_execution.harness_streams,
+                "start_turn_streams",
+                side_effect=RuntimeError("can't start new thread"),
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            self.run_turn(adapter, process)
+
+        self.assertEqual([process.pid], self.killed_groups)
+        self.assertTrue(process.killed)

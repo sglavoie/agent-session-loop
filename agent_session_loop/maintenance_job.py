@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import plistlib
 import shutil
@@ -13,6 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from . import durability, state
+from .maintenance_models import (
+    COMMAND_INSTALL,
+    COMMAND_STATUS,
+    COMMAND_UNINSTALL,
+)
 from .maintenance_policy import (
     DEFAULT_HOUR,
     DEFAULT_MAX_RUNTIME_SECONDS,
@@ -153,7 +159,7 @@ class JobStatus:
     def to_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
-            "command": "maintenance status",
+            "command": COMMAND_STATUS,
             "label": self.label,
             "supported": self.supported,
             "plist_path": self.plist_path,
@@ -171,6 +177,25 @@ class JobStatus:
 
 def _platform_supported(platform: str) -> bool:
     return platform == "darwin"
+
+
+def _require_schedule(hour: int, minute: int, max_runtime_seconds: float) -> None:
+    """Refuse a schedule launchd would reject or silently misread.
+
+    The parser refuses these too; this is the same check for a direct caller,
+    made before anything is written so a bad value never reaches the plist.
+    """
+    if isinstance(hour, bool) or not isinstance(hour, int) or not 0 <= hour <= 23:
+        raise MaintenanceError(f"hour must be an integer from 0 to 23; got {hour!r}")
+    if isinstance(minute, bool) or not isinstance(minute, int) or not 0 <= minute <= 59:
+        raise MaintenanceError(
+            f"minute must be an integer from 0 to 59; got {minute!r}"
+        )
+    if not math.isfinite(max_runtime_seconds) or max_runtime_seconds <= 0:
+        raise MaintenanceError(
+            "max_runtime_seconds must be a finite, positive number; "
+            f"got {max_runtime_seconds!r}"
+        )
 
 
 def install_job(
@@ -192,6 +217,7 @@ def install_job(
             "launchd; run `asl maintenance run --apply` from this platform's own "
             "scheduler instead"
         )
+    _require_schedule(hour, minute, max_runtime_seconds)
     resolved = _resolve_executable(executable)
     document = render_plist(
         resolved,
@@ -220,7 +246,7 @@ def install_job(
             detail = f"launchctl bootstrap exited {code}"
     return {
         "ok": loaded or not bootstrap,
-        "command": "maintenance install",
+        "command": COMMAND_INSTALL,
         "label": JOB_LABEL,
         "plist_path": str(target),
         "executable": resolved,
@@ -270,7 +296,7 @@ def uninstall_job(
         error = str(os_error)
     return {
         "ok": not error or error == "no job definition was installed",
-        "command": "maintenance uninstall",
+        "command": COMMAND_UNINSTALL,
         "label": JOB_LABEL,
         "plist_path": str(target),
         "plist_removed": removed,

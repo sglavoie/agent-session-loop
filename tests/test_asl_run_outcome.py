@@ -285,6 +285,8 @@ class StderrOwnershipTests(unittest.TestCase):
             run_outcome._print_text_outcome(payload)
 
         self.assertIn("Run failed: invalid-input", err.getvalue())
+        # The reason alone does not say what to fix; the message does.
+        self.assertIn("Error: bad flag", err.getvalue())
         self.assertNotIn("Run failed", out.getvalue())
         self.assertIn(f"Plan: {payload['plan_dir']}", out.getvalue())
 

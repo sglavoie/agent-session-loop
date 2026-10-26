@@ -21,6 +21,13 @@ from .maintenance_policy import (
     _tree_bytes,
 )
 
+#: The JSON ``command`` each `asl maintenance` leaf reports, hyphenated like
+#: every other nested leaf (``overseer-inspect``, ``inbox-reply``).
+COMMAND_RUN = "maintenance-run"
+COMMAND_INSTALL = "maintenance-install"
+COMMAND_UNINSTALL = "maintenance-uninstall"
+COMMAND_STATUS = "maintenance-status"
+
 
 @dataclass(frozen=True)
 class CorpusUsage:
@@ -289,7 +296,7 @@ class MaintenanceResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
-            "command": "maintenance run",
+            "command": COMMAND_RUN,
             "schema_version": self.schema_version,
             "outcome": self.outcome,
             "trigger": self.trigger,

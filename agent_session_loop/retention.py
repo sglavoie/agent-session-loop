@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -421,7 +422,9 @@ def gc_from_args(args: argparse.Namespace) -> int:
     """CLI handler for ``asl gc``."""
     plan_dir = getattr(args, "plan_dir", None)
     max_age_days = getattr(args, "max_age_days", DEFAULT_MAX_AGE_DAYS)
-    if max_age_days < 0:
+    # Checked here rather than by an argparse type so a refusal keeps its
+    # JSON reason under --json.
+    if not math.isfinite(max_age_days) or max_age_days < 0:
         return _print_gc_error(
             args,
             reason="invalid-max-age-days",

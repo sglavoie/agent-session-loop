@@ -140,7 +140,9 @@ Choose one outcome from evidence. `submitted` permits execution without
 replaying the correction or fabricating acknowledgment. `not-submitted` releases
 the correction for the next prompt, but is refused if delivery is already
 recorded. The command requires a reason and refuses a live runner; the decision
-is durable before any release. There is no timed or default resolution.
+is durable before any release. There is no timed or default resolution. Any
+other `--outcome` is refused with reason `invalid-outcome`, in the `--json`
+envelope like every other refusal of this command.
 
 For a registered `--commit-per-session` run paused after independent repository
 changes, the operator can acknowledge the historical incident and explicitly

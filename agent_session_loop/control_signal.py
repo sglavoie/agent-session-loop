@@ -202,25 +202,32 @@ def _serve_endpoint(
         yield None
         return
 
-    stop_fd_read, stop_fd_write = os.pipe()
-    reader = threading.Thread(
-        target=_serve_wakeups,
-        args=(read_fd, stop_fd_read, event),
-        name=thread_name,
-        daemon=True,
-    )
-    reader.start()
+    # Guarded from here on: a stop pipe refused with EMFILE, or a reader thread
+    # that cannot start, must still close both FIFO descriptors and remove the
+    # node rather than leave a published endpoint nothing serves.
+    stop_fds: tuple[int, int] | None = None
+    reader: threading.Thread | None = None
     try:
+        stop_fds = os.pipe()
+        reader = threading.Thread(
+            target=_serve_wakeups,
+            args=(read_fd, stop_fds[0], event),
+            name=thread_name,
+            daemon=True,
+        )
+        reader.start()
         yield path
     finally:
         # Unlink first: a producer that resolved the path before this point is
         # already inside its own open, and one that arrives after finds nothing
         # to open. Either way it reports rather than blocks.
         _unlink_quietly(path)
-        with contextlib.suppress(OSError):
-            os.write(stop_fd_write, b"\0")
-        reader.join(timeout=5.0)
-        for descriptor in (keepalive_fd, stop_fd_write, stop_fd_read, read_fd):
+        if stop_fds is not None:
+            with contextlib.suppress(OSError):
+                os.write(stop_fds[1], b"\0")
+        if reader is not None and reader.ident is not None:
+            reader.join(timeout=5.0)
+        for descriptor in (keepalive_fd, *(stop_fds or ()), read_fd):
             with contextlib.suppress(OSError):
                 os.close(descriptor)
 

@@ -282,7 +282,8 @@ The eight mailbox commands share normal plan-reference, `--state-dir`, and
   non-zero when anything was refused. Repeating a receipt appends nothing and
   reports `repeated: true`. No payload ever carries the correction's text, and
   nothing waits on the result.
-- `asl ask` appends a worker question, or resumes an existing one with
+- `asl ask` appends a worker question, given as positional `TEXT` or read
+  from standard input with `--text-stdin`, or resumes an existing one with
   `--question-id`. `--wait` polls for the first reply or resolution for
   90 seconds by default;
   `--wait-timeout` accepts 0 through 1800 seconds and requires `--wait`.
@@ -406,7 +407,8 @@ With `--json`, failures use the common error envelope and the following stable
 
 - Message-input errors are `missing-text` when a required message body is
   absent or blank, `invalid-text-source` when both `--text` and
-  `--text-stdin` are supplied, and `stdin-read-error` when standard input
+  `--text-stdin` are supplied (for `asl ask`, both `TEXT` and
+  `--text-stdin`), and `stdin-read-error` when standard input
   cannot be read as strict UTF-8. Resolution input uses `invalid-action` for an
   unsupported or missing action, `invalid-note-source` when both optional note
   sources are selected, and `invalid-note` when a supplied note is not text.

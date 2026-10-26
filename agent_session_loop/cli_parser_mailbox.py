@@ -25,8 +25,7 @@ def _add_inbox_commands(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     inbox_sub = inbox_parser.add_subparsers(
-        dest="inbox_command",
-        required=True,
+        dest="inbox_command", required=True, metavar="COMMAND"
     )
 
     inbox_guidance_parser = inbox_sub.add_parser(
@@ -195,15 +194,26 @@ def _add_worker_message_commands(
         ),
     )
     _add_plan_reference_args(ask_parser)
-    ask_parser.add_argument(
-        "text",
-        nargs="?",
-        help="New question body",
-    )
-    ask_parser.add_argument(
-        "--question-id",
-        metavar="QUESTION_ID",
-        help="Resume an existing question without appending it again",
+    # The handler checks these three itself so a conflict keeps its JSON
+    # ``reason``; the usage line still shows them as alternatives.
+    ask_parser.show_as_alternatives(
+        ask_parser.add_argument(
+            "text",
+            nargs="?",
+            help=(
+                "New question body (this, --text-stdin, or --question-id, exactly one)"
+            ),
+        ),
+        ask_parser.add_argument(
+            "--text-stdin",
+            action="store_true",
+            help="Read the new question body from standard input instead",
+        ),
+        ask_parser.add_argument(
+            "--question-id",
+            metavar="QUESTION_ID",
+            help="Resume an existing question without appending it again",
+        ),
     )
     ask_parser.add_argument(
         "--wait",
@@ -255,8 +265,7 @@ def _add_outbox_commands(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     outbox_sub = outbox_parser.add_subparsers(
-        dest="outbox_command",
-        required=True,
+        dest="outbox_command", required=True, metavar="COMMAND"
     )
     outbox_wait_parser = outbox_sub.add_parser(
         "wait",

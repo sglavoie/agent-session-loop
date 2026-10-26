@@ -607,5 +607,173 @@ class ParserFlagSpellingTests(unittest.TestCase):
                 self.assertNotIn("TIMEOUT,", help_text)
 
 
+class NumericFlagValidationTests(unittest.TestCase):
+    """Numeric flags refuse NaN, infinity and out-of-range values at parse time.
+
+    Each of these used to reach its handler unchecked and either crash with a
+    traceback (an OverflowError from ``socket.bind`` or ``timedelta``), print a
+    bare ``NaN`` into ``--json`` output, or install a schedule launchd cannot
+    honor. argparse now refuses them with exit 2 and a message naming the flag.
+    """
+
+    def _refused(self, argv: list[str]) -> str:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            cli.build_parser(prog="asl").parse_args(argv)
+        self.assertEqual(2, raised.exception.code)
+        return stderr.getvalue()
+
+    def test_bad_numeric_values_are_refused_with_the_flag_named(self) -> None:
+        cases = (
+            (["workbench", "serve", "--port", "99999"], "--port", "0 to 65535"),
+            (["workbench", "serve", "--port", "-1"], "--port", "0 to 65535"),
+            (["workbench", "--port", "70000"], "--port", "0 to 65535"),
+            (
+                ["overseer", "watch", "--watcher-id", "w", "--for-seconds", "nan"],
+                "--for-seconds",
+                "non-negative",
+            ),
+            (
+                ["overseer", "watch", "--watcher-id", "w", "--lease-seconds", "0"],
+                "--lease-seconds",
+                "positive",
+            ),
+            (
+                ["overseer", "scan", "--pause-window-hours", "nan"],
+                "--pause-window-hours",
+                "non-negative",
+            ),
+            (
+                ["overseer", "scan", "--pause-window-hours", "-1"],
+                "--pause-window-hours",
+                "non-negative",
+            ),
+            (
+                ["overseer", "inspect", "/tmp/plan", "--incident-id", "0"],
+                "--incident-id",
+                "positive",
+            ),
+            (
+                ["baseline", "/tmp/plan", "--per-check-timeout", "nan", "--json"],
+                "--per-check-timeout",
+                "positive",
+            ),
+            (
+                ["baseline", "/tmp/plan", "--total-timeout", "-1"],
+                "--total-timeout",
+                "positive",
+            ),
+            (["maintenance", "install", "--hour", "25"], "--hour", "0 to 23"),
+            (["maintenance", "install", "--minute", "-1"], "--minute", "0 to 59"),
+            (["maintenance", "install", "--minute", "60"], "--minute", "0 to 59"),
+            (
+                ["maintenance", "run", "--max-runtime-seconds", "nan"],
+                "--max-runtime-seconds",
+                "positive",
+            ),
+            (
+                ["maintenance", "run", "--max-runtime-seconds", "-1"],
+                "--max-runtime-seconds",
+                "positive",
+            ),
+            (
+                ["maintenance", "run", "--max-age-days", "inf"],
+                "--max-age-days",
+                "non-negative",
+            ),
+            (
+                [
+                    "workbench",
+                    "connect",
+                    "--target-id",
+                    "t",
+                    "--origin",
+                    "https://example.invalid",
+                    "--token-file",
+                    "/tmp/token",
+                    "--heartbeat-interval",
+                    "nan",
+                ],
+                "--heartbeat-interval",
+                "positive",
+            ),
+        )
+        for argv, flag, requirement in cases:
+            with self.subTest(argv=argv):
+                text = self._refused(argv)
+                self.assertIn(f"argument {flag}: must be", text)
+                self.assertIn(requirement, text)
+                self.assertNotIn("Traceback", text)
+
+    def test_in_range_values_still_parse(self) -> None:
+        parser = cli.build_parser()
+        self.assertEqual(
+            0, parser.parse_args(["workbench", "serve", "--port", "0"]).port
+        )
+        self.assertEqual(
+            65535, parser.parse_args(["workbench", "serve", "--port", "65535"]).port
+        )
+        args = parser.parse_args(
+            ["maintenance", "install", "--hour", "23", "--minute", "0"]
+        )
+        self.assertEqual((23, 0), (args.hour, args.minute))
+        self.assertEqual(
+            0.0, parser.parse_args(["gc", "--max-age-days", "0"]).max_age_days
+        )
+        self.assertEqual(
+            2.5,
+            parser.parse_args(
+                ["baseline", "/tmp/plan", "--per-check-timeout", "2.5"]
+            ).per_check_timeout,
+        )
+
+    def test_group_without_a_leaf_names_the_command_placeholder(self) -> None:
+        groups = (
+            "control",
+            "inbox",
+            "outbox",
+            "overseer",
+            "assurance",
+            "maintenance",
+            "bridge",
+            "agent-mux",
+            "diagnostics",
+        )
+        for group in groups:
+            with self.subTest(group=group):
+                text = self._refused([group])
+                self.assertIn("the following arguments are required: COMMAND", text)
+                self.assertNotIn("_command", text)
+        text = self._refused(["control", "guard"])
+        self.assertIn("the following arguments are required: COMMAND", text)
+
+    def test_overseer_raises_help_lists_the_valid_topics(self) -> None:
+        for leaf in ("decide", "act"):
+            stdout = io.StringIO()
+            with (
+                self.subTest(leaf=leaf),
+                redirect_stdout(stdout),
+                self.assertRaises(SystemExit),
+            ):
+                cli.build_parser(prog="asl").parse_args(["overseer", leaf, "--help"])
+            help_text = " ".join(stdout.getvalue().split())
+            self.assertIn(
+                "TOPIC is one of: acceptance, scope, design, safety", help_text
+            )
+
+    def test_overseer_help_documents_its_exit_status_split(self) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), self.assertRaises(SystemExit):
+            cli.build_parser(prog="asl").parse_args(["overseer", "--help"])
+        help_text = " ".join(stdout.getvalue().split())
+        self.assertIn("`plan_unobserved`", help_text)
+        self.assertIn("`plan-not-found` exit 1", help_text)
+
+    def test_ask_accepts_its_body_on_stdin(self) -> None:
+        args = cli.build_parser().parse_args(["ask", "/tmp/plan", "--text-stdin"])
+        self.assertTrue(args.text_stdin)
+        self.assertIsNone(args.text)
+
+
 if __name__ == "__main__":
     unittest.main()

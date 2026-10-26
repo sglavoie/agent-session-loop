@@ -285,12 +285,20 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
     try:
         verification_context = verification_context_from_plan(plan_dir_arg, cwd_arg)
     except (plans_errors.PlanError, OSError) as error:
-        return _emit_error(CONTRACT_CHECK_EXIT_REASON_CWD_ERROR, str(error))
+        return _emit_error(
+            plans_errors.plan_error_reason(error, CONTRACT_CHECK_EXIT_REASON_CWD_ERROR),
+            str(error),
+        )
 
     try:
         snapshot = plans_snapshot.inspect_plan(plan_dir_arg)
     except plans_errors.PlanError as error:
-        return _emit_error(CONTRACT_CHECK_EXIT_REASON_PLAN_ERROR, str(error))
+        return _emit_error(
+            plans_errors.plan_error_reason(
+                error, CONTRACT_CHECK_EXIT_REASON_PLAN_ERROR
+            ),
+            str(error),
+        )
 
     known_ids = {status.id for status in snapshot.sessions}
     if raw_session is not None:

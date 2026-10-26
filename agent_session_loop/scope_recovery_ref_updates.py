@@ -160,6 +160,5 @@ def accept_ref_updates_from_args(args: argparse.Namespace) -> int:
         workspaces.WorkspaceError,
         OSError,
     ) as error:
-        result = {"ok": False, "accepted": False, "error": str(error)}
-    print(json.dumps(result, indent=2))
-    return 0 if result["ok"] else 1
+        result = recovery_failure("accept-ref-updates", error)
+    return print_recovery_result("accept-ref-updates", result)

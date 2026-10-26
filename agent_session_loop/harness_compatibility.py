@@ -36,7 +36,6 @@ without incurring model usage.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import subprocess
@@ -44,7 +43,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from . import harnesses
+from . import harnesses, responses
 from .harnesses import HARNESS_NAMES, HarnessName
 
 #: Schema version of the :func:`report_payload` document. Consumers (the
@@ -496,6 +495,7 @@ def report_payload(results: Sequence[Compatibility]) -> dict[str, Any]:
         counts[result.status] += 1
     return {
         "schema_version": SCHEMA_VERSION,
+        "command": "harness-compat",
         "ok": counts["incompatible"] == 0,
         "model_use": False,
         "counts": counts,
@@ -529,7 +529,7 @@ def harness_compat_from_args(args: argparse.Namespace) -> int:
     requested: tuple[HarnessName, ...] = tuple(getattr(args, "harness", None) or ())
     results = check_all(requested or None)
     if getattr(args, "json", False):
-        print(json.dumps(report_payload(results), indent=2, sort_keys=True))
+        responses.print_json(report_payload(results))
     else:
         print(_format_text(results))
     return exit_code(results, strict=bool(getattr(args, "strict", False)))

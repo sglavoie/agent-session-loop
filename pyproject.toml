@@ -135,6 +135,12 @@ files = [
     "tests",
     "skills/asl/scripts",
     "skills/session-resplit/scripts",
+    # The installer and the `asl` wrapper run before the package does, so
+    # nothing else type-checks them. The wrapper has no `.py` suffix; mypy
+    # accepts a file named explicitly here whatever its suffix (directory
+    # entries above only pick up `*.py`).
+    "install.py",
+    "bin/.local/bin/agent-session-loop",
 ]
 # Disposable repositories written by the opt-in live-worker evaluator. Each
 # trial is a copy of the same fixture repository, so leaving them in scope

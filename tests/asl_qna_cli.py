@@ -323,22 +323,31 @@ class QnAQuestionsCliTests(unittest.TestCase):
             self.assertEqual("1", payload["details"]["paused_session_id"])
             self.assertEqual("2", payload["details"]["next_pending_id"])
 
-    def test_json_error_for_malformed_plan(self) -> None:
+    def test_json_error_for_missing_and_malformed_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             missing_plan = tmp_dir / "does-not-exist"
+            malformed_plan = tmp_dir / "empty-plan"
+            malformed_plan.mkdir()
             state_dir = tmp_dir / "state"
 
-            code, out, err = self._run_questions(
-                missing_plan, state_dir, json_output=True
-            )
+            # A directory that is not there is `plan-not-found`, as on every
+            # plan-scoped command; one that exists but cannot be read is not.
+            for plan_dir, reason in (
+                (missing_plan, "plan-not-found"),
+                (malformed_plan, "malformed-plan"),
+            ):
+                with self.subTest(reason=reason):
+                    code, out, err = self._run_questions(
+                        plan_dir, state_dir, json_output=True
+                    )
 
-            self.assertEqual(1, code)
-            self.assertEqual("", err)
-            payload = json.loads(out)
-            self.assertFalse(payload["ok"])
-            self.assertEqual("questions", payload["command"])
-            self.assertEqual("malformed-plan", payload["reason"])
+                    self.assertEqual(1, code)
+                    self.assertEqual("", err)
+                    payload = json.loads(out)
+                    self.assertFalse(payload["ok"])
+                    self.assertEqual("questions", payload["command"])
+                    self.assertEqual(reason, payload["reason"])
 
     def test_subprocess_questions_command_wired_into_cli(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

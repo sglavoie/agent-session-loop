@@ -317,7 +317,7 @@ class WorkbenchStaticQueueStateTests(support_static.WorkbenchStaticCase):
         self.assertIn(
             "preview.textContent = plainPreview(plan.last_message_preview);", decoded
         )
-        self.assertIn("lastBody.textContent = plainPreview(lastPreview);", decoded)
+        self.assertIn("setText(lastBody, plainPreview(lastPreview));", decoded)
         self.assertIn(
             'setField(facts, "activity", formatActivityAge(plan.last_activity_at));',
             decoded,

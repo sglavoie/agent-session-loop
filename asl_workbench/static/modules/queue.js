@@ -34,6 +34,7 @@ import {
   restoreQueueScroll,
 } from "./shell.js";
 import { state } from "./state.js";
+import { toEpochMs } from "./time.js";
 
 export function scheduleRefresh() {
   stopQueueTimer();
@@ -464,10 +465,9 @@ export function urgencyRankFor(plan) {
   return stateOrder(plan && plan.primary_state);
 }
 
+/** A published moment in epoch milliseconds, read the way the window reads it. */
 export function parseActivityTimestamp(value) {
-  if (typeof value !== "string" || !value) return null;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : null;
+  return toEpochMs(value);
 }
 
 export function stateOrder(primaryState) {

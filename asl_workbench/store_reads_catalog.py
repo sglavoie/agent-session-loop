@@ -44,6 +44,7 @@ class CatalogReads(StoreBase):
         harness: str | None,
         states: Sequence[str] | None,
         include_absent: bool,
+        plan_key: str | None = None,
     ) -> tuple[list[str], list[Any]]:
         """The ``WHERE`` half of a catalog read, built once for three callers.
 
@@ -58,6 +59,12 @@ class CatalogReads(StoreBase):
         if connector_id is not None:
             clauses.append("e.connector_id = ?")
             parameters.append(connector_id)
+        if plan_key is not None:
+            # One plan's entries, narrowed by the database: a detail read that
+            # filtered a bounded page instead could not find a plan that sorts
+            # past the read limit.
+            clauses.append("e.plan_key = ?")
+            parameters.append(plan_key)
         if not include_absent:
             clauses.append("e.present = 1")
         if search and search.strip():
@@ -102,6 +109,7 @@ class CatalogReads(StoreBase):
         harness: str | None = None,
         states: Sequence[str] | None = None,
         include_absent: bool = False,
+        plan_key: str | None = None,
         offset: int = 0,
         limit: int = DEFAULT_READ_LIMIT,
     ) -> list[dict[str, Any]]:
@@ -118,6 +126,7 @@ class CatalogReads(StoreBase):
             harness=harness,
             states=states,
             include_absent=include_absent,
+            plan_key=plan_key,
         )
         parameters.extend([_clamp_limit(limit), max(0, int(offset))])
         with self.reading() as connection:

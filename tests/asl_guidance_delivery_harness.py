@@ -17,6 +17,7 @@ class _FakeProcess:
     def __init__(self, *, exit_on_delivery: bool = True) -> None:
         self.pid = 424242
         self.returncode: int | None = None
+        self.stdin = None
         self.stdout = _FakePipe("")
         self.stderr = _FakePipe("")
         self.delivered: list[str] = []
@@ -102,6 +103,14 @@ class HarnessLiveDeliverySeamTests(unittest.TestCase):
         sweep = mock.patch.object(harness_process, "sweep_enabled", return_value=False)
         sweep.start()
         self.addCleanup(sweep.stop)
+        # A fake process's PID is a real PID on this machine, and a turn that
+        # fails before its streams start kills its group by PID. Stand in for
+        # that with the child's own kill.
+        killer = mock.patch.object(
+            harness_process, "_kill_process_group", lambda process: process.kill()
+        )
+        killer.start()
+        self.addCleanup(killer.stop)
 
     def run_turn(self, adapter: _RecordingAdapter, process: _FakeProcess) -> Any:
         adapter.process = process

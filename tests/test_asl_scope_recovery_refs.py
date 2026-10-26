@@ -103,11 +103,36 @@ class RefRecoveryTests(unittest.TestCase):
             workspace=self.resolved,
         )
 
+    def test_missing_plan_directory_reports_plan_not_found_on_one_line(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = cli.main(
+                [
+                    "accept-ref-updates",
+                    str(self.root / "missing-plan"),
+                    "--session",
+                    "1",
+                    "--state-dir",
+                    str(self.state_dir),
+                ]
+            )
+        self.assertEqual(1, code)
+        self.assertEqual(1, len(output.getvalue().splitlines()))
+        result = json.loads(output.getvalue())
+        self.assertEqual(
+            {"accepted", "command", "details", "error", "ok", "paused", "reason"},
+            set(result),
+        )
+        self.assertEqual("accept-ref-updates", result["command"])
+        self.assertEqual("plan-not-found", result["reason"])
+        self.assertIs(False, result["ok"])
+
     def test_accepts_exact_preview_and_preserves_pending_read_only_review(self):
         session_before = self.session.read_bytes()
         events_before = self.event_path.read_bytes()
         code, preview = self.invoke()
         self.assertEqual(0, code, preview)
+        self.assertEqual("accept-ref-updates", preview["command"])
         self.assertFalse(preview["accepted"])
         self.assertEqual(events_before, self.event_path.read_bytes())
         self.assertIsNotNone(self.retained())
@@ -237,6 +262,9 @@ class RefRecoveryTests(unittest.TestCase):
         code, result = self.invoke()
         self.assertEqual(1, code, result)
         self.assertIn("original run workspace binding", result["error"])
+        self.assertEqual("accept-ref-updates", result["command"])
+        self.assertEqual("recovery-refused", result["reason"])
+        self.assertIs(False, result["accepted"])
         self.assertIsNotNone(self.retained())
 
     def test_acceptance_for_other_evidence_does_not_clear_failure(self):

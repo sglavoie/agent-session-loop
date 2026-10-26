@@ -24,6 +24,7 @@ import {
 import {
   refreshDetail,
   renderDetailPending,
+  resetDetailForPlan,
   scheduleDetailRefresh,
   stopDetailTimer,
 } from "./detail.js";
@@ -355,6 +356,12 @@ export function applyRoute() {
     resetReplyForPlan();
   }
   state.route = next;
+  if (addressChanged) {
+    // After the route is set, so the receipts and control availability it
+    // redraws are read against the plan being opened. Before the first read
+    // of it lands, nothing on screen may still describe the plan just left.
+    resetDetailForPlan();
+  }
   if (
     next.name === "detail" &&
     next.questionId &&
@@ -452,16 +459,26 @@ export function navigateToQueue() {
   // they came from named a plan, so the filters have to be written back out of
   // state rather than read out of the link.
   const hash = queueHash();
-  if (window.location.hash !== hash) {
-    window.location.hash = hash;
-    if (!hash) {
-      // Clearing a hash to the empty string does not always fire `hashchange`,
-      // so the route would be left on the plan the operator just closed.
-      applyRoute();
-    }
-  } else {
+  if (window.location.hash === hash) {
     applyRoute();
+    return;
   }
+  if (hash) {
+    // `hashchange` routes this one, exactly once.
+    window.location.hash = hash;
+    return;
+  }
+  // Clearing a hash to the empty string does not reliably fire `hashchange`,
+  // and when it does, routing here as well would run the queue route twice.
+  // A pushed entry never fires it, so the route runs once, from here, and the
+  // back button still returns to the plan.
+  const url = window.location.pathname + (window.location.search || "");
+  try {
+    window.history.pushState(null, "", url || "/");
+  } catch (err) {
+    window.location.hash = "";
+  }
+  applyRoute();
 }
 
 export function wireDetailBack() {

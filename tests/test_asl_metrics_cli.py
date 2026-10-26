@@ -141,6 +141,24 @@ class MetricsCliTests(unittest.TestCase):
         self.assertEqual(1, exit_code)
         self.assertTrue(stderr.startswith("asl metrics: --since-days"), stderr)
 
+    def test_metrics_reports_a_window_past_the_calendar_instead_of_crashing(
+        self,
+    ) -> None:
+        exit_code, stdout, _ = self._run_cli(
+            [
+                "metrics",
+                "--state-dir",
+                str(self.state_root),
+                "--since-days",
+                "99999999999",
+                "--json",
+            ]
+        )
+        self.assertEqual(1, exit_code)
+        payload = json.loads(stdout)
+        self.assertFalse(payload["ok"])
+        self.assertIn("since-days", payload["error"])
+
 
 class CliInvocationsCliTests(unittest.TestCase):
     def setUp(self) -> None:

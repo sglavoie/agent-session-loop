@@ -13,6 +13,7 @@ from asl_workbench import archive as portable_archive
 from . import (
     plans_errors,
     plans_files,
+    plans_snapshot,
     responses,
     state,
     state_locks,
@@ -281,6 +282,28 @@ def workbench_pin_from_args(args: Any) -> int:
     """
     plan_dir = args.plan_dir
     cwd = getattr(args, "cwd", None)
+    # The terminal names a plan by typing its path, so a typo would otherwise
+    # pin a directory that is not there; refuse it with the reason every other
+    # plan-scoped command reports for a missing PLAN_DIR. (Unpin still accepts
+    # one, so a pin whose plan has since gone away can be dropped.)
+    try:
+        if isinstance(plan_dir, str) and plan_dir.strip():
+            plans_snapshot.require_plan_directory(plan_dir.strip())
+    except plans_errors.PlanNotFoundError as error:
+        return _print_refusal(
+            args,
+            "pin",
+            ArchiveRefused(
+                plans_errors.PLAN_NOT_FOUND_REASON,
+                str(error),
+                scope=portable_archive.SCOPE_MISSING,
+                details={"plan_dir": str(plan_dir)},
+            ),
+        )
+    except plans_errors.PlanError, OSError, ValueError:
+        # Anything else (a file, a blank path) is `pin_plan`'s to refuse, with
+        # the reason it shares with the HTTP route.
+        pass
     try:
         update = pin_plan(
             plan_dir,

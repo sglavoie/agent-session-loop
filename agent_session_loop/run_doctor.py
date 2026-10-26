@@ -146,7 +146,7 @@ def doctor_from_args(args: argparse.Namespace) -> int:
     except plans_errors.PlanError as error:
         return _print_doctor_error(
             args,
-            reason="malformed-plan",
+            reason=plans_errors.plan_error_reason(error, "malformed-plan"),
             error=error,
             cwd=cwd,
         )

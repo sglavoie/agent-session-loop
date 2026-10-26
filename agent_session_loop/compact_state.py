@@ -23,13 +23,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from . import (
     artifacts,
+    cli_common,
     events,
     plans_errors,
     plans_files,
@@ -37,9 +37,9 @@ from . import (
     run_persistence,
     state,
     state_locks,
+    state_status,
     turn_execution_constants,
 )
-from .cli_defaults import program_name
 
 # Subdirectory (relative to a turn artifact directory) where failed-command
 # gzip artifacts live, matching the runner-managed verification convention.
@@ -382,6 +382,16 @@ def _print_report(report: CompactionReport) -> None:
         print("Re-run with --apply to write the compact records.")
 
 
+def _compact_state_error_reason(error: Exception) -> str:
+    if isinstance(error, plans_errors.PlanError):
+        return state_status.plans_errors_reason(error)
+    if isinstance(error, artifacts.ArtifactError):
+        return "artifact-error"
+    if isinstance(error, OSError):
+        return "os-error"
+    return "state-error"
+
+
 def compact_state_from_args(args: argparse.Namespace) -> int:
     """CLI handler for ``asl compact-state``."""
     try:
@@ -400,19 +410,13 @@ def compact_state_from_args(args: argparse.Namespace) -> int:
         plans_errors.PlanError,
         state.StateError,
     ) as error:
-        if getattr(args, "json", False):
-            print(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "command": "compact-state",
-                        "error": str(error),
-                    },
-                    sort_keys=True,
-                )
-            )
-        else:
-            print(f"{program_name()} compact-state: {error}", file=sys.stderr)
+        cli_common.print_error(
+            args,
+            command_name="compact-state",
+            text_label="compact-state",
+            reason=_compact_state_error_reason(error),
+            error=str(error),
+        )
         return 1
 
     if getattr(args, "json", False):
