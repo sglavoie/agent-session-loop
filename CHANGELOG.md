@@ -114,6 +114,38 @@ A polish and hardening round after the public release.
   itself and removes its temporary file on failure; `plans` shows a
   never-run plan's activity and reports a bad `--readiness` as
   `input-error`; an empty PLAN_DIR is refused.
+- Review loop: refreshing a pending review's contract finds its headings only
+  as whole lines, so a finding that quotes one no longer duplicates the verify
+  recipe; over-deep `final-review.json`, repair journals and state, huge
+  `Status:` counts and a float artifact version are refused instead of
+  crashing; a dirty path holding a backtick reads back intact; an
+  `ASL_REVIEW_GUARD_EXCLUDE` refusal names the variable; one finding reads in
+  the singular.
+- Assurance: damaged pending-audit records, ledger lines, index caches,
+  manifests and state are skipped or refused rather than crashing every
+  command; `assurance plan` reports an unreadable ledger as such; an unknown
+  `--plan` is `plan-not-found` and a mistyped `--audit-harness` is refused
+  before any run is marked unusable; Ctrl-D at a confirmation cancels; lone
+  surrogates and over-long issue ids are refused; counts read in the singular.
+- Redirect and repositories: `register-repositories` refuses non-UTF-8
+  manifests and stdin, a missing `--cwd` and an empty PLAN_DIR, and gives
+  checkouts that differ only in case distinct aliases; the repository scanners
+  use the plan parser's fence rule; NUL-bearing paths, non-UTF-8 or over-deep
+  event, last-message and redirect evidence files no longer crash; a redirect
+  refused before anything was persisted no longer says it was settled.
+- Turns and conversations: a lone surrogate in harness output is logged as
+  U+FFFD instead of losing the turn; output still counts as activity when its
+  live log append fails; a failed launch drops its interactive surfaces even
+  if its teardown write fails; a post-result hang after a CPU-progress
+  clearance can be recovered again; a repair child whose commit targets could
+  not be read records `failed`; ledger capture and relocation failures are
+  recorded and reported, and a NUL-bearing ledger path is an invalid record.
+- Workbench: a remote submission discarded before it left, or refused by the
+  connector with a receipt, is settled instead of blocking the plan's later
+  mutations forever; a failed migration backup leaves no wedged
+  `migration.json` or staging directory; a malformed legacy project list no
+  longer rolls back the store upgrade; an overflowing history time or
+  duration is left unplaced instead of ending the import.
 
 ### Changed
 
