@@ -38,6 +38,17 @@ def _read_answer(
             summary=f"policy output was not JSON: {error}",
             exit_status=exit_status,
         )
+    except RecursionError:
+        # Not a ValueError: pathologically nested JSON raises it from the
+        # decoder instead of a decode error.
+        return _failed(
+            plan_dir=plan_dir,
+            access=access,
+            repositories=repositories,
+            failure="response_unreadable",
+            summary="policy output was nested too deeply to decode",
+            exit_status=exit_status,
+        )
     if not isinstance(parsed, dict):
         return _failed(
             plan_dir=plan_dir,

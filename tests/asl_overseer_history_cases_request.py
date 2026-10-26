@@ -276,6 +276,18 @@ class HistoryUnavailableTests(unittest.TestCase):
         self.assertEqual(history.failure, "response_unreadable")
         self.assertFalse(history.available)
 
+    def test_a_garbled_answer_is_unreadable_rather_than_a_crash(self) -> None:
+        """Non-UTF-8 output fails the strict decode inside ``subprocess.run``;
+        nesting deep enough raises RecursionError, which is not a ValueError."""
+        undecodable = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        for history in (
+            _read(raises=undecodable)[0],
+            _read(stdout="[" * 1_000_000)[0],
+        ):
+            with self.subTest(summary=history.summary):
+                self.assertEqual(history.failure, "response_unreadable")
+                self.assertFalse(history.available)
+
     def test_a_crashed_client_that_printed_evidence_is_still_refused(self) -> None:
         history, _ = _read(payload=_payload(), returncode=3)
         self.assertEqual(history.failure, "answer_mismatch")

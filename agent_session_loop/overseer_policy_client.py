@@ -225,6 +225,17 @@ def authorize(
             summary=f"{AMX_BINARY} overseer policy did not answer in {timeout}s",
             exit_status=None,
         )
+    except UnicodeDecodeError as error:
+        # Decoded strictly, and refused rather than replaced: an answer that
+        # is not text is not an answer, however much of it would still parse.
+        return _failed(
+            plan_dir=plan_dir,
+            access=access,
+            repositories=repositories,
+            failure="response_unreadable",
+            summary=f"policy output was not UTF-8: {error}",
+            exit_status=None,
+        )
     except (OSError, subprocess.SubprocessError) as error:
         return _failed(
             plan_dir=plan_dir,
