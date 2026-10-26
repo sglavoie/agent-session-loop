@@ -32,6 +32,11 @@ from .store_values import (
 )
 
 
+def _like_literal(text: str) -> str:
+    """``text`` as a LIKE pattern that matches only itself, escaped with ``\\``."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class CatalogReads(StoreBase):
     """Read side for the plan catalog, aggregate counts and schema checks."""
 
@@ -68,14 +73,20 @@ class CatalogReads(StoreBase):
         if not include_absent:
             clauses.append("e.present = 1")
         if search and search.strip():
-            clauses.append("e.search_text LIKE ?")
-            parameters.append(f"%{search.strip().casefold()}%")
+            # Escaped, because ``_`` and ``%`` are wildcards to LIKE and a
+            # plan named ``my_app`` must not find ``my-app`` as well.
+            clauses.append("e.search_text LIKE ? ESCAPE '\\'")
+            parameters.append(f"%{_like_literal(search.strip().casefold())}%")
         if project is not None:
-            # ``projects`` is a JSON array, so the needle is the encoded name
-            # rather than the bare one: matching ``"scripts"`` with quotes is
-            # what stops a search for ``script`` from claiming membership.
-            clauses.append("e.projects LIKE ?")
-            parameters.append(f"%{json.dumps(project)}%")
+            # ``projects`` is a JSON array, so membership is an exact match on
+            # one of its elements. A pattern over the encoded text could not
+            # be one: LIKE folds ASCII case and reads ``_`` as any character.
+            # ``json_valid`` keeps one unreadable row from failing the read.
+            clauses.append(
+                "json_valid(e.projects) AND EXISTS "
+                "(SELECT 1 FROM json_each(e.projects) WHERE value = ?)"
+            )
+            parameters.append(project)
         if harness:
             clauses.append("e.harness = ?")
             parameters.append(harness)
