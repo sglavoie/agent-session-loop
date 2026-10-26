@@ -276,5 +276,42 @@ class ExpansionCeilingTests(_OverseerCase):
         self.assertTrue(excerpt.truncated)
 
 
+class UnmatchedSelectorTests(_OverseerCase):
+    """A --plan nobody has a record of is the wrong question, as in inspect."""
+
+    def test_scan_and_watch_refuse_a_plan_discovery_never_saw(self) -> None:
+        nobody = str(self.fleet.plans_root / "plan-nobody-has")
+        for argv in (
+            ("scan", "--plan", nobody),
+            ("scan", "--plan", str(self.plan), "--plan", nobody),
+            ("watch", "--watcher-id", WATCHER, "--plan", nobody),
+            ("watch", "--watcher-id", WATCHER, "--plan", nobody, "--for-seconds", "1"),
+        ):
+            with self.subTest(argv=argv):
+                status, payload = self.fleet.invoke(*argv)
+
+                self.assertEqual(2, status, payload)
+                self.assertEqual("plan_unobserved", payload["reason"])
+                self.assertIn("plan-nobody-has", payload["error"])
+
+    def test_a_plan_whose_record_is_unreadable_is_still_matched(self) -> None:
+        own = state.plan_state_dir(self.plan, self.fleet.state_root)
+        (own / "state.json").write_bytes(b"\xff")
+
+        status, payload = self.fleet.invoke("scan", "--plan", str(self.plan))
+
+        # A partial view, which is a refusal, and not an unknown plan.
+        self.assertEqual(1, status, payload)
+        self.assertFalse(payload["complete"])
+
+    def test_a_named_plan_with_a_record_still_watches(self) -> None:
+        payload = self.watch("--plan", str(self.plan))
+
+        self.assertEqual(
+            [str(self.plan)],
+            [item["plan_dir"] for item in payload["sweeps"][0]["enrolled"]],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

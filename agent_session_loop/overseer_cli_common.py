@@ -177,6 +177,24 @@ def _selection(args: argparse.Namespace) -> overseer_watch.Selection:
     return overseer_watch.Selection(plans=plans, projects=projects)
 
 
+def _refuse_unmatched_plans(
+    selection: overseer_watch.Selection, inventory: overseer_discovery.Inventory
+) -> None:
+    """Refuse a ``--plan`` no state record belongs to, as ``inspect`` does.
+
+    A selector that matched nothing narrows the fleet to nothing, and an empty
+    answer to a misspelled plan reads exactly like a plan with nothing to say.
+    """
+    unmatched = selection.unmatched_plans(inventory.candidates)
+    if unmatched:
+        raise OverseerCliError(
+            "plan_unobserved",
+            "discovery has no record of "
+            + ", ".join(canonical_plan(plan) for plan in unmatched)
+            + "; run `asl overseer scan` to see the plans it does know",
+        )
+
+
 def _pause_window_seconds(args: argparse.Namespace) -> float:
     hours = getattr(args, "pause_window_hours", None)
     if hours is None:

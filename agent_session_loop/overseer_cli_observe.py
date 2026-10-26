@@ -42,6 +42,7 @@ def scan_from_args(
         window = common_module._pause_window_seconds(args)
         selection = common_module._selection(args)
         inventory = seams.build_inventory(state_dir=state_dir)
+        common_module._refuse_unmatched_plans(selection, inventory)
     except common_module.OverseerCliError as error:
         return common_module._failure("overseer-scan", error, as_json=as_json)
     matching = [
@@ -120,10 +121,18 @@ def watch_from_args(
             as_json=as_json,
         )
         return common_module.EXIT_OK
+    selection = common_module._selection(args)
+    if selection.plans:
+        try:
+            common_module._refuse_unmatched_plans(
+                selection, seams.build_inventory(state_dir=state_dir)
+            )
+        except common_module.OverseerCliError as error:
+            return common_module._failure("overseer-watch", error, as_json=as_json)
     common: dict[str, Any] = {
         "watcher": watcher,
         "ledger": ledger,
-        "selection": common_module._selection(args),
+        "selection": selection,
         "state_dir": state_dir,
         "now": seams.utc_now,
         "pause_window_seconds": common_module._pause_window_seconds(args),

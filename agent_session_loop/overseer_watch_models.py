@@ -176,6 +176,27 @@ class Selection:
             return False
         return any(_canonical(named) == candidate for named in self.plans)
 
+    def unmatched_plans(
+        self, candidates: tuple[overseer_discovery.Candidate, ...]
+    ) -> tuple[str, ...]:
+        """The named plans no state record belongs to, in the order named.
+
+        A record belongs to a plan when it names it or when its directory is
+        the plan's own hash, so a plan whose record could not be read is still
+        found -- that is a partial view, not a plan nobody has heard of.
+        """
+        owned = {candidate.state_dir.name for candidate in candidates}
+        named = {_canonical(candidate.plan_dir) for candidate in candidates}
+        unmatched: list[str] = []
+        for plan in self.plans:
+            canonical = _canonical(plan)
+            if canonical is not None and (
+                canonical in named or plans_files.path_sha256(canonical) in owned
+            ):
+                continue
+            unmatched.append(plan)
+        return tuple(unmatched)
+
     def selects(self, candidate: overseer_discovery.Candidate) -> bool:
         """Whether this run is inside the invocation's explicit scope."""
         if not self.explicit:
