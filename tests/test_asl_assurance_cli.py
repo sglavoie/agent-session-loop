@@ -103,6 +103,20 @@ class AssuranceListTests(fixtures.AssuranceCliTestCase):
         self.assertEqual(["ASI-3", "ASI-2"], self.list_rows(out))
         self.assertIn("1 more matching issue not shown", out)
 
+    def test_a_line_escaping_a_lone_surrogate_is_a_warning_not_a_row(self) -> None:
+        # A real stdout cannot encode the surrogate, so listing it would raise.
+        self.open_three_issues()
+        text = self.ledger_path.read_text(encoding="utf-8")
+        self.ledger_path.write_text(
+            text.replace("exhausted.", "exhausted \\ud800.", 1), encoding="utf-8"
+        )
+
+        code, payload, _ = self.run_json(["assurance", "list"])
+
+        self.assertEqual(0, code)
+        self.assertEqual(1, payload["rejected_count"])
+        self.assertNotIn("\ud800", "".join(row["summary"] for row in payload["issues"]))
+
     def test_default_limit_is_fifty_rows(self) -> None:
         self.open_three_issues()
         code, payload, err = self.run_json(["assurance", "list"])

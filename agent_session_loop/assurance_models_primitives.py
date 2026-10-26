@@ -35,6 +35,9 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9]+(?:[._\-][A-Za-z0-9]+)*$")
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _ISSUE_ID_RE = re.compile(r"^(?:ASI-)?([1-9][0-9]*)$")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+#: A lone surrogate arrives only as a JSON escape such as ``\ud800``. It
+#: cannot be encoded as UTF-8, so storing or printing such text would raise.
+_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 _ARTIFACT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 ISSUE_ID_PREFIX = "ASI-"
@@ -78,6 +81,8 @@ def _require_text(value: object, *, label: str, max_chars: int = MAX_TEXT_CHARS)
         )
     if _CONTROL_RE.search(value):
         raise AssuranceError(f"{label} must not contain control characters")
+    if _SURROGATE_RE.search(value):
+        raise AssuranceError(f"{label} must not contain lone surrogate code points")
     return value
 
 

@@ -239,6 +239,11 @@ class BoundsTests(unittest.TestCase):
         with self.assertRaisesRegex(AssuranceError, "leading or trailing whitespace"):
             _finding(summary="  A retry ran after the budget was exhausted.\n")
 
+    def test_text_with_a_lone_surrogate_is_rejected(self) -> None:
+        # UTF-8 cannot encode it, so the ledger write or a print would raise.
+        with self.assertRaisesRegex(AssuranceError, "lone surrogate"):
+            _finding(summary="A retry ran \ud800 after the budget.")
+
     def test_malformed_severity_is_rejected(self) -> None:
         with self.assertRaisesRegex(AssuranceError, "'severity' must be one of"):
             _finding(severity="catastrophic")
