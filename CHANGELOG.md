@@ -45,6 +45,32 @@ A polish and hardening round after the public release.
   `--state-dir`.
 - Supervision cursors are written with mode `0600` like the other mailbox
   files, and `install.py --home` names the renderer for that home.
+- Plan authoring: a code fence closes only on a run at least as long as its
+  opener, so a quoted example no longer adds phantom sessions; a leading BOM no
+  longer hides Session 1; sessions out of ascending order, and contracts for
+  sessions the plan lacks, are refused; non-UTF-8 input is an `input-error`
+  rather than a traceback; the plan title skips fenced comments; a `|` in a
+  title keeps the manifest table intact; `## Repositories` tolerates trailing
+  whitespace; a heading such as `### Session cookies` is content; re-splitting
+  or re-preparing reports `already-split`; and `prepare` authors the split
+  exactly as `split` does, harness skill prefix included.
+- `asl commit`: the staged diff is captured the same way whatever the user's
+  diff configuration, and quoted, non-ASCII and renamed file names parse; a
+  submodule pointer bump commits despite dirty content inside the submodule;
+  `snapshot-drifted` lists paths verbatim.
+- Storage: `compact-state --apply` gives each failed check's output its own
+  artifact instead of overwriting one with another, and keeps a torn
+  `events.jsonl` line rather than failing; dry runs of `maintenance run` and
+  `migrate-state` write nothing, and leave a dead-owner lock in place.
+- Reporting: `status`, `tail`, `review-verdict` and `progress` tolerate
+  non-UTF-8 bytes; `status` text says how the recorded run ended; `tail`
+  says a run stopped when it neither finished nor paused, keeps the run's
+  outcome in its recent window, follows truncated events and logs, prints
+  whole log lines, and refuses an events file it cannot open; `progress
+  --tail` follows a rewritten journal and refuses `--json`; `review-verdict`
+  text prints every finding in full; counts of one read in the singular; tail
+  and sessions times carry their UTC offset; `doctor` shows its required
+  arguments and refuses a bad harness as JSON; `sessions --limit 0` is refused.
 
 ### Changed
 
@@ -61,6 +87,9 @@ A polish and hardening round after the public release.
   bridge's interventions; CI checkouts drop their persisted token, Playwright
   browsers are cached, and the harness-compatibility job triggers on every
   module its verdict depends on.
+- Documentation agrees with the parser on command synopses, `supervisor-guide`
+  JSON keys and leaf-only help groups; the bridge release check requests the
+  retired protocol, and the mental-model citations point at current lines.
 
 ## [0.2.0] - 2026-10-23
 
