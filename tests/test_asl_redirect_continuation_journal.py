@@ -158,6 +158,38 @@ class SerializationTests(JournalTestCase):
         self.assertTrue(turn_redirect.settle())
         self.assertTrue(turn_redirect.settle())
 
+    def test_a_respawned_worker_rebinds_until_a_correction_arms(self) -> None:
+        # Codex's app-server fallback spawns `codex exec` through the same
+        # callback once the first process has exited.
+        workers: list[int] = []
+        controllers: list[FakeController] = []
+
+        def build(worker: Any) -> FakeController:
+            workers.append(worker.pid)
+            controllers.append(FakeController(report=termination_report()))
+            return controllers[-1]
+
+        turn_redirect = redirect_continuation.TurnRedirect(
+            plan_dir=self.plan_dir,
+            target=target(1),
+            state_dir=self.state_dir,
+            build_controller=build,
+            poll_seconds=0.01,
+            bind_wait_seconds=0.05,
+            report_wait_seconds=0.5,
+        )
+        self.addCleanup(turn_redirect.close)
+
+        turn_redirect.bind_worker(WORKER_PID)
+        turn_redirect.bind_worker(WORKER_PID + 1)
+        self.assertIsNotNone(turn_redirect.accept(self.submit()))
+        turn_redirect.bind_worker(WORKER_PID + 2)
+
+        self.assertEqual([WORKER_PID, WORKER_PID + 1], workers)
+        self.assertEqual(1, controllers[0].released)
+        self.assertEqual([], controllers[0].accepted)
+        self.assertEqual(["op-1"], controllers[1].accepted)
+
     def test_a_correction_with_no_worker_to_stop_is_refused(self) -> None:
         request = self.submit()
         turn_redirect, controller = self.gate()
