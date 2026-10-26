@@ -144,6 +144,16 @@ class ProgressCliTests(unittest.TestCase):
                 progress_file.read_text(encoding="utf-8"),
             )
 
+    def test_backfill_counts_a_single_entry_in_the_singular(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1",))
+
+            code, out, err = self._run_backfill(plan_dir)
+
+            self.assertEqual(0, code, err)
+            self.assertIn("wrote 1 entry to ", out)
+
     def test_backfill_force_overwrites_existing_journal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"

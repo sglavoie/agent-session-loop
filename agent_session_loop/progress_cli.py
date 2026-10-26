@@ -32,6 +32,7 @@ from . import (
     tail,
 )
 from .cli_defaults import program_name
+from .formatting import count_noun
 
 DEFAULT_POLL_INTERVAL_SECONDS = tail.POLL_INTERVAL_SECONDS
 
@@ -126,8 +127,8 @@ def backfill_progress_from_args(args: argparse.Namespace) -> int:
         )
         return 0
     print(
-        f"{program_name()} backfill-progress: wrote {result.entries_written} "
-        f"entries to {result.path}"
+        f"{program_name()} backfill-progress: wrote "
+        f"{count_noun(result.entries_written, 'entry', 'entries')} to {result.path}"
     )
     return 0
 

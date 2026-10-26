@@ -6,6 +6,16 @@ import math
 from typing import Any
 
 
+def count_noun(count: Any, singular: str, plural: str | None = None) -> str:
+    """``count`` with ``singular`` or its plural: ``1 entry``, ``2 entries``.
+
+    ``plural`` defaults to ``singular + "s"``. A count that is not exactly one
+    (zero, many, or an unknown ``None``) takes the plural.
+    """
+    noun = singular if count == 1 else (plural or f"{singular}s")
+    return f"{count} {noun}"
+
+
 def format_duration_seconds(value: Any) -> str:
     """Format a duration value for text progress output."""
     try:
