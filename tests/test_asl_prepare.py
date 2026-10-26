@@ -71,6 +71,18 @@ class PrepareValidatorPayloadTests(PrepareValidatorFixtures):
         with self.assertRaisesRegex(plans_errors.PlanError, "unsupported version"):
             prepare_parsing.parse_validator_output(payload)
 
+    def test_rejects_a_version_that_only_equals_an_integer(self) -> None:
+        # True == 1 and 1.0 == 1, but neither is version 1, and accepting one
+        # would store it back into prepare-validation.json as written.
+        for version in (True, 1.0, 2.0):
+            with self.subTest(version=version):
+                payload = _validator_payload()
+                payload["version"] = version
+                with self.assertRaisesRegex(
+                    plans_errors.PlanError, f"unsupported version {version!r}"
+                ):
+                    prepare_parsing.parse_validator_output(payload)
+
     def test_v2_requires_repo_attribution_on_every_finding_kind(self) -> None:
         payload = {
             "version": prepare_models.PREPARE_VALIDATION_VERSION,
