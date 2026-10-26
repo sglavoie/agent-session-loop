@@ -523,6 +523,51 @@ class StateCompactionTests(unittest.TestCase):
         self.assertNotIn("turns", lines[2]["payload"])
         self.assertEqual("r", lines[2]["payload"]["run_id"])
 
+    def test_torn_event_lines_are_kept_and_the_rest_still_compacts(self) -> None:
+        # A crash mid-append leaves a torn final record (here also a torn
+        # UTF-8 sequence mid-file). Compaction used to fail the whole plan
+        # with a bare JSON error naming no file, leaving state.json and
+        # every result.json uncompacted.
+        state_path = self._write_state({"run_id": "r", "turns": [self._v1_turn()]})
+        result_path = self._write_result(
+            [{"name": "c1", "status": "fail", "stdout": self.big, "stderr": ""}]
+        )
+        good = json.dumps(
+            {"created_at": "t1", "name": "run_started", "payload": {"run_id": "r"}},
+            sort_keys=True,
+        ).encode("utf-8")
+        not_utf8 = b'{"name": "z\xe2\x82'
+        torn = b'{"name": "y", "creat'
+        events_path = self.plan_state / events.EVENTS_FILE_NAME
+        events_path.write_bytes(good + b"\n" + not_utf8 + b"\n" + good + b"\n" + torn)
+
+        projected = compact_state.compact_plan_state(
+            self.plan_dir, state_dir=self.state_dir, apply=False
+        )
+        report = compact_state.compact_plan_state(
+            self.plan_dir, state_dir=self.state_dir, apply=True
+        )
+
+        self.assertEqual(2, projected.unparseable_event_lines)
+        self.assertEqual(2, report.to_dict()["unparseable_event_lines"])
+        lines = events_path.read_bytes().split(b"\n")
+        # Fragments stay byte-for-byte, the torn tail still unterminated.
+        self.assertEqual(not_utf8, lines[1])
+        self.assertEqual(torn, lines[-1])
+        for line in (lines[0], lines[2]):
+            record = json.loads(line)
+            self.assertEqual("run_started", record["name"])
+            self.assertEqual(events.EVENT_SCHEMA_VERSION, record["version"])
+        self.assertIn(str(state_path), report.rewritten_paths)
+        self.assertIn(str(result_path), report.rewritten_paths)
+        self.assertEqual(
+            run_persistence.COMPACT_STATE_SCHEMA_VERSION,
+            json.loads(state_path.read_text(encoding="utf-8"))["version"],
+        )
+        self.assertEqual(
+            projected.projected_bytes_reclaimed, report.actual_bytes_reclaimed
+        )
+
     def test_apply_is_idempotent(self) -> None:
         self._write_state({"run_id": "r", "turns": [self._v1_turn()]})
         self._write_result(

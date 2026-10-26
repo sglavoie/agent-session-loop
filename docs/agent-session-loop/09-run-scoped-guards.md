@@ -490,6 +490,9 @@ Reclaim figures are net of the gzip bytes those retained failure artifacts add
 (reported separately as `artifact_bytes_added`), so a compaction that keeps a
 poorly compressible failure artifact never reports more saving than is actually
 reclaimed on disk.
+An `events.jsonl` line that does not parse (a record torn by a crash
+mid-append) is written back byte-for-byte rather than failing the plan, and
+counted as `unparseable_event_lines`.
 Every rewrite is atomic (temp-file + rename), so an interrupted compaction never
 leaves a partially written JSON file, and re-running is idempotent. `--json`
 emits the full `CompactionReport` payload.

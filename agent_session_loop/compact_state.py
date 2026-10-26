@@ -57,6 +57,7 @@ class _Stats:
     artifact_bytes_added: int = 0
     pass_output_removed: int = 0
     failed_output_extracted: int = 0
+    unparseable_event_lines: int = 0
     rewritten_paths: list[str] = field(default_factory=list)
 
 
@@ -76,6 +77,7 @@ class CompactionReport:
     actual_bytes_reclaimed: int
     pass_output_removed: int
     failed_output_extracted: int
+    unparseable_event_lines: int
     rewritten_paths: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -94,6 +96,7 @@ class CompactionReport:
             "actual_bytes_reclaimed": self.actual_bytes_reclaimed,
             "pass_output_removed": self.pass_output_removed,
             "failed_output_extracted": self.failed_output_extracted,
+            "unparseable_event_lines": self.unparseable_event_lines,
             "rewritten_paths": list(self.rewritten_paths),
         }
 
@@ -105,12 +108,6 @@ def _read_json(path: Path) -> Any:
 def _dump_state_bytes(payload: dict[str, Any]) -> bytes:
     """Serialize a state/result payload the way the runner persists it."""
     return (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8")
-
-
-def _dump_events_bytes(records: list[dict[str, Any]]) -> bytes:
-    """Serialize events one JSON object per line, matching ``append_event``."""
-    lines = [json.dumps(record, sort_keys=True) + "\n" for record in records]
-    return "".join(lines).encode("utf-8")
 
 
 def _stream_has_metadata(check: dict[str, Any], stream: str) -> bool:
@@ -317,17 +314,35 @@ def _compact_state_file(path: Path, *, apply: bool, stats: _Stats) -> None:
 
 
 def _compact_events_file(path: Path, *, apply: bool, stats: _Stats) -> None:
+    """Compact each event record, keeping lines that do not parse verbatim.
+
+    A crash mid-append leaves a torn final record (and a torn multi-byte
+    character can leave a line that is not even UTF-8). Event readers already
+    skip such a line and ``append_event`` starts its next record on a fresh
+    line, so the fragment carries no record anyone reads; failing the whole
+    plan over it would also leave ``state.json`` and every ``result.json``
+    uncompacted. The fragment is written back byte-for-byte -- including a
+    missing final newline -- so compaction neither loses nor invents bytes,
+    and each one is counted in the report.
+    """
     original = path.read_bytes()
-    records: list[dict[str, Any]] = []
-    for line in original.decode("utf-8").splitlines():
-        if not line.strip():
+    pieces = original.split(b"\n")
+    out: list[bytes] = []
+    for index, piece in enumerate(pieces):
+        terminated = index < len(pieces) - 1
+        if not piece.strip():
             continue
-        parsed = json.loads(line)
+        try:
+            parsed = json.loads(piece.decode("utf-8"))
+        except ValueError:  # JSONDecodeError and UnicodeDecodeError
+            stats.unparseable_event_lines += 1
+            out.append(piece + b"\n" if terminated else piece)
+            continue
         if isinstance(parsed, dict):
-            records.append(_compact_event_record(parsed))
-        else:
-            records.append(parsed)
-    compact = _dump_events_bytes(records)
+            parsed = _compact_event_record(parsed)
+        # Serialize events one JSON object per line, matching ``append_event``.
+        out.append((json.dumps(parsed, sort_keys=True) + "\n").encode("utf-8"))
+    compact = b"".join(out)
     _rewrite(path, original, compact, apply=apply, stats=stats)
 
 
@@ -401,6 +416,7 @@ def compact_plan_state(
         actual_bytes_reclaimed=reclaimed if apply else 0,
         pass_output_removed=stats.pass_output_removed,
         failed_output_extracted=stats.failed_output_extracted,
+        unparseable_event_lines=stats.unparseable_event_lines,
         rewritten_paths=tuple(stats.rewritten_paths),
     )
 
@@ -424,6 +440,10 @@ def _print_report(report: CompactionReport) -> None:
         f"Failed-check outputs extracted: {report.failed_output_extracted}; "
         f"pass outputs removed (lossy): {report.pass_output_removed}"
     )
+    if report.unparseable_event_lines:
+        print(
+            f"Unparseable event lines kept verbatim: {report.unparseable_event_lines}"
+        )
     if not report.applied and report.files_rewritten:
         print("Re-run with --apply to write the compact records.")
 
