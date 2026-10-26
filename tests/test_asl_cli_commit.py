@@ -2,13 +2,30 @@
 
 from __future__ import annotations
 
+import argparse
+import io
 import unittest
+from contextlib import redirect_stdout
+from unittest import mock
 
-from agent_session_loop import cli, commit_message
+from agent_session_loop import cli, commit_message, commit_message_output
 
 
 class CommitCliTests(unittest.TestCase):
     """Commit CLI tests."""
+
+    def test_end_of_input_at_the_prompt_declines_the_commit(self) -> None:
+        args = argparse.Namespace(yes=False, json=False)
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(commit_message_output, "_is_tty", return_value=True),
+            mock.patch("builtins.input", side_effect=EOFError),
+            redirect_stdout(stdout),
+        ):
+            confirmed = commit_message_output._confirm(args, "Commit?")
+
+        self.assertFalse(confirmed)
+        self.assertEqual("\n", stdout.getvalue())
 
     def test_commit_subparser_is_wired_with_defaults(self) -> None:
         parser = cli.build_parser()

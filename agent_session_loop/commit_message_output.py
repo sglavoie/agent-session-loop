@@ -147,7 +147,14 @@ def _confirm(args: argparse.Namespace, question: str) -> bool:
         return True
     if not (_is_tty(sys.stdin) and _is_tty(sys.stdout)):
         return True
-    return input(f"{question} [y/N] ").strip().lower() in {"y", "yes"}
+    try:
+        answer = input(f"{question} [y/N] ")
+    except EOFError:
+        # Ctrl-D at the prompt declines like any answer that is not yes; end
+        # the prompt's line so the cancellation starts on its own.
+        print()
+        return False
+    return answer.strip().lower() in {"y", "yes"}
 
 
 def _prepare_header(
