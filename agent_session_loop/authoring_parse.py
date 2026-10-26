@@ -315,7 +315,7 @@ def _parse_repository_registry(
             first_heading,
             category=LINT_REPOSITORIES_PLACEMENT,
         )
-    if first_heading != _REPOSITORIES_HEADING:
+    if first_heading.rstrip(" \t") != _REPOSITORIES_HEADING:
         raise _source_registry_error(
             first_heading_line,
             "repository registry heading must be exactly '## Repositories'",

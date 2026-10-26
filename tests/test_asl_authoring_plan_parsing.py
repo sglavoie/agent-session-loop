@@ -194,6 +194,26 @@ class PlanParsingTests(PlanAuthoringBase):
             ("# Plan", "", "", "Shared context.", ""), parsed.context_lines
         )
 
+    def test_repositories_heading_tolerates_trailing_whitespace(self) -> None:
+        for trailing in (" ", "\t", "  \t "):
+            with self.subTest(trailing=repr(trailing)):
+                text = (
+                    f"# Plan\n\n## Repositories{trailing}\n\n"
+                    "| Alias | Path | Origin |\n"
+                    "| --- | --- | --- |\n"
+                    "| app | repo | https://example.com/app.git |\n\n"
+                    "## Session 1: A\n\n"
+                    "**Reads repositories**: app\n"
+                    "**Writes repositories**: app\n\nx\n"
+                )
+
+                parsed = authoring_parse.parse_plan_document(text)
+                lint = authoring_lint.lint_plan_document(text)
+
+                self.assertIsNotNone(parsed.registry)
+                self.assertEqual(("app",), parsed.registry.aliases)
+                self.assertEqual((), lint.findings)
+
     def test_parse_plan_document_ignores_registry_shaped_content(
         self,
     ) -> None:
