@@ -434,6 +434,20 @@ class JsonPlansListingCliTests(JsonCliHelpers, unittest.TestCase):
                     self.assertEqual("input-error", payload["reason"])
                     self.assertIn("finite, non-negative number", payload["error"])
 
+    def test_plans_unknown_readiness_is_an_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            code, stdout, stderr = self._run_plans(
+                "--state-dir", tmp, "--readiness", "bogus", "--json"
+            )
+        self.assertEqual(1, code, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual("input-error", payload["reason"])
+        self.assertTrue(
+            payload["error"].startswith("--readiness must be one of "),
+            payload["error"],
+        )
+        self.assertTrue(payload["error"].endswith("; got 'bogus'"), payload["error"])
+
     def test_plans_stale_days_beyond_the_calendar_keeps_nothing(self) -> None:
         self.assertFalse(
             self._stale_days_verdict(

@@ -11,6 +11,7 @@ from typing import Any
 
 from . import (
     plans_errors,
+    plans_models,
     plans_readiness,
     responses,
 )
@@ -231,11 +232,15 @@ def plans_from_args(args: Any, *, now: datetime | None = None) -> int:
     if readiness_filter is not None:
         try:
             readiness_filter = plans_readiness.parse_readiness_state(readiness_filter)
-        except plans_errors.PlanError as error:
+        except plans_errors.PlanError:
             return _plans_error(
                 args,
-                reason="invalid-readiness",
-                error=str(error),
+                reason="input-error",
+                error=flag_refusal(
+                    "--readiness",
+                    f"must be one of {', '.join(plans_models.READINESS_STATES)}",
+                    readiness_filter,
+                ),
             )
 
     try:

@@ -232,9 +232,10 @@ asl unlock ~/.local/share/agent-plans/example-plan/ --json
 All parsed subcommands that support `--json` print JSON errors to stdout. Common
 error fields are `ok`, `command`, `reason`, `error`, `paused`, and `details`.
 A flag value a handler refuses itself, such as `tail --lines 0`,
-`plans --stale-days -1`, `metrics --since-days 0`, `gc --max-age-days -1`, or
-`commit --timeout -1`, is `reason: input-error`, with an `error` worded like
-argparse's own refusal (`--lines must be a positive integer; got '0'`).
+`plans --stale-days -1`, `plans --readiness bogus`, `metrics --since-days 0`,
+`gc --max-age-days -1`, or `commit --timeout -1`, is `reason: input-error`,
+with an `error` worded like argparse's own refusal (`--lines must be a
+positive integer; got '0'`).
 `asl tail --json` is a stream rather than one object: it prints the latest
 run's `events.jsonl` records one per line — the last `--lines` of them, then
 each new one until `run_finished` (or only the first part with `--no-follow`)
