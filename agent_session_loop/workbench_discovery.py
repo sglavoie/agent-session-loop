@@ -84,7 +84,9 @@ def _iter_state_plan_dirs(state_root: Path, *, warnings: list[str]) -> tuple[Pat
                 continue
             try:
                 raw = json.loads(payload_path.read_text(encoding="utf-8"))
-            except OSError, json.JSONDecodeError:
+            except OSError, ValueError, RecursionError:
+                # Per file: one non-UTF-8, unparseable, or pathologically
+                # nested state file hides that plan, never the whole corpus.
                 continue
             if not isinstance(raw, Mapping):
                 continue
