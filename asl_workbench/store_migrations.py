@@ -342,7 +342,15 @@ def _carry_project_catalogs(connection: sqlite3.Connection, created_at: float) -
         for plan_key, metadata in catalog.items():
             if not isinstance(metadata, dict):
                 continue
-            projects = [str(name) for name in metadata.get("projects") or []]
+            # Only a list of names is a project list. Iterating anything else
+            # would split a lone string into letters, or raise on a number and
+            # roll back the whole upgrade over one label.
+            listed = metadata.get("projects")
+            projects = (
+                [name for name in listed if isinstance(name, str)]
+                if isinstance(listed, list)
+                else []
+            )
             title = metadata.get("title")
             connection.execute(
                 "INSERT OR IGNORE INTO catalog_entry (connector_id, plan_key, "

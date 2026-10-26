@@ -268,6 +268,35 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(opened.catalog(now=NOW), [])
             self.assertEqual(opened.counts(now=NOW).plans, 0)
 
+    def test_a_malformed_project_list_carries_no_projects_and_does_not_block(
+        self,
+    ) -> None:
+        companion_database(self.path, created_at=NOW - RETENTION)
+        connection = sqlite3.connect(self.path)
+        connection.execute(
+            "INSERT INTO service_meta (key, value) VALUES (?, ?)",
+            (
+                store_types.META_PROJECT_CATALOG_PREFIX + "other-mac",
+                '{"number": {"projects": 5}, "word": {"projects": "scripts"}, '
+                '"mixed": {"projects": ["scripts", {"a": 1}]}}',
+            ),
+        )
+        connection.commit()
+        connection.close()
+        with store_workbench.WorkbenchStore.open(
+            self.path, policy=POLICY, created_at=NOW
+        ) as opened:
+            self.assertEqual(opened.schema_version, store_types.SCHEMA_VERSION)
+            with opened.reading() as reading:
+                rows = reading.execute(
+                    "SELECT plan_key, projects FROM catalog_entry "
+                    "WHERE connector_id = 'other-mac' ORDER BY plan_key"
+                ).fetchall()
+        self.assertEqual(
+            [(row["plan_key"], row["projects"]) for row in rows],
+            [("mixed", '["scripts"]'), ("number", "[]"), ("word", "[]")],
+        )
+
     def test_a_carried_label_is_retired_by_the_first_complete_generation(
         self,
     ) -> None:
