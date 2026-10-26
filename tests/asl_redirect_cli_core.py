@@ -222,6 +222,22 @@ class UnavailableControlTests(RedirectCliTestCase):
         self.assertEqual("", out)
         self.assertIn("durably settled", err)
 
+    def test_a_channel_refused_before_persisting_does_not_claim_settlement(
+        self,
+    ) -> None:
+        self.write_state()
+        self.write_lock()
+
+        code, out, err = self.run_cli(
+            ["control", "redirect", str(self.plan_dir), "--text", FEEDBACK]
+        )
+
+        self.assertEqual(redirect_cli.EXIT_UNAVAILABLE, code)
+        self.assertEqual("", out)
+        self.assertIn("refused before anything was persisted", err)
+        self.assertNotIn("settled", err)
+        self.assertEqual((), self.journal().requests)
+
     def test_no_run_at_all_is_a_refusal_rather_than_an_unavailable_channel(
         self,
     ) -> None:

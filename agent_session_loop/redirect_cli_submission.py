@@ -146,6 +146,10 @@ def _submission_error_text(
     # The stage says what happened and the reason says why; text output used
     # to drop the reason, so a refusal with no live run read only "rejected".
     why = f" ({outcome.reason})" if outcome.reason else ""
+    if outcome.operation_id is None:
+        # A pre-check refusal persists nothing, so the stage's "settled" wording
+        # would claim a journal record that does not exist.
+        return f"{subject} is {stage}{why}: refused before anything was persisted"
     return f"{subject} is {stage}{why}: {STAGE_DESCRIPTIONS[stage]}"
 
 
@@ -160,6 +164,8 @@ def _submission_hint(outcome: redirect_admission.SubmissionOutcome) -> str | Non
     if outcome.outcome == redirect_admission.OUTCOME_UNCERTAIN:
         return RECONCILE_HINT
     if outcome.outcome == redirect_admission.OUTCOME_UNAVAILABLE:
+        if outcome.operation_id is None:
+            return "resubmit once a run that serves redirects holds this plan"
         return (
             "the request is durably settled, so no later run will act on it; "
             "resubmit once a run holds this plan again"
