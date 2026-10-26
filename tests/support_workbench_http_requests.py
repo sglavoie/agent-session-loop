@@ -149,6 +149,26 @@ class AuthenticatorTests(unittest.TestCase):
         self.assertEqual(response.headers.get("WWW-Authenticate"), "Bearer")
         self.assertEqual(provider.calls, [])
 
+    def test_a_non_ascii_local_token_is_unauthorized_rather_than_an_error(
+        self,
+    ) -> None:
+        provider = RecordingProvider()
+        app = Application(
+            provider, LocalTokenAuthenticator(lambda: "secret"), policy=LOCAL_POLICY
+        )
+        for token in ("s\u00e9cret", "\u2603", "secret\udcff"):
+            with self.subTest(token=token):
+                response = app.handle(
+                    build(
+                        "POST",
+                        "/api/unlock",
+                        headers={"Authorization": f"Bearer {token}"},
+                        body=b"{}",
+                    )
+                )
+                self.assertEqual(response.status, 401)
+        self.assertEqual(provider.calls, [])
+
     def test_the_token_is_read_at_request_time(self) -> None:
         """The server mints it after this object is built, so it is a callable."""
         token = {"value": "first"}

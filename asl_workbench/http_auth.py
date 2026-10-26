@@ -141,7 +141,13 @@ class LocalTokenAuthenticator:
             return Principal(role=ROLE_OWNER)
         presented = parse_authorization(request.header("authorization"))
         expected = self._token()
-        if presented and secrets.compare_digest(presented, expected):
+        # Compared as bytes: ``compare_digest`` refuses a ``str`` holding
+        # anything but ASCII with a TypeError, and a header is whatever the
+        # caller sent, so a non-ASCII token would have been a 500, not a 401.
+        if presented and secrets.compare_digest(
+            presented.encode("utf-8", "surrogatepass"),
+            expected.encode("utf-8", "surrogatepass"),
+        ):
             return Principal(role=ROLE_OWNER)
         raise unauthorized("missing or invalid Authorization bearer token")
 
