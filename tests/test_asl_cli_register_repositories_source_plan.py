@@ -242,6 +242,20 @@ class RegisterRepositoriesSourcePlanTests(unittest.TestCase):
             self.assertEqual("input-error", payload["reason"])
             self.assertIn("exactly one", payload["error"])
 
+    def test_non_utf8_stdin_is_an_input_error_like_a_non_utf8_file(self) -> None:
+        stdin = io.TextIOWrapper(io.BytesIO(b"# Plan\n\xff\xfe\n"), "utf-8")
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), mock.patch("sys.stdin", stdin):
+            code = cli.main(
+                ["register-repositories", "--inline-stdin", "--cwd", str(self.svc)]
+                + ["--json"]
+            )
+
+        self.assertEqual(1, code)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual("input-error", payload["reason"])
+        self.assertIn("cannot read source plan from stdin", payload["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

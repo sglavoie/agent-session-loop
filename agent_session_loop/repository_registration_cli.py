@@ -1,4 +1,5 @@
 # ruff: noqa: F403, F405
+from . import cli_common
 from .cli_defaults import program_name
 from .plans_files import read_input_text
 from .repository_registration_derivation import (
@@ -166,7 +167,16 @@ def _register_source_plan_from_args(args: Any) -> int:
     if args.inline_stdin:
         source_path = "<stdin>"
         try:
-            text = authoring_paths.extract_inline_plan(sys.stdin.read())
+            # Strict, like --plan-file: a surrogateescaped plan would be echoed
+            # back as markdown nothing can write or parse as JSON.
+            raw = cli_common.read_stdin_text()
+        except (OSError, TypeError, UnicodeError, ValueError) as error:
+            return _emit_error(
+                REGISTER_REASON_INPUT_ERROR,
+                f"cannot read source plan from stdin: {error}",
+            )
+        try:
+            text = authoring_paths.extract_inline_plan(raw)
         except ValueError as error:
             return _emit_error(REGISTER_REASON_INPUT_ERROR, str(error))
     else:
