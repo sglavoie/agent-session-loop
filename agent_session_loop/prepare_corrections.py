@@ -8,7 +8,11 @@ from pathlib import Path
 from .authoring_transaction import PlanTransaction
 from .contracts import COMPLETION_CONTRACT_HEADING
 from .plans_errors import PlanError
-from .plans_files import canonicalize_path
+from .plans_files import (
+    canonicalize_path,
+    read_text_and_line_ending,
+    with_line_ending,
+)
 from .plans_handoff import HANDOFF_HEADING
 from .prepare_models import (
     _HEADING_LINE_RE,
@@ -201,10 +205,10 @@ def apply_corrections(
             continue
         session_path = canonical_dir / session.session_id.filename
         try:
-            text = session_path.read_text(encoding="utf-8")
+            text, line_ending = read_text_and_line_ending(session_path)
         except FileNotFoundError as error:
             raise PlanError(f"missing session file: {session_path}") from error
-        except OSError as error:
+        except (OSError, UnicodeDecodeError) as error:
             raise PlanError(f"cannot read {session_path}: {error}") from error
 
         original = text
@@ -214,7 +218,9 @@ def apply_corrections(
             )
             outcomes.append(outcome)
         if text != original:
-            transaction.stage(session.session_id.filename, text)
+            transaction.stage(
+                session.session_id.filename, with_line_ending(text, line_ending)
+            )
 
     transaction.commit()
     return tuple(outcomes)

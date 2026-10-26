@@ -87,6 +87,36 @@ class ExpandIngestCliTests(unittest.TestCase):
             session_text = (plan_dir / "session-1.md").read_text(encoding="utf-8")
             self.assertIn("load_settings", session_text)
 
+    def test_correction_keeps_a_crlf_session_file_crlf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = tmp_path / "plan"
+            _write_prepare_plan(plan_dir, ("1",))
+            session = plan_dir / "session-1.md"
+            lf_text = session.read_text(encoding="utf-8")
+            session.write_bytes(lf_text.replace("\n", "\r\n").encode("utf-8"))
+            payload = _validator_payload(
+                corrections=[
+                    {
+                        "expected_text": "load_config",
+                        "replacement_text": "load_settings",
+                        "reason": "renamed helper",
+                    }
+                ]
+            )
+            batch = self._write_batch(tmp_path, payload)
+
+            code, stdout, _stderr = self._run_cli(
+                str(plan_dir), "--batch-file", str(batch), "--json"
+            )
+
+            self.assertEqual(0, code, stdout)
+            self.assertEqual(1, json.loads(stdout)["correction_summary"]["applied"])
+            raw = session.read_bytes()
+            self.assertIn(b"load_settings", raw)
+            # Every line still ends in CRLF; none was rewritten to a bare LF.
+            self.assertEqual(raw.count(b"\n"), raw.count(b"\r\n"))
+
     def test_second_batch_reports_only_its_own_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

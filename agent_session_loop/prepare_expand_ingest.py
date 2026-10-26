@@ -18,7 +18,12 @@ from .plans_errors import (
     PlanError,
     PlanNotFoundError,
 )
-from .plans_files import canonicalize_path, read_input_text
+from .plans_files import (
+    canonicalize_path,
+    read_input_text,
+    read_text_and_line_ending,
+    with_line_ending,
+)
 from .plans_snapshot import require_plan_directory
 from .prepare_corrections import CorrectionOutcome, _apply_one_correction
 from .prepare_expansion import insert_expansion_reference, render_expansion
@@ -98,7 +103,7 @@ def ingest_expand_batch(
     for session in update.sessions:
         session_path = canonical_dir / session.session_id.filename
         try:
-            session_text = session_path.read_text(encoding="utf-8")
+            session_text, line_ending = read_text_and_line_ending(session_path)
         except FileNotFoundError as error:
             raise PlanError(f"missing session file: {session_path}") from error
         except (OSError, UnicodeDecodeError) as error:
@@ -123,7 +128,10 @@ def ingest_expand_batch(
             )
             outcomes.append(outcome)
         if session_text != original_text:
-            transaction.stage(session.session_id.filename, session_text)
+            transaction.stage(
+                session.session_id.filename,
+                with_line_ending(session_text, line_ending),
+            )
 
     files = transaction.commit()
     return ExpandIngestResult(
