@@ -270,9 +270,12 @@ class ParserDefaultsAndSupervisorGuideTests(unittest.TestCase):
                 self.assertEqual(harness, args.harness)
                 self.assertTrue(args.json)
 
-        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as rejected:
-            parser.parse_args(["supervisor-guide", "--harness", "nope"])
-        self.assertEqual(2, rejected.exception.code)
+        # The handler refuses an unknown harness, so --json keeps its envelope.
+        rejected = parser.parse_args(["supervisor-guide", "--harness", "nope"])
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            self.assertEqual(1, supervisor_guide.supervisor_guide_from_args(rejected))
+        self.assertIn("--harness must be one of auto, ", stderr.getvalue())
 
         root_help = io.StringIO()
         with redirect_stdout(root_help), self.assertRaises(SystemExit) as printed:

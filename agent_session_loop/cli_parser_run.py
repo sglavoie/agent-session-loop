@@ -36,9 +36,11 @@ def _add_run_inspection_commands(
             "detached helper launch, mailbox operations, and leaf help."
         ),
     )
+    # Validated by the handler, so an unknown harness keeps its JSON
+    # `input-error` under --json instead of argparse's plain-text exit 2.
     supervisor_guide_parser.add_argument(
         "--harness",
-        choices=("auto", *harnesses.HARNESS_NAMES),
+        metavar="{" + ",".join(("auto", *harnesses.HARNESS_NAMES)) + "}",
         default="auto",
         help=(
             "Harness whose skill invocation to show; 'auto' detects the "

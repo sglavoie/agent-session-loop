@@ -121,6 +121,7 @@ class InputErrorWordingTests(unittest.TestCase):
             (("assurance", "list", "--limit", "0", *state), "--limit", "0"),
             (("sessions", "--limit", "0", *state), "--limit", "0"),
             (("doctor", str(self.plan_dir), "--harness", "nope"), "--harness", "nope"),
+            (("supervisor-guide", "--harness", "bogus"), "--harness", "bogus"),
             (
                 ("assurance", "process-pending", "--audit-timeout", "0", *state),
                 "--audit-timeout",
