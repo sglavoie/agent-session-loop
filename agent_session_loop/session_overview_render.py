@@ -1,7 +1,7 @@
 """Focused portion of agent_session_loop/session_overview.py."""
 
 from .cli_defaults import program_name
-from .cli_parser_support import NON_NEGATIVE_INTEGER, flag_refusal
+from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
 from .session_overview_running import *
 
 
@@ -248,8 +248,10 @@ def sessions_from_args(args: argparse.Namespace) -> int:
         show_recent = True
 
     limit = args.limit if args.limit is not None else DEFAULT_RECENT_LIMIT
-    if limit < 0:
-        message = flag_refusal("--limit", NON_NEGATIVE_INTEGER, limit)
+    # Zero rows would print "Recent sessions: none" over sessions that exist,
+    # so it is refused like `assurance list --limit 0`.
+    if limit < 1:
+        message = flag_refusal("--limit", POSITIVE_INTEGER, limit)
         if args.json:
             responses.print_json(
                 responses.error_payload(

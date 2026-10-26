@@ -165,7 +165,7 @@ rows include `plan_dir`, `state_dir`, `run_id`, `harness`, `session_id`,
 `artifact_dir`. Plan paths in JSON are always full canonical paths; the
 text rendering uses basenames by default and switches to full paths when
 `--verbose` is passed. A missing state root returns success with empty
-arrays. Invalid parsed inputs such as `--limit -1` produce
+arrays. Invalid parsed inputs such as `--limit 0` produce
 `reason: input-error`; catastrophic state-root errors produce
 `reason: state-error`.
 

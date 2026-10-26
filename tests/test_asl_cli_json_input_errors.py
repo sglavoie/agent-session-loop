@@ -119,6 +119,7 @@ class InputErrorWordingTests(unittest.TestCase):
             (("gc", "--max-age-days", "-1", *state), "--max-age-days", "-1"),
             (("commit", "--timeout", "-1"), "--timeout", "-1"),
             (("assurance", "list", "--limit", "0", *state), "--limit", "0"),
+            (("sessions", "--limit", "0", *state), "--limit", "0"),
             (("doctor", str(self.plan_dir), "--harness", "nope"), "--harness", "nope"),
             (
                 ("assurance", "process-pending", "--audit-timeout", "0", *state),

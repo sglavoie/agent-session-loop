@@ -788,7 +788,7 @@ class NumericFlagValidationTests(unittest.TestCase):
             ),
             (
                 ["sessions", "--limit", "-1"],
-                "--limit must be a non-negative integer; got '-1'",
+                "--limit must be a positive integer; got '-1'",
             ),
         )
         with tempfile.TemporaryDirectory() as tmp:

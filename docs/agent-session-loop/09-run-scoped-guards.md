@@ -459,7 +459,7 @@ PID, harness, session ID, turn index, and plan; `Recent sessions` lists the
 most recently finished turns with finished time, duration, status result,
 harness, session ID, run ID, and plan. `--running` and `--recent` are
 independent filters; passing neither (or both) shows both sections. `--limit`
-must be non-negative, defaults to `20`, and truncates recent rows only. Text
+must be a positive integer, defaults to `20`, and truncates recent rows only. Text
 output uses compact plan-directory basenames; `--verbose` opts into full
 canonical paths; JSON always includes full paths. The compact plan basename
 shown after `plan` can be passed directly to `asl status` as its
