@@ -42,6 +42,8 @@ import ast
 import inspect
 import io
 import json
+import os
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -61,6 +63,7 @@ from agent_session_loop import (
     run_loop,
     runner,
     state,
+    state_locks,
 )
 from agent_session_loop.run_errors import RunError
 from tests.support import assert_no_runner_import, called_names, write_plan
@@ -493,6 +496,65 @@ class AdmissionOrderTests(unittest.TestCase):
         payload = json.loads(out.getvalue())
         self.assertEqual(run_entry.turn_execution_constants.INTERRUPTED_EXIT, code)
         self.assertEqual("interrupted", payload["pause_reason"])
+
+    def test_a_termination_signal_takes_the_interrupt_path(self) -> None:
+        # Left at their defaults, SIGTERM and SIGHUP ended the process with no
+        # terminal record, no restored TTY and the harness's group still alive.
+        for signum in run_entry.TERMINATION_SIGNALS:
+            with self.subTest(signal=signal.Signals(signum).name):
+                before = signal.getsignal(signum)
+                fixture = _EntryFixture(self, ("pending",))
+                seen: list[object] = []
+
+                def _signalled(
+                    *, _signum: int = signum, _seen: list[object] = seen, **kwargs: Any
+                ) -> tuple[int, dict[str, Any]]:
+                    _seen.append(signal.getsignal(_signum))
+                    os.kill(os.getpid(), _signum)
+                    raise AssertionError("the signal did not interrupt the run")
+
+                tokens = fixture.tokens()
+                out = io.StringIO()
+                with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                    code = run_entry.run_from_args(
+                        _parse(tokens), run_argv=tokens[1:], run_locked=_signalled
+                    )
+
+                payload = json.loads(out.getvalue())
+                self.assertEqual(
+                    run_entry.turn_execution_constants.INTERRUPTED_EXIT, code
+                )
+                self.assertEqual("interrupted", payload["pause_reason"])
+                self.assertEqual(
+                    f"run interrupted by {signal.Signals(signum).name}",
+                    payload["pause_message"],
+                )
+                self.assertNotEqual(before, seen[0])
+                self.assertEqual(before, signal.getsignal(signum))
+                # The lock was released on the way out.
+                self.assertIsNone(
+                    state_locks.read_lock_info(fixture.plan_dir, fixture.state_dir)
+                )
+
+    def test_an_ignored_hangup_stays_ignored(self) -> None:
+        # `nohup asl run` asked to survive a closed terminal.
+        previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        self.addCleanup(signal.signal, signal.SIGHUP, previous)
+        fixture = _EntryFixture(self, ("pending",))
+
+        def _hung_up(**kwargs: Any) -> tuple[int, dict[str, Any]]:
+            os.kill(os.getpid(), signal.SIGHUP)
+            return 0, {"plan_dir": str(fixture.plan_dir), "ok": True}
+
+        tokens = fixture.tokens()
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            code = run_entry.run_from_args(
+                _parse(tokens), run_argv=tokens[1:], run_locked=_hung_up
+            )
+
+        self.assertEqual(0, code)
+        self.assertIs(signal.SIG_IGN, signal.getsignal(signal.SIGHUP))
 
     def test_the_locked_runs_payload_is_the_one_that_is_emitted(self) -> None:
         fixture = _EntryFixture(self, ("pending",))

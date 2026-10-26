@@ -31,3 +31,26 @@ from __future__ import annotations
 
 class RunError(Exception):
     """Raised when the run loop cannot continue safely."""
+
+
+class RunTerminatedBySignal(KeyboardInterrupt):
+    """A termination signal ended a locked run, the way Ctrl-C does.
+
+    ``asl run`` turns SIGTERM and SIGHUP into this while it holds the plan
+    lock, so a ``kill`` or a closed terminal takes the same teardown as Ctrl-C:
+    the harness's process group is killed, the run records its ``interrupted``
+    pause and the terminal is restored. A subclass rather than a bare
+    ``KeyboardInterrupt`` only so the record can say which signal it was; every
+    ``except KeyboardInterrupt`` still catches it.
+    """
+
+    def __init__(self, signal_name: str) -> None:
+        super().__init__(signal_name)
+        self.signal_name = signal_name
+
+
+def interrupt_message(error: BaseException) -> str:
+    """The ``interrupted`` pause message for ``error``."""
+    if isinstance(error, RunTerminatedBySignal):
+        return f"run interrupted by {error.signal_name}"
+    return "run interrupted by user"
