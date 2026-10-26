@@ -101,6 +101,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # Nothing here pushes, so the token is not left in .git/config.
+          persist-credentials: false
 
       # The portable Workbench is deployed to a host documented at Python 3.13
       # (see `[tool.ruff.per-file-target-version]` in pyproject.toml), so its
