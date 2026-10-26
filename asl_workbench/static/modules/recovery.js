@@ -22,7 +22,12 @@ import {
   RECOVERY_TARGET_LABELS,
 } from "./constants.js";
 import { handleLaunchClick, handleUnlockClick } from "./controls.js";
-import { planUrl, routePlanId, shortenStatePath } from "./identity.js";
+import {
+  planReadGuard,
+  planUrl,
+  routePlanId,
+  shortenStatePath,
+} from "./identity.js";
 import { applyActionAvailability } from "./operations.js";
 import { hideReplyPanel, loadAndRenderReply } from "./panels.js";
 import { redirectStageLine } from "./redirect.js";
@@ -76,6 +81,7 @@ export async function loadAndRenderRecovery(
   linkedQuestionId,
 ) {
   const planId = routePlanId();
+  const stale = planReadGuard();
   const compact = plan && plan.recovery ? plan.recovery : null;
   let renderedRecovery = null;
   if (compact) {
@@ -92,6 +98,7 @@ export async function loadAndRenderRecovery(
     const body = await apiRequest(
       planUrl("/api/recovery")
     );
+    if (stale()) return;
     if (body && body.ok === true && body.recovery) {
       renderedRecovery = body.recovery;
       renderRecoveryPanel(body.recovery);
@@ -103,6 +110,7 @@ export async function loadAndRenderRecovery(
       renderedRecovery = null;
     }
   } catch (err) {
+    if (stale()) return;
     if (compact) {
       const fallback = Object.assign({}, compact, {
         warnings: [
@@ -142,10 +150,12 @@ export async function loadAndRenderRecovery(
 // no button that performs any of it.
 
 export async function loadAndRenderConversationRecovery() {
+  const stale = planReadGuard();
   try {
     const body = await apiRequest(
       planUrl("/api/conversation-recovery")
     );
+    if (stale()) return;
     if (body && body.ok === true) {
       state.conversationRecovery = body;
       renderConversationRecovery(body);
@@ -155,6 +165,7 @@ export async function loadAndRenderConversationRecovery() {
       );
     }
   } catch (err) {
+    if (stale()) return;
     renderConversationRecoveryError(describeError(err));
   }
 }

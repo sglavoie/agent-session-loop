@@ -52,6 +52,10 @@ export const REASON_OPERATION_UNAVAILABLE = "operation-unavailable";
 export const IN_FLIGHT_MESSAGE =
   "a submission is already in flight; wait for its answer";
 
+/** What a second click is told while an earlier batch is still settling. */
+export const HELD_MESSAGE =
+  "an earlier submission is still settling; wait for it to finish";
+
 /* Every mutating action the shared interface offers, by the name the DOM uses
  * for it.
  *
@@ -259,7 +263,7 @@ export function planAwaitsReply(plan) {
  * submission already on its way. Each returns the *specific* explanation --
  * "disabled" with no sentence is the state this replaces.
  */
-export function actionAvailability(name) {
+export function actionAvailability(name, withinHold) {
   const action = ACTIONS[name];
   if (!action) return { enabled: true, reason: null };
   const capability = capabilityOf(action.operation);
@@ -291,6 +295,9 @@ export function actionAvailability(name) {
   }
   if (operationInFlight(name)) {
     return { enabled: false, reason: IN_FLIGHT_MESSAGE };
+  }
+  if (!withinHold && state.operationsHeld.has(name)) {
+    return { enabled: false, reason: HELD_MESSAGE };
   }
   return { enabled: true, reason: null };
 }
@@ -368,6 +375,29 @@ export function beginOperation(name) {
 
 export function endOperation(name) {
   state.operationsInFlight.delete(name);
+}
+
+/**
+ * Keep an action shut across a whole batch, not just one request.
+ *
+ * A restore or a remote archive is answered "pending" and then polled for up
+ * to a minute; the per-request guard has long been released by then, and a
+ * second click would start a second loop with fresh operation ids. The holder
+ * passes `withinHold` to `runMutation` for its own submissions and must
+ * release the hold in a `finally`. Returns false when already held or sent.
+ */
+export function holdOperation(name) {
+  if (state.operationsHeld.has(name) || state.operationsInFlight.has(name)) {
+    return false;
+  }
+  state.operationsHeld.add(name);
+  applyActionAvailability();
+  return true;
+}
+
+export function releaseOperation(name) {
+  state.operationsHeld.delete(name);
+  applyActionAvailability();
 }
 
 // ---------------------------------------------------------------------------
@@ -699,12 +729,13 @@ export function answerKind(answer) {
  * the answer wherever that panel draws things. Everything else -- the
  * double-submit guard, the receipt, the focus the browser's own confirm dialog
  * took away, and re-asking what this mode can do after an unavailable refusal
- * -- happens here so that no caller has to remember it.
+ * -- happens here so that no caller has to remember it. A caller that took
+ * `holdOperation` for a batch sets `withinHold` so its own submissions pass.
  */
 export async function runMutation(spec) {
   const name = spec.action;
   const action = ACTIONS[name] || {};
-  const availability = actionAvailability(name);
+  const availability = actionAvailability(name, spec.withinHold === true);
   if (!availability.enabled) {
     spec.feedback("error", availability.reason || "this action is unavailable");
     return null;

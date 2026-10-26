@@ -16,8 +16,11 @@
 import { OUTCOME_PENDING, OUTCOME_RESULT, apiRequest, describeError } from "./api.js";
 import { applyChipPressedState } from "./filters.js";
 import {
+  HELD_MESSAGE,
   applyActionAvailability,
   captureFocus,
+  holdOperation,
+  releaseOperation,
   runMutation,
 } from "./operations.js";
 import { setField } from "./panels.js";
@@ -397,12 +400,14 @@ export function requestArchiveRestore(archiveId) {
   // Shared single-entry restore used by both row-level and bulk restore, so
   // the endpoint, the payload shape, and the classification of the answer stay
   // aligned. It returns the classified answer rather than an envelope: a
-  // restore the far side only recorded is not a restored plan.
+  // restore the far side only recorded is not a restored plan. Its callers
+  // hold "archive-restore" for as long as they poll, so it submits within it.
   return runMutation({
     action: "archive-restore",
     path: "/api/archive/restore",
     body: { archive_id: archiveId },
     subject: "restore of " + archiveId,
+    withinHold: true,
     feedback: showArchiveFeedback,
   });
 }
@@ -430,11 +435,28 @@ async function settledArchiveAnswer(answer) {
   return false;
 }
 
+/* Every restore button stays shut until the receipt settles, not just while
+ * the request is out: `settledArchiveAnswer` polls for up to forty seconds,
+ * and a second click in that window would start a second loop with new
+ * operation ids. */
+function holdRestores() {
+  if (holdOperation("archive-restore")) return true;
+  showArchiveFeedback("error", HELD_MESSAGE);
+  return false;
+}
+
 export async function handleArchiveRestore(archiveId) {
   if (!archiveId) return;
+  if (!holdRestores()) return;
   showArchiveFeedback("", "");
-  const answer = await requestArchiveRestore(archiveId);
-  if (await settledArchiveAnswer(answer)) {
+  let restored = false;
+  try {
+    const answer = await requestArchiveRestore(archiveId);
+    restored = await settledArchiveAnswer(answer);
+  } finally {
+    releaseOperation("archive-restore");
+  }
+  if (restored) {
     showArchiveFeedback("info", "restored " + archiveId);
     loadArchiveView();
   }
@@ -451,18 +473,23 @@ export async function handleArchiveRestoreSelected() {
   );
   restoreFocus();
   if (!confirmed) return;
+  if (!holdRestores()) return;
   showArchiveFeedback("", "");
   let restored = 0;
   let failed = 0;
-  for (const id of ids) {
-    const answer = await requestArchiveRestore(id);
-    if (await settledArchiveAnswer(answer)) {
-      restored += 1;
-      state.archiveSelection.delete(id);
-    } else {
-      failed += 1;
-      break;
+  try {
+    for (const id of ids) {
+      const answer = await requestArchiveRestore(id);
+      if (await settledArchiveAnswer(answer)) {
+        restored += 1;
+        state.archiveSelection.delete(id);
+      } else {
+        failed += 1;
+        break;
+      }
     }
+  } finally {
+    releaseOperation("archive-restore");
   }
   const parts = ["restored " + restored];
   if (failed) parts.push("stopped at the first unconfirmed or failed entry");

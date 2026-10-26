@@ -23,6 +23,7 @@ import {
 import { setSelectedPlan } from "./prefs.js";
 import {
   buildRow,
+  markRowSelected,
   populateRow,
   renderEmptyState,
   updatePreview,
@@ -139,6 +140,10 @@ export async function refresh() {
 export function setRefreshStatus(stateName, text) {
   const el = document.getElementById("wb-refresh-status");
   if (!el) return;
+  // The line is a live region so a failed read is announced, but the
+  // "refreshing…" / "updated" pair repeats on every poll and would talk over
+  // everything else; only an error is spoken.
+  el.setAttribute("aria-live", stateName === "error" ? "polite" : "off");
   el.setAttribute("data-state", stateName);
   el.textContent = text;
 }
@@ -650,8 +655,7 @@ export function upsertRow(plan) {
     state.rowsByPlan.set(planId, row);
   }
   populateRow(row, plan);
-  const isSelected = state.selectedPlan === planId;
-  row.setAttribute("data-selected", isSelected ? "true" : "false");
+  markRowSelected(row, state.selectedPlan === planId);
   return row;
 }
 

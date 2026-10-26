@@ -1011,6 +1011,72 @@ for (const deployment of DEPLOYMENTS) {
       );
     });
 
+    test("a panel read that lands after a plan switch is not drawn", async ({
+      page,
+    }) => {
+      const alpha = await openDetail(page, deployment, "alpha");
+      const bravo = rowFor(await catalog(page), "bravo");
+      await page.evaluate(async () => {
+        const detail = await import("/static/modules/detail.js");
+        detail.stopDetailTimer();
+      });
+      await page.waitForFunction(async () => {
+        const { state } = await import("/static/modules/state.js");
+        return !state.detailInFlight;
+      });
+      const param = alpha.plan_dir ? "plan_dir" : "plan_key";
+      const value = alpha.plan_dir || alpha.plan_key;
+      // Hold alpha's panel reads, then answer them with alpha's data only
+      // once bravo is on screen: the late answers must be dropped.
+      let release;
+      const held = new Promise((resolve) => {
+        release = resolve;
+      });
+      const late = async (route) => {
+        const url = new URL(route.request().url());
+        if (url.searchParams.get(param) !== value) return route.continue();
+        await held;
+        const body = url.pathname === "/api/logs"
+          ? { ok: true, text: "ALPHA-LATE" }
+          : {
+              ok: true,
+              action_token: "alpha-token",
+              permitted_actions: ["redirect"],
+              disabled_reasons: {},
+              live_target: null,
+            };
+        return route.fulfill({ json: body });
+      };
+      await page.route("**/api/logs?**", late);
+      await page.route("**/api/redirect-status?**", late);
+      await page.evaluate(async () => {
+        const panels = await import("/static/modules/panels.js");
+        const redirect = await import("/static/modules/redirect.js");
+        window.__lateReads = Promise.all([
+          panels.loadAndRenderLog("stdout"),
+          redirect.loadAndRenderRedirect(),
+        ]);
+      });
+      await page.evaluate((hash) => {
+        window.location.hash = hash;
+      }, detailHash(bravo));
+      await expect(page.locator("#wb-detail-state")).toHaveAttribute(
+        "data-state",
+        PLAN_STATES.bravo.primary_state,
+      );
+      release();
+      const after = await page.evaluate(async () => {
+        await window.__lateReads;
+        const { state } = await import("/static/modules/state.js");
+        return {
+          stdout: document.getElementById("wb-detail-stdout").textContent,
+          token: state.redirect.actionToken,
+        };
+      });
+      expect(after.stdout).not.toBe("ALPHA-LATE");
+      expect(after.token).not.toBe("alpha-token");
+    });
+
     test("a detail error leaves nothing of the plan behind it", async ({
       page,
     }) => {
@@ -1232,6 +1298,60 @@ for (const deployment of DEPLOYMENTS) {
           `#wb-archive-entries [data-archive-id="${ARCHIVE.expired.archive_id}"]`,
         ),
       ).toBeVisible();
+    });
+
+    test("a restore stays shut until its receipt settles", async ({ page }) => {
+      await openArchive(page, deployment);
+      const { byOperation } = await capabilities(page);
+      test.skip(
+        !byOperation["archive-list"].available ||
+          !byOperation["archive-restore"].available,
+        "this deployment does not carry out restores",
+      );
+      // The restore is only recorded, and its receipt stays pending until
+      // released: the window a second click used to start a second loop in.
+      let submissions = 0;
+      await page.route("**/api/archive/restore", (route) => {
+        submissions += 1;
+        return route.fulfill({
+          status: 202,
+          json: { ok: true, operation: { operation_id: "op-held", status: "pending" } },
+        });
+      });
+      let release;
+      const held = new Promise((resolve) => {
+        release = resolve;
+      });
+      await page.route("**/api/archive?operation_id=*", async (route) => {
+        await held;
+        return route.fulfill({
+          json: { ok: true, operation: { operation_id: "op-held", status: "consumed" } },
+        });
+      });
+      const row = page.locator(
+        `#wb-archive-entries [data-archive-id="${ARCHIVE.expired.archive_id}"]`,
+      );
+      const restore = row.locator('[data-action="archive-restore"]');
+      await restore.click();
+      await expect.poll(() => submissions).toBe(1);
+      await expect(restore).toBeDisabled();
+      await expect(restore).toHaveAttribute(
+        "data-disabled-reason",
+        /still settling/,
+      );
+      // A second request from code rather than the (disabled) button is
+      // refused too, and nothing more goes on the wire.
+      await page.evaluate(async (id) => {
+        const archive = await import("/static/modules/archive.js");
+        await archive.handleArchiveRestore(id);
+      }, ARCHIVE.expired.archive_id);
+      expect(submissions).toBe(1);
+      release();
+      await expect(page.locator("#wb-archive-restore-selected")).not.toHaveAttribute(
+        "data-disabled-reason",
+        /still settling/,
+      );
+      expect(submissions).toBe(1);
     });
 
     test("a bulk action with nothing selected explains the selection, not the mode", async ({

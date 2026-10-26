@@ -147,6 +147,10 @@ export const state = {
   // The mutations this tab has sent and not heard back about, by action name.
   // A guard rather than a record: what outlives the answer is the receipt.
   operationsInFlight: new Set(),
+  // Actions held shut for a whole batch: a submission whose receipt is then
+  // polled until it settles, or a loop of them. The guard above lasts only as
+  // long as one request; this one lasts until the caller has its answer.
+  operationsHeld: new Set(),
   // The operation the *server* still holds for the plan on screen, as the
   // remote mode reports it on every plan read. The authority on what is
   // outstanding, since it survives this tab entirely.

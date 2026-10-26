@@ -8,7 +8,13 @@
 import { apiRequest, OUTCOME_PENDING, OUTCOME_RESULT } from "./api.js";
 import { DAY_MS } from "./constants.js";
 import { planIdOf, planLabel } from "./identity.js";
-import { applyActionAvailability, runMutation } from "./operations.js";
+import {
+  HELD_MESSAGE,
+  applyActionAvailability,
+  holdOperation,
+  releaseOperation,
+  runMutation,
+} from "./operations.js";
 import {
   normalizeThresholdDays,
   persistCleanupMode,
@@ -309,42 +315,54 @@ export async function performBulkArchive() {
       showCleanupFeedback("error", "the Mac observation is not live; wait for the connector before archiving");
       return;
     }
+    // Each plan is polled until the Mac settles it, so the archive button
+    // stays shut for the whole batch rather than for each request: a second
+    // click would otherwise start a second loop with new operation ids.
+    if (!holdOperation("archive-plan")) {
+      showCleanupFeedback("error", HELD_MESSAGE);
+      return;
+    }
     let archived = 0;
     let failed = 0;
-    for (const id of ids) {
-      showCleanupFeedback("pending", "archiving " + (archived + failed + 1) + " of " + ids.length + "…");
-      const answer = await runMutation({
-        action: "archive-plan",
-        path: "/api/plan/archive",
-        body: { plan_key: id, confirm_plan_key: id },
-        subject: "archive of " + id,
-        planId: id,
-        feedback: () => {},
-      });
-      if (answer && answer.outcome === OUTCOME_PENDING && answer.operation?.id) {
-        let status;
-        try {
-          status = await waitForArchive(id, answer.operation.id);
-        } catch (error) {
-          status = "unconfirmed";
-        }
-        if (status !== "consumed") {
+    try {
+      for (const id of ids) {
+        showCleanupFeedback("pending", "archiving " + (archived + failed + 1) + " of " + ids.length + "…");
+        const answer = await runMutation({
+          action: "archive-plan",
+          path: "/api/plan/archive",
+          body: { plan_key: id, confirm_plan_key: id },
+          subject: "archive of " + id,
+          planId: id,
+          withinHold: true,
+          feedback: () => {},
+        });
+        if (answer && answer.outcome === OUTCOME_PENDING && answer.operation?.id) {
+          let status;
+          try {
+            status = await waitForArchive(id, answer.operation.id);
+          } catch (error) {
+            status = "unconfirmed";
+          }
+          if (status !== "consumed") {
+            failed += 1;
+            showCleanupFeedback("warning", "stopped after " + archived + " archived; " + id + " is " + status + ". Review its receipt before retrying.");
+            break;
+          }
+        } else if (!answer || answer.outcome !== OUTCOME_RESULT) {
           failed += 1;
-          showCleanupFeedback("warning", "stopped after " + archived + " archived; " + id + " is " + status + ". Review its receipt before retrying.");
+          showCleanupFeedback(
+            "warning",
+            "stopped after " + archived + " archived; " + id + " was not admitted (" +
+              (answer?.error || answer?.reason || "no answer") + ")."
+          );
           break;
         }
-      } else if (!answer || answer.outcome !== OUTCOME_RESULT) {
-        failed += 1;
-        showCleanupFeedback(
-          "warning",
-          "stopped after " + archived + " archived; " + id + " was not admitted (" +
-            (answer?.error || answer?.reason || "no answer") + ")."
-        );
-        break;
+        archived += 1;
+        state.cleanupSelection.delete(id);
+        state.cleanupCandidates.delete(id);
       }
-      archived += 1;
-      state.cleanupSelection.delete(id);
-      state.cleanupCandidates.delete(id);
+    } finally {
+      releaseOperation("archive-plan");
     }
     updateCleanupReview();
     if (!failed) showCleanupFeedback("info", "archived " + archived + " plans");

@@ -653,6 +653,24 @@ for (const deployment of DEPLOYMENTS) {
         .toBe("wb-detail-label");
     });
 
+    test("the refresh line is a status region that speaks only errors", async ({
+      page,
+    }) => {
+      await openQueue(page, deployment);
+      const status = page.locator("#wb-refresh-status");
+      await expect(status).toHaveAttribute("role", "status");
+      // Every poll rewrites "refreshing…" and "updated …"; announcing those
+      // would talk over everything else, so only an error is spoken.
+      await expect(status).toHaveAttribute("aria-live", "off");
+      await page.evaluate(async () => {
+        const queue = await import("/static/modules/queue.js");
+        queue.stopQueueTimer();
+        queue.setRefreshStatus("error", "error: unreachable");
+      });
+      await expect(status).toHaveAttribute("aria-live", "polite");
+      await expect(status).toHaveText("error: unreachable");
+    });
+
     test("a row itself selects its plan from the keyboard", async ({ page }) => {
       await openQueue(page, deployment);
       const plans = await catalog(page);
@@ -663,6 +681,10 @@ for (const deployment of DEPLOYMENTS) {
       await row.focus();
       await page.keyboard.press("Enter");
       await expect(row).toHaveAttribute("data-selected", "true");
+      // The selection is announced, not only drawn: a screen reader on the
+      // focused row hears it is the current one, and no other row claims it.
+      await expect(row).toHaveAttribute("aria-current", "true");
+      await expect(page.locator('.wb-row[aria-current="true"]')).toHaveCount(1);
       // Selecting is not navigating: the queue stays the route.
       await expect(page.locator("#wb-shell")).not.toHaveAttribute(
         "data-route",
