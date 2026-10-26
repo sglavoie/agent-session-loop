@@ -415,8 +415,10 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         check_id="env-harness.install-cli",
         severity_hint="red",
         message=(
-            "Install the harness CLI on PATH, or set "
-            "`agent_session_loop/harnesses.json` to point at the right executable."
+            "Install the harness CLI on PATH, or point it at the right "
+            "executable in `~/.config/agent-session-loop/harnesses.json` "
+            "(`$XDG_CONFIG_HOME/agent-session-loop/harnesses.json` when "
+            "`XDG_CONFIG_HOME` is set)."
         ),
         question_template=(
             "Harness CLI problem: {message}. Should I help configure harnesses.json?"

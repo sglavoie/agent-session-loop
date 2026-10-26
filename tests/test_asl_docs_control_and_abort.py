@@ -302,6 +302,16 @@ class ControlAndAbortDocsTests(unittest.TestCase):
                 msg=f"autopilot docs omit stop_kind marker: {marker!r}",
             )
 
+    def test_docs_list_worker_hung_among_autopilot_stops(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        autopilot_docs = docs.split("## Autopilot Skill", 1)[1].split("\n## ", 1)[0]
+        guide = self._read("docs/asl-guide.md")
+
+        self.assertIn("- `worker_hung` (`ok: false`)", autopilot_docs)
+        self.assertIn("`capped`, `worker_hung`, `status-error`", guide)
+        for section in (autopilot_docs, guide):
+            self.assertIn("skills/asl/references/quota-and-hangs.md", section)
+
     def test_docs_describe_the_workbench_abort_endpoint(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
         normalized = " ".join(docs.split())

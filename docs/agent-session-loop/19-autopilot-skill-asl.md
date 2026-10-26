@@ -406,6 +406,13 @@ field is the terminal verdict (`ok` is `true` only for a clean completion):
   — `max_chunks` self-launched pause-retry/review relaunches, or
   `attach_max_seconds` (default 12h) of wall clock within a single attach
   episode. Both are kwargs-only, with no CLI flag.
+- `worker_hung` (`ok: false`): a hard hang bar fired on the supervised worker
+  (`result_received_process_alive` on consecutive probes, or the idle ceiling)
+  and the runner's one automatic recovery did not resume the turn. The helper
+  neither kills nor waits on the child, which keeps the plan lock; `hang`
+  carries the evidence. Follow
+  [quota-and-hangs](../../skills/asl/references/quota-and-hangs.md) before
+  signalling or relaunching anything.
 - `status-error` / `run-error` (`ok: false`): `asl status --json` or `asl run`
   itself failed to produce a usable payload.
 - `empty-reply` (`ok: false`): `--reply-stdin` was requested but stdin carried

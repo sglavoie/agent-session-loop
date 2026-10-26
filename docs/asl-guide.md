@@ -41,7 +41,7 @@ A honored stop lets the current session finish and, when any session is still pe
 ### Autopilot skill
 
 The shared `asl` skill (invoked `$asl <exact asl run command>` under Codex or `/asl ...` under Claude/Copilot) supervises one `asl run` end to end: it starts or attaches to the run, polls structured status, auto-retries recoverable pauses, streams the reply back through `--reply-stdin` (never persisting reply text), and relaunches runner-owned same-plan repair/rereview continuations when the command's review harness and absolute cap permit them.
-It stops with a terminal status (`complete`, `max-sessions`, `stopped`, `needs_agent_reply`, `review_findings`, `user_required`, `blocked`, `capped`, `status-error`, `run-error`) so the driving agent knows what to do next; `--max-sessions N` is a global session budget that stops cleanly (`max-sessions`, `ok: true`) once `N` sessions have completed, `stopped` (`ok: true`) is the twin clean early stop after an honored `asl control stop-after-current` left sessions pending, and `review_findings` means no automatic continuation supported by that command remains.
+It stops with a terminal status (`complete`, `max-sessions`, `stopped`, `needs_agent_reply`, `review_findings`, `user_required`, `blocked`, `capped`, `worker_hung`, `status-error`, `run-error`) so the driving agent knows what to do next; `--max-sessions N` is a global session budget that stops cleanly (`max-sessions`, `ok: true`) once `N` sessions have completed, `stopped` (`ok: true`) is the twin clean early stop after an honored `asl control stop-after-current` left sessions pending, `review_findings` means no automatic continuation supported by that command remains, and `worker_hung` (`ok: false`) means a hang bar fired and the still-running child needs the procedure in [quota-and-hangs](../skills/asl/references/quota-and-hangs.md).
 
 ### Preparation and inspection
 
@@ -179,7 +179,7 @@ instead of being accepted as complete.
 `asl control set-model PLAN [--harness H] [--harness-model MODEL|--clear-harness-model] [--effort E|--clear-effort]`
 changes only future implementation invocations in the current runner process.
 It never changes an active subprocess or a generated review turn. The mailbox
-adds two private (`0600`) state files, seven commands, and one `mailbox` event
+adds three private (`0600`) state files, eight commands, and one `mailbox` event
 name with body-free action variants; it adds no runner/supervisor thread, no
 terminal status, and no Workbench mailbox-authoring, reply, resolution, notice,
 or live model-control endpoint in v1.
@@ -192,8 +192,9 @@ window pinned in `agent_session_loop/harness_compatibility.py`. It uses no
 model: the only subprocess it builds is `<executable> --version`, which is what
 makes it safe to schedule as a recurring CI smoke against every provider CLI.
 Unknown releases warn and known-incompatible releases block — default exit is 0
-clean and 1 on an incompatible release, while `--strict` exits 3 on anything
-that is not `supported`. Probes memoize per executable, time out at 20 seconds,
+clean and 1 on an incompatible release; `--strict` also fails an unknown
+release, exiting 3 when nothing is incompatible (an incompatible release still
+exits 1). Probes memoize per executable, time out at 20 seconds,
 and can be disabled with `ASL_HARNESS_VERSION_PROBE=0`; any probe failure
 degrades to `unknown` rather than to `incompatible`.
 
@@ -383,7 +384,8 @@ just reliability-stress
 just test-browser   # Workbench browser tests; needs Node and npm
 ```
 
-`just test-fast` runs the unit/schema/parser test modules; `just test-all` runs
+`just test-fast` runs the fast lane: every `tests/test*.py` module that does
+not declare `ASL_TEST_LANE = "integration"`. `just test-all` runs
 the complete suite (including helper-script tests under `skills/`) as isolated
 parallel shards. Both use stdlib `unittest` only — see
 [Verification](agent-session-loop/26-observational-and-mutation-guarantees.md#verification)
