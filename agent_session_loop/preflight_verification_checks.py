@@ -92,8 +92,9 @@ def _check_command_runnability(
     Skipped entirely when ``cwd is None`` (mirrors the environment cwd guard):
     without a repo root there is no interpreter/PATH context to probe against.
     Otherwise every :class:`CommandCheck` is passed to :func:`diagnose_command`
-    (fail-open by design), mapping ``executable-not-found`` to a red finding and
-    ``module-not-importable`` to a yellow finding. Both block ``--mark-loop-ready``.
+    (fail-open by design), mapping ``cwd-not-found`` and ``executable-not-found``
+    to red findings and ``module-not-importable`` to a yellow finding. All block
+    ``--mark-loop-ready``.
 
     ``which`` and ``module_probe`` are optional injectable seams forwarded to
     :func:`diagnose_command`; when ``None`` the helper's own defaults
@@ -136,7 +137,20 @@ def _check_command_runnability(
             )
             if diagnostic is None:
                 continue
-            if diagnostic.reason == "executable-not-found":
+            if diagnostic.reason == "cwd-not-found":
+                findings.append(
+                    _finding(
+                        "red",
+                        "command-not-runnable",
+                        (
+                            f"session {session_id} check {check.name!r} "
+                            "cwd does not exist"
+                        ),
+                        session_id=session_id,
+                        detail=diagnostic.detail,
+                    )
+                )
+            elif diagnostic.reason == "executable-not-found":
                 findings.append(
                     _finding(
                         "red",

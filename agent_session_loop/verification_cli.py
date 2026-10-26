@@ -15,6 +15,7 @@ from .verification_models import (
     CheckResult,
     VerificationContext,
     VerificationResult,
+    require_verification_root,
     verification_context_from_plan,
 )
 from .verification_run import run_verification
@@ -261,6 +262,7 @@ def verify_from_args(args: argparse.Namespace) -> int:
         return 1
 
     try:
+        require_verification_root(cwd_arg)
         verification_context = verification_context_from_plan(plan_dir_arg, cwd_arg)
     except (plans_errors.PlanError, OSError) as error:
         _emit_verify_error(

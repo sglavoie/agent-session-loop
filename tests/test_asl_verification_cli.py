@@ -322,6 +322,44 @@ class VerifyCliTests(unittest.TestCase):
             # Interpreter guidance now lives authoritatively in the hint.
             self.assertIn("python3", hint["message"])
 
+    def test_verify_json_names_a_missing_command_cwd_not_the_command(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            contract = _contract_block(
+                '{"type": "command", "name": "cmd", "argv": ["true"], '
+                '"cwd": "no-such-dir"}'
+            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(1, completed.returncode)
+            payload = json.loads(completed.stdout)
+            check = payload["checks"][0]
+            self.assertEqual("command-error", check["failure_reason"])
+            self.assertIn("command cwd does not exist", check["detail"])
+            self.assertIn("no-such-dir", check["detail"])
+
+    def test_verify_json_refuses_a_missing_cwd_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            contract = _contract_block('{"type": "file_exists", "path": "a"}')
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+            missing = tmp_dir / "missing-root"
+
+            completed = self._run_verify(plan_dir, session="1", cwd=missing)
+
+            self.assertEqual(1, completed.returncode)
+            payload = json.loads(completed.stdout)
+            self.assertEqual("cwd-error", payload["reason"])
+            self.assertEqual(f"cwd does not exist: {missing}", payload["error"])
+
     def test_verify_json_failure_attaches_repair_hint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)

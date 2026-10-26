@@ -36,6 +36,7 @@ from .verification_command_diagnosis import (
 from .verification_models import (
     VerificationContext,
     _coerce_verification_context,
+    require_verification_root,
     verification_context_from_plan,
 )
 
@@ -283,14 +284,8 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
             print(f"{program_name()} contract-check: {error}", file=sys.stderr)
         return 1
 
-    try:
-        verification_context = verification_context_from_plan(plan_dir_arg, cwd_arg)
-    except (plans_errors.PlanError, OSError) as error:
-        return _emit_error(
-            plans_errors.plan_error_reason(error, CONTRACT_CHECK_EXIT_REASON_CWD_ERROR),
-            str(error),
-        )
-
+    # The plan is read before the root, as verify reads it, so a missing plan
+    # directory reads as plan-not-found whatever --cwd names.
     try:
         snapshot = plans_snapshot.inspect_plan(plan_dir_arg)
     except plans_errors.PlanError as error:
@@ -298,6 +293,15 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
             plans_errors.plan_error_reason(
                 error, CONTRACT_CHECK_EXIT_REASON_PLAN_ERROR
             ),
+            str(error),
+        )
+
+    try:
+        require_verification_root(cwd_arg)
+        verification_context = verification_context_from_plan(plan_dir_arg, cwd_arg)
+    except (plans_errors.PlanError, OSError) as error:
+        return _emit_error(
+            plans_errors.plan_error_reason(error, CONTRACT_CHECK_EXIT_REASON_CWD_ERROR),
             str(error),
         )
 

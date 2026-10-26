@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 from agent_session_loop import (
@@ -23,6 +24,27 @@ class CommandDiagnosisTests(VerificationExecutorFixtures):
             self.assertIsNotNone(diagnostic)
             self.assertEqual("executable-not-found", diagnostic.reason)
             self.assertIn("pytest", diagnostic.detail)
+
+    def test_diagnose_command_flags_a_missing_cwd_before_the_executable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = replace(self._command(("pytest", "-q")), cwd="no-such-dir")
+            diagnostic = verification_command_diagnosis.diagnose_command(
+                check, repo_root=Path(tmp), which=lambda _name: None
+            )
+
+            assert diagnostic is not None
+            self.assertEqual("cwd-not-found", diagnostic.reason)
+            self.assertIn("no-such-dir", diagnostic.detail)
+
+            # A missing root is the caller's finding, not one per check.
+            self.assertEqual(
+                "executable-not-found",
+                verification_command_diagnosis.diagnose_command(
+                    check, repo_root=Path(tmp) / "absent", which=lambda _n: None
+                ).reason,
+            )
 
     def test_diagnose_command_skips_path_bearing_executable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

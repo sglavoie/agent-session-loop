@@ -127,6 +127,27 @@ class PreflightCommandRunnabilityTests(unittest.TestCase):
         self.assertIn("executable is not on PATH", finding.message)
         self.assertIn("pytest", finding.detail)
 
+    def test_missing_command_cwd_emits_red(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = contracts.CommandCheck(
+                name="run-1",
+                argv=("python3", "-m", "unittest"),
+                timeout_seconds=300,
+                cwd="no-such-dir",
+            )
+            findings = preflight_verification_checks._check_command_runnability(
+                {"1": self._contract("1", check)},
+                tmp,
+                which=lambda name: f"/usr/bin/{name}",
+                module_probe=lambda interpreter, module, *, cwd: True,
+            )
+        self.assertEqual(1, len(findings))
+        finding = findings[0]
+        self.assertEqual("red", finding.severity)
+        self.assertEqual("command-not-runnable", finding.category)
+        self.assertIn("cwd does not exist", finding.message)
+        self.assertIn("no-such-dir", finding.detail)
+
     def test_missing_module_emits_single_yellow(self) -> None:
         contracts_by_session = {
             "1": self._contract(

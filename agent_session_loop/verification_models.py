@@ -177,6 +177,19 @@ class VerificationContext:
         )
 
 
+def require_verification_root(cwd: str | Path) -> None:
+    """Refuse a ``--cwd`` root that is not an existing directory.
+
+    Worded as preflight's ``env-repo-root`` finding words it, so verify and
+    contract-check refuse the root instead of failing every check against it.
+    """
+    root = Path(cwd)
+    if not root.exists():
+        raise plans_errors.PlanError(f"cwd does not exist: {cwd}")
+    if not root.is_dir():
+        raise plans_errors.PlanError(f"cwd is not a directory: {cwd}")
+
+
 def verification_context_from_plan(
     plan_dir: str | Path, cwd: str | Path
 ) -> VerificationContext:
