@@ -396,9 +396,20 @@ def worktree_drifted_paths(cwd: Path, pathspec: Sequence[str]) -> list[str]:
     is not blank (edited or deleted since staging) or when it is untracked
     altogether, which is how a path staged as a deletion and then recreated is
     caught.
+
+    A submodule is committed as its HEAD alone, so only a HEAD that moved
+    since staging drifts; edited or untracked files inside it never reach the
+    commit and are ignored, whatever ``submodule.<name>.ignore`` says.
     """
     result = _git_paths(
-        cwd, ["status", "--porcelain", "-uall", *_pathspec_args(pathspec)]
+        cwd,
+        [
+            "status",
+            "--porcelain",
+            "-uall",
+            "--ignore-submodules=dirty",
+            *_pathspec_args(pathspec),
+        ],
     )
     if result.returncode != 0:
         raise models.CommitMessageError(
