@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import unittest
+import uuid
 from typing import Any
+from unittest import mock
 
 from agent_session_loop import (
     clock,
     events,
+    mailbox,
     mailbox_appenders,
     mailbox_constants,
+    mailbox_cursors,
     mailbox_models,
     mailbox_vocabulary,
+    mailbox_waits,
+    run_coordination_mailbox_question,
     run_coordination_mailbox_wait,
     run_coordination_wait_models,
     run_coordination_wait_record,
@@ -156,6 +163,44 @@ class ReplyRaceTests(fixtures.CoordinationTestCase):
         )
 
 
+class ResumedWaitStartTests(fixtures.CoordinationTestCase):
+    """A resumed wait that cannot start degrades to a pause, never a crash."""
+
+    def test_a_refused_wait_start_is_an_unavailable_wait(self) -> None:
+        question, wait_start = self.open_wait()
+        mailbox_waits.finish_wait(
+            self.plan_dir,
+            question.id,
+            wait_start.id,
+            reason=mailbox_vocabulary.WAIT_END_REASON_TIMEOUT,
+            state_dir=self.state_dir_arg,
+        )
+
+        with (
+            mock.patch.object(
+                mailbox_waits,
+                "append_wait_start",
+                side_effect=mailbox_models.MailboxError(
+                    mailbox_constants.ERROR_MAILBOX_FULL
+                ),
+            ),
+            self.assertRaises(
+                run_coordination_wait_models.MailboxWaitUnavailable
+            ) as caught,
+        ):
+            run_coordination_mailbox_question.ensure_mailbox_question(
+                plan_dir=self.plan_dir,
+                state_dir_arg=self.state_dir_arg,
+                question_id=question.id,
+                text=question.text or "",
+                run_id=fixtures.RUN_ID,
+                session_id=fixtures.SESSION_ID,
+                turn_index=1,
+            )
+
+        self.assertEqual(caught.exception.reason, mailbox_constants.ERROR_MAILBOX_FULL)
+
+
 class MailboxWaitCoordinatorTests(fixtures.CoordinationTestCase):
     """Announce, poll, commit, clear -- in that order, whatever the poll does."""
 
@@ -182,6 +227,9 @@ class MailboxWaitCoordinatorTests(fixtures.CoordinationTestCase):
         *,
         wait_for_reply,
         notifier: fixtures.RecordingNotifier | None = None,
+        finish_lifecycle=(
+            run_coordination_mailbox_wait.finish_mailbox_reply_wait_lifecycle
+        ),
     ) -> run_coordination_mailbox_wait.MailboxWaitCoordinator:
         return run_coordination_mailbox_wait.MailboxWaitCoordinator(
             plan_dir=self.plan_dir,
@@ -192,6 +240,7 @@ class MailboxWaitCoordinatorTests(fixtures.CoordinationTestCase):
             persistence=self.persistence,
             notifier=notifier,
             wait_for_reply=wait_for_reply,
+            finish_lifecycle=finish_lifecycle,
         )
 
     def test_a_reply_racing_the_timeout_is_honoured_end_to_end(self) -> None:
@@ -275,6 +324,127 @@ class MailboxWaitCoordinatorTests(fixtures.CoordinationTestCase):
         cleared = self.persistence.payloads(events.MAILBOX_EVENT)[-1]
         self.assertEqual(cleared["action"], events.MAILBOX_ACTION_WAIT_CLEARED)
         self.assertEqual(cleared["reason"], wait_budgets.WAIT_REASON_ERROR)
+
+    def test_an_interrupted_poll_ends_the_mailbox_wait(self) -> None:
+        # Before the fix the question stayed waiting: `asl inbox reply`
+        # accepted an answer the stopped run would never consume.
+        question, wait_start = self.open_wait()
+        prepared = self.prepared(question, wait_start)
+
+        def poll(**_kwargs: Any) -> run_coordination_wait_models.MailboxWaitResult:
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            self.coordinator(prepared, wait_for_reply=poll).run()
+
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir_arg)
+        self.assertIsNone(view.active_wait_for(question.id))
+        with self.assertRaises(mailbox_models.MailboxError) as caught:
+            mailbox_appenders.append_reply(
+                self.plan_dir, question.id, "too late", state_dir=self.state_dir_arg
+            )
+        self.assertEqual(
+            caught.exception.reason, mailbox_constants.REJECT_QUESTION_NOT_WAITING
+        )
+
+    def test_an_interrupted_poll_never_receipts_an_answer_it_did_not_deliver(
+        self,
+    ) -> None:
+        question, wait_start = self.open_wait()
+        prepared = self.prepared(question, wait_start)
+
+        def poll(**_kwargs: Any) -> run_coordination_wait_models.MailboxWaitResult:
+            mailbox_appenders.append_reply(
+                self.plan_dir, question.id, "answered", state_dir=self.state_dir_arg
+            )
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            self.coordinator(prepared, wait_for_reply=poll).run()
+
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir_arg)
+        closure = view.closure_for(question.id)
+        assert closure is not None
+        self.assertIsNone(view.receipt_for_closure(closure.id))
+
+    def test_a_wait_end_that_cannot_be_written_pauses_instead_of_raising(
+        self,
+    ) -> None:
+        question, wait_start = self.open_wait()
+        prepared = self.prepared(question, wait_start)
+
+        def refuse(**_kwargs: Any) -> run_coordination_wait_models.MailboxWaitResult:
+            raise mailbox_models.MailboxError(mailbox_constants.ERROR_MAILBOX_FULL)
+
+        result = self.coordinator(
+            prepared,
+            wait_for_reply=lambda **_kwargs: (
+                run_coordination_wait_models.MailboxWaitResult(
+                    reason=mailbox_constants.ERROR_MAILBOX_FULL, pending_outbox=1
+                )
+            ),
+            finish_lifecycle=refuse,
+        ).run()
+
+        self.assertEqual(result.reason, mailbox_constants.ERROR_MAILBOX_FULL)
+        self.assertIsNone(result.closure)
+        self.assertNotIn("waiting_for_reply", self.payload)
+
+    def test_a_wait_that_gives_up_on_a_full_mailbox_can_still_end(self) -> None:
+        # The poll used to give up only past ``view.full`` (128 bytes short of
+        # the cap), far above the wait-end cap, so ending the wait always
+        # raised. It now gives up once no answer can land, below that cap.
+        question, wait_start = self.open_wait()
+        mailbox_path = mailbox_cursors.mailbox_path_for_plan(
+            self.plan_dir, self.state_dir_arg
+        )
+        target = (
+            mailbox_constants.MAILBOX_MAX_BYTES
+            - mailbox_constants.MAILBOX_WAIT_END_RESERVE_BYTES
+            - mailbox_constants.MAILBOX_RECEIPT_RESERVE_BYTES
+            + 1024
+        )
+        record = {
+            "created_at": clock.isoformat(clock.utc_now()),
+            "delivery_mode": mailbox_vocabulary.DELIVERY_MODE_ASYNC,
+            "id": str(uuid.uuid4()),
+            "kind": mailbox_vocabulary.KIND_QUESTION,
+            "text": "",
+            "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
+        }
+        overhead = len(json.dumps(record, separators=(",", ":"))) + 1
+        record["text"] = "x" * (target - mailbox_path.stat().st_size - overhead)
+        with mailbox_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir_arg)
+        self.assertFalse(view.full)
+        self.assertFalse(view.accepts_wait_closures)
+
+        result = run_coordination_mailbox_wait.wait_for_mailbox_reply(
+            plan_dir=self.plan_dir,
+            state_dir_arg=self.state_dir_arg,
+            payload=self.payload,
+            question_id=question.id,
+            run_id=fixtures.RUN_ID,
+            settings=fixtures.settings(),
+            persistence=self.persistence,
+            started_monotonic=0.0,
+            monotonic=lambda: 0.0,
+            sleep=lambda _seconds: self.fail("a full mailbox must not poll"),
+        )
+        self.assertEqual(result.reason, mailbox_constants.ERROR_MAILBOX_FULL)
+
+        completion = mailbox_waits.finish_wait(
+            self.plan_dir,
+            question.id,
+            wait_start.id,
+            reason=mailbox_vocabulary.WAIT_END_REASON_ERROR,
+            state_dir=self.state_dir_arg,
+        )
+        self.assertEqual(
+            completion.wait_end.wait_end_reason,
+            mailbox_vocabulary.WAIT_END_REASON_ERROR,
+        )
 
     def test_the_injected_poll_receives_the_prepared_wait_verbatim(self) -> None:
         question, wait_start = self.open_wait()

@@ -21,6 +21,8 @@ from .mailbox_constants import (
     REJECT_INVALID_TARGET,
     REJECT_INVALID_WAIT_END_REASON,
     REJECT_INVALID_WAIT_ID,
+    REJECT_QUESTION_ALREADY_ANSWERED,
+    REJECT_QUESTION_ALREADY_RESOLVED,
     REJECT_QUESTION_NOT_FOUND,
     REJECT_QUESTION_NOT_WAITING,
 )
@@ -32,6 +34,7 @@ from .mailbox_vocabulary import (
     DELIVERY_MODE_WAIT,
     KIND_QUESTION,
     KIND_RECEIPT,
+    KIND_REPLY,
     KIND_WAIT_END,
     KIND_WAIT_START,
     WAIT_END_REASON_CLOSURE,
@@ -146,6 +149,7 @@ def finish_wait(
     reason: WaitEndReason | str,
     state_dir: str | Path | None = None,
     created_at: str | None = None,
+    consume_closure: bool = True,
 ) -> WaitCompletion:
     """Atomically end a wait, giving any committed closure priority.
 
@@ -153,6 +157,11 @@ def finish_wait(
     races.  If a closure won first, this transaction records its receipt and a
     closure wait-end.  Otherwise it records the requested timeout/error end;
     any later strict wait-mode closure is rejected as ``question-not-waiting``.
+
+    ``consume_closure=False`` is for a waiter that is going away without being
+    able to act on an answer: a closure found under the lock is then refused
+    rather than receipted, so the answer is never reported consumed by a run
+    that did not deliver it.
     """
     if reason not in (WAIT_END_REASON_TIMEOUT, WAIT_END_REASON_ERROR):
         raise MailboxError(REJECT_INVALID_WAIT_END_REASON, str(reason))
@@ -193,6 +202,14 @@ def finish_wait(
                 REJECT_QUESTION_NOT_WAITING, question_id, path=mailbox_path
             )
         closure = view.closure_for(question_id)
+        if closure is not None and not consume_closure:
+            raise MailboxError(
+                REJECT_QUESTION_ALREADY_ANSWERED
+                if closure.kind == KIND_REPLY
+                else REJECT_QUESTION_ALREADY_RESOLVED,
+                question_id,
+                path=mailbox_path,
+            )
         records: list[dict[str, Any]] = []
         receipt: MailboxMessage | None = None
         if closure is not None:
