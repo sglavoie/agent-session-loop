@@ -14,6 +14,7 @@ from . import (
 )
 from .authoring_parse import (
     _iter_structural_lines,
+    _out_of_order_session_error,
     _parse_repository_registry,
     _parse_source_session_heading,
     _source_heading_error,
@@ -36,6 +37,7 @@ from .authoring_source_models import (
     SourceScopeError,
 )
 from .plans_errors import PlanError
+from .plans_session_ids import SessionId
 
 
 def _suggest_heading_repair(error: SourceHeadingError) -> str | None:
@@ -108,6 +110,7 @@ def lint_plan_document(
     findings: list[PlanLintFinding] = []
     session_ids: list[str] = []
     first_id_lines: dict[str, int] = {}
+    previous: tuple[SessionId, int] | None = None
 
     lines = text.splitlines()
     structural_lines = tuple(_iter_structural_lines(lines))
@@ -168,6 +171,20 @@ def lint_plan_document(
 
         first_id_lines[session_id.value] = line_number
         session_ids.append(session_id.value)
+        out_of_order = _out_of_order_session_error(
+            session_id, previous, line_number=line_number, line=line
+        )
+        if out_of_order is not None:
+            findings.append(
+                PlanLintFinding(
+                    line=line_number,
+                    category=out_of_order.category,
+                    message=str(out_of_order),
+                    source_line=line,
+                    suggested_line=None,
+                )
+            )
+        previous = (session_id, line_number)
 
     if not findings and registry is not None:
         try:

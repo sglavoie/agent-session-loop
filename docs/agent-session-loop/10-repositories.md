@@ -258,8 +258,10 @@ malformed heading in the plan. Each entry in the `findings` array carries `line`
 categories: `invalid-session-id`, `zero-id-component`, `malformed-heading`,
 `missing-id-whitespace`, `missing-session-id`, `non-numeric-session-id`,
 `session-id-suffix`, `dangling-title-separator`, `malformed-title`,
-`punctuation-free-title`, `unsupported-title-separator`, and
-`duplicate-session-id`. `suggested_line` is non-null exactly when the damage has
+`punctuation-free-title`, `unsupported-title-separator`,
+`duplicate-session-id`, and `out-of-order-session` (a session whose id sorts
+before the one above it: sessions run in dotted numeric order, so the source
+must list them that way). `suggested_line` is non-null exactly when the damage has
 a single correct rewrite (`punctuation-free-title` and
 `unsupported-title-separator`), and any suggestion emitted is guaranteed to
 parse; every other category would invent an id, renumber sessions, or drop a

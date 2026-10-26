@@ -31,6 +31,7 @@ from .authoring_source_models import (
     LINT_MISSING_ID_WHITESPACE,
     LINT_MISSING_SESSION_ID,
     LINT_NON_NUMERIC_SESSION_ID,
+    LINT_OUT_OF_ORDER_SESSION,
     LINT_PUNCTUATION_FREE_TITLE,
     LINT_REPOSITORIES_PLACEMENT,
     LINT_SESSION_ID_SUFFIX,
@@ -211,6 +212,34 @@ def _parse_source_session_heading(
         )
     title = (raw_title or "").strip(" \t") or None
     return session_id, title, len(heading.group("hashes"))
+
+
+def _out_of_order_session_error(
+    session_id: SessionId,
+    previous: tuple[SessionId, int] | None,
+    *,
+    line_number: int,
+    line: str,
+) -> SourceHeadingError | None:
+    """Diagnose a session that sorts before the one written above it.
+
+    ``session-run`` executes sessions in dotted-numeric order while the split
+    links each session to the one above it in the source, so a plan written
+    out of order would hand a session the wrong predecessor. The repair is a
+    renumbering or a move, which changes what the plan means, so it is
+    reported rather than sorted silently.
+    """
+    if previous is None or not session_id < previous[0]:
+        return None
+    previous_id, previous_line = previous
+    return _source_heading_error(
+        line_number,
+        f"session {session_id.value!r} follows session {previous_id.value!r} "
+        f"(line {previous_line}); sessions must appear in ascending dotted "
+        f"numeric order, the order they run in",
+        line,
+        category=LINT_OUT_OF_ORDER_SESSION,
+    )
 
 
 def _iter_structural_lines(
@@ -415,6 +444,7 @@ def parse_plan_document(text: str) -> ParsedPlan:
 
     current: dict[str, Any] | None = None
     first_id_lines: dict[str, int] = {}
+    previous: tuple[SessionId, int] | None = None
 
     def _flush(end: int) -> None:
         if current is None:
@@ -466,6 +496,12 @@ def parse_plan_document(text: str) -> ParsedPlan:
                 category=LINT_DUPLICATE_SESSION_ID,
             )
         first_id_lines[session_id.value] = line_number
+        out_of_order = _out_of_order_session_error(
+            session_id, previous, line_number=line_number, line=line
+        )
+        if out_of_order is not None:
+            raise out_of_order
+        previous = (session_id, line_number)
 
         _flush(index)
         current = {

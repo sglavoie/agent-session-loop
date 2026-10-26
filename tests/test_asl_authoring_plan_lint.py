@@ -150,6 +150,33 @@ class PlanLintTests(PlanAuthoringBase):
         self.assertIsNone(finding.suggested_line)
         self.assertEqual(("1",), result.session_ids)
 
+    def test_out_of_order_sessions_are_refused_not_sorted(self) -> None:
+        text = (
+            "# Order\n\n## Session 2: Second\n\nDo b.\n\n"
+            "## Session 1: First\n\nDo a.\n\n"
+            "## Session 3: Third\n\nDo c.\n\n"
+            "### Session 2.1: Late child\n\nDo d.\n"
+        )
+
+        result = authoring_lint.lint_plan_document(text)
+
+        self.assertEqual(
+            [
+                (7, authoring_source_models.LINT_OUT_OF_ORDER_SESSION),
+                (15, authoring_source_models.LINT_OUT_OF_ORDER_SESSION),
+            ],
+            [(finding.line, finding.category) for finding in result.findings],
+        )
+        self.assertIn("follows session '2' (line 3)", result.findings[0].message)
+        self.assertIsNone(result.findings[0].suggested_line)
+        with self.assertRaises(authoring_source_models.SourceHeadingError) as raised:
+            authoring_parse.parse_plan_document(text)
+        self.assertEqual(
+            authoring_source_models.LINT_OUT_OF_ORDER_SESSION,
+            raised.exception.category,
+        )
+        self.assertEqual(7, raised.exception.line_number)
+
     def test_lint_plan_document_ignores_headings_in_code_fences(self) -> None:
         result = authoring_lint.lint_plan_document(
             "## Session 1: A\n\n```\n## Session 2 Broken\n```\n\n## Session 2: B\n\ny\n"
