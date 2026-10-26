@@ -81,6 +81,31 @@ class MetricsCollectionTests(MetricsCollectionBase):
         self.assertEqual(1, report.turns["unsuccessful"])
         self.assertEqual(60.0, report.turns["unsuccessful_runtime_seconds"])
 
+    def test_a_failure_before_the_window_still_spoils_first_pass(self) -> None:
+        state_dir = _make_state_dir(self.state_root, self.tmp_path / "plan-d")
+        _write_turn_result(
+            state_dir,
+            run_id="run-1",
+            turn_index=1,
+            session_id="1",
+            started_at=_iso(self.now, hours_ago=24 * 10),
+            finished_at=_iso(self.now, hours_ago=24 * 10 - 0.1),
+            status_result="verify-failed",
+        )
+        _write_turn_result(
+            state_dir,
+            run_id="run-2",
+            turn_index=1,
+            session_id="1",
+            started_at=_iso(self.now, hours_ago=24 * 2),
+            finished_at=_iso(self.now, hours_ago=24 * 2 - 0.1),
+        )
+        report = self._collect(since_days=7)
+        self.assertEqual(1, report.first_pass["sessions_attempted"])
+        self.assertEqual(1, report.first_pass["sessions_completed"])
+        self.assertEqual(0, report.first_pass["sessions_completed_first_pass"])
+        self.assertEqual(0.0, report.first_pass["first_pass_rate"])
+
     def test_review_turns_do_not_count_toward_first_pass(self) -> None:
         state_dir = _make_state_dir(self.state_root, self.tmp_path / "plan-b")
         _write_turn_result(

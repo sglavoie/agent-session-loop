@@ -49,6 +49,10 @@ def collect_metrics(
     interrupted_turns = 0
     session_turns: dict[tuple[str, str], metrics_models._SessionTurns] = {}
     completion_times: dict[tuple[str, str], str] = {}
+    # The earliest implementation turn each session ever had, window or not:
+    # the window picks which sessions count, but "first pass" is about the
+    # session's whole history, so a failure before the window still counts.
+    first_turns: dict[tuple[str, str], tuple[str, bool]] = {}
 
     pause_counts: dict[str, int] = {}
     pauses_total = 0
@@ -162,6 +166,23 @@ def collect_metrics(
         timing_runs.extend(plan_timing_report.runs)
         timing_unattributable_records += plan_timing_report.unattributable_records
         timing_unattributable_results += plan_timing_report.unattributable_turn_results
+
+        for payload in turn_payloads:
+            session_id = payload.get("session_id")
+            started_at = payload.get("started_at")
+            if (
+                payload.get("session_kind") == metrics_models._IMPLEMENTATION_KIND
+                and isinstance(session_id, str)
+                and isinstance(started_at, str)
+            ):
+                turn = (
+                    started_at,
+                    payload.get("status_result") == metrics_models._COMPLETE_STATUS,
+                )
+                key = (dir_key, session_id)
+                earliest = first_turns.get(key)
+                if earliest is None or turn < earliest:
+                    first_turns[key] = turn
 
         for payload in turn_payloads:
             finished_at = metrics_models._parse_timestamp(payload.get("finished_at"))
@@ -338,11 +359,11 @@ def collect_metrics(
     sessions_attempted = len(session_turns)
     sessions_completed = 0
     sessions_first_pass = 0
-    for tracker in session_turns.values():
+    for key, tracker in session_turns.items():
         ordered = tracker.sorted_turns()
         if any(ok for _, ok in ordered):
             sessions_completed += 1
-            if ordered[0][1]:
+            if first_turns.get(key, ordered[0])[1]:
                 sessions_first_pass += 1
 
     verify_sessions_repaired = 0
