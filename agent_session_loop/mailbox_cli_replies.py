@@ -6,6 +6,7 @@ import argparse
 
 from . import (
     cli_common,
+    mailbox,
     mailbox_appenders,
     mailbox_cli_agent_mux,
     mailbox_cli_args,
@@ -65,11 +66,13 @@ def inbox_reply_from_args(args: argparse.Namespace) -> int:
     mailbox_cli_agent_mux.notify_agent_mux_mailbox_reply(
         context, args, message, projection
     )
+    unconsumable = _unconsumable_reason(context, args)
     receipt, waited, timed_out = mailbox_cli_receipts.await_consumption(
         args,
         context.snapshot.plan_dir,
         message.id,
         timeout=consumption_timeout,
+        skip=unconsumable is not None,
     )
     consumed = receipt is not None
     payload = responses.success_payload(
@@ -87,6 +90,7 @@ def inbox_reply_from_args(args: argparse.Namespace) -> int:
         consumed=consumed,
         waited=waited,
         timed_out=timed_out,
+        unconsumable_reason=unconsumable,
         receipt=None
         if receipt is None
         else mailbox_cli_output.message_payload(receipt),
@@ -98,7 +102,44 @@ def inbox_reply_from_args(args: argparse.Namespace) -> int:
             f"Accepted reply {message.id} to question {args.to} "
             f"(seq {message.seq}, consumed: {'yes' if consumed else 'no'})"
         )
+        if unconsumable is not None and getattr(args, "wait_consumed", False):
+            print(
+                "Did not wait for consumption: no active run owns this question; "
+                "the reply stays in the mailbox for a later turn to collect."
+            )
     return 0
+
+
+def _unconsumable_reason(
+    context: cli_common.PlanCommandContext,
+    args: argparse.Namespace,
+) -> str | None:
+    """Say why no receipt can follow this reply now, or ``None``.
+
+    A reply, unlike a resolution, is accepted with no active run: an async
+    answer stays in the mailbox for a later turn to collect, and operators may
+    close historical questions. Only the run that owns the question writes the
+    receipt, though, so without that run a consumption wait can only time out.
+    """
+    run_id = mailbox_cli_status.active_status_run_id(context)
+    if run_id is None:
+        return mailbox_cli_constants.ERROR_NO_ACTIVE_RUN
+    try:
+        view = mailbox.read_mailbox(context.snapshot.plan_dir, state_dir=args.state_dir)
+    except OSError, mailbox_models.MailboxError:
+        return None
+    question = next(
+        (
+            message
+            for message in view.messages
+            if message.kind == mailbox_vocabulary.KIND_QUESTION
+            and message.id == args.to
+        ),
+        None,
+    )
+    if question is not None and question.run_id != run_id:
+        return mailbox_constants.REJECT_QUESTION_NOT_OPEN
+    return None
 
 
 def inbox_resolve_from_args(args: argparse.Namespace) -> int:

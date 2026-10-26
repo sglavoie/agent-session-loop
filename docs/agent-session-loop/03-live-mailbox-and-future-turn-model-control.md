@@ -244,7 +244,13 @@ The eight mailbox commands share normal plan-reference, `--state-dir`, and
   for a worker/runner receipt, with `--wait-timeout` defaulting to 90 seconds;
   a receipt timeout leaves the successful append `ok: true`,
   `delivery_state: accepted`, `consumed: false`, and `timed_out: true`;
-  `waited` says whether a consumption wait ran at all.
+  `waited` says whether a consumption wait ran at all. Unlike a resolution, a
+  reply needs no active run: an async answer stays in the mailbox for a later
+  turn to collect. Only the run that owns the question writes a receipt, so
+  when no active run exists, or the question belongs to another run,
+  `--wait-consumed` returns at once with `waited: false` and
+  `unconsumable_reason` (`no-active-run` or `question-not-open`), which is
+  `null` otherwise.
 - `asl inbox resolve` atomically closes a live-run question without fabricating
   reply text. `--action continue` directs a worker to proceed without treating
   an optional `--note`/`--note-stdin` value as an operator answer;

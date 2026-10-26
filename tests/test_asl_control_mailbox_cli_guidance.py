@@ -19,6 +19,7 @@ from agent_session_loop import (
     mailbox_cli_guidance,
     mailbox_cli_receipts,
     mailbox_cli_replies,
+    mailbox_constants,
     mailbox_leases,
     mailbox_models,
     mailbox_vocabulary,
@@ -101,6 +102,43 @@ class MailboxCliTests(MailboxCliTestsBase):
         self.assertEqual(receipt.id, payload["receipt"]["id"])
         self.assertTrue(payload["waited"])
         self.assertFalse(payload["timed_out"])
+
+    def test_reply_skips_a_consumption_wait_no_run_can_end(self) -> None:
+        # A reply is still accepted, for a later turn to collect, but only the
+        # owning run writes a receipt, so waiting for one without it can only
+        # time out.
+        for active_run, reason in (
+            (None, mailbox_cli_constants.ERROR_NO_ACTIVE_RUN),
+            ("run-live", mailbox_constants.REJECT_QUESTION_NOT_OPEN),
+        ):
+            with self.subTest(active_run=active_run):
+                if active_run is not None:
+                    self.write_active_turn(run_id=active_run)
+                question = mailbox_appenders.append_question(
+                    self.plan_dir,
+                    "Asked by an earlier run",
+                    state_dir=self.state_dir,
+                    run_id="run-earlier",
+                )
+                with mock.patch.object(
+                    mailbox_cli_receipts, "wait_for_receipt"
+                ) as wait:
+                    code, payload = self.payload_from(
+                        mailbox_cli_replies.inbox_reply_from_args,
+                        self.args(
+                            to=question.id,
+                            text="answer",
+                            wait_consumed=True,
+                            wait_timeout=300,
+                        ),
+                    )
+                self.assertEqual(0, code)
+                self.assertTrue(payload["ok"])
+                wait.assert_not_called()
+                self.assertFalse(payload["waited"])
+                self.assertFalse(payload["timed_out"])
+                self.assertFalse(payload["consumed"])
+                self.assertEqual(reason, payload["unconsumable_reason"])
 
     def test_closures_report_whether_they_waited_for_consumption(self) -> None:
         self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)

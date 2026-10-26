@@ -140,14 +140,16 @@ def await_consumption(
     closure_id: str,
     *,
     timeout: float,
+    skip: bool = False,
 ) -> tuple[mailbox_models.MailboxMessage | None, bool, bool]:
     """Return ``(receipt, waited, timed_out)`` for one appended closure.
 
-    Only a requested ``--wait-consumed`` waits. The closure append is
-    authoritative, so an observation failure after it stays a truthful
-    successful append with no receipt, and is not a timeout either.
+    Only a requested ``--wait-consumed`` waits, and ``skip`` says no consumer
+    exists to wait for. The closure append is authoritative, so an observation
+    failure after it stays a truthful successful append with no receipt, and is
+    not a timeout either.
     """
-    if not getattr(args, "wait_consumed", False):
+    if skip or not getattr(args, "wait_consumed", False):
         return None, False, False
     try:
         receipt = wait_for_receipt(
