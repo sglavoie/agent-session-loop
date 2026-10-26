@@ -212,6 +212,18 @@ class UnavailableControlTests(RedirectCliTestCase):
         self.assertEqual(redirect_admission.REFUSE_NO_ACTIVE_RUN, payload["reason"])
         self.assertEqual((), self.journal().requests)
 
+    def test_text_output_names_why_a_redirect_was_refused(self) -> None:
+        """The JSON carried the reason; the text used to say only "rejected"."""
+        self.write_state(run_id=None)
+
+        code, out, err = self.run_cli(
+            ["control", "redirect", str(self.plan_dir), "--text", FEEDBACK]
+        )
+
+        self.assertEqual(redirect_cli.EXIT_REFUSED, code)
+        self.assertEqual("", out)
+        self.assertIn(redirect_admission.REFUSE_NO_ACTIVE_RUN, err)
+
     def test_a_paused_run_is_sent_to_the_mailbox_instead(self) -> None:
         self.write_state(paused=True)
         self.write_lock()

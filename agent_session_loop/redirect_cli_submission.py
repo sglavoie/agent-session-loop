@@ -138,7 +138,10 @@ def _submission_error_text(
         if outcome.operation_id is not None
         else "redirect"
     )
-    return f"{subject} is {stage}: {STAGE_DESCRIPTIONS[stage]}"
+    # The stage says what happened and the reason says why; text output used
+    # to drop the reason, so a refusal with no live run read only "rejected".
+    why = f" ({outcome.reason})" if outcome.reason else ""
+    return f"{subject} is {stage}{why}: {STAGE_DESCRIPTIONS[stage]}"
 
 
 def _submission_hint(outcome: redirect_admission.SubmissionOutcome) -> str | None:
