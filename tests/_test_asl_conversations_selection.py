@@ -276,6 +276,34 @@ class CorruptionTests(ConversationTestBase):
         selection = conversations.select_conversation(self.plan_state, self.binding())
         self.assertEqual(conversations.SELECTION_CORRUPT, selection.state)
 
+    def test_nul_bearing_paths_are_rejected_rather_than_crashing(self) -> None:
+        # os.path.realpath raises ValueError on an embedded NUL, which is not a
+        # ConversationError; selection must report corruption, not a traceback.
+        for field in ("plan_dir", "workspace_root"):
+            with self.subTest(field=field):
+                payload = self.reference().to_payload()
+                payload[field] = f"{payload[field]}\x00tail"
+                self.ledger_path.unlink(missing_ok=True)
+                self._corrupt_with(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "kind": "conversation_confirmed",
+                            "recorded_at": "2026-09-10T00:00:00+00:00",
+                            "reference": payload,
+                        }
+                    ).encode("utf-8")
+                )
+                ledger = conversations.read_conversations(self.plan_state)
+                self.assertEqual(
+                    [conversations.REJECT_INVALID_RECORD],
+                    [line.reason for line in ledger.rejected],
+                )
+                selection = conversations.select_conversation(
+                    self.plan_state, self.binding()
+                )
+                self.assertEqual(conversations.SELECTION_CORRUPT, selection.state)
+
     def test_unreadable_ledger_is_not_read_as_absent(self) -> None:
         self.live_conversation()
         self.ledger_path.chmod(0o000)

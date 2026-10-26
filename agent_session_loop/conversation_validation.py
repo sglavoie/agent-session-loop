@@ -364,7 +364,14 @@ def _validate_plan_dir(value: object) -> str:
             f"plan_dir must be an absolute path; got {text!r}",
             {"plan_dir": text},
         )
-    return str(canonicalize_path(text))
+    try:
+        return str(canonicalize_path(text))
+    except ValueError as error:
+        # An embedded NUL makes realpath raise ValueError; a hand-edited ledger
+        # line must read as an invalid record, not crash the reader.
+        raise ConversationError(
+            ERROR_INVALID_REFERENCE, f"plan_dir is not a usable path: {error}"
+        ) from error
 
 
 def _validate_scope_aliases(value: object) -> tuple[str, ...]:
@@ -411,7 +418,7 @@ def _workspace_binding(root: object, digest: object) -> WorkspaceBinding:
         )
     try:
         return WorkspaceBinding(workspace_root=root, registry_digest=digest)
-    except WorkspaceError as error:
+    except (WorkspaceError, ValueError) as error:
         raise ConversationError(
             ERROR_INVALID_REFERENCE, f"workspace binding is invalid: {error}"
         ) from error
