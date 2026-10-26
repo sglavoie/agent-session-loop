@@ -122,7 +122,8 @@ def review_verdict_from_args(args: argparse.Namespace) -> int:
 def _print_text_review_verdict(payload: dict[str, Any]) -> None:
     print(f"Plan: {payload['plan_dir']}")
     if payload.get("ok"):
-        print(f"Verdict: {payload.get('status_line')}")
+        status_line = str(payload.get("status_line") or "")
+        print(f"Verdict: {status_line.removeprefix('Status:').strip()}")
         print(f"Outcome: {payload.get('outcome')}")
         print(f"Total findings: {payload.get('total_findings')}")
     else:
@@ -133,11 +134,58 @@ def _print_text_review_verdict(payload: dict[str, Any]) -> None:
     if payload.get("summary_total_chars"):
         print(f"Summary ({payload['summary_total_chars']} chars):")
         print(payload["summary"])
+    findings = payload.get("findings")
+    if isinstance(findings, list) and findings:
+        print("Findings:")
+        for finding in findings:
+            if isinstance(finding, dict):
+                for line in _finding_text_lines(finding):
+                    print(line)
     next_steps = payload.get("next_steps") or []
     if next_steps:
         print("Next steps:")
         for step in next_steps:
             print(f"  - {step}")
+
+
+def _finding_text_lines(finding: dict[str, Any]) -> list[str]:
+    """One structured finding, in full, for the text verdict."""
+    labels = [
+        f"{key} {finding[key]}"
+        for key in ("repo", "repair_group")
+        if isinstance(finding.get(key), str) and finding[key]
+    ]
+    header = (
+        f"  {finding.get('id', '?')} [{finding.get('severity', '?')}] "
+        f"{finding.get('title', '')}"
+    )
+    lines = [header + (f" ({', '.join(labels)})" if labels else "")]
+    evidence = finding.get("evidence")
+    if isinstance(evidence, list) and evidence:
+        lines.append("    Evidence:")
+        for entry in evidence:
+            if not isinstance(entry, dict):
+                continue
+            symbol = entry.get("symbol")
+            suffix = f" ({symbol})" if symbol else ""
+            lines.append(f"      - {entry.get('path')}{suffix}")
+    explanation = finding.get("explanation")
+    if explanation:
+        lines.append("    Explanation:")
+        lines.extend(f"      {line}" for line in str(explanation).splitlines())
+    done_criteria = finding.get("done_criteria")
+    if isinstance(done_criteria, list) and done_criteria:
+        lines.append("    Done criteria:")
+        lines.extend(f"      - {criterion}" for criterion in done_criteria)
+    checks = finding.get("verification_checks")
+    if isinstance(checks, list) and checks:
+        lines.append("    Verification checks:")
+        for check in checks:
+            if isinstance(check, dict):
+                lines.append(
+                    f"      - {check.get('name', '?')} ({check.get('type', '?')})"
+                )
+    return lines
 
 
 # Cross-cycle finding identity. Rereview cycles need to recognize a finding

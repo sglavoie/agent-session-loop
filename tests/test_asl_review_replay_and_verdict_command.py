@@ -274,6 +274,40 @@ class ReviewVerdictCommandTests(unittest.TestCase):
                 payload["next_steps"][0],
             )
 
+    def test_text_verdict_prints_every_finding_in_full(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("complete",))
+            self._write_review(
+                plan_dir,
+                "body\nStatus: 1 Findings (1 high, 0 med, 0 low)\n",
+                artifact=self._artifact(),
+            )
+            args = argparse.Namespace(
+                plan_dir=str(plan_dir), state_dir=str(state_dir), json=False
+            )
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(0, review.review_verdict_from_args(args))
+
+            text = out.getvalue()
+            self.assertIn("Verdict: 1 Findings (1 high, 0 med, 0 low)\n", text)
+            self.assertNotIn("Verdict: Status:", text)
+            self.assertIn(
+                "Findings:\n"
+                "  F1 [high] Finding F1 title (repair_group group-1)\n"
+                "    Evidence:\n"
+                "      - agent_session_loop/runner.py (run_loop)\n"
+                "    Explanation:\n"
+                "      Explanation for F1.\n"
+                "    Done criteria:\n"
+                "      - The issue is fixed and covered by a test.\n"
+                "    Verification checks:\n"
+                "      - verify-F1 (command)\n",
+                text,
+            )
+
     def test_non_utf8_event_log_and_review_do_not_crash_the_verdict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
