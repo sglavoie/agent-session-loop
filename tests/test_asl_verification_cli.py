@@ -472,6 +472,26 @@ class VerifyCliTests(unittest.TestCase):
             self.assertEqual("invalid-session", payload["reason"])
             self.assertEqual("not-a-session", payload["session"])
 
+    def test_verify_json_reports_an_absent_session_as_invalid_session(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            write_plan(plan_dir, ("pending",))
+
+            completed = self._run_verify(plan_dir, session="3", cwd=repo_root)
+
+            self.assertEqual(1, completed.returncode)
+            payload = json.loads(completed.stdout)
+            self.assertEqual("invalid-session", payload["reason"])
+            self.assertEqual(
+                f"session 3 is not present in {plan_dir}", payload["error"]
+            )
+            self.assertNotIn("repair_hint", payload)
+
     def test_verify_reports_a_missing_plan_directory_before_its_sessions(
         self,
     ) -> None:
