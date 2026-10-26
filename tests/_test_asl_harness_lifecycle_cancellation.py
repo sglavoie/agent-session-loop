@@ -151,6 +151,35 @@ class CancellationWindowTests(_TurnTestCase):
         self.assertEqual(harnesses.CANCEL_STAGE_UNSTARTED, result.cancel_stage)
         self.assertTrue(signal.completed)
 
+    def test_a_failed_spawn_answers_a_waiting_cancellation(self) -> None:
+        # A missing executable already did; a non-executable one or an argv
+        # past E2BIG left the abort pending until its waiter timed out.
+        for error in (
+            FileNotFoundError(2, "No such file or directory"),
+            PermissionError(13, "Permission denied"),
+            OSError(7, "Argument list too long"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                adapter = _LifecycleAdapter()
+                signal = harnesses.AbortSignal()
+
+                with (
+                    mock.patch.object(
+                        harness_execution.subprocess, "Popen", side_effect=error
+                    ),
+                    self.assertRaises(harnesses.HarnessError) as raised,
+                ):
+                    adapter.run(
+                        cwd=self.tmp,
+                        plan_dir=self.tmp,
+                        prompt="do the work",
+                        last_message_path=self.tmp / "last.txt",
+                        abort=signal,
+                    )
+
+                self.assertIs(error, raised.exception.__cause__)
+                self.assertTrue(signal.completed)
+
     def test_cancelling_during_the_handshake_submits_nothing(self) -> None:
         signal = harnesses.AbortSignal()
         # Armed from inside the handshake, in the window a real cancellation
