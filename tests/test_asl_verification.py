@@ -397,6 +397,22 @@ class CommandCheckExecutionTests(VerificationExecutorFixtures):
             self.assertEqual("pass", result.status)
             self.assertIsNone(result.failure_reason)
 
+    def test_regex_check_on_a_non_utf8_file_fails_as_a_file_error(self) -> None:
+        # Bytes that are not UTF-8 raise UnicodeDecodeError while reading and
+        # used to escape run_check, ending the run instead of failing the check.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "binary.dat").write_bytes(b"ready\n\xff\xfe\n")
+            check = contracts.RegexInFileCheck(
+                name="binary", path="binary.dat", pattern=r"^ready$"
+            )
+
+            result = verification_checks.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("file-error", result.failure_reason)
+            self.assertIn("cannot read binary.dat", result.detail)
+
     def test_absolute_file_and_regex_paths_resolve_inside_the_repo_root(
         self,
     ) -> None:

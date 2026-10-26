@@ -371,7 +371,11 @@ def _run_regex_in_file_check(
             detail=f"file does not exist: {check.path}",
             duration_seconds=time.monotonic() - start,
         )
-    except OSError as error:
+    except (OSError, ValueError) as error:
+        # ValueError rather than only OSError: bytes that are not UTF-8 raise
+        # UnicodeDecodeError while reading. That is a failed check, not a crash:
+        # decoding with replacement instead would let the pattern match or miss
+        # on substituted text and report a verdict about a file it never read.
         return CheckResult(
             name=check.name,
             kind=check.kind,
