@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import harnesses
+from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
 
 
 @dataclass(frozen=True)
@@ -528,15 +529,21 @@ def validate_run_namespace(
 
     timeout = getattr(ns, "timeout", None)
     if timeout is not None and timeout <= 0:
-        errors.append(FlagError("--timeout must be a positive integer"))
+        errors.append(FlagError(flag_refusal("--timeout", POSITIVE_INTEGER, timeout)))
 
     max_sessions = getattr(ns, "max_sessions", None)
     if max_sessions is not None and max_sessions <= 0:
-        errors.append(FlagError("--max-sessions must be a positive integer"))
+        errors.append(
+            FlagError(flag_refusal("--max-sessions", POSITIVE_INTEGER, max_sessions))
+        )
 
     max_pending = getattr(ns, "max_pending_sessions", None)
     if max_pending is not None and max_pending <= 0:
-        errors.append(FlagError("--max-pending-sessions must be a positive integer"))
+        errors.append(
+            FlagError(
+                flag_refusal("--max-pending-sessions", POSITIVE_INTEGER, max_pending)
+            )
+        )
 
     max_repair_group_attempts = getattr(ns, "max_repair_group_attempts", None)
     if max_repair_group_attempts is not None and max_repair_group_attempts < 0:
@@ -608,7 +615,9 @@ def validate_run_namespace(
 
     audit_timeout = getattr(ns, "audit_timeout", None)
     if audit_timeout is not None and audit_timeout <= 0:
-        errors.append(FlagError("--audit-timeout must be a positive integer"))
+        errors.append(
+            FlagError(flag_refusal("--audit-timeout", POSITIVE_INTEGER, audit_timeout))
+        )
 
     # An audit harness that equals the implementation harness would grade its
     # own turns. It may equal the review harness, which was already independent

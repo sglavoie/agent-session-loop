@@ -134,6 +134,8 @@ class AssurancePlanTests(fixtures.AssurancePlanCase):
                 "assurance_models_primitives",
                 "assurance_models_vocab",
                 "assurance_projection",
+                # Refusal wording only; it imports nothing beyond the stdlib.
+                "cli_parser_support",
                 "harnesses",
                 "state",
                 "state_plan_refs",

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from . import plans_registry, plans_session_scope, repository_evidence, workspaces
+from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
 from .plans_errors import PlanError
 from .plans_files import canonicalize_path
 from .plans_session_ids import parse_session_id
@@ -26,7 +27,7 @@ from .prepare_validation_cache import _canonical_json_digest
 def _positive_validator_control(value: object, *, name: str) -> int:
     """Return a positive integer validator control or fail before work starts."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise PlanError(f"{name} must be a positive integer")
+        raise PlanError(flag_refusal(name, POSITIVE_INTEGER, value))
     return value
 
 

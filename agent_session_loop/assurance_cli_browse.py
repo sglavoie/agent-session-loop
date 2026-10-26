@@ -28,6 +28,7 @@ from .assurance_cli_common import (
 )
 from .assurance_models_primitives import AssuranceError, parse_issue_id
 from .assurance_models_vocab import ISSUE_STATES, SEVERITIES
+from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
 
 
 def assurance_list_from_args(args: argparse.Namespace) -> int:
@@ -50,7 +51,7 @@ def assurance_list_from_args(args: argparse.Namespace) -> int:
             "--all already means every state with no row cap",
         )
     if args.limit is not None and args.limit < 1:
-        return refuse(f"--limit must be a positive integer; got {args.limit}")
+        return refuse(flag_refusal("--limit", POSITIVE_INTEGER, args.limit))
     if args.state is not None and args.state not in ISSUE_STATES:
         return refuse(
             f"--state must be one of {', '.join(ISSUE_STATES)}; got {args.state!r}"
