@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -124,21 +125,38 @@ def _set_offsets_to_eof(
 def _read_new_log_text(
     target: dict[str, Any],
     offsets: dict[str, int],
+    *,
+    final: bool = False,
 ) -> list[str]:
+    """The complete lines appended to a log since the last read.
+
+    The offset stops after the last newline read, so a line written in two
+    appends, or cut inside a multibyte character, is printed once, whole, when
+    its newline arrives; ``final`` flushes a last unterminated line once the
+    run is over. A log that shrank below the offset was truncated or
+    rewritten and is read again from the start. A log replaced whole by a
+    longer one (the turn's final stdout write) keeps its offset, so only what
+    the replacement added is printed.
+    """
     path = target["path"]
     key = _target_key(path)
     if not isinstance(path, Path) or not path.exists():
         offsets.setdefault(key, 0)
         return []
 
+    offset = offsets.get(key, 0)
     try:
         with path.open("rb") as log_file:
-            log_file.seek(offsets.get(key, 0))
+            if os.fstat(log_file.fileno()).st_size < offset:
+                offset = 0
+            log_file.seek(offset)
             data = log_file.read()
-            offsets[key] = log_file.tell()
     except OSError:
         return []
 
+    if not final:
+        data = data[: data.rfind(b"\n") + 1]
+    offsets[key] = offset + len(data)
     if not data:
         return []
     text = data.decode("utf-8", "replace")
