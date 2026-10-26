@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import (
@@ -19,6 +19,7 @@ from . import (
     metrics_timing_evidence,
     plans_errors,
     plans_snapshot,
+    retention_projection,
     review_continuation,
     session_overview,
     state,
@@ -36,12 +37,9 @@ def collect_metrics(
         raise ValueError("--since-days must be a positive integer")
     state_root = state.state_root(state_dir)
     now = now or datetime.now(UTC)
-    try:
-        cutoff = now - timedelta(days=since_days)
-    except OverflowError:
-        raise ValueError(
-            f"--since-days {since_days} reaches back past the earliest date"
-        ) from None
+    # A window past what ``datetime`` can subtract covers the whole history,
+    # the same clamp ``gc --max-age-days`` applies, rather than an error.
+    cutoff = retention_projection._age_cutoff(now, since_days)
 
     turns_total = 0
     turns_successful = 0

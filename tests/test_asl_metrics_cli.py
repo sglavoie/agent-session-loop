@@ -141,9 +141,9 @@ class MetricsCliTests(unittest.TestCase):
         self.assertEqual(1, exit_code)
         self.assertTrue(stderr.startswith("asl metrics: --since-days"), stderr)
 
-    def test_metrics_reports_a_window_past_the_calendar_instead_of_crashing(
-        self,
-    ) -> None:
+    def test_metrics_clamps_a_window_past_the_calendar_like_gc(self) -> None:
+        # gc --max-age-days clamps an age past the calendar to the earliest
+        # instant; metrics --since-days does the same and covers all history.
         exit_code, stdout, _ = self._run_cli(
             [
                 "metrics",
@@ -154,10 +154,10 @@ class MetricsCliTests(unittest.TestCase):
                 "--json",
             ]
         )
-        self.assertEqual(1, exit_code)
+        self.assertEqual(0, exit_code)
         payload = json.loads(stdout)
-        self.assertFalse(payload["ok"])
-        self.assertIn("since-days", payload["error"])
+        self.assertEqual(99999999999, payload["since_days"])
+        self.assertTrue(payload["window_start"].startswith("0001-01-01"))
 
 
 class CliInvocationsCliTests(unittest.TestCase):
