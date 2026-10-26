@@ -109,8 +109,19 @@ def relocate_records(
     if rendered and not terminated:
         rendered[-1] = rendered[-1].removesuffix(b"\n")
     if apply and rewritten:
-        with storage._append_lock(Path(plan_state)):
-            artifacts.atomic_write_bytes(ledger_path, b"".join(rendered), durable=True)
+        try:
+            with storage._append_lock(Path(plan_state)):
+                artifacts.atomic_write_bytes(
+                    ledger_path, b"".join(rendered), durable=True
+                )
+        except OSError as error:
+            # Same error type as the read above, so migration reports the stale
+            # ledger it leaves behind instead of a traceback.
+            raise validation.ConversationError(
+                validation.ERROR_LEDGER_WRITE,
+                f"could not rewrite {ledger_path} while relocating: {error}",
+                {"path": str(ledger_path)},
+            ) from error
     return RelocationReport(
         ledger_path=str(ledger_path),
         records=records,

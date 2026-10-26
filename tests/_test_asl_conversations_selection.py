@@ -2,6 +2,10 @@
 """Conversation ledger selection, retirement, corruption handling, and relocation."""
 
 # ruff: noqa: F403, F405
+from unittest import mock
+
+from agent_session_loop import artifacts
+
 from ._test_asl_conversations_support import *
 
 
@@ -350,6 +354,28 @@ class RelocationTests(ConversationTestBase):
         self.assertEqual(
             (str(self.moved_plan),), conversations.recorded_plan_dirs(self.plan_state)
         )
+
+    def test_a_failed_rewrite_is_a_ledger_write_error(self) -> None:
+        # State migration names a ConversationError after its rename; a raw
+        # OSError escaped it as a traceback with the ledger left stale.
+        self.live_conversation()
+        before = self.ledger_path.read_bytes()
+        with (
+            mock.patch.object(
+                artifacts,
+                "atomic_write_bytes",
+                side_effect=OSError("No space left on device"),
+            ),
+            self.assertRaises(conversations.ConversationError) as raised,
+        ):
+            conversations.relocate_records(
+                self.plan_state,
+                from_plan_dir=self.plan_dir,
+                to_plan_dir=self.moved_plan,
+                apply=True,
+            )
+        self.assertEqual(conversations.ERROR_LEDGER_WRITE, raised.exception.reason)
+        self.assertEqual(before, self.ledger_path.read_bytes())
 
     def test_relocated_conversation_still_resumes(self) -> None:
         self.live_conversation()
