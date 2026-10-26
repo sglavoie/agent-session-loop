@@ -188,6 +188,35 @@ class JsonPlansListingCliTests(JsonCliHelpers, unittest.TestCase):
             self.assertEqual("ready", payload["plans"][0]["primary_state"])
             self.assertEqual("reviewed", payload["plans"][0]["readiness"]["state"])
 
+    def test_plans_text_shows_a_never_run_plan_s_activity_without_a_filter(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            data_home = tmp_dir / "data"
+            share_root = data_home / "agent-plans"
+            share_root.mkdir(parents=True)
+            for name in ("config", "tmp", "home"):
+                (tmp_dir / name).mkdir()
+            plan_dir = share_root / "plan"
+            write_plan(plan_dir, ("pending",))
+            self._write_readiness(
+                plan_dir,
+                state_value="reviewed",
+                checked_at="2026-07-01T00:00:00+00:00",
+            )
+            with patched_env(
+                HOME=str(tmp_dir / "home"),
+                XDG_CONFIG_HOME=str(tmp_dir / "config"),
+                XDG_DATA_HOME=str(data_home),
+                TMPDIR=str(tmp_dir / "tmp"),
+            ):
+                code, stdout, stderr = self._run_plans(
+                    "--state-dir", str(tmp_dir / "state")
+                )
+            self.assertEqual(0, code, stderr)
+            self.assertIn("  activity: 2026-07-01T00:00:00+00:00", stdout)
+
     def test_plans_cli_stale_and_never_run_filters(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)

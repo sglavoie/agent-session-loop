@@ -261,9 +261,9 @@ def plans_from_args(args: Any, *, now: datetime | None = None) -> int:
 
     for summary in summaries:
         readiness: dict[str, str] | None = None
-        if readiness_filter is not None or (
-            stale_days is not None and not summary.last_activity_at
-        ):
+        # A never-run plan's activity is its readiness check stamp, so it is
+        # read whenever activity is unknown, not only for a filter that needs it.
+        if readiness_filter is not None or not summary.last_activity_at:
             readiness = _plan_readiness_payload(
                 summary.plan_dir,
                 warnings=warnings,
