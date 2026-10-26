@@ -9,7 +9,6 @@ from .cli_parser_support import (
     _add_plan_dir_with_option_alias,
     _add_unsafe_bypass_flags,
     _AgentSessionLoopArgumentParser,
-    positive_float,
 )
 
 
@@ -408,7 +407,8 @@ def _add_check_commands(
     baseline_parser.add_argument(
         "--per-check-timeout",
         dest="per_check_timeout",
-        type=positive_float,
+        # Validated by the handler, so a refusal keeps --json.
+        type=float,
         default=None,
         metavar="SECONDS",
         help=(
@@ -420,7 +420,8 @@ def _add_check_commands(
     baseline_parser.add_argument(
         "--total-timeout",
         dest="total_timeout",
-        type=positive_float,
+        # Validated by the handler, so a refusal keeps --json.
+        type=float,
         default=None,
         metavar="SECONDS",
         help=(

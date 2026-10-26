@@ -711,16 +711,6 @@ class NumericFlagValidationTests(unittest.TestCase):
                 "--incident-id",
                 "positive",
             ),
-            (
-                ["baseline", "/tmp/plan", "--per-check-timeout", "nan", "--json"],
-                "--per-check-timeout",
-                "positive",
-            ),
-            (
-                ["baseline", "/tmp/plan", "--total-timeout", "-1"],
-                "--total-timeout",
-                "positive",
-            ),
             (["maintenance", "install", "--hour", "25"], "--hour", "0 to 23"),
             (["maintenance", "install", "--minute", "-1"], "--minute", "0 to 59"),
             (["maintenance", "install", "--minute", "60"], "--minute", "0 to 59"),
