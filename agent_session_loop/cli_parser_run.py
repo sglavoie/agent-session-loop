@@ -225,11 +225,16 @@ def _add_check_commands(
         "doctor",
         help="Check harness and path prerequisites.",
     )
-    doctor_parser.add_argument(
-        "--harness",
+    # Required and validated by the handler, so a missing or unknown harness
+    # keeps its JSON `input-error` under --json instead of argparse's
+    # plain-text exit 2; usage still shows it as required.
+    doctor_parser.show_as_alternatives(
+        doctor_parser.add_argument(
+            "--harness",
+            metavar="{" + ",".join(harnesses.HARNESS_NAMES) + "}",
+            help="Agent harness to check (required)",
+        ),
         required=True,
-        choices=harnesses.HARNESS_NAMES,
-        help="Agent harness to check",
     )
     doctor_parser.add_argument(
         "--harness-model",

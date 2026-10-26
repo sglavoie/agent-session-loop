@@ -102,6 +102,14 @@ class InputErrorWordingTests(unittest.TestCase):
         self.assertEqual("invalid-question-source", payload["reason"])
         self.assertIn("TEXT, --text-stdin, or --question-id", payload["error"])
 
+    def test_doctor_without_a_harness_refuses_in_json(self) -> None:
+        payload = self._json_refusal("doctor", str(self.plan_dir))
+        self.assertEqual("input-error", payload["reason"])
+        self.assertEqual(
+            "--harness is required and must be one of codex, claude, copilot",
+            payload["error"],
+        )
+
     def test_handler_checked_flag_values_share_reason_and_wording(self) -> None:
         state = ("--state-dir", str(self.state_dir))
         cases = (
@@ -111,6 +119,7 @@ class InputErrorWordingTests(unittest.TestCase):
             (("gc", "--max-age-days", "-1", *state), "--max-age-days", "-1"),
             (("commit", "--timeout", "-1"), "--timeout", "-1"),
             (("assurance", "list", "--limit", "0", *state), "--limit", "0"),
+            (("doctor", str(self.plan_dir), "--harness", "nope"), "--harness", "nope"),
             (
                 ("assurance", "process-pending", "--audit-timeout", "0", *state),
                 "--audit-timeout",
