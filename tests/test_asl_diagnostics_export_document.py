@@ -24,6 +24,12 @@ class ExportShapeTests(ExportTestBase):
         self.assertIn("limits", document)
         self.assertIn("redaction_policy", document)
 
+    def test_workbench_archive_is_not_scanned_as_a_plan(self) -> None:
+        (self.state_dir / "archive" / "entry").mkdir(parents=True)
+        document = self.export()
+        self.assertEqual(document["counts"]["plans_scanned"], 0)
+        self.assertEqual(document["runs"], [])
+
     def test_build_block_names_the_build_and_the_bytes(self) -> None:
         identity = diagnostics_export.build_identity(argv0="")
         self.assertEqual(identity["product"], "agent-session-loop")

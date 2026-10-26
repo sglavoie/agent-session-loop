@@ -42,6 +42,12 @@ class MetricsCollectionTests(MetricsCollectionBase):
         )
         self.assertEqual(0, report.state_dirs_scanned)
 
+    def test_non_plan_children_of_the_state_root_are_not_scanned(self) -> None:
+        _make_state_dir(self.state_root, self.tmp_path / "plan-g")
+        (self.state_root / "archive" / "entry").mkdir(parents=True)
+        report = self._collect()
+        self.assertEqual(1, report.state_dirs_scanned)
+
     def test_rejects_non_positive_since_days(self) -> None:
         with self.assertRaises(ValueError):
             self._collect(since_days=0)

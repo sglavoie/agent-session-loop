@@ -264,6 +264,13 @@ class ArchiveReportTests(RetentionTestBase):
         self.assertIn("1 past the 30-day retention window", text)
         self.assertIn("gc never deletes archive entries", text)
 
+    def test_archive_is_not_an_unresolved_plan_state_dir(self) -> None:
+        self._write_run(RUN_NEW, finished_at=_stamp(1))
+        self._archive("entry", days_ago=1, size=10)
+        report = self._gc()
+        self.assertEqual([], report.to_dict()["unresolved_state_dirs"])
+        self.assertEqual(1, len(report.plans))
+
     def test_missing_archive_reads_as_empty(self) -> None:
         archive = self._gc().to_dict()["archive"]
         self.assertEqual(0, archive["entry_count"])

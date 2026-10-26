@@ -18,6 +18,7 @@ module they touch, because every claim worth making spans both halves:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import unittest
@@ -155,7 +156,9 @@ class HistoryTestCase(unittest.TestCase):
         )
 
     def source_dir(self, name: str = "plan-a") -> Path:
-        directory = self.root / name
+        # A real plan state directory is named for its plan's path digest;
+        # the state-root scan skips anything else, so the label is hashed.
+        directory = self.root / hashlib.sha256(name.encode()).hexdigest()
         directory.mkdir(exist_ok=True)
         return directory
 

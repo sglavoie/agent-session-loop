@@ -108,6 +108,19 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+_PLAN_STATE_DIR_NAME_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def is_plan_state_dir_name(name: str) -> bool:
+    """Whether ``name`` is a per-plan state directory name (a path digest).
+
+    Per-plan state lives at ``<state_root>/<path_sha256(plan_dir)>``; anything
+    else under the state root (the Workbench ``archive/``, ledgers, locks) is
+    a sibling, not a plan, and every state-root scan skips it.
+    """
+    return _PLAN_STATE_DIR_NAME_RE.fullmatch(name) is not None
+
+
 def path_sha256(path: str | Path) -> str:
     canonical_path = canonicalize_path(path)
     digest = hashlib.sha256()

@@ -359,7 +359,8 @@ class MetricsMaterializationTests(MetricsCollectionBase):
         self.assertGreater(report.artifacts["grown_bytes"], 0)
 
     def test_active_dir_without_plan_dir_is_skipped_for_compaction(self) -> None:
-        state_dir = self.state_root / "orphaned"
+        orphaned = "0" * 64  # a plan digest with no state.json naming the plan
+        state_dir = self.state_root / orphaned
         state_dir.mkdir()
         _write_turn_result(
             state_dir,
@@ -370,7 +371,7 @@ class MetricsMaterializationTests(MetricsCollectionBase):
             finished_at=_iso(self.now, hours_ago=0.9),
         )
         report = self._collect()
-        self.assertEqual(["orphaned"], report.compaction["dirs_skipped"])
+        self.assertEqual([orphaned], report.compaction["dirs_skipped"])
         self.assertEqual(0, report.compaction["dirs_projected"])
 
     def test_malformed_event_lines_and_results_are_tolerated(self) -> None:

@@ -158,7 +158,7 @@ class ScanRecentRowsTests(unittest.TestCase):
     def test_unresolvable_plan_dir_is_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_root = Path(tmp) / "state"
-            stub_state_dir = state_root / "deadbeef"
+            stub_state_dir = state_root / ("deadbeef" * 8)
             stub_state_dir.mkdir(parents=True)
 
             _make_turn_artifact(
