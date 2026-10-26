@@ -531,6 +531,11 @@ class HangSentinel:
             if previous is not None and cpu_positive:
                 self._suspected = None
                 self._announced = False
+                # The episode is over, exactly as on resumed output, so a
+                # later confirmed hang earns its own recovery attempt.
+                self._recovery_attempted = False
+                self._input_release = None
+                self._input_released_at = None
                 self._root_shutdown_started = None
                 self._root_shutdown_tree = ()
                 self._root_shutdown_escalated = False

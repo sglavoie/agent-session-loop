@@ -390,6 +390,52 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
         self.assertIsNone(stale.suspected)
         deliver.assert_not_called()
 
+    def test_a_hang_after_a_cpu_progress_clearance_is_recovered_again(self) -> None:
+        # A CPU-progress clearance ends the episode just as resumed output
+        # does, so the next confirmed post-result hang earns its own attempt.
+        leaf_cpu = [1.0]
+
+        def tree(pid: int) -> list[dict[str, Any]]:
+            rows = self.tree()
+            rows[1]["cpu_seconds"] = leaf_cpu[0]
+            return rows
+
+        sentinel = turn_execution_hang_sentinel.HangSentinel(
+            sample_tree=tree,
+            monotonic=lambda: 100.0,
+            trigger_idle_seconds=120.0,
+            confirm_samples=2,
+            cpu_epsilon_seconds=0.5,
+            result_grace_seconds=0.0,
+        )
+        report = {"policy": process_tree.POST_RESULT_RECOVERY_POLICY}
+        with (
+            mock.patch.object(
+                process_tree,
+                "prepare_verified_leaf_recovery",
+                return_value=(report, (456,)),
+            ) as prepare,
+            mock.patch.object(
+                process_tree,
+                "signal_verified_leaf_recovery",
+                return_value={**report, "signaled_pids": [456]},
+            ),
+        ):
+            first = self.suspected_result(sentinel)
+            self.assertTrue(sentinel.confirm_assessment(first))
+            sentinel.recover_post_result(first)
+            leaf_cpu[0] = 10.0
+            cleared = sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
+            self.assertEqual("cleared", cleared.transition)
+            sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
+            second = sentinel.evaluate(idle_seconds=210.0, now=self.NOW)
+            self.assertEqual("suspected", second.transition)
+            recovered = sentinel.recover_post_result(second)
+
+        self.assertEqual(2, prepare.call_count)
+        assert recovered.suspected is not None
+        self.assertEqual([456], recovered.suspected["recovery"]["signaled_pids"])
+
 
 if __name__ == "__main__":
     unittest.main()
