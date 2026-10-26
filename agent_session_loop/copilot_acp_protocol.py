@@ -5,6 +5,7 @@
 
 from .copilot_acp_types import *  # noqa: F403
 from .copilot_acp_types import _LineDecoder, _Pending, __version__
+from .harness_json import decode_harness_line
 from .copilot_acp_utils import (
     _content_text,
     _params,
@@ -251,7 +252,7 @@ class _AcpProtocolMixin:
         if not stripped:
             return ""
         try:
-            message = json.loads(stripped)
+            message = decode_harness_line(stripped)
         except ValueError:
             # Not every byte on the agent's stdout is protocol: a wrapper
             # script or a misconfigured binary can print plain text there. It

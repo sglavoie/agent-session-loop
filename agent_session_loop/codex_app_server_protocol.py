@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -22,6 +21,7 @@ from .codex_app_server_types import (
     _RequestRejected,
     _SubmissionRefused,
 )
+from .harness_json import decode_harness_line
 
 #: JSON-RPC's "method not found", the answer to a request this client never
 #: advertised it could serve.
@@ -53,7 +53,7 @@ class AppServerProtocol(AppServerTransport):
         if not stripped:
             return ""
         try:
-            message = json.loads(stripped)
+            message = decode_harness_line(stripped)
         except ValueError:
             # Not every byte on an app-server's stdout is protocol: a wrapper
             # script or a misconfigured binary can print plain text there. It

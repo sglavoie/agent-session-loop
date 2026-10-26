@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from . import claude_stream, guidance_delivery
+from .harness_json import decode_harness_line
 from .harnesses import (
     HarnessTransport,
     StreamName,
@@ -57,8 +57,8 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
             if not line.strip():
                 continue
             try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
+                record = decode_harness_line(line)
+            except ValueError:
                 rendered.append(line)
                 continue
             if not isinstance(record, dict):

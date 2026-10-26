@@ -405,6 +405,7 @@ module = [
     "agent_session_loop.harness_copilot",
     "agent_session_loop.harness_execution",
     "agent_session_loop.harness_failures",
+    "agent_session_loop.harness_json",
     "agent_session_loop.harness_lifecycle",
     "agent_session_loop.harness_process",
     "agent_session_loop.harness_streams",
