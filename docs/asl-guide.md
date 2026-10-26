@@ -108,8 +108,9 @@ from the handshake's `result_path` — with text and JSON carrying equivalent
 commands. `--harness auto` reuses the invoking-harness detection and falls back
 to every supported candidate when detection is absent or ambiguous. Because a
 leaf-only group's help lists its leaves and none of their flags, `asl bridge`,
-`asl control`, `asl inbox`, `asl outbox`, and `asl assurance` each say so and
-name the leaf help to read instead, such as `asl outbox supervise --help`.
+`asl control`, `asl control guard`, `asl inbox`, `asl outbox`,
+`asl assurance`, `asl diagnostics`, `asl maintenance`, `asl agent-mux`, and
+`asl overseer` each say so and name the leaf help to read instead, such as `asl outbox supervise --help`.
 `asl workbench` instead carries the serve flags on the parent parser, so its
 help shows them and its epilogue says the bare `asl workbench` form runs
 `asl workbench serve` with those flags.
