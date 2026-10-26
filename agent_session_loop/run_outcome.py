@@ -45,9 +45,11 @@ Invariants that survive the move:
 
 * **The final emission never kills the run.** :func:`_emit_run_payload`
   swallows ``BrokenPipeError`` and ``OSError`` from the write. A recovered run
-  whose original pipe reader has exited must not crash on the way out, because
-  the same payload is already durable in ``state.json`` and ``result.json``;
-  the terminal is the only copy that was ever expendable.
+  whose original pipe reader has exited must not crash on the way out: a run
+  that reached its loop has already written its terminal record to
+  ``state.json`` (on a crash best-effort, by
+  ``run_loop_finalization._record_run_crash``), and a refusal before the lock
+  never had a run record, so the terminal copy is the expendable one.
 * **The printer reads the seeded keys directly and the ``.get`` keys through
   ``.get``.** ``payload["plan_dir"]``, ``payload["ok"]``,
   ``payload["turns"]``, ``payload["completed_sessions"]`` and
@@ -451,6 +453,9 @@ def _emit_run_payload(args: argparse.Namespace, payload: dict[str, Any]) -> None
             _print_text_outcome(payload)
     except BrokenPipeError, OSError:
         # A recovered run whose original pipe reader exited (helper
-        # early-exit) must not crash on its final emission; the same payload
-        # is already durable in state.json / result.json.
+        # early-exit) must not crash on its final emission. A run that reached
+        # its loop has written its terminal record to state.json -- a crash
+        # only best-effort, through `run_loop_finalization._record_run_crash`
+        # -- and a refusal before the lock has no run record to lose, so this
+        # emission is never the only copy of a run's outcome.
         pass

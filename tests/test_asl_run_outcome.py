@@ -23,8 +23,9 @@ Four contracts:
   run has ended, when `run_reporting`'s coordinator no longer exists to race.
   `tests/test_asl_run_reporting.py` states the other half of that rule.
 * The terminal-emission contract -- a dead pipe never kills the run, because
-  the payload is already durable in `state.json` and `result.json` by the time
-  this module is reached.
+  a run that reached its loop has already written its terminal record to
+  `state.json` (best-effort on a crash), and a refusal before the lock has no
+  run record to lose.
 
 Every payload here is built for real against a plan on disk. Nothing reaches
 Git or a harness, so nothing spawns a process, which is what keeps this module
@@ -513,7 +514,7 @@ class TerminalEmissionTests(unittest.TestCase):
 
     def test_a_dead_pipe_is_swallowed_on_both_routes(self) -> None:
         # A recovered run whose original reader exited must not crash on its
-        # final emission; the same payload is already durable on disk.
+        # final emission; the terminal copy is never the run's only record.
         payload = self.plan.error()
         for error in (BrokenPipeError("gone"), OSError("closed")):
             for tokens in ((), ("--json",)):

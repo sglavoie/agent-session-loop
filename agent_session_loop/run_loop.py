@@ -73,7 +73,12 @@ from . import (
     state,
     verification_models,
 )
-from .run_loop_finalization import _finalize_run, _handle_run_crash
+from .run_loop_finalization import (
+    _finalize_run,
+    _handle_run_crash,
+    _record_run_crash,
+    _stop_run_controls,
+)
 from .run_loop_frame import LoopSignal, RunFrame, RunResult
 from .run_loop_setup_gates import _pass_readiness_gate, _prepare_review_and_resume
 from .run_loop_setup_state import _open_run_state, _register_control_surfaces
@@ -142,23 +147,33 @@ def run_locked(
         wakeup=wakeup,
         redirect_wakeup=redirect_wakeup,
     )
-    for setup_step in _SETUP_STEPS:
-        early = setup_step(frame)
-        if early is not None:
-            return early
+    # Setup and the settlement run outside the loop's crash handler, so this
+    # outer guard is what still writes a terminal record and stops the
+    # keyboard listener when either of them -- or the handler's re-raise --
+    # lets an exception out.
     try:
-        while True:
-            outcome = _run_loop_pass(frame)
-            if isinstance(outcome, LoopSignal):
-                if outcome is LoopSignal.BREAK:
-                    break
-                continue
-            if outcome is not None:
-                return outcome
-    except BaseException as error:  # noqa: BLE001
-        _handle_run_crash(frame, error)
-    # The one call site, at the point every one of the loop's breaks converges
-    # on, so the settlement keeps the ordering it depends on.
-    result = _finalize_run(frame)
-    assert result is not None
-    return result
+        for setup_step in _SETUP_STEPS:
+            early = setup_step(frame)
+            if early is not None:
+                return early
+        try:
+            while True:
+                outcome = _run_loop_pass(frame)
+                if isinstance(outcome, LoopSignal):
+                    if outcome is LoopSignal.BREAK:
+                        break
+                    continue
+                if outcome is not None:
+                    return outcome
+        except BaseException as error:  # noqa: BLE001
+            _handle_run_crash(frame, error)
+        # The one call site, at the point every one of the loop's breaks
+        # converges on, so the settlement keeps the ordering it depends on.
+        result = _finalize_run(frame)
+        assert result is not None
+        return result
+    except BaseException as error:
+        _record_run_crash(frame, error)
+        raise
+    finally:
+        _stop_run_controls(frame)
