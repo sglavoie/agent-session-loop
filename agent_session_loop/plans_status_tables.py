@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 
+from .contract_models import fenced_line_flags
 from .plans_files import (
     _atomic_write_text,
     _raise_read_error,
@@ -122,18 +123,24 @@ def _sync_status_tables_in_text(
     status_by_session: Mapping[str, StatusValue],
 ) -> tuple[str, bool]:
     lines = text.splitlines(keepends=False)
+    # A table quoted inside a fenced code block is an example, not a ledger.
+    fenced = fenced_line_flags(lines)
     updated: list[str] = []
     changed = False
     index = 0
 
     while index < len(lines):
-        if not lines[index].lstrip().startswith("|"):
+        if fenced[index] or not lines[index].lstrip().startswith("|"):
             updated.append(lines[index])
             index += 1
             continue
 
         block_start = index
-        while index < len(lines) and lines[index].lstrip().startswith("|"):
+        while (
+            index < len(lines)
+            and not fenced[index]
+            and lines[index].lstrip().startswith("|")
+        ):
             index += 1
         block = lines[block_start:index]
         synced_block, block_changed = _sync_status_table_block(block, status_by_session)

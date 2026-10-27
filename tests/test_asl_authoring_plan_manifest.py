@@ -115,6 +115,42 @@ class PlanManifestTransactionTests(PlanAuthoringBase):
         self.assertIn("| 3.1 | c \\| d | pending | session-3.1.md |", replaced)
         self.assertNotIn("x | y", replaced)
 
+    def test_status_row_edits_skip_fenced_example_tables(self) -> None:
+        rendered = authoring_manifest.render_manifest(self._manifest_spec())
+        example = "\n".join(
+            [
+                "```markdown",
+                "| # | Title | Status | File |",
+                "|---|---|---|---|",
+                "| 1 | Example | pending | session-1.md |",
+                "```",
+            ]
+        )
+        heading_end = rendered.index("\n") + 1
+        text = f"{rendered[:heading_end]}\n{example}\n{rendered[heading_end:]}"
+
+        added = authoring_manifest.add_manifest_session_row(
+            text,
+            authoring_manifest.ManifestSession(
+                session_id=plans_session_ids.parse_session_id("3"), title="Third"
+            ),
+        )
+        replaced, changed = authoring_manifest.replace_session_status_rows(
+            added,
+            "1",
+            (
+                authoring_manifest.ManifestSession(
+                    session_id=plans_session_ids.parse_session_id("1.1"),
+                    title="Split",
+                ),
+            ),
+        )
+
+        self.assertTrue(changed)
+        self.assertIn(example, replaced)
+        self.assertLess(replaced.index("| 2 | Second"), replaced.index("| 3 | Third"))
+        self.assertIn("| 1.1 | Split | pending | session-1.1.md |", replaced)
+
     def test_add_manifest_session_row_without_table_raises(self) -> None:
         with self.assertRaises(plans_errors.PlanError):
             authoring_manifest.add_manifest_session_row(

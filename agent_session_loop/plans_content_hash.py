@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+from .contract_models import fenced_line_flags
 from .plans_discovery import (
     discover_session_files,
 )
@@ -194,17 +195,23 @@ def _clear_status_cells_block(block: list[str]) -> list[str]:
 
 def _clear_status_cells_in_text(text: str) -> str:
     lines = text.splitlines(keepends=False)
+    # A table quoted inside a fenced code block is an example, not a ledger.
+    fenced = fenced_line_flags(lines)
     out: list[str] = []
     index = 0
 
     while index < len(lines):
-        if not lines[index].lstrip().startswith("|"):
+        if fenced[index] or not lines[index].lstrip().startswith("|"):
             out.append(lines[index])
             index += 1
             continue
 
         block_start = index
-        while index < len(lines) and lines[index].lstrip().startswith("|"):
+        while (
+            index < len(lines)
+            and not fenced[index]
+            and lines[index].lstrip().startswith("|")
+        ):
             index += 1
         block = lines[block_start:index]
         out.extend(_clear_status_cells_block(block))

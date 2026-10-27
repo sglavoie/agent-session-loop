@@ -104,6 +104,37 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertEqual((), changed)
             self.assertEqual(original_context, context_path.read_text(encoding="utf-8"))
 
+    def test_sync_derived_status_ledgers_leaves_fenced_context_tables(self) -> None:
+        # The quoting fence is longer than the nested one, so the inner closing
+        # fence does not end it and the table after it is still quoted.
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("complete", "pending"))
+            context_path = plan_dir / "context.md"
+            original_context = "\n".join(
+                [
+                    "# Context",
+                    "",
+                    "````markdown",
+                    "```",
+                    "nested example",
+                    "```",
+                    "| Session | Status |",
+                    "| --- | --- |",
+                    "| 1 | blocked |",
+                    "| 2 | in-review |",
+                    "````",
+                    "",
+                ]
+            )
+            context_path.write_text(original_context, encoding="utf-8")
+
+            snapshot = plans_snapshot.inspect_plan(plan_dir)
+            changed = plans_status_tables.sync_derived_status_ledgers(snapshot)
+
+            self.assertEqual((), changed)
+            self.assertEqual(original_context, context_path.read_text(encoding="utf-8"))
+
     def test_unknown_and_empty_statuses_are_reported_as_invalid_pauses(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
@@ -499,5 +530,38 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             )
 
             self.assertEqual(
+                baseline, plans_content_hash.stable_readiness_sha256(plan_dir)
+            )
+
+    def test_stable_readiness_sha256_tracks_fenced_status_examples(self) -> None:
+        # A fenced example is plan content, not a status ledger: editing it
+        # moves readiness like any other context edit.
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending", "pending"))
+            context_path = plan_dir / "context.md"
+
+            def write_context(status: str) -> None:
+                context_path.write_text(
+                    "\n".join(
+                        [
+                            "# Context",
+                            "",
+                            "```markdown",
+                            "| Session | Status |",
+                            "| --- | --- |",
+                            f"| 1 | {status} |",
+                            "```",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+
+            write_context("blocked")
+            baseline = plans_content_hash.stable_readiness_sha256(plan_dir)
+            write_context("in-review")
+
+            self.assertNotEqual(
                 baseline, plans_content_hash.stable_readiness_sha256(plan_dir)
             )

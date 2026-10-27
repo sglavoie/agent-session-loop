@@ -12,6 +12,7 @@ from . import (
     repository_scope_registry,
 )
 from .authoring_render import previous_session_reference_line
+from .contract_models import fenced_line_flags
 from .plans_errors import PlanError
 from .plans_models import ReadinessMetadata
 from .plans_readiness import SPLIT_FROM_PREFIX
@@ -239,18 +240,24 @@ def replace_session_status_rows(
     canonical_id = parse_session_id(session_id)
     replacement_rows = tuple(replacements)
     lines = text.splitlines()
+    # A table quoted inside a fenced code block is an example, not a ledger.
+    fenced = fenced_line_flags(lines)
     updated: list[str] = []
     changed = False
     index = 0
 
     while index < len(lines):
-        if not lines[index].lstrip().startswith("|"):
+        if fenced[index] or not lines[index].lstrip().startswith("|"):
             updated.append(lines[index])
             index += 1
             continue
 
         block_start = index
-        while index < len(lines) and lines[index].lstrip().startswith("|"):
+        while (
+            index < len(lines)
+            and not fenced[index]
+            and lines[index].lstrip().startswith("|")
+        ):
             index += 1
         block = lines[block_start:index]
         parsed_header = (
@@ -298,13 +305,18 @@ def add_manifest_session_row(manifest_text: str, session: ManifestSession) -> st
     session-status table is present.
     """
     lines = manifest_text.splitlines(keepends=False)
+    fenced = fenced_line_flags(lines)
     index = 0
     while index < len(lines):
-        if not lines[index].lstrip().startswith("|"):
+        if fenced[index] or not lines[index].lstrip().startswith("|"):
             index += 1
             continue
         block_start = index
-        while index < len(lines) and lines[index].lstrip().startswith("|"):
+        while (
+            index < len(lines)
+            and not fenced[index]
+            and lines[index].lstrip().startswith("|")
+        ):
             index += 1
         block = lines[block_start:index]
         if _is_session_status_table(block):
