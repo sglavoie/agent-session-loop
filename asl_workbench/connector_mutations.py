@@ -108,7 +108,9 @@ class MutationLane(ConnectorState):
         if len(self._queue.answers) >= MAX_QUEUED_ANSWERS:
             return
         with self._lock:
-            if self._mutating is not None:
+            # A worker can finish after this step's collection pass. Its
+            # report still owns the result slot until the next pass takes it.
+            if self._mutating is not None or self._mutation_result is not None:
                 return
         request = self._mutations.next_attempt(now)
         reconciling = False
@@ -119,6 +121,10 @@ class MutationLane(ConnectorState):
             request = next(iter(self._settling_mutations.values()), None)
             if request is None:
                 return
+            # Rotate before attempting the read: missing evidence or a failed
+            # reconciliation must not monopolize every later settlement pass.
+            self._settling_mutations.pop(request.operation_id)
+            self._settling_mutations[request.operation_id] = request
             reconciling = True
             self._next_settlement = now + MUTATION_SETTLEMENT_INTERVAL_SECONDS
         with self._lock:

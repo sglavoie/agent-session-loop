@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from typing import Any
+from unittest import mock
 
 from asl_workbench import catalog
 from asl_workbench import connector_protocols as portable_protocols
@@ -92,6 +93,29 @@ class LaneTests(unittest.TestCase):
         self.drive(connector, channel, 8)
         self.assertEqual(len(channel.answers()), 1)
         self.assertEqual(len(responder.requests), 1)
+
+    def test_completion_after_collection_preserves_both_read_answers(self) -> None:
+        channel = fixtures.LinkChannel()
+        worker = fixtures.HeldWorker()
+        connector = fixtures.make_connector(channel=channel, run_answer=worker)
+        channel.carry(self.read_request("r1"))
+        channel.carry(self.read_request("r2"))
+        self.drive(connector, channel, 8)
+
+        with mock.patch.object(
+            connector, "_expire_reads", side_effect=lambda now: worker.release()
+        ):
+            connector.step(fixtures.NOW + 1.0)
+        worker.release()
+        for index in range(4):
+            connector.step(fixtures.NOW + 2.0 + 0.1 * index)
+        worker.release()
+        for index in range(4):
+            connector.step(fixtures.NOW + 3.0 + 0.1 * index)
+
+        self.assertEqual(
+            ["r1", "r2"], [answer["request_id"] for answer in channel.answers()]
+        )
 
     def test_a_request_for_another_connector_is_not_taken_in(self) -> None:
         from asl_workbench.transport import request_envelope as compose

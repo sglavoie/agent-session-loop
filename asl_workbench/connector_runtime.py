@@ -274,7 +274,8 @@ class ObservationConnector(ReadLane):
 
     def _start_observation(self, now: float) -> None:
         with self._lock:
-            if self._observing:
+            # A completed scan still owns the slot until collection adopts it.
+            if self._observing or self._result is not None:
                 return
             self._observing = True
         # Scheduled before the pass runs rather than after it lands: a walk

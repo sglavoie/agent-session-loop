@@ -266,6 +266,26 @@ class CheckpointTests(unittest.TestCase):
 class HeartbeatIsolationTests(unittest.TestCase):
     """A slow corpus delays the corpus, never the liveness signal."""
 
+    def test_completion_after_collection_preserves_the_observation(self) -> None:
+        worker = HeldWorker()
+        cycle = cycle_with()
+        source = StubSource([cycle, OSError("the next scan failed")])
+        channel = FakeChannel()
+        connector = make_connector(source, channel, run_observation=worker)
+        connector.step(NOW)
+
+        # The scan finishes between collection and scheduling, with the next
+        # scan already due. Its result must reach the publisher first.
+        with mock.patch.object(
+            connector, "_expire_reads", side_effect=lambda now: worker.release()
+        ):
+            connector.step(NOW + 40.0)
+        worker.release()
+        drain(connector, start=NOW + 41.0, steps=10)
+
+        self.assertEqual([cycle], source.committed)
+        self.assertEqual(1, len(channel.payloads(VIEW_SNAPSHOT)))
+
     def test_heartbeats_continue_while_an_observation_pass_is_in_flight(self) -> None:
         worker = HeldWorker()
         source = StubSource([cycle_with()])

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest import mock
 
 from asl_workbench import remote_actions
 from asl_workbench.operations import (
@@ -128,6 +129,86 @@ class LaneTests(unittest.TestCase):
         (report,) = channel.operations()
         self.assertIsNone(report.get("request_id"))
         self.assertEqual([], channel.receipts())
+
+    def test_unresolved_settlement_does_not_starve_later_operations(self) -> None:
+        for first_result in (
+            None,
+            remote_actions.MutationResult(status=OPERATION_ACCEPTED),
+            RuntimeError("evidence unavailable"),
+        ):
+            with self.subTest(first_result=first_result):
+                channel = LinkChannel()
+                performer = SettlingPerformer()
+                connector = make_connector(channel=channel, performer=performer)
+                channel.carry(submission("m1", operation_id="op-1"))
+                channel.carry(submission("m2", operation_id="op-2"))
+
+                def reconcile(
+                    request: remote_actions.MutationRequest,
+                    *,
+                    now: float,
+                    pending: remote_actions.MutationResult
+                    | Exception
+                    | None = first_result,
+                ) -> remote_actions.MutationResult | None:
+                    if request.operation_id == "op-1":
+                        if isinstance(pending, Exception):
+                            raise pending
+                        return pending
+                    return remote_actions.MutationResult(status=OPERATION_CONSUMED)
+
+                with mock.patch.object(performer, "reconcile", side_effect=reconcile):
+                    drive(connector, 10)
+                    for offset in (2.0, 4.0, 6.0):
+                        drive(connector, 6, start=NOW + offset)
+
+                consumed = [
+                    report["payload"]["operation_id"]
+                    for report in channel.operations()
+                    if report["payload"]["status"] == OPERATION_CONSUMED
+                ]
+                self.assertEqual(["op-2"], consumed)
+                self.assertEqual(2, len(performer.calls))
+
+                drive(connector, 6, start=NOW + 8.0)
+                self.assertEqual(0, connector.pending_mutations())
+                self.assertEqual(
+                    ["op-2", "op-1"],
+                    [
+                        report["payload"]["operation_id"]
+                        for report in channel.operations()
+                        if report["payload"]["status"] == OPERATION_CONSUMED
+                    ],
+                )
+
+    def test_completion_after_collection_preserves_both_mutation_reports(self) -> None:
+        channel = LinkChannel()
+        performer = StubPerformer()
+        worker = HeldWorker()
+        connector = make_connector(
+            channel=channel, performer=performer, run_mutation=worker
+        )
+        channel.carry(submission("m1", operation_id="op-1"))
+        channel.carry(submission("m2", operation_id="op-2"))
+        drive(connector, 8)
+
+        # Finish the first worker after this step collected results but before
+        # it tries to start the next worker. Finish that next worker promptly,
+        # too, so an uncollected result would be overwritten deterministically.
+        with mock.patch.object(
+            connector, "_expire_mutations", side_effect=lambda now: worker.release()
+        ):
+            connector.step(NOW + 1.0)
+        worker.release()
+        drive(connector, 4, start=NOW + 2.0)
+        worker.release()
+        drive(connector, 4, start=NOW + 3.0)
+
+        self.assertEqual(
+            ["op-1", "op-2"],
+            [report["payload"]["operation_id"] for report in channel.operations()],
+        )
+        self.assertEqual(0, connector.pending_mutations())
 
     def test_a_submission_to_a_connector_that_does_not_act_is_refused(self) -> None:
         channel = LinkChannel()

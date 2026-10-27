@@ -179,7 +179,9 @@ class ReadLane(MutationLane):
         if len(self._queue.answers) >= MAX_QUEUED_ANSWERS:
             return
         with self._lock:
-            if self._answering is not None:
+            # Completion may land after collection in the same service step.
+            # Do not let the next worker overwrite that uncollected answer.
+            if self._answering is not None or self._answer_result is not None:
                 return
             request = self._requests.pop(0)
             self._answering = request
