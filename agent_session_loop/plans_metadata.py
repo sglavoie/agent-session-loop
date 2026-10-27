@@ -90,7 +90,9 @@ def load_plan_metadata(plan_dir: str | Path) -> PlanMetadataValue | None:
         raise PlanError(f"{path} must contain a JSON object")
 
     version = payload.get("version")
-    if version in {
+    # An unhashable or boolean version falls through to the legacy parser's
+    # unsupported-version refusal instead of a set-membership TypeError.
+    if type(version) is int and version in {
         PLAN_METADATA_V2_SCHEMA_VERSION,
         PLAN_METADATA_V3_SCHEMA_VERSION,
     }:

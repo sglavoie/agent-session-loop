@@ -462,6 +462,22 @@ class WorkspaceMetadataTests(unittest.TestCase):
             with self.assertRaisesRegex(plans_errors.PlanError, "SHA-256"):
                 plans_metadata.load_plan_metadata(plan_dir)
 
+    def test_loader_refuses_a_non_integer_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            metadata_path = plan_dir / plans_metadata.PLAN_METADATA_FILE_NAME
+            for version in ([2], {}, True):
+                with self.subTest(version=version):
+                    metadata_path.write_text(
+                        json.dumps({"version": version, "cwd": "/tmp"}),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(
+                        plans_errors.PlanError, "unsupported version"
+                    ):
+                        plans_metadata.load_plan_metadata(plan_dir)
+
     def test_v3_loader_accepts_and_discards_a_legacy_inventory_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
