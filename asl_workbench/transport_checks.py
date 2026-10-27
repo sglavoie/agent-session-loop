@@ -27,6 +27,7 @@ from .transport_vocabulary import (
     ERROR_BODY_LEAK,
     ERROR_FRAME_TOO_LARGE,
     ERROR_INVALID_FIELD,
+    ERROR_MALFORMED,
     ERROR_MISSING_FIELD,
     ERROR_UNKNOWN_FIELD,
     MAX_WARNING_CHARS,
@@ -185,17 +186,26 @@ def assert_no_body(document: Any, *, where: str) -> None:
     operations module already keeps for records on disk. The same walk runs on
     the wire so a leak is a refused frame rather than a refused write: by the
     time a write is attempted the prose has already crossed the network.
+    A document nested deeper than the walk can follow is refused as malformed
+    rather than escaping as a :class:`RecursionError`.
     """
+    try:
+        _walk_for_body(document, where)
+    except RecursionError as error:
+        raise _fail(ERROR_MALFORMED, where, "nested too deeply") from error
+
+
+def _walk_for_body(document: Any, where: str) -> None:
     if isinstance(document, Mapping):
         for name, value in document.items():
             if isinstance(name, str) and name in FORBIDDEN_PERSISTED_KEYS:
                 raise _fail(ERROR_BODY_LEAK, where, name)
-            assert_no_body(value, where=f"{where}.{name}")
+            _walk_for_body(value, f"{where}.{name}")
         return
     if isinstance(document, (str, bytes)) or not isinstance(document, Sequence):
         return
     for index, value in enumerate(document):
-        assert_no_body(value, where=f"{where}[{index}]")
+        _walk_for_body(value, f"{where}[{index}]")
 
 
 # --------------------------------------------------------------------------

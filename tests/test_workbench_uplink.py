@@ -182,6 +182,18 @@ class UploadTests(UplinkCase):
         refused = self.refusal(elsewhere)
         self.assertEqual(refused.status, 400)
 
+    def test_a_payload_nested_too_deeply_is_a_malformed_refusal(self) -> None:
+        # Shallow enough for the request body to parse, too deep for the body
+        # walk: a 400 the connector can read, not a 500 from the safety net.
+        frame = heartbeat()
+        nested: list[Any] = []
+        for _ in range(3000):
+            nested = [nested]
+        frame["payload"]["x"] = nested
+        refused = self.refusal(frame, subject=CONNECTOR)
+        self.assertEqual(refused.status, 400)
+        self.assertEqual(refused.reason, "malformed")
+
     def test_a_downward_kind_may_not_be_uploaded(self) -> None:
         """A request travels down, so a request arriving up is refused.
 

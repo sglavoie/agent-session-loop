@@ -205,7 +205,9 @@ def validate_frame(
         message = json.loads(raw, parse_constant=refuse_non_finite)
     except TransportError:
         raise
-    except (UnicodeDecodeError, ValueError) as error:
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
+        # A frame well under the size cap can still nest deeper than the
+        # decoder will follow; that is a malformed frame, not a crash.
         raise _fail(ERROR_MALFORMED, "frame", str(error)) from error
     return validate_envelope(message, direction=direction, target_id=target_id)
 

@@ -199,6 +199,30 @@ class InvalidMessagesFailPredictably(unittest.TestCase):
         self.assertLess(len(raw), transport.MAX_FRAME_BYTES)
         self.assertEqual(envelope, transport.validate_frame(raw))
 
+    def test_a_frame_nested_past_the_decoder_is_malformed_not_a_crash(self) -> None:
+        # Well under the size ceiling, yet deeper than json.loads will follow.
+        depth = 200_000
+        raw = b'{"x":' + b"[" * depth + b"]" * depth + b"}"
+        self.assertLess(len(raw), transport.MAX_FRAME_BYTES)
+        with self.assertRaises(transport.TransportError) as caught:
+            transport.validate_frame(raw)
+        self.assertEqual(transport.ERROR_MALFORMED, caught.exception.code)
+
+    def test_a_payload_nested_past_the_body_walk_is_malformed_not_a_crash(
+        self,
+    ) -> None:
+        # Shallow enough for the decoder, too deep for the recursive body walk.
+        envelope = fixture("observation-heartbeat")
+        depth = 3000
+        view = '"view": "heartbeat"'
+        frame = json.dumps(envelope)
+        self.assertIn(view, frame)
+        frame = frame.replace(view, f'{view}, "x": ' + "[" * depth + "]" * depth)
+        self.assertTrue(json.loads(frame))
+        with self.assertRaises(transport.TransportError) as caught:
+            transport.validate_frame(frame.encode("utf-8"), direction="up")
+        self.assertEqual(transport.ERROR_MALFORMED, caught.exception.code)
+
     def test_encoding_refuses_a_frame_the_far_end_would_reject(self) -> None:
         # Measured on the way out too, so an oversized answer is a local error
         # the connector can page around instead of a refusal discovered after
