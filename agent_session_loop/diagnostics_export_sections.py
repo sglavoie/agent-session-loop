@@ -50,6 +50,11 @@ def _projection_section(
         "finished_at",
     )
     projection = _pick(raw, fields)
+    # The timestamps are strings by contract, and the run list sorts on
+    # ``updated_at``: a number planted there would make that sort compare an
+    # int with another run's string, so anything else exports as absent.
+    for clock in ("started_at", "updated_at", "finished_at"):
+        projection[clock] = _bounded_str(raw.get(clock))
     process = raw.get("process")
     projection["process"] = (
         _pick(process, ("pid", "start_token")) if isinstance(process, Mapping) else None

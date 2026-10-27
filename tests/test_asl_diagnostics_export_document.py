@@ -173,6 +173,27 @@ class ExportCorrelationTests(ExportTestBase):
         self.assertNotIn("unexpected_body", projection)
         self.assertEqual(projection["process"], {"pid": 4242, "start_token": "token-1"})
 
+    def test_non_string_projection_clock_neither_exports_nor_breaks_ordering(
+        self,
+    ) -> None:
+        def projection(updated_at: Any) -> dict[str, Any]:
+            return {
+                "schema_version": agent_mux_projection.PROJECTION_SCHEMA_VERSION,
+                "contract_set_id": agent_mux_projection.CONTRACT_SET_ID,
+                "updated_at": updated_at,
+            }
+
+        for name, run_id, updated_at in (
+            ("plan-int", "run-int", 5),
+            ("plan-str", "run-str", "2026-10-01T00:00:00Z"),
+        ):
+            plan_dir = self.tmp_path / name
+            plan_dir.mkdir()
+            self.seed_state(plan_dir, run_id=run_id, projection=projection(updated_at))
+        runs = self.export()["runs"]
+        self.assertEqual([run["run_id"] for run in runs], ["run-str", "run-int"])
+        self.assertIsNone(runs[1]["projection"]["updated_at"])
+
     def test_run_id_selector_narrows_the_document(self) -> None:
         self.seed_full_plan("plan-a")
         plan_b = self.tmp_path / "plan-b"
