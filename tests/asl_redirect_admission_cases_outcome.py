@@ -194,6 +194,26 @@ class UndeliverableChannelTests(AdmissionTestCase):
             ),
         )
 
+    def test_a_retried_operation_the_runner_already_accepted_stays_accepted(
+        self,
+    ) -> None:
+        """A failed ring cannot report "did not land" over the journal's answer."""
+        target = redirect_store_models.RedirectTarget(RUN_ID, "session-9", 1)
+        feedback = "stop and re-read the session contract"
+        earlier = redirect_store_requests.submit_request(
+            self.plan_dir, target=target, feedback=feedback, state_dir=self.state_dir
+        )
+        redirect_admission.accept_redirect(
+            self.plan_dir, earlier.operation_id, target=target, state_dir=self.state_dir
+        )
+
+        outcome = self.submit(feedback=feedback, operation_id=earlier.operation_id)
+
+        self.assertFalse(outcome.delivery.delivered)
+        self.assertEqual(redirect_admission.OUTCOME_ACCEPTED, outcome.outcome)
+        self.assertTrue(outcome.request.accepted)
+        self.assertTrue(self.journal().request(earlier.operation_id).accepted)
+
     def test_an_unwritable_settlement_leaves_the_request_open_not_accepted(
         self,
     ) -> None:

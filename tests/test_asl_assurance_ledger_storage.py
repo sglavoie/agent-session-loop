@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 # ruff: noqa: F403, F405
+from agent_session_loop import assurance_ledger_vocabulary as ledger_vocabulary
 from tests.asl_assurance_ledger_test_support import *
 
 
@@ -342,6 +343,26 @@ class RejectionTests(LedgerTestCase):
         ledger.append_issue_observation(_observation(), state_dir=self.state_dir)
         text = self.ledger_path.read_text(encoding="utf-8")
         self.write_ledger_text(text.replace('"ASI-1"', f'"ASI-{"9" * 5000}"'))
+        view = self.read()
+        self.assertEqual((), view.records)
+        self.assertEqual(
+            [ledger.REJECT_INVALID_RECORD], [item.reason for item in view.rejected]
+        )
+
+    def test_an_integer_too_large_for_a_float_is_rejected_not_raised(self) -> None:
+        recorded_at = "2026-01-01T00:00:00+00:00"
+        line = {
+            "version": max(ledger_vocabulary.SUPPORTED_LEDGER_SCHEMA_VERSIONS),
+            "kind": ledger_vocabulary.KIND_HUMAN_CLOSEOUT,
+            "recorded_at": recorded_at,
+            "payload": {
+                "run_id": "r1",
+                "outcome": "accepted",
+                "recorded_at": recorded_at,
+                "rework_minutes": 10**400,
+            },
+        }
+        self.write_ledger_text(json.dumps(line) + "\n")
         view = self.read()
         self.assertEqual((), view.records)
         self.assertEqual(

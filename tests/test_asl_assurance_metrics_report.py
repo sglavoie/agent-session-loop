@@ -114,6 +114,34 @@ class RunReportTests(AssuranceReportTestCase):
         self.assertIsNone(assurance_report.status_line(None))
         self.assertIsNone(assurance_report.status_line({}))
 
+    def test_status_line_survives_a_timeout_too_large_for_a_float(self) -> None:
+        huge = 10**400
+        self.assertEqual(
+            f"Supervisor audit: all-clear (codex via config role, {huge}s per attempt)",
+            assurance_report.status_line(
+                {
+                    "state": "all-clear",
+                    "role": {
+                        "harness": "codex",
+                        "source": "config",
+                        "timeout_seconds": huge,
+                    },
+                }
+            ),
+        )
+
+    def test_an_over_deep_audit_report_degrades_like_a_malformed_one(self) -> None:
+        run_dir = Path(self.state_dir) / "run"
+        run_dir.mkdir(parents=True)
+        report_path = run_dir / assurance_models_vocab.AUDIT_REPORT_FILENAME
+        for text in ("{not json", "[" * 200_000):
+            with self.subTest(text=text[:10]):
+                report_path.write_text(text, encoding="utf-8")
+                report = assurance_report.build_run_report(
+                    _assurance(), run_dir=run_dir, open_issues=False
+                )
+                self.assertIsNone(report["lanes_total"])
+
 
 class BoundedSummaryTests(AssuranceReportTestCase):
     def test_summary_truncates_and_flags_it(self) -> None:

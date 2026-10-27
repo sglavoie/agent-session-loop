@@ -101,6 +101,16 @@ COMPACT_STATE_SCHEMA_VERSION = 2
 #: diagnostics remain recoverable from the referenced artifact.
 _VERIFICATION_OUTPUT_KEYS = ("stdout", "stderr")
 
+#: Lists of check payloads a verification summary or pause may carry; each
+#: entry can hold the raw ``stdout`` / ``stderr`` previews of one check.
+_VERIFICATION_CHECK_LISTS = (
+    "checks",
+    "failures",
+    "diagnostic_failures",
+    "deferred_failures",
+    "skipped_checks",
+)
+
 
 def _strip_check_output(check: Any) -> Any:
     """Drop raw stdout/stderr from a verification check payload.
@@ -128,7 +138,7 @@ def _bounded_verification_details(details: Any) -> Any:
     if not isinstance(details, dict):
         return details
     bounded = dict(details)
-    for key in ("checks", "failures"):
+    for key in _VERIFICATION_CHECK_LISTS:
         value = bounded.get(key)
         if isinstance(value, list):
             bounded[key] = [_strip_check_output(check) for check in value]
@@ -164,13 +174,7 @@ def _compact_turn_summary(turn: Any) -> Any:
         summary["after"] = _compact_snapshot(summary["after"])
     verification = summary.get("verification")
     if isinstance(verification, dict):
-        compact_verification = dict(verification)
-        checks = compact_verification.get("checks")
-        if isinstance(checks, list):
-            compact_verification["checks"] = [
-                _strip_check_output(check) for check in checks
-            ]
-        summary["verification"] = compact_verification
+        summary["verification"] = _bounded_verification_details(verification)
     return summary
 
 

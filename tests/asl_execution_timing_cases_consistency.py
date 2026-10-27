@@ -34,6 +34,46 @@ class InconsistencyTests(unittest.TestCase):
                     run.phase_seconds[execution_timing.PHASE_WORKER_EXECUTION], 0.0
                 )
 
+    def test_backwards_timestamp_spans_are_reported_rather_than_absorbed(
+        self,
+    ) -> None:
+        records = [
+            record
+            for record in _clean_run_events()
+            if record["name"]
+            not in (
+                events.VERIFICATION_STARTED_EVENT,
+                events.VERIFICATION_FINISHED_EVENT,
+            )
+        ]
+        verification = _verification(turn_index=1, started=140, finished=100)
+        del verification[1]["payload"]["duration_seconds"]
+        records[4:4] = verification
+        phase_run = _one(records)
+        self.assertIn(
+            execution_timing.ANOMALY_INVALID_NUMBER, _codes(phase_run.anomalies)
+        )
+        self.assertEqual(
+            0.0, phase_run.phase_seconds[execution_timing.PHASE_VERIFICATION]
+        )
+        self.assertFalse(phase_run.trustworthy)
+
+        turn = _execution_finished(turn_index=1, started=100, finished=0)
+        del turn["payload"]["duration_seconds"]
+        turn_run = _one([_run_started(), turn, _run_finished()])
+        self.assertIn(
+            execution_timing.ANOMALY_INVALID_NUMBER, _codes(turn_run.anomalies)
+        )
+        self.assertIsNone(turn_run.attempts[0].duration_seconds)
+
+        wall_run = _one(
+            [_run_started(), _run_finished(started=500, finished=300, duration=None)]
+        )
+        self.assertIn(
+            execution_timing.ANOMALY_INVALID_NUMBER, _codes(wall_run.anomalies)
+        )
+        self.assertIsNone(wall_run.wall_seconds)
+
     def test_a_duration_contradicting_its_own_timestamps_is_flagged(self) -> None:
         run = _one(
             [

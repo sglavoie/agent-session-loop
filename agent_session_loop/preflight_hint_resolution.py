@@ -252,7 +252,7 @@ def _override_check_id_for_finding(finding: PreflightFinding) -> str:
     if finding.category == "env-git":
         if "not inside a git repository" in finding.message:
             return "env-git.outside-worktree"
-        if "worktree is dirty" in finding.message:
+        if "is dirty;" in finding.message or "linked tree is dirty" in finding.message:
             return "env-git.dirty-worktree"
         return ""
     if finding.category == "env-lock":

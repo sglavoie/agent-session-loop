@@ -83,7 +83,9 @@ REASON_LANE_EVIDENCE_ABSENT = "lane-evidence-absent"
 #: :data:`MAX_AGENT_CATALOG_BYTES`.
 MAX_PROMPTED_CANDIDATES = 8
 
-_JSON_FENCE_RE = re.compile(r"```(?:json)?[ \t]*\n(.*?)```", re.DOTALL)
+#: A fence line: an opener may carry a language tag, a closer carries none.
+#: Matched per line so an earlier block's closer is never read as an opener.
+_FENCE_LINE_RE = re.compile(r"[ \t]*```[ \t]*([A-Za-z0-9_+-]*)[ \t]*")
 
 #: Keys the agent may set on a finding. ``fingerprint``, ``issue_id``, and
 #: ``schema_version`` are absent because ASL computes them; an agent that sends
@@ -422,5 +424,5 @@ class AgentCatalog:
 # This is deliberately explicit: focused implementation modules import this
 # compatibility vocabulary with ``*``, and static analyzers need that surface.
 # fmt: off
-__all__ = ("contextlib", "json", "os", "re", "shutil", "Iterable", "Mapping", "Sequence", "dataclass", "field", "replace", "Path", "Any", "artifacts", "assurance_ledger", "assurance_models_artifacts", "assurance_models_audit", "assurance_models_findings", "assurance_models_primitives", "assurance_models_vocab", "assurance_projection", "durability", "supervisor_audit_models", "supervisor_audit_vocabulary", "audit_checks", "audit_evidence_constants", "audit_evidence_models", "Finding", "AttemptOutcome", "CheckStatus", "AUDIT_STAGING_DIR_NAME", "AGENT_OUTPUT_SCHEMA_VERSION", "MAX_AGENT_CATALOG_BYTES", "MAX_CATALOG_SUMMARY_CHARS", "IDENTITY_DECISIONS", "MAX_AGENT_OUTPUT_BYTES", "LOCALIZATION_ROOTS", "REASON_AGENT_UNAVAILABLE", "REASON_LANE_COVERAGE", "REASON_LANE_EVIDENCE_ABSENT", "MAX_PROMPTED_CANDIDATES", "_JSON_FENCE_RE", "_AGENT_FINDING_KEYS", "_IDENTITY_KEYS", "_AGENT_IDENTITY_KEYS", "AUDIT_PROMPT_TEMPLATE", "AUDIT_CORRECTION_TEMPLATE", "AUDIT_CANDIDATE_TEMPLATE", "AgentOutputError", "IDENTITY_SOURCES", "IdentityDecision", "AgentAudit", "_inline", "AgentCatalogEntry", "AgentCatalog")
+__all__ = ("contextlib", "json", "os", "re", "shutil", "Iterable", "Mapping", "Sequence", "dataclass", "field", "replace", "Path", "Any", "artifacts", "assurance_ledger", "assurance_models_artifacts", "assurance_models_audit", "assurance_models_findings", "assurance_models_primitives", "assurance_models_vocab", "assurance_projection", "durability", "supervisor_audit_models", "supervisor_audit_vocabulary", "audit_checks", "audit_evidence_constants", "audit_evidence_models", "Finding", "AttemptOutcome", "CheckStatus", "AUDIT_STAGING_DIR_NAME", "AGENT_OUTPUT_SCHEMA_VERSION", "MAX_AGENT_CATALOG_BYTES", "MAX_CATALOG_SUMMARY_CHARS", "IDENTITY_DECISIONS", "MAX_AGENT_OUTPUT_BYTES", "LOCALIZATION_ROOTS", "REASON_AGENT_UNAVAILABLE", "REASON_LANE_COVERAGE", "REASON_LANE_EVIDENCE_ABSENT", "MAX_PROMPTED_CANDIDATES", "_FENCE_LINE_RE", "_AGENT_FINDING_KEYS", "_IDENTITY_KEYS", "_AGENT_IDENTITY_KEYS", "AUDIT_PROMPT_TEMPLATE", "AUDIT_CORRECTION_TEMPLATE", "AUDIT_CANDIDATE_TEMPLATE", "AgentOutputError", "IDENTITY_SOURCES", "IdentityDecision", "AgentAudit", "_inline", "AgentCatalogEntry", "AgentCatalog")
 # fmt: on

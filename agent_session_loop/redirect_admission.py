@@ -449,12 +449,29 @@ def submit_redirect(
 
     delivery = control_signal.notify_redirect(facts.plan_dir, state_dir=state_dir)
     if not delivery.delivered:
+        settled = _settle_undeliverable(facts.plan_dir, request, state_dir=state_dir)
+        if (
+            settled.terminal
+            and settled.reason != redirect_store_vocab.REASON_URGENT_CHANNEL_UNAVAILABLE
+        ):
+            # Already settled by someone else: a retried operation id the
+            # runner took earlier, or an acceptance that won the race with the
+            # failed ring. The journal's answer stands.
+            return SubmissionOutcome(
+                outcome=(OUTCOME_ACCEPTED if settled.accepted else OUTCOME_REJECTED),
+                plan_dir=facts.plan_dir,
+                reason=settled.reason,
+                operation_id=settled.operation_id,
+                request=settled,
+                target=target,
+                delivery=delivery,
+            )
         return SubmissionOutcome(
             outcome=OUTCOME_UNAVAILABLE,
             plan_dir=facts.plan_dir,
             reason=redirect_store_vocab.REASON_URGENT_CHANNEL_UNAVAILABLE,
             operation_id=request.operation_id,
-            request=_settle_undeliverable(facts.plan_dir, request, state_dir=state_dir),
+            request=settled,
             target=target,
             delivery=delivery,
         )
@@ -492,7 +509,7 @@ def _settle_undeliverable(
             state_dir=state_dir,
         )
     except redirect_store_models.RedirectStoreError:
-        return request
+        return _current_request(plan_dir, request, state_dir=state_dir)
 
 
 def _await_settlement(

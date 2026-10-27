@@ -69,7 +69,9 @@ _RUN_ANCHOR_PREFIX = "run/"
 
 
 def _format_timeout(value: Any) -> str:
-    if isinstance(value, (int, float)) and float(value).is_integer():
+    if isinstance(value, int):
+        return f"{int(value)}s"
+    if isinstance(value, float) and value.is_integer():
         return f"{int(value)}s"
     return f"{value}s"
 
@@ -178,7 +180,7 @@ def _lane_coverage(
         return None, None, ()
     try:
         payload = json.loads(Path(report_path).read_text(encoding="utf-8"))
-    except OSError, ValueError:
+    except OSError, ValueError, RecursionError:
         return None, None, ()
     lanes = payload.get("lanes") if isinstance(payload, Mapping) else None
     if not isinstance(lanes, Sequence) or isinstance(lanes, (str, bytes)) or not lanes:

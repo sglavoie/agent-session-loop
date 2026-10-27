@@ -334,6 +334,21 @@ class ControlDispatchTests(ControlsTestCase):
         self.assertEqual(intervention.REASON_INVALID_PLAN, caught.exception.reason)
         self.assertEqual(controls.SCOPE_INTERVENTION, caught.exception.scope)
 
+    def test_an_open_caller_cannot_queue_for_a_path_that_cannot_be_resolved(
+        self,
+    ) -> None:
+        for kind in (controls.CONTROL_STOP_AFTER_CURRENT, controls.CONTROL_ABORT):
+            with self.subTest(kind=kind):
+                with self.assertRaises(workbench_controls.ControlRefused) as caught:
+                    workbench_controls.dispatch_control(
+                        UNRESOLVABLE_PLAN_DIR, kind, state_dir=self.state_dir
+                    )
+
+                self.assertEqual(
+                    intervention.REASON_INVALID_PLAN, caught.exception.reason
+                )
+                self.assertEqual(controls.SCOPE_INTERVENTION, caught.exception.scope)
+
     def test_an_unsupported_harness_is_refused_before_anything_is_queued(self) -> None:
         self.live_run()
 

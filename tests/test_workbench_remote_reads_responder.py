@@ -96,6 +96,15 @@ class ResponderTests(fixtures.ResponderTestCase):
         self.assertEqual(second["offset"], 2)
         self.assertNotEqual(first["entries"], second["entries"])
 
+    def test_a_cursor_past_the_page_ceiling_still_reads_to_the_end(self) -> None:
+        """The entry cap bounds a page, not where one may start."""
+        self.write_events(self.plan, 2300)
+        last = self.ask("events", offset=2200)
+        self.assertEqual(last["offset"], 2200)
+        self.assertEqual(last["entry_count"], 100)
+        self.assertEqual(last["complete"], "complete")
+        self.assertIsNone(last.get("next_offset"))
+
     def test_a_read_is_bounded_by_bytes_and_not_only_by_rows(self) -> None:
         self.write_events(self.plan, 4, payload_size=150_000)
         payload = self.ask("events", limit=4)

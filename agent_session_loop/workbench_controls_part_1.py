@@ -5,6 +5,7 @@ from . import workbench_controls_shared as _shared
 globals().update(
     {name: value for name, value in vars(_shared).items() if not name.startswith("__")}
 )
+from . import plans_files
 from .workbench_controls_shared import *
 
 ABORT_NOTES: Mapping[str, str] = {
@@ -380,6 +381,18 @@ def dispatch_control(
     command = _queue_command(kind)
     if kind == portable_controls.CONTROL_SELECT_HARNESS:
         require_harness(harness or "")
+
+    # The open read below answers an unusable path with "nothing is running",
+    # and the queue append would then fail on it as a bare OS error; refuse it
+    # here as the launch and redirect surfaces do.
+    try:
+        plans_files.canonicalize_path(plan_dir)
+    except (OSError, ValueError) as error:
+        raise ControlRefused(
+            intervention.REASON_INVALID_PLAN,
+            f"invalid plan directory {str(plan_dir)!r}: {error}",
+            scope=portable_controls.SCOPE_INTERVENTION,
+        ) from error
 
     strict = authorization == portable_controls.AUTHORIZATION_STRICT
     activity = inspect_activity(plan_dir, state_dir=state_dir, strict=strict)

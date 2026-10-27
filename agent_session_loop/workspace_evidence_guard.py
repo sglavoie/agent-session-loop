@@ -64,8 +64,14 @@ def _workspace_write_guard_evidence(
             # it, so it answers to that repository's alias rather than to none.
             alias = registered.get(repository if linked is None else linked[0])
             qualifier = alias or repository
+            # Paths arrive qualified by the full repository key, and a linked
+            # worktree's key has colons of its own, so strip the key itself
+            # rather than splitting at the first colon.
+            key_prefix = f"{repository}:"
             qualified_paths = [
-                f"{qualifier}:{path.split(':', 1)[1]}"
+                f"{qualifier}:{path.removeprefix(key_prefix)}"
+                if isinstance(path, str) and path.startswith(key_prefix)
+                else f"{qualifier}:{path.split(':', 1)[1]}"
                 if isinstance(path, str) and ":" in path
                 else f"{qualifier}:{path}"
                 for path in changes.get("qualified_paths", ())

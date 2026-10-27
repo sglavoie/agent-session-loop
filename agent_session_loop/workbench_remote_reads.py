@@ -43,6 +43,7 @@ the readers rather than a promise made at this layer.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -290,8 +291,11 @@ class AslDetailResponder:
         request: Mapping[str, Any],
     ) -> _Material:
         """One paged read. The cursor the reader produced is the one that ships."""
+        # The entry cap bounds a page, not where it starts: like the local
+        # surface, an offset only has to be non-negative, or a long run's
+        # history could not be paged to its end.
         offset = details.bounded_int(
-            request.get("offset"), default=0, maximum=MAX_DETAIL_ENTRIES, name="offset"
+            request.get("offset"), default=0, maximum=sys.maxsize, name="offset"
         )
         limit = details.bounded_int(
             request.get("limit"),

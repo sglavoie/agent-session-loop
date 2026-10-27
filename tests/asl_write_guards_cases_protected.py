@@ -1,4 +1,12 @@
 # mypy: ignore-errors
+from agent_session_loop import (
+    guards_models,
+    guards_rules,
+    repository_evidence,
+    repository_evidence_registered,
+    workspace_evidence_guard,
+)
+
 from .asl_write_guards_support import *
 
 
@@ -75,6 +83,54 @@ class ProtectedPathChangedPathsTests(unittest.TestCase):
                 }
             ),
         )
+
+    def test_a_linked_worktree_change_is_qualified_by_the_owning_alias(
+        self,
+    ) -> None:
+        """Uncommitted, it convicts the same way it does once committed."""
+
+        def fingerprint(tracked: list[str]) -> dict[str, Any]:
+            return {
+                "git": True,
+                "head": "h1",
+                "refs": [],
+                "tracked_changed": tracked,
+                "tracked_patches": [[path, "x"] for path in tracked],
+                "index_changed": [],
+                "index_patches": [],
+                "untracked": [],
+                "index_flagged": [],
+                "worktree_ignore": [],
+                "ignore_config": [],
+            }
+
+        linked = repository_evidence.linked_worktree_key("app", "/elsewhere/feature")
+        comparison = repository_evidence_registered.compare_workspace_snapshots(
+            {"app": fingerprint([]), linked: fingerprint([])},
+            {"app": fingerprint([]), linked: fingerprint(["src/secret.py"])},
+        )
+        evidence = workspace_evidence_guard._workspace_write_guard_evidence(
+            workspace=SimpleNamespace(
+                repositories=[
+                    SimpleNamespace(alias="App", repository=SimpleNamespace(path="app"))
+                ]
+            ),
+            scope=SimpleNamespace(writes=("App",), reads=("App",)),
+            comparison=comparison,
+            exclude=(),
+            include_ignored=False,
+        )
+        paths = write_guards_protected._protected_path_changed_paths(evidence)
+        self.assertEqual(("App:src/secret.py",), paths)
+        rule = guards_models.GuardRule(
+            id="g-1",
+            reason=None,
+            created_at="t",
+            path=guards_rules.parse_protected_path_rule(
+                "App:src/secret.py", aliases=["App"]
+            ),
+        )
+        self.assertIn("g-1", dict(guards_rules.match_protected_paths([rule], paths)))
 
 
 class ProtectedPathReviewChangedPathsTests(unittest.TestCase):

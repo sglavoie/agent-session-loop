@@ -136,7 +136,12 @@ def _require_int(value: object, *, label: str, minimum: int, maximum: int) -> in
 def _require_number(value: object, *, label: str, minimum: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise AssuranceError(f"{label} must be a number")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        raise AssuranceError(
+            f"{label} must be a finite number; got {value!r}"
+        ) from None
     if not math.isfinite(number):
         raise AssuranceError(f"{label} must be a finite number; got {value!r}")
     if number < minimum:

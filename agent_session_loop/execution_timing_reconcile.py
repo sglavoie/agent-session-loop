@@ -61,6 +61,7 @@ def _reconcile_attempt(run: _RunEvidence, attempt: _AttemptEvidence) -> TurnAtte
                 },
             )
         )
+        duration = None
 
     for record in attempt.timing:
         if chosen is None or record is chosen:
@@ -253,7 +254,22 @@ def _run_timing(
                         )
                     )
         elif slot.finish_seen and interval is not None:
-            phase_seconds[slot.phase] += (interval[1] - interval[0]).total_seconds()
+            spanned_phase = (interval[1] - interval[0]).total_seconds()
+            if spanned_phase < -tolerance:
+                run.anomalies.append(
+                    Observation(
+                        ANOMALY_INVALID_NUMBER,
+                        {
+                            "phase": slot.phase,
+                            "source": slot.label,
+                            "field": "duration_seconds",
+                            "value": _round(spanned_phase),
+                            "reason": "negative-span",
+                        },
+                    )
+                )
+            else:
+                phase_seconds[slot.phase] += max(spanned_phase, 0.0)
         elif slot.finish_seen:
             # The phase ran — both of its records exist — but nothing states how
             # long it took: no usable duration and not enough timestamps to span
@@ -327,7 +343,19 @@ def _run_timing(
         spanned: float | None = None
         if started_at is not None and finished_at is not None:
             spanned = (finished_at - started_at).total_seconds()
-        if wall_seconds is None:
+        if wall_seconds is None and spanned is not None and spanned < -tolerance:
+            run.anomalies.append(
+                Observation(
+                    ANOMALY_INVALID_NUMBER,
+                    {
+                        "source": events.RUN_FINISHED_EVENT,
+                        "field": "duration_seconds",
+                        "value": _round(spanned),
+                        "reason": "negative-span",
+                    },
+                )
+            )
+        elif wall_seconds is None:
             wall_seconds = spanned
         elif spanned is not None and abs(spanned - wall_seconds) > tolerance:
             run.anomalies.append(

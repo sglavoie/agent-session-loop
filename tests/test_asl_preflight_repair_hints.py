@@ -124,6 +124,36 @@ class PreflightRepairHintTests(unittest.TestCase):
         self.assertEqual("env-git.dirty-worktree", hint.check_id)
         self.assertEqual("env-state", hint.fix_category)
 
+    def test_registered_and_linked_dirty_trees_resolve_to_dirty_override(
+        self,
+    ) -> None:
+        for message in (
+            "repository app is dirty; commit-mode runs require written "
+            "registered trees to be clean",
+            "needed repository app linked tree is dirty or unavailable",
+        ):
+            with self.subTest(message=message):
+                finding = preflight_models.PreflightFinding(
+                    severity="yellow",
+                    category="env-git",
+                    message=message,
+                    path="/tmp/repo",
+                    detail="commit-mode: per-session",
+                )
+                hint = preflight_hint_resolution.repair_hint_for_finding(finding)
+                self.assertEqual("env-git.dirty-worktree", hint.check_id)
+        read_only = preflight_models.PreflightFinding(
+            severity="green",
+            category="env-git",
+            message="repository app is dirty but read-only for the next session; "
+            "its changes are not committed",
+            path="/tmp/repo",
+        )
+        self.assertNotEqual(
+            "env-git.dirty-worktree",
+            preflight_hint_resolution.repair_hint_for_finding(read_only).check_id,
+        )
+
     def test_env_lock_stale_resolves_to_override(self) -> None:
         finding = preflight_models.PreflightFinding(
             severity="yellow",

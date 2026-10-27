@@ -12,6 +12,7 @@ from agent_session_loop import (
     repository_evidence,
     supervisor_audit,
     supervisor_audit_agent,
+    supervisor_audit_agent_parse,
     supervisor_audit_checks,
     supervisor_audit_vocabulary,
 )
@@ -342,6 +343,31 @@ class AgentAuditEngineTests(checks_support.AgentAuditEngineFixture):
         }
 
         self.assertEqual(set(RUBRIC_LANES), covered)
+
+
+class AgentAnswerFenceTests(unittest.TestCase):
+    """The answer is read from its own fenced block, whatever surrounds it."""
+
+    BODY = '{"schema_version": 2, "lanes": [], "findings": []}'
+
+    def test_the_json_block_is_found_around_other_fences_and_line_endings(
+        self,
+    ) -> None:
+        body = self.BODY
+        for label, text in (
+            ("json only", f"```json\n{body}\n```\n"),
+            ("bare", body),
+            ("untagged", f"```\n{body}\n```\n"),
+            (
+                "code block first",
+                f"Here:\n```python\nprint(1)\n```\nAnswer:\n```json\n{body}\n```\n",
+            ),
+            ("crlf", f"```json\r\n{body}\r\n```\r\n"),
+        ):
+            with self.subTest(label):
+                self.assertEqual(
+                    json.loads(body), supervisor_audit_agent_parse._agent_payload(text)
+                )
 
 
 if __name__ == "__main__":

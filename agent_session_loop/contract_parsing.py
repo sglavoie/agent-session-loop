@@ -79,12 +79,14 @@ def _parse_verify_payload(
             session_id=session_id,
             repository_registry=repository_registry,
         )
-        if check.name in seen_names:
+        # Compared case-folded: each name becomes a failure-artifact stem, and
+        # on a case-insensitive filesystem ``Lint`` and ``lint`` share a file.
+        if check.name.casefold() in seen_names:
             raise PlanError(
                 f"session {session_id.value} contract check name "
                 f"{check.name!r} is duplicated"
             )
-        seen_names.add(check.name)
+        seen_names.add(check.name.casefold())
         checks.append(check)
 
     checks_by_name = {check.name: check for check in checks}

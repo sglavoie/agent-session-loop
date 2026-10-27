@@ -248,6 +248,26 @@ class CompactStateTests(unittest.TestCase):
         # The caller's dict is not mutated in place.
         self.assertEqual("raw", details["checks"][0]["stdout"])
 
+    def test_every_check_list_is_stripped_in_details_and_turn_summaries(
+        self,
+    ) -> None:
+        lists = (
+            "checks",
+            "failures",
+            "diagnostic_failures",
+            "deferred_failures",
+            "skipped_checks",
+        )
+        details = {
+            key: [{"name": key, "stdout": "raw", "stderr": "raw"}] for key in lists
+        }
+        bounded = run_persistence._bounded_verification_details(details)
+        summary = run_persistence._compact_turn_summary({"verification": details})
+        for key in lists:
+            with self.subTest(key=key):
+                self.assertEqual([{"name": key}], bounded[key])
+                self.assertEqual([{"name": key}], summary["verification"][key])
+
     def test_a_non_mapping_passes_through_untouched(self) -> None:
         self.assertEqual("nope", run_persistence._bounded_verification_details("nope"))
         self.assertEqual("nope", run_persistence._strip_check_output("nope"))

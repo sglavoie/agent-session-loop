@@ -60,6 +60,17 @@ class ParserAndStateTests(ParserAndStateTestsBase):
         with self.assertRaisesRegex(plans_errors.PlanError, "duplicated"):
             contracts.parse_completion_contract(text, session_id="1")
 
+        # Names that differ only in case share a failure artifact on a
+        # case-insensitive filesystem, so they are duplicates too.
+        with self.assertRaisesRegex(plans_errors.PlanError, "'Same' is duplicated"):
+            contracts.parse_completion_contract(
+                text.replace(
+                    '{"name": "same", "type": "file_exists", "path": "b"}',
+                    '{"name": "Same", "type": "file_exists", "path": "b"}',
+                ),
+                session_id="1",
+            )
+
     def test_parse_completion_contract_reads_parallel_flag(self) -> None:
         for literal, expected in (("true", True), ("false", False), (None, False)):
             with self.subTest(parallel=literal):

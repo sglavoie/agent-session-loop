@@ -102,6 +102,35 @@ def _candidate_section(
     )
 
 
+def _fenced_json(text: str) -> str:
+    """Return the last fenced block meant as JSON, else ``text`` itself.
+
+    Fences are paired line by line, so a block in another language (or the
+    closer of one) is skipped rather than read as the start of the answer. A
+    ``json`` block wins over an untagged one.
+    """
+    tagged: list[str] = []
+    untagged: list[str] = []
+    tag: str | None = None
+    body: list[str] = []
+    for line in text.splitlines():
+        match = _FENCE_LINE_RE.fullmatch(line)
+        if tag is None:
+            if match is not None:
+                tag = match.group(1).lower()
+                body = []
+        elif match is not None and not match.group(1):
+            if tag == "json":
+                tagged.append("\n".join(body))
+            elif not tag:
+                untagged.append("\n".join(body))
+            tag = None
+        else:
+            body.append(line)
+    blocks = tagged or untagged
+    return blocks[-1] if blocks else text
+
+
 def _agent_payload(text: str) -> dict[str, Any]:
     if not isinstance(text, str) or not text.strip():
         raise AgentOutputError("malformed-output", "the agent returned no output")
@@ -111,8 +140,7 @@ def _agent_payload(text: str) -> dict[str, Any]:
             f"the agent answered with more than the {MAX_AGENT_OUTPUT_BYTES}-byte "
             "cap on audit output",
         )
-    fenced = _JSON_FENCE_RE.findall(text)
-    candidate = fenced[-1] if fenced else text
+    candidate = _fenced_json(text)
     try:
         payload = json.loads(candidate)
     except (ValueError, RecursionError) as error:
