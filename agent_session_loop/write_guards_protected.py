@@ -67,12 +67,23 @@ def _protected_path_changed_paths(
     if not isinstance(changed, Mapping):
         return None
     qualified: list[str] = []
-    for entry in changed.values():
+    for repository, entry in changed.items():
         if not isinstance(entry, Mapping):
             continue
         paths = entry.get("qualified_paths")
         if isinstance(paths, list):
             qualified.extend(str(path) for path in paths)
+        if not entry.get("head_changed"):
+            continue
+        # A committed change leaves the status lanes clean and moves only the
+        # tip, so the paths the tip move carried are read alongside them. A
+        # moved tip without that list is a commit nobody looked inside.
+        head_paths = entry.get("head_paths")
+        if not isinstance(head_paths, list):
+            return None
+        alias = entry.get("alias")
+        qualifier = alias if isinstance(alias, str) and alias else str(repository)
+        qualified.extend(f"{qualifier}:{path}" for path in head_paths)
     return tuple(dict.fromkeys(qualified))
 
 
@@ -115,14 +126,26 @@ def _protected_path_review_changed_paths(
         # clears every path rule at once -- a stronger clearance than an empty
         # change list, and the same one the finished-turn path grants.
         return ()
-    return tuple(
-        repository_evidence.qualified_repository_paths(
-            guards.LEGACY_PATH_QUALIFIER,
-            review_guard._review_guard_changed_paths(
-                fingerprint_before, fingerprint_after
-            ),
-        )
+    changes = review_guard._review_guard_changed_paths(
+        fingerprint_before, fingerprint_after
     )
+    qualified = repository_evidence.qualified_repository_paths(
+        guards.LEGACY_PATH_QUALIFIER, changes
+    )
+    if changes.get("head_changed"):
+        # The same committed-change blind spot the finished-turn path closes.
+        try:
+            head_paths = repository_evidence.head_transition_paths(
+                guard_context["cwd"],
+                str(changes.get("head_before") or ""),
+                str(changes.get("head_after") or ""),
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        qualified.extend(
+            f"{guards.LEGACY_PATH_QUALIFIER}:{path}" for path in head_paths
+        )
+    return tuple(dict.fromkeys(qualified))
 
 
 def _enforce_protected_path_guard(

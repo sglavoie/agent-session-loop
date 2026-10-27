@@ -122,6 +122,9 @@ from .repository_evidence_transitions import (
     format_repository_changes as format_repository_changes,
 )
 from .repository_evidence_transitions import (
+    head_transition_paths as head_transition_paths,
+)
+from .repository_evidence_transitions import (
     is_remote_tracking_ref as is_remote_tracking_ref,
 )
 from .repository_evidence_transitions import (
@@ -256,6 +259,7 @@ __all__ = [
     "discover_git_worktree_inventory",
     "discover_git_worktrees",
     "format_repository_changes",
+    "head_transition_paths",
     "is_remote_tracking_ref",
     "remote_ref_drift",
     "repository_evidence_unavailable",

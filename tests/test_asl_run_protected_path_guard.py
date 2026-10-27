@@ -294,6 +294,59 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
             "worker rewrote this\n", self.protected.read_text(encoding="utf-8")
         )
 
+    def test_a_committed_change_to_a_protected_path_rejects_the_turn(self) -> None:
+        """Committing the edit does not hide it from the guard.
+
+        A commit leaves the status lanes clean and moves only HEAD, so a guard
+        that read the status lanes alone cleared a frozen path the worker had
+        rewritten and committed.
+        """
+        run_id = "guard-protected-committed"
+        self._enqueue_guard(run_id, ".:notes.md")
+
+        def edit_and_commit(*_args: object, **_kwargs: object) -> Any:
+            self.protected.write_text("worker rewrote this\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "commit", "-qam", "worker"], cwd=self.repo_root, check=True
+            )
+            return self._mark_complete()
+
+        exit_code, payload = self._run_with(run_id, edit_and_commit)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            events.PAUSE_REASON_GUARD_PROTECTED_PATH_CHANGED,
+            payload["pause_reason"],
+        )
+        guard = payload["turns"][0]["protected_path_guard"]
+        self.assertFalse(guard["passed"])
+        self.assertEqual([".:notes.md"], sorted(guard["matched_paths"].values())[0])
+
+    def test_a_committed_change_without_head_paths_is_unavailable(self) -> None:
+        """A moved tip whose paths could not be listed clears nothing."""
+        run_id = "guard-protected-committed-blind"
+        self._enqueue_guard(run_id, ".:notes.md")
+
+        def edit_and_commit(*_args: object, **_kwargs: object) -> Any:
+            (self.repo_root / "README.md").write_text("worker\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "commit", "-qam", "worker"], cwd=self.repo_root, check=True
+            )
+            return self._mark_complete()
+
+        with mock.patch.object(
+            repository_evidence,
+            "head_transition_paths",
+            side_effect=repository_evidence.RepositoryEvidenceError("boom"),
+        ):
+            exit_code, payload = self._run_with(run_id, edit_and_commit)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            events.PAUSE_REASON_GUARD_PROTECTED_PATH_UNAVAILABLE,
+            payload["pause_reason"],
+        )
+
     def test_a_protected_path_restored_before_the_end_passes(self) -> None:
         run_id = "guard-protected-restored"
         self._enqueue_guard(run_id, ".:notes.md")
@@ -550,6 +603,65 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
         self.assertEqual(
             "review rewrote this\n", self.protected.read_text(encoding="utf-8")
         )
+
+    def test_legacy_review_exception_convicts_a_committed_protected_path(
+        self,
+    ) -> None:
+        """The crash-path recapture names what a review committed, too."""
+        self._use_legacy_review_fixture()
+        run_id = "guard-protected-legacy-review-committed"
+        self._enqueue_guard(run_id, ".:notes.md")
+
+        def edit_commit_then_raise(*_args: object, **_kwargs: object) -> Any:
+            self.protected.write_text("review rewrote this\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "commit", "-qam", "review"], cwd=self.repo_root, check=True
+            )
+            raise RuntimeError("synthetic review crash")
+
+        with (
+            mock.patch.object(
+                harnesses, "run_harness", side_effect=edit_commit_then_raise
+            ),
+            self.assertRaisesRegex(RuntimeError, "synthetic review crash"),
+        ):
+            self._invoke(run_id)
+
+        rejections = self._turn_rejections("protected-path-guard")
+        self.assertEqual(1, len(rejections))
+        self.assertEqual(
+            events.PAUSE_REASON_GUARD_PROTECTED_PATH_CHANGED,
+            rejections[0]["reason"],
+        )
+        self.assertEqual(
+            [".:notes.md"],
+            sorted(rejections[0]["detail"]["matched_paths"].values())[0],
+        )
+
+    def test_a_workspace_commit_to_a_protected_path_rejects_the_turn(self) -> None:
+        """A registered repository's commit is named under its alias."""
+        self._use_workspace_fixture()
+        run_id = "guard-protected-workspace-committed"
+        self._enqueue_guard(run_id, "SVC:notes.md")
+
+        def edit_and_commit(*_args: object, **_kwargs: object) -> Any:
+            self.protected.write_text("worker rewrote this\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "commit", "-qam", "worker"],
+                cwd=self.repositories["SVC"],
+                check=True,
+            )
+            return self._mark_complete()
+
+        exit_code, payload = self._run_with(run_id, edit_and_commit)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            events.PAUSE_REASON_GUARD_PROTECTED_PATH_CHANGED,
+            payload["pause_reason"],
+        )
+        guard = payload["turns"][0]["protected_path_guard"]
+        self.assertEqual(["SVC:notes.md"], sorted(guard["matched_paths"].values())[0])
 
 
 if __name__ == "__main__":

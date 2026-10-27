@@ -247,6 +247,58 @@ def classify_head_transition(
         evidence_git._GIT_RUNNER.reset(token)
 
 
+def head_transition_paths(
+    cwd: str | Path,
+    before_head: str,
+    after_head: str,
+) -> list[str]:
+    """Name every path whose committed content differs between two tips.
+
+    A status comparison only sees changes relative to the HEAD current at each
+    snapshot, so a change the worker committed shows up as a moved tip and
+    nothing else. These are the paths that tip move carried, read from the
+    trees themselves so a rewind or rewrite is named as fully as a commit.
+    An empty tip (an unborn branch on one side) names its whole tree. Paths
+    are repository-root relative, whatever directory ``cwd`` is.
+    """
+    root = Path(cwd)
+    if before_head == after_head:
+        return []
+    if before_head and after_head:
+        argv = [
+            "diff-tree",
+            "-r",
+            "-z",
+            "--no-renames",
+            "--name-only",
+            before_head,
+            after_head,
+        ]
+    else:
+        argv = [
+            "ls-tree",
+            "-r",
+            "-z",
+            "--full-tree",
+            "--name-only",
+            before_head or after_head,
+        ]
+    try:
+        result = evidence_git._run_git_bytes(root, argv)
+    except Exception as error:
+        raise evidence_git.RepositoryEvidenceError(
+            f"could not list the paths a HEAD move changed: {error}"
+        ) from error
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise evidence_git.RepositoryEvidenceError(
+            "could not list the paths a HEAD move changed: "
+            f"{detail or 'git ' + argv[0] + ' failed'}"
+        )
+    names = result.stdout.decode("utf-8", evidence_git.GUARD_TEXT_ERRORS)
+    return sorted({name for name in names.split("\0") if name})
+
+
 def qualified_repository_paths(
     repository: str,
     changed_paths: Mapping[str, Any],

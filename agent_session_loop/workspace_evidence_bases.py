@@ -179,6 +179,17 @@ def _annotate_history_transitions(
                     "error": str(error),
                 }
             }
+            continue
+        # The status lanes compare each snapshot against its own HEAD, so a
+        # committed change is visible only here. The write guard does not need
+        # the names, but the protected-path guard does, and reads a missing
+        # list as unavailable rather than as "the commit touched nothing".
+        try:
+            raw_changes["head_paths"] = repository_evidence.head_transition_paths(
+                root, before_head, after_head
+            )
+        except repository_evidence.RepositoryEvidenceError as error:
+            raw_changes["head_paths_unavailable"] = str(error)
 
 
 def _workspace_review_bases(
