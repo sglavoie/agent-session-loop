@@ -206,6 +206,11 @@ def _read_shared(journal_path: Path) -> bytes:
         _fail(ERROR_JOURNAL_READ, str(error), path=journal_path)
     try:
         fcntl.flock(fd, fcntl.LOCK_SH)
+        # A failed compaction can leave the inode empty or partially rewritten.
+        # Its durable replacement is authoritative until recovery finishes.
+        pending = _read_compaction(journal_path)
+        if pending is not None:
+            return pending
         return _read_locked(fd)
     except OSError as error:
         _fail(ERROR_JOURNAL_READ, str(error), path=journal_path)
@@ -233,6 +238,7 @@ def _locked_journal(journal_path: Path) -> Iterator[tuple[int, _Replay]]:
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         os.fchmod(fd, 0o600)
+        _recover_compaction(fd, journal_path=journal_path)
         yield fd, _replay(_read_locked(fd))
     except OSError as error:
         _fail(ERROR_JOURNAL_WRITE, str(error), path=journal_path)
@@ -268,6 +274,9 @@ def _append_locked(
     projected = operations.persist_operation(record)
     encoded = _encode(replay.last_seq + 1, projected) + b"\n"
     existing_size = os.fstat(fd).st_size
+    if existing_size and not _ends_with_newline(fd, existing_size):
+        # Count the torn-tail separator before deciding whether the append fits.
+        encoded = b"\n" + encoded
     if existing_size + len(encoded) > OPERATIONS_JOURNAL_MAX_BYTES:
         _compact_locked(fd, replay, journal_path=journal_path)
         existing_size = os.fstat(fd).st_size
@@ -279,10 +288,6 @@ def _append_locked(
                 path=journal_path,
                 size_bytes=existing_size,
             )
-    if existing_size and not _ends_with_newline(fd, existing_size):
-        # An unterminated tail from a crashed writer: close its line so this
-        # row is its own rather than appending onto a half-written one.
-        encoded = b"\n" + encoded
     _write_at(fd, existing_size, encoded, journal_path=journal_path)
     replay.last_seq += 1
     replay.size_bytes = existing_size + len(encoded)
@@ -324,10 +329,43 @@ def _ends_with_newline(fd: int, size: int) -> bool:
     return os.read(fd, 1) == b"\n"
 
 
+def _compaction_path(journal_path: Path) -> Path:
+    return journal_path.with_name(journal_path.name + ".compact")
+
+
+def _read_compaction(journal_path: Path) -> bytes | None:
+    try:
+        return _compaction_path(journal_path).read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _recover_compaction(fd: int, *, journal_path: Path) -> None:
+    """Finish a published compaction under the journal's exclusive lock.
+
+    Keep the replacement until the rewritten inode is durable. Readers use
+    that replacement after an interruption; writers finish the rewrite before
+    appending. The inode itself never changes, so waiting flock holders still
+    serialize with the recovering writer.
+    """
+    pending = _read_compaction(journal_path)
+    # A writer can die after publishing the replacement but before syncing its
+    # directory entry. Make it durable before touching the journal. When absent,
+    # this also finishes a prior writer's interrupted unlink barrier, so an old
+    # replacement cannot reappear after a later append becomes durable.
+    durability.sync_directory(journal_path.parent)
+    if pending is not None:
+        os.ftruncate(fd, 0)
+        _write_at(fd, 0, pending, journal_path=journal_path)
+        _compaction_path(journal_path).unlink()
+        durability.sync_directory(journal_path.parent)
+
+
 def _compact_locked(fd: int, replay: _Replay, *, journal_path: Path) -> None:
     """Rewrite the journal as one row per surviving operation, in place.
 
-    In place, on the same fd, under the lock already held. Every open operation
+    In place, on the same fd, under the lock already held. A durable recovery
+    file holds the replacement before any bytes are removed. Every open operation
     survives; the settled ones survive most-recently-settled first, up to
     :data:`OPERATIONS_RETAINED_SETTLED`. Sequence numbers are renumbered from
     one because the file after this is the whole history there is.
@@ -351,10 +389,16 @@ def _compact_locked(fd: int, replay: _Replay, *, journal_path: Path) -> None:
         _encode(index, row) + b"\n" for index, row in enumerate(survivors, start=1)
     )
     try:
-        os.ftruncate(fd, 0)
+        durability.replace_bytes(
+            _compaction_path(journal_path),
+            encoded,
+            sync_file=True,
+            sync_parent=True,
+            permissions=0o600,
+        )
+        _recover_compaction(fd, journal_path=journal_path)
     except OSError as error:
         _fail(ERROR_JOURNAL_WRITE, str(error), path=journal_path)
-    _write_at(fd, 0, encoded, journal_path=journal_path)
     replay.records = {str(row["operation_id"]): row for row in survivors}
     replay.last_seq = len(survivors)
     replay.size_bytes = len(encoded)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from typing import Any
 from unittest import mock
@@ -301,6 +302,107 @@ class DurableJournalTests(JournalFixture, unittest.TestCase):
         # The lock is held on this fd. Replacing the file would hand two
         # processes two different locks over the same journal.
         self.assertEqual(inode, self.journal_path.stat().st_ino)
+
+    def test_failed_compaction_preserves_receipts_and_admission(self) -> None:
+        self.admit("op-1")
+        before = self.rows()
+        inode = self.journal_path.stat().st_ino
+        real_write = os.write
+        real_sync = workbench_operation_journal.durability.fullsync
+        for failure in ("short-write", "sync"):
+            with self.subTest(failure=failure):
+                with workbench_operation_journal._locked_journal(self.journal_path) as (
+                    fd,
+                    replay,
+                ):
+
+                    def write(target: int, data: bytes, fault: str = failure) -> int:
+                        if target == fd and fault == "short-write":
+                            return real_write(target, data[:10])
+                        return real_write(target, data)
+
+                    def sync(target: int, fault: str = failure) -> None:
+                        if target == fd and fault == "sync":
+                            raise OSError("injected journal sync failure")
+                        real_sync(target)
+
+                    with (
+                        mock.patch.object(os, "write", side_effect=write),
+                        mock.patch.object(
+                            workbench_operation_journal.durability,
+                            "fullsync",
+                            side_effect=sync,
+                        ),
+                        self.assertRaises(operations.OperationError),
+                    ):
+                        workbench_operation_journal._compact_locked(
+                            fd, replay, journal_path=self.journal_path
+                        )
+                self.assertEqual(before, self.rows())
+                self.assertTrue(self.admit("op-1").replayed)
+                self.assertEqual(
+                    operations.REASON_OPERATION_OUTSTANDING,
+                    self.admit("op-2").reason,
+                )
+                self.assertEqual(inode, self.journal_path.stat().st_ino)
+
+    def test_torn_tail_separator_counts_against_the_size_limit(self) -> None:
+        self.admit("op-1")
+        with self.journal_path.open("ab") as handle:
+            handle.write(b"{")
+        with workbench_operation_journal._locked_journal(self.journal_path) as (
+            fd,
+            replay,
+        ):
+            row = replay.records["op-1"]
+            encoded_size = (
+                len(workbench_operation_journal._encode(replay.last_seq + 1, row)) + 1
+            )
+            bound = self.journal_path.stat().st_size + encoded_size
+            with mock.patch.object(
+                workbench_operation_journal, "OPERATIONS_JOURNAL_MAX_BYTES", bound
+            ):
+                workbench_operation_journal._append_locked(
+                    fd, replay, row, journal_path=self.journal_path
+                )
+        self.assertLessEqual(self.journal_path.stat().st_size, bound)
+
+    def test_recovery_syncs_its_replacement_before_truncating(self) -> None:
+        self.admit("op-1")
+        before = self.journal_path.read_bytes()
+        with (
+            workbench_operation_journal._locked_journal(self.journal_path) as (
+                fd,
+                replay,
+            ),
+            mock.patch.object(
+                workbench_operation_journal.durability,
+                "sync_directory",
+                side_effect=OSError("injected directory sync failure"),
+            ),
+            self.assertRaises(operations.OperationError),
+        ):
+            workbench_operation_journal._compact_locked(
+                fd, replay, journal_path=self.journal_path
+            )
+        recovery = self.journal_path.with_name("operations.jsonl.compact")
+        self.assertTrue(recovery.exists())
+        self.assertEqual(before, self.journal_path.read_bytes())
+        # The replacement was renamed but its publication was not flushed.
+        # A second failed barrier must leave both recovery sources untouched.
+        with (
+            mock.patch.object(
+                workbench_operation_journal.durability,
+                "sync_directory",
+                side_effect=OSError("directory still cannot be synced"),
+            ),
+            self.assertRaises(operations.OperationError),
+        ):
+            self.admit("op-1")
+        self.assertTrue(recovery.exists())
+        self.assertEqual(before, self.journal_path.read_bytes())
+        self.assertTrue(self.admit("op-1").replayed)
+        self.assertFalse(recovery.exists())
 
     def test_export_drops_the_local_identifiers(self) -> None:
         self.admit("op-1", method=operations.METHOD_ABORT)

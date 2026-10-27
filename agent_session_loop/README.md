@@ -15,6 +15,14 @@ mutation admission. The portable `asl_workbench.catalog_*` modules separate
 vocabularies, safe labels, records, and paginated views. These public modules
 use explicit imports to preserve existing callers.
 
+Operation-journal compaction publishes an owner-only `operations.jsonl.compact`
+recovery file before truncating `operations.jsonl`. Readers use that replacement
+after an interrupted rewrite; the next writer restores and syncs the journal,
+then durably removes the recovery file before appending. The journal keeps its
+inode and `flock`, so recovery preserves both outstanding operations and
+cross-process admission ordering. Torn-tail separators count toward the journal's
+byte limit before an append is admitted.
+
 The public imports for commit messages, conversation continuity, AgentMux
 contracts, and overseer decisions, context, and CLI commands remain in their
 original modules. Their implementations live in focused sibling modules:
