@@ -266,10 +266,10 @@ def parse_finding(payload: object, *, label: str = "finding") -> Finding:
 # Normalized finding text
 # ---------------------------------------------------------------------------
 
-#: The trailing line, or line and column, a localization pointer may carry. Two
-#: sightings of one defect almost never name the same line, so the file is the
-#: durable half of the pointer and the position is not.
-_LOCALIZATION_POSITION_RE = re.compile(r":[0-9]+(?::[0-9]+)?$")
+#: The trailing line or line range, optionally with a column, a localization
+#: pointer may carry. Two sightings of one defect almost never name the same
+#: line, so the file is the durable half of the pointer and the position is not.
+_LOCALIZATION_POSITION_RE = re.compile(r":[0-9]+(?:-[0-9]+)?(?::[0-9]+)?$")
 
 #: Split points between words. Punctuation, backticks, and path separators all
 #: vanish, so ``runner.py`` and ``runner`` share a token, and the dots, dashes,

@@ -144,6 +144,18 @@ class NormalizedFindingTextTests(unittest.TestCase):
         self.assertEqual(
             "agent_session_loop/runner.py",
             assurance_models_findings.normalize_localization(
+                "agent_session_loop/runner.py:120-140"
+            ),
+        )
+        self.assertEqual(
+            "agent_session_loop/runner.py",
+            assurance_models_findings.normalize_localization(
+                "agent_session_loop/runner.py:120-140:7"
+            ),
+        )
+        self.assertEqual(
+            "agent_session_loop/runner.py",
+            assurance_models_findings.normalize_localization(
                 "agent_session_loop/runner.py"
             ),
         )
