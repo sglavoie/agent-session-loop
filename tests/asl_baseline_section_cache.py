@@ -293,6 +293,34 @@ class BaselineCacheTests(unittest.TestCase):
             cache = baseline_cache.BaselineCache.load(path)
             self.assertEqual(0, len(cache))
 
+    def test_cache_load_skips_untrustworthy_files_and_entries(self) -> None:
+        version = baseline_cache.BASELINE_CACHE_VERSION
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / baseline_cache.BASELINE_RESULTS_FILENAME
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": version,
+                        "entries": {
+                            "null": {"key": "null", "result": None},
+                            "text": {"key": "text", "result": "oops"},
+                            "ok": {"key": "ok", "result": {"passed": True}},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cache = baseline_cache.BaselineCache.load(path)
+            self.assertEqual(1, len(cache))
+            self.assertIsNotNone(cache.get("ok"))
+
+            for raw in (
+                b'{"version": %d, "entries": {}}\xff' % version,
+                b"[" * 100000,
+            ):
+                path.write_bytes(raw)
+                self.assertEqual(0, len(baseline_cache.BaselineCache.load(path)))
+
     def test_baseline_results_excluded_from_content_and_readiness_hashes(
         self,
     ) -> None:

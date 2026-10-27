@@ -270,14 +270,17 @@ class BaselineCache:
             return cache
         try:
             data = json.loads(cache.path.read_text(encoding="utf-8"))
-        except OSError, json.JSONDecodeError:
+        except OSError, ValueError, RecursionError:
+            # ValueError covers a malformed document and a non-UTF-8 byte alike;
+            # an untrustworthy file is treated as an empty cache.
             return cache
         if not isinstance(data, dict) or data.get("version") != BASELINE_CACHE_VERSION:
             return cache
         entries = data.get("entries", {})
         if isinstance(entries, dict):
             for key, raw in entries.items():
-                if isinstance(raw, dict):
+                # An entry whose result is not a mapping cannot be trusted.
+                if isinstance(raw, dict) and isinstance(raw.get("result", {}), dict):
                     cache._entries[str(key)] = BaselineRecord.from_dict(raw)
         return cache
 
