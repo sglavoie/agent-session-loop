@@ -112,6 +112,28 @@ class WorkbenchArchiveStorageTests(unittest.TestCase):
             self.assertEqual(good.archive_id, listing.entries[0].archive_id)
             self.assertTrue(listing.warnings)
 
+    def test_non_utf8_metadata_is_a_warning_or_a_refusal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_root = tmp_path / "state"
+            good = self._metadata(tmp_path, "20260703T120000Z-goodgoodgood")
+            workbench_archive.save_archive_metadata(good, state_root)
+            bad_id = "20260703T130000Z-notutf8notu"
+            bad_dir = workbench_archive.archive_entry_dir(bad_id, state_root)
+            bad_dir.mkdir(parents=True)
+            (bad_dir / workbench_archive.ARCHIVE_METADATA_FILE_NAME).write_bytes(
+                b'{"archive_id": "\xff"}'
+            )
+
+            listing = workbench_archive.list_archive_entries(state_root)
+
+            self.assertEqual(
+                [good.archive_id], [entry.archive_id for entry in listing.entries]
+            )
+            self.assertTrue(any(bad_id in w for w in listing.warnings))
+            with self.assertRaises(workbench_registry_models.WorkbenchError):
+                workbench_archive.load_archive_metadata(bad_id, state_root)
+
     def test_list_missing_root_is_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_root = Path(tmp) / "state"

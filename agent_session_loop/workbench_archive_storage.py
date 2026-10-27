@@ -355,7 +355,9 @@ def load_archive_metadata(
         return None
     try:
         raw_text = meta_path.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, ValueError) as error:
+        # ValueError: bytes that are not UTF-8 are as unreadable as a missing
+        # permission, and must refuse the same way rather than escape.
         raise workbench_registry_models.WorkbenchError(
             f"cannot read archive metadata {meta_path}: {error}"
         ) from error
@@ -417,7 +419,8 @@ def list_archive_entries(
             continue
         try:
             raw = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+        except (OSError, ValueError) as error:
+            # ValueError covers both malformed JSON and non-UTF-8 bytes.
             warnings.append(f"{context}: unreadable metadata: {error}; skipping")
             continue
         entry_warnings: list[str] = []
