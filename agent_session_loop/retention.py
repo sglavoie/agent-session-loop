@@ -149,7 +149,7 @@ class GCReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "ok": True,
+            "ok": self.failure_count == 0,
             "command": "gc",
             "scope": self.scope,
             "applied": self.applied,

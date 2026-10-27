@@ -6,6 +6,7 @@ import io
 import json
 import socket
 import unittest
+import unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
 
 from agent_session_loop import (
@@ -201,6 +202,21 @@ class DryRunPurityTests(RetentionTestBase):
             (self.plan_state / state.RUNS_DIR_NAME / RUN_OLD).is_dir(),
             "a locked plan keeps every run under --apply",
         )
+
+    def test_a_failed_removal_makes_the_report_not_ok(self) -> None:
+        sweepable = self._make_plan("sweepable")
+        self._write_run(RUN_OLD, finished_at=_stamp(45), plan_dir=sweepable)
+        self._write_run(RUN_NEW, finished_at=_stamp(1), plan_dir=sweepable)
+
+        with unittest.mock.patch.object(
+            retention, "remove_run_directory", return_value="permission denied"
+        ):
+            report = retention.run_gc(state_dir=self.state_root, apply=True, now=NOW)
+
+        payload = report.to_dict()
+        self.assertEqual(payload["failed_removal_count"], 1)
+        # `asl gc` exits 1 on this report, so its JSON must not say ok.
+        self.assertFalse(payload["ok"])
 
 
 class ArchiveReportTests(RetentionTestBase):
