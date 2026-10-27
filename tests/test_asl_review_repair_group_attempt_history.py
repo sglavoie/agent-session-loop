@@ -144,6 +144,22 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
             review_continuation.repair_group_attempts(self.event_path, snapshot),
         )
 
+    def test_repair_group_attempts_recovers_a_group_named_with_backticks(
+        self,
+    ) -> None:
+        group = "Handle `None` in load_config"
+        snapshot = self._write_repair_children(
+            [
+                _structured_review_finding(finding_id="F1", repair_group="runner"),
+                _structured_review_finding(finding_id="F2", repair_group=group),
+            ]
+        )
+
+        self.assertEqual(
+            {group: 1, "runner": 1},
+            review_continuation.repair_group_attempts(self.event_path, snapshot),
+        )
+
     def test_repair_group_attempts_deduplicates_events_and_children(
         self,
     ) -> None:

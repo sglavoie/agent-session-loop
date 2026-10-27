@@ -37,7 +37,9 @@ GENERATED_REVIEW_REPAIR_SESSION_VERSION = 1
 REPOSITORY_AWARE_GENERATED_REVIEW_REPAIR_SESSION_VERSION = 2
 
 
-_REPAIR_GROUP_LINE_RE = re.compile(r"(?m)^- Repair group: `([^`]+)`\.$")
+# Greedy up to the line's closing "`.": a group name is reviewer text and may
+# itself hold a backtick, which the renderer writes verbatim.
+_REPAIR_GROUP_LINE_RE = re.compile(r"(?m)^- Repair group: `(.+)`\.$")
 
 
 #: Maximum number of repair groups (child sessions) produced per cycle.
