@@ -217,6 +217,30 @@ A polish and hardening round after the public release.
   budgeted once; `asl metrics` leaves its own trace record out of
   `records_read`; the paused resolver route is given as
   `asl run --resume --reply` throughout.
+- Continuation: each run gets its own handoff-correction budget instead of
+  inheriting attempts earlier runs spent; a repair group refused as exhausted
+  no longer counts its never-created child as one more attempt.
+- Mailbox: `asl ask --wait` ends the wait it opened when it is interrupted,
+  fails mid-wait, or is sent SIGTERM or SIGHUP by a harness timeout, so a reply
+  is no longer accepted for a question nobody is listening to.
+- Assurance and verification: a malformed or non-UTF-8 baseline cache reads as
+  empty instead of crashing `preflight`, `baseline` and `prepare`; a stray
+  byte in `events.jsonl` spoils only its own line for the verification and
+  terminal readers; catch-up dates an abandoned run by its start, not by when
+  its death was noticed, so a run that predates the newest resolution is
+  skipped as `superseded-generation`.
+- State: a fresh run checks the default review-fix cycle cap against
+  `--max-review-fix-cycles-ceiling`, as `--resume` already did; an over-nested
+  result or state file no longer crashes `gc`, `compact-state` or `status`; a
+  failed write during `migrate-state --apply` is reported, with `relocated`,
+  instead of a traceback.
+- Plan preparation: a cached validator correction whose replacement extends its
+  original text is not re-applied on every `prepare --resume`; a workspace
+  rebind keeps baseline evidence current for a plan inside a registered
+  repository and no longer prints `/private/private/...` paths; status sync,
+  manifest row edits and the readiness hash skip fenced example tables (a plan
+  marked loop-ready with such a table reads stale once and needs
+  `asl preflight --mark-loop-ready` again).
 
 ### Changed
 
