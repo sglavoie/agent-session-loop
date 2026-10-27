@@ -269,6 +269,32 @@ class ReviewFingerprintDiffEvidenceTests(ReviewFingerprintBase):
             changed["untracked_added"],
         )
 
+    def test_unusual_tracked_names_are_recorded_unquoted(self) -> None:
+        names = ["café.md", 'say "hi".txt', "tab\there.txt", "new\nline.txt"]
+        for name in names:
+            self._write(name, "one\n")
+        self._commit_all("add unusual names")
+        before = self._fingerprint()
+        for name in names:
+            self._write(name, "two\n")
+        self._stage("café.md")
+        after = self._fingerprint()
+
+        # Without `-z` git C-quotes each of these, so `café.md` would be
+        # recorded as `"caf\303\251.md"`, which names no file on disk.
+        self.assertIsNone(review_guard._review_guard_unavailable_detail(after))
+        self.assertEqual(sorted(names), after["tracked_changed"])
+        self.assertEqual(
+            sorted(names), sorted(entry[0] for entry in after["tracked_patches"])
+        )
+        self.assertEqual(["café.md"], after["index_changed"])
+        for name in names:
+            self.assertTrue((self.repo_root / name).is_file(), name)
+        self.assertEqual(
+            sorted(names),
+            review_guard._review_guard_changed_paths(before, after)["tracked"],
+        )
+
     def test_a_named_path_git_renders_no_patch_for_fails_closed(self) -> None:
         self._write("README.md", "mutated\n")
         real_run_git_bytes = review_guard_git._run_git_bytes
@@ -277,9 +303,9 @@ class ReviewFingerprintDiffEvidenceTests(ReviewFingerprintBase):
             result = real_run_git_bytes(cwd, args)
             if tuple(args[:3]) == ("diff", "HEAD", "--patch-with-raw"):
                 # Keep the raw entry that names the path; drop its patch.
-                raw, _, _patch = result.stdout.partition(b"\n\n")
+                raw, _, _patch = result.stdout.partition(b"\0\0")
                 return subprocess.CompletedProcess(
-                    args=result.args, returncode=0, stdout=raw + b"\n\n", stderr=b""
+                    args=result.args, returncode=0, stdout=raw + b"\0\0", stderr=b""
                 )
             return result
 
@@ -303,7 +329,7 @@ class ReviewFingerprintDiffEvidenceTests(ReviewFingerprintBase):
                 return subprocess.CompletedProcess(
                     args=result.args,
                     returncode=0,
-                    stdout=b":100644 M\tREADME.md\n\n" + result.stdout,
+                    stdout=b":100644 M\0README.md\0" + result.stdout,
                     stderr=b"",
                 )
             return result

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import (
     repository_evidence_git as evidence_git,
@@ -18,46 +18,63 @@ from . import (
 )
 
 
-def _split_raw_from_patch(text: str, *, argv: Sequence[str]) -> tuple[str, str]:
-    """Split ``--patch-with-raw`` output into ``--name-status`` text and the patch.
+class _RawDiffEntry(NamedTuple):
+    """One ``--raw`` record: the destination mode, the status, and the path."""
+
+    dst_mode: str
+    status: str
+    path: str
+
+
+def _split_raw_from_patch(
+    text: str, *, argv: Sequence[str]
+) -> tuple[list[_RawDiffEntry], str]:
+    """Split ``--patch-with-raw -z`` output into its raw entries and the patch.
 
     One probe renders both, so the name list and the patches are read from the
     same diff queue instead of two runs that a concurrent write could set
-    apart. Git prints every raw entry, ``:<mode> <mode> <sha> <sha> <status>``
-    then a tab and the path, followed by one blank line and the patch exactly
-    as plain ``git diff`` renders it, so ``diff_sha256`` stays the hash of the
-    same bytes. Dropping the four fields before the status leaves the
-    ``<status>\t<path>`` line ``--name-status`` prints. A raw entry that does
-    not have that shape fails the capture closed.
+    apart. Under ``-z`` git prints every raw entry as
+    ``:<mode> <mode> <sha> <sha> <status>``, a NUL, the path verbatim and
+    another NUL; one more NUL ends the list, and the patch follows exactly as
+    plain ``git diff`` renders it, so ``diff_sha256`` stays the hash of the
+    same bytes. Without ``-z`` git C-quotes any path holding a quote, a tab, a
+    newline, or (under the default ``core.quotePath``) a non-ASCII byte, so
+    ``café.md`` would be recorded as ``"caf\\303\\251.md"`` and name no file.
+    A raw entry that does not have that shape fails the capture closed.
     """
-    names: list[str] = []
+    entries: list[_RawDiffEntry] = []
     cursor = 0
     while text.startswith(":", cursor):
-        end = text.find("\n", cursor)
-        if end < 0:
+        meta_end = text.find("\0", cursor)
+        path_end = text.find("\0", meta_end + 1) if meta_end >= 0 else -1
+        if path_end < 0:
             raise evidence_git._ReviewGuardUnavailable("diff-raw-malformed", argv)
-        fields = text[cursor + 1 : end].split(" ", 4)
-        if len(fields) != 5 or "\t" not in fields[4]:
+        fields = text[cursor + 1 : meta_end].split(" ")
+        path = text[meta_end + 1 : path_end]
+        if len(fields) != 5 or not fields[4] or not path:
             raise evidence_git._ReviewGuardUnavailable("diff-raw-malformed", argv)
-        names.append(fields[4] + "\n")
-        cursor = end + 1
-    if names and text.startswith("\n", cursor):
+        entries.append(_RawDiffEntry(fields[1], fields[4], path))
+        cursor = path_end + 1
+    if entries and text.startswith("\0", cursor):
         cursor += 1
-    return "".join(names), text[cursor:]
+    return entries, text[cursor:]
 
 
 def _pair_diff_names_with_patches(
-    names_text: str, diff_text: str, *, argv: Sequence[str], reason: str
+    entries: Sequence[_RawDiffEntry],
+    diff_text: str,
+    *,
+    argv: Sequence[str],
+    reason: str,
 ) -> tuple[list[str], list[list[str]]]:
-    """Attribute each patch in ``diff_text`` to its path in ``names_text``.
+    """Attribute each patch in ``diff_text`` to its entry in ``entries``.
 
-    ``names_text`` is ``--name-status`` output (see
-    :func:`_split_raw_from_patch`), which walks the same diff queue in the same
-    order as the full patch. Its status is what says how many patch
-    sections the path claims, so consuming that many per entry attributes each
-    patch without re-parsing ``diff --git`` headers, whose two paths cannot be
-    told apart when one of them contains a space. ``--no-renames`` is what keeps
-    every entry to a single ``<status>\\t<path>`` line.
+    ``entries`` come from :func:`_split_raw_from_patch`, which walks the same
+    diff queue in the same order as the full patch. Each status is what says
+    how many patch sections the path claims, so consuming that many per entry
+    attributes each patch without re-parsing ``diff --git`` headers, whose two
+    paths cannot be told apart when one of them contains a space.
+    ``--no-renames`` is what keeps every entry to a single path.
 
     A typechange is the one status claiming two sections
     (:data:`_TYPE_CHANGED_PATCH_SECTIONS`); both are hashed together, so the
@@ -70,16 +87,11 @@ def _pair_diff_names_with_patches(
     """
     changed: list[str] = []
     section_counts: list[int] = []
-    for line in names_text.splitlines():
-        if not line:
-            continue
-        status, tab, rel = line.partition("\t")
-        if not tab or not status or not rel:
-            raise evidence_git._ReviewGuardUnavailable(reason, argv)
-        changed.append(rel)
+    for entry in entries:
+        changed.append(entry.path)
         section_counts.append(
             evidence_git._TYPE_CHANGED_PATCH_SECTIONS
-            if status == evidence_git._TYPE_CHANGED_STATUS
+            if entry.status == evidence_git._TYPE_CHANGED_STATUS
             else 1
         )
     patches = evidence_git._DIFF_FILE_HEADER_RE.split(diff_text)[1:]
@@ -234,11 +246,12 @@ def _capture_review_repo_fingerprint(
             "diff",
             diff_base,
             "--patch-with-raw",
+            "-z",
             *evidence_git._GUARD_DIFF_FLAGS,
             "--",
             *pathspecs,
         ]
-        names_text, diff_text = _split_raw_from_patch(
+        names, diff_text = _split_raw_from_patch(
             evidence_git._review_guard_git_output(cwd_path, diff_argv),
             argv=diff_argv,
         )
@@ -247,11 +260,12 @@ def _capture_review_repo_fingerprint(
             "--cached",
             diff_base,
             "--patch-with-raw",
+            "-z",
             *evidence_git._GUARD_DIFF_FLAGS,
             "--",
             *pathspecs,
         ]
-        index_names_text, index_diff_text = _split_raw_from_patch(
+        index_names, index_diff_text = _split_raw_from_patch(
             evidence_git._review_guard_git_output(cwd_path, index_diff_argv),
             argv=index_diff_argv,
         )
@@ -328,13 +342,13 @@ def _capture_review_repo_fingerprint(
         )
 
         tracked_changed, tracked_patches = _pair_diff_names_with_patches(
-            names_text,
+            names,
             diff_text,
             argv=diff_argv,
             reason="tracked-patch-missing",
         )
         index_changed, index_patches = _pair_diff_names_with_patches(
-            index_names_text,
+            index_names,
             index_diff_text,
             argv=index_diff_argv,
             reason="index-patch-missing",
