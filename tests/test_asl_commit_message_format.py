@@ -301,6 +301,28 @@ class FormatCommitMessageTests(unittest.TestCase):
         for line in wrapped.split("\n")[1:]:
             self.assertLessEqual(len(line), 40, line)
 
+    def test_extract_false_keeps_everything_above_a_later_title_shaped_line(
+        self,
+    ) -> None:
+        text = (
+            "Bump the pinned dependencies\n"
+            "\n"
+            "The lockfile drifted.\n"
+            "\n"
+            "note: pins lxml below 6 until upstream ships a wheel.\n"
+            "\n"
+            "Signed-off-by: Someone <a@b.c>\n"
+        )
+
+        self.assertEqual(
+            commit_message.format_commit_message(text, extract=False),
+            "Bump the pinned dependencies\n"
+            "\n"
+            "The lockfile drifted.\n"
+            "\n"
+            "note: pins lxml below 6 until upstream ships a wheel.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

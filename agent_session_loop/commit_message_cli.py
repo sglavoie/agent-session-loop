@@ -160,7 +160,9 @@ def _run_message_file(args: argparse.Namespace, repo_root: Path) -> int:
             "no staged changes to commit",
             reason=models.REASON_NO_STAGED_CHANGES,
         )
-    message = format.format_commit_message(text)
+    # An operator's message has no model preamble to cut, and its title need
+    # not be conventional, so nothing above a later title-shaped line is lost.
+    message = format.format_commit_message(text, extract=False)
     if not message.strip():
         raise models.CommitMessageError(
             "the supplied commit message is empty after formatting",

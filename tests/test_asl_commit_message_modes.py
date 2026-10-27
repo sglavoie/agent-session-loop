@@ -177,6 +177,35 @@ class CommitHandlerTests(fixtures.CommitHandlerCase):
         self.assertEqual(0, code, err)
         self.assertNotIn("Co-authored-by", self.head_message())
 
+    def test_message_file_keeps_a_plain_title_above_a_title_shaped_line(
+        self,
+    ) -> None:
+        self.write("src/alpha.py", "print('alpha')\n")
+
+        code, _out, err = self.run_commit(
+            str(self.repo),
+            "--yes",
+            "--message-file",
+            "-",
+            stdin=(
+                "Bump the pinned dependencies\n\n"
+                "The lockfile drifted from the manifest.\n\n"
+                "note: pins lxml below 6 until upstream ships a wheel.\n"
+            ),
+        )
+
+        self.assertEqual(0, code, err)
+        self.assertEqual(
+            [
+                "Bump the pinned dependencies",
+                "",
+                "The lockfile drifted from the manifest.",
+                "",
+                "note: pins lxml below 6 until upstream ships a wheel.",
+            ],
+            self.head_message().splitlines(),
+        )
+
     def test_message_file_refuses_an_empty_message(self) -> None:
         self.write("src/alpha.py", "print('alpha')\n")
         before = self.commit_count()

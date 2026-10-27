@@ -127,14 +127,16 @@ def format_paragraph(
     )
 
 
-def format_commit_message(text: str, width: int = 80) -> str:
+def format_commit_message(text: str, width: int = 80, *, extract: bool = True) -> str:
     """Normalize a generated message into committable form.
 
     The first non-blank line is the title and is kept verbatim, however long
     it is; paragraphs and bullets below it are re-wrapped at ``width`` after
     consecutive lines are joined, and blank lines are preserved as written.
+    ``extract=False`` skips the preamble cut for a message an operator wrote,
+    whose title need not be conventional, so only disallowed trailers go.
     """
-    text = extract_commit_message(text)
+    text = extract_commit_message(text) if extract else strip_disallowed_trailers(text)
     lines = text.split("\n")
     result: list[str] = []
 

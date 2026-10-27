@@ -284,8 +284,10 @@ modes:
   agent.
 - **`--message-file PATH`** — commit the supplied message instead of generating
   one, with `-` reading stdin. It is formatted and stripped of disallowed
-  attribution trailers exactly as a generated message would be, and it is the
-  one mode that needs no harness at all.
+  attribution trailers exactly as a generated message would be, but nothing
+  above a later title-shaped line is cut as model preamble: its first line is
+  its title, conventional or not. It is the one mode that needs no harness at
+  all.
 
 The generation turn is bounded. `--timeout SECONDS` (default: 900) moves that
 bound and cannot remove it: a value of zero or less is refused as an invalid
