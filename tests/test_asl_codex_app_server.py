@@ -26,6 +26,7 @@ from typing import Any
 from agent_session_loop import (
     codex_app_server,
     guidance_delivery,
+    harness_codex_transports,
 )
 from tests import support_asl_codex_app_server as fixtures
 
@@ -283,6 +284,25 @@ class OutputNormalizationTests(unittest.TestCase):
         self.assertEqual(
             codex_app_server.TURN_STATUS_COMPLETED, self.session.turn_status
         )
+
+    def test_an_unterminated_last_line_is_flushed_by_the_output_processor(
+        self,
+    ) -> None:
+        # ``readline`` only hands over a line without its newline at EOF, so
+        # that read is the app-server's last word and must not stay buffered.
+        processor = harness_codex_transports._CodexAppServerOutputProcessor(
+            self.session
+        )
+        completed = fixtures.notification(
+            "turn/completed", turn={"id": "turn-1", "status": "completed"}
+        )
+
+        rendered = processor.process_chunk("stdout", completed.rstrip("\n"))
+        prose = processor.process_chunk("stdout", "fatal: no auth.json")
+
+        self.assertEqual("turn completed\n", rendered)
+        self.assertTrue(processor.final_result_seen)
+        self.assertEqual("fatal: no auth.json\n", prose)
 
     def test_a_failed_turn_carries_its_reason(self) -> None:
         rendered = self.session.feed(

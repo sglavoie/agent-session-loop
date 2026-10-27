@@ -48,7 +48,15 @@ class _CodexAppServerOutputProcessor(_OutputProcessor):
     def process_chunk(self, stream_name: StreamName, text: str) -> str:
         if stream_name != "stdout":
             return text
-        return self._session.feed(text)
+        rendered = self._session.feed(text)
+        if text and not text.endswith("\n"):
+            # The reader hands over whatever ``readline`` produced, and that
+            # only lacks a trailing newline at EOF -- so this is the
+            # app-server's last word. Flushing it is what keeps a terminal
+            # ``turn/completed``, or prose printed on the way out, from sitting
+            # in the decoder's buffer unread.
+            rendered += self._session.flush()
+        return rendered
 
     def last_message(
         self,
