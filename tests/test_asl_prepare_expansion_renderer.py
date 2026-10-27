@@ -323,6 +323,38 @@ class ExpansionRendererTests(unittest.TestCase):
                 (plan_dir / "session-1.md").read_text(encoding="utf-8"),
             )
 
+    def test_correction_extending_its_expected_text_is_idempotent(self) -> None:
+        # The replacement still contains the expected text once applied, so a
+        # rerun must not apply it again and grow the text on every resume.
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_prepare_plan(plan_dir)
+            validation = self._corrections_validation(
+                [
+                    {
+                        "expected_text": "Update the retry helper in `foo/bar.py`",
+                        "replacement_text": (
+                            "Update the retry helper in `foo/bar.py` "
+                            "(and its test `tests/test_bar.py`)"
+                        ),
+                        "reason": "the test also needs updating",
+                    }
+                ]
+            )
+
+            first = prepare_corrections.apply_corrections(plan_dir, validation)
+            text_after_first = (plan_dir / "session-1.md").read_text(encoding="utf-8")
+            outcomes = prepare_corrections.apply_corrections(plan_dir, validation)
+
+            self.assertEqual(prepare_models.CORRECTION_APPLIED, first[0].status)
+            self.assertEqual(
+                prepare_models.CORRECTION_ALREADY_APPLIED, outcomes[0].status
+            )
+            self.assertEqual(
+                text_after_first,
+                (plan_dir / "session-1.md").read_text(encoding="utf-8"),
+            )
+
     def test_ambiguous_correction_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"

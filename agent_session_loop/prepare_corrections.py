@@ -131,15 +131,26 @@ def _apply_one_correction(
         )
 
     occurrences = text.count(correction.expected_text)
+    # A replacement that extends its expected text still contains it once
+    # applied, so "already applied" also means every remaining occurrence
+    # of the expected text sits inside an occurrence of the replacement.
+    already_applied = correction.replacement_text in text and (
+        occurrences == 0
+        or (
+            correction.expected_text in correction.replacement_text
+            and correction.expected_text
+            not in text.replace(correction.replacement_text, "")
+        )
+    )
+    if already_applied:
+        return text, CorrectionOutcome(
+            session_id=session_id,
+            expected_text=correction.expected_text,
+            replacement_text=correction.replacement_text,
+            status=CORRECTION_ALREADY_APPLIED,
+            detail="replacement text already present",
+        )
     if occurrences == 0:
-        if correction.replacement_text in text:
-            return text, CorrectionOutcome(
-                session_id=session_id,
-                expected_text=correction.expected_text,
-                replacement_text=correction.replacement_text,
-                status=CORRECTION_ALREADY_APPLIED,
-                detail="replacement text already present",
-            )
         return text, _blocked(
             session_id,
             correction,
