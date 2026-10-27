@@ -342,6 +342,11 @@ class PrivacyTests(unittest.TestCase):
         )
         self.assertIsNone(catalog.record_from_summary(payload).entry.pause_reason)
 
+    def test_a_pause_reason_with_a_trailing_newline_is_dropped(self) -> None:
+        # `$` also matches before a final newline; the slug must be all of it.
+        payload = _minimal_summary_payload("/tmp/plan", pause_reason="agent-question\n")
+        self.assertIsNone(catalog.record_from_summary(payload).entry.pause_reason)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -310,6 +310,29 @@ class InvalidMessagesFailPredictably(unittest.TestCase):
             transport.validate_envelope(envelope, direction=transport.DIRECTION_UP)
         self.assertEqual(transport.ERROR_FRAME_TOO_LARGE, caught.exception.code)
 
+    def test_an_identifier_with_a_trailing_newline_is_refused(self) -> None:
+        # `$` also matches before a final newline, so each pattern must match
+        # the whole value rather than merely reach its end.
+        for path in (
+            ("request_id",),
+            ("target_id",),
+            ("payload", "target", "plan_key"),
+            ("payload", "target", "run_id"),
+            ("payload", "target", "session_id"),
+        ):
+            with self.subTest(field=".".join(path)):
+                envelope = fixture("request-detail-read")
+                if path[-1] == "session_id":
+                    envelope["payload"]["target"]["session_id"] = "1.2"
+                transport.validate_envelope(envelope)
+                holder = envelope
+                for name in path[:-1]:
+                    holder = holder[name]
+                holder[path[-1]] += "\n"
+                with self.assertRaises(transport.TransportError) as caught:
+                    transport.validate_envelope(envelope)
+                self.assertEqual(transport.ERROR_INVALID_FIELD, caught.exception.code)
+
     def test_a_deadline_is_only_carried_by_the_kind_that_owns_one(self) -> None:
         envelope = fixture("observation-heartbeat")
         envelope["deadline"] = NOW + 30.0

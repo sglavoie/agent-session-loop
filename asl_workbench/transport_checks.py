@@ -103,13 +103,13 @@ def _text(value: Any, where: str, *, limit: int = MAX_LABEL_CHARS) -> str:
 
 
 def _identifier(value: Any, where: str) -> str:
-    if not isinstance(value, str) or not _IDENTIFIER.match(value):
+    if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
         raise _fail(ERROR_INVALID_FIELD, where, "expected an identifier")
     return value
 
 
 def _key(value: Any, where: str) -> str:
-    if not isinstance(value, str) or not _KEY.match(value):
+    if not isinstance(value, str) or not _KEY.fullmatch(value):
         raise _fail(ERROR_INVALID_FIELD, where, f"expected {KEY_CHARS} hex characters")
     return value
 
@@ -243,7 +243,7 @@ def _validate_target(value: Any, where: str) -> None:
 
 
 def _word_matching(value: Any, where: str, pattern: re.Pattern[str]) -> str:
-    if not isinstance(value, str) or not pattern.match(value):
+    if not isinstance(value, str) or not pattern.fullmatch(value):
         raise _fail(ERROR_INVALID_FIELD, where, "malformed")
     return value
 

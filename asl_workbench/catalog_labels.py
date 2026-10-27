@@ -194,7 +194,9 @@ def _vocabulary_value(value: object, vocabulary: Sequence[str]) -> str | None:
 
 
 def _slug(value: object) -> str | None:
-    return value if isinstance(value, str) and _PAUSE_REASON_RE.match(value) else None
+    return (
+        value if isinstance(value, str) and _PAUSE_REASON_RE.fullmatch(value) else None
+    )
 
 
 def _session_id(value: object) -> str | None:
