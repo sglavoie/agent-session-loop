@@ -175,6 +175,7 @@ def _validate_run_inputs(
     # and commit-mode resolution stay here because they are CLI-runner specific.
     errors = run_flags.validate_run_namespace(
         args,
+        default_max_review_fix_cycles=DEFAULT_MAX_REVIEW_FIX_CYCLES,
         default_max_review_fix_cycles_ceiling=DEFAULT_MAX_REVIEW_FIX_CYCLES_CEILING,
     )
     if errors:

@@ -86,6 +86,31 @@ class RunFlagValidationTests(unittest.TestCase):
         self.assertEqual("invalid-argument", result["reason"])
         self.assertEqual(message, result["error"])
 
+    def test_ceiling_below_the_default_cycle_cap_is_rejected_on_a_fresh_run(
+        self,
+    ) -> None:
+        # ``--resume`` restores the default cap of 4 and checks it against the
+        # ceiling, so the first launch must refuse the same combination.
+        message = "--max-review-fix-cycles 4 exceeds --max-review-fix-cycles-ceiling 2"
+        args = argparse.Namespace(cwd=str(REPO_ROOT), max_review_fix_cycles_ceiling=2)
+
+        with self.assertRaises(runner.RunError) as caught:
+            run_inputs._validate_run_inputs(
+                args, resolve_review_guard_excludes=review_guard._review_guard_excludes
+            )
+        self.assertEqual(message, str(caught.exception))
+
+        result = self.autopilot.parse_command(
+            "asl run /tmp/plan --max-review-fix-cycles-ceiling 2"
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(message, result["error"])
+
+        resumed = self.autopilot.parse_command(
+            "asl run /tmp/plan --resume --max-review-fix-cycles-ceiling 2"
+        )
+        self.assertTrue(resumed["ok"], resumed)
+
     def test_helper_forwards_new_review_cap_flags(self) -> None:
         result = self.autopilot.parse_command(
             "asl run /tmp/plan --max-repair-group-attempts 3 "

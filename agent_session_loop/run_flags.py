@@ -504,6 +504,7 @@ def validate_run_namespace(
     ns: argparse.Namespace,
     *,
     defer_resume_dependent: bool = False,
+    default_max_review_fix_cycles: int | None = None,
     default_max_review_fix_cycles_ceiling: int | None = None,
 ) -> list[FlagError]:
     """Return the shared numeric/harness cross-field errors for ``ns``.
@@ -526,7 +527,9 @@ def validate_run_namespace(
     command and safely defers the check to the child, which the runner re-runs
     against the overlaid namespace. This keeps supervisor and runner parity for
     a model-only resume override while still rejecting the same misuse on a
-    non-resume command.
+    non-resume command. The same deferral applies to checking the default
+    ``--max-review-fix-cycles`` against the ceiling: a resume restores the
+    persisted cap, so only the overlaid namespace knows the effective value.
     """
     errors: list[FlagError] = []
 
@@ -584,6 +587,11 @@ def validate_run_namespace(
     if cycle_ceiling is None:
         cycle_ceiling = default_max_review_fix_cycles_ceiling
     effective_cycles = cycles if cycles is not None else legacy_cycles
+    # A fresh run whose cap is left at its default is still bound by the
+    # ceiling, or ``--resume`` would restore that default and refuse a run the
+    # first launch accepted.
+    if effective_cycles is None and not defer_resume_dependent:
+        effective_cycles = default_max_review_fix_cycles
     if (
         effective_cycles is not None
         and cycle_ceiling is not None

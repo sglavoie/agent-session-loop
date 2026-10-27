@@ -278,6 +278,7 @@ def parse_command(command: str) -> dict:
     validation_errors = _run_flags.validate_run_namespace(
         namespace,
         defer_resume_dependent=bool(getattr(namespace, "resume", False)),
+        default_max_review_fix_cycles=DEFAULT_MAX_REVIEW_FIX_CYCLES,
         default_max_review_fix_cycles_ceiling=(
             _run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES_CEILING
         ),
