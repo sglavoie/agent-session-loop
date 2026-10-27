@@ -333,13 +333,29 @@ def _check_retry_resume(context: _CheckContext) -> _Verdict:
                     f"the recorded retry policy gives {key}={recorded.get(key)!r} "
                     f"where the pause classifier gives {expected[key]!r}"
                 )
-    retries: dict[str, list[dict[str, Any]]] = {}
+    # The runner gives every review cycle a fresh retry budget
+    # (``review_transitions.read_prior_review_verdict_retries`` forgets the
+    # attempts before the latest ``review_cycle`` record), so attempts are
+    # weighed against the budget of the cycle that spent them.
+    retries: dict[str, dict[int, list[dict[str, Any]]]] = {}
+    cycle = 0
     for record in context.records:
-        if record.get("name") != events.REVIEW_VERDICT_RETRY_EVENT:
+        name = record.get("name")
+        if name == events.REVIEW_CYCLE_EVENT:
+            cycle += 1
+            continue
+        if name != events.REVIEW_VERDICT_RETRY_EVENT:
             continue
         payload = audit_evidence_helpers._mapping(record.get("payload"))
-        retries.setdefault(str(payload.get("session")), []).append(payload)
-    for session, attempts in sorted(retries.items()):
+        retries.setdefault(str(payload.get("session")), {}).setdefault(
+            cycle, []
+        ).append(payload)
+    spent = [
+        (session, attempts)
+        for session, cycles in sorted(retries.items())
+        for _, attempts in sorted(cycles.items())
+    ]
+    for session, attempts in spent:
         budgets = [
             payload["max_attempts"]
             for payload in attempts

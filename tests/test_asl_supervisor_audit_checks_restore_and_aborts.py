@@ -257,6 +257,58 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
             self.assertEqual("unavailable", verdict.status)
             self.assertIn("recorded no pause policy", verdict.detail)
 
+    def _review_verdict_retries(
+        self, history: tuple[Path, Path, Path, Path], *cycles: int
+    ) -> None:
+        """Record review-verdict retries for session 9, one batch per cycle."""
+        records: list[tuple[str, dict[str, Any]]] = [
+            ("run_started", {"run_id": RUN_ID})
+        ]
+        for cycle, attempts in enumerate(cycles):
+            if cycle:
+                records.append(
+                    (events.REVIEW_CYCLE_EVENT, {"run_id": RUN_ID, "cycle": cycle})
+                )
+            records.extend(
+                (
+                    events.REVIEW_VERDICT_RETRY_EVENT,
+                    {
+                        "run_id": RUN_ID,
+                        "session": "9",
+                        "attempt": attempt,
+                        "max_attempts": 2,
+                    },
+                )
+                for attempt in range(1, attempts + 1)
+            )
+        records.append(("run_finished", {"run_id": RUN_ID, "ok": True}))
+        self._write_events(history[2], records)
+
+    def test_each_review_cycle_spends_its_own_retry_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            # The runner forgets a cycle's retries when the next one opens, so
+            # three relaunches across two cycles stay inside a budget of two.
+            self._review_verdict_retries(history, 2, 1)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["retry-resume"].status)
+
+    def test_one_cycle_relaunching_past_its_budget_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._review_verdict_retries(history, 1, 3)
+
+            _, results = self._audit(history)
+
+            verdict = results["retry-resume"]
+            self.assertEqual("fail", verdict.status)
+            self.assertIn(
+                "session 9 was relaunched 3 times against a budget of 2",
+                verdict.detail,
+            )
+
     def test_a_killed_turn_is_accounted_for_by_the_abort_that_asked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
