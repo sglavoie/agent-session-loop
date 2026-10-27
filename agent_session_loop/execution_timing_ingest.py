@@ -142,7 +142,9 @@ def _record_timing(
 def _phase_key(phase: str, discriminator: Any, ordinal: int) -> Any:
     if discriminator is None:
         return (phase, "unkeyed", ordinal)
-    return (phase, discriminator)
+    # The discriminator is a raw payload value, so a list or object must not
+    # reach the dict lookup as-is.
+    return (phase, _hashable(discriminator))
 
 
 def _phase_slot(

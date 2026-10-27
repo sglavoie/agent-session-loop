@@ -158,6 +158,26 @@ class InconsistencyTests(unittest.TestCase):
         )
         self.assertEqual(conflict.detail["field"], "session_kind")
 
+    def test_unhashable_phase_discriminators_do_not_crash_collection(self) -> None:
+        # A list or object where a turn index or phase name belongs is a bad
+        # payload value, not a reason to crash `asl metrics`.
+        for name, field in (
+            (events.VERIFICATION_STARTED_EVENT, "turn_index"),
+            (events.VERIFICATION_FINISHED_EVENT, "turn_index"),
+            (events.FINALIZATION_STARTED_EVENT, "phase"),
+            (events.FINALIZATION_FINISHED_EVENT, "phase"),
+        ):
+            for value in ([1], {"x": 1}):
+                with self.subTest(name=name, value=value):
+                    run = _one(
+                        [
+                            _run_started(),
+                            _event(name, {"run_id": RUN_ID, field: value}),
+                            _run_finished(),
+                        ]
+                    )
+                    self.assertEqual(run.run_id, RUN_ID)
+
 
 class ZeroAndEmptyTests(unittest.TestCase):
     def test_a_zero_duration_run_reports_no_shares_instead_of_dividing_by_zero(
