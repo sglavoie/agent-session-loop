@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from asl_workbench.archive import MAX_RETENTION_DAYS
+
 from . import (
     harnesses,
     plans_files,
@@ -206,7 +208,7 @@ def _coerce_retention_days(raw: Any, *, warnings: list[str]) -> int:
             f"{DEFAULT_ARCHIVE_RETENTION_DAYS}"
         )
         return DEFAULT_ARCHIVE_RETENTION_DAYS
-    if raw < 1:
+    if raw < 1 or raw > MAX_RETENTION_DAYS:
         warnings.append(
             f"archive_retention_days: invalid value {raw!r}; using default "
             f"{DEFAULT_ARCHIVE_RETENTION_DAYS}"

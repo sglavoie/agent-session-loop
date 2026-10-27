@@ -345,3 +345,22 @@ class WorkbenchArchiveRetentionTests(unittest.TestCase):
             workbench_registry.set_archive_retention_days(registry, 0)
         with self.assertRaises(workbench_registry_models.WorkbenchError):
             workbench_registry.set_archive_retention_days(registry, True)
+        with self.assertRaises(workbench_registry_models.WorkbenchError):
+            workbench_registry.set_archive_retention_days(registry, 10_000_000)
+
+    def test_out_of_range_retention_coerces_to_default_with_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / workbench_registry_models.REGISTRY_FILE_NAME
+            registry_path.write_text(
+                json.dumps({"archive_retention_days": 10_000_000}), encoding="utf-8"
+            )
+
+            registry = workbench_registry.load_registry(registry_path)
+
+            self.assertEqual(
+                workbench_registry_models.DEFAULT_ARCHIVE_RETENTION_DAYS,
+                registry.archive_retention_days,
+            )
+            self.assertTrue(
+                any("archive_retention_days" in w for w in registry.warnings)
+            )

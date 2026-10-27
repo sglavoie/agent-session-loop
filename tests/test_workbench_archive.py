@@ -73,7 +73,13 @@ class PortableArchiveRulesTests(unittest.TestCase):
         self,
     ) -> None:
         self.assertEqual(7, portable_archive.require_retention_days(7))
-        for bad in (0, -1, True, False, 1.5, "7", None):
+        self.assertEqual(
+            portable_archive.MAX_RETENTION_DAYS,
+            portable_archive.require_retention_days(
+                portable_archive.MAX_RETENTION_DAYS
+            ),
+        )
+        for bad in (0, -1, True, False, 1.5, "7", None, 10_000_000):
             with self.assertRaises(portable_archive.ArchiveRequestError) as ctx:
                 portable_archive.require_retention_days(bad)
             self.assertEqual(
@@ -122,6 +128,21 @@ class PortableArchiveRulesTests(unittest.TestCase):
         payload = review.to_payload()
         self.assertNotIn("removed_count", payload)
         self.assertNotIn("failed_count", payload)
+
+    def test_an_entry_whose_expiry_is_past_the_calendar_is_retained(self) -> None:
+        review = portable_archive.cleanup_review(
+            [
+                {"archive_id": "far", "archived_at": "9999-12-20T00:00:00+00:00"},
+                {"archive_id": "old", "archived_at": _iso(40)},
+            ],
+            now=NOW,
+            retention_days=30,
+        )
+
+        self.assertEqual(["old"], list(review.candidate_ids))
+        far = review.verdict("far")
+        self.assertEqual(portable_archive.CLEANUP_RETAINED, far.state)
+        self.assertIsNone(far.eligible_at)
 
     def test_only_purging_is_destructive_and_it_needs_confirming(self) -> None:
         self.assertEqual(

@@ -142,6 +142,10 @@ class WorkbenchArchiveStorageTests(unittest.TestCase):
         expires = workbench_archive.compute_expires_at("2026-07-03T12:00:00+00:00", 30)
         self.assertEqual("2026-08-02T12:00:00+00:00", expires)
 
+    def test_compute_expires_at_past_the_calendar_never_expires(self) -> None:
+        expires = workbench_archive.compute_expires_at("9999-12-20T12:00:00+00:00", 30)
+        self.assertEqual("9999-12-31T23:59:59.999999+00:00", expires)
+
     def test_archived_entries_excluded_from_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp).resolve()

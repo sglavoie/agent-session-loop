@@ -10,6 +10,8 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
+from asl_workbench.archive import MAX_RETENTION_DAYS
+
 from . import (
     config,
     durability,
@@ -213,9 +215,14 @@ def set_archive_retention_days(
     registry: WorkbenchRegistry, days: int
 ) -> WorkbenchRegistry:
     """Return a new registry with ``archive_retention_days`` set to ``days``."""
-    if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+    if (
+        isinstance(days, bool)
+        or not isinstance(days, int)
+        or not 1 <= days <= MAX_RETENTION_DAYS
+    ):
         raise WorkbenchError(
-            f"archive_retention_days must be a positive integer: {days!r}"
+            "archive_retention_days must be a positive integer of at most "
+            f"{MAX_RETENTION_DAYS}: {days!r}"
         )
     return replace(registry, archive_retention_days=days)
 

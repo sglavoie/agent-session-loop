@@ -259,7 +259,11 @@ def compute_expires_at(archived_at: str, retention_days: int) -> str:
             f"invalid archived_at timestamp {archived_at!r}: {error}"
         ) from error
     days = max(0, int(retention_days))
-    return (archived + timedelta(days=days)).isoformat()
+    try:
+        return (archived + timedelta(days=days)).isoformat()
+    except OverflowError:
+        # Past the last representable date: the entry simply never expires.
+        return datetime.max.replace(tzinfo=archived.tzinfo).isoformat()
 
 
 def _coerce_archive_metadata(

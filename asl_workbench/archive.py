@@ -210,6 +210,10 @@ class ArchiveRequestError(Exception):
 #: the archive root, so anything that could leave that root is not an id.
 _ARCHIVE_ID_FORBIDDEN = ("/", "\\", "\0")
 
+#: The longest retention window accepted, a century. Beyond it an expiry date
+#: leaves the range ``datetime`` can represent, and no real window needs more.
+MAX_RETENTION_DAYS = 36500
+
 
 def valid_archive_id(archive_id: Any) -> bool:
     """Whether ``archive_id`` names an entry without escaping the archive root.
@@ -228,8 +232,10 @@ def valid_archive_id(archive_id: Any) -> bool:
 def require_retention_days(value: Any) -> int:
     """Narrow a retention window to a positive whole number of days.
 
-    A bool is rejected explicitly: ``True`` is an ``int`` that would set the
-    retention window to one day, which is both wrong and destructive-adjacent.
+    The window is capped at :data:`MAX_RETENTION_DAYS` so every expiry it
+    yields is a date ``datetime`` can hold. A bool is rejected explicitly:
+    ``True`` is an ``int`` that would set the retention window to one day,
+    which is both wrong and destructive-adjacent.
     """
     if isinstance(value, bool) or not isinstance(value, int):
         raise ArchiveRequestError(
@@ -240,6 +246,12 @@ def require_retention_days(value: Any) -> int:
         raise ArchiveRequestError(
             REASON_INVALID_REQUEST,
             "archive_retention_days must be a positive integer",
+            details={"archive_retention_days": value},
+        )
+    if value > MAX_RETENTION_DAYS:
+        raise ArchiveRequestError(
+            REASON_INVALID_REQUEST,
+            f"archive_retention_days must be at most {MAX_RETENTION_DAYS}",
             details={"archive_retention_days": value},
         )
     return value
@@ -424,13 +436,19 @@ def classify_entry(
     the Pi against a cached listing without the Pi's clock deciding what a Mac
     is allowed to delete.
     """
-    retention = timedelta(days=max(0, retention_days))
     archived = parse_timestamp(archived_at)
     if archived is None:
         return RetentionVerdict(archive_id, CLEANUP_UNDATED, None, None)
     reference = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
     age = reference - archived
-    eligible_at = (archived + retention).isoformat()
+    try:
+        retention = timedelta(days=max(0, retention_days))
+        eligible_at: str | None = (archived + retention).isoformat()
+    except OverflowError:
+        # A stored entry dated near the end of the calendar, or a window no
+        # date can be added to, never becomes eligible -- it is not a crash
+        # that hides every other entry from the review.
+        return RetentionVerdict(archive_id, CLEANUP_RETAINED, age.total_seconds(), None)
     state = CLEANUP_ELIGIBLE if age >= retention else CLEANUP_RETAINED
     return RetentionVerdict(archive_id, state, age.total_seconds(), eligible_at)
 
@@ -522,6 +540,7 @@ __all__ = [
     "CONFIRMED_OPERATIONS",
     "DESTRUCTIVE_OPERATIONS",
     "OPERATIONS",
+    "MAX_RETENTION_DAYS",
     "OPERATION_ARCHIVE",
     "OPERATION_ARCHIVE_MANY",
     "OPERATION_PIN",
