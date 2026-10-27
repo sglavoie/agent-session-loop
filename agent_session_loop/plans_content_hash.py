@@ -22,6 +22,7 @@ from .plans_models import (
 )
 from .plans_readiness import (
     _is_readiness_line,
+    _split_lines,
 )
 from .plans_registry import (
     _is_separator_row,
@@ -144,16 +145,22 @@ def _strip_final_handoff_block(text: str) -> str:
 
 
 def _strip_readiness_lines(text: str) -> str:
-    lines = text.splitlines(keepends=False)
+    # Lines are "\n"-delimited here, as `plans_readiness` parses and rewrites
+    # them: a form feed or U+2028 does not start a readiness line there, so it
+    # must not here either.
+    lines = _split_lines(text)
     # Matches `replace_readiness_metadata_in_text`, which never rewrites a
     # fenced example header, so editing one must still move the hash.
     fenced = fenced_line_flags(lines)
-    kept = [
-        line
-        for line, is_fenced in zip(lines, fenced, strict=True)
-        if is_fenced or not _is_readiness_line(line)
-    ]
     suffix = "\n" if text.endswith("\n") else ""
+    kept: list[str] = []
+    for index, (line, is_fenced) in enumerate(zip(lines, fenced, strict=True)):
+        if is_fenced or not _is_readiness_line(line):
+            # What is kept is still split as `splitlines` always split it, so
+            # a manifest whose readiness lines hold no such character keeps
+            # its hash.
+            terminated = index < len(lines) - 1 or bool(suffix)
+            kept.extend((line + "\n" if terminated else line).splitlines())
     return "\n".join(kept) + suffix
 
 

@@ -555,6 +555,42 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 baseline, plans_content_hash.stable_readiness_sha256(plan_dir)
             )
 
+    def test_stable_readiness_sha256_tracks_prose_after_a_form_feed(self) -> None:
+        # The parser reads "\n"-delimited lines, so a readiness header behind a
+        # form feed is prose to it, and editing that prose must move the hash.
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            manifest_path = plan_dir / "manifest.md"
+
+            def write_manifest(quoted_state: str) -> None:
+                manifest_path.write_text(
+                    f"# Manifest\n\nNotes\f**Readiness**: {quoted_state}\n",
+                    encoding="utf-8",
+                )
+
+            write_manifest("draft")
+            self.assertIsNone(
+                plans_readiness.parse_readiness_metadata(
+                    manifest_path.read_text(encoding="utf-8")
+                )
+            )
+            baseline = plans_content_hash.stable_readiness_sha256(plan_dir)
+            write_manifest("reviewed")
+
+            self.assertNotEqual(
+                baseline, plans_content_hash.stable_readiness_sha256(plan_dir)
+            )
+
+    def test_readiness_stripping_keeps_hashes_of_form_feeds_in_prose(self) -> None:
+        # Existing plans keep their identity: a separator outside a readiness
+        # line still hashes as the line break `splitlines` always made it.
+        manifest_text = "# Plan\n\nPage one\fPage two\n\n**Readiness**: loop-ready"
+        self.assertEqual(
+            "# Plan\n\nPage one\nPage two\n",
+            plans_content_hash._strip_readiness_lines(manifest_text),
+        )
+
     def test_stable_readiness_sha256_ignores_handoff_status_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
