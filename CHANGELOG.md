@@ -184,6 +184,39 @@ A polish and hardening round after the public release.
   the Claude command line, redirect refusal codes, the Workbench
   `question-reply` and `history` routes, the full event list, and symbols
   that moved to sibling modules.
+- Guards: a protected path the worker changed and then committed is convicted,
+  and HEAD moving without a readable path list leaves the guard unavailable
+  rather than passing; the legacy `.` qualifier names the repository top level
+  in both the pre-tool hook and postflight, so a run from a subdirectory no
+  longer splits them; a retry merge lets the newer attempt's view of an
+  untracked path win, so a file the retry deleted is not staged.
+- Repository evidence: changed tracked paths are recorded verbatim rather than
+  C-quoted; an unresolved merge conflict, an untracked embedded repository and
+  a prunable linked worktree are fingerprinted or skipped instead of leaving
+  every turn unavailable; edits inside an already dirty submodule move the
+  fingerprint; scope recovery refuses to checkpoint an embedded repository.
+- Harnesses: the Claude stream splits records on newlines only, so U+2028,
+  U+2029 and U+0085 inside a record no longer tear it; the Claude prompt is
+  written from a thread so the turn timeout and abort bound it; an ACP request
+  with a malformed option kind, or one whose handling fails, is still
+  answered; the Codex app-server decoder flushes a final unterminated line;
+  failure classification ignores Claude's model narration.
+- Workbench: a stranded pending or dispatched remote operation is settled at
+  startup and on each sweep, and a new submission supersedes an `unconfirmed`
+  one once the plan is idle, so one lost acknowledgement cannot lock a plan;
+  connector freshness no longer counts the corpus walk twice; a new plan's
+  first run that fails between observation cycles alerts; future-dated
+  observations are refused as `future-observation`; a history entry must name
+  its project.
+- Operations: a maintenance dry run judges the log-body budget after
+  compression, as `--apply` does; `tail` no longer splits a line still being
+  written; a timestamp the local zone cannot hold renders at its stored
+  offset; a context file that is not UTF-8 is reported as unreadable by
+  `startup-context` and install verification; `asl gc --json` reports
+  `ok: false` when a removal fails; a baseline check shared by sessions is
+  budgeted once; `asl metrics` leaves its own trace record out of
+  `records_read`; the paused resolver route is given as
+  `asl run --resume --reply` throughout.
 
 ### Changed
 
