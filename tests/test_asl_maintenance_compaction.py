@@ -131,6 +131,29 @@ class CompactionTests(MaintenanceTestBase):
         self.assertTrue((turn / "stderr.log.gz").is_file())
         self.assertTrue((turn / "last-message.txt.gz").is_file())
 
+    def test_the_dry_run_judges_the_budget_after_compression_like_apply(self) -> None:
+        # ~440 KB raw, a couple of KB once gzipped: over the budget only raw.
+        run_dir = self._newest_only(
+            age_days=200, bodies={"stdout.log": b"compressible log line\n" * 20000}
+        )
+        turn = run_dir / "turn-0001-session-1"
+
+        dry = self._run(apply=False, log_body_budget_bytes=100_000)
+
+        assert dry.plan is not None
+        (entry,) = dry.plan.compactions
+        (action,) = entry.actions
+        self.assertEqual(action.action, "compress")
+        self.assertEqual(entry.removable_bytes, 0)
+        self.assertLess(action.stored_bytes, 100_000)
+        self.assertEqual(entry.body_bytes_after, action.stored_bytes)
+
+        applied = self._run(apply=True, log_body_budget_bytes=100_000)
+
+        self.assertEqual(applied.removed_body_count, 0)
+        self.assertEqual(applied.compressed_body_count, 1)
+        self.assertEqual((turn / "stdout.log.gz").stat().st_size, action.stored_bytes)
+
     def test_a_removed_body_leaves_path_bytes_digest_and_reason_behind(self) -> None:
         payload = os.urandom(40_000)
         run_dir = self._newest_only(age_days=200, bodies={"stdout.log": payload})

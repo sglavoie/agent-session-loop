@@ -185,6 +185,39 @@ def _stage_compressed(source: Path, target: Path) -> tuple[Path, str, int]:
     return temporary, digest.hexdigest(), total
 
 
+class _ByteCounter:
+    """A write-only sink that keeps the length of what it was given and nothing else."""
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    def write(self, data: bytes) -> int:
+        self.count += len(data)
+        return len(data)
+
+    def flush(self) -> None:
+        return None
+
+
+def _compressed_size(source: Path) -> int:
+    """Return the exact size ``_stage_compressed`` would publish for ``source``.
+
+    The per-run budget is measured after compression, so a projection that
+    judges a raw body by its raw size plans removals ``--apply`` never makes.
+    The same deterministic gzip is streamed into a counter rather than a file,
+    which costs the compression but writes nothing and holds one chunk at most.
+    """
+    counter = _ByteCounter()
+    sink = gzip.GzipFile(filename="", mode="wb", fileobj=counter, mtime=0)
+    with source.open("rb") as raw, sink as compressed:
+        while True:
+            chunk = raw.read(_CHUNK_BYTES)
+            if not chunk:
+                break
+            compressed.write(chunk)
+    return counter.count
+
+
 def _discard_staged(temporary: Path) -> None:
     """Drop a staged gzip that was never published, leaving the corpus as it was."""
     with contextlib.suppress(OSError):

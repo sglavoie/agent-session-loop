@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import clock, retention, retention_projection, state, state_locks
-from .maintenance_bodies import _iter_bodies, _over_budget_selection
+from .maintenance_bodies import (
+    _Body,
+    _compressed_size,
+    _iter_bodies,
+    _over_budget_selection,
+)
 from .maintenance_models import (
     CorpusUsage,
     LogBodyAction,
@@ -136,17 +142,46 @@ def _compactable_runs(
     return eligible
 
 
+def _projected_body(body: _Body, *, measure_compression: bool) -> _Body:
+    """Return ``body`` as compaction would leave it before any removal.
+
+    A raw body is compressed before the budget is judged, so its size here is
+    the gzip it would become. One that cannot be read is projected at its raw
+    size, which is also what a failed compression leaves on disk.
+    """
+    if body.compressed or not measure_compression:
+        return body
+    try:
+        stored_bytes = _compressed_size(body.source)
+    except OSError:
+        return body
+    return dataclasses.replace(body, stored_bytes=stored_bytes)
+
+
 def _project_compaction(
     plan_dir: str,
     run: retention_projection.RunCandidate,
     *,
     now: datetime,
     log_body_budget_bytes: int,
+    measure_compression: bool = True,
 ) -> RunCompaction:
+    """Project one run's compaction the way ``compact_run`` performs it.
+
+    ``compact_run`` compresses first and judges the budget afterwards, so the
+    selection here runs over each body's post-compression size. Each action's
+    ``byte_count`` is the body's size on disk now and ``stored_bytes`` the size
+    it would be retained at. ``measure_compression=False`` skips the gzip pass
+    and judges raw bodies at their raw size, an upper bound on what is removed.
+    """
     bodies = _iter_bodies(run.path)
     before = sum(body.stored_bytes for body in bodies)
+    projected = [
+        _projected_body(body, measure_compression=measure_compression)
+        for body in bodies
+    ]
     selected, removable = _over_budget_selection(
-        bodies, budget_bytes=log_body_budget_bytes
+        projected, budget_bytes=log_body_budget_bytes
     )
     selected_paths = {str(body.source) for body in selected}
     actions = tuple(
@@ -154,13 +189,13 @@ def _project_compaction(
             path=str(body.source),
             action="remove" if str(body.source) in selected_paths else "compress",
             byte_count=body.stored_bytes,
-            stored_bytes=body.stored_bytes,
+            stored_bytes=after.stored_bytes,
             sha256="",
             reason=(
                 REASON_LOG_BODY_BUDGET if str(body.source) in selected_paths else ""
             ),
         )
-        for body in bodies
+        for body, after in zip(bodies, projected, strict=True)
         if not body.compressed or str(body.source) in selected_paths
     )
     return RunCompaction(
@@ -170,7 +205,7 @@ def _project_compaction(
         finished_at=run.finished_at,
         age_seconds=run.age_seconds,
         body_bytes_before=before,
-        body_bytes_after=before - removable,
+        body_bytes_after=sum(body.stored_bytes for body in projected) - removable,
         removable_bytes=removable,
         actions=actions,
     )
@@ -187,11 +222,17 @@ def plan_maintenance(
     budget_bytes: int = CORPUS_BUDGET_BYTES,
     min_free_fraction: float = MIN_FREE_FRACTION,
     usage: CorpusUsage | None = None,
+    measure_compression: bool = True,
 ) -> MaintenancePlan:
     """Project every action policy permits on this corpus, mutating nothing.
 
     ``usage`` is accepted so the threshold measurement taken before the claim is
     not repeated under it; omit it and the corpus is measured here.
+    ``measure_compression`` gzips each raw log body into a counter so the
+    per-run budget is judged on the size ``--apply`` would actually retain;
+    the applied pass turns it off, since its mutator compresses for real and
+    judges the budget afterwards, and a second gzip pass under the deadline
+    would only spend the time the mutator needs.
     """
     moment = _now(now)
     measured = (
@@ -217,6 +258,7 @@ def plan_maintenance(
             run,
             now=moment,
             log_body_budget_bytes=log_body_budget_bytes,
+            measure_compression=measure_compression,
         )
         for plan_dir, run in _compactable_runs(
             reclaim, now=moment, compaction_age_days=compaction_age_days

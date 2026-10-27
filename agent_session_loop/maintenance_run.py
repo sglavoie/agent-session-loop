@@ -385,6 +385,7 @@ def run_maintenance(
             compaction_age_days=compaction_age_days,
             log_body_budget_bytes=log_body_budget_bytes,
             usage=at_claim,
+            measure_compression=False,
         )
         removals, compactions, drops = _revalidate(plan, state_dir=state_dir)
 
