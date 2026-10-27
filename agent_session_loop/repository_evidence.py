@@ -86,6 +86,7 @@ from .repository_evidence_ignore import (
     _fingerprint_ignore_target as _fingerprint_ignore_target,
 )
 from .repository_evidence_ignore import _ignore_source_rel as _ignore_source_rel
+from .repository_evidence_nodes import NESTED_REPOSITORY_KIND as NESTED_REPOSITORY_KIND
 from .repository_evidence_nodes import (
     _fingerprint_index_flagged_nodes as _fingerprint_index_flagged_nodes,
 )

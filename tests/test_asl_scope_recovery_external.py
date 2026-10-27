@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from agent_session_loop import scope_recovery_external_changes
+
 # ruff: noqa: F403, F405
 from tests.asl_scope_recovery_test_support import *
 
@@ -182,3 +184,27 @@ class ExternalRecoveryTests(ExternalRecoveryTestCase):
             code, preview = self.invoke()
             self.assertEqual(1, code, preview)
             self.assertIn("recovery journal is unreadable", json.dumps(preview))
+
+    def test_an_untracked_embedded_repository_blocks_the_checkpoint(self):
+        # Staging it would commit a bare gitlink, never the files inside it.
+        nested = self.repos["notes"] / "vendored"
+        nested.mkdir()
+        git_stdout(nested, "init", "-q")
+        (nested / "inside.txt").write_text("inside\n")
+        code, preview = self.invoke()
+        self.assertIn(
+            "untracked embedded repository", " ".join(preview["remaining_blockers"])
+        )
+        self.assertEqual(1, self.invoke(*self.accept_args(preview))[0])
+        self.assertNotIn("vendored", git_stdout(self.repos["notes"], "ls-files"))
+
+    def test_checkpoint_content_refuses_a_node_it_cannot_read(self):
+        nested = self.repos["notes"] / "vendored"
+        nested.mkdir()
+        with self.assertRaisesRegex(
+            scope_recovery_external_changes.RecoveryError,
+            "checkpoint content is unreadable",
+        ):
+            scope_recovery_external_changes._checkpoint_content(
+                self.repos["notes"], ["vendored"]
+            )

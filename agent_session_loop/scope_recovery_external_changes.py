@@ -192,6 +192,13 @@ def _external_proposal(
             )
         if fp != after[key]:
             blockers.append(f"retained content or index evidence drifted in {key}")
+        if _embedded_repositories(fp):
+            # Staging an embedded repository records a gitlink with no
+            # submodule entry, never the files inside it.
+            blockers.append(
+                f"dirty paths in {key} include an untracked embedded repository "
+                "that cannot be checkpointed"
+            )
         if dirty:
             targets.append(
                 dict(
@@ -295,17 +302,30 @@ def _capture_recovery(proposal: dict[str, Any]) -> dict[str, Any]:
     return current
 
 
-def _checkpoint_content(root: Path, paths: list[str]) -> list[list[Any]]:
+def _embedded_repositories(fingerprint: dict[str, Any]) -> list[str]:
     return [
-        repository_evidence._fingerprint_repo_node(
-            root / path,
-            rel=path,
-            argv=(),
-            reason_prefix="checkpoint",
-            absent_kind="absent",
-        )
-        for path in paths
+        entry[0]
+        for entry in fingerprint.get("untracked") or ()
+        if isinstance(entry, list)
+        and len(entry) == 3
+        and entry[1] == repository_evidence.NESTED_REPOSITORY_KIND
     ]
+
+
+def _checkpoint_content(root: Path, paths: list[str]) -> list[list[Any]]:
+    try:
+        return [
+            repository_evidence._fingerprint_repo_node(
+                root / path,
+                rel=path,
+                argv=(),
+                reason_prefix="checkpoint",
+                absent_kind="absent",
+            )
+            for path in paths
+        ]
+    except repository_evidence._ReviewGuardUnavailable as error:
+        raise RecoveryError(f"checkpoint content is unreadable: {error}") from None
 
 
 def _finish_checkpoint(progress: dict[str, Any], current: dict[str, Any]) -> None:
