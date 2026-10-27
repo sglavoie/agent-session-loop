@@ -37,8 +37,7 @@ def _reconcile_locked(
     plan_dir: str | Path,
     state_dir: str | Path | None,
     now: float,
-    superseding: bool = False,
-    resubmitted: str = "",
+    superseding_scope: str | None = None,
 ) -> list[dict[str, Any]]:
     """Settle what the authorities can settle, under the lock already held.
 
@@ -54,11 +53,11 @@ def _reconcile_locked(
     steps are not history anyone can use: they are all conclusions from the
     same single reading of the evidence, drawn in the same instant.
 
-    ``resubmitted`` names the operation the caller is submitting right now, and
-    it is the one row superseding never touches. A resend of the same id is the
-    same submission, so letting it replace its own uncertain record would mean
-    a retry answering itself with "you were replaced by you" -- and would hand
-    the resend a fresh attempt at a mutation that may already have run.
+    ``superseding_scope`` is supplied only for a previously unseen operation
+    id. A replay or conflicting reuse is not a new submission and cannot
+    replace any uncertain operation, including one newer than the request
+    being retried. A new submission replaces only operations in its own scope;
+    unrelated operations remain open to late evidence.
     """
     outstanding_rows = [
         record
@@ -71,7 +70,9 @@ def _reconcile_locked(
     changed: list[dict[str, Any]] = []
     for record in outstanding_rows:
         evidence = _evidence_for(record, facts, plan_dir=plan_dir, state_dir=state_dir)
-        replaceable = superseding and record.get("operation_id") != resubmitted
+        replaceable = (
+            superseding_scope is not None and record.get("scope") == superseding_scope
+        )
         settled: dict[str, Any] | None = None
         current: Mapping[str, Any] = record
         for _ in range(_MAX_RECONCILE_STEPS):
@@ -166,8 +167,11 @@ def admit_operation(
             plan_dir=plan_dir,
             state_dir=state_dir,
             now=moment,
-            superseding=True,
-            resubmitted=identifier,
+            superseding_scope=(
+                operations.method_scope(resolved)
+                if identifier not in replay.records
+                else None
+            ),
         )
         admission = operations.admit(
             replay.ordered(),

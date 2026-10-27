@@ -14,6 +14,10 @@ A polish and hardening round after the public release.
 
 ### Fixed
 
+- Workbench: replaying an older request, reusing its id for a conflicting action,
+  or submitting an unrelated action no longer supersedes uncertain operations.
+  Those records remain open to late confirmation; only a new operation in the
+  same scope can replace them.
 - Quota retry hints preserve fractional timestamps and their timezone offsets,
   and dotted `a.m.`/`p.m.` times remain parseable, so cooldowns and supervisor
   waits use the provider's reset time. Local clock hints use the UTC offset

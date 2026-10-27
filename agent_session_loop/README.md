@@ -43,6 +43,12 @@ operation confirmation moves directly to `consumed`, allowing late evidence to
 resolve `unconfirmed` operations; repeated confirmation preserves the original
 receipt and settlement time.
 
+Admission supersedes an uncertain operation only for a new operation id in the
+same scope. Replaying an older request, refusing conflicting reuse of its id,
+or submitting an unrelated action preserves the uncertain record so late
+evidence can still settle it. Launch and resume share the run-start scope and
+can replace one another when the plan is idle and the prior owner is gone.
+
 The public imports for commit messages, conversation continuity, AgentMux
 contracts, and overseer decisions, context, and CLI commands remain in their
 original modules. Their implementations live in focused sibling modules:

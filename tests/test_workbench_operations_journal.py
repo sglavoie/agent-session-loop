@@ -621,6 +621,68 @@ class InterruptionTests(JournalFixture, unittest.TestCase):
             operations.DETAIL_REPLACED_UNCERTAIN, self.row("op-1")["detail_code"]
         )
 
+    def _completed_operation(self, operation_id: str) -> None:
+        self.admit(operation_id)
+        workbench_operations.mark_dispatched(
+            self.canonical, operation_id, state_dir=self.state_dir
+        )
+        workbench_operations.confirm_operation(
+            self.canonical, operation_id, state_dir=self.state_dir
+        )
+
+    def test_replaying_an_old_request_does_not_replace_a_newer_uncertain_one(
+        self,
+    ) -> None:
+        self._completed_operation("op-old")
+        self._orphan(operations.OPERATION_DISPATCHED)
+        workbench_operations.reconcile_plan(self.canonical, state_dir=self.state_dir)
+        before = self.journal_path.read_bytes()
+
+        replayed = self.admit("op-old")
+
+        self.assertTrue(replayed.replayed)
+        self.assertEqual(operations.OPERATION_UNCONFIRMED, self.row("op-1")["status"])
+        self.assertEqual(before, self.journal_path.read_bytes())
+
+    def test_conflicting_reuse_does_not_replace_an_uncertain_operation(self) -> None:
+        self._completed_operation("op-old")
+        self._orphan(operations.OPERATION_DISPATCHED)
+        workbench_operations.reconcile_plan(self.canonical, state_dir=self.state_dir)
+        before = self.journal_path.read_bytes()
+
+        refused = self.admit("op-old", method=operations.METHOD_REPLY)
+
+        self.assertTrue(refused.refused)
+        self.assertEqual(operations.REASON_OPERATION_CONFLICT, refused.reason)
+        self.assertEqual(operations.OPERATION_UNCONFIRMED, self.row("op-1")["status"])
+        self.assertEqual(before, self.journal_path.read_bytes())
+
+    def test_an_unrelated_submission_preserves_uncertainty_and_late_confirmation(
+        self,
+    ) -> None:
+        self._orphan(operations.OPERATION_DISPATCHED)
+        workbench_operations.reconcile_plan(self.canonical, state_dir=self.state_dir)
+        before = self.row("op-1")
+
+        admitted = self.admit("op-abort", method=operations.METHOD_ABORT)
+
+        self.assertTrue(admitted.admitted)
+        self.assertEqual(before, self.row("op-1"))
+        workbench_operations.confirm_operation(
+            self.canonical, "op-1", state_dir=self.state_dir
+        )
+        self.assertEqual(operations.OPERATION_CONSUMED, self.row("op-1")["status"])
+
+    def test_a_resume_can_replace_an_uncertain_launch_in_the_shared_scope(
+        self,
+    ) -> None:
+        self._orphan(operations.OPERATION_DISPATCHED)
+
+        admitted = self.admit("op-resume", method=operations.METHOD_REPLY)
+
+        self.assertTrue(admitted.admitted)
+        self.assertEqual(operations.OPERATION_SUPERSEDED, self.row("op-1")["status"])
+
 
 if __name__ == "__main__":
     unittest.main()
