@@ -11,9 +11,11 @@ from unittest import mock
 from agent_session_loop import (
     control_queue,
     events,
+    intervention,
     mailbox_appenders,
     state,
     workbench_archive,
+    workbench_controls,
     workbench_launch,
     workbench_operations,
     workbench_remote_actions,
@@ -34,6 +36,7 @@ from asl_workbench.operations import (
     OPERATION_CONSUMED,
     OPERATION_DISPATCHED,
     OPERATION_REJECTED,
+    REASON_OPERATION_CONFLICT,
 )
 from tests.support import (
     _WORKBENCH_DEAD_PID,
@@ -152,6 +155,19 @@ class PerformerTests(PerformerTestCase):
 
         self.assertEqual(OPERATION_ACCEPTED, first.status)
         self.assertEqual(OPERATION_ACCEPTED, second.status)
+        self.assertEqual(
+            [control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT], self.queued()
+        )
+
+    def test_conflicting_operation_reuse_reports_the_actual_refusal(self) -> None:
+        self.live_run()
+        token = self.token()
+        self.perform(bridge_token=token)
+
+        result = self.perform(method=METHOD_ABORT, bridge_token=token)
+
+        self.assertEqual(OPERATION_REJECTED, result.status)
+        self.assertEqual(REASON_OPERATION_CONFLICT, result.reason)
         self.assertEqual(
             [control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT], self.queued()
         )
@@ -404,6 +420,58 @@ class PerformerTests(PerformerTestCase):
         # refuses -- with its own word, reached through its own route.
         self.assertEqual(OPERATION_REJECTED, result.status)
         self.assertIsNotNone(result.reason)
+
+    def test_unpersisted_redirect_is_rejected_in_the_journal_and_on_replay(
+        self,
+    ) -> None:
+        self.live_run()
+        refused = workbench_controls.RedirectSubmission(
+            facts=intervention.inspect_run(self.plan_dir, state_dir=self.state_dir),
+            operation_id=None,
+            operation=None,
+            live_target=None,
+            outcome="rejected",
+            reason="target-changed",
+            target=None,
+            waited_seconds=0.0,
+            replayed=False,
+            persisted=False,
+            accepted=False,
+            journal_complete=True,
+        )
+        request = self.request(
+            operation_id="op-x",
+            method=METHOD_REDIRECT,
+            reply_ref=REPLY_REF,
+            action_token=ACTION_TOKEN,
+            bridge_token=self.token(),
+        )
+        with mock.patch.object(
+            workbench_controls, "submit_correction", return_value=refused
+        ) as submit:
+            first = self.performer.perform(request, body=REPLY_TEXT, now=NOW)
+            self.assertEqual(OPERATION_REJECTED, first.status)
+            self.assertEqual("target-changed", first.reason)
+            self.assertEqual(OPERATION_REJECTED, self.row("op-x")["status"])
+            self.assertEqual(
+                [],
+                workbench_operations.open_operations(
+                    self.plan_dir, state_dir=self.state_dir
+                ),
+            )
+            replay = self.performer.perform(request, body=REPLY_TEXT, now=NOW + 1)
+            self.assertEqual(OPERATION_REJECTED, replay.status)
+            submit.assert_called_once()
+            # A new correction must reach ASL, rather than being blocked by
+            # the previous refusal's operation row.
+            again = self.perform(
+                body=REPLY_TEXT,
+                operation_id="op-next",
+                method=METHOD_REDIRECT,
+                bridge_token=self.token(),
+            )
+            self.assertEqual("target-changed", again.reason)
+            self.assertEqual(2, submit.call_count)
 
     def test_asls_private_refusal_word_stays_on_this_machine(self) -> None:
         self.live_run()

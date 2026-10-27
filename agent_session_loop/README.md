@@ -23,6 +23,13 @@ inode and `flock`, so recovery preserves both outstanding operations and
 cross-process admission ordering. Torn-tail separators count toward the journal's
 byte limit before an append is admitted.
 
+Operation-journal replay skips JSON that exceeds the decoder's nesting limit,
+just as it skips torn lines, preserving usable records and later writes. Remote
+corrections that return without persisting are rejected inside the journal's
+settlement context, so their retries report rejection and later corrections are
+not blocked. Remote admission refusals retain the journal's reason and message,
+including conflicting reuse of an operation id and uncertain prior outcomes.
+
 The public imports for commit messages, conversation continuity, AgentMux
 contracts, and overseer decisions, context, and CLI commands remain in their
 original modules. Their implementations live in focused sibling modules:

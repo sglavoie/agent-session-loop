@@ -237,6 +237,17 @@ class DurableJournalTests(JournalFixture, unittest.TestCase):
         )
         self.assertEqual(operations.OPERATION_DISPATCHED, self.row("op-1")["status"])
 
+    def test_overdeep_json_does_not_block_reads_or_later_writes(self) -> None:
+        self.admit("op-1")
+        with self.journal_path.open("ab") as handle:
+            handle.write(b"[" * 1_000_000 + b"\n")
+        self.assertEqual(["op-1"], [row["operation_id"] for row in self.rows()])
+        workbench_operations.mark_dispatched(
+            self.canonical, "op-1", state_dir=self.state_dir
+        )
+        self.assertEqual(operations.OPERATION_DISPATCHED, self.row("op-1")["status"])
+        self.assertTrue(self.admit("op-1").replayed)
+
     def _append_raw(self, operation: dict[str, Any]) -> None:
         with self.journal_path.open("a", encoding="utf-8") as handle:
             handle.write(

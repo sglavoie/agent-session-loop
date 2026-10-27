@@ -109,8 +109,8 @@ class _Journal:
                 )
                 return self
             raise MutationRefused(
-                portable_operations.REASON_OPERATION_OUTSTANDING,
-                "another mutation is outstanding for this plan",
+                admission.reason or portable_operations.REASON_OPERATION_OUTSTANDING,
+                admission.message or "another mutation is outstanding for this plan",
             )
         workbench_operations.mark_dispatched(
             self._plan_dir,

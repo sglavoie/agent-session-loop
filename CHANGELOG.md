@@ -14,6 +14,11 @@ A polish and hardening round after the public release.
 
 ### Fixed
 
+- Workbench: a remote correction refused before persistence is recorded as
+  rejected, so retries no longer report acceptance and later corrections remain
+  possible; remote admission preserves the actual conflict or uncertainty
+  reason; deeply nested JSON lines no longer block operation-journal reads
+  and writes.
 - Run loop: closed lifecycle, transport and durability gaps; a refused run or a
   stale teardown no longer breaks a live run; plan identity, locks, durable
   writes, timestamps and git path parsing are hardened.

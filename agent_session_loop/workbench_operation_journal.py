@@ -155,7 +155,7 @@ def _replay(data: bytes) -> _Replay:
 def _parse_line(line: bytes) -> tuple[int, dict[str, Any]] | None:
     try:
         payload = json.loads(line)
-    except ValueError:
+    except ValueError, RecursionError:
         return None
     if not isinstance(payload, dict):
         return None

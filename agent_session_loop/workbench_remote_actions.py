@@ -366,11 +366,11 @@ class AslMutationPerformer:
                 action_token=request.bridge_token or None,
                 run_id=request.run_id,
             )
-        if not submission.persisted:
-            raise MutationRefused(
-                submission.reason or portable_controls.REASON_INVALID_REQUEST,
-                "the correction was not persisted",
-            )
+            if not submission.persisted:
+                raise MutationRefused(
+                    submission.reason or portable_controls.REASON_INVALID_REQUEST,
+                    "the correction was not persisted",
+                )
         return MutationResult(status=OPERATION_ACCEPTED, run_id=request.run_id)
 
     def _unlock(
