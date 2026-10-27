@@ -310,7 +310,10 @@ def _prepare_workspace_rebind(
             with tempfile.TemporaryDirectory(
                 prefix="asl-rebind-"
             ) as staging_root_value:
-                staged_plan_dir = Path(staging_root_value) / "plan"
+                # Canonical, as the staged prepare reports it: rebasing the
+                # shorter spelling found inside the canonical one would leave
+                # a stray leading component (``/private/private/...``).
+                staged_plan_dir = canonicalize_path(staging_root_value) / "plan"
                 shutil.copytree(plan_dir, staged_plan_dir, symlinks=True)
                 (staged_plan_dir / PREPARE_VALIDATION_FILENAME).unlink(missing_ok=True)
                 (staged_plan_dir / PREPARE_VALIDATION_CACHE_FILENAME).unlink(

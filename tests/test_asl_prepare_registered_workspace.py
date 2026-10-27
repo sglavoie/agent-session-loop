@@ -404,5 +404,11 @@ class PrepareRegisteredWorkspaceTests(PrepareEndToEndFixtures):
             [step.detail for step in result.steps]
             + [blocker.message for blocker in result.blockers]
         )
-        self.assertIn(str(first.plan_dir / "session-1.md"), diagnostics)
+        # Anchored on the preceding word so a staged prefix rewritten inside a
+        # longer (canonical) spelling of the staged path, which leaves a
+        # doubled or stray leading component, cannot pass as a substring.
+        self.assertIn(
+            f"injected staged failure at {first.plan_dir / 'session-1.md'}",
+            diagnostics,
+        )
         self.assertNotIn(str(staged_paths[0]), diagnostics)
