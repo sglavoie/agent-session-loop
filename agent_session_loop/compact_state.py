@@ -102,7 +102,13 @@ class CompactionReport:
 
 
 def _read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    try:
+        return json.loads(text)
+    except RecursionError as error:
+        # The decoder raises RecursionError, not a ValueError, for
+        # pathologically nested JSON; report it like any other malformed file.
+        raise ValueError(f"{path} is nested too deeply to decode: {error}") from None
 
 
 def _dump_state_bytes(payload: dict[str, Any]) -> bytes:
@@ -334,7 +340,7 @@ def _compact_events_file(path: Path, *, apply: bool, stats: _Stats) -> None:
             continue
         try:
             parsed = json.loads(piece.decode("utf-8"))
-        except ValueError:  # JSONDecodeError and UnicodeDecodeError
+        except ValueError, RecursionError:  # undecodable or nested too deeply
             stats.unparseable_event_lines += 1
             out.append(piece + b"\n" if terminated else piece)
             continue

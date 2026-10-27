@@ -224,7 +224,9 @@ def _run_finished_at(run_dir: Path) -> tuple[datetime | None, tuple[str, str]]:
         label = f"{result_path.parent.name}/{result_path.name}"
         try:
             payload = json.loads(result_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, RecursionError) as error:
+            # RecursionError is not a ValueError: the decoder raises it for
+            # pathologically nested JSON, which is just as undatable.
             return None, (RETAIN_UNDATED, f"{label} is unreadable: {error}")
         if not isinstance(payload, dict):
             return None, (RETAIN_UNDATED, f"{label} does not hold a JSON object")

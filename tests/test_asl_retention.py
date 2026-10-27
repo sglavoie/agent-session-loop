@@ -284,6 +284,16 @@ class RetentionSafetyTests(RetentionTestBase):
         self.assertFalse(run.reclaimable)
         self.assertEqual(run.reason, retention_projection.RETAIN_UNDATED)
 
+    def test_over_nested_turn_artifact_retains_the_run(self) -> None:
+        # The decoder raises RecursionError, not a ValueError, for this.
+        self._write_run(RUN_OLD, finished_at=None, result_text="[" * 1_000_000)
+        self._write_run(RUN_NEW, finished_at=_stamp(1))
+
+        run = self._runs_by_id(self._report())[RUN_OLD]
+
+        self.assertFalse(run.reclaimable)
+        self.assertEqual(run.reason, retention_projection.RETAIN_UNDATED)
+
     def test_non_object_turn_artifact_retains_the_run(self) -> None:
         self._write_run(RUN_OLD, finished_at=None, result_text="[]")
         self._write_run(RUN_NEW, finished_at=_stamp(1))

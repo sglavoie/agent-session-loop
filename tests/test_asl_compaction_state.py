@@ -669,6 +669,39 @@ class StateCompactionTests(unittest.TestCase):
         self.assertEqual(1, report.files_rewritten)
         self.assertEqual(before, state_path.read_bytes())
 
+    def test_cli_reports_an_over_nested_result_instead_of_crashing(self) -> None:
+        # The decoder raises RecursionError, not a ValueError, for this; it
+        # must fail the command with a report like any other malformed file.
+        result_path = self._write_result([])
+        result_path.write_text("[" * 1_000_000, encoding="utf-8")
+        args = argparse.Namespace(
+            plan_dir=str(self.plan_dir),
+            state_dir=str(self.state_dir),
+            apply=False,
+            json=True,
+        )
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = compact_state.compact_state_from_args(args)
+
+        self.assertEqual(1, code)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual("state-error", payload["reason"])
+        self.assertIn(str(result_path), payload["error"])
+
+    def test_over_nested_event_lines_are_kept_verbatim(self) -> None:
+        deep = b"[" * 1_000_000
+        events_path = self.plan_state / events.EVENTS_FILE_NAME
+        events_path.write_bytes(deep + b"\n")
+
+        report = compact_state.compact_plan_state(
+            self.plan_dir, state_dir=self.state_dir, apply=True
+        )
+
+        self.assertEqual(1, report.unparseable_event_lines)
+        self.assertEqual(deep + b"\n", events_path.read_bytes())
+
     def test_cli_refuses_a_directory_that_is_not_a_plan(self) -> None:
         not_a_plan = self.tmp_path / "not-a-plan"
         not_a_plan.mkdir()
