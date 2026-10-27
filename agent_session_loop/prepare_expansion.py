@@ -175,7 +175,9 @@ def insert_expansion_reference(
     no ``> **Before starting**:`` anchor line to insert after.
     """
     reference = expansion_reference_line(session_id)
-    lines = session_text.splitlines()
+    # Split on "\n" alone: ``str.splitlines`` also breaks on form feeds,
+    # U+2028 and the like, which the "\n" rejoin would make real line breaks.
+    lines = session_text.removesuffix("\n").split("\n")
     if any(line.strip() == reference for line in lines):
         return session_text, False
 

@@ -255,6 +255,24 @@ class ExpansionRendererTests(unittest.TestCase):
             self.assertEqual(session_text, session_text_again)
             self.assertEqual(1, session_text_again.count(reference))
 
+    def test_reference_insert_keeps_non_newline_line_separators(self) -> None:
+        # Form feed, U+2028 and U+0085 are text here, not line breaks.
+        session_text = (
+            "# Session 1: T\n\n> **Before starting**: read context\n\n"
+            "A note: kept, a page\x0cbreak and a \x85 too.\n"
+        )
+
+        updated, changed = prepare_expansion.insert_expansion_reference(
+            session_text, "1"
+        )
+
+        reference = prepare_expansion.expansion_reference_line("1")
+        self.assertTrue(changed)
+        self.assertEqual(
+            session_text.replace("read context\n", f"read context\n{reference}\n"),
+            updated,
+        )
+
     def test_write_expansions_fails_closed_on_missing_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"

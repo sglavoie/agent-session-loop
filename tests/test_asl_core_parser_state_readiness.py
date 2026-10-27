@@ -498,6 +498,34 @@ class ParserAndStateTests(ParserAndStateTestsBase):
         self.assertIn("\n".join(fenced_example), rewritten)
         self.assertEqual(updated, plans_readiness.parse_readiness_metadata(rewritten))
 
+    def test_readiness_rewrite_keeps_non_newline_line_separators(self) -> None:
+        # Form feed, U+2028 and U+0085 are text here, not line breaks.
+        notes = "line one still line one, a page\x0cbreak and a \x85 too."
+        manifest_text = "\n".join(
+            [
+                "# Manifest",
+                "",
+                "**Readiness**: draft",
+                "**Readiness SHA-256**: `a`",
+                "**Readiness checked at**: x",
+                "",
+                "## Notes",
+                "",
+                notes,
+                "",
+            ]
+        )
+        updated = plans_models.ReadinessMetadata(
+            state="running", readiness_sha256="b", checked_at="y"
+        )
+
+        rewritten = plans_readiness.replace_readiness_metadata_in_text(
+            manifest_text, updated
+        )
+
+        self.assertTrue(rewritten.endswith(f"\n{notes}\n"))
+        self.assertEqual(updated, plans_readiness.parse_readiness_metadata(rewritten))
+
     def test_stable_readiness_sha256_tracks_fenced_readiness_examples(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"

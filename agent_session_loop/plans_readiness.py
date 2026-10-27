@@ -71,6 +71,15 @@ def parse_readiness_state(value: str) -> ReadinessState:
     )
 
 
+def _split_lines(text: str) -> list[str]:
+    """Split on "\\n" alone, as the manifest is rejoined.
+
+    ``str.splitlines`` also breaks on form feeds, U+2028, U+0085 and the like,
+    which a rewrite rejoined with "\\n" would turn into real line breaks.
+    """
+    return text.removesuffix("\n").split("\n") if text else []
+
+
 def _is_readiness_line(line: str) -> bool:
     stripped = line.lstrip()
     return (
@@ -87,7 +96,7 @@ def parse_readiness_metadata(manifest_text: str) -> ReadinessMetadata | None:
     sha: str | None = None
     checked_at: str | None = None
 
-    lines = manifest_text.splitlines()
+    lines = _split_lines(manifest_text)
     # A header quoted inside a fenced code block is an example, not metadata.
     fenced = fenced_line_flags(lines)
     for raw_line, is_fenced in zip(lines, fenced, strict=True):
@@ -205,7 +214,7 @@ def _find_readiness_insertion_index(lines: list[str]) -> int:
 def replace_readiness_metadata_in_text(text: str, metadata: ReadinessMetadata) -> str:
     """Insert or replace readiness metadata lines in manifest text."""
     new_block = _render_readiness_metadata_lines(metadata)
-    lines = text.splitlines(keepends=False)
+    lines = _split_lines(text)
     # Fenced example headers are left exactly as written.
     fenced = fenced_line_flags(lines)
     existing = {
