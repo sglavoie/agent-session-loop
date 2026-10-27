@@ -74,8 +74,10 @@ _ENVIRONMENT_KEYS = frozenset({"env", "environ", "environment"})
 #: word inside it. The trailing boundary is what keeps ``auth`` from swallowing
 #: ``authorized_aliases``; it admits a plural and an upper-case camelCase
 #: continuation (``authToken``) so narrowing the match sheds no real secret.
+#: The leading boundary likewise admits a camelCase word start (``accessToken``,
+#: ``clientSecret``), where a lower-case letter or digit meets an upper-case one.
 _SECRET_KEY_RE = re.compile(
-    r"(?i)(?:^|[-_.])(?:api[-_]?key|access[-_]?key|auth|authorization|bearer|"
+    r"(?i)(?:^|[-_.]|(?<=(?-i:[a-z0-9]))(?=(?-i:[A-Z])))(?:api[-_]?key|access[-_]?key|auth|authorization|bearer|"
     r"cookie|credential|credentials|passphrase|passwd|password|private[-_]?key|"
     r"pwd|secret|session[-_]?key|signature|token)s?(?=$|[-_.]|(?-i:[A-Z]))"
 )
@@ -101,7 +103,9 @@ def _is_path_key(name: str) -> bool:
     return name.startswith("/") and "\n" not in name
 
 
-_CREDENTIAL_URL_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://)[^/\s@]+@")
+#: The userinfo runs to the last ``@`` before the path, so a password holding
+#: an unescaped ``@`` (``user:p@ss@host``) is withheld whole.
+_CREDENTIAL_URL_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://)[^/\s]+@")
 
 
 #: Keys whose value is a command line. Argv is redacted positionally as well as

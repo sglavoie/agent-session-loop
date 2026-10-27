@@ -229,6 +229,35 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
                 supervisor_audit_evidence_constants.REDACTED, result["authorization"]
             )
 
+    def test_camel_case_secret_keys_are_redacted_wherever_the_word_falls(
+        self,
+    ) -> None:
+        keys = ("accessToken", "clientSecret", "githubToken", "AccessToken")
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            self._rewrite_result(
+                run_dir, **dict.fromkeys(keys, "hunter2"), isAuthorized=True
+            )
+
+            result = self._collect(workspace, plan_dir, state_dir, run_dir).payload[
+                "turns"
+            ][0]["result"]
+
+            for key in keys:
+                self.assertEqual(
+                    supervisor_audit_evidence_constants.REDACTED, result[key], key
+                )
+            self.assertIs(True, result["isAuthorized"])
+
+    def test_a_url_password_holding_an_at_sign_is_withheld_whole(self) -> None:
+        self.assertEqual(
+            f"clone https://{supervisor_audit_evidence_constants.REDACTED}"
+            "@github.com/x.git failed",
+            supervisor_audit_evidence_redaction._redact_secrets(
+                "clone https://user:p@ss@github.com/x.git failed"
+            ),
+        )
+
     def test_a_reply_origin_survives_while_a_remote_is_canonicalized(self) -> None:
         for origin in run_prompts.REPLY_ORIGINS:
             with self.subTest(origin=origin), tempfile.TemporaryDirectory() as tmp:
