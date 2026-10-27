@@ -183,8 +183,17 @@ class Uplink(UplinkFlowMixin):
                 self.reads.link_down(now=now, note="the connector stopped uploading")
             )
             self._drop_carried(now=now)
+        self._settle_stranded(now, restarted=False)
         self._expire_bodies(now)
         self._keep(self.reads.expire(now))
+
+    def recover(self, now: float) -> None:
+        """Settle what a previous process left open, before serving anything.
+
+        Every ``pending`` row is stranded at startup, because the queue that
+        would have carried it died with the process that held it.
+        """
+        self._settle_stranded(now, restarted=True)
 
     # -- DetailLane ----------------------------------------------------------
 

@@ -12,7 +12,10 @@ from .operations import (
     OPERATION_EXPIRED,
     OPERATION_PENDING,
     OPERATION_REJECTED,
+    OPERATION_TRANSITIONS,
     OPERATION_UNCONFIRMED,
+    reconcile,
+    terminal,
 )
 from .remote_reads import RemoteReadError
 from .store_types import IngestInvalid, IngestRefused
@@ -139,7 +142,18 @@ class UplinkFlowMixin(UplinkBodiesMixin):
         """
         payload = envelope["payload"]
         operation_id = str(payload["operation_id"])
-        if self.store.operation(operation_id) is None:
+        row = self.store.operation(operation_id)
+        if row is None:
+            return
+        current = str(row.get("status", ""))
+        reported = str(payload["status"])
+        if reported != current and reported not in OPERATION_TRANSITIONS.get(
+            current, frozenset()
+        ):
+            # A late report against a row this service already concluded --
+            # the stranded sweep settles what nobody reported in time. Dropped
+            # for the reason an unknown operation is: refusing it would have
+            # the connector resend it on every upload, forever.
             return
         self.store.advance_operation(
             operation_id,
@@ -212,7 +226,8 @@ class UplinkFlowMixin(UplinkBodiesMixin):
             # Recorded outside the lock: ``_departed`` writes to the journal,
             # and a database write held across the condition every reader
             # waits on would make one command's departure everybody's pause.
-            self._departed(envelope, now=now)
+            if not self._departed(envelope, now=now):
+                continue
             return envelope
 
     def _next_carried(self) -> Mapping[str, Any] | None:
@@ -222,11 +237,16 @@ class UplinkFlowMixin(UplinkBodiesMixin):
             except IndexError:
                 return None
 
-    def _departed(self, envelope: Mapping[str, Any], *, now: float) -> None:
-        """Record that this frame has actually left."""
+    def _departed(self, envelope: Mapping[str, Any], *, now: float) -> bool:
+        """Record that this frame has actually left. False when it must not.
+
+        A submission whose row is no longer ``pending`` was settled without
+        it -- expired by the stranded sweep -- and carrying it now would run a
+        mutation its own journal row says did not happen.
+        """
         payload = envelope.get("payload")
         if not isinstance(payload, Mapping):
-            return
+            return True
         request_id = envelope.get("request_id")
         if payload.get("request") != REQUEST_MUTATE:
             # A read's deadline starts when it leaves, not when it was
@@ -234,15 +254,22 @@ class UplinkFlowMixin(UplinkBodiesMixin):
             # had its time yet.
             if isinstance(request_id, str):
                 self.reads.sent(request_id, now=now)
-            return
+            return True
         operation_id = payload.get("operation_id")
         if not isinstance(operation_id, str):
-            return
+            return True
         if self.store.operation(operation_id) is None:
-            return
-        self.store.advance_operation(
-            operation_id, OPERATION_DISPATCHED, now=now, dispatched_at=now
-        )
+            return True
+        if not self.store.settle_operation_if(
+            operation_id,
+            OPERATION_PENDING,
+            OPERATION_DISPATCHED,
+            now=now,
+            dispatched_at=now,
+        ):
+            self.discard_body(operation_id)
+            return False
+        return True
 
     def _undelivered(
         self, envelope: Mapping[str, Any], *, now: float, detail_code: str | None
@@ -270,6 +297,64 @@ class UplinkFlowMixin(UplinkBodiesMixin):
             detail_code=detail_code,
             settled_at=now,
         )
+
+    def _settle_stranded(self, now: float, *, restarted: bool) -> None:
+        """Settle journal rows that nothing on the link will ever report.
+
+        The carry queue is memory, so a restart strands every ``pending`` row
+        it held, and a lost acknowledgement strands a ``dispatched`` one the
+        connector never received. Either would hold its plan's one outstanding
+        mutation for good, since retention keeps every open row. The verdicts
+        are :func:`~asl_workbench.operations.reconcile`'s for an owner that is
+        gone:
+
+        * ``pending`` and not in the carry queue settles as ``expired``: it
+          never left, so it never ran. Only once its window has closed, unless
+          ``restarted`` -- a submission between its journal write and its
+          hand-down is briefly not queued either.
+        * ``dispatched`` with no report one command lifetime past its window
+          settles as ``unconfirmed``: it may have run and nobody can say. The
+          grace covers an attempt the connector started inside the window.
+        """
+        with self._ready:
+            carried = {
+                str(envelope["payload"].get("operation_id"))
+                for envelope in self._carry
+                if isinstance(envelope.get("payload"), Mapping)
+            }
+        for row in self.store.operations_in_status(
+            OPERATION_PENDING, connector_id=self.connector_id
+        ):
+            if str(row["operation_id"]) in carried:
+                continue
+            if restarted or now >= self._window_end(row):
+                self._settle_one(row, now=now)
+        for row in self.store.operations_in_status(
+            OPERATION_DISPATCHED, connector_id=self.connector_id
+        ):
+            if now >= self._window_end(row) + self.command_lifetime_seconds:
+                self._settle_one(row, now=now)
+
+    def _window_end(self, row: Mapping[str, Any]) -> float:
+        deliver_by = row.get("deliver_by")
+        if isinstance(deliver_by, int | float):
+            return float(deliver_by)
+        return float(row.get("requested_at") or 0.0) + self.command_lifetime_seconds
+
+    def _settle_one(self, row: Mapping[str, Any], *, now: float) -> None:
+        verdict = reconcile(row, now=now)
+        if verdict is None:
+            return
+        operation_id = str(row["operation_id"])
+        if self.store.settle_operation_if(
+            operation_id,
+            str(row["status"]),
+            verdict.status,
+            now=now,
+            detail_code=verdict.detail_code,
+            settled_at=now if terminal(verdict.status) else None,
+        ):
+            self.discard_body(operation_id)
 
     def _offer(self, envelope: Mapping[str, Any]) -> None:
         """Queue one frame for the next acknowledgement, or refuse to.

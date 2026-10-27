@@ -22,13 +22,18 @@ from typing import Any
 from asl_workbench.connector_payloads import heartbeat_payload
 from asl_workbench.observation import ObservationPolicy
 from asl_workbench.operations import (
+    DETAIL_CONNECTOR_RESTARTED,
+    DETAIL_DEADLINE_PASSED,
+    DETAIL_NO_RESULT,
     METHOD_QUESTION_REPLY,
     METHOD_STOP_AFTER_CURRENT,
     OPERATION_ACCEPTED,
+    OPERATION_CONSUMED,
     OPERATION_DISPATCHED,
     OPERATION_EXPIRED,
     OPERATION_PENDING,
     OPERATION_REJECTED,
+    OPERATION_UNCONFIRMED,
 )
 from asl_workbench.store_workbench import WorkbenchStore
 from asl_workbench.transport import (
@@ -411,6 +416,108 @@ class CarriageTests(UplinkCase):
         assert row is not None
         self.assertEqual(row["status"], OPERATION_EXPIRED)
         self.assertIsNone(self.store.outstanding_operation(PLAN_KEY))
+
+    def test_a_restart_expires_what_its_carry_queue_was_holding(self) -> None:
+        """The queue is memory; the journal row would hold its plan for good."""
+        self.store.record_operation(
+            operation_record("op-1"), connector_id=CONNECTOR, received_at=NOW
+        )
+        self.uplink.hand_down(submission("op-1"), now=NOW)
+        self.uplink = self.build()
+        self.uplink.recover(NOW + 1)
+        row = self.store.operation("op-1")
+        assert row is not None
+        self.assertEqual(row["status"], OPERATION_EXPIRED)
+        self.assertEqual(row["detail_code"], DETAIL_CONNECTOR_RESTARTED)
+        self.assertIsNone(self.store.outstanding_operation(PLAN_KEY))
+
+    def test_an_uncarried_pending_row_expires_only_once_its_window_closes(
+        self,
+    ) -> None:
+        """Between journal write and hand-down a live submission is not queued."""
+        self.store.record_operation(
+            operation_record("op-1"), connector_id=CONNECTOR, received_at=NOW
+        )
+        self.uplink.sweep(NOW + 59)
+        row = self.store.operation("op-1")
+        assert row is not None
+        self.assertEqual(row["status"], OPERATION_PENDING)
+        self.uplink.sweep(NOW + 60)
+        row = self.store.operation("op-1")
+        assert row is not None
+        self.assertEqual(row["status"], OPERATION_EXPIRED)
+        self.assertEqual(row["detail_code"], DETAIL_DEADLINE_PASSED)
+
+    def test_a_carried_pending_row_is_left_for_the_carry_queue(self) -> None:
+        self.store.record_operation(
+            operation_record("op-1"), connector_id=CONNECTOR, received_at=NOW
+        )
+        self.uplink.hand_down(submission("op-1"), now=NOW)
+        self.uplink.sweep(NOW + 100)
+        row = self.store.operation("op-1")
+        assert row is not None
+        self.assertEqual(row["status"], OPERATION_PENDING)
+        self.assertEqual(self.uplink.carried, 1)
+
+    def test_a_frame_whose_row_was_settled_without_it_is_not_carried(self) -> None:
+        self.store.record_operation(
+            operation_record("op-1"), connector_id=CONNECTOR, received_at=NOW
+        )
+        self.uplink.hand_down(submission("op-1"), now=NOW)
+        self.store.advance_operation("op-1", OPERATION_EXPIRED, now=NOW + 1)
+        self.assertIsNone(self.uplink.ingest(heartbeat(at=NOW + 2), now=NOW + 2))
+        row = self.store.operation("op-1")
+        assert row is not None
+        self.assertEqual(row["status"], OPERATION_EXPIRED)
+
+    def test_a_dispatch_whose_acknowledgement_was_lost_becomes_unconfirmed(
+        self,
+    ) -> None:
+        """Nobody can say whether it ran, which is not the same as holding forever."""
+        self.store.record_operation(
+            operation_record("op-1"), connector_id=CONNECTOR, received_at=NOW
+        )
+        self.uplink.hand_down(submission("op-1"), now=NOW)
+        self.assertIsNotNone(self.uplink.ingest(heartbeat(at=NOW + 1), now=NOW + 1))
+        grace = self.uplink.command_lifetime_seconds
+        self.uplink.sweep(NOW + 60 + grace - 1)
+        row = self.store.operation("op-1")
+        assert row is not None
+        self.assertEqual(row["status"], OPERATION_DISPATCHED)
+        self.uplink.sweep(NOW + 60 + grace)
+        row = self.store.operation("op-1")
+        assert row is not None
+        self.assertEqual(row["status"], OPERATION_UNCONFIRMED)
+        self.assertEqual(row["detail_code"], DETAIL_NO_RESULT)
+
+    def test_a_late_report_the_sweep_has_concluded_against_is_dropped(
+        self,
+    ) -> None:
+        """Refused, it would be resent on every upload; a later fact still lands."""
+        self.store.record_operation(
+            operation_record("op-1"), connector_id=CONNECTOR, received_at=NOW
+        )
+        self.store.advance_operation(
+            "op-1", OPERATION_DISPATCHED, now=NOW, dispatched_at=NOW
+        )
+        self.store.advance_operation("op-1", OPERATION_UNCONFIRMED, now=NOW + 400)
+
+        def report(status: str, at: float) -> dict[str, Any]:
+            return operation_envelope(
+                payload={"operation_id": "op-1", "status": status, "observed_at": at},
+                connector_id=CONNECTOR,
+                target_id=TARGET,
+                sent_at=at,
+            )
+
+        self.uplink.ingest(report(OPERATION_ACCEPTED, NOW + 401), now=NOW + 401)
+        row = self.store.operation("op-1")
+        assert row is not None
+        self.assertEqual(row["status"], OPERATION_UNCONFIRMED)
+        self.uplink.ingest(report(OPERATION_CONSUMED, NOW + 402), now=NOW + 402)
+        row = self.store.operation("op-1")
+        assert row is not None
+        self.assertEqual(row["status"], OPERATION_CONSUMED)
 
     def test_a_wall_clock_step_is_not_silence(self) -> None:
         """A Pi has no RTC: its wall clock jumps when NTP first answers.

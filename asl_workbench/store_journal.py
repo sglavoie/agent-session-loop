@@ -8,11 +8,14 @@ from typing import Any
 
 from .operations import (
     OPERATION_OUTSTANDING_STATUSES,
+    OPERATION_UNCONFIRMED,
     REASON_UNKNOWN_OPERATION,
+    Evidence,
     OperationError,
     export_operation,
     next_status,
     persist_operation,
+    reconcile,
 )
 from .store_base import StoreBase
 from .store_columns import (
@@ -55,6 +58,7 @@ class OperationJournal(StoreBase):
         *,
         connector_id: str,
         received_at: float,
+        plan_idle: bool = False,
     ) -> dict[str, Any] | None:
         """Look up, decide, and journal one submission in one transaction.
 
@@ -65,8 +69,18 @@ class OperationJournal(StoreBase):
         ``BEGIN IMMEDIATE`` is what keeps "one outstanding mutation per plan"
         true when two submissions arrive together: the second reads the
         first's row rather than a snapshot taken before it was written.
+
+        ``plan_idle`` says the newest observation shows nothing running on the
+        plan. A submission is then a person acting in place of an ``unconfirmed``
+        operation, so that operation is superseded first -- the same rule the
+        Mac's journal applies, and the only way out of ``unconfirmed`` short of
+        a late report.
         """
         with self.transaction() as connection:
+            if plan_idle:
+                self._supersede_uncertain(
+                    connection, plan_key, operation_id, now=received_at
+                )
             recorded = [
                 record
                 for record in (
@@ -80,6 +94,40 @@ class OperationJournal(StoreBase):
                 return None
             return self._insert_operation(
                 connection, decided, connector_id=connector_id, received_at=received_at
+            )
+
+    def _supersede_uncertain(
+        self,
+        connection: sqlite3.Connection,
+        plan_key: str,
+        resubmitted: str,
+        *,
+        now: float,
+    ) -> None:
+        """Supersede every ``unconfirmed`` row on an idle plan but a resend's own.
+
+        A resend of the same id is the same submission, and letting it replace
+        its own uncertain record would hand it a fresh attempt at a mutation
+        that may already have run.
+        """
+        rows = connection.execute(
+            "SELECT * FROM operation WHERE plan_key = ? AND status = ? "
+            "AND operation_id != ?",
+            (plan_key, OPERATION_UNCONFIRMED, resubmitted),
+        ).fetchall()
+        for row in rows:
+            verdict = reconcile(
+                _operation_record(row),
+                Evidence(run_active=False),
+                now=now,
+                superseding=True,
+            )
+            if verdict is None:
+                continue
+            connection.execute(
+                "UPDATE operation SET status = ?, detail_code = ?, "
+                "settled_at = ?, updated_at = ? WHERE operation_id = ?",
+                (verdict.status, verdict.detail_code, now, now, row["operation_id"]),
             )
 
     def _insert_operation(
@@ -145,6 +193,38 @@ class OperationJournal(StoreBase):
                 (status, detail_code, dispatched_at, settled_at, now, operation_id),
             )
             return _operation_record(self._operation_row(operation_id))
+
+    def settle_operation_if(
+        self,
+        operation_id: str,
+        expected: str,
+        status: str,
+        *,
+        now: float,
+        detail_code: str | None = None,
+        dispatched_at: float | None = None,
+        settled_at: float | None = None,
+    ) -> bool:
+        """Move one operation to ``status`` only while it is still ``expected``.
+
+        What a sweep uses: its verdict was drawn from a row it read earlier,
+        and a report that moved the row since is newer evidence than the
+        sweep's, so a row that is no longer ``expected`` is left alone.
+        """
+        with self.transaction() as connection:
+            row = self._operation_row(operation_id)
+            if row is None or str(row["status"]) != expected:
+                return False
+            next_status(expected, status)
+            connection.execute(
+                "UPDATE operation SET status = ?, "
+                "detail_code = COALESCE(?, detail_code), "
+                "dispatched_at = COALESCE(?, dispatched_at), "
+                "settled_at = COALESCE(?, settled_at), updated_at = ? "
+                "WHERE operation_id = ?",
+                (status, detail_code, dispatched_at, settled_at, now, operation_id),
+            )
+            return True
 
     def operation(self, operation_id: str) -> dict[str, Any] | None:
         """One journal row, or ``None``."""

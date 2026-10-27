@@ -301,6 +301,10 @@ def run(
                         static=shell_bundle(),
                     ),
                 )
+                # Before the server starts: no submission can be between its
+                # journal write and its hand-down yet, so every open row a
+                # previous process left is one nothing will carry.
+                uplink.recover(time.time())
                 restore_signals = install_shutdown_handlers(server)
                 worker = threading.Thread(
                     target=serve or (lambda instance: instance.serve_forever()),

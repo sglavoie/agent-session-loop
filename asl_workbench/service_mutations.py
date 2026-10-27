@@ -83,6 +83,9 @@ class ServiceMutations(ServiceState):
                 decide,
                 connector_id=self._connector_id,
                 received_at=now,
+                plan_idle=self._store.plan_idle(
+                    self._connector_id, request.plan_key, now=now
+                ),
             )
             if record is None:
                 # The first submission's own row, handed back untouched. Handing it

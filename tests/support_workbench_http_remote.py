@@ -6,6 +6,12 @@ import threading
 import time
 from unittest import mock
 
+from asl_workbench.operations import (
+    OPERATION_DISPATCHED,
+    OPERATION_SUPERSEDED,
+    OPERATION_UNCONFIRMED,
+    REASON_OPERATION_UNCERTAIN,
+)
 from asl_workbench.remote_reads import RemoteReadError
 from asl_workbench.store_types import MAX_READ_LIMIT
 
@@ -42,7 +48,14 @@ from .support_workbench_http_base import (
     unittest,
     workbench_service,
 )
-from .support_workbench_store import catalog_entry, catalog_payload, envelope
+from .support_workbench_store import (
+    catalog_entry,
+    catalog_payload,
+    envelope,
+    heartbeat_payload,
+    run_row,
+    snapshot_payload,
+)
 
 
 class RemoteProviderTests(unittest.TestCase):
@@ -505,6 +518,63 @@ class RemoteProviderTests(unittest.TestCase):
         response = self.submit("op-3", plan_key="plan-other")
         self.assertEqual(document(response)["reason"], REASON_OPERATION_CONFLICT)
         self.assertEqual(len(self.mutations.handed), 1)
+
+    def observe_plan(self, *, primary_state: str) -> None:
+        self.store.ingest_heartbeat(
+            envelope(
+                "heartbeat", heartbeat_payload(observed_at=NOW), connector_id="mac"
+            ),
+            received_at=NOW,
+        )
+        self.store.ingest_snapshot(
+            envelope(
+                "snapshot",
+                snapshot_payload(
+                    observed_at=NOW,
+                    runs=[
+                        run_row(
+                            "run-1", plan_key="plan-abc", primary_state=primary_state
+                        )
+                    ],
+                ),
+                connector_id="mac",
+            ),
+            received_at=NOW,
+        )
+
+    def leave_unconfirmed(self, operation_id: str) -> None:
+        self.submit(operation_id)
+        self.store.advance_operation(operation_id, OPERATION_DISPATCHED, now=NOW)
+        self.store.advance_operation(operation_id, OPERATION_UNCONFIRMED, now=NOW)
+
+    def test_an_uncertain_mutation_on_an_idle_plan_is_superseded(self) -> None:
+        """Otherwise one lost acknowledgement would lock the plan for good."""
+        self.observe_plan(primary_state="paused-for-reply")
+        self.leave_unconfirmed("op-lost")
+        response = self.submit("op-next")
+        self.assertEqual(response.status, 202)
+        lost = self.store.operation("op-lost")
+        assert lost is not None
+        self.assertEqual(lost["status"], OPERATION_SUPERSEDED)
+        self.assertEqual(len(self.mutations.handed), 2)
+
+    def test_an_uncertain_mutation_is_not_superseded_while_a_run_is_live(
+        self,
+    ) -> None:
+        self.observe_plan(primary_state="running")
+        self.leave_unconfirmed("op-lost")
+        response = self.submit("op-next")
+        self.assertEqual(document(response)["reason"], REASON_OPERATION_UNCERTAIN)
+        lost = self.store.operation("op-lost")
+        assert lost is not None
+        self.assertEqual(lost["status"], OPERATION_UNCONFIRMED)
+
+    def test_an_uncertain_mutation_is_not_superseded_without_an_observation(
+        self,
+    ) -> None:
+        self.leave_unconfirmed("op-lost")
+        response = self.submit("op-next")
+        self.assertEqual(document(response)["reason"], REASON_OPERATION_UNCERTAIN)
 
     def test_a_live_run_control_needs_the_freshness_proof(self) -> None:
         """The far end's own parser decides, before anything is journalled."""

@@ -6,6 +6,7 @@ import sqlite3
 from typing import Any
 
 from . import freshness as freshness_module
+from .incidents_models import ACTIVE_STATES
 from .observation import (
     OBSERVATION_ABSENT,
     OBSERVATION_CURRENT,
@@ -123,6 +124,34 @@ class RunReads(StoreBase):
             bridge_protocol=_as_int(row["bridge_protocol"]),
             projection_age_seconds=row["snapshot_projection_age_seconds"],
         )
+
+    def plan_idle(self, connector_id: str, plan_key: str, *, now: float) -> bool:
+        """Whether the newest observation demonstrably shows nothing running.
+
+        Demonstrably: the projection has to be fresh and whole, because a
+        stale or truncated one cannot say a run is *not* there.
+        """
+        status = next(
+            (
+                found
+                for found in self.connector_statuses(now=now)
+                if found.connector_id == connector_id
+            ),
+            None,
+        )
+        if status is None or not status.freshness.projection_fresh or status.truncated:
+            return False
+        marks = ", ".join("?" * len(ACTIVE_STATES))
+        with self.reading() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM run_summary r "
+                "JOIN connector c ON c.connector_id = r.connector_id "
+                "WHERE r.connector_id = ? AND r.plan_key = ? AND r.present = 1 "
+                "AND r.observed_at = c.snapshot_observed_at "
+                f"AND r.primary_state IN ({marks}) LIMIT 1",
+                (connector_id, plan_key, *sorted(ACTIVE_STATES)),
+            ).fetchone()
+        return row is None
 
     def runs(
         self,
