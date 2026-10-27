@@ -60,11 +60,14 @@ class IncidentMixin(LedgerCore):
         metadata-only discovery boundary already establishes before any
         authorization is asked for.
         """
-        if evidence:
-            self._require_context_grant(grant=grant, plan_dir=plan_dir)
         moment = self._now()
-        epoch = self.current_epoch()
         with self.transaction() as connection:
+            # Inside the write lock: a policy change landing between the check
+            # and the insert would stamp evidence read under the old grant with
+            # the new epoch, unsealed.
+            if evidence:
+                self._require_context_grant(grant=grant, plan_dir=plan_dir)
+            epoch = self.current_epoch()
             cursor = connection.execute(
                 """
                 INSERT INTO incident (

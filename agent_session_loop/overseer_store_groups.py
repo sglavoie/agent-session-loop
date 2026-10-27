@@ -52,18 +52,20 @@ class CheckpointGroupMixin(LedgerCore):
         :func:`agent_session_loop.overseer_checkpoint_groups.prepare_group` will
         not do.
         """
-        self._require_grant(
-            grant=grant,
-            plan_dir=plan_dir,
-            access=overseer_policy_client.ACCESS_ACTION,
-        )
-        if grant is None:
-            raise LedgerRefused(f"no action grant for {plan_dir}")
-        if not group_key:
-            raise LedgerError("a checkpoint group must be keyed")
         moment = self._now()
-        epoch = self.current_epoch()
         with self.transaction() as connection:
+            # Inside the write lock, so a policy change cannot land between the
+            # grant check and the epoch the group is stamped with.
+            self._require_grant(
+                grant=grant,
+                plan_dir=plan_dir,
+                access=overseer_policy_client.ACCESS_ACTION,
+            )
+            if grant is None:
+                raise LedgerRefused(f"no action grant for {plan_dir}")
+            if not group_key:
+                raise LedgerError("a checkpoint group must be keyed")
+            epoch = self.current_epoch()
             connection.execute(
                 """
                 INSERT INTO checkpoint_group (

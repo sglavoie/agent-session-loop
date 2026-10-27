@@ -54,16 +54,18 @@ class ActionMixin(LedgerCore):
         :meth:`recovery_attempts` counts by; deciding what "the same situation"
         means is the dispatcher's job, not this table's.
         """
-        self._require_grant(
-            grant=grant,
-            plan_dir=plan_dir,
-            access=overseer_policy_client.ACCESS_ACTION,
-        )
-        if grant is None:
-            raise LedgerRefused(f"no action grant for {plan_dir}")
         moment = self._now()
-        epoch = self.current_epoch()
         with self.transaction() as connection:
+            # Inside the write lock, so a policy change cannot land between the
+            # grant check and the epoch the attempt is stamped with.
+            self._require_grant(
+                grant=grant,
+                plan_dir=plan_dir,
+                access=overseer_policy_client.ACCESS_ACTION,
+            )
+            if grant is None:
+                raise LedgerRefused(f"no action grant for {plan_dir}")
+            epoch = self.current_epoch()
             cursor = connection.execute(
                 """
                 INSERT INTO action (

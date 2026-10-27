@@ -207,6 +207,63 @@ class PolicyChangeTests(_LedgerCase):
             )
         self.assertEqual(self.ledger.actions(plan_dir=PLAN), ())
 
+    def racing_ledger(self) -> overseer_store_ledger.Ledger:
+        """A second ledger whose next write races another overseer's policy move.
+
+        The clock is read just before the write lock is taken, so a policy
+        change landing there is the one a check made outside the lock misses.
+        """
+        moved: list[bool] = []
+
+        def now() -> str:
+            if not moved:
+                moved.append(True)
+                self.ledger.note_policy(config_fingerprint=NEXT_FINGERPRINT)
+            return "2026-01-01T00:00:00+00:00"
+
+        racing = overseer_store_ledger.open_ledger(state_dir=self.root, now=now)
+        self.addCleanup(racing.close)
+        return racing
+
+    def test_evidence_is_not_stamped_with_a_policy_its_grant_predates(self) -> None:
+        grant = self.enrolled()
+        with self.assertRaises(overseer_store_models.LedgerRefused):
+            self.racing_ledger().open_incident(
+                grant=grant,
+                plan_dir=PLAN,
+                run_id="run-1",
+                kind="verify_failed",
+                summary="failed",
+                evidence=_evidence(1),
+            )
+        fresh = _grant(fingerprint=NEXT_FINGERPRINT, digest="rd-2")
+        view = self.ledger.read_evidence(plan_dir=PLAN, grant=fresh)
+        self.assertEqual((view.records, view.withheld), ((), 0))
+
+    def test_an_action_is_not_attempted_under_a_policy_its_grant_predates(
+        self,
+    ) -> None:
+        self.enrolled()
+        grant = _grant(access=overseer_policy_client.ACCESS_ACTION, digest="rd-act")
+        with self.assertRaises(overseer_store_models.LedgerRefused):
+            self.racing_ledger().attempt_action(
+                grant=grant, plan_dir=PLAN, operation="reply", target="q"
+            )
+        self.assertEqual(self.ledger.actions(plan_dir=PLAN), ())
+
+    def test_a_group_is_not_opened_under_a_policy_its_grant_predates(self) -> None:
+        self.enrolled()
+        grant = _grant(access=overseer_policy_client.ACCESS_ACTION, digest="rd-act")
+        with self.assertRaises(overseer_store_models.LedgerRefused):
+            self.racing_ledger().open_checkpoint_group(
+                grant=grant,
+                plan_dir=PLAN,
+                group_key="group-1",
+                target="checkpoint",
+                record={"status": "pending"},
+            )
+        self.assertIsNone(self.ledger.checkpoint_group("group-1"))
+
 
 if __name__ == "__main__":
     unittest.main()
