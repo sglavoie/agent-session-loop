@@ -73,6 +73,23 @@ class IncrementalReadTests(HistoryTestCase):
         self.assertEqual(result.malformed, 1)
         self.assertFalse(result.complete)
 
+    def test_a_line_nested_past_the_decoder_is_malformed_not_fatal(self) -> None:
+        # Under the record ceiling, yet deeper than json.loads will follow: one
+        # such line must not abort this pass, and with it every later one.
+        depth = 200_000
+        path = self.write_events([_started("run-1", at=10), _finished("run-1", at=20)])
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                '{"name": "run_finished", "payload": '
+                + "[" * depth
+                + "]" * depth
+                + "}\n"
+            )
+        result = self.run_import()
+        self.assertEqual(len(result.entries), 1)
+        self.assertEqual(result.malformed, 1)
+        self.assertFalse(result.complete)
+
     def test_a_non_finite_number_is_refused_rather_than_imported(self) -> None:
         path = self.write_events([_started("run-1", at=10)])
         with path.open("a", encoding="utf-8") as handle:

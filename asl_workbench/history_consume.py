@@ -81,7 +81,9 @@ def consume_records(
             continue
         try:
             record = json.loads(line, parse_constant=primitives.refuse_non_finite)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # A line nested deeper than the decoder follows is as unreadable
+            # as a torn one, and must not abort the rest of the pass.
             malformed += 1
             continue
         if not isinstance(record, Mapping):
