@@ -317,6 +317,45 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
         )
         self.assertEqual(1, view.counts.questions)
 
+    def test_interrupted_ask_wait_ends_its_wait_and_can_be_resumed(self) -> None:
+        with (
+            mock.patch.object(time, "sleep", side_effect=KeyboardInterrupt),
+            self.assertRaises(KeyboardInterrupt),
+            redirect_stdout(io.StringIO()),
+        ):
+            mailbox_cli_ask.ask_from_args(
+                self.args(text="Need a decision", wait=True, wait_timeout=60)
+            )
+
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        question = next(
+            message
+            for message in view.messages
+            if message.kind == mailbox_vocabulary.KIND_QUESTION
+        )
+        wait_start = next(
+            message
+            for message in view.messages
+            if message.kind == mailbox_vocabulary.KIND_WAIT_START
+        )
+        wait_end = view.messages[-1]
+        self.assertEqual(mailbox_vocabulary.KIND_WAIT_END, wait_end.kind)
+        self.assertEqual(wait_start.id, wait_end.wait_id)
+        self.assertEqual(
+            mailbox_vocabulary.WAIT_END_REASON_ERROR, wait_end.wait_end_reason
+        )
+        self.assertIsNone(view.active_wait_for(question.id))
+        self.assertNotEqual("waiting", view.delivery_state_for(question.id))
+
+        code, resumed = self.payload_from(
+            mailbox_cli_ask.ask_from_args,
+            self.args(question_id=question.id, wait=True, wait_timeout=0),
+        )
+        self.assertEqual(0, code)
+        self.assertTrue(resumed["timed_out"])
+        self.assertIsNotNone(resumed["wait_start"])
+        self.assertNotEqual(wait_start.id, resumed["wait_start"]["id"])
+
     def test_ask_resume_returns_an_existing_reply_without_appending(self) -> None:
         question = mailbox_appenders.append_question(
             self.plan_dir,

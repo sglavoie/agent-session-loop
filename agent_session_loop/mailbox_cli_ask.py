@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import time
 from pathlib import Path
 
@@ -174,6 +175,33 @@ def wait_for_reply(
     )
 
 
+def _end_abandoned_wait(
+    plan_dir: str | Path,
+    question_id: str,
+    wait_id: str,
+    *,
+    state_dir: str | Path | None,
+) -> None:
+    """Best-effort close of a wait this asker leaves by raising.
+
+    An interrupt or a mailbox failure mid-wait otherwise leaves the question
+    waiting for an asker that has stopped listening: ``asl inbox reply`` would
+    accept an answer no one consumes and ``--wait-consumed`` would hang on it.
+    An answer that already arrived is left unconsumed rather than receipted,
+    because this asker never reported it; ``ask --question-id --wait`` opens a
+    fresh wait to collect it.
+    """
+    with contextlib.suppress(OSError, mailbox_models.MailboxError):
+        mailbox_waits.finish_wait(
+            plan_dir,
+            question_id,
+            wait_id,
+            reason=mailbox_vocabulary.WAIT_END_REASON_ERROR,
+            state_dir=state_dir,
+            consume_closure=False,
+        )
+
+
 def ask_from_args(args: argparse.Namespace) -> int:
     """Append or resume a worker question, optionally waiting for closure."""
     text = getattr(args, "text", None)
@@ -304,39 +332,51 @@ def ask_from_args(args: argparse.Namespace) -> int:
                         state_dir=args.state_dir,
                     )
 
-        closure = (
-            initial_view.closure_for(question.id) if initial_view is not None else None
-        )
-        if (
-            args.wait
-            and closure is not None
-            and initial_view is not None
-            and initial_view.receipt_for_closure(closure.id) is None
-        ):
+        try:
+            closure = (
+                initial_view.closure_for(question.id)
+                if initial_view is not None
+                else None
+            )
+            if (
+                args.wait
+                and closure is not None
+                and initial_view is not None
+                and initial_view.receipt_for_closure(closure.id) is None
+            ):
+                if wait_start is not None:
+                    mailbox_waits.consume_wait_closure(
+                        context.snapshot.plan_dir,
+                        question.id,
+                        wait_start.id,
+                        state_dir=args.state_dir,
+                    )
+                else:
+                    mailbox_appenders.append_receipt(
+                        context.snapshot.plan_dir,
+                        question.id,
+                        closure.id,
+                        state_dir=args.state_dir,
+                    )
+            timed_out = False
+            if args.wait and closure is None:
+                closure, timed_out = wait_for_closure(
+                    context.snapshot.plan_dir,
+                    question.id,
+                    state_dir=args.state_dir,
+                    timeout=wait_timeout,
+                    initial_view=initial_view,
+                    wait_id=None if wait_start is None else wait_start.id,
+                )
+        except BaseException:
             if wait_start is not None:
-                mailbox_waits.consume_wait_closure(
+                _end_abandoned_wait(
                     context.snapshot.plan_dir,
                     question.id,
                     wait_start.id,
                     state_dir=args.state_dir,
                 )
-            else:
-                mailbox_appenders.append_receipt(
-                    context.snapshot.plan_dir,
-                    question.id,
-                    closure.id,
-                    state_dir=args.state_dir,
-                )
-        timed_out = False
-        if args.wait and closure is None:
-            closure, timed_out = wait_for_closure(
-                context.snapshot.plan_dir,
-                question.id,
-                state_dir=args.state_dir,
-                timeout=wait_timeout,
-                initial_view=initial_view,
-                wait_id=None if wait_start is None else wait_start.id,
-            )
+            raise
     except mailbox_models.MailboxError as error:
         mailbox_cli_output.print_mailbox_error(
             args,
