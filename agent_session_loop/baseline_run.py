@@ -126,8 +126,10 @@ def run_baseline(
     total_budget = (
         float(total_timeout)
         if total_timeout is not None
+        # Budgeted over the checks that will run: a check two sessions share
+        # executes once, so it must not earn the total budget twice.
         else contracts.recipe_total_budget_seconds(
-            VerifyRecipe(checks=tuple(check for _, check in collected))
+            VerifyRecipe(checks=tuple(check for _, check, _, _ in resolved_checks))
         )
     )
     recorded_at = now or datetime.now(UTC).isoformat()

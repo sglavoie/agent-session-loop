@@ -378,6 +378,33 @@ class BaselineTotalBudgetTests(unittest.TestCase):
             self.assertFalse(result.total_exceeded)
             self.assertTrue(result.all_satisfied)
 
+    def test_a_check_two_sessions_share_is_budgeted_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            write_plan(
+                plan_dir,
+                ("pending", "pending"),
+                contracts_by_id={
+                    "1": _command_contract('["true"]', session="1"),
+                    "2": _command_contract('["true"]', session="2"),
+                },
+            )
+            seen_timeouts: list[float] = []
+
+            def fake_run_check(check, *, repo_root):
+                seen_timeouts.append(check.timeout_seconds)
+                return self._pass_result(check, 1.0)
+
+            with mock.patch.object(baseline_run, "run_check", fake_run_check):
+                result = baseline.run_baseline(plan_dir, repo_root)
+
+            # One execution, so the total is that one check's budget, not two.
+            self.assertEqual(1, len(seen_timeouts))
+            self.assertEqual(seen_timeouts[0], result.total_budget_seconds)
+
     def test_success_after_total_budget_overrun_is_unsatisfied(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
