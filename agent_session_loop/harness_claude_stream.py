@@ -53,7 +53,12 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
             return text
 
         rendered: list[str] = []
-        for line in text.splitlines():
+        # Split on "\n" alone, as the reader does: ``str.splitlines`` also
+        # breaks on U+2028, U+2029 and U+0085, which Node's JSON.stringify
+        # leaves unescaped inside strings, and would tear such a record into
+        # fragments that are logged verbatim instead of parsed.
+        for raw_line in text.split("\n"):
+            line = raw_line.removesuffix("\r")
             if not line.strip():
                 continue
             try:

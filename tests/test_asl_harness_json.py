@@ -51,6 +51,29 @@ class ClaudeStreamDecodingTests(unittest.TestCase):
 
         self.assertEqual(f"{line}\n", processor.process_chunk("stdout", f"{line}\n"))
 
+    def test_a_unicode_line_separator_inside_a_string_does_not_tear_the_record(
+        self,
+    ) -> None:
+        # Node's JSON.stringify leaves U+2028, U+2029 and U+0085 unescaped.
+        processor = harness_claude._ClaudeStreamJsonOutputProcessor()
+        echo = (
+            '{"type": "user", "message": {"role": "user", '
+            '"content": "SECRET one\u2028two\u2029three"}}\n'
+        )
+        result = (
+            '{"type": "result", "subtype": "success", "is_error": false, '
+            '"result": "done\u0085ok", "num_turns": 1}\r\n'
+        )
+
+        self.assertNotIn("SECRET", processor.process_chunk("stdout", echo))
+        processor.process_chunk("stdout", result)
+
+        self.assertTrue(processor.final_result_seen)
+        self.assertEqual(
+            "done\u0085ok\n",
+            processor.last_message(stdout="", stderr="", last_message_path=None),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
