@@ -66,12 +66,22 @@ def submit_correction(
             persisted=True,
             accepted=False,
         )
-        conflict = redirect_store_validation.replay_conflict(
-            recorded.feedback_digest,
-            recorded.target,
-            feedback=correction,
-            expected_target=target,
-        )
+        try:
+            conflict = redirect_store_validation.replay_conflict(
+                recorded.feedback_digest,
+                recorded.target,
+                feedback=correction,
+                expected_target=target,
+            )
+        except redirect_store_models.RedirectStoreError as error:
+            raise RedirectSubmitFailed(
+                error.reason,
+                error.message,
+                source=portable_controls.SOURCE_JOURNAL,
+                request_shaped=error.reason in REDIRECT_REQUEST_REASONS,
+                details=dict(error.details),
+                plan_dir=facts.plan_dir,
+            ) from error
         if conflict is not None:
             raise RedirectConflict(
                 conflict,

@@ -119,7 +119,7 @@ def validate_feedback(feedback: str) -> str:
         raise RedirectStoreError(
             ERROR_INVALID_FEEDBACK, "redirect feedback must be non-empty text"
         )
-    size = len(feedback.encode("utf-8"))
+    size = len(_feedback_bytes(feedback))
     if size > REDIRECT_MAX_FEEDBACK_BYTES:
         raise RedirectStoreError(
             ERROR_INVALID_FEEDBACK,
@@ -130,6 +130,18 @@ def validate_feedback(feedback: str) -> str:
             },
         )
     return feedback
+
+
+def _feedback_bytes(feedback: str) -> bytes:
+    # A lone surrogate is what a non-UTF-8 argv byte or a JSON ``\udcff``
+    # escape decodes to; it has no UTF-8 form, so it is refused as feedback
+    # rather than escaping as an encoding traceback.
+    try:
+        return feedback.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise RedirectStoreError(
+            ERROR_INVALID_FEEDBACK, "redirect feedback must be valid UTF-8 text"
+        ) from error
 
 
 def _validate_ttl(ttl_seconds: int | None) -> int:
@@ -152,7 +164,7 @@ def _validate_ttl(ttl_seconds: int | None) -> int:
 
 def feedback_digest(feedback: str) -> str:
     """Return the short digest that names a correction without carrying it."""
-    return hashlib.sha256(feedback.encode("utf-8")).hexdigest()[:32]
+    return hashlib.sha256(_feedback_bytes(feedback)).hexdigest()[:32]
 
 
 def new_operation_id() -> str:

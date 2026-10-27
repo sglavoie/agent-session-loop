@@ -128,6 +128,17 @@ class ReplayIdentityTests(WorkbenchRedirectTestCase):
         self.assertFalse(body["retryable"])
         self.assert_journal_unchanged()
 
+    def test_a_retry_with_a_lone_surrogate_is_refused_as_feedback(self) -> None:
+        """JSON can carry ``\\udcff``; it has no UTF-8 form to compare by."""
+        self.submitted()
+
+        status, body, _ = self.submit(text="fix it \udcff", wait_seconds=5.0)
+
+        self.assertEqual(400, status)
+        self.assertEqual(redirect_store_vocab.ERROR_INVALID_FEEDBACK, body["reason"])
+        self.assertFalse(body["retryable"])
+        self.assert_journal_unchanged()
+
     def test_the_refusal_hands_back_the_recorded_correction(self) -> None:
         """What the composer needs to offer reconciliation: the durable record."""
         self.submitted()

@@ -85,6 +85,28 @@ class SubmissionTests(RedirectStoreTestCase):
         )
         self.assertFalse(self.journal_path().exists())
 
+    def test_feedback_with_a_lone_surrogate_is_refused_not_raised(self) -> None:
+        # What a non-UTF-8 argv byte decodes to: no UTF-8 form exists for it.
+        feedback = "fix it \udcff"
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
+            self.submit(feedback=feedback)
+        self.assertEqual(
+            redirect_store_vocab.ERROR_INVALID_FEEDBACK, caught.exception.reason
+        )
+        self.assertFalse(self.journal_path().exists())
+
+        recorded = self.submit(feedback="fix it")
+        with self.assertRaises(redirect_store_models.RedirectStoreError) as caught:
+            redirect_store_validation.replay_conflict(
+                recorded.feedback_digest,
+                recorded.target,
+                feedback=feedback,
+                expected_target=None,
+            )
+        self.assertEqual(
+            redirect_store_vocab.ERROR_INVALID_FEEDBACK, caught.exception.reason
+        )
+
     def test_a_malformed_target_is_refused_before_anything_is_written(self) -> None:
         for target in (
             redirect_store_models.RedirectTarget("", "session-9", 1),
