@@ -301,12 +301,15 @@ def catalog_page_payload(
     """
     entries = [catalog_entry_payload(entry) for entry in page.entries]
     collected = list(warnings)
+    # A last page of a generation that could not read every plan is final
+    # locally, but the wire's ``final`` means "retire what this generation did
+    # not see", so such a page travels as neither.
     payload = _catalog_frame(
         entries,
         page=page,
         observed_at=observed_at,
         complete=page.complete,
-        final=page.final,
+        final=page.final and page.complete,
         source_generation=source_generation,
         warnings=collected,
     )
@@ -314,7 +317,8 @@ def catalog_page_payload(
         return payload
     kept = [entry for entry in entries if _refusal(_probe_catalog(entry)) is None]
     refused = len(entries) - len(kept)
-    collected.append(f"catalog: {refused} entries could not be published")
+    if refused:
+        collected.append(f"catalog: {refused} entries could not be published")
     return _catalog_frame(
         kept,
         page=page,

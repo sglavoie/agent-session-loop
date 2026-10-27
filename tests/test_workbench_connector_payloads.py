@@ -148,6 +148,25 @@ class PayloadTests(unittest.TestCase):
         self.assertNotIn("count", published)
         self.assertNotIn("limit", published)
 
+    def test_an_incomplete_generation_publishes_without_a_false_refusal(
+        self,
+    ) -> None:
+        # Final locally but not complete: the wire cannot carry that pair, so
+        # it travels as neither, and no entry was refused to say otherwise.
+        built = catalog.build_catalog(
+            [], warnings=["plan root unreadable"], complete=False
+        )
+        (page,) = built.pages()
+        self.assertTrue(page.final)
+        self.assertFalse(page.complete)
+        published = portable_payloads.catalog_page_payload(
+            page, observed_at=NOW, warnings=["plan root unreadable"]
+        )
+        self.assert_publishable(published)
+        self.assertFalse(published["complete"])
+        self.assertFalse(published["final"])
+        self.assertEqual(["plan root unreadable"], published["warnings"])
+
     def test_an_entry_the_wire_refuses_clears_both_complete_and_final(self) -> None:
         # Clearing `complete` alone would be refused on arrival, and a page
         # that lost a plan must not retire the plan it lost.
