@@ -260,6 +260,16 @@ class RunnerSignalAndHarnessConfigTests(unittest.TestCase):
             )
         )
 
+    def test_live_action_signal_sees_a_real_pause_after_a_noop(self) -> None:
+        signal = turn_execution_signals.live_action_signal(
+            "stdout",
+            "RUNNER_PAUSE: none\nRUNNER_PAUSE: needs-input - which database?\n",
+        )
+
+        self.assertIsNotNone(signal)
+        self.assertEqual("runner-pause", signal["reason"])
+        self.assertEqual("needs-input - which database?", signal["message"])
+
     def test_custom_harness_config_accepts_supported_shapes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "harnesses.json"

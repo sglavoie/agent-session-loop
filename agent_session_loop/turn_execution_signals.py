@@ -155,8 +155,17 @@ def live_action_signal(
     # Only the prefix branch is source-gated: an approval prompt on stderr is a
     # report about the harness, not an assertion the agent made about itself.
     if signal_source_trusted(stream_name):
-        pause = extract_prefixed_line(text, events.RUNNER_PAUSE_PREFIX)
-        if pause is not None and not is_noop_runner_pause(pause):
+        # Read through the post-turn parser so a no-op ``RUNNER_PAUSE: none``
+        # earlier in the chunk cannot hide a real pause after it.
+        pause = next(
+            (
+                message
+                for kind, message, _line in runner_signal_lines(text)
+                if kind == "pause"
+            ),
+            None,
+        )
+        if pause is not None:
             return {
                 "reason": "runner-pause",
                 "message": pause,
