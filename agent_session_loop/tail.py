@@ -50,7 +50,7 @@ from .tail_logs import (
     _read_log_lines,
     _read_new_log_text,
     _session_sort_key,
-    _set_offsets_to_eof,
+    _set_offsets_to_last_line,
     _target_key,
 )
 from .tail_models import (
@@ -96,7 +96,7 @@ __all__ = [
     "_read_log_lines",
     "_read_new_log_text",
     "_session_sort_key",
-    "_set_offsets_to_eof",
+    "_set_offsets_to_last_line",
     "_target_key",
     "DEFAULT_LINES",
     "POLL_INTERVAL_SECONDS",
@@ -374,9 +374,14 @@ class TailFollower:
         run_records = tail_records._event_records_for_run(records, run_id)
         targets = tail_logs._discover_targets(run_records, state_payload)
         offsets: dict[str, int] = {}
+        initial_finished = _has_run_finished(records, run_id) or _state_run_finished(
+            state_payload
+        )
         if self._initial_log_lines > 0:
-            self._emit_initial_log_replay(state_payload, targets)
-        tail_logs._set_offsets_to_eof(targets, offsets)
+            self._emit_initial_log_replay(
+                state_payload, targets, final=initial_finished
+            )
+        tail_logs._set_offsets_to_last_line(targets, offsets)
         return _TailFollowLoop(
             state_path=state_path,
             batches=batches,
@@ -386,9 +391,7 @@ class TailFollower:
             out=self._out,
             poll_interval=self._poll_interval,
             stop_event=self._stop_event,
-            initial_finished=(
-                _has_run_finished(records, run_id) or _state_run_finished(state_payload)
-            ),
+            initial_finished=initial_finished,
             include_events=self._include_events,
         )
 
@@ -396,6 +399,8 @@ class TailFollower:
         self,
         state_payload: dict[str, Any] | None,
         targets: dict[str, dict[str, Any]],
+        *,
+        final: bool,
     ) -> None:
         if self._initial_log_scope == "active":
             replay_targets = tail_logs._active_targets(state_payload)
@@ -414,7 +419,7 @@ class TailFollower:
                 str(value.get("stream")),
             ),
         ):
-            lines.extend(tail_logs._read_log_lines(target))
+            lines.extend(tail_logs._read_log_lines(target, final=final))
         if lines:
             tail_logs._print_lines(lines[-self._initial_log_lines :], self._out)
 
@@ -445,7 +450,12 @@ def tail_plan(
     run_id = tail_records._latest_run_id(state_payload, records)
     targets: dict[str, dict[str, Any]] = {}
     offsets: dict[str, int] = {}
+    initial_finished = _has_run_finished(records, run_id) or _state_run_finished(
+        state_payload
+    )
 
+    # A line still being written is left for the follow to print whole; only a
+    # replay nothing follows prints it as it stands.
     tail_logs._emit_recent(
         records=records,
         state_payload=state_payload,
@@ -454,6 +464,7 @@ def tail_plan(
         out=out,
         targets=targets,
         offsets=offsets,
+        final=not follow or initial_finished,
     )
 
     if not follow:
@@ -469,9 +480,7 @@ def tail_plan(
         out=out,
         poll_interval=poll_interval,
         stop_event=stop_event,
-        initial_finished=(
-            _has_run_finished(records, run_id) or _state_run_finished(state_payload)
-        ),
+        initial_finished=initial_finished,
     )
     follow_loop.run()
 

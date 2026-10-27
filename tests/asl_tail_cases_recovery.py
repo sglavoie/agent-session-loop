@@ -55,6 +55,118 @@ class TailFollowerRecoveryTests(TailFollowerTestCase):
             self.assertEqual(text.count("stdout session=1 turn=2 | third line"), 1)
             self.assertEqual(text.count("stdout session=1 turn=2 | fourth line"), 1)
 
+    def test_initial_replay_holds_back_a_line_still_being_written(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path, events_path = self.setup_tail_files(
+                tmp_dir
+            )
+            stdout_log = tmp_dir / "stdout.log"
+            stdout_log.write_text("first line\nhalf-wr", encoding="utf-8")
+            turn_payload = {
+                "run_id": "run-1",
+                "session": 1,
+                "session_id": "1",
+                "total_sessions": 1,
+                "turn_index": 1,
+                "stdout_path": str(stdout_log),
+            }
+            self.write_state_payload(
+                state_path,
+                {
+                    "run_id": "run-1",
+                    "active_turn": turn_payload,
+                    "turns": [turn_payload],
+                    "run_finished_at": None,
+                },
+            )
+            out = io.StringIO()
+            follower = tail.TailFollower(
+                plan_dir,
+                state_dir=state_dir,
+                out=out,
+                poll_interval=0.01,
+                include_events=False,
+                initial_log_lines=40,
+                initial_log_scope="active",
+            )
+            self.addCleanup(self.cleanup_follower, follower)
+
+            follower.start()
+            wait_until(lambda: "| first line" in out.getvalue())
+            self.append_log_line(stdout_log, "itten line\n")
+            wait_until(lambda: "| half-written line" in out.getvalue())
+            follower.stop()
+            self.assertTrue(follower.join(1.0))
+            self.assertEqual(
+                out.getvalue().splitlines(),
+                [
+                    "stdout session=1 turn=1 | first line",
+                    "stdout session=1 turn=1 | half-written line",
+                ],
+            )
+
+    def test_tail_recent_replay_leaves_an_unfinished_line_to_the_follow(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout_log = Path(tmp) / "stdout.log"
+            stdout_log.write_bytes(b"first\nhalf-wr")
+            record = {
+                "name": "turn_started",
+                "payload": {
+                    "run_id": "r",
+                    "session_id": "1",
+                    "turn_index": 1,
+                    "stdout_path": str(stdout_log),
+                },
+            }
+            targets: dict[str, dict[str, object]] = {}
+            offsets: dict[str, int] = {}
+            following = io.StringIO()
+            tail_logs._emit_recent(
+                records=[record],
+                state_payload=None,
+                run_id="r",
+                lines=40,
+                out=following,
+                targets=targets,
+                offsets=offsets,
+                final=False,
+            )
+            with stdout_log.open("ab") as log_file:
+                log_file.write(b"itten line\n")
+            for target in targets.values():
+                tail_logs._print_lines(
+                    tail_logs._read_new_log_text(target, offsets), following
+                )
+            log_lines = [
+                line for line in following.getvalue().splitlines() if "|" in line
+            ]
+            self.assertEqual(
+                log_lines,
+                [
+                    "stdout session=1 turn=1 | first",
+                    "stdout session=1 turn=1 | half-written line",
+                ],
+            )
+
+            # A replay nothing follows prints the line as it stands.
+            with stdout_log.open("ab") as log_file:
+                log_file.write(b"last-wr")
+            snapshot = io.StringIO()
+            tail_logs._emit_recent(
+                records=[record],
+                state_payload=None,
+                run_id="r",
+                lines=40,
+                out=snapshot,
+                targets={},
+                offsets={},
+                final=True,
+            )
+            self.assertIn("| last-wr", snapshot.getvalue())
+
     def test_tail_follower_initial_active_replay_skips_completed_turns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)

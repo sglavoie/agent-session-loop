@@ -95,29 +95,62 @@ def _log_prefix(target: dict[str, Any]) -> str:
     )
 
 
-def _read_log_lines(target: dict[str, Any]) -> list[str]:
+def _read_log_lines(target: dict[str, Any], *, final: bool = True) -> list[str]:
+    """Every line a log holds now, for the replay printed before following it.
+
+    Unless ``final``, an unterminated last line is held back: it is still being
+    written, and the follow that picks up at ``_set_offsets_to_last_line``
+    prints it once, whole, when its newline arrives.
+    """
     path = target["path"]
     if not isinstance(path, Path) or not path.exists():
         return []
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        data = path.read_bytes()
     except OSError:
         return []
+    if not final:
+        data = data[: data.rfind(b"\n") + 1]
+    text = data.decode("utf-8", "replace")
     prefix = _log_prefix(target)
     return [f"{prefix}{line}" for line in text.splitlines()]
 
 
-def _set_offsets_to_eof(
+def _last_line_end(path: Path) -> int:
+    """The offset just past a log's last newline, or 0 when it has none.
+
+    Read backwards a chunk at a time, so a long log costs one chunk and not a
+    full read just to find where its last complete line ends.
+    """
+    chunk_bytes = 64 * 1024
+    with path.open("rb") as log_file:
+        end = os.fstat(log_file.fileno()).st_size
+        while end > 0:
+            start = max(0, end - chunk_bytes)
+            log_file.seek(start)
+            newline = log_file.read(end - start).rfind(b"\n")
+            if newline >= 0:
+                return start + newline + 1
+            end = start
+    return 0
+
+
+def _set_offsets_to_last_line(
     targets: dict[str, dict[str, Any]],
     offsets: dict[str, int],
 ) -> None:
+    """Start following each log just past the last line a replay could print.
+
+    Not at end of file: a line still being written would then be followed from
+    its middle, and its first half — held back by the replay — never printed.
+    """
     for key, target in targets.items():
         path = target["path"]
         if not isinstance(path, Path) or not path.exists():
             offsets.setdefault(key, 0)
             continue
         try:
-            offsets[key] = path.stat().st_size
+            offsets[key] = _last_line_end(path)
         except OSError:
             offsets.setdefault(key, 0)
 
@@ -229,7 +262,13 @@ def _emit_recent(
     out: tail_models.TextSink,
     targets: dict[str, dict[str, Any]],
     offsets: dict[str, int],
+    final: bool,
 ) -> None:
+    """Print the run's last ``lines`` of activity and seed ``offsets``.
+
+    ``final`` says nothing will follow this replay, so a log's unterminated
+    last line is printed now instead of being left for a follow to complete.
+    """
     run_records = tail_records._event_records_for_run(records, run_id)
     targets.update(_discover_targets(run_records, state_payload))
     # Interleave each log with the events of the turn that wrote it, rather
@@ -240,7 +279,7 @@ def _emit_recent(
     after: dict[int, list[str]] = {}
     trailing: list[str] = []
     for target in sorted(targets.values(), key=_target_sort_key):
-        log_lines = _read_log_lines(target)
+        log_lines = _read_log_lines(target, final=final)
         anchor = anchors.get(_target_key(target["path"]))
         if anchor is None:
             trailing.extend(log_lines)
@@ -259,4 +298,4 @@ def _emit_recent(
     else:
         _print_lines(["No activity yet."], out)
 
-    _set_offsets_to_eof(targets, offsets)
+    _set_offsets_to_last_line(targets, offsets)
