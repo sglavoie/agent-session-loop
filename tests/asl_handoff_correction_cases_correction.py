@@ -228,7 +228,7 @@ class CorrectionTurnTests(unittest.TestCase):
         self.persistence.append_event(
             self.event_path,
             events.TURN_HANDOFF_CORRECTION_EVENT,
-            {"session_id": "1"},
+            {"session_id": "1", "run_id": "run-1"},
         )
         before_digests = self.artifact_digests()
 

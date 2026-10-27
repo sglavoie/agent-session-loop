@@ -259,8 +259,14 @@ def _preserved_review_artifact_evidence(plan_dir: Path) -> dict[str, Any] | None
     return evidence
 
 
-def _handoff_correction_attempt(event_path: str | Path, session_id: str) -> int:
-    """Return the 1-indexed attempt number the next correction would be."""
+def _handoff_correction_attempt(
+    event_path: str | Path, session_id: str, run_id: str
+) -> int:
+    """Return the 1-indexed attempt number the next correction would be.
+
+    The event log is the plan's and keeps every run's events, so only this
+    run's corrections count: a later run gets its own budget.
+    """
     try:
         data = Path(event_path).read_bytes()
     except OSError:
@@ -285,6 +291,8 @@ def _handoff_correction_attempt(event_path: str | Path, session_id: str) -> int:
             continue
         recorded = payload.get("session_id", payload.get("session"))
         if str(recorded) != str(session_id):
+            continue
+        if payload.get("run_id") != run_id:
             continue
         priors += 1
     return priors + 1
@@ -348,7 +356,7 @@ def _correct_malformed_handoff(
     )
     if defect is None:
         return None, None
-    attempt = _handoff_correction_attempt(event_path, session_id)
+    attempt = _handoff_correction_attempt(event_path, session_id, run_id)
     preserved_review = _preserved_review_artifact_evidence(before.plan_dir)
     evidence: dict[str, Any] = {
         "run_id": run_id,

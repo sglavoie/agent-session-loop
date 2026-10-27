@@ -7,10 +7,10 @@ class HandoffCorrectionAttemptTests(unittest.TestCase):
             "".join(f"{json.dumps(record)}\n" for record in records), encoding="utf-8"
         )
 
-    def correction(self, session_id: str) -> dict[str, object]:
+    def correction(self, session_id: str, run_id: str = "run-a") -> dict[str, object]:
         return {
             "name": events.TURN_HANDOFF_CORRECTION_EVENT,
-            "payload": {"session_id": session_id},
+            "payload": {"session_id": session_id, "run_id": run_id},
         }
 
     def test_missing_event_log_starts_at_one(self) -> None:
@@ -18,7 +18,7 @@ class HandoffCorrectionAttemptTests(unittest.TestCase):
             self.assertEqual(
                 1,
                 handoff_correction._handoff_correction_attempt(
-                    Path(tmp) / "none.jsonl", "1"
+                    Path(tmp) / "none.jsonl", "1", "run-a"
                 ),
             )
 
@@ -34,7 +34,7 @@ class HandoffCorrectionAttemptTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(
-                3, handoff_correction._handoff_correction_attempt(path, "1")
+                3, handoff_correction._handoff_correction_attempt(path, "1", "run-a")
             )
 
     def test_other_sessions_do_not_consume_attempts(self) -> None:
@@ -42,7 +42,24 @@ class HandoffCorrectionAttemptTests(unittest.TestCase):
             path = Path(tmp) / "events.jsonl"
             self.write_events(path, [self.correction("2"), self.correction("3")])
             self.assertEqual(
-                1, handoff_correction._handoff_correction_attempt(path, "1")
+                1, handoff_correction._handoff_correction_attempt(path, "1", "run-a")
+            )
+
+    def test_an_earlier_runs_corrections_do_not_consume_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            self.write_events(
+                path,
+                [
+                    self.correction("1", run_id="run-a"),
+                    {"name": "run_started", "payload": {"run_id": "run-b"}},
+                ],
+            )
+            self.assertEqual(
+                1, handoff_correction._handoff_correction_attempt(path, "1", "run-b")
+            )
+            self.assertEqual(
+                2, handoff_correction._handoff_correction_attempt(path, "1", "run-a")
             )
 
     def test_legacy_session_key_is_counted(self) -> None:
@@ -53,12 +70,12 @@ class HandoffCorrectionAttemptTests(unittest.TestCase):
                 [
                     {
                         "name": events.TURN_HANDOFF_CORRECTION_EVENT,
-                        "payload": {"session": "1"},
+                        "payload": {"session": "1", "run_id": "run-a"},
                     }
                 ],
             )
             self.assertEqual(
-                2, handoff_correction._handoff_correction_attempt(path, "1")
+                2, handoff_correction._handoff_correction_attempt(path, "1", "run-a")
             )
 
     def test_corrupt_lines_are_skipped(self) -> None:
@@ -69,7 +86,7 @@ class HandoffCorrectionAttemptTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(
-                2, handoff_correction._handoff_correction_attempt(path, "1")
+                2, handoff_correction._handoff_correction_attempt(path, "1", "run-a")
             )
 
     def test_undecodable_and_over_deep_lines_are_skipped(self) -> None:
@@ -83,7 +100,7 @@ class HandoffCorrectionAttemptTests(unittest.TestCase):
                 + b"\n"
             )
             self.assertEqual(
-                2, handoff_correction._handoff_correction_attempt(path, "1")
+                2, handoff_correction._handoff_correction_attempt(path, "1", "run-a")
             )
 
     def test_correction_note_names_the_defect_and_the_repair(self) -> None:
