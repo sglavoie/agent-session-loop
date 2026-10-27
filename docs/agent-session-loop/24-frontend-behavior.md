@@ -123,8 +123,9 @@ Pages:
   when that request succeeds. If the detail fetch fails, the compact
   fallback remains visible when available; otherwise the panel renders a
   deterministic "Recovery unavailable" card. Reply-needed recoveries
-  load the embedded reply form through `/api/questions` and submit only
-  through `/api/reply`. Launch and unlock action cards call the same
+  load the embedded reply form through `/api/questions` and submit
+  through `/api/reply`, or through `/api/question-reply` when the run is
+  waiting on a live question. Launch and unlock action cards call the same
   `/api/launch` and `/api/unlock` handlers as the ordinary controls;
   inspect and navigate actions scroll/focus existing detail sections.
 

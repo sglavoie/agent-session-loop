@@ -711,24 +711,6 @@ class NumericFlagValidationTests(unittest.TestCase):
                 "--incident-id",
                 "positive",
             ),
-            (["maintenance", "install", "--hour", "25"], "--hour", "0 to 23"),
-            (["maintenance", "install", "--minute", "-1"], "--minute", "0 to 59"),
-            (["maintenance", "install", "--minute", "60"], "--minute", "0 to 59"),
-            (
-                ["maintenance", "run", "--max-runtime-seconds", "nan"],
-                "--max-runtime-seconds",
-                "positive",
-            ),
-            (
-                ["maintenance", "run", "--max-runtime-seconds", "-1"],
-                "--max-runtime-seconds",
-                "positive",
-            ),
-            (
-                ["maintenance", "run", "--max-age-days", "inf"],
-                "--max-age-days",
-                "non-negative",
-            ),
             (
                 [
                     "workbench",
@@ -779,6 +761,30 @@ class NumericFlagValidationTests(unittest.TestCase):
             (
                 ["sessions", "--limit", "-1"],
                 "--limit must be a positive integer; got '-1'",
+            ),
+            (
+                ["maintenance", "install", "--hour", "25"],
+                "--hour must be an integer from 0 to 23; got '25'",
+            ),
+            (
+                ["maintenance", "install", "--minute", "-1"],
+                "--minute must be an integer from 0 to 59; got '-1'",
+            ),
+            (
+                ["maintenance", "install", "--minute", "60"],
+                "--minute must be an integer from 0 to 59; got '60'",
+            ),
+            (
+                ["maintenance", "run", "--max-runtime-seconds", "nan"],
+                "--max-runtime-seconds must be a finite, positive number; got 'nan'",
+            ),
+            (
+                ["maintenance", "install", "--max-runtime-seconds", "0"],
+                "--max-runtime-seconds must be a finite, positive number; got '0'",
+            ),
+            (
+                ["maintenance", "run", "--max-age-days", "inf"],
+                "--max-age-days must be a finite, non-negative number; got 'inf'",
             ),
         )
         with tempfile.TemporaryDirectory() as tmp:

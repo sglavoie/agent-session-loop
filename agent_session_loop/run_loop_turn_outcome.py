@@ -81,6 +81,11 @@ def _settle_turn_outcome(frame: RunFrame) -> RunResult | LoopSignal | None:
             frame.ctx,
             before=frame.before,
             after=frame.after,
+            session_id=frame.session_id,
+            turn_index=frame.turn_index,
+            result=frame.result,
+            turn_payload=frame.turn_payload,
+            paths=frame.paths,
             session_details=frame.session_details,
         )
         return LoopSignal.BREAK
@@ -123,7 +128,12 @@ def _settle_turn_outcome(frame: RunFrame) -> RunResult | LoopSignal | None:
             frame.ctx,
             before=frame.before,
             after=frame.after,
+            session_id=frame.session_id,
             session_label=frame.session_label,
+            turn_index=frame.turn_index,
+            result=frame.result,
+            turn_payload=frame.turn_payload,
+            paths=frame.paths,
             session_details=frame.session_details,
         )
         return LoopSignal.BREAK

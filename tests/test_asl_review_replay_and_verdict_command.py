@@ -231,6 +231,10 @@ class ReviewVerdictCommandTests(unittest.TestCase):
 
             self.assertFalse(payload["ok"])
             self.assertEqual(review.REVIEW_REASON_MISSING, payload["reason"])
+            self.assertEqual(
+                "no final review has been written yet (final-review.md does not exist)",
+                payload["error"],
+            )
             self.assertEqual("", payload["summary"])
             self.assertEqual(1, len(payload["next_steps"]))
             self.assertIn("--review-harness", payload["next_steps"][0])

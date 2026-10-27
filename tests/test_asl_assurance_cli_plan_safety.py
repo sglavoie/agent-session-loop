@@ -136,6 +136,8 @@ class AssurancePlanTests(fixtures.AssurancePlanCase):
                 "assurance_projection",
                 # Refusal wording only; it imports nothing beyond the stdlib.
                 "cli_parser_support",
+                # The plan parser's fence rule; it imports only session ids.
+                "contract_models",
                 "harnesses",
                 "state",
                 "state_plan_refs",

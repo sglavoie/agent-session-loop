@@ -41,6 +41,7 @@ class ParserReviewGuardAndResumeOverlayTests(unittest.TestCase):
             "inbox": "asl inbox reply --help",
             "outbox": "asl outbox supervise --help",
             "assurance": "asl assurance list --help",
+            "maintenance": "asl maintenance run --help",
         }
 
         for group, leaf_example in groups.items():
@@ -53,6 +54,9 @@ class ParserReviewGuardAndResumeOverlayTests(unittest.TestCase):
                     parser.parse_args([group, "--help"])
                 self.assertEqual(0, printed.exception.code)
                 help_text = group_help.getvalue()
+                # The raw-formatted epilogue is wrapped by hand, so compare
+                # its sentences with the line breaks folded to spaces.
+                flat_help = " ".join(help_text.split())
 
                 if group == "workbench":
                     # The workbench parent installs the serve flags and runs
@@ -65,13 +69,13 @@ class ParserReviewGuardAndResumeOverlayTests(unittest.TestCase):
                     self.assertIn(
                         "This help lists the `asl workbench` leaf commands plus "
                         "the flags the bare `asl workbench` form accepts.",
-                        help_text,
+                        flat_help,
                     )
                     self.assertIn(
                         "Bare `asl workbench` runs `asl workbench serve` with "
                         "those flags; every other leaf has its own, so read "
                         f"`{leaf_example}` or that leaf's help.",
-                        help_text,
+                        flat_help,
                     )
                 else:
                     self.assertNotIn("--host HOST", help_text)
@@ -84,6 +88,15 @@ class ParserReviewGuardAndResumeOverlayTests(unittest.TestCase):
                         f"`{leaf_example}` for its flags.",
                         help_text,
                     )
+                # The raw formatter prints the description and epilogue as
+                # written (flush left), so they must be wrapped in the source;
+                # argparse wraps the indented rows to the terminal itself.
+                raw_lines = [
+                    line
+                    for line in help_text.splitlines()
+                    if line and not line[0].isspace() and not line.startswith("usage:")
+                ]
+                self.assertLessEqual(max(map(len, raw_lines)), 79, help_text)
                 self.assertEqual(
                     group in ("control", "inbox", "outbox"),
                     "Run `asl supervisor-guide` for the whole supervision workflow."

@@ -270,6 +270,17 @@ class FrameBoundTests(unittest.TestCase):
         self.assertEqual([payload], _frames_from(payload + b"\n"))
         self.assertEqual([payload], _frames_from(payload + b"\n", read_size=4096))
 
+    def test_a_crlf_terminator_does_not_count_against_the_ceiling(self) -> None:
+        payload = b"y" * bridge_protocol.MAX_FRAME_BYTES
+
+        self.assertEqual([payload], _frames_from(payload + b"\r\n"))
+        self.assertEqual([payload], _frames_from(payload + b"\r\n", read_size=4096))
+
+    def test_an_unterminated_last_frame_over_the_ceiling_is_rejected(self) -> None:
+        payload = b"z" * (bridge_protocol.MAX_FRAME_BYTES + 1)
+
+        self.assertEqual([bridge_server._FrameTooLarge], _frames_from(payload))
+
     def test_one_byte_over_the_ceiling_is_rejected_across_reads(self) -> None:
         payload = b"z" * (bridge_protocol.MAX_FRAME_BYTES + 1)
 

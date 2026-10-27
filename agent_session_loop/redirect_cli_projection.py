@@ -1,4 +1,5 @@
 # ruff: noqa: F403, F405
+from .cli_parser_support import flag_refusal
 from .redirect_cli_vocab import *
 
 
@@ -247,7 +248,11 @@ def _validated_timeout(
             command_name=command_name,
             text_label=text_label,
             reason=ERROR_INVALID_TIMEOUT,
-            error=f"--timeout must be between 0 and {maximum_seconds:g} seconds",
+            error=flag_refusal(
+                "--timeout",
+                f"must be between 0 and {maximum_seconds:g} seconds",
+                requested,
+            ),
         )
         return None
     return timeout
@@ -275,10 +280,11 @@ def _ttl_is_valid(
             command_name=command_name,
             text_label=text_label,
             reason=redirect_store_vocab.ERROR_INVALID_TTL,
-            error=(
-                f"--ttl must be between "
-                f"{redirect_store_vocab.REDIRECT_MIN_TTL_SECONDS} and "
-                f"{redirect_store_vocab.REDIRECT_MAX_TTL_SECONDS} seconds"
+            error=flag_refusal(
+                "--ttl",
+                f"must be between {redirect_store_vocab.REDIRECT_MIN_TTL_SECONDS} "
+                f"and {redirect_store_vocab.REDIRECT_MAX_TTL_SECONDS} seconds",
+                requested,
             ),
         )
         return False

@@ -6,6 +6,7 @@ import argparse
 from typing import Any
 
 from . import cli_common, control_queue, events, harnesses
+from .cli_parser_support import flag_refusal
 from .control_cli_enqueue import _enqueue_and_report
 from .control_cli_status import (
     _pending_after_current,
@@ -94,10 +95,12 @@ def control_abort_from_args(args: argparse.Namespace) -> int:
             command_name=COMMAND_ABORT,
             text_label="control abort",
             reason=control_queue.REJECT_INVALID_GRACE,
-            error=(
-                "--grace must be a whole number of seconds between "
+            error=flag_refusal(
+                "--grace",
+                "must be a whole number of seconds between "
                 f"{control_queue.MIN_ABORT_GRACE_SECONDS} and "
-                f"{control_queue.MAX_ABORT_GRACE_SECONDS}"
+                f"{control_queue.MAX_ABORT_GRACE_SECONDS}",
+                grace_seconds,
             ),
             details={"grace_seconds": repr(grace_seconds)},
         )

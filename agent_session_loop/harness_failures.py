@@ -190,7 +190,11 @@ _FAILURE_CLASSIFICATION_RULES: tuple[tuple[str, str, bool, re.Pattern[str]], ...
             # catch. The window is bounded so the two words stay one clause.
             r"connection(?:\s+\w+){0,3}\s+(?:closed|reset|refused|dropped)|"
             r"econnreset|econnrefused|etimedout|"
-            r"\b50[234]\b|bad gateway|service unavailable|"
+            # A gateway status counts only beside the word that names it a
+            # status, for the same reason ASI-135 anchors 500: a bare 503 is
+            # as likely a line number as a response.
+            r"\b(?:http(?:/[\d.]+)?|status(?:\s+code)?|error)[\s:=]*50[234]\b|"
+            r"bad gateway|service unavailable|"
             r"gateway timeout|temporarily unavailable|"
             r"network error|stream (?:error|disconnected)|"
             r"read ECONNRESET|socket hang up|"

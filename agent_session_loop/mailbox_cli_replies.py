@@ -22,6 +22,7 @@ from . import (
     mailbox_vocabulary,
     responses,
 )
+from .cli_parser_support import flag_refusal
 
 
 def inbox_reply_from_args(args: argparse.Namespace) -> int:
@@ -151,7 +152,7 @@ def inbox_resolve_from_args(args: argparse.Namespace) -> int:
             command_name=mailbox_cli_constants.COMMAND_INBOX_RESOLVE,
             text_label="inbox resolve",
             reason=mailbox_constants.REJECT_INVALID_ACTION,
-            error="--action must be either continue or pause",
+            error=flag_refusal("--action", "must be either continue or pause", action),
         )
         return 1
     note_ok, note = mailbox_cli_args.optional_note_from_args(args)

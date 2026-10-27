@@ -152,6 +152,20 @@ class BridgeProjectionFailureBackoffTests(unittest.TestCase):
         )
         return session, clock, calls
 
+    def test_the_first_projection_comes_due_without_a_snapshot_request(
+        self,
+    ) -> None:
+        # A client that only listens never polls the session itself, so the
+        # first deadline must hold still rather than recede with the clock.
+        session, clock, _ = self._session(["ok"])
+        self.assertEqual(1.0, session.select_timeout())
+
+        clock[0] += 0.75
+        self.assertEqual(0.25, session.select_timeout())
+        clock[0] += 0.25
+        self.assertEqual(0.0, session.select_timeout())
+        self.assertIsNotNone(session.poll())
+
     def test_a_failed_projection_owes_a_bounded_nonzero_delay(self) -> None:
         session, clock, _ = self._session(["ok"])
         session.poll()

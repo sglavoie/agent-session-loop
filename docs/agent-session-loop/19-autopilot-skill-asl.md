@@ -281,7 +281,7 @@ its plan-directory and repository-root placeholders already substituted, so a
 readiness pause names the exact command that clears it — for example
 `asl baseline <plan-dir> --cwd <repo-root>` for missing baseline evidence. A
 runner-side refusal carries findings rather than hints in its details, so the
-stable pause reason resolves one from `preflight.RUNTIME_REPAIR_HINTS` instead —
+stable pause reason resolves one from `preflight_runtime_hints.RUNTIME_REPAIR_HINTS` instead —
 that fallback is what keeps an `inspect` pause from telling an operator to look
 without saying where. `redirect-successor-blocked` is the reason that needs it
 most, because it is the one pause no reply clears and no flag overrides: its hint

@@ -39,6 +39,29 @@ class DiffParsingTests(unittest.TestCase):
         # Each section carries its own header, so the sections partition the diff.
         self.assertEqual(sum(len(f.content) for f in files), len(raw))
 
+    def test_hunk_lines_that_look_like_file_headers_are_still_counted(
+        self,
+    ) -> None:
+        # Removing front-matter `---` or a `-- comment`, or adding `++i`,
+        # makes a hunk line start with `---`/`+++`; only the headers before
+        # the first hunk are not changes.
+        raw = (
+            "diff --git a/doc.md b/doc.md\n"
+            "index 1111111..2222222 100644\n"
+            "--- a/doc.md\n"
+            "+++ b/doc.md\n"
+            "@@ -1,4 +1,1 @@\n"
+            "----\n"
+            "--- comment\n"
+            "-title: x\n"
+            "----\n"
+            "+++counter;\n"
+        )
+
+        files = commit_message._parse_diff_into_files(raw)
+
+        self.assertEqual((1, 4), (files[0].additions, files[0].deletions))
+
     def test_parses_empty_and_headerless_diffs_as_no_files(self) -> None:
         self.assertEqual(commit_message._parse_diff_into_files(""), [])
         self.assertEqual(commit_message._parse_diff_into_files("   \n\n"), [])

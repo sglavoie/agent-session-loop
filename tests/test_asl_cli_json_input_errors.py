@@ -117,6 +117,21 @@ class InputErrorWordingTests(unittest.TestCase):
             (("plans", "--stale-days", "-1", *state), "--stale-days", "-1"),
             (("metrics", "--since-days", "0", *state), "--since-days", "0"),
             (("gc", "--max-age-days", "-1", *state), "--max-age-days", "-1"),
+            (
+                ("maintenance", "run", "--max-age-days", "-5", *state),
+                "--max-age-days",
+                "-5",
+            ),
+            (
+                ("maintenance", "run", "--max-runtime-seconds", "0", *state),
+                "--max-runtime-seconds",
+                "0",
+            ),
+            (
+                ("maintenance", "install", "--hour", "25", *state),
+                "--hour",
+                "25",
+            ),
             (("commit", "--timeout", "-1"), "--timeout", "-1"),
             (("assurance", "list", "--limit", "0", *state), "--limit", "0"),
             (("sessions", "--limit", "0", *state), "--limit", "0"),
@@ -162,6 +177,42 @@ class InputErrorWordingTests(unittest.TestCase):
                 payload = self._json_refusal(*argv)
                 self.assertEqual("input-error", payload["reason"])
                 self.assertIn(f"{flag} must be", payload["error"])
+                self.assertTrue(
+                    payload["error"].endswith(f"; got '{value}'"), payload["error"]
+                )
+
+    def test_control_and_inbox_refusals_echo_the_value_given(self) -> None:
+        plan = str(self.plan_dir)
+        state = ("--state-dir", str(self.state_dir))
+        cases = (
+            (("control", "abort", plan, "--grace", "-1", *state), "--grace", "-1"),
+            (
+                ("control", "redirect", plan, "--text", "x", "--ttl", "0", *state),
+                "--ttl",
+                "0",
+            ),
+            (
+                ("control", "redirect", plan, "--text", "x", "--timeout", "99"),
+                "--timeout",
+                "99",
+            ),
+            (
+                ("control", "stop-after-current", plan, "--wait", "--timeout", "-3"),
+                "--timeout",
+                "-3",
+            ),
+            (
+                ("inbox", "resolve", plan, "--to", "q1", "--action", "bogus", *state),
+                "--action",
+                "bogus",
+            ),
+        )
+        for argv, flag, value in cases:
+            with self.subTest(argv=argv):
+                payload = self._json_refusal(*argv)
+                self.assertTrue(
+                    payload["error"].startswith(f"{flag} must be"), payload["error"]
+                )
                 self.assertTrue(
                     payload["error"].endswith(f"; got '{value}'"), payload["error"]
                 )

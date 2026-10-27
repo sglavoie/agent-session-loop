@@ -75,7 +75,7 @@ Run the baseline preflight using the Bash tool:
 asl preflight <plan-dir> --json [--cwd <root>] [--harness <name>] [--commit-per-session|--commit-at-end] [--state-dir <dir>] [--max-pending-sessions <n>]
 ```
 
-Capture stdout. Parse the JSON body. Expect the stable shape emitted by `agent_session_loop.preflight._preflight_payload_fields`:
+Capture stdout. Parse the JSON body. Expect the stable shape emitted by `agent_session_loop.preflight_output._preflight_payload_fields`:
 
 - `ok` (bool) — `True` only when every finding is green
 - `findings` (array) — each item has `severity`, `category`, `message`, optional `session_id`/`path`/`line`/`detail`

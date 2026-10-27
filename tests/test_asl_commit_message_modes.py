@@ -198,6 +198,10 @@ class CommitHandlerTests(fixtures.CommitHandlerCase):
 
         self.assertEqual(1, code)
         self.assertIn("cannot read message file", err)
+        # The OS reason alone, so the path is printed once, not twice.
+        self.assertIn("absent.txt: No such file or directory", err)
+        self.assertNotIn("Errno", err)
+        self.assertEqual(1, err.count("absent.txt"))
 
     def test_contradictory_mode_flags_are_refused(self) -> None:
         combinations = (

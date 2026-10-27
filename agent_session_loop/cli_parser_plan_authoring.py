@@ -103,7 +103,7 @@ def _add_plan_authoring_commands(
         default="auto",
         help=(
             "Skill-invocation prefix for generated files (auto detects the "
-            "invoking harness; errors if undetectable)"
+            "invoking harness; errors if undetectable; default: auto)"
         ),
     )
     split_parser.add_argument(
@@ -165,14 +165,17 @@ def _add_plan_authoring_commands(
         "--harness",
         choices=harnesses.HARNESS_NAMES,
         default="codex",
-        help="Implementation harness for the resulting `asl run` command",
+        help=(
+            "Implementation harness for the resulting `asl run` command "
+            "(default: codex)"
+        ),
     )
     prepare_parser.add_argument(
         "--validator-harness",
         dest="validator_harness",
         choices=harnesses.HARNESS_NAMES,
         default="codex",
-        help="Harness used to run preparation validation workers",
+        help=("Harness used to run preparation validation workers (default: codex)"),
     )
     prepare_parser.add_argument(
         "--validator-model",

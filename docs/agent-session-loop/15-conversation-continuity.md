@@ -49,7 +49,9 @@ that do not:
   Skipping it and answering from an older record is exactly the silent selection
   of a stale conversation this ledger exists to prevent.
 
-Every non-`resumable` state requires user input. The way out is an explicit,
+Apart from `absent`, which proceeds by opening a new conversation because a
+session's first turn continues nothing, every non-`resumable` state requires
+user input. The way out is an explicit,
 one-use operator authorization carried on a continuation intent, and that intent
 has no serialization at all — the value that carries the fresh-conversation
 override is one this code cannot write down, so nothing can rehydrate it into a

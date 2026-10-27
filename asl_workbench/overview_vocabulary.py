@@ -18,8 +18,11 @@ no clock of its own -- the moment is always an argument.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
+
+from .timestamps import iso_epoch
 
 __all__ = [
     "ACTIVE_WINDOW_SECONDS",
@@ -40,6 +43,7 @@ __all__ = [
     "SORT_MODES",
     "UNGROUPED_PROJECT",
     "OverviewError",
+    "activity_at",
     "harness_of",
     "plan_projects",
     "plan_search_text",
@@ -200,6 +204,40 @@ def plan_label(row: Mapping[str, Any]) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _activity_epoch(value: Any) -> float | None:
+    """One activity timestamp as a number, accepting either publication.
+
+    The Mac publishes ISO-8601 strings and the Pi publishes epoch seconds.
+    Neither is converted at the boundary because both are the honest shape for
+    the store behind them, so the comparison absorbs the difference.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        # NaN compares false against everything and an infinity outranks every
+        # real moment, so either would scramble the sort and the page cursor.
+        return float(value) if math.isfinite(value) else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    try:
+        number = float(text)
+    except ValueError:
+        pass
+    else:
+        return number if math.isfinite(number) else None
+    return iso_epoch(text)
+
+
+def activity_at(row: Mapping[str, Any]) -> float | None:
+    """When this row last moved, by whichever field its mode filled in."""
+    for key in ("last_activity_at", "run_started_at", "last_observed_at"):
+        moment = _activity_epoch(row.get(key))
+        if moment is not None:
+            return moment
+    return None
 
 
 def plan_search_text(row: Mapping[str, Any]) -> str:

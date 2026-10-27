@@ -15,6 +15,7 @@ from .observation import (
     OBSERVATION_UNCONFIRMED,
     export_catalog_entry,
 )
+from .overview_vocabulary import DEFAULT_SORT_MODE, activity_at, plan_label
 from .store_base import StoreBase
 from .store_columns import (
     _CATALOG_BOOLEANS,
@@ -35,6 +36,40 @@ from .store_values import (
 def _like_literal(text: str) -> str:
     """``text`` as a LIKE pattern that matches only itself, escaped with ``\\``."""
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _sort_activity(last_activity_at: Any, observed_at: Any) -> float | None:
+    """A stored entry's activity moment, read exactly as the local sort reads it."""
+    return activity_at(
+        {"last_activity_at": last_activity_at, "last_observed_at": observed_at}
+    )
+
+
+def _sort_label(display_label: Any, title: Any) -> str:
+    """A stored entry's label, folded exactly as the local sort folds it."""
+    return plan_label({"display_label": display_label, "title": title}).casefold()
+
+
+_SORT_RANK = "COALESCE(e.urgency_rank, 990)"
+_SORT_LABEL = "wb_sort_label(e.display_label, e.title)"
+_SORT_MOMENT = "wb_sort_activity(e.last_activity_at, e.observed_at)"
+
+#: Each sort mode as an ``ORDER BY``, mirroring ``overview_selection._sort_key``
+#: term for term. The order has to be decided before ``LIMIT``: sorting a page
+#: the database cut by urgency would answer ``sort=recent`` with the most urgent
+#: rows, newest first. ``path`` has no path to sort by here -- the Pi never sees
+#: one -- so it falls through to rank and label, as the local key does for a
+#: row with an empty ``plan_dir``. The trailing keys only make paging stable.
+_CATALOG_ORDER: dict[str, str] = {
+    "urgency": f"{_SORT_RANK}, {_SORT_MOMENT} IS NULL, {_SORT_MOMENT} DESC, "
+    f"{_SORT_LABEL}",
+    "recent": f"{_SORT_MOMENT} IS NULL, {_SORT_MOMENT} DESC, {_SORT_RANK}, "
+    f"{_SORT_LABEL}",
+    "label": f"{_SORT_LABEL}, {_SORT_RANK}",
+    "path": f"{_SORT_RANK}, {_SORT_LABEL}",
+    "oldest": f"{_SORT_MOMENT} IS NOT NULL, {_SORT_MOMENT} ASC, {_SORT_RANK}, "
+    f"{_SORT_LABEL}",
+}
 
 
 class CatalogReads(StoreBase):
@@ -121,10 +156,11 @@ class CatalogReads(StoreBase):
         states: Sequence[str] | None = None,
         include_absent: bool = False,
         plan_key: str | None = None,
+        sort: str = DEFAULT_SORT_MODE,
         offset: int = 0,
         limit: int = DEFAULT_READ_LIMIT,
     ) -> list[dict[str, Any]]:
-        """Stored catalog entries, newest generation first, one page at a time.
+        """Stored catalog entries in ``sort`` order, one page at a time.
 
         Carried-over Companion labels are never returned here. They belong to
         :data:`LEGACY_GENERATION`, which is not a generation anybody observed:
@@ -139,15 +175,28 @@ class CatalogReads(StoreBase):
             include_absent=include_absent,
             plan_key=plan_key,
         )
+        order = _CATALOG_ORDER.get(sort)
+        if order is None:
+            raise ValueError(f"unknown sort mode {sort!r}")
         parameters.extend([_clamp_limit(limit), max(0, int(offset))])
         with self.reading() as connection:
+            # Registered per read rather than per connection, because a store
+            # may be handed a connection it did not open. The functions are the
+            # local sort's own readers, so both modes order a row the same way.
+            connection.create_function(
+                "wb_sort_activity", 2, _sort_activity, deterministic=True
+            )
+            connection.create_function(
+                "wb_sort_label", 2, _sort_label, deterministic=True
+            )
             rows = connection.execute(
                 "SELECT e.*, c.catalog_generation AS current_generation, "
                 "c.catalog_complete AS current_complete "
                 "FROM catalog_entry e "
                 "JOIN connector c ON c.connector_id = e.connector_id "
                 f"WHERE {' AND '.join(clauses)} "
-                "ORDER BY e.urgency_rank ASC, e.plan_key ASC LIMIT ? OFFSET ?",
+                f"ORDER BY {order}, e.plan_key ASC, e.connector_id ASC "
+                "LIMIT ? OFFSET ?",
                 parameters,
             ).fetchall()
         exported: list[dict[str, Any]] = []

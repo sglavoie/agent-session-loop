@@ -133,7 +133,7 @@ def run_baseline(
     recorded_at = now or datetime.now(UTC).isoformat()
     registry_digest = verification_context.registry_digest
     if verification_context.workspace is None:
-        fingerprint = repository_fingerprint(canonical_cwd)
+        fingerprint = repository_fingerprint(canonical_cwd, canonical_dir)
         aggregate_fingerprint = None
         repository_evidence_available: bool | None = None
     else:

@@ -107,7 +107,7 @@ Error codes are a closed set — branch on `code`, not on `message`:
 | --- | --- | --- |
 | `malformed-json` | Frame was not parseable JSON. `id` is `null`. | no |
 | `invalid-request` | Missing/empty/over-64-character `id`, missing `method`, non-object `params`, or a frame nested too deeply to decode (`id` is `null`). | no |
-| `unsupported-protocol` | `protocol` is not 2. `details.supported` lists accepted versions. | no |
+| `unsupported-protocol` | `protocol` is not 2. `details.supported` is the accepted version as a string (`"2"`). | no |
 | `unknown-method` | Method not in the capability list. | no |
 | `frame-too-large` | Inbound line exceeded `max_frame_bytes`. | no |
 | `internal-error` | Projection raised, or a handler failed unexpectedly. | yes |
@@ -121,6 +121,7 @@ with the CLI and the Workbench so a client sees one vocabulary:
 | --- | --- | --- |
 | `stale-action-token` | The row the request was built from no longer describes the plan. `details.expected_fingerprint` is the current token. | yes |
 | `action-not-permitted` | The action is not in this run's current `actions`. | no |
+| `invalid-action` | The requested intervention action is not one the service knows. | no |
 | `no-active-run` | No live run holds the plan. | no |
 | `run-mismatch` | `params.run_id` is not the current run. | no |
 | `not-paused` | `run.resume` on a run that is not paused. | no |

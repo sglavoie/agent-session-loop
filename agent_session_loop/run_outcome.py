@@ -288,7 +288,8 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
         print(
             "Spark: "
             f"{'enabled' if spark.get('enabled') else 'disabled'}; "
-            f"route {route_decision or 'none'}; {spark.get('reason', 'unknown')}"
+            f"route {route_decision or 'none'}; "
+            f"availability {spark.get('reason', 'unknown')}"
         )
         if spark.get("retry_at"):
             print(f"Spark retry: {spark['retry_at']}")

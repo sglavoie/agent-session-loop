@@ -154,6 +154,36 @@ A polish and hardening round after the public release.
   oversized transport numbers and counts are refused fields rather than 500s;
   a repository path holding `|` is refused; a CRLF review session keeps its
   line endings when re-scoped.
+- Run loop: a turn that times out or is interrupted takes back a completion
+  claim nothing verified, as a nonzero exit already did, so a relaunch no
+  longer skips that session; a check whose location escapes its root during
+  verification reverts the session and pauses instead of ending the run with
+  the claim intact; a bare 502/503/504 in a turn's output (a line number, a
+  port) no longer makes an unknown failure retryable.
+- Supervision and bridge: `outbox supervise` drops a carried question whose
+  wait ended during the carry delay instead of reporting an unanswerable
+  ACTION; the bridge emits `runs.changed` to a client that never asked for a
+  snapshot; a CRLF frame of exactly the ceiling is accepted and an
+  unterminated last frame over it is refused; `outbox wait --since` above
+  the mailbox's integer ceiling is an `invalid-since` input error.
+- Plans and evidence: the scope-field scanner and the assurance draft's
+  heading check close fences by the plan parser's rule; single-repository
+  baseline evidence ignores a plan directory inside the repository, so it is
+  not stale the moment it is written; commit-message diff counts include hunk
+  lines that start with `---` or `+++`.
+- Workbench: the remote queue sorts before it pages; the label sort orders
+  rows by the label they show; a `#entry=` link opens the history pane and
+  leaving it clears the missing-entry note; `limit=0` is refused.
+- CLI: `harness-compat --strict --json` reports `ok: false` when it exits
+  nonzero; `maintenance` flag values are refused as JSON `input-error`s like
+  `gc`; help shows every flag default as `(default: X)` and wraps group
+  descriptions; `--allow-not-loop-ready` help says what it bypasses; missing
+  files are reported without raw `[Errno 2]` text; text output says yes/no
+  rather than `True`/`False`; more refusals echo the refused value.
+- Documentation agrees with the code on the mailbox schema version and files,
+  the Claude command line, redirect refusal codes, the Workbench
+  `question-reply` and `history` routes, the full event list, and symbols
+  that moved to sibling modules.
 
 ### Changed
 

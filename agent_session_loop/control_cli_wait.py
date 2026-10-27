@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import cli_common, control_signal, events, state
+from .cli_parser_support import flag_refusal
 from .control_cli_vocab import (
     _EVENTS_TOKEN_UNAVAILABLE,
     _EVENTS_TOKEN_UNSEEN,
@@ -297,9 +298,11 @@ def _validated_wait_timeout(
             command_name=command_name,
             text_label=text_label,
             reason="invalid-timeout",
-            error=(
-                "--timeout must be between 0 and "
-                f"{int(MAX_CONTROL_WAIT_TIMEOUT_SECONDS)} seconds"
+            error=flag_refusal(
+                "--timeout",
+                f"must be between 0 and {int(MAX_CONTROL_WAIT_TIMEOUT_SECONDS)} "
+                "seconds",
+                requested,
             ),
         )
         return None

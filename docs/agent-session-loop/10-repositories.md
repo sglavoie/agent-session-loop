@@ -472,14 +472,16 @@ plans, and only while the plan actually is one. The legacy packet names its
 path resolving outside it as a `repository-ambiguous` issue. Before a version 1
 packet is built, and again before its output is ingested, `prepare` recomputes
 the plan's repository footprint against that root; a plan reaching a second
-repository is refused with the dedicated reason `repository-footprint` rather
-than `validator-schema`, and the error payload carries the same
+repository is refused. `asl prepare` reports that refusal as
+`validation-failed` with a plain validation blocker, while `asl
+expand-ingest` refuses it with the dedicated reason `repository-footprint`
+rather than `validator-schema`, its error payload carrying the same
 `repository_footprint` object preflight emits. A version 1 payload that itself
 reports `repository-ambiguous` is refused for the same reason.
 
 The plan's repository *intent* is recomputed at the same two points, and is
-refused with the reason `repository-registry-required` carrying the bounded
-`repository_intent` object. Intent counts locations the plan has still to
+refused with the reason `repository-registry-required`; `expand-ingest`'s error
+payload also carries the bounded `repository_intent` object. Intent counts locations the plan has still to
 create, so it catches the multi-repository plan a footprint scan reads as
 single-repository. Because the check sits on the validation-authority path,
 which prepare runs before the baseline and preflight stages and re-runs against

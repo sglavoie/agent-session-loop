@@ -135,9 +135,11 @@ def validated_timeout(
             command_name=command_name,
             text_label=text_label,
             reason="invalid-timeout",
-            error=(
-                f"{option} must be between 0 and "
-                f"{int(mailbox_cli_constants.MAX_WAIT_TIMEOUT_SECONDS)} seconds"
+            error=flag_refusal(
+                option,
+                "must be between 0 and "
+                f"{int(mailbox_cli_constants.MAX_WAIT_TIMEOUT_SECONDS)} seconds",
+                value,
             ),
         )
         return None
@@ -152,15 +154,25 @@ def validated_since(
 ) -> int | None:
     value = getattr(args, "since", 0)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        mailbox_cli_output.print_input_error(
-            args,
-            command_name=command_name,
-            text_label=text_label,
-            reason="invalid-since",
-            error=flag_refusal("--since", NON_NEGATIVE_INTEGER, value),
+        error = flag_refusal("--since", NON_NEGATIVE_INTEGER, value)
+    elif value > mailbox_constants.MAILBOX_MAX_INTEGER:
+        # No mailbox sequence gets this high, and the reader refuses to scan
+        # past one that could not be stored.
+        error = flag_refusal(
+            "--since",
+            f"must be at most {mailbox_constants.MAILBOX_MAX_INTEGER}",
+            value,
         )
-        return None
-    return value
+    else:
+        return value
+    mailbox_cli_output.print_input_error(
+        args,
+        command_name=command_name,
+        text_label=text_label,
+        reason="invalid-since",
+        error=error,
+    )
+    return None
 
 
 def validated_include(

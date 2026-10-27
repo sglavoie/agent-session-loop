@@ -470,7 +470,10 @@ def _enforce_session_verification(
                 session_label=session_label
             )
         )
-    except OSError as error:
+    except (OSError, plans_errors.PlanError) as error:
+        # A check location the turn made escape its root, or an alias the
+        # registry no longer names, is found only as the check is resolved:
+        # nothing was graded, so the claim is withdrawn like a host failure.
         cursor.advance("run-refused")
         return refuse(
             verification_transitions.refuse_unavailable_verification(

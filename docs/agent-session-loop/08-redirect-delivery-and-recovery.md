@@ -30,7 +30,7 @@ an old `acknowledged` line still settles its correction.
 Identity is the producer's own `operation_id`: resubmitting it with the same
 target and the same feedback digest returns the existing request instead of
 appending a second one, while resubmitting it with a different target or digest
-fails with `invalid-operation-id` rather than silently replacing what was
+fails with `invalid-redirect-operation-id` rather than silently replacing what was
 already promised. The first terminal record for a
 request wins and every later one is refused as `already-settled`, which is what
 makes a retry that races its own settlement safe. The whole read-decide-append

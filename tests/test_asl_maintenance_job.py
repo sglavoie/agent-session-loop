@@ -405,6 +405,8 @@ class CommandTests(MaintenanceTestBase):
         self.assertEqual(code, 0)
         self.assertIn(maintenance_policy.JOB_LABEL, text)
         self.assertIn("Failures: 0", text)
+        # Not probed, so not known to be loaded; said in words, not `False`.
+        self.assertIn("Loaded: no — ", text)
 
     def test_install_reports_a_refusal_as_json(self) -> None:
         code, payload = self._capture(

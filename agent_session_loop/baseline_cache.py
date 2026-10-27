@@ -104,7 +104,25 @@ def _git(root: Path, *args: str) -> str | None:
     return completed.stdout
 
 
-def repository_fingerprint(cwd: str | Path) -> str:
+def _plan_dir_exclude_pathspec(root: Path, plan_dir: str | Path | None) -> str | None:
+    """The pathspec dropping ``plan_dir`` from a status, when it lies inside."""
+    if plan_dir is None:
+        return None
+    toplevel = _git(root, "rev-parse", "--show-toplevel")
+    if toplevel is None:
+        return None
+    try:
+        relative = canonicalize_path(plan_dir).relative_to(
+            canonicalize_path(toplevel.strip())
+        )
+    except ValueError:
+        return None
+    if not relative.parts:
+        return None
+    return f":(top,literal,exclude){relative.as_posix()}"
+
+
+def repository_fingerprint(cwd: str | Path, plan_dir: str | Path | None = None) -> str:
     """Return a fingerprint of the repository state rooted at ``cwd``.
 
     The fingerprint combines the current ``HEAD`` commit with a full porcelain
@@ -112,10 +130,18 @@ def repository_fingerprint(cwd: str | Path) -> str:
     staged changes, and untracked files each change the fingerprint and thereby
     invalidate cache entries. Non-git directories fall back to a stable,
     path-derived marker.
+
+    A ``plan_dir`` inside the repository is left out of the listing, as the
+    registered-workspace capture leaves it out: otherwise writing the baseline
+    evidence itself, or any later plan bookkeeping, makes that evidence stale.
     """
     root = canonicalize_path(cwd)
     head = _git(root, "rev-parse", "HEAD")
-    status = _git(root, "status", "--porcelain=v1", "--untracked-files=all")
+    status_args = ["status", "--porcelain=v1", "--untracked-files=all"]
+    excluded = _plan_dir_exclude_pathspec(root, plan_dir)
+    if excluded is not None:
+        status_args += ["--", ":(top)", excluded]
+    status = _git(root, *status_args)
     if head is None and status is None:
         return "non-git:" + _sha256("nogit\0" + os.fspath(root))
     digest = hashlib.sha256()

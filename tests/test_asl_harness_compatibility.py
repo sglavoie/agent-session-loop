@@ -327,6 +327,14 @@ class ReportTests(unittest.TestCase):
             {"supported": 1, "unknown": 1, "incompatible": 1}, payload["counts"]
         )
 
+    def test_payload_ok_agrees_with_the_strict_exit_code(self) -> None:
+        unknown = self._results("supported", "unknown")
+        self.assertIs(True, compat.report_payload(unknown)["ok"])
+        self.assertEqual(3, compat.exit_code(unknown, strict=True))
+        self.assertIs(False, compat.report_payload(unknown, strict=True)["ok"])
+        supported = self._results("supported")
+        self.assertIs(True, compat.report_payload(supported, strict=True)["ok"])
+
     def test_payload_is_json_serializable_and_carries_the_policy(self) -> None:
         payload = compat.report_payload(self._results("supported"))
         decoded = json.loads(json.dumps(payload))

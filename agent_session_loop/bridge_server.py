@@ -74,10 +74,11 @@ class _FrameReader:
         data = self._read(_READ_CHUNK_BYTES)
         if not data:
             self._ended = True
-            if self._discarding:
+            last = bytes(self._partial).rstrip(b"\r\n")
+            if self._discarding or len(last) > self._limit:
                 self._items.append(self._OVERSIZE)
-            elif self._partial:
-                self._items.append(bytes(self._partial).rstrip(b"\r\n"))
+            elif last:
+                self._items.append(last)
             self._partial.clear()
             self._items.append(self._END)
             return
@@ -96,13 +97,14 @@ class _FrameReader:
                 break
             self._partial += data[start : newline + 1]
             start = newline + 1
-            line = bytes(self._partial)
+            line = bytes(self._partial).rstrip(b"\r\n")
             self._partial.clear()
-            if len(line) > self._limit + 1:
+            if len(line) > self._limit:
                 self._items.append(self._OVERSIZE)
             else:
-                self._items.append(line.rstrip(b"\r\n"))
-        if len(self._partial) > self._limit + 1:
+                self._items.append(line)
+        # Room for a CRLF terminator still to come, since it is not counted.
+        if len(self._partial) > self._limit + 2:
             self._partial.clear()
             self._discarding = True
 

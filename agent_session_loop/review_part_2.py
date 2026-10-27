@@ -8,6 +8,7 @@ globals().update(
 from .review_shared import *
 from .review_part_1 import *
 from .formatting import count_noun
+from .plans_files import os_error_reason
 
 
 def _validate_finding(
@@ -235,11 +236,23 @@ def load_review_verdict(
     artifact_path = final_review_artifact_path(plan_dir)
     try:
         text = review_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "reason": REVIEW_REASON_MISSING,
+            "error": (
+                f"no final review has been written yet ({FINAL_REVIEW_FILENAME} "
+                "does not exist)"
+            ),
+            "review_output_path": str(review_path),
+        }
     except OSError as error:
         return {
             "ok": False,
             "reason": REVIEW_REASON_MISSING,
-            "error": f"could not read {FINAL_REVIEW_FILENAME}: {error}",
+            "error": (
+                f"could not read {FINAL_REVIEW_FILENAME}: {os_error_reason(error)}"
+            ),
             "review_output_path": str(review_path),
         }
     except UnicodeDecodeError as error:

@@ -18,6 +18,7 @@ from . import (
 from . import (
     commit_message_models as models,
 )
+from .plans_files import os_error_reason
 
 # ---------------------------------------------------------------------------
 # `asl commit` handler
@@ -121,7 +122,7 @@ def _read_message_text(source: str) -> str:
         return path.read_text(encoding="utf-8")
     except OSError as error:
         raise models.CommitMessageError(
-            f"cannot read message file {path}: {error}",
+            f"cannot read message file {path}: {os_error_reason(error)}",
             reason=models.REASON_INVALID_ARGUMENTS,
         ) from error
 

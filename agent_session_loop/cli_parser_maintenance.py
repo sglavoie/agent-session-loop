@@ -14,9 +14,6 @@ from .cli_defaults import (
 from .cli_parser_support import (
     _AgentSessionLoopArgumentParser,
     _group_epilogue,
-    int_in_range,
-    non_negative_float,
-    positive_float,
 )
 
 
@@ -112,6 +109,12 @@ def _add_maintenance_commands(
             "Own the scheduled storage maintenance job that keeps the state "
             "corpus inside its budget without touching protected evidence."
         ),
+        # Wrapped by hand: the raw formatter keeps the epilogue's line breaks,
+        # and with them the description's, so an unwrapped one is one line.
+        description=(
+            "Own the scheduled storage maintenance job that keeps the state "
+            "corpus\ninside its budget without touching protected evidence."
+        ),
         epilog=_group_epilogue("maintenance", "asl maintenance run --help"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -145,21 +148,22 @@ def _add_maintenance_commands(
     )
     maintenance_install_parser.add_argument(
         "--hour",
-        type=int_in_range(0, 23),
+        # Range-checked by the handler so a refusal keeps its JSON envelope.
+        type=int,
         default=_MAINTENANCE_DEFAULT_HOUR,
         metavar="HOUR",
         help=f"Local hour to run at, 0-23 (default: {_MAINTENANCE_DEFAULT_HOUR})",
     )
     maintenance_install_parser.add_argument(
         "--minute",
-        type=int_in_range(0, 59),
+        type=int,
         default=_MAINTENANCE_DEFAULT_MINUTE,
         metavar="MINUTE",
         help=(f"Local minute to run at, 0-59 (default: {_MAINTENANCE_DEFAULT_MINUTE})"),
     )
     maintenance_install_parser.add_argument(
         "--max-runtime-seconds",
-        type=positive_float,
+        type=float,
         default=_MAINTENANCE_DEFAULT_MAX_RUNTIME_SECONDS,
         metavar="SECONDS",
         help=(
@@ -220,7 +224,9 @@ def _add_maintenance_commands(
     )
     maintenance_run_parser.add_argument(
         "--max-age-days",
-        type=non_negative_float,
+        # Checked by the handler, as `asl gc` checks its own, so a refusal
+        # keeps its JSON envelope under --json.
+        type=float,
         default=_RETENTION_DEFAULT_MAX_AGE_DAYS,
         metavar="DAYS",
         help=(
@@ -230,7 +236,7 @@ def _add_maintenance_commands(
     )
     maintenance_run_parser.add_argument(
         "--max-runtime-seconds",
-        type=positive_float,
+        type=float,
         default=_MAINTENANCE_DEFAULT_MAX_RUNTIME_SECONDS,
         metavar="SECONDS",
         help=(

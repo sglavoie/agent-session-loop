@@ -2,12 +2,13 @@
 
 ASL's optional mailbox lets a supervisor steer a running worker without
 changing the selected session or converting every question into a terminal
-pause. It adds exactly two files below the canonical per-plan state directory:
+pause. It adds only these files below the canonical per-plan state directory:
 
 - `mailbox.jsonl` is a non-destructive JSONL log containing `guidance`,
   `question`, `reply`, `resolution`, `notice`, `supervision-end`, worker `ack`,
-  `wait-start`, `wait-end`, and `receipt` records. New appends use schema v3
-  while reads remain compatible with legacy v1/v2 and mixed logs. Physical 1-based line
+  `wait-start`, `wait-end`, `receipt`, and `guidance-delivery` records. New
+  appends use schema v4 while reads remain compatible with legacy v1/v2/v3 and
+  mixed logs. Physical 1-based line
   number is the durable sequence, including
   malformed lines. Appends are locked, the file is never truncated or rotated,
   and an append that would exceed 4 MiB
@@ -67,7 +68,7 @@ raw exit reason, a required `outcome` from the closed enum `complete`, `paused`,
 `stopped`, `blocked`, `error`, an optional `run_id` validated only when
 present, and an optional `supervision_id` — a UUID naming the supervising
 launch that ended, rejected as `invalid-supervision-id` when it is present and
-malformed. The kind is schema v3 only, so a v1 or v2 line claiming it is rejected
+malformed. The kind exists only from schema v3, so a v1 or v2 line claiming it is rejected
 as an unknown kind for its version. Only the Autopilot helper writes the record,
 at most once per helper process; the helper attaches no `run_id`, because one
 helper supervises several sequential `asl run` children and a single run id
@@ -306,13 +307,14 @@ The eight mailbox commands share normal plan-reference, `--state-dir`, and
   The wait polls mailbox
   metadata every two seconds and re-parses the append-only log only when its
   metadata changes.
-  New waits use mailbox schema v3: the question and first `wait-start` are
+  New waits use the current mailbox schema (v4 keeps the wait semantics v3
+  introduced): the question and first `wait-start` are
   appended atomically, resumed waits append another `wait-start`, and timeout
   appends `wait-end` under the same mailbox lock used by closures. A reply or
-  resolution to a v3 `delivery_mode: wait` question is accepted only during an
+  resolution to a v3-or-later `delivery_mode: wait` question is accepted only during an
   active wait; a late closure fails with `question-not-waiting`. When `asl ask`
   observes a closure it atomically appends a `receipt` and closure `wait-end`.
-  Historical v1/v2 and v3 `delivery_mode: async` questions retain their
+  Historical v1/v2 and v3-or-later `delivery_mode: async` questions retain their
   asynchronous closure behavior.
 - `asl notify` publishes a nonblocking worker notice from exactly one of
   positional `TEXT` or `--text-stdin`. Publication requires authoritative

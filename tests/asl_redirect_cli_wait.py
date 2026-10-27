@@ -183,6 +183,12 @@ class FreshConversationRecoveryTests(RedirectCliTestCase):
         self.assertEqual("", err)
         self.assertIn("--fresh-conversation", out)
         self.assertIn("one-use", out)
+        # The ledger flags read as words, not Python reprs.
+        self.assertRegex(
+            out, r"Conversation ledger: readable (yes|no), trustworthy (yes|no), "
+        )
+        self.assertNotIn("=True", out)
+        self.assertNotIn("=False", out)
         # Nothing was authorized: no run started, no state written.
         self.assertEqual(before, (self.state_dir / "plans").exists())
 

@@ -90,7 +90,7 @@ class ServiceQueries(ServiceState):
         )
 
     def _handle_queue(self, call: Call) -> Response:
-        """The retained catalog, one page, newest generation first.
+        """The retained catalog, one page, in the order the request asked for.
 
         The rows are catalog entries rather than the Mac's plan summaries, and
         they address a plan by ``plan_key``: this service has never seen a
@@ -112,6 +112,7 @@ class ServiceQueries(ServiceState):
         entries = self._store.catalog(
             now=now,
             states=filters.states,
+            sort=filters.sort,
             offset=filters.offset,
             limit=filters.limit,
             **narrowing,

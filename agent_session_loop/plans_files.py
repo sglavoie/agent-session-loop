@@ -86,6 +86,15 @@ def plan_title_from_markdown(content: str) -> str | None:
     return None
 
 
+def os_error_reason(error: OSError) -> str:
+    """The OS's wording for ``error``, such as ``No such file or directory``.
+
+    ``str(error)`` reads ``[Errno 2] No such file or directory: '<path>'``, so
+    a message that already names the path would print it twice.
+    """
+    return error.strerror or str(error)
+
+
 def read_input_text(path: str | os.PathLike[str], *, label: str) -> str:
     """Read a caller-named UTF-8 text file, dropping a leading byte-order mark.
 
@@ -95,7 +104,11 @@ def read_input_text(path: str | os.PathLike[str], *, label: str) -> str:
     """
     try:
         return Path(path).read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeDecodeError) as error:
+    except OSError as error:
+        raise InputReadError(
+            f"cannot read {label} {path}: {os_error_reason(error)}"
+        ) from error
+    except UnicodeDecodeError as error:
         raise InputReadError(f"cannot read {label} {path}: {error}") from error
 
 

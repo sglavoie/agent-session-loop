@@ -70,6 +70,27 @@ class PlanParsingTests(PlanAuthoringBase):
         )
         self.assertIn("## Session 8: Still quoted", parsed.sessions[0].lines)
 
+    def test_scope_fields_inside_a_nested_example_are_content(self) -> None:
+        # The scope scan must close a fence by the parser's rule: the inner
+        # ``` block cannot end the ```` block quoting it, so the example's
+        # fields are neither a duplicate nor the session's own.
+        text = (
+            "# Plan\n\n## Repositories\n\n"
+            "| Alias | Path | Origin |\n| --- | --- | --- |\n"
+            "| app | app | https://example.com/app.git |\n"
+            "| lib | lib | https://example.com/lib.git |\n\n"
+            "## Session 1: Docs\n\n"
+            "**Reads repositories**: app\n**Writes repositories**: app\n\n"
+            "````markdown\n## Session 9: Example\n\n```markdown\n"
+            "**Reads repositories**: lib\n**Writes repositories**: lib\n"
+            "```\n````\n"
+        )
+        parsed = authoring_parse.parse_plan_document(text)
+
+        scope = parsed.sessions[0].scope
+        assert scope is not None
+        self.assertEqual((("app",), ("app",)), (scope.reads, scope.writes))
+
     def test_parse_plan_document_rejects_duplicate_ids(self) -> None:
         text = "## Session 1: A\n\nx\n\n## Session 01: B\n\ny\n"
         with self.assertRaises(plans_errors.PlanError) as raised:

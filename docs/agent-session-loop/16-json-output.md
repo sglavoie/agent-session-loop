@@ -22,22 +22,58 @@ woke from a system suspend — and a reader rolls it forward from
 terminal instant. Waits persisted before the ceiling began rolling carry a
 static `hard_deadline` instead of those two keys, and every reader still renders
 that key for them. `events.jsonl` records
+`run_started`, `preflight_skipped`, `preflight_auto_repaired`,
+`conversation_continuation`, `redirect_continuation`,
 `turn_started`, `turn_heartbeat`, `action_required`,
+`turn_hang_suspected`, `turn_hang_cleared`, `harness_degraded`,
 `turn_execution_finished`, `turn_handoff_correction`, `turn_rejected`,
 `session_reopened`, `turn_finished`,
 `verification_started`, `verification_check_started`, `verification_heartbeat`,
 `verification_check_finished`, `verification_check_skipped`,
 `verification_finished`, `commit_started`,
-`commit_finished`, `paused_work_committed`,
-`run_control`, `review_scope_selected`,
-`review_session_created`, `review_cycle`,
+`commit_finished`, `commit_group_started`, `commit_group_updated`,
+`commit_group_finished`, `paused_work_committed`, `repair_commit_preflight`,
+`workspace_write_scope_repair`, `run_control`, `review_scope_selected`,
+`review_session_created`, `review_cycle`, `review_verdict_retry`,
 `review_repair_reopened`, `mailbox`, `reply_provided`,
-`resolution_consumed`, `process_sweep`,
+`resolution_consumed`, `process_sweep`, `agent_mux_delivery`,
 `finalization_started`, `finalization_heartbeat`, `finalization_finished`,
 `run_paused`, and
 `run_finished` events as they happen. `process_sweep` is conditional: it is
 appended only when a post-turn or post-check sweep actually signalled a
-surviving process (see **Process sweep** above).
+surviving process (see **Process sweep** above). Outside a run,
+`asl accept-ref-updates --accept` appends `workspace_ref_updates_accepted`,
+`asl acknowledge-external-changes --accept` appends
+`workspace_external_changes_acknowledged`, and `asl migrate-state --apply`
+appends `state_migrated`.
+The less self-describing names, one line each:
+
+- `preflight_auto_repaired`: the startup readiness gate rewrote a missing
+  progress journal or the manifest readiness line and reran preflight; the
+  payload is the repair's action, category, and path.
+- `turn_hang_suspected` / `turn_hang_cleared`: the live hang assessment
+  crossed into, or retracted, a suspected hang for the active turn.
+- `harness_degraded`: the harness lost an auxiliary transport on the way up
+  and ran the turn anyway; it carries no pause or failure reason.
+- `commit_group_started` / `commit_group_updated` / `commit_group_finished`:
+  a commit group's `phase` (`started`, an intermediate phase, `complete`),
+  with the `group` record also upserted into run state.
+- `repair_commit_preflight`: a generated review-repair child passed its commit
+  preflight before launch (a failure pauses `commit-preflight` instead).
+- `workspace_write_scope_repair`: a retained out-of-scope change passed its
+  repair check (fresh expansion or restored), so the session may run.
+- `conversation_continuation`: once per turn, before the harness starts, which
+  conversation the turn runs on and why, including "open a new one".
+- `redirect_continuation`: an accepted mid-turn correction became the next
+  attempt of the same session, was dropped because selection moved on, or was
+  consumed; it names operation ids, never the feedback.
+- `review_verdict_retry`: a review verdict failed validation and the same
+  review session is re-run in-run instead of pausing.
+- `workspace_ref_updates_accepted` / `workspace_external_changes_acknowledged`:
+  an operator accepted a previewed remote-ref update digest, or acknowledged
+  checkpointed external changes, for the next pending session.
+- `state_migrated`: the state directory was relocated, or `state.json` was
+  upgraded in place to the current schema version.
 `turn_execution_finished` states that the harness process ended and nothing
 more: exit code, the timed-out/interrupted/aborted flags, the turn's timings
 and artifact paths, and `plan_readable` for whether the plan still parsed

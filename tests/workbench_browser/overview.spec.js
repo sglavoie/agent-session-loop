@@ -552,6 +552,27 @@ for (const deployment of DEPLOYMENTS) {
       await expect(page.locator(".wb-row")).toHaveCount(1);
     });
 
+    test("a label sort orders rows by the label they display", async ({
+      page,
+    }) => {
+      await openQueue(page, deployment);
+      const order = await page.evaluate(async () => {
+        const queue = await import("/static/modules/queue.js");
+        // A Pi row carries neither `label` nor `plan_dir`, and a Mac row for
+        // an unnamed plan carries a null `label`: both display a fallback, and
+        // the sort has to read the same one or it orders nothing.
+        const rows = [
+          { plan_key: "k1", display_label: "zeta", urgency_rank: 10 },
+          { plan_dir: "/z/plans/x", label: null, title: "Beta", urgency_rank: 10 },
+          { plan_key: "k2", display_label: "alpha", urgency_rank: 50 },
+        ];
+        return rows
+          .sort((a, b) => queue.comparePlanRowsFor("label", a, b))
+          .map((row) => row.display_label || row.title);
+      });
+      expect(order).toEqual(["alpha", "Beta", "zeta"]);
+    });
+
     test("every sort mode the shell offers is one the server accepts", async ({
       page,
     }) => {
@@ -712,6 +733,40 @@ for (const deployment of DEPLOYMENTS) {
 
       await page.locator("#wb-history-toggle").click();
       await expect(pane).toHaveAttribute("data-open", "false");
+    });
+
+    test("a linked ending opens the pane, and leaving the link clears its note", async ({
+      page,
+    }) => {
+      await openQueue(page, deployment);
+      const entry = await page
+        .locator(".wb-history-row")
+        .first()
+        .getAttribute("data-entry-id");
+      await openQueue(page, deployment, `#entry=${encodeURIComponent(entry)}`);
+      // Collapsed by default, so a link that only highlighted its card would
+      // highlight something nobody can see.
+      await expect(page.locator("#wb-history")).toHaveAttribute("data-open", "true");
+      await expect(page.locator("#wb-history-toggle")).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+      await expect(page.locator("#wb-history-toggle")).toHaveText("hide history");
+      await expect(
+        page.locator('.wb-history-row[data-linked="true"]'),
+      ).toBeVisible();
+
+      await openQueue(page, deployment, "#entry=no-such-entry");
+      await expect(page.locator("#wb-history-missing")).toBeVisible();
+      await page.evaluate(() => {
+        location.hash = "#older=1";
+      });
+      await page.locator("#wb-refresh-now").click();
+      await expect(page.locator("#wb-refresh-status")).toHaveAttribute(
+        "data-state",
+        "idle",
+      );
+      await expect(page.locator("#wb-history-missing")).toBeHidden();
     });
 
     test("the endings are listed newest first with their outcomes", async ({

@@ -55,7 +55,8 @@ class LiveContractDocsTests(unittest.TestCase):
         for marker in (
             "`agent_session_loop.workbench_actions.perform` is the single "
             "application operation behind `POST /api/launch`, `POST /api/reply`, "
-            "and the bridge's `run.resume` and `question.reply`",
+            "`POST /api/question-reply`, and the bridge's `run.resume` and "
+            "`question.reply`",
             "A stale target is refused with or without an action token.",
             "a target that has moved is refused before admission, so the "
             "operation id the request carried is still spendable",

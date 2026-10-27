@@ -20,7 +20,8 @@ Read endpoints (loopback-open, no token required):
   `reason: "operation-unavailable"` and that same sentence as `error`.
 - `GET /api/summary` — counts and health only, readable by a
   summary-scoped caller. The narrow read a status pane needs without
-  owner-scoped plan detail; every other read requires the owner.
+  owner-scoped plan detail. `GET /api/capabilities` is summary-scoped
+  too; every other read except the health probe requires the owner.
 - `GET /api/queue` — every discovered plan summarized via
   `WorkbenchSummary` (counts, primary state, recommended action,
   warnings, last-message preview, artifact paths, compact Recovery
@@ -39,6 +40,11 @@ Read endpoints (loopback-open, no token required):
   `catalog_generation`, `catalog_complete`, `catalog_total`, and
   `catalog_warnings` — the last naming any plan the scan could not classify,
   as opposed to `discovery_warnings`, which name a source it could not read.
+- `GET /api/history` — runs that ended inside the retention window,
+  newest first, read from the event files without advancing the
+  connector's checkpoint. Accepts the overview filters plus an optional
+  `outcome`; returns `entries`, `observed_at`, `complete`, `incidents`,
+  and `warnings`.
 - `GET /api/plan?plan_dir=<path>` — single-plan detail. The payload
   carries the same additive triage fields as `/api/queue` (`urgency_rank`,
   `urgency_group`, `activity_label`, `concise_reason`, `last_activity_at`,
@@ -151,6 +157,14 @@ Mutating endpoints (bearer-token required):
   Payload: `{"plan_dir": "...", "reply_text": "..."}`. The `reply_text`
   body is streamed to the child via `--reply-stdin`; only `reply_length`
   survives in the response. It accepts the same optional `launch_id`.
+- `POST /api/question-reply` — answer a run's live mailbox question
+  without spawning another run. Payload: `{"plan_dir": "...",
+  "reply_text": "..."}` plus optional `question_id`, `run_id`,
+  `action_token`, and `operation_id` (a resend with the same id is
+  answered `replayed: true`). Returns `202` with `reason: "accepted"`,
+  the body-free `operation`, and `replayed`; the Workbench's reply form
+  uses it instead of `/api/reply` when the plan is waiting on a live
+  question.
 - `POST /api/control/stop-after-current` — enqueue a
   `request-stop-after-current` command on the per-plan control queue.
   The runner consumes it at the next checkpoint.
@@ -295,8 +309,9 @@ reach the file even under a key the allowlist keeps.
 ### One path for a launch, a reply, and a paused resume
 
 `agent_session_loop.workbench_actions.perform` is the single application
-operation behind `POST /api/launch`, `POST /api/reply`, and the bridge's
-`run.resume` and `question.reply`. It runs the same six steps every time:
+operation behind `POST /api/launch`, `POST /api/reply`,
+`POST /api/question-reply`, and the bridge's
+`run.resume` and `question.reply`. It runs the same seven steps every time:
 inspect the run through `intervention.inspect_run`, check freshness,
 admit through the journal, consult the caller's guard, record dispatch,
 carry the mutation out, and settle the row. Surface-specific code is

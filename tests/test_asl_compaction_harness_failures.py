@@ -199,6 +199,8 @@ class HarnessFailureClassificationTests(unittest.TestCase):
             "read ECONNRESET",
             "Error: connection reset by peer",
             "502 Bad Gateway",
+            "HTTP/1.1 503",
+            "upstream returned status code: 504",
             "service unavailable, try again",
             "stream disconnected unexpectedly",
         ):
@@ -211,6 +213,19 @@ class HarnessFailureClassificationTests(unittest.TestCase):
                     classification.reason,
                 )
                 self.assertTrue(classification.retryable)
+
+    def test_a_bare_gateway_number_is_not_a_transport_failure(self) -> None:
+        # A line range or port that happens to be 502-504 is prose, not a
+        # response status, and must not make an unknown failure retryable.
+        for text in ("Updated parser.py lines 480-503.", "listening on :8504 and 503"):
+            with self.subTest(text=text):
+                classification = harness_failures.classify_harness_failure(
+                    self._result(stdout=text)
+                )
+                self.assertEqual(
+                    events.PAUSE_REASON_NONZERO_EXIT, classification.reason
+                )
+                self.assertFalse(classification.retryable)
 
     def test_unknown_nonzero_fails_closed(self) -> None:
         classification = harness_failures.classify_harness_failure(

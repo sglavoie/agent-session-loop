@@ -21,6 +21,11 @@ def _add_inbox_commands(
             "Write supervisor messages, read pending worker guidance, or "
             "receipt an urgent correction."
         ),
+        # Wrapped by hand for the raw formatter the epilogue needs.
+        description=(
+            "Write supervisor messages, read pending worker guidance, or "
+            "receipt an\nurgent correction."
+        ),
         epilog=_group_epilogue("inbox", "asl inbox reply --help", guide=True),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

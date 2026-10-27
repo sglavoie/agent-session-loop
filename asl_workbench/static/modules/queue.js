@@ -14,7 +14,7 @@ import {
   REFRESH_INTERVAL_MS,
 } from "./constants.js";
 import { refreshHistory } from "./history.js";
-import { planHint, planIdOf, planSearchText } from "./identity.js";
+import { planHint, planIdOf, planLabel, planSearchText } from "./identity.js";
 import {
   renderFacets,
   renderObservationBanners,
@@ -471,8 +471,10 @@ export function oldestSortTimestampFor(plan) {
 }
 
 export function compareLabels(a, b) {
-  const labelA = (a.label || a.plan_dir || "").toLowerCase();
-  const labelB = (b.label || b.plan_dir || "").toLowerCase();
+  // The label the row displays, so a remote row (which carries neither
+  // `label` nor `plan_dir`) sorts by the name the operator reads.
+  const labelA = planLabel(a).toLowerCase();
+  const labelB = planLabel(b).toLowerCase();
   return labelA.localeCompare(labelB);
 }
 

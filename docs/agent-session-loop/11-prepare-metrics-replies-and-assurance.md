@@ -111,9 +111,13 @@ and forwarded into both the emitted `asl run` command and any emitted
 `--validator-harness` always uses that harness's native or configured default.
 Stable JSON reasons: `ok`, `needs-plan-iteration`, `validation-failed`,
 `baseline-unsatisfied`, `not-loop-ready`, `input-error`, `cwd-error`,
-`plan-structure`, and `already-split` (the source plan already has a split
+`plan-structure`, `already-split` (the source plan already has a split
 directory, listed in `details.existing_outputs`; rerun with `--resume` on it,
-or pass `--force-new` for an intentional second split).
+or pass `--force-new` for an intentional second split),
+`workspace-rebind-failed` (an explicit `--rebind-workspace` could not be
+applied), and `repository-registry-required` (the plan intends to reach more
+than one repository but has no repository registry; see
+[Repositories](10-repositories.md)).
 
 `metrics` aggregates workflow reliability and storage numbers from the
 persisted state corpus, defaulting to the last 7 days (`--since-days DAYS`

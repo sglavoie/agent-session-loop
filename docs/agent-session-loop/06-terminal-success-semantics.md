@@ -259,7 +259,7 @@ poll raises — and a `SupervisionCursor` carries the lease-and-clock ratchet a
 bounded wait advances, where a fresh lease is the only thing that rolls the
 unsupervised ceiling forward and a suspend restarts it at the wake instant. The
 exactly-once reply guarantee is unchanged and now stated in one place: the poll
-loop reads the mailbox without its lock, so `mailbox.finish_wait` re-checks
+loop reads the mailbox without its lock, so `mailbox_waits.finish_wait` re-checks
 under it and whatever closure it finds there overrides the timeout the loop
 arrived with. Like the lane modules, the `run_coordination_*` modules never import the
 runner — serialized persistence, the AgentMux notification seam, and the

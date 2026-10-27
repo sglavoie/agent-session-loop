@@ -89,7 +89,7 @@ def _add_overseer_commands(
         "--pause-window-hours",
         type=non_negative_float,
         metavar="HOURS",
-        help="How far back a pause still counts as recent (default 24)",
+        help="How far back a pause still counts as recent (default: 24)",
     )
     overseer_scan_parser.add_argument(
         "--state-dir",
@@ -153,27 +153,30 @@ def _add_overseer_commands(
         type=_watch_seconds,
         metavar="SECONDS",
         default=15.0,
-        help="Wait this long between sweeps under --for-seconds (default 15)",
+        help="Wait this long between sweeps under --for-seconds (default: 15)",
     )
     overseer_watch_parser.add_argument(
         "--sweep-seconds",
         type=_positive_watch_seconds,
         metavar="SECONDS",
         default=60.0,
-        help="Budget for one sweep; plans not reached are reported deferred",
+        help=(
+            "Budget for one sweep; plans not reached are reported deferred "
+            "(default: 60)"
+        ),
     )
     overseer_watch_parser.add_argument(
         "--lease-seconds",
         type=_positive_watch_seconds,
         metavar="SECONDS",
         default=300.0,
-        help="How long each watch lease is held before it expires (default 300)",
+        help="How long each watch lease is held before it expires (default: 300)",
     )
     overseer_watch_parser.add_argument(
         "--pause-window-hours",
         type=non_negative_float,
         metavar="HOURS",
-        help="How far back a pause still counts as recent (default 24)",
+        help="How far back a pause still counts as recent (default: 24)",
     )
     overseer_watch_parser.add_argument(
         "--release",
@@ -187,7 +190,7 @@ def _add_overseer_commands(
         type=_timeout_seconds,
         default=10.0,
         metavar="SECONDS",
-        help="Seconds to wait for each Agent Mux authorization (default 10)",
+        help="Seconds to wait for each Agent Mux authorization (default: 10)",
     )
     overseer_watch_parser.add_argument(
         "--state-dir",
@@ -223,7 +226,7 @@ def _add_overseer_commands(
     overseer_inspect_parser.add_argument(
         "--kind",
         default="question_pending",
-        help="Why this incident is being opened (default question_pending)",
+        help="Why this incident is being opened (default: question_pending)",
     )
     overseer_inspect_parser.add_argument(
         "--summary",
@@ -267,7 +270,7 @@ def _add_overseer_commands(
         type=_timeout_seconds,
         default=10.0,
         metavar="SECONDS",
-        help="Seconds to wait for the Agent Mux authorization (default 10)",
+        help="Seconds to wait for the Agent Mux authorization (default: 10)",
     )
     overseer_inspect_parser.add_argument(
         "--state-dir",
@@ -309,7 +312,7 @@ def _add_overseer_commands(
         "--operation",
         default="reply",
         choices=("reply", "guidance", "verify", "commit", "resume"),
-        help="The operation to resolve (default reply)",
+        help="The operation to resolve (default: reply)",
     )
     overseer_decide_parser.add_argument(
         "--incident-id",
@@ -384,7 +387,7 @@ def _add_overseer_commands(
         type=_timeout_seconds,
         default=10.0,
         metavar="SECONDS",
-        help="Seconds to wait for the Agent Mux authorization (default 10)",
+        help="Seconds to wait for the Agent Mux authorization (default: 10)",
     )
     overseer_decide_parser.add_argument(
         "--state-dir",
@@ -494,7 +497,7 @@ def _add_overseer_commands(
         "--session",
         dest="session_id",
         metavar="SESSION_ID",
-        help="For resume: the session to resume (default the run's own next)",
+        help="For resume: the session to resume (default: the run's own next)",
     )
     overseer_act_parser.add_argument(
         "--claims-file",
@@ -545,7 +548,7 @@ def _add_overseer_commands(
         type=_timeout_seconds,
         default=10.0,
         metavar="SECONDS",
-        help="Seconds to wait for each Agent Mux authorization (default 10)",
+        help="Seconds to wait for each Agent Mux authorization (default: 10)",
     )
     overseer_act_parser.add_argument(
         "--state-dir",
@@ -581,7 +584,7 @@ def _add_overseer_commands(
         type=_timeout_seconds,
         default=10.0,
         metavar="SECONDS",
-        help="Seconds to wait for each Agent Mux authorization (default 10)",
+        help="Seconds to wait for each Agent Mux authorization (default: 10)",
     )
     overseer_reconcile_parser.add_argument(
         "--state-dir",

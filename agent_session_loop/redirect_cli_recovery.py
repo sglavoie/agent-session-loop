@@ -1,4 +1,5 @@
 # ruff: noqa: F403, F405
+from .formatting import count_noun
 from .redirect_cli_projection import *
 from .redirect_cli_projection import _live_target
 from .redirect_cli_vocab import *
@@ -147,8 +148,10 @@ def control_recover_conversation_from_args(args: argparse.Namespace) -> int:
                 "the command below is what would authorize a fresh start."
             )
         print(
-            f"  Conversation ledger: readable={ledger.readable} "
-            f"trustworthy={ledger.trustworthy} records={ledger.records}"
+            "  Conversation ledger: "
+            f"readable {'yes' if ledger.readable else 'no'}, "
+            f"trustworthy {'yes' if ledger.trustworthy else 'no'}, "
+            f"{count_noun(ledger.records, 'record')}"
         )
         print(f"  Authorize one fresh conversation: {command}")
         print(f"  {FRESH_CONVERSATION_NOTE}.")

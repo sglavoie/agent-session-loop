@@ -181,6 +181,9 @@ export function formatSessions(entry) {
   return done + " done, " + pending + " pending";
 }
 
+// The entry id the pane was last opened for, so a refresh does not reopen it.
+let openedForEntry = null;
+
 /**
  * Scroll to the entry an `#entry=` link named, if it is on this page.
  *
@@ -190,11 +193,25 @@ export function formatSessions(entry) {
  */
 export function focusLinkedEntry() {
   const entryId = state.route && state.route.entryId;
-  if (!entryId) return;
+  const missing = document.getElementById("wb-history-missing");
+  if (!entryId) {
+    // A route that no longer names an entry must not keep the note the last
+    // one left behind.
+    if (missing) missing.hidden = true;
+    openedForEntry = null;
+    return;
+  }
+  // The pane is collapsed by default, and a card in a collapsed list cannot
+  // be seen or scrolled to: following a link is the request to open it. Once
+  // per link, because this runs on every refresh and an operator who hides
+  // the pane again has answered that request.
+  if (openedForEntry !== entryId) {
+    openedForEntry = entryId;
+    setHistoryOpen(true);
+  }
   const card = document.querySelector(
     '.wb-history-row[data-entry-id="' + entryId.replace(/"/g, "") + '"]'
   );
-  const missing = document.getElementById("wb-history-missing");
   if (!card) {
     if (missing) {
       missing.hidden = false;
@@ -225,10 +242,18 @@ export function wireHistoryControls() {
   const section = document.getElementById("wb-history");
   if (toggle && section) {
     toggle.addEventListener("click", () => {
-      const open = section.getAttribute("data-open") !== "true";
-      section.setAttribute("data-open", open ? "true" : "false");
-      toggle.setAttribute("aria-expanded", open ? "true" : "false");
-      toggle.textContent = open ? "hide history" : "show history";
+      setHistoryOpen(section.getAttribute("data-open") !== "true");
     });
+  }
+}
+
+/** Open or collapse the history pane, keeping its toggle in step. */
+export function setHistoryOpen(open) {
+  const section = document.getElementById("wb-history");
+  const toggle = document.getElementById("wb-history-toggle");
+  if (section) section.setAttribute("data-open", open ? "true" : "false");
+  if (toggle) {
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    toggle.textContent = open ? "hide history" : "show history";
   }
 }

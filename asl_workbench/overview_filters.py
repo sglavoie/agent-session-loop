@@ -143,8 +143,8 @@ class QueueFilters:
             raise OverviewError(f"unknown sort mode {self.sort!r}")
         if self.offset < 0:
             raise OverviewError("offset must be non-negative")
-        if self.limit < 0 or self.limit > MAX_PAGE_LIMIT:
-            raise OverviewError(f"limit must be between 0 and {MAX_PAGE_LIMIT}")
+        if self.limit < 1 or self.limit > MAX_PAGE_LIMIT:
+            raise OverviewError(f"limit must be between 1 and {MAX_PAGE_LIMIT}")
 
     @property
     def states(self) -> tuple[str, ...]:
@@ -200,6 +200,12 @@ def parse_filters(
         raise invalid_request(
             "include_completed must be 0 or 1", include_completed=completed
         )
+    limit = call.bounded_int("limit", default=default_limit, maximum=MAX_PAGE_LIMIT)
+    # An empty page is not a page size: the Mac answered it with nothing and the
+    # Pi's store with one row, so the two modes disagreed about a request
+    # neither front end sends. Refused, like the detail reads refuse it.
+    if limit < 1:
+        raise invalid_request("query parameter 'limit' must be at least 1", limit=limit)
     return QueueFilters(
         project=call.optional_query("project"),
         search=call.optional_query("q"),
@@ -208,7 +214,7 @@ def parse_filters(
         include_completed=completed != "0",
         sort=sort,
         offset=call.non_negative_int("offset", default=0),
-        limit=call.bounded_int("limit", default=default_limit, maximum=MAX_PAGE_LIMIT),
+        limit=limit,
     )
 
 

@@ -282,6 +282,11 @@ class MailboxCliTestsPart10(MailboxCliTestsBase):
             ),
             (
                 mailbox_cli_outbox.outbox_wait_from_args,
+                self.args(since=mailbox_constants.MAILBOX_MAX_INTEGER + 1, timeout=0),
+                "invalid-since",
+            ),
+            (
+                mailbox_cli_outbox.outbox_wait_from_args,
                 self.args(timeout=mailbox_cli_constants.MAX_WAIT_TIMEOUT_SECONDS + 1),
                 "invalid-timeout",
             ),

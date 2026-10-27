@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from .contract_models import fenced_line_flags
 from .plans_errors import (
     PlanError,
 )
@@ -181,22 +181,15 @@ def _parse_scope_alias_list(
 
 
 def _structural_session_scope_indices(lines: Sequence[str]) -> tuple[int, ...]:
-    indices: list[int] = []
-    fence: str | None = None
-    for index, line in enumerate(lines):
-        match = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
-        if match is not None:
-            delimiter = match.group(1)[0]
-            if fence is None:
-                fence = delimiter
-            elif fence == delimiter:
-                fence = None
-            continue
-        if fence is None and line.startswith(
-            (READS_REPOSITORIES_PREFIX, WRITES_REPOSITORIES_PREFIX)
-        ):
-            indices.append(index)
-    return tuple(indices)
+    # The plan parser's fence rule, so a nested example the parser reads as
+    # content never contributes, or hides, a scope field.
+    fenced = fenced_line_flags(lines)
+    return tuple(
+        index
+        for index, line in enumerate(lines)
+        if not fenced[index]
+        and line.startswith((READS_REPOSITORIES_PREFIX, WRITES_REPOSITORIES_PREFIX))
+    )
 
 
 def strip_session_scope_lines(lines: Sequence[str]) -> tuple[str, ...]:

@@ -519,15 +519,21 @@ def check_all(
     )
 
 
-def report_payload(results: Sequence[Compatibility]) -> dict[str, Any]:
-    """The stable JSON document for ``asl harness-compat --json``."""
+def report_payload(
+    results: Sequence[Compatibility], *, strict: bool = False
+) -> dict[str, Any]:
+    """The stable JSON document for ``asl harness-compat --json``.
+
+    ``ok`` agrees with :func:`exit_code`: under ``strict`` an unknown harness
+    fails the check, so it is not ``ok`` either.
+    """
     counts = {"supported": 0, "unknown": 0, "incompatible": 0}
     for result in results:
         counts[result.status] += 1
     return {
         "schema_version": SCHEMA_VERSION,
         "command": "harness-compat",
-        "ok": counts["incompatible"] == 0,
+        "ok": exit_code(results, strict=strict) == 0,
         "model_use": False,
         "counts": counts,
         "harnesses": [result.payload() for result in results],
@@ -559,8 +565,9 @@ def harness_compat_from_args(args: argparse.Namespace) -> int:
     """``asl harness-compat`` entry point."""
     requested: tuple[HarnessName, ...] = tuple(getattr(args, "harness", None) or ())
     results = check_all(requested or None)
+    strict = bool(getattr(args, "strict", False))
     if getattr(args, "json", False):
-        responses.print_json(report_payload(results))
+        responses.print_json(report_payload(results, strict=strict))
     else:
         print(_format_text(results))
-    return exit_code(results, strict=bool(getattr(args, "strict", False)))
+    return exit_code(results, strict=strict)

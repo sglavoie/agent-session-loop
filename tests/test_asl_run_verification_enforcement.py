@@ -262,6 +262,33 @@ class RunVerificationEnforcementTests(unittest.TestCase):
         self.assertIsInstance(payload["run_finished_at"], str)
         self.assertNotEqual("", payload["run_finished_at"])
 
+    def test_verify_check_escaping_the_repository_pauses_and_reverts_status(
+        self,
+    ) -> None:
+        # The location is only found to escape as the check is resolved, which
+        # must still withdraw the claim rather than end the run with it kept.
+        outside = self.tmp_path / "outside"
+        outside.mkdir()
+        (outside / "marker.txt").write_text("x", encoding="utf-8")
+        (self.repo_root / "out").symlink_to(outside)
+        contracts_by_id = {
+            "1": _contract_block(
+                '{"type": "file_exists", "path": "out/marker.txt", "name": "marker"}',
+                session="1",
+            )
+        }
+        self._write_plan(("pending",), contracts_by_id=contracts_by_id)
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("verify-failed", payload["pause_reason"])
+        self.assertIn("escapes", payload["pause_message"])
+        text = (self.plan_dir / "session-1.md").read_text(encoding="utf-8")
+        self.assertIn("- **Status**: pending", text)
+        self.assertEqual(0, payload["final_snapshot"]["counts"]["complete"])
+
     def test_verify_parallel_contract_completes_and_marks_event(self) -> None:
         contracts_by_id = {
             "1": _contract_block(

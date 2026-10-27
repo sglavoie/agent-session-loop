@@ -252,6 +252,43 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
         )
         self.assertGreater(timeouts[0], 0)
 
+    def test_outbox_supervise_drops_a_carried_question_whose_wait_ended(
+        self,
+    ) -> None:
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        question, wait = mailbox_waits.append_wait_question(
+            self.plan_dir,
+            "Still blocked?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+            session_id="5",
+            turn_index=2,
+            waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_WORKER,
+        )
+        launch = mailbox_validation.new_supervision_id()
+        code, first = self.supervise_lines(supervision_id=launch)
+        self.assertEqual("ACTION questions=1", first[0])
+
+        # The worker's wait times out while the repeat waits out its delay.
+        real_wait = mailbox_cli_waits.wait_for_questions
+
+        def timing_out_wait(*args, **kwargs):
+            mailbox_waits.finish_wait(
+                self.plan_dir,
+                question.id,
+                wait.id,
+                reason=mailbox_vocabulary.WAIT_END_REASON_TIMEOUT,
+                state_dir=self.state_dir,
+            )
+            return real_wait(*args, **{**kwargs, "timeout": 0})
+
+        with mock.patch.object(
+            mailbox_cli_waits, "wait_for_questions", timing_out_wait
+        ):
+            code, lines = self.supervise_lines(supervision_id=launch)
+        self.assertEqual(0, code)
+        self.assertEqual(["IDLE"], lines)
+
     def test_outbox_supervise_never_carries_another_runs_question(self) -> None:
         self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
         mailbox_appenders.append_question(

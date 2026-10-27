@@ -209,6 +209,12 @@ class ExpandIngestCliTests(unittest.TestCase):
             self.assertEqual(1, code)
             body = json.loads(stdout)
             self.assertEqual("input-error", body["reason"])
+            # The OS reason alone: no errno prefix, and the path named once.
+            self.assertTrue(
+                body["error"].endswith("nope.json: No such file or directory"),
+                body["error"],
+            )
+            self.assertEqual(1, body["error"].count("nope.json"))
 
     def test_non_utf8_batch_file_is_input_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

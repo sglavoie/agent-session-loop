@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 
 from . import responses, retention, retention_projection
 from .cli_defaults import program_name
+from .cli_parser_support import NON_NEGATIVE_NUMBER, POSITIVE_NUMBER, flag_refusal
 from .maintenance_job import JobStatus, install_job, job_status, uninstall_job
 from .maintenance_models import (
     COMMAND_INSTALL,
@@ -126,6 +128,10 @@ def _print_plan_and_outcome(result: MaintenanceResult) -> None:
         )
 
 
+def _yes_no(flag: object) -> str:
+    return "yes" if flag else "no"
+
+
 def _print_status(status: JobStatus) -> None:
     print(f"Maintenance job: {status.label}")
     if not status.plist_present:
@@ -133,7 +139,7 @@ def _print_status(status: JobStatus) -> None:
     else:
         freshness = "present, current" if status.plist_current else "present, stale"
     print(f"Definition: {status.plist_path} ({freshness})")
-    print(f"Loaded: {status.loaded} — {status.load_detail}")
+    print(f"Loaded: {_yes_no(status.loaded)} — {status.load_detail}")
     print(f"State root: {status.state_root}")
     print(f"Manifest: {status.manifest_path}")
     last_run = status.last_run
@@ -195,8 +201,35 @@ def _failure_reason(error: Exception) -> str:
     return "input-error"
 
 
+def _refuse_flag_value(args: argparse.Namespace) -> str | None:
+    """The refusal of the first out-of-range numeric flag, or ``None``.
+
+    The handler checks these rather than argparse ``type=`` so a refusal
+    keeps its ``input-error`` envelope under ``--json``, as ``asl gc`` does.
+    """
+    for flag, dest, low, high in (
+        ("--hour", "hour", 0, 23),
+        ("--minute", "minute", 0, 59),
+    ):
+        value = getattr(args, dest, None)
+        if value is not None and not low <= value <= high:
+            return flag_refusal(flag, f"must be an integer from {low} to {high}", value)
+    max_age_days = getattr(args, "max_age_days", None)
+    if max_age_days is not None and (
+        not math.isfinite(max_age_days) or max_age_days < 0
+    ):
+        return flag_refusal("--max-age-days", NON_NEGATIVE_NUMBER, max_age_days)
+    runtime = getattr(args, "max_runtime_seconds", None)
+    if runtime is not None and (not math.isfinite(runtime) or runtime <= 0):
+        return flag_refusal("--max-runtime-seconds", POSITIVE_NUMBER, runtime)
+    return None
+
+
 def run_from_args(args: argparse.Namespace) -> int:
     """CLI handler for ``asl maintenance run``."""
+    refusal = _refuse_flag_value(args)
+    if refusal is not None:
+        return _fail(COMMAND_RUN, ValueError(refusal), args)
     try:
         result = run_maintenance(
             getattr(args, "state_dir", None),
@@ -227,6 +260,9 @@ def run_from_args(args: argparse.Namespace) -> int:
 
 def install_from_args(args: argparse.Namespace) -> int:
     """CLI handler for ``asl maintenance install``."""
+    refusal = _refuse_flag_value(args)
+    if refusal is not None:
+        return _fail(COMMAND_INSTALL, ValueError(refusal), args)
     try:
         payload = install_job(
             executable=getattr(args, "executable", None),
@@ -249,7 +285,7 @@ def install_from_args(args: argparse.Namespace) -> int:
             f"{' '.join(payload['argv'])}"
         )
         print(f"Output: {payload['log_path']}")
-        print(f"Bootstrapped: {payload['bootstrapped']} — {payload['detail']}")
+        print(f"Bootstrapped: {_yes_no(payload['bootstrapped'])} — {payload['detail']}")
     return 0 if payload["ok"] else 1
 
 
@@ -265,8 +301,8 @@ def uninstall_from_args(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         print(json.dumps(payload, sort_keys=True))
     else:
-        print(f"Removed: {payload['plist_removed']} ({payload['plist_path']})")
-        print(f"Booted out: {payload['booted_out']} — {payload['detail']}")
+        print(f"Removed: {_yes_no(payload['plist_removed'])} ({payload['plist_path']})")
+        print(f"Booted out: {_yes_no(payload['booted_out'])} — {payload['detail']}")
         if payload["error"]:
             print(payload["error"])
         print(

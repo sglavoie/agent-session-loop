@@ -70,7 +70,8 @@ the card.
 
 Commands in `commands` are copy-only repair guidance. Workbench never
 executes those commands; mutating actions are limited to the existing
-`/api/reply`, `/api/launch`, and `/api/unlock` endpoints with their
+`/api/reply`, `/api/question-reply`, `/api/launch`, and `/api/unlock`
+endpoints with their
 normal confirmation and validation flows.
 
 Action `target` values are UI focus keys from `RECOVERY_ACTION_TARGETS`.

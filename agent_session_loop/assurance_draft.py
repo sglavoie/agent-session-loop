@@ -44,6 +44,7 @@ from .assurance_models_primitives import (
 )
 from .assurance_models_vocab import MAX_LOCATOR_CHARS
 from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
+from .contract_models import fenced_line_flags
 from .harnesses import HARNESS_NAMES
 
 #: Seconds granted to the single drafting turn. Drafting gets no retry: a
@@ -378,17 +379,8 @@ def _normalize_heading(text: str) -> str:
 def _headings(lines: Sequence[str]) -> list[str]:
     """Return the document's headings, ignoring anything inside a code fence."""
     found: list[str] = []
-    fence: str | None = None
-    for line in lines:
-        match = _FENCE_RE.match(line)
-        if match is not None:
-            delimiter = match.group(1)[0]
-            if fence is None:
-                fence = delimiter
-            elif fence == delimiter:
-                fence = None
-            continue
-        if fence is not None:
+    for line, fenced in zip(lines, fenced_line_flags(lines), strict=True):
+        if fenced:
             continue
         heading = _HEADING_RE.match(line)
         if heading is not None:

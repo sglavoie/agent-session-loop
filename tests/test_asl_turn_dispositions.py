@@ -54,6 +54,7 @@ from unittest import mock
 from agent_session_loop import (
     handoff_correction,
     plans_payloads,
+    plans_snapshot,
     run_loop_context,
     run_termination,
     turn_disposition_failures,
@@ -65,7 +66,7 @@ from agent_session_loop import (
 )
 from tests import support_asl_run_loop_view as run_loop_view
 
-from .support import assert_no_runner_import
+from .support import assert_no_runner_import, write_plan
 from .support_asl_turn_dispositions import (
     ENTRY_POINTS,
     INJECTED_SEAMS,
@@ -170,15 +171,31 @@ class RunLoopDelegationTests(unittest.TestCase):
 class UninspectedTurnTests(DispositionTestCase):
     """Turns the plan could not be re-inspected after."""
 
+    def uninspected(self, kind: str, *, after: Any) -> dict[str, Any]:
+        """Run the ``kind`` branch and return the turn payload it was given."""
+        turn_payload: dict[str, Any] = {"turn_index": 1}
+        common = {
+            "before": self.before,
+            "after": after,
+            "session_id": SESSION_ID,
+            "turn_index": 1,
+            "result": self.result(returncode=None, timed_out=kind == "timeout"),
+            "turn_payload": turn_payload,
+            "paths": self.paths(),
+            "session_details": self.session_details,
+        }
+        if kind == "timeout":
+            turn_dispositions.pause_timed_out_turn(
+                self.ctx, session_label=SESSION_LABEL, **common
+            )
+        else:
+            turn_dispositions.pause_interrupted_run(self.ctx, **common)
+        return turn_payload
+
     def test_an_interrupted_turn_publishes_the_after_image_when_it_has_one(
         self,
     ) -> None:
-        turn_dispositions.pause_interrupted_run(
-            self.ctx,
-            before=self.before,
-            after=self.after,
-            session_details=self.session_details,
-        )
+        self.uninspected("interrupted", after=self.after)
         self.assertEqual(
             plans_payloads.snapshot_payload(self.after),
             self.ctx.payload["final_snapshot"],
@@ -195,25 +212,14 @@ class UninspectedTurnTests(DispositionTestCase):
         )
 
     def test_an_interrupted_turn_falls_back_to_the_before_image(self) -> None:
-        turn_dispositions.pause_interrupted_run(
-            self.ctx,
-            before=self.before,
-            after=None,
-            session_details=self.session_details,
-        )
+        self.uninspected("interrupted", after=None)
         self.assertEqual(
             plans_payloads.snapshot_payload(self.before),
             self.ctx.payload["final_snapshot"],
         )
 
     def test_a_timed_out_turn_names_the_session_in_its_message(self) -> None:
-        turn_dispositions.pause_timed_out_turn(
-            self.ctx,
-            before=self.before,
-            after=None,
-            session_label=SESSION_LABEL,
-            session_details=self.session_details,
-        )
+        self.uninspected("timeout", after=None)
         self.assertEqual(
             plans_payloads.snapshot_payload(self.before),
             self.ctx.payload["final_snapshot"],
@@ -223,6 +229,34 @@ class UninspectedTurnTests(DispositionTestCase):
             f"harness turn timed out for {SESSION_LABEL}",
             self.ctx.pauses[0]["message"],
         )
+
+    def test_a_cut_off_turn_takes_back_its_unsettled_completion(self) -> None:
+        # Neither branch is a settlement, so a claim the worker wrote before
+        # the turn was cut off must not let a relaunch skip the session.
+        for kind in ("timeout", "interrupted"):
+            with self.subTest(kind=kind):
+                write_plan(self.plan_dir, ("complete",))
+                claimed = plans_snapshot.inspect_plan(self.plan_dir)
+                self.ctx.pauses.clear()
+
+                turn_payload = self.uninspected(kind, after=claimed)
+
+                record = turn_payload["completion_reconciliation"]
+                self.assertIs(True, record["reverted"])
+                self.assertEqual(
+                    turn_dispositions.UNINSPECTED_COMPLETION_REASONS[kind],
+                    record["reason"],
+                )
+                self.assertEqual(
+                    record, self.ctx.pauses[0]["details"]["completion_reconciliation"]
+                )
+                self.assertEqual(
+                    "pending",
+                    plans_snapshot.inspect_plan(self.plan_dir).sessions[0].status,
+                )
+                self.assertEqual(
+                    SESSION_ID, self.ctx.payload["final_snapshot"]["next_pending_id"]
+                )
 
     def test_an_abort_is_recorded_rather_than_paused(self) -> None:
         listener = mock.Mock()

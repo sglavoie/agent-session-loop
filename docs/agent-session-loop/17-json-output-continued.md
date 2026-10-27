@@ -226,7 +226,10 @@ only where the session declares a handoff target.
 window as `since_days`, `window_start`, and `generated_at`, then
 `state_dirs_scanned` and `state_dirs_active` beside the `turns`, `first_pass`,
 `pauses`, `verification_repair`, `review_cycles`, `agent_mux_delivery`,
-`artifacts`, `compaction`, `cli_invocations`, and `execution_timing` objects.
+`artifacts`, `compaction`, `assurance`, `cli_invocations`, and
+`execution_timing` objects (see
+[Assurance in metrics, retention, and consumers](12-assurance-in-metrics-retention-and-consumers.md#assurance-in-metrics-retention-and-consumers)
+for `assurance`).
 Every field in those
 objects answers for
 the window alone, including `review_cycles.unique_materializations` and its

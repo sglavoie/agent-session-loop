@@ -100,6 +100,7 @@ from typing import Any
 from . import (
     handoff_correction,
     handoff_guards,
+    harnesses,
     plans_models,
     plans_payloads,
     run_control,
@@ -183,19 +184,92 @@ def _record_uninspected_final_snapshot(
         )
 
 
+#: Why an interrupted or timed-out turn's completion claim was withdrawn.
+UNINSPECTED_COMPLETION_REASONS = {
+    "interrupted": "unsettled-completion-after-interrupt",
+    "timeout": "unsettled-completion-after-timeout",
+}
+
+
+def _withdraw_uninspected_completion(
+    ctx: turn_disposition_models.RunContext,
+    *,
+    disposition: str,
+    before: plans_models.PlanSnapshot,
+    after: plans_models.PlanSnapshot | None,
+    session_id: str,
+    turn_index: int,
+    result: harnesses.HarnessResult,
+    turn_payload: dict[str, Any],
+    paths: dict[str, Path],
+) -> dict[str, Any] | None:
+    """Publish the final image with any unsettled completion claim taken back.
+
+    Neither an interrupt nor a timeout is a settlement, so a session the worker
+    marked ``complete`` before the turn was cut off holds a claim no check
+    adjudicated. Left in place, a relaunch would select the next session and
+    the claimed one would never be verified.
+    """
+    if after is None:
+        _record_uninspected_final_snapshot(ctx, before=before, after=None)
+        return None
+    reconciled, reconciliation = _reconcile_unsettled_completion(
+        ctx,
+        after=after,
+        selected_after=next(
+            (item for item in after.sessions if item.id == session_id), None
+        ),
+        session_id=session_id,
+        turn_index=turn_index,
+        result=result,
+        turn_payload=turn_payload,
+        paths=paths,
+        reason=UNINSPECTED_COMPLETION_REASONS[disposition],
+        failure_note=(
+            f"the harness turn ended ({disposition}) before it reached an "
+            "accepted settlement; the completion claim is withdrawn and the "
+            "work this session already wrote is left in place"
+        ),
+    )
+    _record_uninspected_final_snapshot(ctx, before=before, after=reconciled)
+    return reconciliation
+
+
 def pause_interrupted_run(
     ctx: turn_disposition_models.RunContext,
     *,
     before: plans_models.PlanSnapshot,
     after: plans_models.PlanSnapshot | None,
+    session_id: str,
+    turn_index: int,
+    result: harnesses.HarnessResult,
+    turn_payload: dict[str, Any],
+    paths: dict[str, Path],
     session_details: dict[str, Any],
 ) -> None:
     """Stop a run whose turn was interrupted by the operator's own terminal."""
-    _record_uninspected_final_snapshot(ctx, before=before, after=after)
+    reconciliation = _withdraw_uninspected_completion(
+        ctx,
+        disposition="interrupted",
+        before=before,
+        after=after,
+        session_id=session_id,
+        turn_index=turn_index,
+        result=result,
+        turn_payload=turn_payload,
+        paths=paths,
+    )
     ctx.pause(
         reason="interrupted",
         message="run interrupted by user",
-        details=session_details,
+        details={
+            **session_details,
+            **(
+                {"completion_reconciliation": reconciliation}
+                if reconciliation is not None
+                else {}
+            ),
+        },
     )
 
 
@@ -204,15 +278,37 @@ def pause_timed_out_turn(
     *,
     before: plans_models.PlanSnapshot,
     after: plans_models.PlanSnapshot | None,
+    session_id: str,
     session_label: str,
+    turn_index: int,
+    result: harnesses.HarnessResult,
+    turn_payload: dict[str, Any],
+    paths: dict[str, Path],
     session_details: dict[str, Any],
 ) -> None:
     """Stop a run whose harness turn outlived its wall-clock budget."""
-    _record_uninspected_final_snapshot(ctx, before=before, after=after)
+    reconciliation = _withdraw_uninspected_completion(
+        ctx,
+        disposition="timeout",
+        before=before,
+        after=after,
+        session_id=session_id,
+        turn_index=turn_index,
+        result=result,
+        turn_payload=turn_payload,
+        paths=paths,
+    )
     ctx.pause(
         reason="timeout",
         message=f"harness turn timed out for {session_label}",
-        details=session_details,
+        details={
+            **session_details,
+            **(
+                {"completion_reconciliation": reconciliation}
+                if reconciliation is not None
+                else {}
+            ),
+        },
     )
 
 

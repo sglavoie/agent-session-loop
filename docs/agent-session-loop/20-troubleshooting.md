@@ -328,7 +328,8 @@ after a restart.
   `POST /api/plans/archive`, `POST /api/plan/delete`,
   `POST /api/archive/restore`, `POST /api/archive/delete`,
   `POST /api/archive/settings`, `POST /api/launch`,
-  `POST /api/reply`, `POST /api/control/...`, `POST /api/unlock`)
+  `POST /api/reply`, `POST /api/question-reply`, `POST /api/control/...`,
+  `POST /api/unlock`)
   requires
   an `Authorization: Bearer <token>` header. The token is generated with
   `secrets.token_urlsafe(32)` at startup and compared with

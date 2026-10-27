@@ -5,7 +5,7 @@ harness. For Codex, Claude, and Copilot this means:
 
 ```text
 codex app-server  (thread/start sandbox: danger-full-access)
-claude --print --verbose --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode bypassPermissions <prompt>
+claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages --add-dir <plan-dir> --permission-mode bypassPermissions  (stdin carries <prompt>)
 copilot -C <cwd> --add-dir <plan-dir> --allow-all-tools --allow-all-paths --no-ask-user --silent --acp  (session/prompt carries <prompt>)
 ```
 
@@ -15,7 +15,7 @@ where supported by that harness:
 
 ```text
 codex app-server  (thread/start sandbox: workspace-write, writable root <plan-dir>)
-claude --print --verbose --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode dontAsk <prompt>
+claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages --add-dir <plan-dir> --permission-mode dontAsk  (stdin carries <prompt>)
 copilot -C <cwd> --add-dir <plan-dir> --no-ask-user --silent --acp  (session/prompt carries <prompt>)
 ```
 

@@ -207,14 +207,14 @@ In both versions an `R` claim carries the Step 3 origin rationale inside its
 could not be established is reported as a `removal-unjustified` issue naming the
 symbol, the history commands that came back empty, and what the session must
 state before removing it. Both values are accepted by
-`prepare.CLAIM_TYPES` / `prepare.ISSUE_TYPES`; anything outside those tuples is
+`prepare_models.CLAIM_TYPES` / `prepare_models.ISSUE_TYPES`; anything outside those tuples is
 rejected fail-closed with nothing written.
 
 Every session entry carries `spark: {eligible, reason}` in both versions. Set `eligible: true` only for a small explicit scope with settled decisions, sufficient local context, and a clear completion contract; set it `false` for broad refactors, public API or schema changes, migrations, high-risk work, or unresolved uncertainty. The `reason` must be concise and evidence-based. Emit this marker for every session, whether or not the run will use `--spark`: an omitted marker is accepted silently and degrades that session to baseline routing forever, so omission is indistinguishable from a deliberate "ineligible" verdict. `asl expand-ingest --json` reports `spark_missing`, the ingested session ids whose marker was dropped; a non-empty list means that payload must be re-ingested carrying it.
 
 The parser rejects (fail-closed, `PlanError`, nothing written) unknown keys, empty required strings, unknown `claim_type`/`issue_type`/`direction`, invalid/duplicate session ids, and more than 3 `patterns` per session. Claims about code to be _created_ set `"to_be_created": true` (no `line`) and render as "N/A — to be created" instead of being flagged as issues. `contract_problems` requires `contract_checked: true` and takes the Step 3 findings verbatim. `corrections` are exact factual text replacements only (`expected_text != replacement_text`) — never design changes, plan restructuring, or contract-body edits; report those as `issues` or `contract_problems`.
 
-Process sessions in bounded batches (`prepare.DEFAULT_VALIDATION_BATCH_SIZE` = 4 sessions per payload; `prepare.batch_sessions` semantics). Write each batch payload to a JSON file and ingest it:
+Process sessions in bounded batches (`prepare_models.DEFAULT_VALIDATION_BATCH_SIZE` = 4 sessions per payload; `prepare_packet.batch_sessions` semantics). Write each batch payload to a JSON file and ingest it:
 
 ```bash
 asl expand-ingest <plan-dir> --batch-file <batch-payload>.json --json

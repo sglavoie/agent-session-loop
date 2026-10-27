@@ -72,7 +72,7 @@ def capture_baseline_repository_evidence(
 ) -> tuple[str, bool]:
     """Capture reusable current evidence for baseline freshness checks."""
     if context.workspace is None:
-        return repository_fingerprint(context.root), True
+        return repository_fingerprint(context.root, plan_dir), True
     return _registered_repository_fingerprint(context, plan_dir)
 
 

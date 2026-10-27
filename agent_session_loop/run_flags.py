@@ -83,7 +83,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
         option_strings=("--harness",),
         choices=harnesses.HARNESS_NAMES,
         cli_default="codex",
-        help="Agent harness to invoke",
+        help="Agent harness to invoke (default: codex)",
     ),
     RunFlag(
         dest="review_harness",
@@ -363,8 +363,11 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
         action="store_true",
         cli_default=False,
         help=(
-            "Bypass the readiness gate and run even when the plan is not "
-            "marked loop-ready (preflight findings are still reported)"
+            "Run past a failing readiness gate instead of pausing. Without "
+            "it a draft or reviewed marker or a missing progress journal is "
+            "repaired automatically when nothing else blocks; with it that "
+            "repair is skipped and other red findings are waved through "
+            "(still reported), except a plan reaching beyond its bound root"
         ),
     ),
     RunFlag(

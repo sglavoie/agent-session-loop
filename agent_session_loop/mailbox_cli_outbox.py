@@ -381,10 +381,17 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
         and wait_result.lost_reason is None
         and wait_result.mailbox_view is not None
     ):
+        from . import intervention_facts
+
+        # The carry delay can outlive a ``--wait`` question's wait, so recheck
+        # that a reply can still close each carried question.
+        still_open = intervention_facts.open_question_ids(
+            plan_dir, state_dir=args.state_dir, view=wait_result.mailbox_view
+        )
         open_questions = tuple(
             question
             for question in wait_result.mailbox_view.unanswered_questions
-            if question.id in carried_ids
+            if question.id in carried_ids and question.id in still_open
         )
 
     run_evidence: dict[str, Any] | None = None

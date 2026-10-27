@@ -157,6 +157,28 @@ def _section_path(header_rest: str, content: str) -> str:
     return _strip_side_prefix(names[1])
 
 
+def _count_changed_lines(section: str) -> tuple[int, int]:
+    """Count one file section's added and removed lines.
+
+    Only lines after the first hunk header count: ``---``/``+++`` are file
+    headers there and nowhere else, so a removed ``-- comment`` or front-matter
+    ``---`` inside a hunk is still a deletion.
+    """
+    additions = 0
+    deletions = 0
+    in_hunk = False
+    for line in section.split("\n"):
+        if line.startswith("@@"):
+            in_hunk = True
+        elif not in_hunk:
+            continue
+        elif line.startswith("+"):
+            additions += 1
+        elif line.startswith("-"):
+            deletions += 1
+    return additions, deletions
+
+
 def _parse_diff_into_files(diff: str) -> list[models.FileDiff]:
     if not diff.strip():
         return []
@@ -185,14 +207,7 @@ def _parse_diff_into_files(diff: str) -> list[models.FileDiff]:
             or models._GIT_BINARY_PATCH_PATTERN.search(content)
         )
 
-        additions = 0
-        deletions = 0
-        if not is_binary:
-            for line in content.split("\n"):
-                if line.startswith("+") and not line.startswith("+++"):
-                    additions += 1
-                elif line.startswith("-") and not line.startswith("---"):
-                    deletions += 1
+        additions, deletions = (0, 0) if is_binary else _count_changed_lines(content)
 
         files.append(
             models.FileDiff(
@@ -249,15 +264,9 @@ def _truncate_file_diff(file_diff: models.FileDiff, max_size: int) -> models.Fil
 
     remaining_hunks = len(hunks) - hunks_included
     if remaining_hunks > 0:
-        remaining_adds = file_diff.additions
-        remaining_dels = file_diff.deletions
-
-        included_content = "".join(truncated_parts)
-        for line in included_content.split("\n"):
-            if line.startswith("+") and not line.startswith("+++"):
-                remaining_adds -= 1
-            elif line.startswith("-") and not line.startswith("---"):
-                remaining_dels -= 1
+        included_adds, included_dels = _count_changed_lines("".join(truncated_parts))
+        remaining_adds = file_diff.additions - included_adds
+        remaining_dels = file_diff.deletions - included_dels
 
         truncated_parts.append(
             f"\n[...{remaining_hunks} more hunks: "

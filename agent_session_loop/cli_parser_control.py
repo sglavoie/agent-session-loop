@@ -32,6 +32,11 @@ def _add_control_commands(
             "Queue a control command for the runner that owns a plan "
             "(works for --json runs, where the run-control keys are off)."
         ),
+        # Wrapped by hand for the raw formatter the epilogue needs.
+        description=(
+            "Queue a control command for the runner that owns a plan (works "
+            "for\n--json runs, where the run-control keys are off)."
+        ),
         epilog=_group_epilogue("control", "asl control abort --help", guide=True),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -146,6 +151,11 @@ def _add_control_commands(
         help=(
             "Add, remove, or list run-scoped guards: commands denied through "
             "the worker's PATH, and paths that must end the turn unchanged."
+        ),
+        # Wrapped by hand for the raw formatter the epilogue needs.
+        description=(
+            "Add, remove, or list run-scoped guards: commands denied through "
+            "the\nworker's PATH, and paths that must end the turn unchanged."
         ),
         epilog=_group_epilogue("control guard", "asl control guard add --help"),
         formatter_class=argparse.RawDescriptionHelpFormatter,

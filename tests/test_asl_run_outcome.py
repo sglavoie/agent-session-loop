@@ -291,6 +291,20 @@ class StderrOwnershipTests(unittest.TestCase):
         self.assertNotIn("Run failed", out.getvalue())
         self.assertIn(f"Plan: {payload['plan_dir']}", out.getvalue())
 
+    def test_the_spark_line_labels_its_availability(self) -> None:
+        # `asl status` labels the reason `availability`; the run summary used
+        # to print it bare (`route none; disabled`).
+        plan = _PlanFixture(self, ("pending",))
+        payload = plan.seeded()
+        payload["spark"] = {"enabled": False, "reason": "disabled"}
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            run_outcome._print_text_outcome(payload)
+
+        self.assertIn(
+            "Spark: disabled; route none; availability disabled", out.getvalue()
+        )
+
 
 class ReaderContractTests(unittest.TestCase):
     """Every key the printer indexes bare is a key its two payloads supply."""

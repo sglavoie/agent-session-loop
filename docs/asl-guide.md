@@ -35,8 +35,8 @@ A violation rejects the turn, retains every filesystem change, returns the sessi
 ### Run control without the Workbench
 
 The Workbench's run controls are also available without it. `asl control stop-after-current PLAN_DIR_OR_ID [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]` and `asl control select-harness PLAN_DIR_OR_ID --harness codex|claude|copilot [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]` are the programmatic equivalents of the interactive `p` and `1`/`2`/`3` run-control keys, which are disabled for `run --json`, `run --dry-run`, and non-TTY runs; each validates the plan, enqueues onto the durable per-plan control queue, and reports `enqueued`, `command_id`, `run_active`, and a `note` (plus `pending_after_current` for stop-after-current and `harness` for select-harness).
-The rest of `asl control` — `abort`, `set-model`, `guard`, and the `redirect`, `redirect-status`, `resolve-redirect` and `recover-conversation` leaves for correcting a live turn — is listed with its flags in the [command reference](agent-session-loop/02-commands.md); every receipt wait there takes `--wait` with `--timeout` (also spelled `--wait-timeout`).
-A honored stop lets the current session finish and, when any session is still pending, exits the run successfully with `reason: stopped` so the next run resumes from the remainder (a stop requested during the last session is a no-op that still ends `all-complete`).
+The rest of `asl control` — `abort`, `set-model`, `guard`, and the `redirect`, `redirect-status`, `resolve-redirect` and `recover-conversation` leaves for correcting a live turn — is listed with its flags in the [command reference](agent-session-loop/02-commands.md); every receipt wait there takes `--wait` with `--timeout` (also spelled `--wait-timeout`), except that `redirect` always waits for the runner's acceptance up to `--timeout` (default 2 seconds, at most 30) and `redirect-status` waits only with `--wait-acknowledged`.
+An honored stop lets the current session finish and, when any session is still pending, exits the run successfully with `reason: stopped` so the next run resumes from the remainder (a stop requested during the last session still ends `all-complete`, unless `--review-harness` is set: the generated review would start after that session, so the run exits `reason: stopped` with the review pending and re-running the same command performs it).
 
 ### Autopilot skill
 
@@ -135,10 +135,10 @@ information without opening a reply wait. Autopilot reports them as bounded
 escaped `NOTICE` progress and keeps complete question and notice arrays
 separate in its final structured outbox; attach replays notices from the live
 run at least once per supervisor process and suppresses in-process duplicates.
-The schema-v3 log is non-destructive, still reads v1/v2 records, uses physical
+The schema-v4 log is non-destructive, still reads v1/v2/v3 records, uses physical
 line numbers as durable cursors, and caps appends at 4 MiB. Nested capacity
 reserves keep closure, wait termination, and consumption-receipt records
-appendable. Wait-mode v3 questions accept a closure only while a recorded wait
+appendable. Wait-mode questions (v3 and later) accept a closure only while a recorded wait
 is active; a late closure returns `question-not-waiting`. The first concurrent
 reply or resolution logically closes a question, and all source, closure, and
 lifecycle records remain append-only history because mailbox rotation and

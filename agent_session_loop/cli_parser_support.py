@@ -603,12 +603,14 @@ def _group_epilogue(
             f"Flags belong to a leaf, so read `{leaf_example}` for its flags.",
         ]
     else:
+        # Broken by hand: the groups use the raw formatter, which prints each
+        # line as written, so these stay inside 79 columns.
         lines = [
-            f"This help lists the `asl {group}` leaf commands plus the flags "
-            f"the bare `asl {group}` form accepts.",
-            f"Bare `asl {group}` runs `{parent_form_leaf}` with those flags; "
-            f"every other leaf has its own, so read `{leaf_example}` "
-            "or that leaf's help.",
+            f"This help lists the `asl {group}` leaf commands plus the flags the",
+            f"bare `asl {group}` form accepts.",
+            f"Bare `asl {group}` runs `{parent_form_leaf}` with those flags; every",
+            f"other leaf has its own, so read `{leaf_example}` or that",
+            "leaf's help.",
         ]
     if guide:
         lines.append("Run `asl supervisor-guide` for the whole supervision workflow.")

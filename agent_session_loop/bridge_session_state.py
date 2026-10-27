@@ -123,6 +123,7 @@ class SessionState:
     _last_snapshot_at: float | None = field(default=None, repr=False)
     _last_build_seconds: float = field(default=0.0, repr=False)
     _retry_at: float | None = field(default=None, repr=False)
+    _first_projection_at: float | None = field(default=None, repr=False)
 
     def projection_interval(self) -> float:
         """How long a projection stays authoritative, and how often to poll.
@@ -146,11 +147,18 @@ class SessionState:
         A failure owes its own deadline, because the deadline of the last
         *successful* projection is already in the past by then and would put
         the loop into a zero-timeout retry spin.
+
+        Before any projection the first deadline is fixed when first asked
+        for: one counted afresh from the clock would recede on every call and
+        never come due, so a client that only listened would never hear
+        ``runs.changed``.
         """
         if self._retry_at is not None:
             return self._retry_at
         if self._last_snapshot_at is None:
-            return self.clock() + self.poll_interval
+            if self._first_projection_at is None:
+                self._first_projection_at = self.clock() + self.poll_interval
+            return self._first_projection_at
         return self._last_snapshot_at + self.projection_interval()
 
     def select_timeout(self) -> float:

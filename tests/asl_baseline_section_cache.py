@@ -227,6 +227,30 @@ class BaselineCacheTests(unittest.TestCase):
             self.assertNotEqual(staged, committed)
             self.assertNotEqual(clean, committed)
 
+    def test_repository_fingerprint_ignores_a_plan_dir_inside_the_repo(
+        self,
+    ) -> None:
+        # Writing baseline evidence into a plan kept in the repository must
+        # not make that evidence stale the moment it lands.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            init_git_repo(repo)
+            plan_dir = repo / "plans" / "p"
+            plan_dir.mkdir(parents=True)
+            before = baseline_cache.repository_fingerprint(repo, plan_dir)
+            self.assertEqual(before, baseline_cache.repository_fingerprint(repo))
+
+            (plan_dir / "baseline-results.json").write_text("{}\n", encoding="utf-8")
+            self.assertEqual(
+                before, baseline_cache.repository_fingerprint(repo, plan_dir)
+            )
+            self.assertNotEqual(before, baseline_cache.repository_fingerprint(repo))
+
+            (repo / "elsewhere.txt").write_text("x\n", encoding="utf-8")
+            self.assertNotEqual(
+                before, baseline_cache.repository_fingerprint(repo, plan_dir)
+            )
+
     def test_repository_fingerprint_non_git_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             fingerprint = baseline_cache.repository_fingerprint(tmp)

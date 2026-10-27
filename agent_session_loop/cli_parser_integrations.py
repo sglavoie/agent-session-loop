@@ -18,6 +18,11 @@ def _add_bridge_commands(
             "Serve the NDJSON run projection and token-guarded interventions "
             "to a supervision client."
         ),
+        # Wrapped by hand for the raw formatter the epilogue needs.
+        description=(
+            "Serve the NDJSON run projection and token-guarded interventions "
+            "to a\nsupervision client."
+        ),
         epilog=_group_epilogue("bridge", "asl bridge serve --help"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

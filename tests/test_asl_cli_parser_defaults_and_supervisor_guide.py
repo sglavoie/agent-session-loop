@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import re
@@ -20,6 +21,41 @@ from agent_session_loop import (
 
 class ParserDefaultsAndSupervisorGuideTests(unittest.TestCase):
     """Parser defaults and the supervisor-guide / notify / outbox parser contracts."""
+
+    def test_every_valued_default_is_named_in_its_help(self) -> None:
+        """A flag with a real default says it as ``(default: X)``.
+
+        A default argparse fills in (``--harness`` is ``codex``) that the help
+        leaves out is invisible to anyone choosing whether to pass the flag.
+        """
+
+        def walk(parser: argparse.ArgumentParser, path: tuple[str, ...]):
+            yield path, parser
+            for action in parser._actions:
+                if isinstance(action, argparse._SubParsersAction):
+                    for name, child in action.choices.items():
+                        yield from walk(child, (*path, name))
+
+        missing = []
+        unstandard = []
+        for path, parser in walk(cli.build_parser("asl"), ()):
+            for action in parser._actions:
+                text = action.help or ""
+                if re.search(r"\(default (?!:|and only supported:)", text):
+                    unstandard.append((path, action.option_strings, text))
+                default = action.default
+                if (
+                    text == argparse.SUPPRESS
+                    or isinstance(default, bool)
+                    or not isinstance(default, (str, int, float))
+                    or default in ("", argparse.SUPPRESS)
+                    or isinstance(action, argparse._StoreConstAction)
+                ):
+                    continue
+                if "default" not in text.lower():
+                    missing.append((path, action.option_strings, default))
+        self.assertEqual([], missing)
+        self.assertEqual([], unstandard)
 
     def test_commit_flags_are_mutually_exclusive(self) -> None:
         parser = cli.build_parser()

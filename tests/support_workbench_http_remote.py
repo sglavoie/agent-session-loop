@@ -179,6 +179,60 @@ class RemoteProviderTests(unittest.TestCase):
         )
         self.assertEqual(sum(payload["counts"]["by_state"].values()), total)
 
+    def test_the_sort_is_applied_before_the_page_is_cut(self) -> None:
+        # Urgency and activity disagree on purpose: the most urgent row is the
+        # oldest and sorts last by label, so a page cut in urgency order and
+        # then labelled with the requested sort would put it first every time.
+        self.store.ingest_catalog(
+            envelope(
+                "catalog_page",
+                catalog_payload(
+                    observed_at=NOW - 10,
+                    generation="gen-sort",
+                    entries=[
+                        catalog_entry(
+                            "urgent-old",
+                            urgency_rank=10,
+                            display_label="Zulu",
+                            last_activity_at="2020-01-01T00:00:00+00:00",
+                        ),
+                        catalog_entry(
+                            "quiet-new",
+                            urgency_rank=50,
+                            display_label="alpha",
+                            last_activity_at="2030-01-01T00:00:00Z",
+                        ),
+                    ],
+                ),
+            ),
+            received_at=NOW - 10,
+        )
+        expected = {
+            "urgency": "urgent-old",
+            "recent": "quiet-new",
+            "label": "quiet-new",
+            "oldest": "urgent-old",
+        }
+        for sort, first in expected.items():
+            with self.subTest(sort=sort):
+                payload = document(
+                    self.remote_app().handle(
+                        build("GET", f"/api/queue?sort={sort}&limit=1")
+                    )
+                )
+                self.assertEqual(payload["filters"]["sort"], sort)
+                self.assertEqual([row["plan_key"] for row in payload["plans"]], [first])
+                self.assertTrue(payload["truncated"])
+
+    def test_an_empty_page_size_is_refused_rather_than_rounded_up(self) -> None:
+        for path in ("/api/queue?limit=0", "/api/history?limit=0"):
+            with self.subTest(path=path):
+                response = self.remote_app().handle(build("GET", path))
+                self.assertEqual(response.status, 400)
+                payload = document(response)
+                self.assertEqual(payload["reason"], "invalid-request")
+                self.assertIn("limit", payload["error"])
+
     def test_a_path_is_refused_rather_than_guessed_at(self) -> None:
         response = self.remote_app().handle(
             build("GET", "/api/plan?plan_dir=/Users/x/plan")

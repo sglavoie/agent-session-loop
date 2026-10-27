@@ -241,8 +241,10 @@ stdlib `unittest` only) sharing fixtures through `tests/support.py`.
 `just test-fast` runs the fast lane (every module that does not declare
 `ASL_TEST_LANE = "integration"`); `just test-all` runs
 everything — including the helper-script suites under `skills/` — as isolated
-parallel shards via `tests/run_suite.py`, which also fails if a test module is
-missing from its shard lists. Individual modules run directly, for example
+parallel shards via `tests/run_suite.py`. Lanes are derived, not listed: a
+module's lane comes from its own `ASL_TEST_LANE` / `ASL_TEST_PORTABLE` /
+`ASL_TEST_SHARDS` literals, and every mode also runs a registration shard that
+fails unless each discovered test runs exactly once. Individual modules run directly, for example
 `python3 -m unittest tests.test_asl_verification_run_and_observers -q`.
 
 `just test-portable` is a third lane cut for CI rather than for a developer. It
