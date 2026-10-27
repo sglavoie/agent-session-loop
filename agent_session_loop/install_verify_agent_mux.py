@@ -36,6 +36,9 @@ def _amx_doctor(path_env: str | None, home: Path) -> tuple[str | None, Any]:
         completed = subprocess.run(
             [active_amx, "doctor", "--json"],
             text=True,
+            # Undecodable output is a report that cannot be read, not a crash
+            # of the whole verification: replaced bytes fail the JSON parse.
+            errors="replace",
             capture_output=True,
             env=env,
             check=False,

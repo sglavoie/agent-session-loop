@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import io
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from agent_session_loop import (
     agent_mux_projection,
@@ -145,6 +147,27 @@ class InstallVerifyAgentMuxTests(unittest.TestCase):
         self.assertEqual(len(checks), 1)
         self.assertFalse(checks[0]["ok"])
         self.assertTrue(checks[0]["advisory"])
+
+    def test_undecodable_doctor_output_is_advisory_not_a_crash(self) -> None:
+        amx = self.tmp_path / "amx"
+        amx.write_text("#!/bin/sh\n", encoding="utf-8")
+        amx.chmod(0o755)
+
+        def _run(argv: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            # What text mode does with the bytes, under the caller's errors=.
+            stdout = b"\xff\xfe not json".decode(
+                "utf-8", kwargs.get("errors", "strict")
+            )
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+        with mock.patch.object(install_verify_agent_mux.subprocess, "run", _run):
+            checks = install_verify_agent_mux._check_agent_mux(
+                path_env=str(self.tmp_path), home=self.tmp_path, active_asl=None
+            )
+        self.assertEqual(len(checks), 1)
+        self.assertFalse(checks[0]["ok"])
+        self.assertTrue(checks[0]["advisory"])
+        self.assertIn("could not be read", checks[0]["detail"])
 
 
 class InstallVerifyPromotionTests(unittest.TestCase):
