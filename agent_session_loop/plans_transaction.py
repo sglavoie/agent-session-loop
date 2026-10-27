@@ -175,7 +175,7 @@ def _recover_pending_plan_transaction_locked(
 
     try:
         payload = json.loads(journal_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise PlanError(
             f"cannot read pending plan transaction journal: {error}"
         ) from error

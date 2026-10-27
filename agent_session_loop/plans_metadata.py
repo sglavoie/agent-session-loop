@@ -77,7 +77,7 @@ def load_plan_metadata(plan_dir: str | Path) -> PlanMetadataValue | None:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         _raise_read_error(path, error)
 
     try:

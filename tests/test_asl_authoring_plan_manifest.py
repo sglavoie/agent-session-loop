@@ -272,6 +272,24 @@ class PlanManifestTransactionTests(PlanAuthoringBase):
                 },
             )
 
+    def test_non_utf8_journal_and_plan_metadata_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            metadata_path = plan_dir / plans_metadata.PLAN_METADATA_FILE_NAME
+            metadata_path.write_bytes(b'{"version": 1, "cwd": "/tmp/\xff"}')
+            with self.assertRaisesRegex(plans_errors.PlanError, "cannot read"):
+                plans_metadata.load_plan_metadata(plan_dir)
+
+            transaction_dir = plan_dir / plans_transaction.PLAN_TRANSACTION_DIR_NAME
+            transaction_dir.mkdir()
+            (
+                transaction_dir / plans_transaction.PLAN_TRANSACTION_JOURNAL_NAME
+            ).write_bytes(b'{"version": 1, "entries": "\xff"}')
+            with self.assertRaisesRegex(
+                plans_errors.PlanError, "cannot read pending plan transaction journal"
+            ):
+                plans_transaction.recover_pending_plan_transaction(plan_dir)
+
     def test_transaction_recovery_times_out_with_holder_diagnostic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp)

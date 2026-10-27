@@ -46,7 +46,7 @@ def load_prepare_validation(plan_dir: str | Path) -> PrepareValidation | None:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         raise PlanError(f"cannot read {path}: {error}") from error
     try:
         payload = json.loads(text)

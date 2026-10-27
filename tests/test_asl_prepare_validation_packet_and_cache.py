@@ -309,6 +309,25 @@ class PrepareValidationPacketAndCacheTests(PrepareValidatorFixtures):
             with self.assertRaisesRegex(plans_errors.PlanError, "not valid JSON"):
                 prepare_validation_store.load_prepare_validation(plan_dir)
 
+    def test_load_fails_closed_on_non_utf8_aggregate_and_cache(self) -> None:
+        loaders = (
+            (
+                prepare_models.PREPARE_VALIDATION_FILENAME,
+                prepare_validation_store.load_prepare_validation,
+            ),
+            (
+                prepare_models.PREPARE_VALIDATION_CACHE_FILENAME,
+                prepare_validation_cache.load_prepare_validation_cache,
+            ),
+        )
+        for filename, load in loaders:
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as tmp:
+                plan_dir = Path(tmp) / "plan"
+                _write_prepare_plan(plan_dir)
+                (plan_dir / filename).write_bytes(b'{"version": 2, "x": "\xff"}')
+                with self.assertRaisesRegex(plans_errors.PlanError, "cannot read"):
+                    load(plan_dir)
+
     def test_unknown_validation_cache_version_is_a_safe_cache_miss(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"

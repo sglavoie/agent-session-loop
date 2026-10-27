@@ -178,7 +178,7 @@ def load_prepare_validation_cache(
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return PrepareValidationCache()
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         raise PlanError(f"cannot read {path}: {error}") from error
     try:
         payload = json.loads(text)
