@@ -380,6 +380,38 @@ class DocumentValidationTests(unittest.TestCase):
             {contract.REASON_INVALID_ENUM},
         )
 
+    def test_a_boolean_is_not_the_number_a_const_names(self) -> None:
+        """Python says ``True == 1``; JSON Schema says a boolean is not a number."""
+        document = self._live_turn()
+        document["schema_version"] = True
+        self.assertEqual(
+            _reasons(contract.validate_document(self.projection, document)),
+            {contract.REASON_CONST_MISMATCH},
+        )
+
+    def test_const_and_enum_compare_json_types_not_python_equality(self) -> None:
+        schema = {
+            "roots": {"doc": "Doc"},
+            "forbidden_property_names": [],
+            "body_bearing_pointers": [],
+            "max_document_bytes": 10000,
+            "definitions": {
+                "Doc": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["flag", "kind"],
+                    "properties": {"flag": {"const": False}, "kind": {"enum": [0, 1]}},
+                }
+            },
+        }
+        self.assertEqual(
+            contract.validate_document(schema, {"flag": False, "kind": 1.0}), []
+        )
+        self.assertEqual(
+            _reasons(contract.validate_document(schema, {"flag": 0, "kind": True})),
+            {contract.REASON_CONST_MISMATCH, contract.REASON_INVALID_ENUM},
+        )
+
     def test_an_oversized_string_is_rejected(self) -> None:
         document = self._live_turn()
         document["question_id"] = "q" * 129

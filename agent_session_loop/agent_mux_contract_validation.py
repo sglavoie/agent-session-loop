@@ -135,6 +135,24 @@ def _json_type(value: Any) -> str:
     return "unknown"
 
 
+def _json_equal(left: Any, right: Any) -> bool:
+    """JSON Schema equality: Python's ``True == 1`` is not JSON's.
+
+    A boolean equals only a boolean; ``1`` and ``1.0`` are the same number.
+    """
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left == right
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _json_equal(a, b) for a, b in zip(left, right, strict=True)
+        )
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(
+            _json_equal(left[key], right[key]) for key in left
+        )
+    return bool(left == right)
+
+
 def _validate_node(
     node: Mapping[str, Any],
     value: Any,
@@ -151,7 +169,7 @@ def _validate_node(
     problems: list[models.Violation] = []
 
     if "const" in node:
-        if value != node["const"]:
+        if not _json_equal(value, node["const"]):
             problems.append(
                 models.Violation(
                     models.REASON_CONST_MISMATCH,
@@ -161,7 +179,7 @@ def _validate_node(
             )
         return problems
     if "enum" in node:
-        if value not in node["enum"]:
+        if not any(_json_equal(value, option) for option in node["enum"]):
             problems.append(
                 models.Violation(
                     models.REASON_INVALID_ENUM,
