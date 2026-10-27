@@ -230,7 +230,7 @@ def _validate_history_entry(value: Any, where: str) -> None:
     _identifier(entry["run_id"], f"{where}.run_id")
     _word(entry["outcome"], f"{where}.outcome", HISTORY_OUTCOMES)
     _number(entry["recorded_at"], f"{where}.recorded_at")
-    _optional(entry, "project", where, _text)
+    _text(entry["project"], f"{where}.project")
     _optional(
         entry,
         "projects",

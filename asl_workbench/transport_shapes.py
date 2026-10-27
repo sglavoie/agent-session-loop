@@ -167,7 +167,9 @@ RUN_SHAPE = _Shape(
 
 #: One completed run inside a history batch. Every name is one
 #: :data:`asl_workbench.observation.HISTORY_PERSIST_FIELDS` keeps, minus the
-#: ingestion bookkeeping the service assigns itself.
+#: ingestion bookkeeping the service assigns itself. ``project`` is required:
+#: the store keeps it ``NOT NULL`` and every ending names one, so a frame
+#: without it is refused here rather than failing inside the transaction.
 HISTORY_ENTRY_SHAPE = _Shape(
     required=frozenset(
         {
@@ -176,13 +178,13 @@ HISTORY_ENTRY_SHAPE = _Shape(
             "plan_key",
             "run_key",
             "run_id",
+            "project",
             "outcome",
             "recorded_at",
         }
     ),
     optional=frozenset(
         {
-            "project",
             "projects",
             "harness",
             "model",
