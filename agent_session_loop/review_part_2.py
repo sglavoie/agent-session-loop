@@ -58,8 +58,14 @@ def _validate_finding(
         "explanation": _require_finding_str(
             finding_id, payload.get("explanation"), label="explanation"
         ),
-        "repair_group": _require_finding_str(
-            finding_id, payload.get("repair_group"), label="repair_group"
+        # One line: the name is rendered into a child's "- Repair group:"
+        # bullet and read back from it, so a line break inside it would drop
+        # the child's attempt record. Whitespace runs collapse the same way
+        # finding_repeat_key already compares group names.
+        "repair_group": " ".join(
+            _require_finding_str(
+                finding_id, payload.get("repair_group"), label="repair_group"
+            ).split()
         ),
         "done_criteria": _validate_string_list(
             finding_id, payload.get("done_criteria"), label="done_criteria"
