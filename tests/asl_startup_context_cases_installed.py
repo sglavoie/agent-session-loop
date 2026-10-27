@@ -124,6 +124,22 @@ class InstalledStartupContextTests(unittest.TestCase):
             )
             self.assertNotIn("Errno", detail)
 
+    def test_context_file_that_is_not_utf8_fails_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home, fake_bin = self.build_home(temp_dir)
+            (home / ".claude/CLAUDE.md").write_bytes(b"# Notes\ncaf\xe9\n")
+
+            payload = self.verify(home, fake_bin)
+
+            self.assertFalse(payload["ok"])
+            detail = next(
+                failure["detail"]
+                for failure in payload["failures"]
+                if failure["name"] == "startup-context"
+            )
+            self.assertIn("cannot read", detail)
+            self.assertIn(".claude/CLAUDE.md", detail)
+
     def test_stale_context_marker_fails_verification(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             home, fake_bin = self.build_home(temp_dir)

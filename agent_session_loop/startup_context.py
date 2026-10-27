@@ -397,7 +397,31 @@ def _file_record(
         "path": str(path.relative_to(root)),
         "stale": current != desired,
         "missing": missing,
+        "unreadable": None,
     }
+
+
+def _unreadable_record(path: Path, root: Path, error: str) -> dict[str, Any]:
+    """A context file that exists but cannot be read as UTF-8 text.
+
+    It is neither stale nor missing: nobody can tell what it holds, so a sync
+    leaves it exactly as it is rather than rendering over an operator's file.
+    """
+    return {
+        "path": str(path.relative_to(root)),
+        "stale": False,
+        "missing": False,
+        "unreadable": error,
+    }
+
+
+def _read_current(path: Path) -> str:
+    """``path``'s text, or ``""`` when it does not exist yet.
+
+    Raises ``OSError`` or ``UnicodeDecodeError`` for a file that exists but
+    cannot be read; the caller reports it instead of rewriting it.
+    """
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
 
 
 def sync(
@@ -423,7 +447,11 @@ def sync(
     for target in () if reference_only else context_targets(discovery.found):
         path = home_root / target.installed_path
         exists = path.is_file()
-        current = path.read_text(encoding="utf-8") if exists else ""
+        try:
+            current = _read_current(path)
+        except (OSError, UnicodeDecodeError) as error:
+            files.append(_unreadable_record(path, home_root, str(error)))
+            continue
         desired = apply_block(current, render_block(target.harness))
         files.append(
             _file_record(path, home_root, current, desired, missing=not exists)
@@ -433,20 +461,27 @@ def sync(
 
     reference = root / REFERENCE_PATH
     exists = reference.is_file()
-    current = reference.read_text(encoding="utf-8") if exists else ""
-    desired = render_reference()
-    files.append(_file_record(reference, root, current, desired, missing=not exists))
-    if not check and current != desired:
-        reference.parent.mkdir(parents=True, exist_ok=True)
-        _replace_file(reference, desired)
+    try:
+        current = _read_current(reference)
+    except (OSError, UnicodeDecodeError) as error:
+        files.append(_unreadable_record(reference, root, str(error)))
+    else:
+        desired = render_reference()
+        files.append(
+            _file_record(reference, root, current, desired, missing=not exists)
+        )
+        if not check and current != desired:
+            reference.parent.mkdir(parents=True, exist_ok=True)
+            _replace_file(reference, desired)
 
     # A missing file is also stale (its desired content differs from nothing),
     # so ``stale`` keeps naming every file a sync would write; ``missing`` is
     # the subset that does not exist yet and that a sync would create.
     stale = [record["path"] for record in files if record["stale"]]
     missing = [record["path"] for record in files if record["missing"]]
+    unreadable = [record["path"] for record in files if record["unreadable"]]
     return {
-        "ok": not (check and stale),
+        "ok": not unreadable and not (check and stale),
         "command": COMMAND_NAME,
         "repo_root": str(root),
         "home": str(home_root),
@@ -454,6 +489,7 @@ def sync(
         "files": files,
         "stale": stale,
         "missing": missing,
+        "unreadable": unreadable,
         "remedy": SYNC_REMEDY,
         "written": [] if check else stale,
         "harness_roots": {**discovery.payload(), "note": discovery.note()},
@@ -503,18 +539,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if payload["ok"] else 1
     if not args.reference_only:
         print(payload["harness_roots"]["note"])
+    for record in payload["files"]:
+        if record["unreadable"]:
+            print(
+                f"unreadable: {record['path']} ({record['unreadable']}); "
+                "left as it is: save it as UTF-8 to render the startup card"
+            )
     if args.check:
         if payload["stale"]:
             missing = set(payload["missing"])
             for path in payload["stale"]:
                 print(f"missing: {path}" if path in missing else f"stale: {path}")
             print(f"run `{SYNC_REMEDY}` to render the startup card")
-        else:
+        elif not payload["unreadable"]:
             print("startup context is up to date")
     else:
         for path in payload["written"]:
             print(f"rendered: {path}")
-        if not payload["written"]:
+        if not payload["written"] and not payload["unreadable"]:
             print("startup context is up to date")
     return 0 if payload["ok"] else 1
 

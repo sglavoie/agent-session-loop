@@ -452,6 +452,48 @@ class StartupContextRendererTests(unittest.TestCase):
             self.assertIn("stale: .codex/AGENTS.md", output)
             self.assertIn("just sync-skills", output)
 
+    def test_a_context_file_that_is_not_utf8_is_reported_and_left_alone(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = self.build_repo(temp_dir)
+            claude = repo_root / ".claude/CLAUDE.md"
+            latin1 = b"# Notes\ncaf\xe9\n"
+            claude.write_bytes(latin1)
+
+            for check in (True, False):
+                with self.subTest(check=check):
+                    stdout = io.StringIO()
+                    with (
+                        mock.patch.object(
+                            startup_context.install_verify_common.os,
+                            "environ",
+                            HARNESS_ENV,
+                        ),
+                        contextlib.redirect_stdout(stdout),
+                    ):
+                        code = startup_context.main(
+                            [
+                                *(["--check"] if check else []),
+                                "--repo-root",
+                                str(repo_root),
+                                "--home",
+                                str(repo_root),
+                            ]
+                        )
+                    payload = startup_context.sync(
+                        repo_root, home=repo_root, env=HARNESS_ENV, check=True
+                    )
+
+                    self.assertEqual(code, 1)
+                    self.assertFalse(payload["ok"])
+                    self.assertEqual(payload["unreadable"], [".claude/CLAUDE.md"])
+                    self.assertNotIn(".claude/CLAUDE.md", payload["stale"])
+                    self.assertEqual(claude.read_bytes(), latin1)
+                    output = stdout.getvalue()
+                    self.assertIn("unreadable: .claude/CLAUDE.md", output)
+                    self.assertNotIn("up to date", output)
+
     def test_checked_in_generated_blocks_are_current(self) -> None:
         payload = startup_context.sync(REPO_ROOT, check=True, reference_only=True)
 

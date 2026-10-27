@@ -167,7 +167,7 @@ def _check_startup_context(
                 failure("startup-context", f"{path} is missing; {remedy}"),
             )
             continue
-        except OSError as error:
+        except (OSError, UnicodeDecodeError) as error:
             checks.append(
                 failure("startup-context", f"cannot read {path}: {error}"),
             )
