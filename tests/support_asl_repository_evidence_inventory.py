@@ -42,8 +42,32 @@ class RepositoryEvidenceParityTests(unittest.TestCase):
 
         self.assertTrue(repository_evidence.remove_worktree(self.repository, owned))
         self.assertEqual(
-            (other.resolve(),), repository_evidence.linked_worktrees(self.repository)
+            (other.resolve(),),
+            repository_evidence.linked_worktrees(
+                self.repository, include_prunable=True
+            ),
         )
+
+    def test_a_prunable_worktree_registration_is_not_a_disappeared_repository(
+        self,
+    ) -> None:
+        # A checkout deleted before the run leaves a registration git marks
+        # `prunable`. Listing it made every snapshot report the repository as
+        # disappeared, which refused every turn as unavailable.
+        head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=self.repository, text=True
+        ).strip()
+        stale = repository_evidence.add_detached_worktree(
+            self.repository, self.root / "stale", head
+        )
+        shutil.rmtree(stale)
+
+        self.assertEqual((), repository_evidence.linked_worktrees(self.repository))
+        snapshot = repository_evidence.capture_registered_snapshot(
+            self.root, self.plan_dir, ["repository"]
+        )
+        self.assertEqual(["repository"], list(snapshot))
+        self.assertNotIn("unavailable", snapshot["repository"])
 
     def test_worktree_cleanup_cannot_claim_success_when_inventory_fails(self) -> None:
         commands: list[list[str]] = []
