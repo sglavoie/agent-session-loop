@@ -248,8 +248,8 @@ close a plainly nonblocking question without an answer using `asl inbox resolve
 `--action pause`. Its JSON adds `context_kind: "waiting"`, `question_id`,
 `waiting_for_reply`, `reply_command`, `reply_stdin_command`,
 `continue_command`, and `pause_command`. A durable paused resolver is headed
-`# Paused Agent Session - Resolver Prompt` and retains its `asl run --reply`
-resume guidance. Both JSON shapes include `ok`, `command: "questions"`,
+`# Paused Agent Session - Resolver Prompt` and retains its
+`asl run --resume --reply` resume guidance. Both JSON shapes include `ok`, `command: "questions"`,
 `session_id`, `next_pending_id`, verbatim `last_message`, assembled
 `rendered_prompt`, and `state_path`. If neither context exists, `--json`
 produces `ok: false` with a stable `reason` (`no-paused-run`,

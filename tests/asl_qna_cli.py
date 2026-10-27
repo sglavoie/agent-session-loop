@@ -101,6 +101,8 @@ class QnAQuestionsCliTests(unittest.TestCase):
             self.assertIn("Should we use 1a or 1b?", out)
             self.assertIn("## Instructions", out)
             self.assertIn("`asl run --resume --reply`", out)
+            # Every mention names --resume, which restores the harness.
+            self.assertNotIn("`asl run --reply`", out)
             self.assertIn(str(last_message_path), out)
             self.assertIn("- Session ID: 1", out)
 

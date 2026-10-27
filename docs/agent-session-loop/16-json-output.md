@@ -370,8 +370,8 @@ Paused `run --json` payloads also carry an `interactive_help` object whenever
 the paused turn left a non-empty `last-message.txt` body (it is `null`
 otherwise). The block surfaces the data a wrapping coordinator needs to route
 the operator conversation without rebuilding state: `questions_command` and
-`reply_command` are ready-to-paste `asl questions` and `asl run --reply TEXT`
-invocations preserving the current `--state-dir`; `session_id` is the paused
+`reply_command` are ready-to-paste `asl questions` and
+`asl run --resume --reply TEXT` invocations preserving the current `--state-dir`; `session_id` is the paused
 turn's session, `next_pending_id` is the canonical next pending ID,
 `turn_index` is the paused turn index, `artifact_paths` repeats the durable
 `last_message_path`/`stdout_path`/`stderr_path`/`result_path`/`artifact_dir`,

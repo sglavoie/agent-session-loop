@@ -80,7 +80,7 @@ def render_resolver_prompt(context: QnAContext) -> str:
         "An agent harness paused mid-session waiting on a clarifying answer. "
         "Read the context below, ask the user the question(s) the previous "
         "agent needed answered, then return a concise reply suitable for "
-        "`asl run --reply`."
+        "`asl run --resume --reply`."
     )
     lines.append("")
 

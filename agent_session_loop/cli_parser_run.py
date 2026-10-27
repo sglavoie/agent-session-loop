@@ -60,7 +60,7 @@ def _add_run_inspection_commands(
         "questions",
         help=(
             "Print a resolver prompt for the latest paused run so a second "
-            "agent can collect a reply suitable for `asl run --reply`."
+            "agent can collect a reply suitable for `asl run --resume --reply`."
         ),
     )
     questions_parser.add_argument(

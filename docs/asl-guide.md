@@ -18,7 +18,7 @@ Run split agent session plans one session at a time.
 `asl run` self-heals stale/missing runner-managed `progress.md` and recomputable manifest readiness metadata before pausing, `asl preflight` clears non-derived loop-ready findings, `asl verify` executes a session's completion contract, and `asl sessions` shows running and recent ASL-managed activity across every plan state directory.
 Pass `asl run ... --review-harness codex|claude|copilot` to append a final pure-critique session under a second harness that writes `PLAN_DIR/final-review.md`.
 Review repair materializations use an absolute cross-run `--max-review-fix-cycles` cap: a higher cap can reopen budget-stopped findings, and a corrected structured artifact can retry a prior `malformed-review-repair`; the additive `review_resume` JSON block and Workbench Recovery Center explain the next same-plan action.
-When a session pauses with `reason: blocked` because it needs operator answers, use `asl questions PLAN_DIR` to render the resolver prompt and `asl run PLAN_DIR --reply TEXT` to resume the paused turn with the operator's verbatim reply.
+When a session pauses with `reason: blocked` because it needs operator answers, use `asl questions PLAN_DIR` to render the resolver prompt and `asl run PLAN_DIR --resume --reply TEXT` to resume the paused turn with the operator's verbatim reply under its original harness, model, and effort.
 
 ### Workbench
 
