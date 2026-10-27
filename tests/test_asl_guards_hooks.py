@@ -235,6 +235,65 @@ class GuardPreToolHookTests(unittest.TestCase):
         self.assertNotIn(str(self.hook), commands[0])
 
 
+class LegacyAliasBindingTests(unittest.TestCase):
+    """The legacy ``.`` qualifier names the repository root, not the cwd.
+
+    The postflight comparison qualifies a legacy turn's paths against the Git
+    top level, so a run started in a subdirectory has to bind ``.`` there too
+    or the hook and the postflight disagree about which file a rule names.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.repo = self.root / "repo"
+        self.sub = self.repo / "sub"
+        self.sub.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+
+    def _hook_denies(self, rule: str, target: Path) -> bool:
+        controller = guards.GuardController(
+            run_id="run-legacy",
+            run_dir=self.root / "runs" / rule.replace("/", "_"),
+            workspace_aliases=guards.legacy_workspace_aliases(self.sub),
+        )
+        controller.add([], paths=[guards.parse_protected_path_rule(rule)])
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(claude_stream.guard_hook_script_path()),
+                str(controller.policy_file),
+            ],
+            input=json.dumps(
+                {"tool_name": "Write", "tool_input": {"file_path": str(target)}}
+            ),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, completed.returncode)
+        return bool(completed.stdout.strip())
+
+    def test_a_subdirectory_cwd_binds_the_repository_root(self) -> None:
+        self.assertEqual(
+            {guards.LEGACY_PATH_QUALIFIER: str(self.repo)},
+            guards.legacy_workspace_aliases(self.sub),
+        )
+
+    def test_the_hook_qualifies_a_write_the_way_the_postflight_does(self) -> None:
+        target = self.sub / "notes.md"
+        self.assertTrue(self._hook_denies(".:sub/notes.md", target))
+        self.assertFalse(self._hook_denies(".:notes.md", target))
+
+    def test_a_cwd_outside_any_repository_binds_itself(self) -> None:
+        outside = self.root / "plain"
+        outside.mkdir()
+        self.assertEqual(
+            {guards.LEGACY_PATH_QUALIFIER: str(outside)},
+            guards.legacy_workspace_aliases(outside),
+        )
+
+
 class ExternalReadOnlyAliasTests(unittest.TestCase):
     """``--allow-external-changes``: edits refused before they run, per turn.
 

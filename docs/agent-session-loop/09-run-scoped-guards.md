@@ -165,7 +165,10 @@ A **protected-path rule** is written `Alias:glob` and names paths that must end
 each turn byte-identical to how that turn found them. The qualifier is a
 repository alias the *active plan* declares: a registered plan requires one of
 its own aliases (`api:config/settings.toml`), and a legacy single-repository
-plan requires the literal `.` (`.:notes.md`). Patterns are relative POSIX paths
+plan requires the literal `.` (`.:notes.md`). The `.` qualifier names the
+repository's Git top level, not the directory the run was started in, so a run
+started in `repo/sub` protects `repo/sub/notes.md` as `.:sub/notes.md`.
+Patterns are relative POSIX paths
 matched **case-sensitively** against normalized paths, and support literal
 segments, `*` and `?` within one path segment, and `**` across segments —
 `docs/**/*.md` matches `docs/guide.md` and `docs/deep/nested/guide.md` alike.

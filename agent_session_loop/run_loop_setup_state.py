@@ -129,7 +129,7 @@ def _open_run_state(frame: RunFrame) -> RunResult | None:
                 for repository in frame.verification_context.workspace.repositories
             }
             if frame.verification_context.workspace is not None
-            else {guards.LEGACY_PATH_QUALIFIER: str(frame.cwd)}
+            else guards.legacy_workspace_aliases(frame.cwd)
         ),
     )
     event_path = frame.state_dir / events.EVENTS_FILE_NAME

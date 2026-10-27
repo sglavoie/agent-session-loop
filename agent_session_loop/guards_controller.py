@@ -17,6 +17,27 @@ for _module in (_models, _rules, _policy):
     )
 
 
+def legacy_workspace_aliases(cwd: str | Path) -> dict[str, str]:
+    """Bind the legacy ``.`` qualifier to the repository root holding ``cwd``.
+
+    The postflight comparison names a legacy turn's paths relative to the Git
+    top level, whatever subdirectory the run was started in, so the pre-tool
+    hook has to qualify a write against that same root. Binding ``.`` to the
+    working directory instead let the hook pass a write the postflight then
+    convicted, and refuse one the postflight would never have. A ``cwd``
+    outside any repository keeps itself as the root.
+    """
+    from . import git_subprocess
+
+    root = str(cwd)
+    try:
+        completed = git_subprocess.run_git(root, ["rev-parse", "--show-toplevel"])
+    except OSError, ValueError:
+        return {LEGACY_PATH_QUALIFIER: root}
+    toplevel = completed.stdout.strip() if completed.returncode == 0 else ""
+    return {LEGACY_PATH_QUALIFIER: toplevel or root}
+
+
 def _write_policy(*args: Any, **kwargs: Any) -> None:
     """Dispatch through the public seam so callers can replace the policy writer."""
     from . import guards

@@ -363,7 +363,7 @@ def _stage_turn_launch(frame: RunFrame) -> RunResult | LoopSignal | None:
                 for repository in frame.workspace.repositories
             }
             if frame.workspace is not None
-            else {guards.LEGACY_PATH_QUALIFIER: str(frame.cwd)}
+            else guards.legacy_workspace_aliases(frame.cwd)
         )
         frame.ctx.guard_controller.mark_turn_snapshot(frame.protected_path_baseline)
         # The worker may read an externally changed alias it cannot
