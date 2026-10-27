@@ -448,12 +448,21 @@ def _keep_distinct_rejection(
 
 
 def _reviewed_digests(
-    decision: KeepDistinctDecision, *, catalog: IdentityCatalog
+    decision: KeepDistinctDecision,
+    *,
+    catalog: IdentityCatalog,
+    edges: Mapping[str, str],
 ) -> tuple[str, ...]:
-    """The digest each named issue is recognized by, in the order it was named."""
+    """The digest each named issue is recognized by, in the order it was named.
+
+    ``catalog`` and ``edges`` describe the inbox once this transaction's merges
+    land, because that is the inbox the ruling is next compared against: a
+    digest taken before a merge that absorbs into one of the ruled issues would
+    lapse the ruling the moment it was written.
+    """
     digests: list[str] = []
     for issue_id in decision.issue_ids:
-        digest = catalog.identity_digest(issue_id)
+        digest = catalog.identity_digest(follow_merge_chain(edges, issue_id))
         if digest is None:
             raise ProjectionError(
                 UNKNOWN_ISSUE,
@@ -529,6 +538,7 @@ def apply_manifest(
         edges = dict(view.merge_edges)
         bindings = dict(view.identity_bindings)
         records: list[PendingRecord] = []
+        rulings: list[PendingRecord] = []
         for decision in binds:
             refusal = _bind_rejection(
                 decision, known=known, edges=edges, bindings=bindings
@@ -553,18 +563,7 @@ def apply_manifest(
             refused = _keep_distinct_rejection(keep, known=known, edges=edges)
             if refused is not None:
                 raise refused
-            records.append(
-                PendingRecord(
-                    kind=KIND_ISSUE_KEPT_DISTINCT,
-                    payload=IssueKeptDistinct(
-                        issue_ids=keep.issue_ids,
-                        identity_digests=_reviewed_digests(keep, catalog=catalog),
-                        recorded_at=stamp,
-                        note=keep.note,
-                    ),
-                    recorded_at=stamp,
-                )
-            )
+        merged: list[PendingRecord] = []
         for merge in merges:
             rejected = projection.merge_rejection(
                 source=merge.source_issue_id,
@@ -575,7 +574,7 @@ def apply_manifest(
             if rejected is not None:
                 raise rejected
             edges[merge.source_issue_id] = merge.target_issue_id
-            records.append(
+            merged.append(
                 PendingRecord(
                     kind=KIND_ISSUE_MERGED,
                     payload=IssueMerge(
@@ -587,10 +586,47 @@ def apply_manifest(
                     recorded_at=stamp,
                 )
             )
+        if keeps and merged:
+            # Rulings are digested against the inbox this append leaves behind,
+            # so the merges are replayed onto the view first; the rulings still
+            # land ahead of the merges, against the issues they were reviewed as.
+            catalog = projection.project(
+                LedgerView(
+                    path=view.path,
+                    records=(
+                        *view.records,
+                        *(
+                            LedgerRecord(
+                                seq=view.last_seq + offset,
+                                kind=KIND_ISSUE_MERGED,
+                                recorded_at=stamp,
+                                payload=item.payload,
+                            )
+                            for offset, item in enumerate(merged, start=1)
+                        ),
+                    ),
+                    rejected=view.rejected,
+                )
+            ).catalog
+        for keep in keeps:
+            rulings.append(
+                PendingRecord(
+                    kind=KIND_ISSUE_KEPT_DISTINCT,
+                    payload=IssueKeptDistinct(
+                        issue_ids=keep.issue_ids,
+                        identity_digests=_reviewed_digests(
+                            keep, catalog=catalog, edges=edges
+                        ),
+                        recorded_at=stamp,
+                        note=keep.note,
+                    ),
+                    recorded_at=stamp,
+                )
+            )
         counts["bindings"] = len(binds)
         counts["merges"] = len(merges)
         counts["kept_distinct"] = len(keeps)
-        return tuple(records)
+        return (*records, *rulings, *merged)
 
     records = ledger.append_transaction(build, state_dir=state_dir, recorded_at=stamp)
     return ApplyResult(

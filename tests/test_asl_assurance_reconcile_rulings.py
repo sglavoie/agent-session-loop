@@ -39,6 +39,63 @@ class KeepDistinctTests(ReconcileTestCase):
         self.assertEqual(0, payload["kept_distinct"])
         self.assertEqual(settled, self.ledger_path.read_bytes())
 
+    def test_a_ruling_beside_a_merge_into_its_issue_holds_and_reapplies_clean(
+        self,
+    ) -> None:
+        first = self.observe(_finding(), run_id=RUN_ID)
+        second = self.observe(
+            _finding(
+                invariant_key="retry.budget-respect",
+                summary="A retry ran after the retry budget was fully exhausted.",
+            ),
+            run_id=OTHER_RUN_ID,
+        )
+        third = self.observe(
+            _finding(
+                invariant_key="retry.budget-respected-x",
+                summary="A retry ran after the retry budget was exhausted again.",
+            ),
+            run_id=THIRD_RUN_ID,
+        )
+        manifest = self.preview_manifest()
+        decisions = [
+            item
+            for item in manifest["decisions"]
+            if item["decision"] != assurance_models_reconcile.DECISION_REVIEW
+        ]
+        decisions.append(
+            {
+                "decision": assurance_models_reconcile.DECISION_MERGE,
+                "source_issue_id": second,
+                "target_issue_id": first,
+                "note": None,
+            }
+        )
+        decisions.append(
+            {
+                "decision": assurance_models_reconcile.DECISION_KEEP_DISTINCT,
+                "issue_ids": [first, third],
+                "note": None,
+            }
+        )
+        path = self.write_manifest({**manifest, "decisions": decisions})
+        self.assertEqual(1, self.apply_path(path)["kept_distinct"])
+        settled = self.ledger_path.read_bytes()
+
+        # The ruling was digested against ASI-1 as the merge left it, so it
+        # still holds: the re-run has nothing to write and the pair stays quiet.
+        payload = self.apply_path(path)
+        self.assertFalse(payload["applied"])
+        self.assertEqual(settled, self.ledger_path.read_bytes())
+        self.assertNotIn(
+            [first, third],
+            [
+                item["issue_ids"]
+                for item in self.preview_manifest()["decisions"]
+                if item["decision"] == assurance_models_reconcile.DECISION_REVIEW
+            ],
+        )
+
     def test_the_apply_preview_loop_repeats_no_decision_and_still_finds_new_ones(
         self,
     ) -> None:
