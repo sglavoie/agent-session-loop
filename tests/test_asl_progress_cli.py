@@ -12,6 +12,18 @@ from agent_session_loop import state_mailbox_status
 ASL_TEST_PORTABLE = True
 
 
+class _FollowerStopEvent(threading.Event):
+    """Expose when the follower has read the journal's initial contents."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.polling = threading.Event()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.polling.set()
+        return super().wait(timeout)
+
+
 class ProgressCliTests(unittest.TestCase):
     """Coverage for ``asl backfill-progress`` and ``asl progress``."""
 
@@ -412,7 +424,7 @@ class ProgressCliTests(unittest.TestCase):
             plan_dir.mkdir()
             journal = plans_progress.progress_path(plan_dir)
             journal.write_text("# Progress\n" + "old entry\n" * 20, encoding="utf-8")
-            stop = threading.Event()
+            stop = _FollowerStopEvent()
             seen = threading.Event()
 
             class WaitableStringIO(io.StringIO):
@@ -431,6 +443,7 @@ class ProgressCliTests(unittest.TestCase):
             )
             thread.start()
             try:
+                self.assertTrue(stop.polling.wait(timeout=2.0))
                 # A forced backfill replaces the journal whole, shorter.
                 replacement = journal.with_name("progress.md.tmp")
                 replacement.write_text("# Progress\nrebuilt\n", encoding="utf-8")
@@ -464,7 +477,7 @@ class ProgressCliTests(unittest.TestCase):
             plans_progress.append_progress_entry(plan_dir, initial_entry)
 
             buffer = io.StringIO()
-            stop = threading.Event()
+            stop = _FollowerStopEvent()
             seen_new_entry = threading.Event()
 
             class WaitableStringIO(io.StringIO):
@@ -487,6 +500,7 @@ class ProgressCliTests(unittest.TestCase):
             )
             thread.start()
             try:
+                self.assertTrue(stop.polling.wait(timeout=2.0))
                 second_entry = plans_models.ProgressEntry(
                     session_id=plans_session_ids.parse_session_id("2"),
                     status="complete",

@@ -263,7 +263,16 @@ def probe(
     except Exception:  # noqa: BLE001 - a failed probe is unverified, never dead
         return UNVERIFIED
     if completed.returncode != 0:
-        return DEAD
+        # An empty selection exits 1 without output. Diagnostics, partial
+        # output, other exit codes and signals mean ps itself failed; none
+        # establishes that the helper's pid is vacant.
+        if (
+            completed.returncode == 1
+            and not (completed.stdout or "").strip()
+            and not (completed.stderr or "").strip()
+        ):
+            return DEAD
+        return UNVERIFIED
     birth = _parse_birth(completed.stdout)
     if birth is None or not record.birth:
         return UNVERIFIED

@@ -263,6 +263,26 @@ class ProbeTests(unittest.TestCase):
             ),
         )
 
+    def test_ps_command_failures_do_not_prove_the_helper_died(self) -> None:
+        cases = (
+            (1, "", "ps: permission denied\n"),
+            (2, "", "ps: invalid option\n"),
+            (2, "", ""),
+            (-9, "", ""),
+            (1, f"{_BIRTH}\n", ""),
+        )
+        for returncode, stdout, stderr in cases:
+            with self.subTest(returncode=returncode, stdout=stdout, stderr=stderr):
+                result = subprocess.CompletedProcess(
+                    ["ps"], returncode, stdout=stdout, stderr=stderr
+                )
+                self.assertEqual(
+                    supervision_liveness.UNVERIFIED,
+                    supervision_liveness.probe(
+                        _record(), run_command=mock.Mock(return_value=result)
+                    ),
+                )
+
     def test_non_positive_pid_is_unverified(self) -> None:
         def unreachable(*args, **kwargs):  # pragma: no cover - must not be reached
             raise AssertionError("an impossible pid must not be probed")

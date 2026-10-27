@@ -130,7 +130,7 @@ def wait_for_questions(
                 # even at the deadline, before declaring the record missing.
                 last_read_token = mailbox_cli_constants.MAILBOX_TOKEN_UNSEEN
                 continue
-        if lost_reason is not None:
+        if lost_reason is not None and last_read_error is None:
             return mailbox_cli_models.OutboxWaitResult(
                 questions=(),
                 notices=(),
@@ -154,7 +154,12 @@ def wait_for_questions(
             )
 
         if now >= deadline:
-            if last_successful_view is None and last_read_error is not None:
+            if last_read_error is not None and (
+                last_successful_view is None or lost_reason is not None
+            ):
+                # A pre-probe snapshot cannot rule out a terminal record
+                # published during exit. Retry the final read within the
+                # budget, then report its error rather than a false LOST.
                 raise last_read_error
             next_since = max(
                 since,

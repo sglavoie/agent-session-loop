@@ -35,6 +35,83 @@ from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
 
 
 class MailboxCliTestsPart9(MailboxCliTestsBase):
+    def test_dead_helper_requires_a_successful_final_mailbox_read(self) -> None:
+        empty = mailbox_snapshot.MailboxView(
+            mailbox_path=mailbox_cursors.mailbox_path_for_plan(
+                self.plan_dir, self.state_dir
+            )
+        )
+        error = mailbox_models.MailboxError(
+            mailbox_constants.ERROR_MAILBOX_READ,
+            "temporarily unavailable",
+            path=empty.mailbox_path,
+        )
+        # Even a successful read before the probe cannot rule out a terminal
+        # record published while the helper exits.
+        for first_read in (empty, error):
+            with (
+                self.subTest(initial_read_succeeded=first_read is empty),
+                mock.patch.object(
+                    mailbox, "read_mailbox", side_effect=[first_read, error]
+                ),
+                mock.patch.object(mailbox_cli_status, "write_supervisor_lease"),
+            ):
+                with self.assertRaises(mailbox_models.MailboxError) as raised:
+                    mailbox_cli_waits.wait_for_questions(
+                        self.plan_dir,
+                        state_dir=self.state_dir,
+                        since=0,
+                        timeout=0,
+                        supervisor_id=str(uuid.uuid4()),
+                        include=mailbox_cli_constants.OUTBOX_INCLUDE_SUPERVISION,
+                        liveness_probe=lambda: (
+                            mailbox_cli_constants.SUPERVISE_LOST_HELPER_EXITED
+                        ),
+                    )
+                self.assertIs(error, raised.exception)
+
+    def test_final_mailbox_read_retries_before_declaring_helper_lost(self) -> None:
+        empty = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        terminal = mailbox_appenders.append_supervision_end(
+            self.plan_dir,
+            "helper exited: complete",
+            outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
+            state_dir=self.state_dir,
+            supervision_id=mailbox_validation.new_supervision_id(),
+        )
+        finished = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        error = mailbox_models.MailboxError(
+            mailbox_constants.ERROR_MAILBOX_READ,
+            "temporarily unavailable",
+            path=empty.mailbox_path,
+        )
+        probe = mock.Mock(
+            return_value=mailbox_cli_constants.SUPERVISE_LOST_HELPER_EXITED
+        )
+        with (
+            mock.patch.object(
+                mailbox, "read_mailbox", side_effect=[empty, error, finished]
+            ) as read,
+            mock.patch.object(mailbox_cli_status, "write_supervisor_lease"),
+            mock.patch.object(time, "monotonic", return_value=0.0),
+            mock.patch.object(time, "sleep") as sleep,
+        ):
+            result = mailbox_cli_waits.wait_for_questions(
+                self.plan_dir,
+                state_dir=self.state_dir,
+                since=0,
+                timeout=10,
+                supervisor_id=str(uuid.uuid4()),
+                include=mailbox_cli_constants.OUTBOX_INCLUDE_SUPERVISION,
+                liveness_probe=probe,
+            )
+
+        self.assertEqual((terminal,), result.supervision_ends)
+        self.assertIsNone(result.lost_reason)
+        self.assertEqual(3, read.call_count)
+        probe.assert_called_once()
+        sleep.assert_called_once()
+
     def test_terminal_record_published_during_dead_probe_wins(self) -> None:
         launch = mailbox_validation.new_supervision_id()
         self.write_liveness_record(launch)
