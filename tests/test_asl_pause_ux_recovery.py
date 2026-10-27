@@ -225,6 +225,27 @@ class PauseRecoveryPathsTests(unittest.TestCase):
             overseer_resume.recovery_refusal(self._facts("awaiting-reply"))
         )
 
+    def test_an_exhausted_review_verdict_repair_needs_inspection(self) -> None:
+        # The review-verdict repair loop pauses under the same `verify-failed`
+        # reason as the verification repair loop. A relaunch only burns a
+        # review turn that is exhausted on arrival, so either budget flag has
+        # to take the pause off the recoverable path.
+        for key in pause_policy.REPAIR_EXHAUSTED_DETAIL_KEYS:
+            with self.subTest(key=key):
+                policy = pause_policy.classify_pause("verify-failed", {key: True})
+                self.assertFalse(policy["recoverable"])
+                self.assertTrue(policy["requires_user"])
+                self.assertEqual(0, policy["max_retries"])
+                self.assertEqual(
+                    pause_policy.USER_ACTION_INSPECT, policy["user_action"]
+                )
+
+        # A declined retry records the flag as false: no budget was spent.
+        declined = pause_policy.classify_pause(
+            "verify-failed", {"review_verdict_repair_exhausted": False}
+        )
+        self.assertTrue(declined["recoverable"])
+
 
 if __name__ == "__main__":
     unittest.main()

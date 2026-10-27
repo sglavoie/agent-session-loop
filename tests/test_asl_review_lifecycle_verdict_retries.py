@@ -105,6 +105,10 @@ class RunReviewVerdictRetryTests(MutatingFakeClaudeMixin):
         details = payload["pause_details"]
         self.assertTrue(details["review_verdict_repair_exhausted"])
         self.assertEqual(2, details["review_verdict_repair_attempt"])
+        # An exhausted budget is not retried: another launch would only spend
+        # a review turn that is exhausted on arrival.
+        self.assertFalse(payload["pause_policy"]["recoverable"])
+        self.assertEqual(0, payload["pause_policy"]["max_retries"])
         retries = self._review_verdict_retries()
         self.assertEqual(1, len(retries))
         self.assertEqual(

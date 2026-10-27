@@ -271,7 +271,9 @@ turn outcomes off it too.
 
 `policy_version: 5` also makes `verify-failed`
 require inspection when `verification_repair_exhausted` is true; an exhausted
-repair budget is never automatically retried.
+repair budget is never automatically retried. `policy_version: 6` applies the
+same rule to `review_verdict_repair_exhausted`, which the review-verdict repair
+loop records under the same `verify-failed` reason.
 
 Every pause with `requires_user` also populates the state payload's
 `action_required` block (`source: pause`), echoing the pause reason, message,

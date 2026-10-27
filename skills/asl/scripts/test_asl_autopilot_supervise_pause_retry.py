@@ -352,7 +352,9 @@ class SuperviseRunPauseRetryTest(SuperviseRunInjectedBase):
         )
         result = self._supervise(status, run, max_retries=2)
         self.assertFalse(result["ok"], result)
-        self.assertEqual(result["reason"], "paused")
+        # The pause policy classifies it like an exhausted verification
+        # repair, so it surfaces as needing a human, not as a plain pause.
+        self.assertEqual(result["reason"], "user_required")
         self.assertEqual(run.chunks, [1])
         self.assertEqual(result["retries"]["count"], 0)
 

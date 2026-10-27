@@ -107,8 +107,9 @@ same fingerprint) is treated as exhausted immediately rather than burning the
 remaining attempt. Exhaustion keeps the existing `verify-failed` pause — no new
 pause reason — and adds `review_verdict_fingerprint`,
 `review_verdict_repair_attempt`, `review_verdict_repair_max_attempts`, and
-`review_verdict_repair_exhausted: true` to the pause details; the autopilot
-treats that key like `verification_repair_exhausted` and stops relaunching. A
+`review_verdict_repair_exhausted: true` to the pause details; the pause policy
+and the autopilot treat that key like `verification_repair_exhausted`, so the
+pause requires inspection and is never relaunched. A
 pending stop-after-current request wins over a retry: the run pauses instead,
 recording `review_verdict_repair_declined: "stop-after-current"` with
 `review_verdict_repair_exhausted: false` so the record does not claim a budget

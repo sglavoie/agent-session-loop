@@ -168,7 +168,7 @@ class ArtifactSafetyAndPauseUxTests(fixtures.ArtifactSafetyAndPauseUxCase):
     def test_policy_version_marks_the_changed_user_action_meaning(self) -> None:
         # `user_action` changed meaning for reasons that already ship, so a
         # consumer diffing a persisted v3 block must not read it as agreement.
-        self.assertEqual(5, pause_policy.POLICY_VERSION)
+        self.assertEqual(6, pause_policy.POLICY_VERSION)
         self.assertEqual(
             pause_policy.POLICY_VERSION,
             pause_policy.classify_pause("commit-preflight")["policy_version"],

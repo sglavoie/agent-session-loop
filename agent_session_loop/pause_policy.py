@@ -200,7 +200,19 @@ USER_ACTION_INSPECT = "inspect"
 # and unclassifiable turn outcomes that were still reaching ``reply`` by
 # falling through.
 # v5 carries exhausted verification-repair budgets into the recovery policy.
-POLICY_VERSION = 5
+# v6 treats an exhausted review-verdict repair budget the same way: it pauses
+# under the same ``verify-failed`` reason, and v5 still classified it as
+# recoverable.
+POLICY_VERSION = 6
+
+# The ``verify-failed`` detail keys that mark a spent repair budget: the
+# verification repair loop's and the review-verdict repair loop's. Either one
+# means relaunching the same session cannot succeed, so the pause needs
+# inspection rather than another automatic retry.
+REPAIR_EXHAUSTED_DETAIL_KEYS = (
+    "verification_repair_exhausted",
+    "review_verdict_repair_exhausted",
+)
 
 # How many times a supervisor relaunches the same session for a given
 # recoverable pause reason before giving up and surfacing the pause.
@@ -247,7 +259,7 @@ def classify_pause(
     repair_exhausted = (
         reason == "verify-failed"
         and details is not None
-        and details.get("verification_repair_exhausted") is True
+        and any(details.get(key) is True for key in REPAIR_EXHAUSTED_DETAIL_KEYS)
     )
     recoverable = reason in RECOVERABLE_PAUSE_REASONS and not repair_exhausted
     if recoverable:
