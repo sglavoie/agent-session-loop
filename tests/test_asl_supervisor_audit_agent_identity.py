@@ -13,11 +13,16 @@ from agent_session_loop import (
     assurance_projection,
     supervisor_audit,
     supervisor_audit_agent,
+    supervisor_audit_agent_resolution,
 )
 from agent_session_loop.assurance_models_findings import Finding
 from agent_session_loop.assurance_models_inbox import IssueObservation
 from agent_session_loop.assurance_models_summary import AuditAttempt
 from agent_session_loop.assurance_models_vocab import MAX_AUDIT_ATTEMPTS
+from agent_session_loop.supervisor_audit_agent_contract import (
+    AgentAudit,
+    IdentityDecision,
+)
 from tests import support_supervisor_audit_checks as checks_support
 from tests.support_supervisor_audit import RUN_ID, RunHistoryFixture, ScriptedAuditor
 
@@ -595,6 +600,37 @@ class FailClosedIdentityTests(RunHistoryFixture, unittest.TestCase):
         self.assertIn("2 finding(s)", resolution.detail)
         self.assertIn("ASI-3", resolution.detail)
         self.assertIn("ASI-7", resolution.detail)
+
+
+class IdentitySelectionTests(unittest.TestCase):
+    """A fingerprint's selection is the decision of the finding that was kept."""
+
+    def _finding(self, summary: str) -> Finding:
+        return Finding(
+            category="lifecycle",
+            component="runner",
+            invariant_key="retry.budget",
+            lane="lifecycle-retry-resume",
+            severity="high",
+            summary=summary,
+            recommendation="Respect the retry budget.",
+            evidence=("events.jsonl",),
+        )
+
+    def test_a_kept_new_finding_is_not_given_a_duplicates_issue(self) -> None:
+        kept, duplicate = self._finding("first wording"), self._finding("second")
+        self.assertEqual(kept.fingerprint, duplicate.fingerprint)
+        agent = AgentAudit(
+            lanes=(),
+            findings=(kept, duplicate),
+            identities=(IdentityDecision("new"), IdentityDecision("existing", "ASI-7")),
+        )
+        merged = supervisor_audit_agent_resolution._merged_findings((), agent.findings)
+
+        self.assertEqual([kept], list(merged))
+        self.assertEqual(
+            {}, supervisor_audit_agent_resolution._identity_selections(agent, merged)
+        )
 
 
 if __name__ == "__main__":

@@ -200,10 +200,16 @@ def _identity_selections(
     """
     carried = {finding.fingerprint for finding in findings}
     selections: dict[str, str] = {}
+    # A ``new`` decision selects no issue yet still claims its fingerprint, so
+    # a later duplicate's ``existing`` decision cannot attach to the kept one.
+    decided: set[str] = set()
     for finding, decision in agent.decisions:
+        if finding.fingerprint in decided:
+            continue
+        decided.add(finding.fingerprint)
         if decision.issue_id is None or finding.fingerprint not in carried:
             continue
-        selections.setdefault(finding.fingerprint, decision.issue_id)
+        selections[finding.fingerprint] = decision.issue_id
     return selections
 
 
