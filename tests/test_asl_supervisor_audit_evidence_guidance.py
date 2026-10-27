@@ -368,6 +368,45 @@ class EvidenceBundleTests(evidence_support.EvidenceBundleFixture):
             )
             self.assertNotIn("action_required_superseded", status)
 
+    def test_join_values_that_are_not_ids_join_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_guidance(history[2], observed=True)
+            self._append_mailbox_record(
+                history[2],
+                {
+                    "id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                    "kind": mailbox_vocabulary.KIND_REPLY,
+                    "version": mailbox_constants.MAILBOX_SCHEMA_VERSION,
+                    "to": [self.GUIDANCE_ID],
+                    "wait_id": {"id": self.GUIDANCE_ID},
+                    "closure_id": None,
+                },
+            )
+
+            section = self._collect(*history).payload["mailbox"]
+
+            # A list or object under a join key is not an id, so the record
+            # stays unscoped instead of crashing the collector.
+            self.assertNotIn(
+                "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                [row["id"] for row in section["records"]],
+            )
+            self.assertEqual(1, section["summary"]["delivered_count"])
+
+    def test_an_event_whose_status_is_an_object_is_still_collected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._append_event(
+                history[2], "custom", {"run_id": RUN_ID, "status": {"state": "fail"}}
+            )
+
+            bundle = self._collect(*history)
+
+            self.assertIn(
+                "custom", [row["name"] for row in bundle.payload["events"]["records"]]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

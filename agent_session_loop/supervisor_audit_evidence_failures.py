@@ -36,7 +36,8 @@ def _payload_shows_failure(payload: Mapping[str, Any]) -> bool:
         return True
     if payload.get("passed") is False:
         return True
-    if payload.get("status") in {"fail", "unavailable"}:
+    status = payload.get("status")
+    if isinstance(status, str) and status in {"fail", "unavailable"}:
         return True
     for key in ("timed_out", "interrupted", "hang_suspected", "paused"):
         if payload.get(key) is True:

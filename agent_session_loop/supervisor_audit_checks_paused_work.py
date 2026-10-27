@@ -92,10 +92,8 @@ def _settles_paused_work(
         return False
     if str(record.get("name") or "") not in _PAUSED_WORK_SETTLEMENT_COMMIT_EVENTS:
         return False
-    return (
-        audit_evidence_helpers._mapping(record.get("payload")).get("group_id")
-        in settlement_group_ids
-    )
+    group_id = audit_evidence_helpers._mapping(record.get("payload")).get("group_id")
+    return isinstance(group_id, str) and group_id in settlement_group_ids
 
 
 def _paused_work_settlement_label(payload: Mapping[str, Any]) -> str:

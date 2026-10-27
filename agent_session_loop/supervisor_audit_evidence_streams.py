@@ -222,7 +222,12 @@ def _read_mailbox(
         identifier = parsed.get("id")
         was_delivered = identifier is not None and str(identifier) in delivered_ids
         was_referenced = identifier is not None and str(identifier) in referenced_ids
-        joined = any(parsed.get(key) in owned for key in _MAILBOX_JOIN_KEYS)
+        # A join value is an id string; any other JSON shape joins nothing,
+        # and a list or object would not even hash against ``owned``.
+        joined = any(
+            isinstance(parsed.get(key), str) and parsed.get(key) in owned
+            for key in _MAILBOX_JOIN_KEYS
+        )
         if (
             not joined
             and not was_delivered

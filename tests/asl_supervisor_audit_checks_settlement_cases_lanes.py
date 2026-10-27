@@ -268,3 +268,31 @@ class DeterministicCheckLaneTests(SettlementCheckBase):
                 "2 record(s) of work follow the run's terminal record",
                 results["terminal-artifacts"].detail,
             )
+
+    def test_a_commit_record_naming_its_group_by_a_list_is_not_a_settlement(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            epilogue = self._settlement_epilogue()
+            epilogue.append(
+                (
+                    events.COMMIT_STARTED_EVENT,
+                    {
+                        "run_id": RUN_ID,
+                        "group_id": ["group-paused-1"],
+                        "scope": "session",
+                    },
+                )
+            )
+            self._paused_run(history, epilogue)
+
+            _, results = self._audit(history)
+
+            # A group id that is not a string names no settlement group, so
+            # the record is work after the end rather than an unhashable crash.
+            self.assertEqual("fail", results["terminal-artifacts"].status)
+            self.assertIn(
+                "1 record(s) of work follow the run's terminal record",
+                results["terminal-artifacts"].detail,
+            )
