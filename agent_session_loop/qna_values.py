@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ from .qna_models import (
 )
 
 
-def _wait_ceiling_field(waiting_for_reply: dict[str, Any]) -> str:
+def _wait_ceiling_field(waiting_for_reply: Mapping[str, Any]) -> str:
     """Name the key carrying this record's unsupervised ceiling.
 
     Waits persisted before the ceiling began rolling carry only the static

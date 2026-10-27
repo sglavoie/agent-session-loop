@@ -13,6 +13,10 @@ from .asl_bridge_projection_section_hello import *
 # are named explicitly.
 from .asl_bridge_projection_section_hello import _Corpus
 
+from datetime import UTC, datetime, timedelta
+
+from agent_session_loop.run_coordination_wait_record import WaitingForReply
+
 
 class RunsProjectionTests(unittest.TestCase):
     def test_snapshot_excludes_ready_recent_and_complete_plans(self) -> None:
@@ -216,6 +220,43 @@ class RunsProjectionTests(unittest.TestCase):
             self.assertEqual(1, row["question"]["unanswered_count"])
             self.assertEqual("live", row["question"]["waiting_status"])
             self.assertIn("question.reply", row["actions"])
+            self.assertEqual(
+                "2099-06-19T16:15:00+00:00", row["question"]["hard_deadline"]
+            )
+            self.assertIsNone(row["question"]["unsupervised_ceiling_seconds"])
+
+    def test_current_format_wait_projects_its_ceiling_deadline_and_span(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir = corpus.waiting_plan()
+            path = state.plan_state_dir(plan_dir, corpus.state_root) / "state.json"
+            payload = json.loads(path.read_text())
+            started = datetime(2099, 6, 19, 16, 5, tzinfo=UTC)
+            # The record the runner writes today: the ceiling is
+            # ``unsupervised_deadline_at`` and its span a float, not the legacy
+            # ``hard_deadline`` the fixture above carries.
+            payload["waiting_for_reply"] = WaitingForReply(
+                question_id=payload["waiting_for_reply"]["question_id"],
+                session_id="1",
+                turn_index=4,
+                started_at=started,
+                base_deadline=started + timedelta(minutes=5),
+                unsupervised_deadline_at=started + timedelta(minutes=30),
+                unsupervised_ceiling_seconds=1800,
+                last_lease_activity_at=started,
+            ).to_payload()
+            corpus.write_state(plan_dir, payload)
+
+            (row,) = corpus.snapshot()["rows"]
+
+            self.assertEqual("awaiting-reply", row["phase"])
+            self.assertEqual(
+                "2099-06-19T16:35:00+00:00", row["question"]["hard_deadline"]
+            )
+            self.assertEqual(1800, row["question"]["unsupervised_ceiling_seconds"])
+            self.assertIs(int, type(row["question"]["unsupervised_ceiling_seconds"]))
 
     def test_live_wait_inside_turn_projects_reply_operation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

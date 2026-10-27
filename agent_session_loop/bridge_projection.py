@@ -18,6 +18,7 @@ from . import (
     mailbox,
     mailbox_models,
     mailbox_snapshot,
+    qna_values,
     redirect_recovery,
     state,
     state_locks,
@@ -42,6 +43,7 @@ from .bridge_protocol import (
     _bounded_id,
     _bounded_int,
     _bounded_path,
+    _bounded_span,
     _bounded_strings,
     _bounded_text,
     _epoch,
@@ -171,11 +173,16 @@ def _question_projection(
         if selected is not None
         else None,
         "waiting_status": waiting_status,
+        # The wire keeps the legacy name, but a current-format wait records its
+        # ceiling as ``unsupervised_deadline_at``; read whichever key the
+        # record carries, as every other wait reader does.
         "hard_deadline": (
-            _bounded_text(waiting.get("hard_deadline")) if waiting else None
+            _bounded_text(waiting.get(qna_values._wait_ceiling_field(waiting)))
+            if waiting
+            else None
         ),
         "unsupervised_ceiling_seconds": (
-            _bounded_int(waiting.get("unsupervised_ceiling_seconds"))
+            _bounded_span(waiting.get("unsupervised_ceiling_seconds"))
             if waiting
             else None
         ),

@@ -37,6 +37,7 @@ Five properties are structural rather than incidental:
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -461,6 +462,20 @@ def _bounded_int(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value
+
+
+def _bounded_span(value: Any) -> int | None:
+    """Project a persisted span of seconds as the wire's whole-second integer.
+
+    ASL persists a wait's ceiling span as a float (``1800.0``), so an int-only
+    reader dropped every current-format value; a non-finite or negative span
+    still projects as unknown.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return int(value)
 
 
 def _bounded_strings(values: Any, *, limit: int) -> list[str]:
