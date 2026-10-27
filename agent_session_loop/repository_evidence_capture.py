@@ -29,6 +29,10 @@ _UNMERGED_STATUS = "U"
 _UNMERGED_NOTICE_RE = re.compile(r"^\* Unmerged path .*\n?", re.MULTILINE)
 
 
+# The raw diff mode of a gitlink, the index entry a submodule is tracked by.
+_GITLINK_MODE = "160000"
+
+
 class _RawDiffEntry(NamedTuple):
     """One ``--raw`` record: the destination mode, the status, and the path."""
 
@@ -97,7 +101,9 @@ def _pair_diff_names_with_patches(
     attributed to a neighbouring path.
 
     ``evidence`` maps a path to further text hashed with its sections — for an
-    unmerged entry its conflict stages, which no patch carries.
+    unmerged entry its conflict stages, and for a checked-out gitlink its
+    repository's own digest (:func:`_nested_repository_digest`), neither of
+    which any patch carries.
 
     A queue that does not add up fails the capture closed rather than pairing
     short and dropping its tail: a path with no patch evidence carries no
@@ -450,13 +456,22 @@ def _capture_review_repo_fingerprint(
             cwd_path, repo_root
         )
         unmerged_stages = _unmerged_stage_evidence(cwd_path, [*names, *index_names])
+        # A dirty submodule renders as `Subproject commit <sha>-dirty` however
+        # much more is written inside it, so each checked-out gitlink in the
+        # worktree diff carries its repository's own evidence too.
+        gitlink_worktrees = {
+            entry.path: nested_repository(entry.path)
+            for entry in names
+            if entry.dst_mode == _GITLINK_MODE
+            and (repo_root / entry.path / ".git").exists()
+        }
 
         tracked_changed, tracked_patches = _pair_diff_names_with_patches(
             names,
             diff_text,
             argv=diff_argv,
             reason="tracked-patch-missing",
-            evidence=unmerged_stages,
+            evidence={**unmerged_stages, **gitlink_worktrees},
         )
         index_changed, index_patches = _pair_diff_names_with_patches(
             index_names,

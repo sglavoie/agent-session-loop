@@ -328,6 +328,41 @@ class ReviewFingerprintDiffEvidenceTests(ReviewFingerprintBase):
             edited["untracked"], self._fingerprint("nested/new.txt")["untracked"]
         )
 
+    def test_edits_inside_a_dirty_submodule_move_the_fingerprint(self) -> None:
+        sub = self.repo_root / "sub"
+        init_git_repo(sub)
+        self._write("z.txt", "one\n")
+        self._commit_all("add a submodule")
+        (sub / "README.md").write_text("dirty\n", encoding="utf-8")
+        self._write("z.txt", "two\n")
+
+        # Once dirty, `git diff HEAD` renders only `Subproject commit
+        # <sha>-dirty` for the gitlink, which a further edit does not change.
+        before = self._fingerprint()
+        self.assertIsNone(review_guard._review_guard_unavailable_detail(before))
+        self.assertEqual(["sub", "z.txt"], before["tracked_changed"])
+        self.assertEqual(
+            ["sub", "z.txt"], [entry[0] for entry in before["tracked_patches"]]
+        )
+        self.assertEqual(before, self._fingerprint())
+
+        (sub / "README.md").write_text("dirtier\n", encoding="utf-8")
+        edited = self._fingerprint()
+        self.assertEqual(
+            ["sub"],
+            review_guard._review_guard_changed_paths(before, edited)["tracked"],
+        )
+        (sub / "new.txt").write_text("new\n", encoding="utf-8")
+        added = self._fingerprint()
+        self.assertEqual(
+            ["sub"],
+            review_guard._review_guard_changed_paths(edited, added)["tracked"],
+        )
+        self.assertEqual(
+            edited["tracked_patches"],
+            self._fingerprint("sub/new.txt")["tracked_patches"],
+        )
+
     def test_an_unresolved_merge_conflict_is_fingerprinted(self) -> None:
         self._write("a.txt", "base\n")
         self._write("z.txt", "base\n")
