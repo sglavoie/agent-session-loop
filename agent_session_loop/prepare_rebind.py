@@ -10,7 +10,8 @@ from typing import Any
 
 from . import harnesses, plans_metadata, plans_registry, state, state_locks, workspaces
 from .authoring_transaction import PlanTransaction
-from .baseline_cache import BASELINE_RESULTS_FILENAME, BaselineCache
+from .baseline_cache import BASELINE_RESULTS_FILENAME, BaselineCache, BaselineRecord
+from .baseline_evidence import capture_baseline_repository_evidence
 from .plans_errors import PlanError
 from .plans_files import canonicalize_path
 from .plans_session_ids import parse_session_id
@@ -38,6 +39,7 @@ from .prepare_results import (
     _WorkspaceRebindConcurrencyError,
 )
 from .prepare_validator import ValidatorRunner
+from .verification_models import VerificationContext
 
 
 def _workspace_rebind_summary(
@@ -153,6 +155,45 @@ def _rebase_staged_rebind_text(
 ) -> str:
     """Replace an ephemeral staged-plan prefix with the durable plan path."""
     return value.replace(str(staged_plan_dir), str(plan_dir))
+
+
+def _rebase_staged_baseline_evidence(
+    baseline_path: Path,
+    *,
+    context: VerificationContext,
+    staged_plan_dir: Path,
+    plan_dir: Path,
+) -> None:
+    """Re-key staged baseline evidence from the staged copy to the durable plan.
+
+    The staged prepare fingerprints the registered repositories leaving out
+    only the staged copy, so a durable plan directory inside one of them is
+    captured as untracked content and the published evidence would be stale
+    at once. The two captures differ only in that directory, so evidence that
+    is still current for the staged copy is current for the durable plan;
+    evidence the repositories have since moved past is left stale.
+    """
+    staged_digest, staged_available = capture_baseline_repository_evidence(
+        context, staged_plan_dir
+    )
+    durable_digest, durable_available = capture_baseline_repository_evidence(
+        context, plan_dir
+    )
+    if staged_digest == durable_digest or not (staged_available and durable_available):
+        return
+    cache = BaselineCache.load(baseline_path)
+    rebased = False
+    for key, record in cache.entries().items():
+        if record.result.get("aggregate_repository_fingerprint") != staged_digest:
+            continue
+        result = dict(record.result)
+        result["aggregate_repository_fingerprint"] = durable_digest
+        if result.get("repository_fingerprint") == staged_digest:
+            result["repository_fingerprint"] = durable_digest
+        cache.put(key, BaselineRecord(key=key, recipe=record.recipe, result=result))
+        rebased = True
+    if rebased:
+        cache.save()
 
 
 def _rebase_staged_rebind_diagnostics(
@@ -416,6 +457,12 @@ def _prepare_workspace_rebind(
                 baseline_path = staged_plan_dir / BASELINE_RESULTS_FILENAME
                 if not baseline_path.exists():
                     BaselineCache(baseline_path).save()
+                _rebase_staged_baseline_evidence(
+                    baseline_path,
+                    context=VerificationContext.resolved_workspace(resolved_workspace),
+                    staged_plan_dir=staged_plan_dir,
+                    plan_dir=plan_dir,
+                )
 
                 relative_paths = [
                     "manifest.md",

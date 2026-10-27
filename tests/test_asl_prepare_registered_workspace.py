@@ -21,6 +21,8 @@ from agent_session_loop import (
     plans_session_ids,
     plans_snapshot,
     plans_transaction,
+    preflight,
+    preflight_cli,
     prepare_baseline,
     prepare_models,
     prepare_packet,
@@ -303,6 +305,47 @@ class PrepareRegisteredWorkspaceTests(PrepareEndToEndFixtures):
         self.assertIn("--cwd " + str(new_workspace.resolve()), rebound.run_command)
         self.assertIn("--rebind-workspace", rebound.resume_command)
         self.assertIsNone(state_locks.inspect_lock_info(first.plan_dir, self.state_dir))
+
+    def test_rebind_of_plan_inside_registered_repository_keeps_baseline_current(
+        self,
+    ) -> None:
+        # The staged prepare runs on an external copy, so its baseline capture
+        # sees the durable plan directory as untracked repository content.
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        old_workspace = self.tmp_path / "old-workspace"
+        new_workspace = self.tmp_path / "new-workspace"
+        init_multi_repo_workspace(old_workspace, specs)
+        new_repositories = init_multi_repo_workspace(new_workspace, specs)
+        first = self._prepare(
+            self._write_registered_source(specs),
+            _recording_validator([]),
+            cwd=old_workspace,
+            base_dir=new_repositories[specs[0][0]] / "plans",
+        )
+        self.assertTrue(first.ok, first)
+        assert first.plan_dir is not None
+
+        rebound = self._prepare(
+            None,
+            _recording_validator([]),
+            cwd=new_workspace,
+            resume_plan_dir=first.plan_dir,
+            rebind_workspace=True,
+        )
+
+        self.assertTrue(rebound.ok, rebound)
+        report = preflight.run_preflight(
+            first.plan_dir, cwd=new_workspace, state_dir=self.state_dir
+        )
+        self.assertEqual(
+            [],
+            [
+                finding.category
+                for finding in report.findings
+                if finding.category.startswith("baseline")
+            ],
+        )
+        self.assertEqual((), preflight_cli._mark_loop_ready_blockers(report))
 
     def test_interrupted_rebind_publication_rolls_forward_on_next_read(self) -> None:
         specs = DEFAULT_MULTI_REPO_SPECS[:2]
