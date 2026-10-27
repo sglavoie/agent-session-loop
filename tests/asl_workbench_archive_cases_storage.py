@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import shutil
+from unittest import mock
+
 # ruff: noqa: F403, F405
 from .asl_workbench_archive_support import *
 
@@ -298,6 +301,37 @@ class WorkbenchArchivePlanTests(unittest.TestCase):
 
             self.assertEqual("invalid-plan", ctx.exception.reason)
             self.assertTrue(target.exists())
+
+    def test_archive_puts_the_plan_back_when_its_state_cannot_move(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir, registry_path, canonical = _seed_archivable_plan(tmp_path)
+            plan_state = state.plan_state_dir(canonical, state_dir)
+            real_move = shutil.move
+
+            def flaky_move(src, dst, *args, **kwargs):
+                if Path(src) == plan_state:
+                    raise PermissionError(13, "Permission denied", src)
+                return real_move(src, dst, *args, **kwargs)
+
+            with (
+                mock.patch.object(shutil, "move", side_effect=flaky_move),
+                self.assertRaises(workbench_archive.ArchiveError) as ctx,
+            ):
+                workbench_archive.archive_plan(
+                    canonical,
+                    state_dir=state_dir,
+                    registry_path=registry_path,
+                    include_default_dirs=False,
+                )
+
+            self.assertEqual("os-error", ctx.exception.reason)
+            self.assertTrue((canonical / "manifest.md").is_file())
+            self.assertTrue(plan_state.is_dir())
+            archive_root = workbench_archive.archive_root(state_dir)
+            self.assertEqual([], list(archive_root.iterdir()))
+            listing = workbench_archive.list_archive_entries(state_dir)
+            self.assertEqual((), listing.warnings)
 
     def test_archive_missing_plan_dir_archives_state_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

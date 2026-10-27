@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -33,6 +34,12 @@ from .workbench_archive_storage import (
     remove_archive_entry,
     save_archive_metadata,
 )
+
+
+def _discard_empty_entry(entry_dir: Path) -> None:
+    """Remove an archive entry a failed archive left empty, best effort."""
+    with contextlib.suppress(OSError):
+        entry_dir.rmdir()
 
 
 def archive_plan(
@@ -80,6 +87,7 @@ def archive_plan(
         try:
             shutil.move(str(canonical), str(archive_plan_path(archive_id, state_dir)))
         except OSError as error:
+            _discard_empty_entry(entry_dir)
             raise ArchiveError(
                 "os-error",
                 f"cannot archive plan directory {canonical}: {error}",
@@ -93,6 +101,15 @@ def archive_plan(
         try:
             shutil.move(str(plan_state), str(archive_state_path(archive_id, state_dir)))
         except OSError as error:
+            # The plan is already inside an entry that has no archive.json yet,
+            # which no listing would show. Put it back where it was; the entry
+            # is then empty and goes too.
+            if plan_archived:
+                with contextlib.suppress(OSError):
+                    shutil.move(
+                        str(archive_plan_path(archive_id, state_dir)), str(canonical)
+                    )
+            _discard_empty_entry(entry_dir)
             raise ArchiveError(
                 "os-error",
                 f"cannot archive plan state {plan_state}: {error}",
