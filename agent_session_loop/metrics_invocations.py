@@ -95,11 +95,14 @@ def collect_cli_invocations(
     an invocation whose start was pruned is still summarized from its end.
     An invocation belongs to the window by its start timestamp, so a pair that
     straddles midnight or a day boundary is counted once, under its start.
+    ``exclude_invocation_id``'s records are dropped entirely, from
+    ``records_read`` as well as from every count.
     """
     corpus = cli_trace.read_corpus(trace_root)
     records = corpus.records
     invocations: dict[str, _TracedInvocation] = {}
     ignored = corpus.malformed_lines
+    excluded = 0
     for record in records:
         invocation_id = _string_or_none(record.get("invocation_id"))
         event = record.get("event")
@@ -110,6 +113,7 @@ def collect_cli_invocations(
             ignored += 1
             continue
         if invocation_id == exclude_invocation_id:
+            excluded += 1
             continue
         # A duplicate of either half is dropped rather than counted twice, so a
         # replayed or double-appended file cannot inflate the totals.
@@ -187,7 +191,9 @@ def collect_cli_invocations(
     return {
         "trace_root": str(trace_root),
         "retention_days": cli_trace.RETENTION_DAYS,
-        "records_read": len(records) + corpus.malformed_lines,
+        # The report's own records are not part of what it reads: on an empty
+        # corpus it would otherwise report one record read and nothing else.
+        "records_read": len(records) + corpus.malformed_lines - excluded,
         "records_ignored": ignored,
         "starts": starts,
         "completions": completions,

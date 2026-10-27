@@ -232,7 +232,8 @@ invocation whose `start` was pruned is still summarized from its `end`, and an
 invocation belongs to the window by its start timestamp so narrowing
 `--since-days` never raises a count. The report also excludes its own
 invocation, whose `start` record is already on disk while the handler runs and
-would otherwise always appear as an unmatched start.
+would otherwise always appear as an unmatched start, and leaves its records
+out of `records_read` too.
 
 The command is read-only:
 it never mutates state, events, or plan directories.

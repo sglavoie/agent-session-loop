@@ -432,6 +432,9 @@ class CliInvocationMetricsTests(unittest.TestCase):
         self.assertEqual(1, section["starts"])
         self.assertEqual(0, section["unmatched_starts"])
         self.assertEqual({"status": 1}, section["by_command"])
+        # Two records for "other"; the report's own start is not read.
+        self.assertEqual(2, section["records_read"])
+        self.assertEqual(0, section["records_ignored"])
 
 
 if __name__ == "__main__":
