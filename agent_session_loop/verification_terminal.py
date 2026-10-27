@@ -29,17 +29,19 @@ def read_event_records(event_path: str | Path) -> list[dict[str, Any]]:
     """
 
     try:
-        text = Path(event_path).read_text(encoding="utf-8")
+        # Bytes, decoded line by line below: a stray non-UTF-8 byte then
+        # spoils only its own line, the way a torn line does, not the file.
+        data = Path(event_path).read_bytes()
     except OSError:
         return []
     records: list[dict[str, Any]] = []
-    for line in text.splitlines():
+    for line in data.splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
+            record = json.loads(line.decode("utf-8"))
+        except ValueError, RecursionError:
             continue
         if isinstance(record, dict):
             records.append(record)

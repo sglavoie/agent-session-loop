@@ -70,6 +70,16 @@ class TerminalRequiredCheckTests(unittest.TestCase):
         self.assertIn("broad:tests", blocker.message)
         self.assertEqual(len(blocker.details["deferred_unresolved"]), 1)
 
+    def test_a_non_utf8_or_deeply_nested_line_spoils_only_itself(self) -> None:
+        self._defer("1", "broad:tests")
+        with self.event_path.open("ab") as handle:
+            handle.write(b"\xff\xfe torn\n" + b"[" * 100000 + b"\n")
+        blocker = verification_transitions.terminal_blocker(
+            {"reason": "all-complete", "turns": []}, self.event_path
+        )
+        assert blocker is not None
+        self.assertIn("broad:tests", blocker.message)
+
     def test_a_later_all_clear_review_redeems_the_deferral(self) -> None:
         self._defer("1", "broad:tests")
         self._append(
