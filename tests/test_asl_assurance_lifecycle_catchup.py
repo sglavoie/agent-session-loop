@@ -296,11 +296,22 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
             state_dir=root,
         )
 
-    def _date_record(self, history: tuple[Path, Path, Path, Path], when: str) -> None:
-        """Date the pending record, which is otherwise stamped as the run dies."""
+    def _date_record(
+        self,
+        history: tuple[Path, Path, Path, Path],
+        when: str,
+        *,
+        started: str | None = None,
+    ) -> None:
+        """Date the pending record, which is otherwise stamped as the run dies.
+
+        ``started`` defaults to ``when``: the run started and was found dead
+        in the same generation.
+        """
         path = assurance_catchup.record_path(history[3])
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["recorded_at"] = when
+        payload["run_started_at"] = started or when
         path.write_text(json.dumps(payload), encoding="utf-8")
 
     def test_a_run_older_than_the_newest_fix_is_left_to_the_backlog(self) -> None:
@@ -320,6 +331,44 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
             )
             inbox = assurance_projection.read_projection(state_dir=root)
             self.assertIsNone(inbox.run(RUN_ID))
+
+    def test_a_run_found_dead_after_the_fix_is_dated_by_its_start(self) -> None:
+        """Detection can come long after the fix; the run's start dates it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            root = history[2].parent
+            self._abandon(history)
+            self._date_record(
+                history, AFTER_FIX_TIMESTAMP, started=BEFORE_FIX_TIMESTAMP
+            )
+            self._dispose(root, "resolve", FIX_TIMESTAMP)
+
+            report = self._process(history)
+
+            self.assertEqual(
+                assurance_catchup.REASON_SUPERSEDED_GENERATION,
+                report.results[0].reason,
+            )
+
+    def test_a_record_without_a_start_is_dated_by_its_detection(self) -> None:
+        """A record written before the start was carried keeps its old dating."""
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            root = history[2].parent
+            self._abandon(history)
+            path = assurance_catchup.record_path(history[3])
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload.pop("run_started_at")
+            payload["recorded_at"] = BEFORE_FIX_TIMESTAMP
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self._dispose(root, "resolve", FIX_TIMESTAMP)
+
+            report = self._process(history)
+
+            self.assertEqual(
+                assurance_catchup.REASON_SUPERSEDED_GENERATION,
+                report.results[0].reason,
+            )
 
     def test_naming_a_superseded_run_audits_it_anyway(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -385,6 +434,7 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
             path = assurance_catchup.record_path(history[3])
             payload = json.loads(path.read_text(encoding="utf-8"))
             payload.pop("recorded_at")
+            payload.pop("run_started_at")
             path.write_text(json.dumps(payload), encoding="utf-8")
             self._dispose(root, "resolve", FIX_TIMESTAMP)
 

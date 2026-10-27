@@ -88,6 +88,9 @@ def _assurance_pending_record(
         "schema_version": ASSURANCE_PENDING_SCHEMA_VERSION,
         "run_id": run_id,
         "recorded_at": detected_at,
+        # When the dead run started, as opposed to when its death was noticed:
+        # only the start places the run in a code generation.
+        "run_started_at": _nonempty_str(state_obj.get("run_started_at")),
         "trigger": trigger,
         "outcome": events.RUN_OUTCOME_ABANDONED,
         "skip": _assurance_skip_reason(state_obj),

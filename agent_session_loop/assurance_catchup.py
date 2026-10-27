@@ -135,6 +135,7 @@ class PendingRun:
     plan_dir: Path | None = None
     workspace_root: Path | None = None
     recorded_at: str | None = None
+    run_started_at: str | None = None
     trigger: str | None = None
     skip: str | None = None
     run_config: Mapping[str, Any] = field(default_factory=dict)
@@ -224,6 +225,7 @@ def read_pending_run(run_dir: Path | str) -> PendingRun | None:
     # A hand-edited non-string stamp is undated, not a sort key that makes
     # ``iter_pending_runs`` compare a number with a string and raise.
     recorded_at = parsed.get("recorded_at")
+    run_started_at = parsed.get("run_started_at")
     return PendingRun(
         run_id=run_id,
         record_path=path,
@@ -232,6 +234,7 @@ def read_pending_run(run_dir: Path | str) -> PendingRun | None:
         plan_dir=_path_or_none(parsed.get("plan_dir")),
         workspace_root=_path_or_none(parsed.get("workspace_root")),
         recorded_at=recorded_at if isinstance(recorded_at, str) else None,
+        run_started_at=run_started_at if isinstance(run_started_at, str) else None,
         trigger=parsed.get("trigger"),
         skip=parsed.get("skip"),
         run_config=config if isinstance(config, dict) else {},
@@ -372,11 +375,19 @@ def _predates_generation(
     A record carrying no timestamp cannot be placed in any generation and is
     left in the current one, because dropping a run over a missing field would
     hide it rather than date it.
+
+    The run's own start dates it: ``recorded_at`` is when its death was
+    noticed, which can come long after a resolution the run predates. A record
+    written before the start was carried, or carrying an unreadable one, falls
+    back to the detection time.
     """
     watermark = generation_watermark(inbox)
-    if watermark is None or pending.recorded_at is None:
+    dated_at = pending.recorded_at
+    if clock.parse_datetime(pending.run_started_at) is not None:
+        dated_at = pending.run_started_at
+    if watermark is None or dated_at is None:
         return False
-    return _moment(pending.recorded_at) < _moment(watermark)
+    return _moment(dated_at) < _moment(watermark)
 
 
 def _registered_repositories(pending: PendingRun) -> tuple[tuple[str, ...], bool]:

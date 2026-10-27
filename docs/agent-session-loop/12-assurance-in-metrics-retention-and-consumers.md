@@ -29,7 +29,10 @@ code moved, since dismissing an issue or accepting its risk both leave the
 behavior exactly as the audits found it. A pending record dated before that
 moment describes a run of code the fix has since replaced, so grading it can only
 re-report the defect the resolution already answered — which is how a backlog
-reopens issues an operator closed. Such a record is reported as `skipped` with
+reopens issues an operator closed. A record is dated by the dead run's
+`run_started_at`, not by `recorded_at`, which is only when its death was
+noticed and can fall well after a fix the run predates; a record written before
+that field existed falls back to `recorded_at`. Such a record is reported as `skipped` with
 `reason: superseded-generation`; it is never deleted, and `--run-id RUN_ID` still
 audits it. A ledger that has resolved nothing sets no boundary and leaves every
 record current, and a record carrying no timestamp is left current too, because
