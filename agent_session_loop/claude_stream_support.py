@@ -101,6 +101,19 @@ INTERRUPT_TIMEOUT_SECONDS = 5.0
 #: sent at a corpse from costing the full timeout.
 _LIVENESS_POLL_SECONDS = 0.05
 
+#: How long opening the transport waits for the initial prompt write before
+#: leaving it to its writer thread. Any prompt the pipe can take returns well
+#: inside this; one larger than the pipe buffer, written to a CLI that is not
+#: yet reading stdin, blocks, and only the turn's wait loop -- which this must
+#: not hold up for long -- can time it out or abort it.
+PROMPT_WRITE_GRACE_SECONDS = 1.0
+
+#: How long shutdown waits for a still-blocked prompt writer. The process is
+#: already collected by then, so the write has normally failed with a broken
+#: pipe; a writer still stuck is one a straggler holding the pipe keeps open,
+#: and it is left behind as the daemon thread it is.
+PROMPT_WRITER_JOIN_SECONDS = 2.0
+
 #: Spool subdirectories. ``pending`` is what the hook may claim, ``claimed``
 #: holds what it took, and ``receipts`` is the evidence ASL reads back.
 _PENDING = "pending"

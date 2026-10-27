@@ -74,12 +74,16 @@ class ClaudeAdapter(ClaudeInvocationAdapter):
         def announce_submission() -> None:
             """The CLI took the conversation up, so the prompt is its now.
 
-            Both halves have to hold. The write below put the words in the
-            pipe, and this record says the CLI got past the ``--resume`` it
-            could have thrown them out over; a turn missing either half has not
-            handed anything to anybody.
+            Both halves have to hold. The write put the words in the pipe, and
+            the session record says the CLI got past the ``--resume`` it could
+            have thrown them out over; a turn missing either half has not
+            handed anything to anybody. The write runs on a thread of its own,
+            so this is reached from whichever half lands second: each side
+            records its own half before reading the other's.
             """
-            if lifecycle is None or not opened or opened[0].prompt_error is not None:
+            if lifecycle is None or not opened or not opened[0].prompt_delivered:
+                return
+            if restorable and not opened[0].session_observed:
                 return
             lifecycle.note_prompt_submitted()
 
@@ -104,24 +108,26 @@ class ClaudeAdapter(ClaudeInvocationAdapter):
         if lifecycle is not None:
             lifecycle.check_not_cancelled()
         # The prompt goes out before the readers start, so the CLI has work to
-        # do from its first byte. A write failure here is not raised: the
-        # process exists and has to be collected like any other failed turn,
-        # with ``prompt_error`` explaining the empty output.
-        if session.send_prompt() and lifecycle is not None and not restorable:
-            # Only on the write that succeeded. A prompt the pipe refused is one
-            # the CLI never saw, and the turn that follows it is a spawned
-            # process sitting on a closed stdin -- not a worker holding the
-            # operator's words.
-            #
-            # And only where nothing can still refuse the prompt this write put
-            # in flight. A CLI that will not honour a ``--resume`` exits without
-            # ever reading its stdin, so the write succeeds against a pipe whose
-            # reader is on its way out: the bytes left this process and reached
-            # nobody. Such a turn reports its submission from the session
-            # announcement above, or from :meth:`_settle_deferred_submission`
-            # once the turn is over and the refusal it would have shown is not
-            # there.
-            lifecycle.note_prompt_submitted()
+        # do from its first byte -- but from a writer thread, so a write the
+        # CLI is not reading cannot hold the turn past its timeout or abort,
+        # which only the wait loop after this enforces. A write failure is not
+        # raised: the process exists and has to be collected like any other
+        # failed turn, with ``prompt_error`` explaining the empty output.
+        #
+        # Submission is reported only on the write that succeeded. A prompt the
+        # pipe refused is one the CLI never saw, and the turn that follows it is
+        # a spawned process sitting on a closed stdin -- not a worker holding
+        # the operator's words.
+        #
+        # And only where nothing can still refuse the prompt this write put in
+        # flight. A CLI that will not honour a ``--resume`` exits without ever
+        # reading its stdin, so the write succeeds against a pipe whose reader
+        # is on its way out: the bytes left this process and reached nobody.
+        # Such a turn reports its submission once the session announcement
+        # above has also arrived, or from :meth:`_settle_deferred_submission`
+        # once the turn is over and the refusal it would have shown is not
+        # there.
+        session.start_prompt(on_delivered=announce_submission)
         return _ClaudeStreamTransport(session)
 
     def run(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 from .support_asl_claude_stream_base import (
     GUIDANCE_ID,
     HOOK_WAIT_SECONDS,
@@ -21,6 +23,8 @@ from .support_asl_claude_stream_base import (
     request_for,
     subprocess,
     sys,
+    threading,
+    time,
     unittest,
     uuid,
 )
@@ -324,6 +328,35 @@ class ClaudeAdapterTransportTests(TempDirTestCase):
 
         self.assertEqual([], captured)
         self.assertEqual([claude_stream.user_message("do the work")], stdin.messages())
+
+    def test_a_prompt_the_cli_is_not_reading_cannot_outlast_an_abort(self) -> None:
+        # Larger than any pipe buffer, written to a CLI wedged before it reads
+        # stdin: the write blocks, and only the turn's wait loop can end it.
+        adapter = self.adapter()
+        prompt = "x" * 300_000
+        invocation = dataclasses.replace(
+            self.invocation(prompt=prompt),
+            argv=[sys.executable, "-c", "import time; time.sleep(30)"],
+        )
+        abort = harnesses.AbortSignal()
+        timer = threading.Timer(0.5, abort.arm, args=("operator abort",))
+        timer.start()
+        started = time.monotonic()
+        try:
+            result = adapter.run(
+                cwd=self.tmp,
+                plan_dir=self.tmp / "plan",
+                prompt=prompt,
+                invocation=invocation,
+                timeout=60,
+                abort=abort,
+            )
+        finally:
+            timer.cancel()
+
+        self.assertTrue(result.aborted)
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertIn("claude prompt was not delivered", result.stderr)
 
     def test_claude_advertises_the_continuity_it_now_has(self) -> None:
         adapter = self.adapter()

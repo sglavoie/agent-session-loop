@@ -77,5 +77,14 @@ class _ClaudeStreamIO:
             stdin.close()
 
     def shutdown(self) -> None:
-        """Release the conversation once the harness process is gone."""
+        """Release the conversation once the harness process is gone.
+
+        A prompt writer still in flight is waited out first, with a bound, so
+        the turn's result reads a settled :attr:`prompt_error`. One that
+        outlives the bound holds the write lock on a pipe some straggler keeps
+        open; closing stdin would wait on that lock forever, so it is left to
+        the daemon writer.
+        """
+        if not self._join_prompt_writer(PROMPT_WRITER_JOIN_SECONDS):
+            return
         self.close_stdin()

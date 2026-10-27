@@ -51,6 +51,8 @@ class _ClaudeStreamState:
         self._messages_answered = 0
         self._stdin_closed = False
         self._prompt_error: str | None = None
+        self._prompt_delivered = False
+        self._prompt_writer: threading.Thread | None = None
         self._session_mismatch: str | None = None
         self._session_observed = False
 
@@ -75,6 +77,12 @@ class _ClaudeStreamState:
         """
         with self._state_lock:
             return self._prompt_error
+
+    @property
+    def prompt_delivered(self) -> bool:
+        """Whether the initial prompt's write has returned successfully."""
+        with self._state_lock:
+            return self._prompt_delivered
 
     @property
     def stdin_closed(self) -> bool:
@@ -177,7 +185,49 @@ class _ClaudeStreamState:
             # rather than at the failure. Closing turns that into a prompt exit.
             self.close_stdin()
             return False
+        with self._state_lock:
+            self._prompt_delivered = True
         return True
+
+    def start_prompt(
+        self,
+        *,
+        on_delivered: Callable[[], None] | None = None,
+        grace: float = PROMPT_WRITE_GRACE_SECONDS,
+    ) -> None:
+        """Write the initial prompt from a thread of its own.
+
+        A prompt larger than the pipe buffer, written to a CLI that has not
+        started reading stdin, blocks the writer until the CLI does. Only the
+        turn's wait loop enforces its timeout and abort, and it starts after
+        this returns, so the write must not hold up the caller: it is waited on
+        for ``grace`` -- long enough for any ordinary prompt -- and otherwise
+        left in flight. A kill then breaks the pipe under it, and the failure is
+        recorded like any other undelivered prompt.
+
+        ``on_delivered`` runs on the writer thread once the write succeeded;
+        its failure is swallowed, since the prompt has already gone out.
+        """
+
+        def write() -> None:
+            if self.send_prompt() and on_delivered is not None:
+                with contextlib.suppress(Exception):
+                    on_delivered()
+
+        writer = threading.Thread(target=write, name="claude-prompt", daemon=True)
+        with self._state_lock:
+            self._prompt_writer = writer
+        writer.start()
+        writer.join(timeout=grace)
+
+    def _join_prompt_writer(self, timeout: float) -> bool:
+        """Wait for a started prompt writer; ``True`` once none is running."""
+        with self._state_lock:
+            writer = self._prompt_writer
+        if writer is None:
+            return True
+        writer.join(timeout=timeout)
+        return not writer.is_alive()
 
     # -- observations from the output processor -----------------------------
 
