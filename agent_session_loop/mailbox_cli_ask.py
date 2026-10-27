@@ -23,6 +23,7 @@ from . import (
     mailbox_vocabulary,
     mailbox_waits,
     responses,
+    run_errors,
 )
 
 
@@ -332,51 +333,59 @@ def ask_from_args(args: argparse.Namespace) -> int:
                         state_dir=args.state_dir,
                     )
 
-        try:
-            closure = (
-                initial_view.closure_for(question.id)
-                if initial_view is not None
-                else None
-            )
-            if (
-                args.wait
-                and closure is not None
-                and initial_view is not None
-                and initial_view.receipt_for_closure(closure.id) is None
-            ):
+        # A harness that times out a tool call sends SIGTERM, whose default
+        # action would skip the cleanup below and leave the wait open.
+        signals = (
+            run_errors.termination_signals_interrupt()
+            if wait_start is not None
+            else contextlib.nullcontext()
+        )
+        with signals:
+            try:
+                closure = (
+                    initial_view.closure_for(question.id)
+                    if initial_view is not None
+                    else None
+                )
+                if (
+                    args.wait
+                    and closure is not None
+                    and initial_view is not None
+                    and initial_view.receipt_for_closure(closure.id) is None
+                ):
+                    if wait_start is not None:
+                        mailbox_waits.consume_wait_closure(
+                            context.snapshot.plan_dir,
+                            question.id,
+                            wait_start.id,
+                            state_dir=args.state_dir,
+                        )
+                    else:
+                        mailbox_appenders.append_receipt(
+                            context.snapshot.plan_dir,
+                            question.id,
+                            closure.id,
+                            state_dir=args.state_dir,
+                        )
+                timed_out = False
+                if args.wait and closure is None:
+                    closure, timed_out = wait_for_closure(
+                        context.snapshot.plan_dir,
+                        question.id,
+                        state_dir=args.state_dir,
+                        timeout=wait_timeout,
+                        initial_view=initial_view,
+                        wait_id=None if wait_start is None else wait_start.id,
+                    )
+            except BaseException:
                 if wait_start is not None:
-                    mailbox_waits.consume_wait_closure(
+                    _end_abandoned_wait(
                         context.snapshot.plan_dir,
                         question.id,
                         wait_start.id,
                         state_dir=args.state_dir,
                     )
-                else:
-                    mailbox_appenders.append_receipt(
-                        context.snapshot.plan_dir,
-                        question.id,
-                        closure.id,
-                        state_dir=args.state_dir,
-                    )
-            timed_out = False
-            if args.wait and closure is None:
-                closure, timed_out = wait_for_closure(
-                    context.snapshot.plan_dir,
-                    question.id,
-                    state_dir=args.state_dir,
-                    timeout=wait_timeout,
-                    initial_view=initial_view,
-                    wait_id=None if wait_start is None else wait_start.id,
-                )
-        except BaseException:
-            if wait_start is not None:
-                _end_abandoned_wait(
-                    context.snapshot.plan_dir,
-                    question.id,
-                    wait_start.id,
-                    state_dir=args.state_dir,
-                )
-            raise
+                raise
     except mailbox_models.MailboxError as error:
         mailbox_cli_output.print_mailbox_error(
             args,

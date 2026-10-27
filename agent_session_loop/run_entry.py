@@ -78,12 +78,8 @@ Invariants that survive the move:
 from __future__ import annotations
 
 import argparse
-import contextlib
-import signal
 import threading
-from collections.abc import Iterator
 from pathlib import Path
-from types import FrameType
 from typing import Any, Protocol
 
 from . import (
@@ -106,47 +102,11 @@ from . import (
     verification_models,
 )
 from .run_entry_resume import _apply_resume_config, _ResumeUnavailable
-from .run_errors import RunError, RunTerminatedBySignal, interrupt_message
-
-#: Signals that end a locked run the way Ctrl-C does. SIGTERM is what `kill`,
-#: a process supervisor or a logout sends; SIGHUP is a closed terminal. Left at
-#: their defaults they end the process without a terminal record, a restored
-#: TTY or a killed harness group -- and the harness runs in a session of its
-#: own, so nothing else would ever stop it.
-TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
-
-
-@contextlib.contextmanager
-def _termination_signals_interrupt() -> Iterator[None]:
-    """Raise :class:`RunTerminatedBySignal` on a termination signal, then undo.
-
-    Only the main thread can install a handler, and Python runs handlers there
-    anyway, so from any other thread this changes nothing. A signal already set
-    to be ignored -- ``nohup asl run`` -- stays ignored. The previous handlers
-    come back on the way out, so a second signal while the interrupt is being
-    reported takes its default action, like a second Ctrl-C.
-    """
-    if threading.current_thread() is not threading.main_thread():
-        yield
-        return
-
-    def _interrupt(signum: int, _frame: FrameType | None) -> None:
-        raise RunTerminatedBySignal(signal.Signals(signum).name)
-
-    previous: dict[signal.Signals, Any] = {}
-    try:
-        for signum in TERMINATION_SIGNALS:
-            try:
-                if signal.getsignal(signum) is signal.SIG_IGN:
-                    continue
-                previous[signum] = signal.signal(signum, _interrupt)
-            except ValueError, OSError:
-                continue
-        yield
-    finally:
-        for restored, handler in previous.items():
-            with contextlib.suppress(ValueError, OSError):
-                signal.signal(restored, handler)
+from .run_errors import (
+    RunError,
+    interrupt_message,
+    termination_signals_interrupt,
+)
 
 
 class LockedRun(Protocol):
@@ -348,7 +308,7 @@ def run_from_args(
             return 1
 
         try:
-            with _termination_signals_interrupt():
+            with termination_signals_interrupt():
                 try:
                     # Checked after acquiring, not before: a check-before-acquire
                     # leaves two racing starters blind to each other and both

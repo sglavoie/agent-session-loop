@@ -7,6 +7,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import signal
 import time
 import unittest
 import uuid
@@ -27,6 +28,7 @@ from agent_session_loop import (
     mailbox_snapshot,
     mailbox_vocabulary,
     mailbox_waits,
+    run_errors,
 )
 from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
 from tests.support import (
@@ -355,6 +357,29 @@ class MailboxCliTestsPart6(MailboxCliTestsBase):
         self.assertTrue(resumed["timed_out"])
         self.assertIsNotNone(resumed["wait_start"])
         self.assertNotEqual(wait_start.id, resumed["wait_start"]["id"])
+
+    def test_sigterm_during_ask_wait_ends_its_wait(self) -> None:
+        # A harness timing out the tool call sends SIGTERM, not SIGINT.
+        def terminate(_seconds: float) -> None:
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        previous = signal.getsignal(signal.SIGTERM)
+        with (
+            mock.patch.object(time, "sleep", side_effect=terminate),
+            self.assertRaises(run_errors.RunTerminatedBySignal),
+            redirect_stdout(io.StringIO()),
+        ):
+            mailbox_cli_ask.ask_from_args(
+                self.args(text="Need a decision", wait=True, wait_timeout=60)
+            )
+        self.assertIs(previous, signal.getsignal(signal.SIGTERM))
+
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        wait_end = view.messages[-1]
+        self.assertEqual(mailbox_vocabulary.KIND_WAIT_END, wait_end.kind)
+        self.assertEqual(
+            mailbox_vocabulary.WAIT_END_REASON_ERROR, wait_end.wait_end_reason
+        )
 
     def test_ask_resume_returns_an_existing_reply_without_appending(self) -> None:
         question = mailbox_appenders.append_question(

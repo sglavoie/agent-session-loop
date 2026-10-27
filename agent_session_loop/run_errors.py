@@ -1,4 +1,4 @@
-"""The run's fatal-error type, on its own so extractions may raise it.
+"""The run's fatal-error types, on their own so extractions may raise them.
 
 An exception is the one thing a boundary seam cannot carry. A parameter, a
 ``Protocol``, or a callback all describe something a caller *hands in*, but a
@@ -28,6 +28,13 @@ This module writes no durable record and holds no state.
 
 from __future__ import annotations
 
+import contextlib
+import signal
+import threading
+from collections.abc import Iterator
+from types import FrameType
+from typing import Any
+
 
 class RunError(Exception):
     """Raised when the run loop cannot continue safely."""
@@ -54,3 +61,46 @@ def interrupt_message(error: BaseException) -> str:
     if isinstance(error, RunTerminatedBySignal):
         return f"run interrupted by {error.signal_name}"
     return "run interrupted by user"
+
+
+#: Signals that end a locked run, or an asker's wait, the way Ctrl-C does.
+#: SIGTERM is what `kill`, a harness tool-call timeout, a process supervisor or
+#: a logout sends; SIGHUP is a closed terminal. Left at their defaults they end
+#: the process without a terminal record, a restored TTY or a killed harness
+#: group -- and the harness runs in a session of its own, so nothing else would
+#: ever stop it. ``asl ask --wait`` takes the same signals so it can close the
+#: wait it opened instead of leaving the question waiting on no one.
+TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+
+
+@contextlib.contextmanager
+def termination_signals_interrupt() -> Iterator[None]:
+    """Raise :class:`RunTerminatedBySignal` on a termination signal, then undo.
+
+    Only the main thread can install a handler, and Python runs handlers there
+    anyway, so from any other thread this changes nothing. A signal already set
+    to be ignored -- ``nohup asl run`` -- stays ignored. The previous handlers
+    come back on the way out, so a second signal while the interrupt is being
+    reported takes its default action, like a second Ctrl-C.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def _interrupt(signum: int, _frame: FrameType | None) -> None:
+        raise RunTerminatedBySignal(signal.Signals(signum).name)
+
+    previous: dict[signal.Signals, Any] = {}
+    try:
+        for signum in TERMINATION_SIGNALS:
+            try:
+                if signal.getsignal(signum) is signal.SIG_IGN:
+                    continue
+                previous[signum] = signal.signal(signum, _interrupt)
+            except ValueError, OSError:
+                continue
+        yield
+    finally:
+        for restored, handler in previous.items():
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(restored, handler)

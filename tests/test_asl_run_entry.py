@@ -59,6 +59,7 @@ from agent_session_loop import (
     run_entry_admission,
     run_entry_resume,
     run_entry_resume_command,
+    run_errors,
     run_flags,
     run_loop,
     runner,
@@ -500,7 +501,7 @@ class AdmissionOrderTests(unittest.TestCase):
     def test_a_termination_signal_takes_the_interrupt_path(self) -> None:
         # Left at their defaults, SIGTERM and SIGHUP ended the process with no
         # terminal record, no restored TTY and the harness's group still alive.
-        for signum in run_entry.TERMINATION_SIGNALS:
+        for signum in run_errors.TERMINATION_SIGNALS:
             with self.subTest(signal=signal.Signals(signum).name):
                 before = signal.getsignal(signum)
                 fixture = _EntryFixture(self, ("pending",))
