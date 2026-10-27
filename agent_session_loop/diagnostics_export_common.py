@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 from collections.abc import Iterable, Mapping, Sequence
@@ -240,16 +241,21 @@ REDACTION_POLICY: tuple[dict[str, str], ...] = (
 # ---------------------------------------------------------------------------
 
 
-def canonical_json_bytes(payload: Any) -> bytes:
+def canonical_json_bytes(payload: Any, *, allow_nan: bool = False) -> bytes:
     """Serialize to stable, newline-terminated UTF-8 JSON.
 
     Restated here rather than imported from :mod:`assurance_models_primitives` so the
     export stays readable by a consumer that has only this module's contract:
     the byte-equality promise is this function, and it should be visible beside
-    the promise.
+    the promise. ``NaN`` and ``Infinity`` are refused by default because they
+    are not JSON, and a document carrying them fails a strict parser.
     """
     text = json.dumps(
-        payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        payload,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=allow_nan,
     )
     return text.encode("utf-8") + b"\n"
 
@@ -270,6 +276,9 @@ def _bounded_scalar(value: Any) -> Any:
     """
     if isinstance(value, str):
         return value[:MAX_STRING_CHARS]
+    if isinstance(value, float) and not math.isfinite(value):
+        # Python's JSON reader accepts ``NaN`` and ``Infinity``; JSON does not.
+        return None
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return None
@@ -317,7 +326,9 @@ class Omissions:
             },
         )
         entry["count"] += count
-        entry["digest"].update(canonical_json_bytes(payload))
+        # Only the digest is published, so a withheld value that is not JSON —
+        # a ``NaN`` schema version, say — may still be hashed.
+        entry["digest"].update(canonical_json_bytes(payload, allow_nan=True))
 
     def to_list(self) -> list[dict[str, Any]]:
         return [

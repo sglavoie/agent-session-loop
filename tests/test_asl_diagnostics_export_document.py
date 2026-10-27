@@ -310,6 +310,38 @@ class ExportRedactionTests(ExportTestBase):
         record = self.export()["runs"][0]["delivery"]["records"][0]
         self.assertEqual(len(record["reason"]), diagnostics_export.MAX_STRING_CHARS)
 
+    def test_non_finite_numbers_are_dropped_so_the_document_stays_json(self) -> None:
+        plan_dir = self.tmp_path / "plan-nan"
+        plan_dir.mkdir()
+        self.seed_state(
+            plan_dir,
+            projection={
+                "schema_version": float("nan"),
+                "contract_set_id": agent_mux_projection.CONTRACT_SET_ID,
+            },
+        )
+        target = self.plan_state_dir(plan_dir)
+        line = {
+            "name": events.AGENT_MUX_DELIVERY_EVENT,
+            "payload": {
+                "run_id": RUN_ID,
+                "attempt_count": float("nan"),
+                "source_sequence": float("inf"),
+            },
+        }
+        (target / events.EVENTS_FILE_NAME).write_text(
+            json.dumps(line) + "\n", encoding="utf-8"
+        )
+        document = self.export()
+        record = document["runs"][0]["delivery"]["records"][0]
+        self.assertIsNone(record["attempt_count"])
+        self.assertIsNone(record["source_sequence"])
+
+        def refuse(constant: str) -> Any:
+            raise ValueError(constant)
+
+        json.loads(self.rendered(document), parse_constant=refuse)
+
     def test_malformed_lines_are_digested_not_quoted(self) -> None:
         plan_dir = self.tmp_path / "plan-damaged"
         plan_dir.mkdir()
