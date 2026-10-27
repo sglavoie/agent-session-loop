@@ -114,9 +114,10 @@ def relocate_records(
                 artifacts.atomic_write_bytes(
                     ledger_path, b"".join(rendered), durable=True
                 )
-        except OSError as error:
+        except (OSError, artifacts.ArtifactError) as error:
             # Same error type as the read above, so migration reports the stale
-            # ledger it leaves behind instead of a traceback.
+            # ledger it leaves behind instead of a traceback. The atomic write
+            # reports its own I/O failure as an ArtifactError, not an OSError.
             raise validation.ConversationError(
                 validation.ERROR_LEDGER_WRITE,
                 f"could not rewrite {ledger_path} while relocating: {error}",

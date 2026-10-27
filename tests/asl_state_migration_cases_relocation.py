@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 # ruff: noqa: F403, F405
+import errno
+from typing import Any
+from unittest import mock
+
+from agent_session_loop import durability
+
 from .asl_state_migration_support import *
 
 
@@ -160,6 +166,53 @@ class ConversationRelocationTests(StateMigrationTestBase):
         self.assertEqual("conversation-ledger-error", caught.exception.reason)
         self.assertTrue(self.old_state_dir.is_dir())
         self.assertFalse(self.new_state_dir.exists())
+
+    def _migrate_cli_json_with_failing_write(self, failing_name: str) -> dict:
+        real_replace = durability.replace_bytes
+
+        def replace_bytes(path: Path, data: bytes, **kwargs: Any) -> None:
+            if Path(path).name == failing_name:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            real_replace(path, data, **kwargs)
+
+        buffer = io.StringIO()
+        with (
+            mock.patch.object(durability, "replace_bytes", replace_bytes),
+            redirect_stdout(buffer),
+        ):
+            exit_code = cli.main(
+                [
+                    "migrate-state",
+                    str(self.new_plan),
+                    "--from",
+                    str(self.old_plan),
+                    "--state-dir",
+                    str(self.state_dir),
+                    "--apply",
+                    "--json",
+                ]
+            )
+        self.assertEqual(1, exit_code)
+        return json.loads(buffer.getvalue())
+
+    def test_a_failed_ledger_rewrite_reports_the_relocation(self) -> None:
+        # The atomic write raises ArtifactError, not OSError; it used to
+        # escape the ledger handler and the CLI as a traceback.
+        self._write_orphan_state()
+        self._seed_conversation()
+        payload = self._migrate_cli_json_with_failing_write(
+            conversations.conversation_ledger_path(self.old_state_dir).name
+        )
+        self.assertEqual("conversation-ledger-error", payload["reason"])
+        self.assertTrue(payload["details"]["relocated"])
+        self.assertTrue(self.new_state_dir.is_dir())
+
+    def test_a_failed_state_rewrite_reports_the_relocation(self) -> None:
+        self._write_orphan_state()
+        payload = self._migrate_cli_json_with_failing_write(events.STATE_FILE_NAME)
+        self.assertEqual("artifact-error", payload["reason"])
+        self.assertTrue(payload["details"]["relocated"])
+        self.assertTrue(self.new_state_dir.is_dir())
 
     def test_a_plan_with_no_ledger_migrates_unchanged(self) -> None:
         self._write_orphan_state()

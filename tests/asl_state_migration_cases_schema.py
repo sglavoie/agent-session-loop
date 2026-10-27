@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 # ruff: noqa: F403, F405
+from unittest import mock
+
+from agent_session_loop import artifacts
+
 from .asl_state_migration_support import *
 
 
@@ -335,6 +339,32 @@ class UpgradeStateSchemaTests(StateMigrationTestBase):
         with self.assertRaises(state_schema_upgrade.MigrationError) as caught:
             self._upgrade()
         self.assertEqual("no-source-state", caught.exception.reason)
+
+    def test_cli_reports_a_failed_upgrade_write_as_an_artifact_error(self) -> None:
+        # The atomic write raises ArtifactError, not OSError; it used to escape
+        # `asl migrate-state` as a traceback.
+        self._write_own_state()
+
+        def refuse(path: Path, *_args: object, **_kwargs: object) -> None:
+            raise artifacts.ArtifactError(f"could not write artifact {path}")
+
+        buffer = io.StringIO()
+        with (
+            mock.patch.object(artifacts, "atomic_write_bytes", refuse),
+            redirect_stdout(buffer),
+        ):
+            exit_code = cli.main(
+                [
+                    "migrate-state",
+                    str(self.new_plan),
+                    "--state-dir",
+                    str(self.state_dir),
+                    "--apply",
+                    "--json",
+                ]
+            )
+        self.assertEqual(1, exit_code)
+        self.assertEqual("artifact-error", json.loads(buffer.getvalue())["reason"])
 
     def test_state_schema_version_reads_every_spelling(self) -> None:
         self.assertIsNone(state_schema_upgrade.state_schema_version({}))

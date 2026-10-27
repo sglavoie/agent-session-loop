@@ -7,7 +7,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import cli_common, plans_errors, plans_files, plans_snapshot, responses
+from . import (
+    artifacts,
+    cli_common,
+    plans_errors,
+    plans_files,
+    plans_snapshot,
+    responses,
+)
 from .cli_defaults import program_name
 from .state import StateError, UnlockResult, lock_path_for_plan, plan_state_dir
 from .state_locks import unlock_plan
@@ -132,6 +139,8 @@ def _migrate_state_error_reason(error: Exception) -> str:
         return error.reason
     if isinstance(error, plans_errors.PlanError):
         return plans_errors.plan_error_reason(error, "malformed-plan")
+    if isinstance(error, artifacts.ArtifactError):
+        return "artifact-error"
     if isinstance(error, OSError):
         return "os-error"
     return "state-error"
@@ -147,7 +156,13 @@ def migrate_state_from_args(args: argparse.Namespace) -> int:
             state_dir=getattr(args, "state_dir", None),
             apply=args.apply,
         )
-    except (MigrationError, plans_errors.PlanError, StateError, OSError) as error:
+    except (
+        MigrationError,
+        plans_errors.PlanError,
+        StateError,
+        OSError,
+        artifacts.ArtifactError,
+    ) as error:
         if getattr(args, "json", False):
             responses.print_json(
                 responses.error_payload(

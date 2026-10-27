@@ -385,9 +385,19 @@ def migrate_plan_state(
                 f"it stays at schema version {shown}"
             )
 
-    artifacts.atomic_write_bytes(
-        new_state_path, _dump_state_bytes(migrated), durable=True
-    )
+    try:
+        artifacts.atomic_write_bytes(
+            new_state_path, _dump_state_bytes(migrated), durable=True
+        )
+    except artifacts.ArtifactError as error:
+        # Like the ledger above: the directory already moved, so say so rather
+        # than leave the operator to guess where the state now lives.
+        raise MigrationError(
+            "artifact-error",
+            "state directory was relocated but its state file could not be "
+            f"rewritten: {error}",
+            {"state_dir": str(new_state_dir), "relocated": True},
+        ) from error
 
     migrated_details: dict[str, Any] = {
         "from_plan_dir": str(old_plan_dir),
