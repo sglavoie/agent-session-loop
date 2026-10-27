@@ -25,6 +25,12 @@ def looks_like_api_error(response: str) -> bool:
     stripped = response.strip()
     if stripped.startswith("API Error:"):
         return True
+    # A conventional title line means a real message, even when its body ends
+    # in an error-shaped JSON example. A title holding a brace is still checked,
+    # so an ``error: {"type": "error", ...}`` dump cannot pass as a title.
+    title = stripped.split("\n", 1)[0].strip()
+    if "{" not in title and models.COMMIT_TITLE_PATTERN.match(title):
+        return False
     brace_pos = stripped.find("{")
     if brace_pos != -1:
         try:

@@ -33,6 +33,30 @@ class ApiErrorGuardTests(unittest.TestCase):
 
         self.assertFalse(commit_message.looks_like_api_error(message))
 
+    def test_a_conventional_message_whose_body_ends_in_an_error_object_is_accepted(
+        self,
+    ) -> None:
+        message = (
+            "fix: Surface upstream failures as error envelopes\n"
+            "\n"
+            "Wrap every upstream failure in the error envelope clients parse:\n"
+            '{"type": "error", "error": {"message": "upstream unavailable"}}'
+        )
+
+        self.assertFalse(commit_message.looks_like_api_error(message))
+
+    def test_an_error_object_behind_a_title_shaped_prefix_is_rejected(self) -> None:
+        self.assertTrue(
+            commit_message.looks_like_api_error(
+                'error: {"type": "error", "error": {"message": "overloaded"}}'
+            )
+        )
+        self.assertTrue(
+            commit_message.looks_like_api_error(
+                'error: {\n  "type": "error",\n  "error": {"message": "overloaded"}\n}'
+            )
+        )
+
     def test_non_error_json_and_unparseable_braces_are_accepted(self) -> None:
         self.assertFalse(commit_message.looks_like_api_error('{"type": "result"}'))
         self.assertFalse(commit_message.looks_like_api_error("feat: add {"))
