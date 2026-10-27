@@ -272,6 +272,7 @@ class VerificationRepairLoopTests(unittest.TestCase):
                         "reason": reason,
                         "details": {
                             "session": session,
+                            "verification_repair_attempt": 1,
                             "failures": [
                                 {
                                     "name": "missing",

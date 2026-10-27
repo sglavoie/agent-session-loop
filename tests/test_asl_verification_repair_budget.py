@@ -10,6 +10,8 @@ from typing import Any
 
 from agent_session_loop import (
     events,
+    plans_payloads,
+    review_transitions,
     verification_cli,
     verification_transitions,
 )
@@ -73,13 +75,15 @@ class VerificationRepairBudgetTests(unittest.TestCase):
         with self.event_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"name": name, "payload": payload}) + "\n")
 
-    def _pause(self, session: str, *, stdout: str = "aa") -> None:
+    def _pause(self, session: str, *, stdout: str = "aa", attempt: int = 1) -> None:
         self._append(
             events.RUN_PAUSED_EVENT,
             {
                 "reason": verification_cli.VERIFY_EXIT_REASON_FAILED,
                 "details": {
                     "session": session,
+                    # Only the graded-failure pause records a repair attempt.
+                    "verification_repair_attempt": attempt,
                     "failures": [
                         {
                             "name": "tests",
@@ -184,7 +188,7 @@ class VerificationRepairBudgetTests(unittest.TestCase):
 
     def test_the_attempt_cap_stops_a_reviewer_producing_new_failures(self) -> None:
         self._pause("1", stdout="aa")
-        self._pause("1", stdout="cc")
+        self._pause("1", stdout="cc", attempt=2)
         repair = verification_transitions.adjudicate_verification_repair(
             details={
                 "failures": [
@@ -204,6 +208,72 @@ class VerificationRepairBudgetTests(unittest.TestCase):
         )
         self.assertEqual(repair.attempt, 3)
         self.assertTrue(repair.exhausted)
+
+    def test_ungraded_verify_failed_pauses_spend_no_repair_budget(self) -> None:
+        # A recipe that could not execute at all and an exhausted review-verdict
+        # repair both pause under `verify-failed`, but neither graded a check.
+        # Counting them would exhaust the budget a failure early and tell the
+        # worker about an attempt that never ran.
+        session_details = plans_payloads.session_details_payload("1")
+        refusal = verification_transitions.refuse_unavailable_verification(
+            session_label="session 1", error="alias 'web' is not registered"
+        )
+        self.assertEqual(verification_cli.VERIFY_EXIT_REASON_FAILED, refusal.reason)
+        self._append(
+            events.RUN_PAUSED_EVENT,
+            {
+                "reason": refusal.reason,
+                "details": refusal.pause_details(session_details),
+            },
+        )
+        self._append(
+            events.RUN_PAUSED_EVENT,
+            {
+                "reason": verification_cli.VERIFY_EXIT_REASON_FAILED,
+                "details": {
+                    **session_details,
+                    "error": "malformed review artifact",
+                    "failure_reason": "malformed-review-artifact",
+                    **review_transitions.ReviewVerdictTransition(
+                        event="exhaust",
+                        state="exhausted",
+                        action="pause",
+                        fingerprint="fp",
+                        attempt=2,
+                        exhausted=True,
+                    ).to_payload(),
+                },
+            },
+        )
+        self.assertEqual(
+            [],
+            verification_transitions.read_prior_verification_failures(
+                self.event_path, "1"
+            ),
+        )
+
+        self._pause("1", stdout="aa")
+        budget = verification_transitions.verification_repair_budget(
+            self.event_path, "1"
+        )
+        self.assertEqual(2, budget.attempt)
+        self.assertIn("Prior verification attempt 1 failed", budget.references[0])
+        repair = verification_transitions.adjudicate_verification_repair(
+            details={
+                "failures": [
+                    {
+                        "name": "tests",
+                        "kind": "command",
+                        "failure_reason": "exit-status",
+                        "returncode": 1,
+                        "stdout_sha256": "cc",
+                        "stderr_sha256": "bb",
+                    }
+                ]
+            },
+            budget=budget,
+        )
+        self.assertFalse(repair.exhausted)
 
     def test_a_failure_without_evidence_is_bounded_by_the_cap_alone(self) -> None:
         self.assertFalse(

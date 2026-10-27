@@ -188,7 +188,11 @@ class InterruptionEarnsNothingTests(unittest.TestCase):
         )
 
     def write_events(self, *reasons: str) -> None:
-        """A run's pause history, as the repair counters read it back."""
+        """A run's pause history, as the repair counters read it back.
+
+        A `verify-failed` pause carries the repair attempt its graded failure
+        recorded, as the real one does; the budget counts nothing else.
+        """
         self.event_path.write_text(
             "".join(
                 json.dumps(
@@ -196,12 +200,20 @@ class InterruptionEarnsNothingTests(unittest.TestCase):
                         "name": events.RUN_PAUSED_EVENT,
                         "payload": {
                             "reason": reason,
-                            "details": {"session": SESSION_ID},
+                            "details": {
+                                "session": SESSION_ID,
+                                **(
+                                    {"verification_repair_attempt": attempt}
+                                    if reason
+                                    == verification_cli.VERIFY_EXIT_REASON_FAILED
+                                    else {}
+                                ),
+                            },
                         },
                     }
                 )
                 + "\n"
-                for reason in reasons
+                for attempt, reason in enumerate(reasons, start=1)
             ),
             encoding="utf-8",
         )

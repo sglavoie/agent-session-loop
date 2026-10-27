@@ -149,17 +149,29 @@ def verification_fingerprint(details: Any) -> str | None:
     return f"{VERIFICATION_FINGERPRINT_PREFIX}:{digest}"
 
 
+#: The pause-detail key only a graded verification failure records (see
+#: :meth:`VerificationRepair.to_payload`); its presence is what marks a
+#: ``verify-failed`` pause as one that spent the repair budget.
+VERIFICATION_REPAIR_ATTEMPT_KEY = "verification_repair_attempt"
+
+
 def read_prior_verification_failures(
     event_path: str | Path, session_id: str
 ) -> list[dict[str, Any]]:
-    """Return prior verify-failed pause detail dicts for ``session_id``.
+    """Return prior graded verification failure detail dicts for ``session_id``.
 
     Reads the persistent ``events.jsonl`` log (append-only across ``asl run``
     invocations) and returns the ``details`` payload of every ``run_paused``
-    event whose reason is ``verify-failed`` and whose session matches, in
-    chronological (oldest-first) order. Malformed or unrelated lines are
-    skipped. Used to reconstruct repair context and prior fingerprints when a
-    paused run is relaunched, without re-running the failed session.
+    event whose reason is ``verify-failed``, whose session matches, and whose
+    details carry ``verification_repair_attempt``, in chronological
+    (oldest-first) order. Malformed or unrelated lines are skipped. Used to
+    reconstruct repair context and prior fingerprints when a paused run is
+    relaunched, without re-running the failed session.
+
+    ``verify-failed`` is also the reason of pauses that graded nothing: a
+    recipe that could not execute at all, and an exhausted review-verdict
+    repair. Only the graded-failure pause records a repair attempt, so that key
+    is what keeps the others from spending this budget.
     """
 
     from .verification_terminal import read_event_records
@@ -177,6 +189,8 @@ def read_prior_verification_failures(
         if not isinstance(details, dict):
             continue
         if str(details.get("session")) != str(session_id):
+            continue
+        if VERIFICATION_REPAIR_ATTEMPT_KEY not in details:
             continue
         priors.append(details)
     return priors
@@ -289,7 +303,7 @@ class VerificationRepair:
     def to_payload(self) -> dict[str, Any]:
         return {
             "verification_fingerprint": self.fingerprint,
-            "verification_repair_attempt": self.attempt,
+            VERIFICATION_REPAIR_ATTEMPT_KEY: self.attempt,
             "verification_repair_exhausted": self.exhausted,
             "verification_repair_max_attempts": self.max_attempts,
         }
