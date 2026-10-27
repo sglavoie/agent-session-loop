@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .contract_models import fenced_line_flags
 from .literals import as_literal
 from .plans_errors import (
     PlanError,
@@ -86,7 +87,12 @@ def parse_readiness_metadata(manifest_text: str) -> ReadinessMetadata | None:
     sha: str | None = None
     checked_at: str | None = None
 
-    for raw_line in manifest_text.splitlines():
+    lines = manifest_text.splitlines()
+    # A header quoted inside a fenced code block is an example, not metadata.
+    fenced = fenced_line_flags(lines)
+    for raw_line, is_fenced in zip(lines, fenced, strict=True):
+        if is_fenced:
+            continue
         line = raw_line.strip()
         if line.startswith(READINESS_SHA_PREFIX):
             payload = _strip_inline_code_ticks(line[len(READINESS_SHA_PREFIX) :])
@@ -200,13 +206,17 @@ def replace_readiness_metadata_in_text(text: str, metadata: ReadinessMetadata) -
     """Insert or replace readiness metadata lines in manifest text."""
     new_block = _render_readiness_metadata_lines(metadata)
     lines = text.splitlines(keepends=False)
-    existing = [index for index, line in enumerate(lines) if _is_readiness_line(line)]
+    # Fenced example headers are left exactly as written.
+    fenced = fenced_line_flags(lines)
+    existing = {
+        index
+        for index, line in enumerate(lines)
+        if not fenced[index] and _is_readiness_line(line)
+    }
 
     if existing:
-        insertion_index = existing[0]
-        kept = [
-            line for index, line in enumerate(lines) if not _is_readiness_line(line)
-        ]
+        insertion_index = min(existing)
+        kept = [line for index, line in enumerate(lines) if index not in existing]
         result = kept[:insertion_index] + new_block + kept[insertion_index:]
     else:
         insertion_index = _find_readiness_insertion_index(lines)

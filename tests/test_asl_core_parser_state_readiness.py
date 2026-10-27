@@ -453,6 +453,80 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertNotIn("2026-01-01", text)
             self.assertEqual(updated, plans_readiness.parse_readiness_metadata(text))
 
+    def test_readiness_metadata_leaves_fenced_example_headers(self) -> None:
+        # A header quoted inside a fence is an example: it neither overrides the
+        # real readiness nor is deleted when readiness is rewritten.
+        fenced_example = [
+            "```markdown",
+            "**Readiness**: draft",
+            "**Readiness SHA-256**: `example`",
+            "**Readiness checked at**: 2020-01-01T00:00:00Z",
+            "```",
+        ]
+        manifest_text = "\n".join(
+            [
+                "# Plan",
+                "",
+                "**Readiness**: loop-ready",
+                "**Readiness SHA-256**: `aaa`",
+                "**Readiness checked at**: 2026-10-27T00:00:00Z",
+                "",
+                "## Notes",
+                "",
+                *fenced_example,
+                "",
+            ]
+        )
+        self.assertEqual(
+            plans_models.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256="aaa",
+                checked_at="2026-10-27T00:00:00Z",
+            ),
+            plans_readiness.parse_readiness_metadata(manifest_text),
+        )
+
+        updated = plans_models.ReadinessMetadata(
+            state="running",
+            readiness_sha256="bbb",
+            checked_at="2026-10-27T01:00:00Z",
+        )
+        rewritten = plans_readiness.replace_readiness_metadata_in_text(
+            manifest_text, updated
+        )
+
+        self.assertIn("\n".join(fenced_example), rewritten)
+        self.assertEqual(updated, plans_readiness.parse_readiness_metadata(rewritten))
+
+    def test_stable_readiness_sha256_tracks_fenced_readiness_examples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            manifest_path = plan_dir / "manifest.md"
+
+            def write_manifest(example_state: str) -> None:
+                manifest_path.write_text(
+                    "\n".join(
+                        [
+                            "# Manifest",
+                            "",
+                            "```markdown",
+                            f"**Readiness**: {example_state}",
+                            "```",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+
+            write_manifest("draft")
+            baseline = plans_content_hash.stable_readiness_sha256(plan_dir)
+            write_manifest("reviewed")
+
+            self.assertNotEqual(
+                baseline, plans_content_hash.stable_readiness_sha256(plan_dir)
+            )
+
     def test_stable_readiness_sha256_ignores_handoff_status_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"

@@ -145,7 +145,14 @@ def _strip_final_handoff_block(text: str) -> str:
 
 def _strip_readiness_lines(text: str) -> str:
     lines = text.splitlines(keepends=False)
-    kept = [line for line in lines if not _is_readiness_line(line)]
+    # Matches `replace_readiness_metadata_in_text`, which never rewrites a
+    # fenced example header, so editing one must still move the hash.
+    fenced = fenced_line_flags(lines)
+    kept = [
+        line
+        for line, is_fenced in zip(lines, fenced, strict=True)
+        if is_fenced or not _is_readiness_line(line)
+    ]
     suffix = "\n" if text.endswith("\n") else ""
     return "\n".join(kept) + suffix
 
