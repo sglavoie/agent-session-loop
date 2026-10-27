@@ -457,6 +457,41 @@ class ExpansionRendererTests(unittest.TestCase):
             self.assertEqual(prepare_models.CORRECTION_BLOCKED, outcomes[0].status)
             self.assertEqual(prepare_models.BLOCKER_HANDOFF_BODY, outcomes[0].blocker)
 
+    def test_handoff_body_stays_blocked_below_form_feeds_in_the_prose(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_prepare_plan(plan_dir)
+            session_path = plan_dir / "session-1.md"
+            # Each form feed is a line break to str.splitlines but not to a
+            # "\n" count, so three of them once shifted the Handoff range
+            # past its own Status line. The section between the contract and
+            # the Handoff keeps the shifted contract range from covering it.
+            text = (
+                session_path.read_text(encoding="utf-8")
+                .replace("to use `load_config`.", "to use\x0c`load_config`\x0c.\x0c")
+                .replace(
+                    "## Handoff", "## Notes\n\nSee the retry helper.\n\n## Handoff"
+                )
+            )
+            session_path.write_text(text, encoding="utf-8")
+            validation = self._corrections_validation(
+                [
+                    {
+                        "expected_text": "- **Status**: pending",
+                        "replacement_text": "- **Status**: complete",
+                        "reason": "already done",
+                    }
+                ]
+            )
+
+            outcomes = prepare_corrections.apply_corrections(plan_dir, validation)
+
+            self.assertEqual(prepare_models.CORRECTION_BLOCKED, outcomes[0].status)
+            self.assertEqual(prepare_models.BLOCKER_HANDOFF_BODY, outcomes[0].blocker)
+            self.assertEqual(text, session_path.read_text(encoding="utf-8"))
+
     def test_heading_correction_is_blocked_as_structural(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"

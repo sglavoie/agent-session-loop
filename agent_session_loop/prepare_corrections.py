@@ -167,7 +167,10 @@ def _apply_one_correction(
         )
 
     offset = text.find(correction.expected_text)
-    lines = text.splitlines()
+    # Split on "\n" alone, as _match_line_span counts: ``str.splitlines`` also
+    # breaks on form feeds, U+2028 and the like, which would shift the
+    # protected ranges away from the lines the match is measured in.
+    lines = text.split("\n")
     start_line, end_line = _match_line_span(text, offset, len(correction.expected_text))
     for range_start, range_end, blocker in _protected_line_ranges(lines):
         if start_line < range_end and end_line >= range_start:
