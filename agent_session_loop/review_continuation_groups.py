@@ -21,6 +21,7 @@ from .review_continuation_events import (
     read_review_events,
 )
 from .review_continuation_models import (
+    REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED,
     REVIEW_CYCLE_DISPOSITION_REPAIRS,
     ReviewEventRecord,
     _nonempty_str,
@@ -182,6 +183,13 @@ def repair_group_attempts(
         counts[repair_group] = counts.get(repair_group, 0) + 1
 
     for record in records:
+        # A group-exhausted cycle records the groups it planned, but it
+        # refused to create their children, so none of them is an attempt.
+        if (
+            record.payload.get("disposition")
+            == REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED
+        ):
+            continue
         for group in _repair_groups_from_payload(record.payload):
             record_attempt(group)
 

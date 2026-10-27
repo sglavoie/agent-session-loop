@@ -292,3 +292,8 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
             ],
             cycle["repair_groups"],
         )
+        # The refused cycle created no child, so it is not another attempt.
+        self.assertEqual(
+            {"runner": 1},
+            review_continuation.repair_group_attempts(self.event_path, self.plan_dir),
+        )
