@@ -117,6 +117,50 @@ class CatalogTests(StoreCase):
         status = self.store.connector_statuses(now=NOW)[0]
         self.assertEqual(status.catalog.completeness, freshness.COMPLETENESS_COMPLETE)
 
+    def test_a_page_that_lost_a_plan_keeps_its_generation_partial(self) -> None:
+        """A later whole, final page must not retire what an earlier page lost.
+
+        The connector sends a page whose plan it could not publish as neither
+        complete nor final; if the next page's own flags decided, that plan,
+        absent from the generation only because it was lost, would be retired.
+        """
+        self.send_catalog(
+            observed_at=NOW - 20,
+            generation="gen-1",
+            entries=[
+                catalog_entry("plan-a"),
+                catalog_entry("plan-b"),
+                catalog_entry("plan-c"),
+            ],
+        )
+        self.send_catalog(
+            observed_at=NOW - 10,
+            generation="gen-2",
+            entries=[catalog_entry("plan-a")],
+            complete=False,
+            final=False,
+            total=3,
+        )
+        last = self.send_catalog(
+            observed_at=NOW - 10,
+            generation="gen-2",
+            entries=[catalog_entry("plan-c")],
+            offset=2,
+            total=3,
+        )
+        self.assertEqual(last.absent, 0)
+        self.assertEqual(set(self.plans_by_key()), {"plan-a", "plan-b", "plan-c"})
+        status = self.store.connector_statuses(now=NOW)[0]
+        self.assertEqual(status.catalog.completeness, freshness.COMPLETENESS_PARTIAL)
+        # A new generation starts whole again and may retire what it omits.
+        fresh = self.send_catalog(
+            observed_at=NOW - 5,
+            generation="gen-3",
+            entries=[catalog_entry("plan-a"), catalog_entry("plan-c")],
+        )
+        self.assertEqual(fresh.absent, 1)
+        self.assertEqual(set(self.plans_by_key()), {"plan-a", "plan-c"})
+
     def test_a_replayed_page_of_the_same_generation_is_a_duplicate(self) -> None:
         entries = [catalog_entry("plan-a")]
         self.send_catalog(

@@ -186,6 +186,10 @@ class HistoryCatalogIngest(StoreRetention):
                     observed_at, float(row["catalog_observed_at"] or observed_at)
                 )
                 already_final = bool(row["catalog_final"])
+                # Completeness belongs to the generation, not the page: one
+                # page that lost a plan leaves the whole generation partial,
+                # so a later whole page cannot retire the plan it lost.
+                complete = complete and bool(row["catalog_complete"])
             else:
                 order = self._order(
                     stored_observed_at=row["catalog_observed_at"],
@@ -235,9 +239,9 @@ class HistoryCatalogIngest(StoreRetention):
 
             absent = 0
             if complete and final:
-                # Only here. A partial generation never proves a plan is gone,
-                # and a complete generation that is still arriving has not yet
-                # said what it carries.
+                # Only here. A generation any page of which was partial never
+                # proves a plan is gone, and a complete generation that is
+                # still arriving has not yet said what it carries.
                 absent = max(
                     0,
                     connection.execute(
