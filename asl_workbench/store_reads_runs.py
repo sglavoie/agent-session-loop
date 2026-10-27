@@ -48,14 +48,14 @@ class RunReads(StoreBase):
         contract_set_id = row["snapshot_contract_set_id"] or row["contract_set_id"]
         compatible = contract_set_id in self._policy.supported_contract_set_ids
         truncated = _as_bool(row["snapshot_truncated"])
-        source_at = row["snapshot_observed_at"]
-        if source_at is not None:
-            source_at -= row["snapshot_projection_age_seconds"] or 0
+        # ``snapshot_observed_at`` is stamped when the corpus walk starts, so it
+        # already is the moment the source saw; ``projection_age_seconds`` is
+        # the walk's own duration, and subtracting it would count it twice.
         evaluated = freshness_module.evaluate(
             now=now,
             policy=self._policy,
             last_heartbeat_at=row["heartbeat_observed_at"],
-            last_snapshot_at=source_at,
+            last_snapshot_at=row["snapshot_observed_at"],
             truncated=truncated,
             compatible=compatible,
         )

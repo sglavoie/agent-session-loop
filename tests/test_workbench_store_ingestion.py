@@ -257,6 +257,22 @@ class OmissionTests(StoreCase):
         self.assertTrue(status.degraded)
         self.assertFalse(status.freshness.absence_proves_removal)
 
+    def test_a_slow_walk_is_not_counted_twice_against_connector_freshness(
+        self,
+    ) -> None:
+        """``observed_at`` is the walk's start; its duration is not extra age."""
+        self.send_heartbeat(observed_at=NOW)
+        self.send_snapshot(
+            observed_at=NOW - 40,
+            runs=[run_row("alpha")],
+            received_at=NOW,
+            projection_age_seconds=40.0,
+        )
+        status = self.store.connector_statuses(now=NOW)[0]
+        self.assertEqual(status.freshness.projection_age_seconds, 40.0)
+        self.assertEqual(status.freshness.label, freshness.FRESHNESS_LIVE)
+        self.assertTrue(status.freshness.replies_enabled)
+
 
 # --------------------------------------------------------------------------
 # History
