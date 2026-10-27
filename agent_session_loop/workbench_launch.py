@@ -69,6 +69,7 @@ class LaunchError(Exception):
 LAUNCH_REASON_INVALID_PLAN = "invalid-plan"
 LAUNCH_REASON_INVALID_PROFILE = "invalid-profile"
 LAUNCH_REASON_EMPTY_REPLY = "empty-reply"
+LAUNCH_REASON_INVALID_REPLY = "invalid-reply"
 LAUNCH_REASON_PROCESS_FAILED = "process-failed"
 
 
@@ -307,7 +308,7 @@ def launch_plan(
             # A lone surrogate cannot reach the child's stdin; refuse it here,
             # before a run exists, rather than after one has been spawned.
             raise LaunchError(
-                LAUNCH_REASON_EMPTY_REPLY,
+                LAUNCH_REASON_INVALID_REPLY,
                 f"reply text is not encodable as UTF-8: {error}",
             ) from error
         reply_length = len(reply_text)

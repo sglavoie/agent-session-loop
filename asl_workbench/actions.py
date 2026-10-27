@@ -122,11 +122,12 @@ def unknown_profile_fields(payload: Mapping[str, Any]) -> tuple[str, ...]:
 
 # -- What a launch failure establishes --------------------------------------
 
-#: ``LaunchError.reason``, mirrored. The first three are raised before anything
-#: is spawned; the fourth is raised on both sides of the spawn.
+#: ``LaunchError.reason``, mirrored. The first four are raised before anything
+#: is spawned; the fifth is raised on both sides of the spawn.
 LAUNCH_INVALID_PLAN = "invalid-plan"
 LAUNCH_INVALID_PROFILE = "invalid-profile"
 LAUNCH_EMPTY_REPLY = "empty-reply"
+LAUNCH_INVALID_REPLY = "invalid-reply"
 LAUNCH_PROCESS_FAILED = "process-failed"
 
 #: Reasons that prove no process was created. ``process-failed`` is
@@ -135,7 +136,12 @@ LAUNCH_PROCESS_FAILED = "process-failed"
 #: child was killed". The second has a process that existed, ran, and may have
 #: written to the plan before it died.
 REFUSING_LAUNCH_REASONS: frozenset[str] = frozenset(
-    {LAUNCH_INVALID_PLAN, LAUNCH_INVALID_PROFILE, LAUNCH_EMPTY_REPLY}
+    {
+        LAUNCH_INVALID_PLAN,
+        LAUNCH_INVALID_PROFILE,
+        LAUNCH_EMPTY_REPLY,
+        LAUNCH_INVALID_REPLY,
+    }
 )
 
 
@@ -332,6 +338,7 @@ __all__ = [
     "LAUNCH_EMPTY_REPLY",
     "LAUNCH_INVALID_PLAN",
     "LAUNCH_INVALID_PROFILE",
+    "LAUNCH_INVALID_REPLY",
     "LAUNCH_PROCESS_FAILED",
     "LAUNCH_PROFILE_FIELDS",
     "MAX_WITNESS_BYTES_PER_LOOK",

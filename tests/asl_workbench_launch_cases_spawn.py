@@ -138,6 +138,9 @@ class WorkbenchLaunchSpawnTests(LaunchPlanSeedMixin, unittest.TestCase):
                 )
 
             self.assertFalse(ctx.exception.spawned)
+            self.assertEqual(
+                workbench_launch.LAUNCH_REASON_INVALID_REPLY, ctx.exception.reason
+            )
             self.assertEqual(0, len(captured), "process must not be spawned")
 
     def test_launch_plan_any_stdin_write_failure_kills_child(self) -> None:
