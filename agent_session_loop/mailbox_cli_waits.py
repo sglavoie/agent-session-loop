@@ -43,6 +43,7 @@ def wait_for_questions(
     lease_degraded = False
     lease_renewal_failures = 0
     lease_renewal_recoveries = 0
+    lost_reason: str | None = None
     kinds = {
         mailbox_cli_constants.OUTBOX_INCLUDE_QUESTIONS: (
             mailbox_vocabulary.KIND_QUESTION,
@@ -120,31 +121,37 @@ def wait_for_questions(
         now = time.monotonic()
         # After the mailbox read, so a woken record always outranks a lost
         # helper: the reader above has already returned anything selected.
-        if liveness_probe is not None and now >= next_probe_at:
+        if lost_reason is None and liveness_probe is not None and now >= next_probe_at:
             lost_reason = liveness_probe()
             next_probe_at = now + mailbox_cli_constants.LEASE_RENEW_INTERVAL_SECONDS
             if lost_reason is not None:
-                return mailbox_cli_models.OutboxWaitResult(
-                    questions=(),
-                    notices=(),
-                    supervision_ends=(),
-                    include=include,
-                    supervisor_id=landed_supervisor_id,
-                    next_since=max(
-                        since,
-                        0
-                        if last_successful_view is None
-                        else last_successful_view.last_seq,
-                    ),
-                    timed_out=False,
-                    lease_supervision=mailbox_cli_models.LeaseSupervision(
-                        degraded=lease_degraded,
-                        renewal_failures=lease_renewal_failures,
-                        renewal_recoveries=lease_renewal_recoveries,
-                    ),
-                    mailbox_view=last_successful_view,
-                    lost_reason=lost_reason,
-                )
+                # The helper can publish its terminal record and exit while
+                # the probe runs. Read once more after observing its death,
+                # even at the deadline, before declaring the record missing.
+                last_read_token = mailbox_cli_constants.MAILBOX_TOKEN_UNSEEN
+                continue
+        if lost_reason is not None:
+            return mailbox_cli_models.OutboxWaitResult(
+                questions=(),
+                notices=(),
+                supervision_ends=(),
+                include=include,
+                supervisor_id=landed_supervisor_id,
+                next_since=max(
+                    since,
+                    0
+                    if last_successful_view is None
+                    else last_successful_view.last_seq,
+                ),
+                timed_out=False,
+                lease_supervision=mailbox_cli_models.LeaseSupervision(
+                    degraded=lease_degraded,
+                    renewal_failures=lease_renewal_failures,
+                    renewal_recoveries=lease_renewal_recoveries,
+                ),
+                mailbox_view=last_successful_view,
+                lost_reason=lost_reason,
+            )
 
         if now >= deadline:
             if last_successful_view is None and last_read_error is not None:

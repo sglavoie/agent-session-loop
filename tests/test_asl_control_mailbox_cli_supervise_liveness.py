@@ -35,6 +35,86 @@ from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
 
 
 class MailboxCliTestsPart9(MailboxCliTestsBase):
+    def test_terminal_record_published_during_dead_probe_wins(self) -> None:
+        launch = mailbox_validation.new_supervision_id()
+        self.write_liveness_record(launch)
+
+        def finish_during_probe(*args, **kwargs):
+            mailbox_appenders.append_supervision_end(
+                self.plan_dir,
+                "helper exited: complete",
+                outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
+                state_dir=self.state_dir,
+                supervision_id=launch,
+            )
+            return supervision_liveness.DEAD
+
+        with mock.patch.object(
+            supervision_liveness, "probe", side_effect=finish_during_probe
+        ) as probe:
+            code, payload = self.payload_from(
+                mailbox_cli_outbox.outbox_supervise_from_args,
+                self.args(timeout=0, supervision_id=launch),
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual(mailbox_cli_constants.SUPERVISE_TOKEN_DONE, payload["state"])
+        self.assertTrue(payload["supervision_ended"])
+        self.assertIsNone(payload["lost_reason"])
+        probe.assert_called_once()
+
+    def test_carried_open_question_wins_over_dead_helper(self) -> None:
+        launch = mailbox_validation.new_supervision_id()
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        self.write_liveness_record(launch)
+        question = mailbox_appenders.append_question(
+            self.plan_dir,
+            "Which shape?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        code, first = self.payload_from(
+            mailbox_cli_outbox.outbox_supervise_from_args,
+            self.args(timeout=0, supervision_id=launch),
+        )
+        self.assertEqual(0, code)
+        self.assertEqual(mailbox_cli_constants.SUPERVISE_TOKEN_ACTION, first["state"])
+
+        with mock.patch.object(
+            supervision_liveness, "probe", return_value=supervision_liveness.DEAD
+        ):
+            code, repeated = self.payload_from(
+                mailbox_cli_outbox.outbox_supervise_from_args,
+                self.args(timeout=0, supervision_id=launch),
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            mailbox_cli_constants.SUPERVISE_TOKEN_ACTION, repeated["state"]
+        )
+        self.assertEqual([question.id], [item["id"] for item in repeated["questions"]])
+
+        def reply_during_probe(*args, **kwargs):
+            mailbox_appenders.append_reply(
+                self.plan_dir,
+                question.id,
+                "Use the first shape",
+                state_dir=self.state_dir,
+            )
+            return supervision_liveness.DEAD
+
+        with mock.patch.object(
+            supervision_liveness, "probe", side_effect=reply_during_probe
+        ):
+            code, closed = self.payload_from(
+                mailbox_cli_outbox.outbox_supervise_from_args,
+                self.args(timeout=0, supervision_id=launch),
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual(mailbox_cli_constants.SUPERVISE_TOKEN_LOST, closed["state"])
+        self.assertEqual([], closed["questions"])
+
     def test_outbox_supervise_lost_payload_carries_run_evidence(self) -> None:
         launch = mailbox_validation.new_supervision_id()
         self.write_liveness_record(launch)

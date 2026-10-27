@@ -378,13 +378,13 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
         carried_ids
         and not own_supervision_ends
         and not open_questions
-        and wait_result.lost_reason is None
         and wait_result.mailbox_view is not None
     ):
         from . import intervention_facts
 
         # The carry delay can outlive a ``--wait`` question's wait, so recheck
-        # that a reply can still close each carried question.
+        # that a reply can still close each carried question. An open question
+        # takes priority over a lost helper even after its cursor was advanced.
         still_open = intervention_facts.open_question_ids(
             plan_dir, state_dir=args.state_dir, view=wait_result.mailbox_view
         )

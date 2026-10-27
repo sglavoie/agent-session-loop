@@ -14,6 +14,10 @@ A polish and hardening round after the public release.
 
 ### Fixed
 
+- Quota retry hints preserve fractional timestamps and their timezone offsets,
+  and dotted `a.m.`/`p.m.` times remain parseable, so cooldowns and supervisor
+  waits use the provider's reset time. Local clock hints use the UTC offset
+  at the reset time when a daylight-saving transition intervenes.
 - Workbench: concurrent operation reports and recovery sweeps no longer turn
   late reports into upload failures; stale refusal receipts cannot overwrite
   acceptance, and expired queued copies cannot expire dispatched operations.

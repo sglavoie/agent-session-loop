@@ -12,12 +12,15 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 _WHITESPACE_RE = re.compile(r"\s+")
+# Periods inside fractional seconds and a.m./p.m. belong to the time. The
+# final meridiem period ends the sentence unless a parenthesized zone follows.
+_RETRY_HINT_TEXT = r"((?:[ap]\.m(?:\.(?=\s*\())?|(?<=\d)\.(?=\d)|[^\n.]){1,48})"
 _RETRY_AT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"retry-after:\s*(\d+)", re.IGNORECASE),
-    re.compile(r"resets?\s+(?:at|on|in)\s+([^\n.]{1,48})", re.IGNORECASE),
-    re.compile(r"reset\s+(?:at|on|in)\s+([^\n.]{1,48})", re.IGNORECASE),
-    re.compile(r"try again\s+(?:at|after|in|on)\s+([^\n.]{1,48})", re.IGNORECASE),
-    re.compile(r"will reset (?:at|on|in)\s+([^\n.]{1,48})", re.IGNORECASE),
+    re.compile(r"resets?\s+(?:at|on|in)\s+" + _RETRY_HINT_TEXT, re.IGNORECASE),
+    re.compile(r"reset\s+(?:at|on|in)\s+" + _RETRY_HINT_TEXT, re.IGNORECASE),
+    re.compile(r"try again\s+(?:at|after|in|on)\s+" + _RETRY_HINT_TEXT, re.IGNORECASE),
+    re.compile(r"will reset (?:at|on|in)\s+" + _RETRY_HINT_TEXT, re.IGNORECASE),
 )
 _ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 _DURATION_RE = re.compile(r"^(\d+)\s*(hours?|minutes?)$", re.IGNORECASE)
@@ -123,9 +126,16 @@ def resolve_retry_at(value: object, *, now: datetime | None = None) -> datetime 
             else current.astimezone()
         )
         target = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if target <= local_now:
+        if not zone_name:
+            # astimezone() without a zone returns a fixed offset for *now*.
+            # Resolve the target wall time separately so it gets the offset
+            # in force at the reset, including a transition later today.
+            target = target.replace(tzinfo=None)
+        resolved = target.astimezone() if not zone_name else target
+        if resolved <= local_now:
             target += timedelta(days=1)
-        return target
+            resolved = target.astimezone() if not zone_name else target
+        return resolved
     except KeyError, ValueError, OverflowError, OSError:
         return None
 
