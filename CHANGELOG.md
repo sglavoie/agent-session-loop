@@ -241,6 +241,48 @@ A polish and hardening round after the public release.
   manifest row edits and the readiness hash skip fenced example tables (a plan
   marked loop-ready with such a table reads stale once and needs
   `asl preflight --mark-loop-ready` again).
+- Overseer: `verify` and `resume --session-id` find the session a paused run
+  stopped on from its last turn, since a paused run has no turn in flight, and
+  the progress token now changes when a run pauses on a later turn; a ledger
+  write checks its grant and stamps its policy epoch inside the write lock, so
+  a concurrent policy change can no longer leave old evidence unsealed under
+  the new epoch.
+- Supervisor audit: a list or object where an id or status belongs no longer
+  stops evidence collection; review-verdict retries are weighed against each
+  review cycle's own budget, as the runner spends them; camelCase secret keys
+  such as `accessToken` and URL passwords holding an `@` are redacted; a kept
+  `new` finding is no longer attached to the issue a duplicate of it chose.
+- Run loop: `asl control redirect` and a Workbench correction retry refuse text
+  that is not valid UTF-8 instead of raising; a repair group whose name holds
+  a backtick keeps its attempt count; a live pause that follows a no-op
+  `RUNNER_PAUSE: none` line is seen mid-turn.
+- Plan files: readiness parsing and rewrites skip fenced examples (a plan
+  marked loop-ready with a fenced readiness example reads stale once and needs
+  `asl preflight --mark-loop-ready` again); form feeds and Unicode line
+  separators survive readiness rewrites and expansion references; a
+  non-integer plan-metadata version, and a non-UTF-8 plan metadata file,
+  transaction journal or prepare validation file, are refused instead of
+  crashing `status`, `preflight` and `prepare --resume`.
+- Reporting: `asl metrics` tolerates a list or object turn index or phase;
+  `asl diagnostics export` survives a non-string projection timestamp, drops
+  NaN and Infinity so it stays strict JSON, and caps tallied event names;
+  `asl install verify` reports undecodable `amx doctor` output as an advisory.
+- Assurance: a reconcile manifest that both merges into an issue and rules on
+  it keeps its ruling and re-applies cleanly; a finding located by a line range
+  such as `file.py:120-140` matches other sightings of its file.
+- Agent Mux contract: a boolean no longer satisfies a `const` or `enum` that
+  names a number, nor `0` a `false`.
+- Commit messages: a conventional message whose body ends in an error-shaped
+  JSON example is no longer mistaken for an API error.
+- Workbench: the archive retention window is capped at 36500 days instead of
+  crashing archive and review, a non-UTF-8 `archive.json` is skipped with a
+  warning, and a plan whose state cannot be archived is put back rather than
+  orphaned; `asl workbench connect` refuses an origin with an unusable port; a
+  launch reply that cannot be encoded is refused before spawning, and a failed
+  reply write always stops the spawned run; transport frames and history lines
+  nested too deeply are malformed (400) rather than a crash or a stalled
+  import; identifiers, keys and pause reasons ending in a newline are refused;
+  an incomplete catalog generation publishes without a false refusal warning.
 
 ### Changed
 
