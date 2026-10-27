@@ -62,8 +62,8 @@ class OperationJournal(StoreBase):
     ) -> dict[str, Any] | None:
         """Look up, decide, and journal one submission in one transaction.
 
-        ``decide`` receives the row this operation id already names and the
-        plan's outstanding operation (each only when present) and returns the
+        ``decide`` receives the row this operation id already names (when
+        present) and every outstanding operation on the plan, and returns the
         record to write, or ``None`` to write nothing; it refuses by raising,
         which rolls the transaction back. Reading and writing under one
         ``BEGIN IMMEDIATE`` is what keeps "one outstanding mutation per plan"
@@ -81,14 +81,13 @@ class OperationJournal(StoreBase):
                 self._supersede_uncertain(
                     connection, plan_key, operation_id, now=received_at
                 )
-            recorded = [
-                record
-                for record in (
-                    self.operation(operation_id),
-                    self.outstanding_operation(plan_key),
-                )
-                if record is not None
-            ]
+            # Every outstanding row, not just the oldest: admission refuses
+            # only an outstanding row in the submission's own scope, so an
+            # older row in another scope must not hide the one that blocks.
+            own = self.operation(operation_id)
+            recorded = ([] if own is None else [own]) + self.outstanding_operations(
+                plan_key
+            )
             decided = decide(recorded)
             if decided is None:
                 return None
@@ -242,6 +241,17 @@ class OperationJournal(StoreBase):
                 (plan_key, *sorted(OPERATION_OUTSTANDING_STATUSES)),
             ).fetchone()
         return None if row is None else _operation_record(row)
+
+    def outstanding_operations(self, plan_key: str) -> list[dict[str, Any]]:
+        """Every operation still outstanding on this plan, oldest request first."""
+        marks = ", ".join("?" * len(OPERATION_OUTSTANDING_STATUSES))
+        with self.reading() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM operation WHERE plan_key = ? AND status IN ({marks}) "
+                "ORDER BY requested_at ASC",
+                (plan_key, *sorted(OPERATION_OUTSTANDING_STATUSES)),
+            ).fetchall()
+        return [_operation_record(row) for row in rows]
 
     def operations_in_status(
         self, status: str, *, connector_id: str | None = None, limit: int | None = None

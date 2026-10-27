@@ -10,8 +10,13 @@ from asl_workbench import (
     store_types,
 )
 from asl_workbench.operations import (
+    METHOD_LAUNCH,
+    METHOD_STOP_AFTER_CURRENT,
     OperationError,
+    OperationTarget,
+    admit,
 )
+from asl_workbench.service_mutations import _rehydrate
 from tests.support_workbench_store import (
     CONNECTOR_ID,
     NOW,
@@ -360,6 +365,48 @@ class OperationJournalTests(StoreCase):
             "op-1", "consumed", now=NOW + 3, settled_at=NOW + 3
         )
         self.assertIsNone(self.store.outstanding_operation("plan-alpha"))
+
+    def test_admission_sees_an_outstanding_row_behind_an_older_one(self) -> None:
+        """An older row in another scope must not hide the one that blocks.
+
+        A pending stop is the plan's oldest outstanding row, and admission
+        refuses only a row in the submission's own scope; handed that row
+        alone, it would admit a second launch while the first is pending.
+        """
+
+        def submit(operation_id: str, method: str, at: float) -> None:
+            def decide(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+                admission = admit(
+                    [_rehydrate(row) for row in rows],
+                    operation_id=operation_id,
+                    method=method,
+                    target=OperationTarget(plan_key="plan-alpha"),
+                    now=at,
+                    deliver_by=at + 60,
+                    command_id=f"cmd-{operation_id}",
+                    run_key="alpha",
+                )
+                if admission.refused:
+                    raise admission.error()
+                return None if admission.replayed else admission.record
+
+            self.store.admit_operation(
+                operation_id,
+                "plan-alpha",
+                decide,
+                connector_id=CONNECTOR_ID,
+                received_at=at,
+            )
+
+        submit("stop", METHOD_STOP_AFTER_CURRENT, NOW)
+        submit("launch-1", METHOD_LAUNCH, NOW + 1)
+        with self.assertRaises(OperationError) as refusal:
+            submit("launch-2", METHOD_LAUNCH, NOW + 2)
+        self.assertEqual(refusal.exception.reason, "operation-outstanding")
+        self.assertIsNone(self.store.operation("launch-2"))
+        # A resend of the admitted launch is still the same operation.
+        submit("launch-1", METHOD_LAUNCH, NOW + 3)
+        self.assertEqual(len(self.store.operations_in_status("pending")), 2)
 
     def test_the_journal_never_stores_the_reply_it_carried(self) -> None:
         with self.assertRaises(OperationError) as refusal:
