@@ -64,6 +64,23 @@ def read_connector_token(path: str | Path) -> str:
     return token
 
 
+def _origin_host_port(origin: str) -> tuple[str, int]:
+    """The host and port an https origin names, or a setup refusal.
+
+    ``urlsplit`` and its ``port`` raise ``ValueError`` for a port out of range
+    or not a number; that is a bad ``--origin``, not a crash.
+    """
+    refusal = "the connector origin must be an https URL naming a host"
+    try:
+        parsed = urllib.parse.urlsplit(origin)
+        port = parsed.port
+    except ValueError as error:
+        raise ConnectorSetupError(f"{refusal}: {error}") from error
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ConnectorSetupError(refusal)
+    return parsed.hostname, port or 443
+
+
 class HttpsChannel:
     """One bounded POST per frame, and nothing clever.
 
@@ -87,14 +104,8 @@ class HttpsChannel:
         timeout: float = REQUEST_TIMEOUT_SECONDS,
         connect: Callable[[], http.client.HTTPConnection] | None = None,
     ) -> None:
-        parsed = urllib.parse.urlsplit(origin)
-        if parsed.scheme != "https" or not parsed.hostname:
-            raise ConnectorSetupError(
-                "the connector origin must be an https URL naming a host"
-            )
+        self.host, self.port = _origin_host_port(origin)
         self.origin = origin
-        self.host = parsed.hostname
-        self.port = parsed.port or 443
         self.path = path
         self.timeout = float(timeout)
         self._token = token
@@ -179,14 +190,8 @@ class HttpsBodySource:
         timeout: float = REQUEST_TIMEOUT_SECONDS,
         connect: Callable[[], http.client.HTTPConnection] | None = None,
     ) -> None:
-        parsed = urllib.parse.urlsplit(origin)
-        if parsed.scheme != "https" or not parsed.hostname:
-            raise ConnectorSetupError(
-                "the connector origin must be an https URL naming a host"
-            )
+        self.host, self.port = _origin_host_port(origin)
         self.origin = origin
-        self.host = parsed.hostname
-        self.port = parsed.port or 443
         self.path = path
         self.timeout = float(timeout)
         self._token = token

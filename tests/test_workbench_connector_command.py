@@ -117,6 +117,20 @@ class HttpsChannelTests(unittest.TestCase):
             with self.assertRaises(workbench_connector.ConnectorSetupError):
                 workbench_connector.HttpsChannel(origin=origin, token="t")
 
+    def test_an_origin_with_an_unusable_port_is_refused_at_construction(
+        self,
+    ) -> None:
+        for origin in (
+            "https://workbench.example:99999",
+            "https://workbench.example:notaport",
+        ):
+            for channel_type in (
+                workbench_connector.HttpsChannel,
+                workbench_connector.HttpsBodySource,
+            ):
+                with self.assertRaises(workbench_connector.ConnectorSetupError):
+                    channel_type(origin=origin, token="t")
+
     def test_an_explicit_port_is_honoured(self) -> None:
         channel = workbench_connector.HttpsChannel(
             origin="https://workbench.example:8443", token="t"
@@ -217,6 +231,25 @@ class CommandTests(unittest.TestCase):
         self.assertFalse(
             workbench_connector.connector_lock_path(self.state_dir).exists()
         )
+
+    def test_an_origin_with_an_unusable_port_is_a_setup_refusal(self) -> None:
+        token_file = Path(self._temporary.name) / "token.json"
+        token_file.write_text(json.dumps({"connector_token": "abc"}))
+        token_file.chmod(0o600)
+        args = _Args(
+            state_dir=str(self.state_dir),
+            origin="https://workbench.example:99999",
+            token_file=str(token_file),
+        )
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            code = workbench_connector.workbench_connect_from_args(
+                args,
+                publish=lambda connector, stop: None,
+                install_signal_handlers=lambda stop: lambda: None,
+            )
+        self.assertEqual(1, code)
+        self.assertEqual("setup-failed", json.loads(stream.getvalue())["reason"])
 
     def test_the_publication_loop_receives_the_connector_and_a_stop_event(self) -> None:
         seen: dict[str, Any] = {}
