@@ -301,6 +301,15 @@ def launch_plan(
                 LAUNCH_REASON_EMPTY_REPLY,
                 "reply text must contain non-whitespace content",
             )
+        try:
+            reply_text.encode("utf-8")
+        except UnicodeEncodeError as error:
+            # A lone surrogate cannot reach the child's stdin; refuse it here,
+            # before a run exists, rather than after one has been spawned.
+            raise LaunchError(
+                LAUNCH_REASON_EMPTY_REPLY,
+                f"reply text is not encodable as UTF-8: {error}",
+            ) from error
         reply_length = len(reply_text)
 
     argv = build_launch_argv(
@@ -359,7 +368,9 @@ def launch_plan(
                 process.stdin.write(reply_text)
             finally:
                 process.stdin.close()
-        except (OSError, BrokenPipeError) as error:
+        except Exception as error:
+            # Any failure to hand over the reply -- a closed pipe, a value the
+            # stream cannot encode -- must not leave the child running alone.
             try:
                 process.kill()
             finally:

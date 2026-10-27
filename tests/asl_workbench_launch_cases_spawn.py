@@ -119,6 +119,55 @@ class WorkbenchLaunchSpawnTests(LaunchPlanSeedMixin, unittest.TestCase):
             )
             self.assertEqual(0, len(captured), "process must not be spawned")
 
+    def test_launch_plan_unencodable_reply_is_refused_before_spawning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            captured: list[_FakePopen] = []
+
+            def factory(argv, **kwargs):
+                proc = _FakePopen(argv, **kwargs)
+                captured.append(proc)
+                return proc
+
+            with self.assertRaises(workbench_launch.LaunchError) as ctx:
+                workbench_launch.launch_plan(
+                    plan_dir,
+                    reply_text="answer \ud800",
+                    popen_factory=factory,
+                )
+
+            self.assertFalse(ctx.exception.spawned)
+            self.assertEqual(0, len(captured), "process must not be spawned")
+
+    def test_launch_plan_any_stdin_write_failure_kills_child(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            captured: list[_BrokenStdinFakePopen] = []
+
+            def factory(argv, **kwargs):
+                proc = _BrokenStdinFakePopen(argv, **kwargs)
+                assert proc.stdin is not None
+
+                def write(_data):
+                    raise UnicodeEncodeError("utf-8", "x", 0, 1, "simulated")
+
+                proc.stdin.write = write
+                captured.append(proc)
+                return proc
+
+            with self.assertRaises(workbench_launch.LaunchError) as ctx:
+                workbench_launch.launch_plan(
+                    plan_dir,
+                    reply_text="ok",
+                    popen_factory=factory,
+                )
+
+            self.assertTrue(ctx.exception.spawned)
+            self.assertEqual(1, len(captured))
+            self.assertEqual(-9, captured[0].returncode)
+
     def _spawn_and_capture_env(self, **launch_kwargs) -> dict[str, str]:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
