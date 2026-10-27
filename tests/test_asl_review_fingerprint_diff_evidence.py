@@ -295,6 +295,48 @@ class ReviewFingerprintDiffEvidenceTests(ReviewFingerprintBase):
             review_guard._review_guard_changed_paths(before, after)["tracked"],
         )
 
+    def test_an_unresolved_merge_conflict_is_fingerprinted(self) -> None:
+        self._write("a.txt", "base\n")
+        self._write("z.txt", "base\n")
+        self._commit_all("add conflict files")
+        self._git("checkout", "-q", "-b", "theirs")
+        self._write("z.txt", "theirs\n")
+        self._commit_all("theirs")
+        self._git("checkout", "-q", "-")
+        self._write("z.txt", "ours\n")
+        self._commit_all("ours")
+        merge = subprocess.run(
+            ["git", "merge", "theirs"], cwd=self.repo_root, capture_output=True
+        )
+        self.assertNotEqual(0, merge.returncode)
+        self._write("a.txt", "staged\n")
+        self._stage("a.txt")
+
+        # The index diff lists `z.txt` as `U` and renders no patch for it.
+        before = self._fingerprint()
+        self.assertIsNone(review_guard._review_guard_unavailable_detail(before))
+        self.assertEqual(["a.txt", "z.txt"], before["index_changed"])
+        self.assertEqual(
+            ["a.txt", "z.txt"], [entry[0] for entry in before["index_patches"]]
+        )
+
+        # The unmerged notice is not attributed to its neighbour, so a stable
+        # conflict compares equal and editing the conflicted file names it.
+        self.assertEqual(before, self._fingerprint())
+        self._write("z.txt", "edited\n")
+        edited = self._fingerprint()
+        self.assertEqual(
+            ["z.txt"],
+            review_guard._review_guard_changed_paths(before, edited)["tracked"],
+        )
+        self._stage("z.txt")
+        resolved = self._fingerprint()
+        self.assertIsNone(review_guard._review_guard_unavailable_detail(resolved))
+        self.assertEqual(
+            ["z.txt"],
+            review_guard._review_guard_changed_paths(edited, resolved)["tracked"],
+        )
+
     def test_a_named_path_git_renders_no_patch_for_fails_closed(self) -> None:
         self._write("README.md", "mutated\n")
         real_run_git_bytes = review_guard_git._run_git_bytes

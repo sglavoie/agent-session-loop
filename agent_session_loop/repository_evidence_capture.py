@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -16,6 +17,14 @@ from . import (
 from . import (
     repository_evidence_nodes as evidence_nodes,
 )
+
+# During an unresolved merge `git diff --cached` lists each conflicted path as
+# `U` and renders no patch for it, only a `* Unmerged path <path>` line ahead
+# of the next section; its evidence is the conflict stages the index holds.
+_UNMERGED_STATUS = "U"
+
+
+_UNMERGED_NOTICE_RE = re.compile(r"^\* Unmerged path .*\n?", re.MULTILINE)
 
 
 class _RawDiffEntry(NamedTuple):
@@ -66,6 +75,7 @@ def _pair_diff_names_with_patches(
     *,
     argv: Sequence[str],
     reason: str,
+    evidence: Mapping[str, str] | None = None,
 ) -> tuple[list[str], list[list[str]]]:
     """Attribute each patch in ``diff_text`` to its entry in ``entries``.
 
@@ -79,7 +89,13 @@ def _pair_diff_names_with_patches(
     A typechange is the one status claiming two sections
     (:data:`_TYPE_CHANGED_PATCH_SECTIONS`); both are hashed together, so the
     pair is that path's content evidence. Pairing one section per entry instead
-    would misalign every remaining path in the queue.
+    would misalign every remaining path in the queue. An unmerged entry is the
+    one claiming none: git prints only a ``* Unmerged path`` notice for it,
+    which is dropped from whichever section it lands in so it is not
+    attributed to a neighbouring path.
+
+    ``evidence`` maps a path to further text hashed with its sections — for an
+    unmerged entry its conflict stages, which no patch carries.
 
     A queue that does not add up fails the capture closed rather than pairing
     short and dropping its tail: a path with no patch evidence carries no
@@ -89,18 +105,21 @@ def _pair_diff_names_with_patches(
     section_counts: list[int] = []
     for entry in entries:
         changed.append(entry.path)
-        section_counts.append(
-            evidence_git._TYPE_CHANGED_PATCH_SECTIONS
-            if entry.status == evidence_git._TYPE_CHANGED_STATUS
-            else 1
-        )
+        if entry.status == evidence_git._TYPE_CHANGED_STATUS:
+            section_counts.append(evidence_git._TYPE_CHANGED_PATCH_SECTIONS)
+        elif entry.status == _UNMERGED_STATUS:
+            section_counts.append(0)
+        else:
+            section_counts.append(1)
     patches = evidence_git._DIFF_FILE_HEADER_RE.split(diff_text)[1:]
     if len(patches) != sum(section_counts):
         raise evidence_git._ReviewGuardUnavailable(reason, argv)
     paired: list[list[str]] = []
     cursor = 0
     for rel, count in zip(changed, section_counts, strict=False):
-        section = "".join(patches[cursor : cursor + count])
+        section = _UNMERGED_NOTICE_RE.sub("", "".join(patches[cursor : cursor + count]))
+        if evidence and rel in evidence:
+            section += "\0" + evidence[rel]
         cursor += count
         paired.append(
             [
@@ -111,6 +130,30 @@ def _pair_diff_names_with_patches(
             ]
         )
     return changed, paired
+
+
+def _unmerged_stage_evidence(
+    cwd: Path, entries: Sequence[_RawDiffEntry]
+) -> dict[str, str]:
+    """Return each unmerged path's conflict stages as ``ls-files -u`` lists them.
+
+    Probed only when the index diff names an unmerged entry, so an ordinary
+    capture pays nothing for it.
+    """
+    if not any(entry.status == _UNMERGED_STATUS for entry in entries):
+        return {}
+    argv = ["ls-files", "--unmerged", "--full-name", "-z", "--", ":(top)"]
+    stages: dict[str, list[str]] = {}
+    for record in evidence_nodes._listed_paths(
+        evidence_git._review_guard_git_output(cwd, argv)
+    ):
+        meta, tab, rel = record.partition("\t")
+        if not tab or not rel:
+            raise evidence_git._ReviewGuardUnavailable(
+                "unmerged-stages-malformed", argv
+            )
+        stages.setdefault(rel, []).append(meta)
+    return {rel: "\n".join(sorted(metas)) for rel, metas in stages.items()}
 
 
 def _capture_review_repo_fingerprint(
@@ -340,18 +383,21 @@ def _capture_review_repo_fingerprint(
         ignore_config_payload = evidence_ignore._fingerprint_ignore_config(
             cwd_path, repo_root
         )
+        unmerged_stages = _unmerged_stage_evidence(cwd_path, [*names, *index_names])
 
         tracked_changed, tracked_patches = _pair_diff_names_with_patches(
             names,
             diff_text,
             argv=diff_argv,
             reason="tracked-patch-missing",
+            evidence=unmerged_stages,
         )
         index_changed, index_patches = _pair_diff_names_with_patches(
             index_names,
             index_diff_text,
             argv=index_diff_argv,
             reason="index-patch-missing",
+            evidence=unmerged_stages,
         )
     except evidence_git._ReviewGuardUnavailable as unavailable:
         return unavailable.fingerprint
