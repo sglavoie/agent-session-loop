@@ -206,6 +206,36 @@ class IncidentResolutionTests(IncidentCase):
         self.engine.tick()
         self.assertEqual(self.diagnostics(), [])
 
+    def test_a_new_plans_first_run_failing_between_cycles_alerts(self) -> None:
+        """No snapshot ever showed the run; its ending is the first sight."""
+        self.at(10)
+        self.observe([run_row("run-1")])
+        self.at(86_400)
+        self.send_heartbeat(observed_at=self.wall)
+        self.send_history(
+            generated_at=self.wall,
+            entries=[
+                history_entry(
+                    "entry-new",
+                    recorded_at=self.wall - 25,
+                    run_finished_at=self.wall - 25,
+                    run_key="run-new",
+                    plan_key="plan-new",
+                    outcome="failed",
+                )
+            ],
+            received_at=self.wall,
+        )
+        self.engine.tick()
+        self.assertEqual(
+            [
+                row["run_key"]
+                for row in self.diagnostics()
+                if row["kind"] == incidents.INCIDENT_TERMINAL_FAILURE
+            ],
+            ["run-new"],
+        )
+
     def test_losing_sight_of_active_work_alerts_and_recovery_resolves_it(
         self,
     ) -> None:

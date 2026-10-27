@@ -203,8 +203,14 @@ def observe_history(
     plan_key = str(entry["plan_key"])
     run_key = str(entry["run_key"])
     recorded_at = float(entry["recorded_at"])
+    # A plan is first seen when an observation names it, and a first run that
+    # fails between two observation cycles is first named by its own ending.
+    # Reaching one staleness bound behind first sight keeps that failure
+    # inside the window while a week of imported endings still falls outside.
     window = max(
-        epoch(connection, now), plan_epoch(connection, connector_id, plan_key, now)
+        epoch(connection, now),
+        plan_epoch(connection, connector_id, plan_key, now)
+        - policy.observation_stale_seconds,
     )
 
     watch = connection.execute(
