@@ -254,12 +254,14 @@ A polish and hardening round after the public release.
   `new` finding is no longer attached to the issue a duplicate of it chose.
 - Run loop: `asl control redirect` and a Workbench correction retry refuse text
   that is not valid UTF-8 instead of raising; a repair group whose name holds
-  a backtick keeps its attempt count; a live pause that follows a no-op
+  a backtick or a line break keeps its attempt count (line breaks collapse to
+  spaces); a live pause that follows a no-op
   `RUNNER_PAUSE: none` line is seen mid-turn.
 - Plan files: readiness parsing and rewrites skip fenced examples (a plan
   marked loop-ready with a fenced readiness example reads stale once and needs
   `asl preflight --mark-loop-ready` again); form feeds and Unicode line
-  separators survive readiness rewrites and expansion references; a
+  separators survive readiness rewrites and expansion references and no
+  longer start a readiness line the readiness hash skips; a
   non-integer plan-metadata version, and a non-UTF-8 plan metadata file,
   transaction journal or prepare validation file, are refused instead of
   crashing `status`, `preflight` and `prepare --resume`.
@@ -278,7 +280,8 @@ A polish and hardening round after the public release.
   crashing archive and review, a non-UTF-8 `archive.json` is skipped with a
   warning, and a plan whose state cannot be archived is put back rather than
   orphaned; `asl workbench connect` refuses an origin with an unusable port; a
-  launch reply that cannot be encoded is refused before spawning, and a failed
+  launch reply that cannot be encoded is refused before spawning as
+  `invalid-reply`, and a failed
   reply write always stops the spawned run; transport frames and history lines
   nested too deeply are malformed (400) rather than a crash or a stalled
   import; identifiers, keys and pause reasons ending in a newline are refused;
