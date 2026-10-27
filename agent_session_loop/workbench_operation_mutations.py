@@ -270,19 +270,33 @@ def settle_operation(
     -- deliberately an explicit act, because deciding on someone's behalf that
     an uncertain mutation did not happen is the decision this module refuses to
     make automatically.
+
+    A delayed acceptance preserves an already consumed receipt. A live reply
+    can be witnessed by reconciliation before its delivery call returns; that
+    stronger evidence must neither be overwritten nor turn delivery into an
+    error. The check shares the journal lock with the update.
     """
     moment = _moment(now)
-    return _update(
-        plan_dir,
-        operation_id,
-        state_dir=state_dir,
-        mutate=lambda record: operations.advance_record(
+
+    def mutate(record: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        if (
+            status == operations.OPERATION_ACCEPTED
+            and record.get("status") == operations.OPERATION_CONSUMED
+        ):
+            return None
+        return operations.advance_record(
             record,
             status,
             now=moment,
             detail_code=detail_code,
             run_id=run_id,
-        ),
+        )
+
+    return _update(
+        plan_dir,
+        operation_id,
+        state_dir=state_dir,
+        mutate=mutate,
     )
 
 
@@ -296,12 +310,16 @@ def confirm_operation(
 ) -> dict[str, Any]:
     """Record that the mutation ran and its receipt is in hand.
 
-    ``accepted`` then ``consumed``, as one append. The two are separate states
+    Write ``consumed`` directly. Acceptance and consumption are separate states
     because on the Companion's side they are separated by a network: a command
     the bridge acknowledged is not yet a command ASL carried out. Here the
     mutation is local and synchronous, so the call that returns the receipt
     establishes both at once, and writing one row that says ``consumed`` is a
     truer record than two rows implying a gap that did not exist.
+
+    Direct confirmation also admits late evidence for an ``unconfirmed`` row,
+    which cannot return to ``accepted``. An already consumed row retains its
+    original receipt unchanged when confirmation is retried.
 
     ``consumed`` is terminal, which is what stops an accounted-for mutation
     from holding its scope: the plan lock, not this journal, is what refuses a
@@ -312,14 +330,14 @@ def confirm_operation(
         plan_dir,
         operation_id,
         state_dir=state_dir,
-        mutate=lambda record: operations.advance_record(
-            operations.advance_record(
+        mutate=lambda record: (
+            None
+            if record.get("status") == operations.OPERATION_CONSUMED
+            else operations.advance_record(
                 record,
-                operations.OPERATION_ACCEPTED,
+                operations.OPERATION_CONSUMED,
                 now=moment,
                 run_id=run_id,
-            ),
-            operations.OPERATION_CONSUMED,
-            now=moment,
+            )
         ),
     )

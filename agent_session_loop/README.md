@@ -36,6 +36,13 @@ are still dispatched, and undelivered copies only expire rows that are still
 pending. A stale status read cannot overwrite newer evidence or turn a late
 report into an upload failure.
 
+Local reply settlement also preserves a consumption receipt when a reconciliation
+sweep observes the worker reading the reply before the delivery call returns.
+Late acceptance returns that stronger receipt without rewriting it. Explicit
+operation confirmation moves directly to `consumed`, allowing late evidence to
+resolve `unconfirmed` operations; repeated confirmation preserves the original
+receipt and settlement time.
+
 The public imports for commit messages, conversation continuity, AgentMux
 contracts, and overseer decisions, context, and CLI commands remain in their
 original modules. Their implementations live in focused sibling modules:

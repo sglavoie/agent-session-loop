@@ -78,6 +78,68 @@ class SharedActionTests(_PlanFixture):
         self.assertEqual(operations.OPERATION_CONSUMED, row["status"])
         self.assertEqual(operations.DETAIL_REPLY_WITNESSED, row["detail_code"])
 
+    def test_a_mailbox_reply_consumed_before_acceptance_still_succeeds(self) -> None:
+        question_id = self.make_waiting()
+        append_reply = intervention.append_question_reply
+
+        def consume_reply(*args: Any, **kwargs: Any) -> Any:
+            result = append_reply(*args, **kwargs)
+            mailbox_appenders.append_receipt(
+                self.canonical,
+                question_id,
+                result.closure_id,
+                state_dir=self.state_dir,
+            )
+            workbench_operations.reconcile_plan(
+                self.canonical, state_dir=self.state_dir
+            )
+            self.assertEqual(
+                operations.OPERATION_CONSUMED, self.row("op-reply")["status"]
+            )
+            return result
+
+        with mock.patch.object(
+            intervention, "append_question_reply", side_effect=consume_reply
+        ):
+            outcome = workbench_actions.reply_to_question(
+                self.canonical,
+                text=REPLY_TEXT,
+                operation_id="op-reply",
+                state_dir=self.state_dir,
+                question_id=question_id,
+            )
+        self.assertEqual(operations.OPERATION_CONSUMED, outcome.status)
+        self.assertEqual(
+            operations.DETAIL_REPLY_WITNESSED, outcome.operation["detail_code"]
+        )
+
+    def test_a_resume_consumed_before_acceptance_still_succeeds(self) -> None:
+        self.make_paused()
+
+        def consume_reply(*args: Any, **kwargs: Any) -> Any:
+            self.append_reply_provided(origin=actions.REPLY_ORIGIN_STDIN)
+            workbench_operations.reconcile_plan(
+                self.canonical, state_dir=self.state_dir
+            )
+            self.assertEqual(
+                operations.OPERATION_CONSUMED, self.row("op-resume")["status"]
+            )
+            return self.launch_result(reply=True)
+
+        with mock.patch.object(
+            workbench_launch, "resume_plan_with_reply", side_effect=consume_reply
+        ):
+            outcome = workbench_actions.resume_with_reply(
+                self.canonical,
+                reply_text=REPLY_TEXT,
+                operation_id="op-resume",
+                state_dir=self.state_dir,
+            )
+        self.assertEqual(operations.OPERATION_CONSUMED, outcome.status)
+        self.assertEqual(
+            operations.DETAIL_REPLY_WITNESSED, outcome.operation["detail_code"]
+        )
+
     def test_a_mailbox_receipt_reconciles_an_in_turn_reply_to_consumed(self) -> None:
         """An in-turn ask writes a receipt without starting another turn."""
         question_id = self.make_waiting()

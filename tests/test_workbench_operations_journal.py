@@ -217,6 +217,93 @@ class DurableJournalTests(JournalFixture, unittest.TestCase):
             self.canonical, state_dir=self.state_dir
         )
 
+    def test_a_late_confirmation_resolves_an_uncertain_operation(self) -> None:
+        self.admit("op-1")
+        workbench_operations.mark_dispatched(
+            self.canonical, "op-1", state_dir=self.state_dir
+        )
+        workbench_operations.settle_operation(
+            self.canonical,
+            "op-1",
+            operations.OPERATION_UNCONFIRMED,
+            state_dir=self.state_dir,
+        )
+        confirmed = workbench_operations.confirm_operation(
+            self.canonical,
+            "op-1",
+            run_id="run-1",
+            state_dir=self.state_dir,
+            now=2000.0,
+        )
+        self.assertEqual(operations.OPERATION_CONSUMED, confirmed["status"])
+        self.assertEqual("run-1", confirmed["run_id"])
+        self.assertEqual(2000.0, confirmed["settled_at"])
+        self.assertEqual([], self.open_rows())
+
+    def test_repeated_confirmation_preserves_the_original_receipt(self) -> None:
+        self.admit("op-1")
+        workbench_operations.mark_dispatched(
+            self.canonical, "op-1", state_dir=self.state_dir
+        )
+        confirmed = workbench_operations.confirm_operation(
+            self.canonical, "op-1", state_dir=self.state_dir, now=2000.0
+        )
+        before = self.journal_path.read_bytes()
+        repeated = workbench_operations.confirm_operation(
+            self.canonical, "op-1", state_dir=self.state_dir, now=3000.0
+        )
+        self.assertEqual(confirmed, repeated)
+        self.assertEqual(before, self.journal_path.read_bytes())
+
+    def test_delayed_acceptance_preserves_consumption_evidence(self) -> None:
+        self.admit("op-1", method=operations.METHOD_QUESTION_REPLY)
+        workbench_operations.mark_dispatched(
+            self.canonical, "op-1", state_dir=self.state_dir
+        )
+        consumed = workbench_operations.settle_operation(
+            self.canonical,
+            "op-1",
+            operations.OPERATION_CONSUMED,
+            detail_code=operations.DETAIL_REPLY_WITNESSED,
+            run_id="run-reader",
+            state_dir=self.state_dir,
+            now=2000.0,
+        )
+        before = self.journal_path.read_bytes()
+        accepted = workbench_operations.settle_operation(
+            self.canonical,
+            "op-1",
+            operations.OPERATION_ACCEPTED,
+            run_id="run-sender",
+            state_dir=self.state_dir,
+            now=3000.0,
+        )
+        self.assertEqual(consumed, accepted)
+        self.assertEqual(before, self.journal_path.read_bytes())
+
+    def test_confirmation_does_not_revive_unattempted_or_failed_operations(
+        self,
+    ) -> None:
+        for status in (
+            operations.OPERATION_PENDING,
+            operations.OPERATION_CANCELLED,
+            operations.OPERATION_REJECTED,
+            operations.OPERATION_EXPIRED,
+            operations.OPERATION_SUPERSEDED,
+        ):
+            with self.subTest(status=status):
+                self.admit("op-1")
+                self._append_raw(_record(status=status))
+                before = self.journal_path.read_bytes()
+                with self.assertRaises(operations.OperationError) as caught:
+                    workbench_operations.confirm_operation(
+                        self.canonical, "op-1", state_dir=self.state_dir
+                    )
+                self.assertEqual(
+                    operations.REASON_INVALID_TRANSITION, caught.exception.reason
+                )
+                self.assertEqual(before, self.journal_path.read_bytes())
+
     def test_an_unknown_operation_cannot_be_advanced(self) -> None:
         self.admit("op-1")
         with self.assertRaises(operations.OperationError) as caught:
