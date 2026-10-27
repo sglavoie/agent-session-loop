@@ -42,7 +42,10 @@ Four rules the merge holds to, and the reason for each:
   repository the merge keeps the earliest ``head_before`` and the latest
   ``head_after``, and composes the two ref transitions rather than concatenating
   them. Carrying a stale ``after`` forward would be treating an old reading as
-  proof about bytes a later attempt has since rewritten.
+  proof about bytes a later attempt has since rewritten. The untracked lanes
+  follow the same rule per path: a file the newer attempt saw removed leaves
+  ``untracked_added`` and ``untracked_changed``, and one it saw present leaves
+  ``untracked_removed``.
 * **A merge never upgrades a verdict.** Only a record that passed, convicted
   nothing and left nothing unobserved is eligible on either side; anything else
   refuses the merge and returns ``None``. A guard that could not see is not a
@@ -315,6 +318,19 @@ def _merge_repository(
     merged = dict(current)
     for category in MERGED_CHANGE_CATEGORIES:
         merged[category] = _union_strings(earlier.get(category), current.get(category))
+    # The untracked lanes name where a path stands, not just that it moved, so
+    # the newer attempt's reading of a path displaces the earlier one: a file
+    # attempt 1 created and attempt 2 deleted is not a file to stage, and one
+    # attempt 1 deleted and attempt 2 re-created is no longer removed.
+    gone = set(_strings(current.get("untracked_removed")))
+    present = set(_strings(current.get("untracked_added"))) | set(
+        _strings(current.get("untracked_changed"))
+    )
+    for category in ("untracked_added", "untracked_changed"):
+        merged[category] = [path for path in merged[category] if path not in gone]
+    merged["untracked_removed"] = [
+        path for path in merged["untracked_removed"] if path not in present
+    ]
     merged["qualified_paths"] = _union_strings(
         earlier.get("qualified_paths"), current.get("qualified_paths")
     )

@@ -105,6 +105,33 @@ class MergeRefreshesStateTests(unittest.TestCase):
         self.assertEqual([], merged["violations"])
         self.assertEqual({}, merged["unavailable"])
 
+    def test_a_file_the_later_attempt_deleted_is_no_longer_staged(self) -> None:
+        # Attempt 1 created scratch.txt and attempt 2 deleted it: carrying it in
+        # `untracked_added` handed `git add` a path that no longer exists, and
+        # the whole commit failed on it.
+        earlier = registered_guard(changes={"SVC": ("scratch.txt", "kept.txt")})
+        current = registered_guard(changes={"SVC": ()})
+        current["changed"]["SVC"]["untracked_removed"] = ["scratch.txt"]
+
+        merged = continuation_guards.merge_session_write_evidence(earlier, current)
+
+        assert merged is not None
+        record = merged["changed"]["SVC"]
+        self.assertEqual(["kept.txt"], record["untracked_added"])
+        self.assertEqual(["scratch.txt"], record["untracked_removed"])
+
+    def test_a_file_the_later_attempt_recreated_is_no_longer_removed(self) -> None:
+        earlier = registered_guard(changes={"SVC": ("first.txt",)})
+        earlier["changed"]["SVC"]["untracked_removed"] = ["notes.txt"]
+        current = registered_guard(changes={"SVC": ("notes.txt",)})
+
+        merged = continuation_guards.merge_session_write_evidence(earlier, current)
+
+        assert merged is not None
+        record = merged["changed"]["SVC"]
+        self.assertEqual(["first.txt", "notes.txt"], record["untracked_added"])
+        self.assertEqual([], record["untracked_removed"])
+
     def test_the_head_transition_spans_the_session_not_the_turn(self) -> None:
         earlier = registered_guard(changes={"SVC": ("first.txt",)})
         earlier["changed"]["SVC"].update(
