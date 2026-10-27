@@ -19,7 +19,13 @@ INLINE_TAIL_INITIAL_LOG_LINES = 40
 
 
 def _local_timestamp(moment: datetime | None = None) -> str:
-    value = datetime.now().astimezone() if moment is None else moment.astimezone()
+    if moment is None:
+        return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        value = moment.astimezone()
+    except OverflowError, ValueError:
+        # A persisted stamp the local zone cannot hold keeps its own offset.
+        value = moment
     return value.strftime("%Y-%m-%d %H:%M:%S")
 
 

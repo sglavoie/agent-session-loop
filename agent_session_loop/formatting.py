@@ -11,9 +11,15 @@ def format_local_timestamp(moment: datetime) -> str:
     """``moment`` in local time with its UTC offset: ``2026-10-25 23:07:09-06:00``.
 
     Compact text for a reader, but never zone-less: the rest of the CLI prints
-    UTC, so a bare wall-clock time could not be told apart from it.
+    UTC, so a bare wall-clock time could not be told apart from it. A moment
+    the local zone cannot hold (one hour from ``datetime.min`` or ``max``) is
+    rendered at the offset it was stored with rather than crashing the reader.
     """
-    return moment.astimezone().isoformat(sep=" ", timespec="seconds")
+    try:
+        local = moment.astimezone()
+    except OverflowError, ValueError:
+        local = moment
+    return local.isoformat(sep=" ", timespec="seconds")
 
 
 def count_noun(count: Any, singular: str, plural: str | None = None) -> str:

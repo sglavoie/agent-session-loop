@@ -9,7 +9,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import plans_files, session_overview, state
+from agent_session_loop import (
+    plans_files,
+    run_reporting_status,
+    session_overview,
+    state,
+    tail_control_messages,
+)
 from tests.session_overview_support import (
     DEAD_PID,
     _active_turn_payload,
@@ -38,6 +44,25 @@ class HelpersTests(unittest.TestCase):
                 "2024-01-01 22:04:05-05:00",
                 session_overview.format_local_time("2024-01-02T03:04:05Z"),
             )
+
+    def test_a_stamp_the_local_zone_cannot_hold_keeps_its_offset(self) -> None:
+        # Converting year 1 west of UTC, or year 9999 east of it, overflows
+        # datetime; the stored offset is printed instead of crashing a reader.
+        cases = (
+            ("America/Denver", "0001-01-01T00:00:00Z", "0001-01-01 00:00:00+00:00"),
+            ("Pacific/Kiritimati", "9999-12-31T23:59:59Z", "9999-12-31 23:59:59+00:00"),
+        )
+        self.addCleanup(time.tzset)
+        for zone, stamp, expected in cases:
+            with self.subTest(zone=zone), mock.patch.dict(os.environ, {"TZ": zone}):
+                time.tzset()
+                self.assertEqual(expected, session_overview.format_local_time(stamp))
+                self.assertEqual(
+                    expected, tail_control_messages._format_local_datetime(stamp)
+                )
+                self.assertEqual(
+                    expected[:19], run_reporting_status._format_local_datetime(stamp)
+                )
 
     def test_parse_iso_timestamp_returns_none_for_garbage(self) -> None:
         self.assertIsNone(session_overview.parse_iso_timestamp("not-a-date"))
