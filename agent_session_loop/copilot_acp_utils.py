@@ -22,7 +22,9 @@ def _select_option(options: Sequence[Any], wanted: str) -> str | None:
         if not isinstance(option, Mapping):
             continue
         kind = option.get("kind")
-        if kind in _STANDING_KINDS or kind != wanted:
+        # Type first: a list or object here is unhashable, and the set lookup
+        # would raise on it instead of passing over an option it cannot use.
+        if not isinstance(kind, str) or kind in _STANDING_KINDS or kind != wanted:
             continue
         option_id = option.get("optionId")
         if isinstance(option_id, str) and option_id:

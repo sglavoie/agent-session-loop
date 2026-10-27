@@ -192,6 +192,36 @@ class PermissionTests(unittest.TestCase):
         self.assertEqual(copilot_acp.DECISION_CANCELLED, decision.decision)
         self.assertIsNone(decision.option_id)
 
+    def test_an_unhashable_option_kind_is_skipped_not_fatal(self) -> None:
+        process, session, _ = self._answer(
+            WORKER_UNGRANTED,
+            request=permission_request(
+                [
+                    {"optionId": "bad", "kind": ["reject_once"]},
+                    {"optionId": "ro", "kind": "reject_once"},
+                ]
+            ),
+        )
+
+        self.assertEqual(
+            {"outcome": {"outcome": "selected", "optionId": "ro"}},
+            process.answer_to("perm-1")["result"],
+        )
+        self.assertIsNone(session.protocol_error)
+
+    def test_a_request_whose_handling_fails_is_still_answered(self) -> None:
+        process = _FakeProcess()
+        session = build_session(process, permissions=WORKER_GRANTED)
+
+        with mock.patch.object(
+            session, "_answer_permission", side_effect=RuntimeError("boom")
+        ):
+            session.feed(permission_request())
+
+        error = process.answer_to("perm-1")["error"]
+        self.assertEqual(-32603, error["code"])
+        self.assertIn("boom", session.protocol_error or "")
+
     def test_an_unnamed_tool_call_still_produces_a_decision(self) -> None:
         _, session, _ = self._answer(
             WORKER_GRANTED,

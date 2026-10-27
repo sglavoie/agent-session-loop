@@ -273,7 +273,20 @@ class _AcpProtocolMixin:
             if "id" in message:
                 # A method and an id together is a server-to-client *request*,
                 # which this client answers rather than logs.
-                return self._handle_request(message["id"], method, _params(message))
+                request_id = message["id"]
+                try:
+                    return self._handle_request(request_id, method, _params(message))
+                except Exception as error:  # noqa: BLE001 - answer, then report
+                    # The agent blocks on its request, so a failure here still
+                    # owes it an answer: unanswered, the turn would wait out
+                    # its whole timeout for a reply that is never coming.
+                    detail = f"{type(error).__name__}: {error}"
+                    self._note_protocol_error(f"failed to handle {method}: {detail}")
+                    self._answer(
+                        request_id,
+                        error={"code": _INTERNAL_ERROR, "message": detail},
+                    )
+                    return ""
             return self._handle_notification(method, _params(message))
         raw_id = message.get("id")
         if not isinstance(raw_id, int):

@@ -145,6 +145,10 @@ DECISION_CANCELLED = "cancelled"
 #: did not advertise a capability for.
 _METHOD_NOT_FOUND = -32601
 
+#: JSON-RPC's "internal error", answered to a request this client failed to
+#: handle, so the agent is never left waiting on an answer that is not coming.
+_INTERNAL_ERROR = -32603
+
 #: What a session calls immediately before submitting work, as its last chance
 #: to be told not to. Raising from it abandons the turn.
 SubmissionGate = Callable[[], None]
