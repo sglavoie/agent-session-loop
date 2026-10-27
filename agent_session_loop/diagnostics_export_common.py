@@ -299,7 +299,11 @@ def _counted(label: str, values: Iterable[Any]) -> list[dict[str, Any]]:
     """
     counts: dict[str, int] = {}
     for value in values:
-        key = value if isinstance(value, str) and value else "unknown"
+        # Capped like every other exported string: a tallied value is copied
+        # verbatim into the document, so an unbounded one would be a body.
+        key = (
+            value[:MAX_STRING_CHARS] if isinstance(value, str) and value else "unknown"
+        )
         counts[key] = counts.get(key, 0) + 1
     return [{label: key, "count": counts[key]} for key in sorted(counts)]
 

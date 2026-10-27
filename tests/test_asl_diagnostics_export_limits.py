@@ -27,6 +27,20 @@ class ExportBoundsTests(ExportTestBase):
         exported = {record["source_event_id"] for record in delivery["records"]}
         self.assertNotIn(SOURCE_EVENT_ID, exported)
 
+    def test_tallied_event_names_are_capped_like_any_string(self) -> None:
+        plan_dir = self.tmp_path / "plan-long-name"
+        plan_dir.mkdir()
+        self.seed_state(plan_dir)
+        line = {"name": "x" * 5000, "payload": {}}
+        (self.plan_state_dir(plan_dir) / events.EVENTS_FILE_NAME).write_text(
+            json.dumps(line) + "\n", encoding="utf-8"
+        )
+        by_name = self.export()["runs"][0]["events"]["by_name"]
+        self.assertEqual(
+            [len(tally["event"]) for tally in by_name],
+            [diagnostics_export.MAX_STRING_CHARS],
+        )
+
     def test_receipt_records_are_capped_and_the_drop_is_counted(self) -> None:
         plan_dir = self.tmp_path / "plan-mail"
         plan_dir.mkdir()
