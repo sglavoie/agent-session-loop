@@ -330,6 +330,66 @@ class HarnessAuthenticationClassificationTests(unittest.TestCase):
                 )
                 self.assertEqual(events.PAUSE_REASON_AUTH_FAILED, classification.reason)
 
+    def test_claude_narration_is_not_read_as_the_failure(self) -> None:
+        # The model narrates its work; a turn fixing a 429 backoff or wiring
+        # OAuth is not out of quota or logged out.
+        cases = (
+            (
+                {
+                    "stdout": (
+                        "claude text: Adding backoff for HTTP 429 responses\n"
+                        "claude tool: Edit\n"
+                    ),
+                    "stderr": "API Error: 500 Internal server error\n",
+                    "last_message": "Adding backoff for HTTP 429 responses",
+                },
+                "provider-server-error",
+            ),
+            (
+                {
+                    "returncode": 124,
+                    "timed_out": True,
+                    "stdout": "claude text: Now wiring the OAuth callback\n",
+                    "last_message": "Now wiring the OAuth callback",
+                },
+                "exit-124",
+            ),
+            (
+                {
+                    "stdout": "claude text: Updating the DNS record parser\n",
+                    "stderr": "Segmentation fault\n",
+                },
+                "exit-1",
+            ),
+        )
+        for overrides, marker in cases:
+            with self.subTest(marker=marker):
+                classification = harness_failures.classify_harness_failure(
+                    self._result(**overrides)
+                )
+                self.assertEqual(marker, classification.marker)
+
+    def test_a_claude_error_result_is_still_classified(self) -> None:
+        classification = harness_failures.classify_harness_failure(
+            self._result(
+                stdout=(
+                    "claude text: Working on the rate limit middleware\n"
+                    f"claude result: error (provider subtype success): "
+                    f"{OBSERVED_AUTH_EXPIRY}\n"
+                ),
+                last_message=OBSERVED_AUTH_EXPIRY,
+            )
+        )
+
+        self.assertEqual(events.PAUSE_REASON_AUTH_FAILED, classification.reason)
+
+    def test_dns_counts_only_as_a_word(self) -> None:
+        classification = harness_failures.classify_harness_failure(
+            self._result(stderr="error: could not load addnsrecord.so\n")
+        )
+
+        self.assertEqual(events.PAUSE_REASON_NONZERO_EXIT, classification.reason)
+
     def test_the_rules_that_outrank_authentication_still_win(self) -> None:
         # Widening the pattern must not reorder the table: the oversized-request
         # rule and the quota rule both precede it, and both describe requests an

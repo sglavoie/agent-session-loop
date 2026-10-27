@@ -198,7 +198,7 @@ _FAILURE_CLASSIFICATION_RULES: tuple[tuple[str, str, bool, re.Pattern[str]], ...
             r"gateway timeout|temporarily unavailable|"
             r"network error|stream (?:error|disconnected)|"
             r"read ECONNRESET|socket hang up|"
-            r"unexpected eof|tls handshake|dns",
+            r"unexpected eof|tls handshake|\bdns\b",
             re.IGNORECASE,
         ),
     ),
@@ -239,14 +239,45 @@ class FailureClassification:
         }
 
 
+# The rendered Claude stream's model narration. The model talks about whatever
+# it is working on -- an OAuth handler, a 429 backoff, a DNS parser -- and every
+# broad rule above would read that prose as the failure. The CLI's own errors
+# reach the log as ``claude result: error`` / ``claude error`` lines instead.
+_CLAUDE_NARRATION_PREFIX = "claude text:"
+# Any line the Claude stream renderer produces, which marks stdout as a
+# rendered stream rather than raw harness output.
+_CLAUDE_RENDERED_RE = re.compile(
+    r"^claude (?:text|tool|result|error|init|status|response)\b", re.MULTILINE
+)
+
+
+def _without_claude_narration(stdout: str) -> str:
+    return "\n".join(
+        line
+        for line in stdout.splitlines()
+        if not line.startswith(_CLAUDE_NARRATION_PREFIX)
+    )
+
+
 def _failure_scan_text(result: harnesses.HarnessResult) -> str:
     """Combine the harness streams most likely to carry a failure signal.
 
     The last message and stderr come first because harnesses surface the
     operative error there; stdout is appended for completeness. The result is
     bounded so classification stays cheap regardless of output volume.
+
+    Model narration is left out. On a rendered Claude stream that is every
+    ``claude text:`` line, and the last message too: it is either the terminal
+    result, whose error is already rendered on its own ``claude result: error``
+    line, or the model's own last words. A turn whose only signal is narration
+    falls through to the fail-closed ``nonzero-exit``.
     """
-    parts = [result.last_message or "", result.stderr or "", result.stdout or ""]
+    stdout = result.stdout or ""
+    last_message = result.last_message or ""
+    if result.name == "claude" and _CLAUDE_RENDERED_RE.search(stdout):
+        stdout = _without_claude_narration(stdout)
+        last_message = ""
+    parts = [last_message, result.stderr or "", stdout]
     combined = "\n".join(part for part in parts if part)
     return combined[:_FAILURE_SCAN_MAX_CHARS]
 
