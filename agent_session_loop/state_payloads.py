@@ -191,9 +191,10 @@ def _runner_state_payload(
             "waiting_for_reply_status": None,
             "abandoned": None,
         }
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, RecursionError) as error:
         # ValueError rather than JSONDecodeError: bytes that are not UTF-8
-        # raise UnicodeDecodeError before any JSON is parsed.
+        # raise UnicodeDecodeError before any JSON is parsed. RecursionError
+        # is what the decoder raises for pathologically nested JSON.
         return {
             "present": True,
             "path": str(state_path),

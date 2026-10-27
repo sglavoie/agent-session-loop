@@ -179,6 +179,18 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 payload["waiting_for_reply_status"],
             )
 
+    def test_runner_state_payload_reports_an_over_nested_state_file(self) -> None:
+        # The decoder raises RecursionError, not a ValueError, for this; it
+        # used to escape and crash `asl status --json`.
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / events.STATE_FILE_NAME
+            state_path.write_text("[" * 1_000_000, encoding="utf-8")
+
+            payload = state_payloads._runner_state_payload(state_path, lock_info=None)
+
+            self.assertTrue(payload["present"])
+            self.assertTrue(payload["error"])
+
     def test_runner_state_payload_exposes_review_harness(self) -> None:
         # `asl control stop-after-current` reports whether the stop also
         # prevents a pending review, which it can only know from the run's
