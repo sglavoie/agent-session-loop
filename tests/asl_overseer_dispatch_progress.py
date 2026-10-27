@@ -33,6 +33,29 @@ class ProgressTokenTests(unittest.TestCase):
             overseer_dispatch.progress_token(_facts(session_id="session-8")),
         )
 
+    def test_a_paused_run_on_a_later_turn_is_in_the_token(self) -> None:
+        """A real pause clears ``active_turn``; its last turn still moved."""
+
+        def paused_on(turn_index: int) -> intervention.RunFacts:
+            facts = _facts()
+            return replace(
+                facts,
+                paused=True,
+                run_active=False,
+                turn_active=False,
+                runner_state={
+                    **facts.runner_state,
+                    "paused": True,
+                    "active_turn": None,
+                    "last_turn": {"session_id": "session-7", "turn_index": turn_index},
+                },
+            )
+
+        self.assertNotEqual(
+            overseer_dispatch.progress_token(paused_on(3)),
+            overseer_dispatch.progress_token(paused_on(4)),
+        )
+
     def test_a_question_appearing_is_in_the_token(self) -> None:
         self.assertNotEqual(
             overseer_dispatch.progress_token(_facts()),

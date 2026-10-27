@@ -446,8 +446,8 @@ def progress_token(facts: intervention.RunFacts) -> str:
     that has been replaced is holding a stale picture. This one covers the same
     run in the same trouble and must not notice the replacement.
     """
-    turn = facts.runner_state.get("active_turn")
-    turn = turn if isinstance(turn, Mapping) else {}
+    # A paused run has no active turn; the turn it stopped on is what moved.
+    turn = intervention.current_turn(facts.runner_state)
     return _digest(
         _PROGRESS_DOMAIN,
         str(facts.plan_dir),

@@ -169,7 +169,10 @@ class _ResumeCase(unittest.TestCase):
             "pause_policy": pause_policy.classify_pause(reason),
             "run_started_at": MOMENT,
             "run_finished_at": None,
-            "active_turn": {"session_id": "15", "turn_index": 3},
+            # The runner clears ``active_turn`` at turn end, before it pauses;
+            # the session a paused run stopped on is in its last turn record.
+            "active_turn": None,
+            "last_turn": {"session_id": "15", "turn_index": 3},
         }
 
     def run_config(self, **overrides: Any) -> dict[str, Any]:

@@ -15,8 +15,7 @@ def session_under_verification(facts: intervention.RunFacts) -> str:
     pointed at any session would be answering about one session's contract with
     another session's working tree, and the result would look like a verdict.
     """
-    turn = facts.runner_state.get("active_turn")
-    named = turn.get("session_id") if isinstance(turn, Mapping) else None
+    named = intervention.current_turn(facts.runner_state).get("session_id")
     if not isinstance(named, str) or not named.strip():
         return ""
     try:

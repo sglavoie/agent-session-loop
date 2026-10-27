@@ -287,6 +287,21 @@ def build_run_facts(
     )
 
 
+def current_turn(runner_state: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The turn this run is on, or last stopped on, as recorded, or ``{}``.
+
+    A turn in flight is ``active_turn``. The runner clears that record when the
+    turn ends, before it writes any pause, so a paused run names the session it
+    stopped on only in its last turn record (``last_turn``). Values are returned
+    unvalidated; callers decide what counts as a session id.
+    """
+    for key in ("active_turn", "last_turn"):
+        turn = runner_state.get(key)
+        if isinstance(turn, Mapping) and turn.get("session_id"):
+            return turn
+    return {}
+
+
 def question_context(
     runner_state: Mapping[str, Any], unanswered_ids: tuple[str, ...]
 ) -> tuple[str | None, str | None]:

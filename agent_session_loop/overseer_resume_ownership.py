@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
 
 from . import intervention, overseer_discovery, state, supervision_liveness
@@ -114,8 +113,7 @@ def _stopped_refusal(
         )
     if not session_id:
         return None
-    turn = facts.runner_state.get("active_turn")
-    stopped_on = turn.get("session_id") if isinstance(turn, Mapping) else None
+    stopped_on = intervention.current_turn(facts.runner_state).get("session_id")
     if stopped_on == session_id:
         return None
     return (

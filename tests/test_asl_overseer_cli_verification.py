@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import io
 import json
 from pathlib import Path
@@ -18,6 +19,7 @@ from agent_session_loop import (
     plans_files,
     plans_registry,
     state,
+    state_payloads,
     workspaces,
 )
 from tests.asl_overseer_cli_fleet import _OverseerCase
@@ -101,6 +103,46 @@ class VerificationOperationTests(_OverseerCase):
         self.assertIsNone(payload["dispatch"]["refusal"])
         self.assertIn("marker", payload["dispatch"]["detail"])
         self.assertIsNone(payload["escalation"])
+
+    def test_a_paused_run_with_no_turn_in_flight_verifies_its_last_session(
+        self,
+    ) -> None:
+        """A real pause clears ``active_turn``; the session is in ``turns``."""
+        self.marker.write_text("present\n", encoding="utf-8")
+        recorded = self.fleet.root / "paused-state.json"
+        recorded.write_text(
+            json.dumps(
+                {
+                    "run_id": self.fleet.facts[str(self.plan)].run_id,
+                    "paused": True,
+                    "reason": "verify-failed",
+                    "active_turn": None,
+                    "turns": [{"session_id": PLAN_SESSION, "turn_index": 3}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        facts = self.fleet.facts[str(self.plan)]
+        self.fleet.facts[str(self.plan)] = dataclasses.replace(
+            facts,
+            runner_state=state_payloads._runner_state_payload(recorded, lock_info=None),
+        )
+        packet = self.observed()
+
+        status, payload = self.act(
+            packet,
+            "--check",
+            "marker",
+            "--reviewed-evidence",
+            self._reviewed(packet),
+            "--claims-file",
+            self._claims(),
+            operation="verify",
+        )
+
+        self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+        self.assertTrue(payload["dispatch"]["performed"], payload["dispatch"]["detail"])
+        self.assertIsNone(payload["dispatch"]["refusal"])
 
     def test_a_declared_check_that_fails_reports_the_failure_not_a_refusal(
         self,

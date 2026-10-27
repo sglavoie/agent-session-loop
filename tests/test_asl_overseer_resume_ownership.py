@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from typing import Any
 
 from agent_session_loop import (
+    events,
     intervention,
     overseer_resume,
+    overseer_resume_ownership,
     supervision_liveness,
     workbench_launch,
 )
@@ -239,6 +242,31 @@ class CheckpointThenResume(fixtures._ResumeCase):
         self.assertTrue(preparation.ready)
         assert receipt is not None
         self.assertEqual("executed", receipt.outcome)
+
+    def test_a_recorded_pause_names_the_session_its_last_turn_ran(self) -> None:
+        """Read from ``state.json`` as the runner leaves it, not a fixture dict."""
+        state_path = self.plan_state() / events.STATE_FILE_NAME
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "run_id": fixtures.RUN,
+                    "plan_dir": self.plan,
+                    "paused": True,
+                    "reason": "verify-failed",
+                    "active_turn": None,
+                    "turns": [{"session_id": "15", "turn_index": 3}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        facts = intervention.inspect_run(self.plan, state_dir=self.root)
+
+        self.assertIsNone(overseer_resume_ownership._stopped_refusal(facts, "15"))
+        refusal = overseer_resume_ownership._stopped_refusal(facts, "9")
+        assert refusal is not None
+        self.assertEqual("session_mismatch", refusal[0])
+        self.assertIn("'15'", refusal[1])
 
     def test_a_run_that_cannot_be_read_is_never_read_as_gone(self) -> None:
         self.readable = False

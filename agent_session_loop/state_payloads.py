@@ -155,6 +155,19 @@ def waiting_for_reply_status(
     return WAITING_FOR_REPLY_STATUS_LIVE
 
 
+def _last_turn(turns: Any) -> dict[str, Any] | None:
+    """The session and index of the last recorded turn, or ``None``."""
+    if not isinstance(turns, list):
+        return None
+    for turn in reversed(turns):
+        if isinstance(turn, dict):
+            return {
+                "session_id": turn.get("session_id"),
+                "turn_index": turn.get("turn_index"),
+            }
+    return None
+
+
 def _runner_state_payload(
     state_path: Path,
     *,
@@ -323,6 +336,9 @@ def _runner_state_payload(
         ),
         "duration_seconds": raw.get("duration_seconds"),
         "active_turn": active_turn,
+        # The runner clears ``active_turn`` when a turn ends, before it writes
+        # any pause, so a paused run's session survives only in its last turn.
+        "last_turn": _last_turn(raw.get("turns")),
         "active_verification": active_verification,
         "active_finalization": active_finalization,
         # Projected so a supervisor can tell an operator-requested stop from an
