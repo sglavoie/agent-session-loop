@@ -70,6 +70,8 @@ REASON_NO_HEARTBEAT = "no connector heartbeat has been received"
 REASON_STALE_HEARTBEAT = "connector heartbeat is stale"
 REASON_NO_SNAPSHOT = "no ASL snapshot has been received"
 REASON_STALE_PROJECTION = "ASL projection is stale"
+REASON_FUTURE_HEARTBEAT = "connector heartbeat is dated ahead of this clock"
+REASON_FUTURE_PROJECTION = "ASL projection is dated ahead of this clock"
 REASON_TRUNCATED = "snapshot was truncated; some runs are not represented"
 REASON_INCOMPATIBLE = "ASL contract is not supported by this deployment"
 REASON_OBSERVATION_ONLY = "this deployment is running in observation-only mode"
@@ -126,20 +128,23 @@ def evaluate(
     projection_age = None if last_snapshot_at is None else now - last_snapshot_at
     reasons: list[str] = []
 
-    transport_fresh = (
-        transport_age is not None and transport_age <= policy.observation_stale_seconds
-    )
+    # A negative age is a source clock running ahead. Within the staleness
+    # bound that is ordinary skew; beyond it the timestamp says nothing about
+    # when the source last spoke, so it is not evidence of being current.
+    bound = policy.observation_stale_seconds
+    transport_fresh = transport_age is not None and -bound <= transport_age <= bound
     if transport_age is None:
         reasons.append(REASON_NO_HEARTBEAT)
+    elif transport_age < -bound:
+        reasons.append(REASON_FUTURE_HEARTBEAT)
     elif not transport_fresh:
         reasons.append(REASON_STALE_HEARTBEAT)
 
-    projection_fresh = (
-        projection_age is not None
-        and projection_age <= policy.observation_stale_seconds
-    )
+    projection_fresh = projection_age is not None and -bound <= projection_age <= bound
     if projection_age is None:
         reasons.append(REASON_NO_SNAPSHOT)
+    elif projection_age < -bound:
+        reasons.append(REASON_FUTURE_PROJECTION)
     elif not projection_fresh:
         reasons.append(REASON_STALE_PROJECTION)
 

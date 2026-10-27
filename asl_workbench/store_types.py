@@ -50,9 +50,14 @@ LEGACY_GENERATION = ""
 # are refused now would have been accepted a minute ago.
 REFUSED_STALE_GENERATION = "stale-generation"
 REFUSED_STALE_OBSERVATION = "stale-observation"
+#: Dated further ahead of the receiver's clock than the staleness bound allows.
+#: Kept out of the store so one fast clock cannot become the high-water mark
+#: that refuses every correctly stamped frame until real time catches up.
+REFUSED_FUTURE_OBSERVATION = "future-observation"
 INGEST_REFUSAL_CODES: tuple[str, ...] = (
     REFUSED_STALE_GENERATION,
     REFUSED_STALE_OBSERVATION,
+    REFUSED_FUTURE_OBSERVATION,
 )
 
 _ORDER_NEWER = "newer"

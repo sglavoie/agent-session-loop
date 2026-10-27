@@ -10,6 +10,7 @@ from tests.support_workbench_store import (
     NOW,
     StoreCase,
     envelope,
+    heartbeat_payload,
     history_entry,
     run_row,
     snapshot_payload,
@@ -116,6 +117,58 @@ class OrderedIngestionTests(StoreCase):
         self.assertEqual(self.run_keys(include_absent=True), {"alpha", "beta"})
         self.assertEqual(after.last_snapshot_at, before.last_snapshot_at)
         self.assertEqual(after.row_count, 2)
+
+    def test_a_future_dated_observation_is_refused_and_sets_no_high_water(
+        self,
+    ) -> None:
+        """A fast clock must not lock out every correctly stamped frame after it."""
+        self.send_snapshot(observed_at=NOW, runs=[run_row("alpha")])
+        for send in (
+            lambda: self.store.ingest_heartbeat(
+                envelope("heartbeat", heartbeat_payload(observed_at=NOW + 3600)),
+                received_at=NOW + 5,
+            ),
+            lambda: self.send_snapshot(
+                observed_at=NOW + 3600, runs=[run_row("alpha")], received_at=NOW + 5
+            ),
+            lambda: self.send_catalog(
+                observed_at=NOW + 3600, generation="g1", received_at=NOW + 5
+            ),
+        ):
+            with self.assertRaises(store_types.IngestRefused) as refusal:
+                send()
+            self.assertEqual(
+                refusal.exception.code, store_types.REFUSED_FUTURE_OBSERVATION
+            )
+        self.send_snapshot(observed_at=NOW + 10, runs=[run_row("beta")])
+        self.assertEqual(self.run_keys(), {"beta"})
+
+    def test_a_clock_ahead_within_the_staleness_bound_is_ordinary_skew(
+        self,
+    ) -> None:
+        self.store.ingest_heartbeat(
+            envelope("heartbeat", heartbeat_payload(observed_at=NOW + 30)),
+            received_at=NOW,
+        )
+        self.send_snapshot(
+            observed_at=NOW + 30, runs=[run_row("alpha")], received_at=NOW
+        )
+        status = self.store.connector_statuses(now=NOW)[0]
+        self.assertEqual(status.freshness.label, freshness.FRESHNESS_LIVE)
+
+    def test_an_observation_far_ahead_of_now_is_not_fresh(self) -> None:
+        evaluated = freshness.evaluate(
+            now=NOW,
+            policy=self.store.policy,
+            last_heartbeat_at=NOW + 3600,
+            last_snapshot_at=NOW + 3600,
+            truncated=False,
+        )
+        self.assertFalse(evaluated.transport_fresh)
+        self.assertFalse(evaluated.projection_fresh)
+        self.assertFalse(evaluated.replies_enabled)
+        self.assertNotEqual(evaluated.label, freshness.FRESHNESS_LIVE)
+        self.assertIn(freshness.REASON_FUTURE_PROJECTION, evaluated.reasons)
 
     def test_an_unknown_refusal_code_cannot_be_invented(self) -> None:
         with self.assertRaises(AssertionError):

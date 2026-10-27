@@ -23,8 +23,10 @@ from .store_migrations import (
 from .store_types import (
     _ORDER_NEWER,
     META_CREATED_AT,
+    REFUSED_FUTURE_OBSERVATION,
     REFUSED_STALE_GENERATION,
     REFUSED_STALE_OBSERVATION,
+    IngestRefused,
 )
 from .store_values import (
     _decoded_list,
@@ -240,6 +242,22 @@ class StoreBase:
         return _membership_clause(memberships, parameters, prefix=prefix)
 
     # -- ordering --------------------------------------------------------
+    def _refuse_future(self, observed_at: float, *, received_at: float) -> None:
+        """Refuse an observation dated beyond the staleness bound ahead of now.
+
+        Ordering trusts the source's clock, so a frame from a clock running
+        fast would otherwise become the high-water mark, and every correctly
+        stamped frame after it would be refused as stale until real time
+        caught up. The bound is the staleness bound because that is already
+        how much clock disagreement the receiver tolerates the other way.
+        """
+        if observed_at > received_at + self._policy.observation_stale_seconds:
+            raise IngestRefused(
+                REFUSED_FUTURE_OBSERVATION,
+                f"observed_at is {observed_at - received_at:.0f}s ahead of "
+                "this service's clock",
+            )
+
     @staticmethod
     def _order(
         *,

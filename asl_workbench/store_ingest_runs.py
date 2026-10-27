@@ -41,6 +41,7 @@ class RunIngest(StoreRetention):
         payload = envelope["payload"]
         observed_at = float(payload["observed_at"])
         generation = _as_int(payload.get("source_generation"))
+        self._refuse_future(observed_at, received_at=received_at)
         with self.transaction() as connection:
             row = self._connector_row(connector_id)
             if row is not None and row["heartbeat_observed_at"] is not None:
@@ -105,6 +106,7 @@ class RunIngest(StoreRetention):
         digest = str(payload["digest"])
         truncated = bool(payload["truncated"])
         runs = list(payload["runs"])
+        self._refuse_future(observed_at, received_at=received_at)
 
         with self.transaction() as connection:
             row = self._connector_row(connector_id)

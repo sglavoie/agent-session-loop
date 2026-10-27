@@ -171,6 +171,7 @@ class HistoryCatalogIngest(StoreRetention):
         offset = max(0, int(payload.get("offset", 0)))
         total = _as_int(payload.get("total"))
         entries = list(payload["entries"])
+        self._refuse_future(observed_at, received_at=received_at)
 
         with self.transaction() as connection:
             self._ensure_connector(connector_id, now=received_at)
