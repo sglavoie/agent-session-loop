@@ -18,6 +18,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+from unittest import mock
 
 from asl_workbench.connector_payloads import heartbeat_payload
 from asl_workbench.observation import ObservationPolicy
@@ -257,6 +258,76 @@ class UploadTests(UplinkCase):
         self.assertEqual(row["status"], OPERATION_ACCEPTED)
         self.assertEqual(row["settled_at"], NOW + 5)
 
+    def test_a_report_racing_a_sweep_rechecks_the_current_status(self) -> None:
+        original = self.store.operation
+        for reported, expected in (
+            (OPERATION_ACCEPTED, OPERATION_UNCONFIRMED),
+            (OPERATION_CONSUMED, OPERATION_CONSUMED),
+        ):
+            with self.subTest(reported=reported):
+                operation_id = f"race-{reported}"
+                self.store.record_operation(
+                    operation_record(operation_id, status=OPERATION_DISPATCHED),
+                    connector_id=CONNECTOR,
+                    received_at=NOW,
+                )
+
+                def read_then_sweep(identifier: str) -> Any:
+                    row = original(identifier)
+                    self.store.advance_operation(
+                        identifier, OPERATION_UNCONFIRMED, now=NOW + 1
+                    )
+                    return row
+
+                report = operation_envelope(
+                    payload={
+                        "operation_id": operation_id,
+                        "status": reported,
+                        "observed_at": NOW + 2,
+                    },
+                    connector_id=CONNECTOR,
+                    target_id=TARGET,
+                    sent_at=NOW + 2,
+                )
+                with mock.patch.object(
+                    self.store, "operation", side_effect=read_then_sweep
+                ):
+                    self.assertIsNone(self.uplink.ingest(report, now=NOW + 2))
+                self.assertEqual(self.store.operation(operation_id)["status"], expected)
+
+    def test_a_refusal_receipt_cannot_reject_a_concurrently_accepted_operation(
+        self,
+    ) -> None:
+        self.store.record_operation(
+            operation_record("race-refusal", status=OPERATION_DISPATCHED),
+            connector_id=CONNECTOR,
+            received_at=NOW,
+        )
+        original = self.store.operation
+
+        def read_then_accept(identifier: str) -> Any:
+            row = original(identifier)
+            self.store.advance_operation(identifier, OPERATION_ACCEPTED, now=NOW + 1)
+            return row
+
+        receipt = receipt_envelope(
+            payload={
+                "outcome": "refused",
+                "observed_at": NOW + 2,
+                "detail_code": "forbidden-method",
+            },
+            capability="mutate",
+            connector_id=CONNECTOR,
+            target_id=TARGET,
+            sent_at=NOW + 2,
+            request_id="submit-race-refusal",
+        )
+        with mock.patch.object(self.store, "operation", side_effect=read_then_accept):
+            self.uplink.ingest(receipt, now=NOW + 2)
+        self.assertEqual(
+            self.store.operation("race-refusal")["status"], OPERATION_ACCEPTED
+        )
+
     def test_a_receipt_refusing_a_submission_settles_its_row(self) -> None:
         """The connector refuses a submission it will not queue with a receipt.
 
@@ -302,6 +373,30 @@ class UploadTests(UplinkCase):
 
 class CarriageTests(UplinkCase):
     """What rides back down, and what happens when nothing collects it."""
+
+    def test_an_undelivered_copy_cannot_expire_a_concurrently_dispatched_operation(
+        self,
+    ) -> None:
+        self.store.record_operation(
+            operation_record("race-departure"),
+            connector_id=CONNECTOR,
+            received_at=NOW,
+        )
+        self.uplink.hand_down(submission("race-departure"), now=NOW)
+        original = self.store.operation
+
+        def read_then_dispatch(identifier: str) -> Any:
+            row = original(identifier)
+            self.store.advance_operation(identifier, OPERATION_DISPATCHED, now=NOW + 1)
+            return row
+
+        with mock.patch.object(self.store, "operation", side_effect=read_then_dispatch):
+            self.assertIsNone(
+                self.uplink.ingest(heartbeat(at=NOW + 1000), now=NOW + 1000)
+            )
+        self.assertEqual(
+            self.store.operation("race-departure")["status"], OPERATION_DISPATCHED
+        )
 
     def test_a_submission_leaves_on_the_next_upload_and_is_dispatched_then(
         self,

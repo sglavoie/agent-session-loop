@@ -142,27 +142,32 @@ class UplinkFlowMixin(UplinkBodiesMixin):
         """
         payload = envelope["payload"]
         operation_id = str(payload["operation_id"])
-        row = self.store.operation(operation_id)
-        if row is None:
-            return
-        current = str(row.get("status", ""))
         reported = str(payload["status"])
-        if reported != current and reported not in OPERATION_TRANSITIONS.get(
-            current, frozenset()
-        ):
-            # A late report against a row this service already concluded --
-            # the stranded sweep settles what nobody reported in time. Dropped
-            # for the reason an unknown operation is: refusing it would have
-            # the connector resend it on every upload, forever.
-            return
-        self.store.advance_operation(
-            operation_id,
-            str(payload["status"]),
-            now=now,
-            detail_code=payload.get("detail_code"),
-            dispatched_at=payload.get("dispatched_at"),
-            settled_at=payload.get("settled_at"),
-        )
+        while True:
+            row = self.store.operation(operation_id)
+            if row is None:
+                return
+            current = str(row.get("status", ""))
+            if reported == current:
+                break
+            if reported not in OPERATION_TRANSITIONS.get(current, frozenset()):
+                # A late report against a row this service already concluded --
+                # the stranded sweep settles what nobody reported in time.
+                # Refusing it would make the connector resend it forever.
+                return
+            if self.store.settle_operation_if(
+                operation_id,
+                current,
+                reported,
+                now=now,
+                detail_code=payload.get("detail_code"),
+                dispatched_at=payload.get("dispatched_at"),
+                settled_at=payload.get("settled_at"),
+            ):
+                break
+            # A sweep or another upload advanced the row since our read.
+            # Recheck: terminal evidence may still settle an unconfirmed row.
+            # Status transitions are acyclic, so contention cannot loop forever.
         self.discard_body(operation_id)
 
     def _settle_refusal(self, envelope: Mapping[str, Any], *, now: float) -> None:
@@ -190,8 +195,9 @@ class UplinkFlowMixin(UplinkBodiesMixin):
         if row is None or row.get("status") != OPERATION_DISPATCHED:
             return
         detail_code = envelope["payload"].get("detail_code")
-        self.store.advance_operation(
+        self.store.settle_operation_if(
             operation_id,
+            OPERATION_DISPATCHED,
             status,
             now=now,
             # A receipt may cite a transport code the journal has no word for.
@@ -290,8 +296,9 @@ class UplinkFlowMixin(UplinkBodiesMixin):
         row = self.store.operation(operation_id)
         if row is None or row.get("status") != OPERATION_PENDING:
             return
-        self.store.advance_operation(
+        self.store.settle_operation_if(
             operation_id,
+            OPERATION_PENDING,
             OPERATION_EXPIRED,
             now=now,
             detail_code=detail_code,

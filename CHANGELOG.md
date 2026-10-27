@@ -14,6 +14,9 @@ A polish and hardening round after the public release.
 
 ### Fixed
 
+- Workbench: concurrent operation reports and recovery sweeps no longer turn
+  late reports into upload failures; stale refusal receipts cannot overwrite
+  acceptance, and expired queued copies cannot expire dispatched operations.
 - Workbench: a remote correction refused before persistence is recorded as
   rejected, so retries no longer report acceptance and later corrections remain
   possible; remote admission preserves the actual conflict or uncertainty

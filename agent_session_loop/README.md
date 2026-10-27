@@ -30,6 +30,12 @@ settlement context, so their retries report rejection and later corrections are
 not blocked. Remote admission refusals retain the journal's reason and message,
 including conflicting reuse of an operation id and uncertain prior outcomes.
 
+Remote operation reports recheck transitions when another upload or recovery
+sweep advances the journal concurrently. Refusal receipts only settle rows that
+are still dispatched, and undelivered copies only expire rows that are still
+pending. A stale status read cannot overwrite newer evidence or turn a late
+report into an upload failure.
+
 The public imports for commit messages, conversation continuity, AgentMux
 contracts, and overseer decisions, context, and CLI commands remain in their
 original modules. Their implementations live in focused sibling modules:
