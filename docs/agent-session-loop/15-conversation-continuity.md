@@ -335,7 +335,8 @@ process-local `implementation_overrides`, `consumed`, and `last_action`;
 `last_action` is one of
 `stop-after-current-requested`, `stop-after-current-canceled`,
 `stop-after-current-consumed`, `abort-turn-requested`, `abort-turn-honored`,
-`abort-turn-satisfied-by-worker`, `tail-enabled`, `tail-disabled`,
+`abort-turn-satisfied-by-worker`, `abort-turn-preempted`, `tail-enabled`,
+`tail-disabled`,
 `harness-selected`, `implementation-model-updated`, or `null`. The three
 abort-pending fields are cleared the moment the abort resolves, so a terminal
 abort `last_action` sits beside `abort_turn_requested: false`.

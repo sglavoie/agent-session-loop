@@ -7,6 +7,7 @@ from .run_termination_controls import (
     _detach_turn_controls,
     _honor_abort_turn,
     _honor_stop_after_current,
+    _record_abort_preempted,
     _record_abort_satisfied_by_worker,
     _record_aborted_turn_exit,
     _stop_before_review_work,

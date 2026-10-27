@@ -19,7 +19,11 @@ outcome for the `run-finished` record, reported as `wait.run_finished`. Only
 reports that the turn ended by itself inside the window, which leaves the run
 paused or still running, so read the run's own terminal state before calling it
 stopped. A successful `abort --wait` therefore means the run is over and the
-plan lock is released, not merely that the turn was killed.
+plan lock is released, not merely that the turn was killed. A turn that the
+runner's own turn timeout or an interrupt ended inside the window records
+`abort-turn-preempted` instead, and `abort --wait` then exits 1 with
+`reason: abort-turn-preempted`: the run paused on that timeout or interrupt,
+and the worker did not comply.
 
 A wait that runs out exits 1 and names which observation failed, with the
 `command_id`, `queue_path`, `signal`, and `wait` evidence under `details`: no
@@ -63,6 +67,10 @@ distinct outcomes, and only the first of them stops the run:
   stands, and the run continues to the next session. Recording that action
   consumes the abort, so stopping the run afterwards needs a fresh
   `asl control` request.
+
+Neither worker outcome applies when the turn timeout or an operator interrupt
+ends the turn inside the window: the abort is consumed and recorded as
+`abort-turn-preempted`, and the timeout or interrupt pause owns the outcome.
 
 An abort observed between turns has nothing to kill and degrades to
 stop-after-current instead. It is recorded as `abort-turn-degraded` rather than

@@ -148,7 +148,10 @@ state before reporting any of them:
   never report the run as stopped on the strength of the abort alone.
 
 An abort that arrives between turns has nothing to kill and degrades to
-`stop-after-current`.
+`stop-after-current`. A turn that the runner's own turn timeout or an
+interrupt ends inside the window is none of these: the abort is recorded as
+`abort-turn-preempted`, the run pauses on that timeout or interrupt, and the
+worker did not comply.
 
 Use `--wait` whenever the stop actually matters. Without it the command only
 proves the request was appended to the durable queue — it exits 0 whether or not
@@ -160,7 +163,9 @@ receipt, and `asl control abort --wait` waits further, for the
 60 seconds and the default grace is 120. Only `abort-turn-honored` proves the
 run is stopping; `wait.terminal_action: abort-turn-satisfied-by-worker` says
 just that the turn ended by itself, which is the paused or still-running outcome
-above — check the run's terminal state before reporting a stop.
+above — check the run's terminal state before reporting a stop. A preempted
+abort makes `--wait` exit 1 with `reason: abort-turn-preempted`; report it as
+the pause it is, never as compliance.
 
 A `--wait` that times out is a **failure to report, never an assumed success**.
 Report the reason verbatim and what it means, and do not claim the run stopped:

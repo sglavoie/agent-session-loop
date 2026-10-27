@@ -200,11 +200,18 @@ def _execute_turn(frame: RunFrame) -> RunResult | LoopSignal | None:
         frame.ctx.persistence.write_state(frame.ctx.payload)
 
     if frame.abort_signal.armed and not frame.result.aborted:
-        # The worker ended the turn inside the grace window, so nothing
-        # was killed and whatever it recorded stands: the pause or
-        # completion path below owns the outcome from here.
+        # The turn ended inside the grace window without the abort's kill.
+        # If the worker ended it, nothing was killed and whatever it
+        # recorded stands; if the turn timeout or an interrupt ended it,
+        # the worker did not comply and must not be credited. Either way
+        # the pause or completion path below owns the outcome from here.
+        record_abort_outcome = (
+            run_termination._record_abort_preempted
+            if frame.result.timed_out or frame.result.interrupted
+            else run_termination._record_abort_satisfied_by_worker
+        )
         with frame.run_control_lock:
-            run_termination._record_abort_satisfied_by_worker(
+            record_abort_outcome(
                 frame.ctx.run_controls,
                 payload=frame.ctx.payload,
                 event_path=frame.ctx.event_path,

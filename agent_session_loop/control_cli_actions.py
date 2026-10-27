@@ -149,6 +149,9 @@ def control_abort_from_args(args: argparse.Namespace) -> int:
         terminal_actions=(
             events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
             events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
+            # The turn timeout or an interrupt ended the turn first; that is an
+            # outcome, but not the one asked for, so it fails the wait below.
+            events.RUN_CONTROL_ACTION_ABORT_TURN_PREEMPTED,
             # Sent between turns there is nothing to kill: the abort becomes
             # stop-after-current, and the wait then follows the run to its end.
             events.RUN_CONTROL_ACTION_ABORT_TURN_DEGRADED,
@@ -156,6 +159,7 @@ def control_abort_from_args(args: argparse.Namespace) -> int:
             # end, so this is the only outcome its `--wait` can be answered by.
             events.RUN_CONTROL_ACTION_FINALIZATION_ABORT_HONORED,
         ),
+        failure_actions=(events.RUN_CONTROL_ACTION_ABORT_TURN_PREEMPTED,),
         report=report,
     )
 

@@ -200,7 +200,7 @@ scope, session ID for per-session commits, argv, cwd, artifact paths, status
 result, duration, and commit SHA when one was created. `run_control` events
 record `stop-after-current-requested`, `stop-after-current-canceled`,
 `stop-after-current-consumed`, `abort-turn-requested`, `abort-turn-honored`,
-`abort-turn-satisfied-by-worker`, `abort-turn-degraded`,
+`abort-turn-satisfied-by-worker`, `abort-turn-preempted`, `abort-turn-degraded`,
 `finalization-abort-honored`,
 `control-command-observed`, `tail-enabled`,
 `tail-disabled`, and
@@ -219,6 +219,9 @@ also carries its `reason` and `detail`. `guards-expired` is recorded once at
 run termination and names the guards the run was still enforcing.
 `abort-turn-degraded` is an abort observed between turns: nothing was killed,
 and the request became `stop-after-current-requested`.
+`abort-turn-preempted` is an abort whose turn the runner's own turn timeout or
+an interrupt ended inside the grace window: the request is consumed, but
+neither the worker nor the abort ended the turn.
 `finalization-abort-honored` is the abort that arrived after the last turn had
 already ended: it cancels the terminal supervisor audit instead of a turn, arms
 with no grace window, and leaves the run's own outcome untouched. `tail` renders

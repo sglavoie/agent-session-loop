@@ -46,6 +46,39 @@ def _record_abort_satisfied_by_worker(
     )
 
 
+def _record_abort_preempted(
+    listener: run_control.RunControlListener,
+    *,
+    payload: dict[str, Any],
+    event_path: Path,
+    control_payload: dict[str, Any],
+    context: Mapping[str, Any] | None = None,
+    persistence: run_persistence._RunPersistence | None = None,
+) -> None:
+    """Clear a pending abort whose turn the runner ended some other way.
+
+    The turn timeout or an operator interrupt killed the turn inside the
+    window, so the worker did not comply and the abort did not fire: the
+    request is consumed so it cannot linger, and recorded as neither.
+    """
+    action = listener.consume_abort_turn()
+    if action is None:
+        return
+    run_coordination_control.record_run_control_action(
+        event_path=event_path,
+        payload=payload,
+        control_payload=control_payload,
+        action=action,
+        context=context,
+        persistence=run_persistence._run_persistence(persistence),
+        event_action=events.RUN_CONTROL_ACTION_ABORT_TURN_PREEMPTED,
+        message=(
+            "turn abort preempted: the turn timed out or was interrupted "
+            "inside the grace window, so the worker did not comply"
+        ),
+    )
+
+
 def _record_aborted_turn_exit(
     listener: run_control.RunControlListener,
     *,

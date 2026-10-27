@@ -146,18 +146,24 @@ def _enqueue_and_report(
             )
             return 1
         if wait.terminal_action in failure_actions:
-            # The runner reached the command and refused it. Reporting that as
-            # a success because the receipt arrived is exactly the mistake
-            # ``--wait`` exists to prevent.
+            # The runner reached the command and refused it, or something else
+            # ended the turn first. Reporting that as a success because the
+            # receipt arrived is exactly the mistake ``--wait`` exists to
+            # prevent.
             outcome = wait.terminal_payload or {}
+            refusal = outcome.get("reason")
             cli_common.print_error(
                 args,
                 command_name=command_name,
                 text_label=text_label,
-                reason=str(outcome.get("reason") or wait.terminal_action),
+                reason=str(refusal or wait.terminal_action),
                 error=(
-                    f"the runner refused command {queued.id}: "
-                    f"{outcome.get('reason') or wait.terminal_action}"
+                    f"the runner refused command {queued.id}: {refusal}"
+                    if refusal
+                    else (
+                        f"command {queued.id} did not take effect: "
+                        f"{outcome.get('message') or wait.terminal_action}"
+                    )
                 ),
                 details={
                     "queue_path": str(queue_path),

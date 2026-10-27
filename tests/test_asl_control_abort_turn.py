@@ -137,6 +137,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
         abort_before_run: bool = False,
         worker_complies: bool = False,
         worker_self_pauses: bool = False,
+        runner_ends_turn: str | None = None,
         grace_seconds: int = 30,
         reason: str = "operator needs the machine",
         enable_mailbox: bool = False,
@@ -151,7 +152,9 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
         ``aborted`` result, exactly what session 3 produces on expiry) or one of
         the two compliant ones: a completion inside the window
         (``worker_complies``) or a self-pause inside it
-        (``worker_self_pauses``).
+        (``worker_self_pauses``). ``runner_ends_turn`` (``"timed_out"`` or
+        ``"interrupted"``) instead plays a turn the runner itself ended
+        inside the window, which is no compliance at all.
         """
         write_plan(self.plan_dir, statuses)
         if enable_mailbox:
@@ -200,6 +203,16 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
                             "RUNNER_PAUSE: blocked - supervisor abort acknowledged\n"
                         ),
                         stderr="",
+                    )
+                if runner_ends_turn is not None:
+                    return harnesses.HarnessResult(
+                        name=name,
+                        argv=[name, str(kwargs["prompt"])],
+                        returncode=124 if runner_ends_turn == "timed_out" else 130,
+                        stdout="",
+                        stderr="",
+                        timed_out=runner_ends_turn == "timed_out",
+                        interrupted=runner_ends_turn == "interrupted",
                     )
                 if not worker_complies:
                     # What the session-3 wait loop returns once the grace
@@ -462,6 +475,52 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
                 events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
                 events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
                 events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
+            ],
+            self.run_control_actions(),
+        )
+        self.assertFalse(payload["control"]["abort_turn_requested"])
+
+    def test_turn_timeout_inside_the_window_is_not_worker_compliance(
+        self,
+    ) -> None:
+        payload, harness_calls = self._run_loop(
+            statuses=("pending", "pending"),
+            abort_during_turn_index=1,
+            runner_ends_turn="timed_out",
+            expected_exit_code=1,
+        )
+
+        # The runner's own turn timeout killed the worker, so crediting the
+        # worker would let `asl control abort --wait` report compliance that
+        # never happened. The abort is still consumed: nothing stays pending.
+        self.assertTrue(payload["paused"])
+        self.assertEqual(["codex"], harness_calls)
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_PREEMPTED,
+            ],
+            self.run_control_actions(),
+        )
+        self.assertFalse(payload["control"]["abort_turn_requested"])
+
+    def test_interrupt_inside_the_window_is_not_worker_compliance(self) -> None:
+        payload, harness_calls = self._run_loop(
+            statuses=("pending", "pending"),
+            abort_during_turn_index=1,
+            runner_ends_turn="interrupted",
+            expected_exit_code=130,
+        )
+
+        self.assertTrue(payload["paused"])
+        self.assertEqual(events.PAUSE_REASON_INTERRUPTED, payload["pause_reason"])
+        self.assertEqual(["codex"], harness_calls)
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_PREEMPTED,
             ],
             self.run_control_actions(),
         )

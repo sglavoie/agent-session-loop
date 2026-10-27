@@ -373,6 +373,51 @@ class ControlCliWaitTests(unittest.TestCase):
             payload["wait"]["terminal_action"],
         )
 
+    def test_abort_wait_fails_when_a_timeout_preempts_the_abort(self) -> None:
+        self.mark_run_active()
+        abort = harnesses.AbortSignal()
+
+        def preempted() -> None:
+            # Stands in for the turn timeout (or an interrupt) ending the turn
+            # inside the grace window: neither the worker nor the abort did.
+            events.append_event(
+                self.event_path,
+                events.Event(
+                    events.RUN_CONTROL_EVENT,
+                    {
+                        "run_id": "20260724T100000Z-1",
+                        "action": events.RUN_CONTROL_ACTION_ABORT_TURN_PREEMPTED,
+                        "message": "turn abort preempted by the turn timeout",
+                    },
+                ),
+            )
+            self.append_run_finished()
+
+        with self.background_runner(abort=abort, after_drain=preempted):
+            exit_code, payload = self.payload_from(
+                control_cli.control_abort_from_args,
+                self.args(
+                    wait=True,
+                    wait_timeout=10.0,
+                    grace_seconds=None,
+                    reason=None,
+                ),
+            )
+
+        # An outcome arrived, but not the one asked for: claiming success here
+        # is the false compliance `--wait` exists to rule out.
+        self.assertEqual(1, exit_code, payload)
+        self.assertEqual(
+            events.RUN_CONTROL_ACTION_ABORT_TURN_PREEMPTED, payload["reason"]
+        )
+        self.assertIn("did not take effect", payload["error"])
+        self.assertIn("turn abort preempted", payload["error"])
+        self.assertEqual(
+            events.RUN_CONTROL_ACTION_ABORT_TURN_PREEMPTED,
+            payload["details"]["wait"]["terminal_action"],
+        )
+        self.assertTrue(payload["details"]["wait"]["run_finished"])
+
     def test_abort_wait_timeout_after_delivery_reports_abort_timeout(self) -> None:
         self.mark_run_active()
         real_wait = control_cli_wait._wait_for_receipt
