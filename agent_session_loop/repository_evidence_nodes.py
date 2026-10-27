@@ -5,10 +5,14 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from . import repository_evidence_git as evidence_git
+
+#: The node kind of an untracked embedded repository, hashed over that
+#: repository's own fingerprint rather than over any one file's bytes.
+NESTED_REPOSITORY_KIND = "nested-repo"
 
 
 def _fingerprint_repo_node(
@@ -105,6 +109,7 @@ def _fingerprint_untracked_nodes(
     argv: Sequence[str],
     reason_prefix: str,
     skip_symlinks: bool = False,
+    nested_repository: Callable[[str], str] | None = None,
 ) -> list[list[str]]:
     """Fingerprint each git-reported untracked path as a repository node.
 
@@ -114,6 +119,12 @@ def _fingerprint_untracked_nodes(
     for a scan whose subject is what git *reads* from the path rather than the
     node itself; a link that cannot be `lstat`ed still reaches
     :func:`_fingerprint_repo_node` and fails the capture closed there.
+
+    Git never descends into an embedded repository it does not track, and
+    lists it once as ``<rel>/``. ``nested_repository`` maps that path to a
+    digest of the repository's own evidence, recorded as a
+    :data:`NESTED_REPOSITORY_KIND` node so a write inside it still moves the
+    fingerprint; without it the directory fails the capture closed.
     """
     payload: list[list[str]] = []
     for rel in sorted(_listed_paths(untracked_text)):
@@ -124,6 +135,12 @@ def _fingerprint_untracked_nodes(
         ):
             continue
         if skip_symlinks and (repo_root / rel).is_symlink():
+            continue
+        if nested_repository is not None and rel.endswith("/"):
+            node_rel = rel.rstrip("/")
+            payload.append(
+                [node_rel, NESTED_REPOSITORY_KIND, nested_repository(node_rel)]
+            )
             continue
         payload.append(
             _fingerprint_repo_node(

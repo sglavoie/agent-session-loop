@@ -11,6 +11,7 @@ from agent_session_loop import (
     review_guard_git,
 )
 from tests.review_fingerprint_base import ReviewFingerprintBase
+from tests.support import init_git_repo
 
 ASL_TEST_LANE = "integration"
 
@@ -293,6 +294,38 @@ class ReviewFingerprintDiffEvidenceTests(ReviewFingerprintBase):
         self.assertEqual(
             sorted(names),
             review_guard._review_guard_changed_paths(before, after)["tracked"],
+        )
+
+    def test_an_untracked_nested_repository_is_fingerprinted_as_a_node(
+        self,
+    ) -> None:
+        nested = self.repo_root / "nested"
+        init_git_repo(nested)
+
+        # `ls-files --others` lists the embedded repository as `nested/`, a
+        # directory no file fingerprint can describe.
+        before = self._fingerprint()
+        self.assertIsNone(review_guard._review_guard_unavailable_detail(before))
+        self.assertEqual(
+            [["nested", "nested-repo"]],
+            [entry[:2] for entry in before["untracked"]],
+        )
+        self.assertEqual(before, self._fingerprint())
+
+        (nested / "README.md").write_text("edited\n", encoding="utf-8")
+        edited = self._fingerprint()
+        self.assertEqual(
+            ["nested"],
+            review_guard._review_guard_changed_paths(before, edited)[
+                "untracked_changed"
+            ],
+        )
+        (nested / "new.txt").write_text("new\n", encoding="utf-8")
+        added = self._fingerprint()
+        self.assertNotEqual(edited["untracked"], added["untracked"])
+        # An allowlisted path inside the nested repository stays out of it.
+        self.assertEqual(
+            edited["untracked"], self._fingerprint("nested/new.txt")["untracked"]
         )
 
     def test_an_unresolved_merge_conflict_is_fingerprinted(self) -> None:

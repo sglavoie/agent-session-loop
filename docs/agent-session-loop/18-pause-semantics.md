@@ -230,8 +230,9 @@ Common pause reasons:
   the guard — (with the plan directory and any
   `--review-guard-exclude` paths excluded from both diffs), and untracked nodes
   outside those
-  paths (file bytes, or a symlink's kind and link text — never the link
-  target's bytes), gitignored ones excluded unless
+  paths (file bytes; a symlink's kind and link text, never the link
+  target's bytes; or an untracked embedded repository's own fingerprint,
+  taken the same way), gitignored ones excluded unless
   `--review-guard-include-ignored` is passed — except for the untracked
   `.gitignore` files git can apply, which are fingerprinted under either mode
   even when their own rules hide them. `.git/info/exclude`, the

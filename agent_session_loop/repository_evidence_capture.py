@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import json
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -154,6 +156,62 @@ def _unmerged_stage_evidence(
             )
         stages.setdefault(rel, []).append(meta)
     return {rel: "\n".join(sorted(metas)) for rel, metas in stages.items()}
+
+
+def _nested_repository_digest(
+    repo_root: Path,
+    rel: str,
+    *,
+    plan_path: Path,
+    exclude: tuple[str, ...],
+    include_ignored: bool,
+) -> str:
+    """Hash the full fingerprint of the repository embedded at ``rel``.
+
+    Git reports an embedded repository — an untracked one, or a submodule's
+    worktree — as a single entry whose own evidence (``nested/``, or
+    ``Subproject commit <sha>-dirty``) does not move when a file inside it is
+    edited again, so the repository is captured in its own right and its
+    digest stands in for its content. The allowlist entries beneath ``rel``
+    are carried in relative to it, and the plan directory resolves on its own.
+
+    The path must be the top level of its own repository: a directory whose
+    ``.git`` is broken resolves to the enclosing repository instead, and
+    capturing that would recurse into the repository under capture.
+    """
+    nested = repo_root / rel
+    toplevel_argv = ["rev-parse", "--show-toplevel"]
+    toplevel = evidence_git._review_guard_git(nested, toplevel_argv).stdout.strip()
+    try:
+        is_own_toplevel = Path(toplevel).resolve() == nested.resolve()
+    except OSError as error:
+        raise evidence_git._ReviewGuardUnavailable(
+            "nested-repo-unresolved", toplevel_argv, error=error, path=rel
+        ) from error
+    if not is_own_toplevel:
+        raise evidence_git._ReviewGuardUnavailable(
+            "nested-repo-unresolved", toplevel_argv, path=rel
+        )
+    prefix = f"{rel}/"
+    fingerprint = _capture_review_repo_fingerprint(
+        nested,
+        plan_path,
+        exclude=tuple(
+            path.removeprefix(prefix) for path in exclude if path.startswith(prefix)
+        ),
+        include_ignored=include_ignored,
+    )
+    unavailable = fingerprint.get("unavailable")
+    if isinstance(unavailable, dict):
+        raise evidence_git._ReviewGuardUnavailable(
+            "nested-repo-unavailable",
+            unavailable.get("argv") or (),
+            error=RuntimeError(unavailable.get("reason")),
+            path=rel,
+        )
+    return hashlib.sha256(
+        json.dumps(fingerprint, sort_keys=True).encode("ascii")
+    ).hexdigest()
 
 
 def _capture_review_repo_fingerprint(
@@ -331,6 +389,13 @@ def _capture_review_repo_fingerprint(
             ":(top)",
         ]
         untracked_text = evidence_git._review_guard_git(cwd_path, untracked_argv).stdout
+        nested_repository = functools.partial(
+            _nested_repository_digest,
+            repo_root,
+            plan_path=plan_path,
+            exclude=exclude,
+            include_ignored=include_ignored,
+        )
         untracked_payload = evidence_nodes._fingerprint_untracked_nodes(
             untracked_text,
             repo_root=repo_root,
@@ -338,6 +403,7 @@ def _capture_review_repo_fingerprint(
             exclude=exclude,
             argv=untracked_argv,
             reason_prefix="untracked",
+            nested_repository=nested_repository,
         )
         # The scan above defers to git's ignore rules, and git applies an
         # untracked `.gitignore` before answering it — so a turn can write one
