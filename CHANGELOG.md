@@ -286,6 +286,22 @@ A polish and hardening round after the public release.
   nested too deeply are malformed (400) rather than a crash or a stalled
   import; identifiers, keys and pause reasons ending in a newline are refused;
   an incomplete catalog generation publishes without a false refusal warning.
+- Repair budgets: an exhausted review-verdict repair needs inspection (pause
+  policy v6) instead of being relaunched to burn another review turn; the
+  verification repair budget and the repair packet's attempt number count only
+  failures that graded a check, not host refusals or review-verdict
+  exhaustion pauses.
+- Run controls: an abort whose turn a turn timeout or an interrupt ended is
+  recorded as `abort-turn-preempted`, and `asl control abort --wait` exits 1,
+  instead of crediting the worker with compliance; the bridge snapshot reports
+  a current-format wait's ceiling deadline and span instead of null.
+- Workbench: the Pi refuses a second launch or reply while the first is still
+  pending behind a mutation in another scope; a catalog plan one page could not
+  publish is no longer retired when a later page closes the same generation.
+- `asl commit --message-file` keeps the operator's own title and opening
+  paragraphs instead of cutting everything above a later title-shaped line such
+  as `note:`; prepare corrections stay blocked inside the Handoff section when
+  form feeds or Unicode line separators sit above it.
 
 ### Changed
 
