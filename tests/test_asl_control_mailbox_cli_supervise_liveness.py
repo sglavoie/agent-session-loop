@@ -17,6 +17,7 @@ from agent_session_loop import (
     agent_mux_delivery,
     mailbox,
     mailbox_appenders,
+    mailbox_cli_agent_mux,
     mailbox_cli_constants,
     mailbox_cli_outbox,
     mailbox_cli_output,
@@ -35,6 +36,88 @@ from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
 
 
 class MailboxCliTestsPart9(MailboxCliTestsBase):
+    def test_terminal_record_survives_interrupted_output_after_cursor_write(
+        self,
+    ) -> None:
+        launch = mailbox_validation.new_supervision_id()
+        self.write_liveness_record(launch)
+        terminal = mailbox_appenders.append_supervision_end(
+            self.plan_dir,
+            "helper exited: complete",
+            outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
+            state_dir=self.state_dir,
+            supervision_id=launch,
+        )
+        with (
+            mock.patch.object(
+                mailbox_cli_agent_mux,
+                "notify_agent_mux_mailbox_question",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.supervise_lines(supervision_id=launch)
+        self.assertEqual(terminal.seq, self.cursor_on_disk(launch))
+
+        with mock.patch.object(
+            supervision_liveness, "probe", return_value=supervision_liveness.DEAD
+        ) as probe:
+            code, recovered = self.payload_from(
+                mailbox_cli_outbox.outbox_supervise_from_args,
+                self.args(timeout=0, supervision_id=launch),
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual("DONE", recovered["state"])
+        self.assertIsNone(recovered["lost_reason"])
+        self.assertEqual(
+            [terminal.id], [item["id"] for item in recovered["supervision_ends"]]
+        )
+        probe.assert_not_called()
+
+    def test_terminal_replay_is_immediate_and_scoped_to_its_launch(self) -> None:
+        launch = mailbox_validation.new_supervision_id()
+        own = mailbox_appenders.append_supervision_end(
+            self.plan_dir,
+            "helper exited: complete",
+            outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_COMPLETE,
+            state_dir=self.state_dir,
+            supervision_id=launch,
+        )
+        foreign = mailbox_appenders.append_supervision_end(
+            self.plan_dir,
+            "helper exited: stopped",
+            outcome=mailbox_vocabulary.SUPERVISION_OUTCOME_STOPPED,
+            state_dir=self.state_dir,
+            supervision_id=mailbox_validation.new_supervision_id(),
+        )
+        mailbox_cursors.write_supervision_cursor(
+            self.plan_dir, launch, foreign.seq, state_dir=self.state_dir
+        )
+        with mock.patch.object(time, "sleep", side_effect=AssertionError("slept")):
+            code, replay = self.payload_from(
+                mailbox_cli_outbox.outbox_supervise_from_args,
+                self.args(timeout=550, supervision_id=launch),
+            )
+        self.assertEqual(0, code)
+        self.assertEqual("DONE", replay["state"])
+        self.assertEqual([own.id], [item["id"] for item in replay["supervision_ends"]])
+        self.assertEqual(foreign.seq, replay["next_since"])
+
+        # The general-purpose outbox reader still honors its physical cursor.
+        code, ordinary = self.payload_from(
+            mailbox_cli_outbox.outbox_wait_from_args,
+            self.args(
+                timeout=0,
+                since=foreign.seq,
+                include=mailbox_cli_constants.OUTBOX_INCLUDE_ALL,
+                supervision_id=launch,
+            ),
+        )
+        self.assertEqual(0, code)
+        self.assertTrue(ordinary["timed_out"])
+        self.assertEqual([], ordinary["supervision_ends"])
+
     def test_dead_helper_requires_a_successful_final_mailbox_read(self) -> None:
         empty = mailbox_snapshot.MailboxView(
             mailbox_path=mailbox_cursors.mailbox_path_for_plan(

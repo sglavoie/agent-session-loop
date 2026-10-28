@@ -1,5 +1,11 @@
 # Agent Session Loop (ASL)
 
+`asl outbox supervise` recovers its launch's terminal record even after the
+persisted cursor has advanced past it. If output is interrupted after saving
+the cursor, retrying returns `DONE` immediately instead of reporting `IDLE` or
+a false `LOST`. Terminal records from other launches remain cursor-scoped;
+the general-purpose `asl outbox wait` retains its ordinary `--since` behavior.
+
 Completion contracts keep their imports in `contracts`, with models, Markdown
 sections, check validation, and recipe parsing in `contract_*`. The
 `handoff_guard_*` modules separate session reopening, mailbox completion,

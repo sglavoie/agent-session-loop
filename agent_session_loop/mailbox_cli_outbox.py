@@ -335,6 +335,7 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
                 supervisor_id=supervisor_id,
                 include=mailbox_cli_constants.OUTBOX_INCLUDE_SUPERVISION,
                 liveness_probe=liveness_probe,
+                replay_supervision_id=supervision_id,
             )
         except mailbox_models.MailboxError as error:
             mailbox_cli_output.print_mailbox_error(

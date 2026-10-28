@@ -28,6 +28,7 @@ def wait_for_questions(
     supervisor_id: str,
     include: str = mailbox_cli_constants.OUTBOX_INCLUDE_QUESTIONS,
     liveness_probe: Callable[[], str | None] | None = None,
+    replay_supervision_id: str | None = None,
 ) -> mailbox_cli_models.OutboxWaitResult:
     started = time.monotonic()
     deadline = started + timeout
@@ -89,6 +90,23 @@ def wait_for_questions(
                 last_read_error = None
                 last_read_token = current_token
                 selected = view.messages_since(since, kinds=kinds)
+                if (
+                    replay_supervision_id is not None
+                    and mailbox_vocabulary.KIND_SUPERVISION_END in kinds
+                ):
+                    # A persisted cursor proves the record was read, not that
+                    # DONE reached the caller. A launch's terminal outcome is
+                    # durable even when output was interrupted after saving it.
+                    selected = (
+                        tuple(
+                            message
+                            for message in view.messages
+                            if message.seq <= since
+                            and message.kind == mailbox_vocabulary.KIND_SUPERVISION_END
+                            and message.supervision_id == replay_supervision_id
+                        )
+                        + selected
+                    )
                 if selected:
                     return mailbox_cli_models.OutboxWaitResult(
                         questions=tuple(
