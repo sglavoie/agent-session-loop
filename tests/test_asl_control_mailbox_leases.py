@@ -18,6 +18,7 @@ from agent_session_loop import (
     mailbox,
     mailbox_appenders,
     mailbox_constants,
+    mailbox_cursors,
     mailbox_leases,
     mailbox_models,
     mailbox_vocabulary,
@@ -27,6 +28,87 @@ from tests.asl_control_mailbox_support import MailboxTestsBase
 
 
 class MailboxTestsPart5(MailboxTestsBase):
+    def test_cursor_read_ignores_symlinked_payload(self) -> None:
+        supervision_id = self.message_id()
+        mailbox_cursors.write_supervision_cursor(
+            self.plan_dir, supervision_id, 42, state_dir=self.state_dir
+        )
+        path = mailbox_cursors.supervision_cursor_path_for_plan(
+            self.plan_dir, supervision_id, self.state_dir
+        )
+        target = self.tmp / "original-cursor"
+        path.rename(target)
+        path.symlink_to(target)
+
+        self.assertEqual(
+            0,
+            mailbox_cursors.read_supervision_cursor(
+                self.plan_dir, supervision_id, state_dir=self.state_dir
+            ),
+        )
+
+    def test_fifo_cursor_read_returns_without_blocking(self) -> None:
+        supervision_id = self.message_id()
+        path = mailbox_cursors.supervision_cursor_path_for_plan(
+            self.plan_dir, supervision_id, self.state_dir
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(path)
+        script = (
+            "import sys; "
+            "from agent_session_loop import mailbox_cursors; "
+            "print(mailbox_cursors.read_supervision_cursor("
+            "sys.argv[1], sys.argv[2], state_dir=sys.argv[3]))"
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(self.plan_dir),
+                supervision_id,
+                str(self.state_dir),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=True,
+        )
+        self.assertEqual("0", result.stdout.strip())
+
+    def test_change_token_forces_read_after_link_replacement(self) -> None:
+        self.guidance("notice")
+        path = self.mailbox_path()
+        original_token = mailbox.mailbox_change_token(path)
+        target = self.tmp / "original-mailbox"
+        path.rename(target)
+        path.symlink_to(target)
+
+        self.assertIs(
+            mailbox_constants.MAILBOX_CHANGE_TOKEN_UNAVAILABLE,
+            mailbox.mailbox_change_token(path),
+        )
+        with self.assertRaises(mailbox_models.MailboxError) as symlink_error:
+            mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual(
+            mailbox_constants.ERROR_MAILBOX_READ, symlink_error.exception.reason
+        )
+
+        path.unlink()
+        os.link(target, path)
+        self.assertIs(
+            mailbox_constants.MAILBOX_CHANGE_TOKEN_UNAVAILABLE,
+            mailbox.mailbox_change_token(path),
+        )
+        with self.assertRaises(mailbox_models.MailboxError) as hardlink_error:
+            mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual(
+            mailbox_constants.ERROR_MAILBOX_READ, hardlink_error.exception.reason
+        )
+        self.assertNotEqual(
+            mailbox_constants.MAILBOX_CHANGE_TOKEN_UNAVAILABLE, original_token
+        )
+
     def test_mailbox_writers_reject_symlinks_and_hard_links(self) -> None:
         path = self.mailbox_path()
         path.parent.mkdir(parents=True, exist_ok=True)

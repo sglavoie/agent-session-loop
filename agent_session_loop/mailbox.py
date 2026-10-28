@@ -21,6 +21,7 @@ import contextlib
 import fcntl
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -130,18 +131,23 @@ def _write_locked_records(
 def mailbox_change_token(mailbox_path: str | Path) -> object:
     """Return cheap append-log metadata used to avoid unchanged full reads."""
     try:
-        stat_result = Path(mailbox_path).stat()
+        stat_result = Path(mailbox_path).lstat()
     except FileNotFoundError:
         return None
     except OSError:
         # The metadata probe is only an optimization. Callers must perform a
         # full read so the mailbox API preserves its established error behavior.
         return MAILBOX_CHANGE_TOKEN_UNAVAILABLE
+    # A replaced path must reach open_regular_file even if it points at the
+    # same inode and has identical content metadata as the last successful read.
+    if not stat.S_ISREG(stat_result.st_mode) or stat_result.st_nlink != 1:
+        return MAILBOX_CHANGE_TOKEN_UNAVAILABLE
     return (
         stat_result.st_dev,
         stat_result.st_ino,
         stat_result.st_size,
         stat_result.st_mtime_ns,
+        stat_result.st_ctime_ns,
     )
 
 

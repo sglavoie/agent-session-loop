@@ -149,7 +149,7 @@ only when no later activity is recorded.
 
 ASL executes a prepared plan one session at a time. Its Autopilot supervisor starts or attaches to `asl run`, watches the active worker, and uses a per-plan mailbox to exchange live guidance, notices, questions, and answers without restarting the session.
 
-Mailbox logs and leases must be regular files with a single link. A symlink, hard link, FIFO, or other special file at either path produces a mailbox or lease error without following the link or waiting for a FIFO writer.
+Mailbox logs and leases must be regular files with a single link. A symlink, hard link, FIFO, or other special file at either path produces a mailbox or lease error without following the link or waiting for a FIFO writer. Supervision cursor reads treat those unsafe file types as missing, so a FIFO cannot stall a supervisor and a linked payload cannot advance its cursor.
 
 ```mermaid
 flowchart TD

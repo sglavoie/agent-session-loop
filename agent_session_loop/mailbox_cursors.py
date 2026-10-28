@@ -99,7 +99,10 @@ def _read_supervision_cursor_payload(
             supervision_id,
             state_dir,
         )
-        payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+        with os.fdopen(
+            open_regular_file(cursor_path, os.O_RDONLY), encoding="utf-8"
+        ) as file:
+            payload = json.load(file)
     except OSError, ValueError, RecursionError:
         # RecursionError is not a ValueError: pathologically nested JSON raises
         # it from the decoder instead of a decode error.
