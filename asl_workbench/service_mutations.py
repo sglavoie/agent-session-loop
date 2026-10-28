@@ -83,7 +83,7 @@ class ServiceMutations(ServiceState):
                 decide,
                 connector_id=self._connector_id,
                 received_at=now,
-                plan_idle=self._store.plan_idle(
+                plan_idle=lambda: self._store.plan_idle(
                     self._connector_id, request.plan_key, now=now
                 ),
             )

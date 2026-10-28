@@ -58,7 +58,7 @@ class OperationJournal(StoreBase):
         *,
         connector_id: str,
         received_at: float,
-        plan_idle: bool = False,
+        plan_idle: Callable[[], bool] | None = None,
     ) -> dict[str, Any] | None:
         """Look up, decide, and journal one submission in one transaction.
 
@@ -70,14 +70,13 @@ class OperationJournal(StoreBase):
         true when two submissions arrive together: the second reads the
         first's row rather than a snapshot taken before it was written.
 
-        ``plan_idle`` says the newest observation shows nothing running on the
-        plan. A submission is then a person acting in place of an ``unconfirmed``
-        operation, so that operation is superseded first -- the same rule the
-        Mac's journal applies, and the only way out of ``unconfirmed`` short of
-        a late report.
+        ``plan_idle`` checks whether the newest observation shows nothing
+        running on the plan. It runs inside this transaction: an observation
+        arriving after an earlier idle check must not supersede an uncertain
+        operation and admit a second mutation against a newly active plan.
         """
         with self.transaction() as connection:
-            if plan_idle:
+            if plan_idle is not None and plan_idle():
                 self._supersede_uncertain(
                     connection, plan_key, operation_id, now=received_at
                 )

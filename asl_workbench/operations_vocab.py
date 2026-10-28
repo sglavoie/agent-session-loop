@@ -231,9 +231,15 @@ OPERATION_TRANSITIONS: Mapping[str, frozenset[str]] = {
         }
     ),
     # Late reconciliation from a receipt or from ASL's own records is the only
-    # way out, and it never goes back to ``dispatched`` or ``accepted``.
+    # way out. An expired mutation receipt proves the connector never attempted
+    # the command, even if link silence had earlier made it unconfirmed.
     OPERATION_UNCONFIRMED: frozenset(
-        {OPERATION_CONSUMED, OPERATION_REJECTED, OPERATION_SUPERSEDED}
+        {
+            OPERATION_CONSUMED,
+            OPERATION_REJECTED,
+            OPERATION_EXPIRED,
+            OPERATION_SUPERSEDED,
+        }
     ),
     OPERATION_CONSUMED: frozenset(),
     OPERATION_REJECTED: frozenset(),

@@ -318,8 +318,18 @@ class ConnectorState:
         )
 
     def _enqueue(self, answer: _Answer) -> None:
-        """Put one finished answer in the lane, or drop it if the lane is full."""
-        if len(self._queue.answers) >= MAX_QUEUED_ANSWERS:
+        """Keep mutation settlements even when the ordinary answer limit is hit.
+
+        A dropped detail answer can time out at its caller. A mutation report
+        or refusal settles a durable command row; discarding it could leave the
+        remote journal uncertain indefinitely.
+        Recovery can produce more reports than the ordinary answer limit at
+        once, so those reports must be allowed to drain through the same lane.
+        """
+        if (
+            len(self._queue.answers) >= MAX_QUEUED_ANSWERS
+            and not answer.settles_mutation
+        ):
             answer.forget()
             self._answer_fault = "the answer queue is full"
             return

@@ -569,6 +569,40 @@ class RemoteProviderTests(unittest.TestCase):
         assert lost is not None
         self.assertEqual(lost["status"], OPERATION_UNCONFIRMED)
 
+    def test_a_new_active_snapshot_before_admission_keeps_uncertain_hold(self) -> None:
+        self.observe_plan(primary_state="paused-for-reply")
+        self.leave_unconfirmed("op-lost")
+        admit_operation = self.store.admit_operation
+
+        def observe_before_admission(*args: Any, **kwargs: Any) -> Any:
+            self.store.ingest_snapshot(
+                envelope(
+                    "snapshot",
+                    snapshot_payload(
+                        observed_at=NOW + 1,
+                        runs=[
+                            run_row(
+                                "run-1", plan_key="plan-abc", primary_state="running"
+                            )
+                        ],
+                    ),
+                    connector_id="mac",
+                ),
+                received_at=NOW + 1,
+            )
+            return admit_operation(*args, **kwargs)
+
+        with mock.patch.object(
+            self.store, "admit_operation", side_effect=observe_before_admission
+        ):
+            response = self.submit("op-next")
+
+        self.assertEqual(document(response)["reason"], REASON_OPERATION_UNCERTAIN)
+        lost = self.store.operation("op-lost")
+        assert lost is not None
+        self.assertEqual(lost["status"], OPERATION_UNCONFIRMED)
+        self.assertIsNone(self.store.operation("op-next"))
+
     def test_an_uncertain_mutation_is_not_superseded_without_an_observation(
         self,
     ) -> None:

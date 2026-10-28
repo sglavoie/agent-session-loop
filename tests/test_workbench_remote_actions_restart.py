@@ -14,6 +14,8 @@ from agent_session_loop import (
     workbench_operations,
 )
 from asl_workbench import remote_actions
+from asl_workbench.connector_lanes import _Answer
+from asl_workbench.connector_support import MAX_QUEUED_ANSWERS
 from asl_workbench.operations import (
     DETAIL_CONNECTOR_RESTARTED,
     DETAIL_NO_RESULT,
@@ -30,6 +32,10 @@ from asl_workbench.operations import (
     OPERATION_UNCONFIRMED,
 )
 from asl_workbench.transport import (
+    CAPABILITY_MUTATE,
+    KIND_DETAIL,
+    KIND_OPERATION,
+    KIND_RECEIPT,
     request_envelope,
 )
 from tests.support import (
@@ -127,6 +133,71 @@ class RestartSettlementTests(unittest.TestCase):
         self.assertEqual("op-old", report["payload"]["operation_id"])
         self.assertEqual(OPERATION_UNCONFIRMED, report["payload"]["status"])
         self.assertEqual(1, performer.recovered)
+
+    def test_recovery_delivers_every_report_past_the_read_queue_limit(self) -> None:
+        channel = LinkChannel()
+        count = MAX_QUEUED_ANSWERS + 1
+        performer = StubPerformer(
+            settlements=[
+                {
+                    "operation_id": f"op-old-{index}",
+                    "status": OPERATION_UNCONFIRMED,
+                    "observed_at": NOW,
+                    "detail_code": DETAIL_CONNECTOR_RESTARTED,
+                }
+                for index in range(count)
+            ]
+        )
+        connector = make_connector(channel=channel, performer=performer)
+
+        self.assertEqual(count, connector.recover(NOW))
+        self.assertEqual(count, len(connector._queue.answers))
+        drive(connector, count + 4)
+        self.assertEqual(
+            {f"op-old-{index}" for index in range(count)},
+            {frame["payload"]["operation_id"] for frame in channel.operations()},
+        )
+
+    def test_completed_mutation_report_survives_a_full_read_queue(self) -> None:
+        connector = make_connector(performer=StubPerformer())
+        connector._queue.answers = [
+            _Answer(request_id=f"read-{index}", kind=KIND_DETAIL, payload={})
+            for index in range(MAX_QUEUED_ANSWERS)
+        ]
+        connector._mutation_result = _Answer(
+            request_id=None,
+            kind=KIND_OPERATION,
+            payload={"operation_id": "op-finished", "status": OPERATION_UNCONFIRMED},
+            capability=CAPABILITY_MUTATE,
+        )
+
+        connector._collect_mutation()
+
+        self.assertIsNone(connector._mutation_result)
+        self.assertEqual(MAX_QUEUED_ANSWERS + 1, len(connector._queue.answers))
+        self.assertEqual(
+            "op-finished", connector._queue.answers[-1].payload["operation_id"]
+        )
+
+    def test_mutation_refusal_survives_queue_pressure_and_link_failure(self) -> None:
+        connector = make_connector(performer=StubPerformer())
+        connector._queue.answers = [
+            _Answer(request_id=f"read-{index}", kind=KIND_DETAIL, payload={})
+            for index in range(MAX_QUEUED_ANSWERS)
+        ]
+        refusal = _Answer(
+            request_id="submit-op-refused",
+            kind=KIND_RECEIPT,
+            payload={"outcome": "refused"},
+            capability=CAPABILITY_MUTATE,
+        )
+
+        connector._enqueue(refusal)
+        self.assertEqual(MAX_QUEUED_ANSWERS + 1, len(connector._queue.answers))
+        connector._fail(NOW)
+
+        self.assertEqual(connector._queue.answers, [refusal])
+        self.assertEqual(refusal.payload["outcome"], "refused")
 
     def test_a_connector_that_cannot_act_recovers_nothing(self) -> None:
         connector = make_connector(performer=None, body_source=None)

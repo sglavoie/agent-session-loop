@@ -15,6 +15,7 @@ from typing import Any
 from .connector_protocols import ObservationCycle
 from .transport import (
     CAPABILITY_DETAIL,
+    CAPABILITY_MUTATE,
     KIND_DETAIL,
     KIND_OPERATION,
     KIND_RECEIPT,
@@ -71,6 +72,13 @@ class _Answer:
     #: differently, so the word is carried rather than assumed.
     capability: str = CAPABILITY_DETAIL
 
+    @property
+    def settles_mutation(self) -> bool:
+        """Whether losing this frame would strand a command's journal row."""
+        return self.kind == KIND_OPERATION or (
+            self.kind == KIND_RECEIPT and self.capability == CAPABILITY_MUTATE
+        )
+
     def forget(self) -> None:
         """Drop whatever body this answer is holding.
 
@@ -119,17 +127,14 @@ class _Queue:
     def drop_correlated(self) -> None:
         """Drop the answers a lost link made pointless, and keep the rest.
 
-        A detail or a receipt answers a question whose asker has already been
-        told the link went down, so delivering one after the reconnect would
-        hand a service material it reported as offline. An operation is not an
-        answer to a waiter: it is the only record this end has of what ASL did
-        to somebody's plan, and the far end can still absorb it late -- an
-        ``unconfirmed`` command settling once the link returns is precisely the
-        reconciliation its state machine keeps a door open for.
+        Detail answers and detail receipts belong to waiters the far end has
+        already told the link went down. Operation reports and mutation refusal
+        receipts settle commands instead: the far end can still absorb both
+        after reconnecting, even when it has marked a command unconfirmed.
         """
         live: list[_Answer] = []
         for answer in self.answers:
-            if answer.kind == KIND_OPERATION:
+            if answer.settles_mutation:
                 live.append(answer)
                 continue
             answer.forget()

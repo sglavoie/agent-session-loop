@@ -183,8 +183,8 @@ class UplinkFlowMixin(UplinkBodiesMixin):
         window, a full queue, a missing token -- with a receipt rather than an
         operation frame, because nothing was attempted. That receipt is the
         only report the dispatched row will ever get, so it settles the row
-        here: left ``dispatched``, the plan would refuse every later mutation
-        as still outstanding.
+        here. A sweep may first call that row ``unconfirmed`` after a lost link;
+        the late receipt still proves that the connector never attempted it.
         """
         status = {
             RECEIPT_REFUSED: OPERATION_REJECTED,
@@ -202,23 +202,33 @@ class UplinkFlowMixin(UplinkBodiesMixin):
         claimed_id = envelope["payload"].get("operation_id")
         if claimed_id is not None and claimed_id != operation_id:
             return
-        row = self.store.operation(operation_id)
-        if (
-            row is None
-            or row.get("connector_id") != self.connector_id
-            or row.get("status") != OPERATION_DISPATCHED
-        ):
-            return
         detail_code = envelope["payload"].get("detail_code")
-        self.store.settle_operation_if(
-            operation_id,
-            OPERATION_DISPATCHED,
-            status,
-            now=now,
-            # A receipt may cite a transport code the journal has no word for.
-            detail_code=detail_code if detail_code in OPERATION_DETAIL_CODES else None,
-            settled_at=None if status == OPERATION_UNCONFIRMED else now,
-        )
+        while True:
+            row = self.store.operation(operation_id)
+            if row is None or row.get("connector_id") != self.connector_id:
+                return
+            current = str(row.get("status", ""))
+            if current == status:
+                break
+            if (
+                current not in (OPERATION_DISPATCHED, OPERATION_UNCONFIRMED)
+                or status not in OPERATION_TRANSITIONS[current]
+            ):
+                return
+            if self.store.settle_operation_if(
+                operation_id,
+                current,
+                status,
+                now=now,
+                # A receipt may cite a transport code the journal has no word for.
+                detail_code=(
+                    detail_code if detail_code in OPERATION_DETAIL_CODES else None
+                ),
+                settled_at=None if status == OPERATION_UNCONFIRMED else now,
+            ):
+                break
+            # A sweep may have moved dispatched to unconfirmed since the read.
+            # Recheck that state; an accepted attempt must not be overwritten.
         self.discard_body(operation_id)
 
     # -- The downward path ---------------------------------------------------

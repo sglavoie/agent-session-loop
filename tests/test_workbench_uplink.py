@@ -440,6 +440,40 @@ class UploadTests(UplinkCase):
                 )
                 self.assertIsNone(self.store.outstanding_operation(PLAN_KEY))
 
+    def test_a_late_refusal_resolves_a_swept_unconfirmed_submission(self) -> None:
+        for operation_id, outcome, settled_status in (
+            ("late-refused", "refused", OPERATION_REJECTED),
+            ("late-expired", "expired", OPERATION_EXPIRED),
+        ):
+            with self.subTest(outcome=outcome):
+                self.store.record_operation(
+                    operation_record(operation_id, status=OPERATION_DISPATCHED),
+                    connector_id=CONNECTOR,
+                    received_at=NOW,
+                )
+                self.store.advance_operation(
+                    operation_id, OPERATION_UNCONFIRMED, now=NOW + 1
+                )
+                receipt = receipt_envelope(
+                    payload={
+                        "outcome": outcome,
+                        "observed_at": NOW + 2,
+                        "detail_code": "deadline-passed",
+                    },
+                    capability="mutate",
+                    connector_id=CONNECTOR,
+                    target_id=TARGET,
+                    sent_at=NOW + 2,
+                    request_id=f"submit-{operation_id}",
+                )
+
+                self.uplink.ingest(receipt, now=NOW + 2, subject=CONNECTOR)
+
+                row = self.store.operation(operation_id)
+                assert row is not None
+                self.assertEqual(row["status"], settled_status)
+                self.assertEqual(row["settled_at"], NOW + 2)
+
     def test_a_matching_operation_id_in_a_refusal_receipt_is_accepted(self) -> None:
         operation_id = "op-explicit-receipt"
         self.store.record_operation(
