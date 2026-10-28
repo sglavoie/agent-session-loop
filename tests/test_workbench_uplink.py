@@ -235,6 +235,45 @@ class UploadTests(UplinkCase):
         self.assertIsNone(self.uplink.ingest(report, now=NOW, subject=CONNECTOR))
         self.assertIsNone(self.store.operation("op-never-submitted"))
 
+    def test_a_report_or_receipt_cannot_settle_another_connectors_operation(
+        self,
+    ) -> None:
+        for operation_id in ("foreign-report", "foreign-receipt"):
+            self.store.record_operation(
+                operation_record(operation_id, status=OPERATION_DISPATCHED),
+                connector_id="other-mac",
+                received_at=NOW,
+            )
+        report = operation_envelope(
+            payload={
+                "operation_id": "foreign-report",
+                "status": OPERATION_ACCEPTED,
+                "observed_at": NOW + 1,
+            },
+            connector_id=CONNECTOR,
+            target_id=TARGET,
+            sent_at=NOW + 1,
+        )
+        receipt = receipt_envelope(
+            payload={
+                "outcome": "refused",
+                "observed_at": NOW + 1,
+                "detail_code": "forbidden-method",
+            },
+            capability="mutate",
+            connector_id=CONNECTOR,
+            target_id=TARGET,
+            sent_at=NOW + 1,
+            request_id="submit-foreign-receipt",
+        )
+        self.uplink.ingest(report, now=NOW + 1, subject=CONNECTOR)
+        self.uplink.ingest(receipt, now=NOW + 1, subject=CONNECTOR)
+        for operation_id in ("foreign-report", "foreign-receipt"):
+            with self.subTest(operation_id=operation_id):
+                row = self.store.operation(operation_id)
+                assert row is not None
+                self.assertEqual(row["status"], OPERATION_DISPATCHED)
+
     def test_a_report_settles_the_operation_this_service_submitted(self) -> None:
         self.store.record_operation(
             operation_record("op-1"), connector_id=CONNECTOR, received_at=NOW
@@ -509,6 +548,24 @@ class CarriageTests(UplinkCase):
         self.uplink.sweep(self.now)
         self.assertFalse(self.uplink.linked)
         self.assertEqual(self.uplink.carried, 0)
+
+    def test_a_fresh_upload_during_silence_check_keeps_the_link_up(self) -> None:
+        self.uplink.ingest(heartbeat(), now=NOW)
+        self.monotonic = 1_000.0
+        uploaded = False
+
+        def clock() -> float:
+            nonlocal uploaded
+            if not uploaded:
+                uploaded = True
+                self.uplink.ingest(heartbeat(at=NOW + 1_000), now=NOW + 1_000)
+            return self.monotonic
+
+        self.uplink.monotonic = clock
+        self.uplink.sweep(NOW + 1_000)
+        self.assertTrue(uploaded)
+        self.assertTrue(self.uplink.linked)
+        self.assertEqual(self.uplink.last_upload_at, NOW + 1_000)
 
     def test_a_submission_dropped_with_the_link_does_not_hold_its_plan(
         self,

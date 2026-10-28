@@ -151,7 +151,7 @@ class UplinkFlowMixin(UplinkBodiesMixin):
         reported = str(payload["status"])
         while True:
             row = self.store.operation(operation_id)
-            if row is None:
+            if row is None or row.get("connector_id") != self.connector_id:
                 return
             current = str(row.get("status", ""))
             if reported == current:
@@ -198,7 +198,11 @@ class UplinkFlowMixin(UplinkBodiesMixin):
         if not isinstance(operation_id, str):
             operation_id = request_id.removeprefix("submit-")
         row = self.store.operation(operation_id)
-        if row is None or row.get("status") != OPERATION_DISPATCHED:
+        if (
+            row is None
+            or row.get("connector_id") != self.connector_id
+            or row.get("status") != OPERATION_DISPATCHED
+        ):
             return
         detail_code = envelope["payload"].get("detail_code")
         self.store.settle_operation_if(
@@ -408,11 +412,3 @@ class UplinkFlowMixin(UplinkBodiesMixin):
             self._carry.clear()
             self._carry.extend(kept)
             return removed
-
-    def _drop_carried(self, *, now: float) -> None:
-        """Discard everything queued for a link that is gone."""
-        with self._ready:
-            dropped = list(self._carry)
-            self._carry.clear()
-        for envelope in dropped:
-            self._undelivered(envelope, now=now, detail_code=None)

@@ -176,16 +176,25 @@ class Uplink(UplinkFlowMixin):
         it, or the first read after an outage waits out its whole budget to
         learn something the service already knew.
         """
+        # Sample first, then inspect the last upload while holding the same
+        # lock uploads use. An upload between the sample and the lock is newer
+        # than the sample and cannot be mistaken for a silent link.
+        observed = self.monotonic()
+        dropped: list[Mapping[str, Any]] = []
         with self._ready:
             last = self._last_upload_mono
-        if last is not None and self.monotonic() - last > self.silence_seconds:
-            with self._ready:
+            if last is not None and observed - last > self.silence_seconds:
                 self._keep(
                     self.reads.link_down(
                         now=now, note="the connector stopped uploading"
                     )
                 )
-            self._drop_carried(now=now)
+                # Draining belongs to the same decision: a reconnect must not
+                # be able to queue a new frame before the old queue is cleared.
+                dropped = list(self._carry)
+                self._carry.clear()
+        for envelope in dropped:
+            self._undelivered(envelope, now=now, detail_code=None)
         self._settle_stranded(now, restarted=False)
         self._expire_bodies(now)
         with self._ready:
