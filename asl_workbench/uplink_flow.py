@@ -86,8 +86,10 @@ class UplinkFlowMixin(UplinkBodiesMixin):
         with self._ready:
             self._last_upload_at = now
             self._last_upload_mono = self.monotonic()
-        if not self.reads.linked:
-            self.reads.link_up(self.capabilities, now=now)
+            # Two uploads must not both observe a down link and each start a
+            # generation: the second link_up would abandon the first's reads.
+            if not self.reads.linked:
+                self.reads.link_up(self.capabilities, now=now)
 
     def _apply(self, envelope: Mapping[str, Any], *, now: float) -> None:
         kind = str(envelope["kind"])
@@ -101,12 +103,15 @@ class UplinkFlowMixin(UplinkBodiesMixin):
             self._settle_refusal(envelope, now=now)
             return
         if kind in (KIND_DETAIL, KIND_RECEIPT):
-            try:
-                answer = self.reads.accept(envelope, now=now)
-            except RemoteReadError as error:
-                raise UplinkRefusal(403, "wrong-connector", str(error)) from error
-            if answer is not None:
-                self._keep((answer,))
+            # Removing the waiter and publishing its answer are one change
+            # from a browser thread's perspective, including at its deadline.
+            with self._ready:
+                try:
+                    answer = self.reads.accept(envelope, now=now)
+                except RemoteReadError as error:
+                    raise UplinkRefusal(403, "wrong-connector", str(error)) from error
+                if answer is not None:
+                    self._keep((answer,))
             return
         # Unreachable: `validate_envelope` refused every other kind already.
         raise UplinkRefusal(  # pragma: no cover

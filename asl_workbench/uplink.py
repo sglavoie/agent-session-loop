@@ -179,13 +179,17 @@ class Uplink(UplinkFlowMixin):
         with self._ready:
             last = self._last_upload_mono
         if last is not None and self.monotonic() - last > self.silence_seconds:
-            self._keep(
-                self.reads.link_down(now=now, note="the connector stopped uploading")
-            )
+            with self._ready:
+                self._keep(
+                    self.reads.link_down(
+                        now=now, note="the connector stopped uploading"
+                    )
+                )
             self._drop_carried(now=now)
         self._settle_stranded(now, restarted=False)
         self._expire_bodies(now)
-        self._keep(self.reads.expire(now))
+        with self._ready:
+            self._keep(self.reads.expire(now))
 
     def recover(self, now: float) -> None:
         """Settle what a previous process left open, before serving anything.
@@ -281,20 +285,24 @@ class Uplink(UplinkFlowMixin):
         withdrawn. Inventing a ``timeout`` for a read that was never carried
         would tell the operator the Mac was slow when the link was idle.
         """
-        self._withdraw(request_id)
-        answer = self._take(request_id)
-        if answer is not None:
-            return answer
-        self._keep(self.reads.expire(self.clock()))
-        answer = self._take(request_id)
-        if answer is not None:
-            return answer
-        cancelled = self.reads.cancel(request_id, now=self.clock())
-        if cancelled is not None:
-            return cancelled
-        answer = self._take(request_id)
-        if answer is not None:
-            return answer
+        # Use the same lock as every settlement publisher. Otherwise an
+        # upload or sweep can remove the waiter before _keep exposes its
+        # answer, and abandonment mistakes that gap for a lost request.
+        with self._ready:
+            self._withdraw(request_id)
+            answer = self._take(request_id)
+            if answer is not None:
+                return answer
+            self._keep(self.reads.expire(self.clock()))
+            answer = self._take(request_id)
+            if answer is not None:
+                return answer
+            cancelled = self.reads.cancel(request_id, now=self.clock())
+            if cancelled is not None:
+                return cancelled
+            answer = self._take(request_id)
+            if answer is not None:
+                return answer
         # Every path above settles or returns, so arriving here means the
         # correlation table and the answer table disagree -- worth a failure
         # rather than a plausible answer.

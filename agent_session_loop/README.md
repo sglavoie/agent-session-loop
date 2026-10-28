@@ -10,6 +10,11 @@ with the client's wait, so the connector uses the same response window. Reads
 whose queue deadline has passed are still discarded. A read cancelled after
 dequeue is skipped before dispatch, leaving that upload free to carry the next
 live request.
+Read settlement publishes its answer atomically with removing the pending
+request. A browser wait ending during an upload, expiry sweep, or disconnect
+receives that outcome instead of an internal error and an uncollected answer.
+Simultaneous uploads establish one link generation, preserving reads queued
+as the connector reconnects.
 
 `asl outbox supervise` recovers its launch's terminal record even after the
 persisted cursor has advanced past it. If output is interrupted after saving
