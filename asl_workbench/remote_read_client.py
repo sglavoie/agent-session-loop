@@ -26,6 +26,7 @@ class _Waiter:
     """One read this process is waiting on."""
 
     request: ReadRequest
+    timeout: float
     #: Set once the request has actually left. A request still queued when the
     #: link drops was never asked, which is a different thing from one that was
     #: asked and went unanswered.
@@ -104,6 +105,7 @@ class DetailReadClient:
         with self._lock:
             if self._waiters:
                 self._abandon(now, note="the link was re-established")
+            self.bodies.clear()
             self._link = _Link(
                 up=True,
                 capabilities=frozenset(capabilities),
@@ -153,6 +155,7 @@ class DetailReadClient:
         ``unavailable`` when there is one that never granted ``detail``.
         Neither is an empty artifact, and neither costs a round trip.
         """
+        lifetime = self._lifetime(timeout)
         request = ReadRequest(
             request_id=request_id,
             detail=detail,
@@ -167,7 +170,7 @@ class DetailReadClient:
             max_bytes=max_bytes,
             reason=reason,
             requested_at=now,
-            deadline=now + self._lifetime(timeout),
+            deadline=now + lifetime,
         )
         with self._lock:
             if request_id in self._waiters:
@@ -187,7 +190,7 @@ class DetailReadClient:
             except TransportError as error:
                 raise RemoteReadError(str(error)) from error
             self._waiters[request_id] = _Waiter(
-                request=request, expires_at=request.deadline
+                request=request, timeout=lifetime, expires_at=request.deadline
             )
             return ReadTicket(request=request, envelope=envelope)
 
@@ -227,14 +230,16 @@ class DetailReadClient:
         The deadline is taken from this moment rather than from composition: a
         request that sat in a queue waiting for the next upload has not had its
         time yet, and starting the clock before it left would time it out for
-        somebody else's slowness.
+        somebody else's slowness. Keep the duration chosen for this request
+        unless the sender explicitly overrides it.
         """
         with self._lock:
             waiter = self._waiters.get(request_id)
             if waiter is None:
                 return
+            lifetime = waiter.timeout if timeout is None else self._lifetime(timeout)
             waiter.sent = True
-            waiter.expires_at = now + self._lifetime(timeout)
+            waiter.expires_at = now + lifetime
 
     def cancel(self, request_id: str, *, now: float) -> ReadAnswer | None:
         """Withdraw one read. A late answer to it is discarded, never held.

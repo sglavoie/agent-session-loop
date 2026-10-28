@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from typing import Any
 
 from asl_workbench import details, remote_reads
@@ -18,6 +19,23 @@ ASL_TEST_PORTABLE = True
 
 class DeadlineTests(unittest.TestCase):
     """One slow read is one slow read."""
+
+    def test_sending_preserves_each_requests_timeout(self) -> None:
+        for timeout in (5.0, 90.0):
+            with self.subTest(timeout=timeout):
+                client = fixtures.make_client(timeout=20.0)
+                client.read(
+                    request_id="r1",
+                    detail="logs",
+                    plan_key=fixtures.PLAN_KEY,
+                    now=fixtures.NOW,
+                    timeout=timeout,
+                )
+                client.sent("r1", now=fixtures.NOW + 2.0)
+                self.assertEqual(client.expire(fixtures.NOW + 2.0 + timeout - 0.5), ())
+                expired = client.expire(fixtures.NOW + 2.0 + timeout)
+                self.assertEqual([answer.request_id for answer in expired], ["r1"])
+                self.assertEqual(expired[0].outcome, remote_reads.OUTCOME_TIMEOUT)
 
     def test_a_deadline_settles_one_read_and_leaves_the_others(self) -> None:
         client = fixtures.make_client(timeout=30.0)
@@ -99,6 +117,21 @@ class DeadlineTests(unittest.TestCase):
 
 class ReconnectTests(unittest.TestCase):
     """A link that dropped is a promise nobody is going to keep."""
+
+    def test_reestablishing_a_link_discards_previous_pairings_cached_bodies(
+        self,
+    ) -> None:
+        client = fixtures.make_client()
+        ticket = client.read(
+            request_id="r1",
+            detail="logs",
+            plan_key=fixtures.PLAN_KEY,
+            now=fixtures.NOW,
+        )
+        client.accept(fixtures.detail_frame("r1"), now=fixtures.NOW + 1.0)
+        self.assertIsNotNone(client.cached(ticket.request, now=fixtures.NOW + 2.0))
+        client.link_up((CAPABILITY_DETAIL,), now=fixtures.NOW + 3.0)
+        self.assertIsNone(client.cached(ticket.request, now=fixtures.NOW + 4.0))
 
     def test_a_dropped_link_abandons_every_waiter_as_offline(self) -> None:
         client = fixtures.make_client()
@@ -338,6 +371,22 @@ class BodyLifetimeTests(unittest.TestCase):
         )
         client.expire(fixtures.NOW + 11.0)
         self.assertEqual(len(client.bodies), 0)
+
+    def test_cached_body_is_not_reused_for_another_run_or_window_size(self) -> None:
+        client = fixtures.make_client()
+        ticket = client.read(
+            request_id="r1",
+            detail="logs",
+            plan_key=fixtures.PLAN_KEY,
+            now=fixtures.NOW,
+        )
+        client.accept(fixtures.detail_frame("r1"), now=fixtures.NOW + 1.0)
+        for selectors in ({"run_id": "another-run"}, {"limit": 1}, {"max_bytes": 1}):
+            with self.subTest(selectors=selectors):
+                other = replace(ticket.request, **selectors)
+                self.assertIsNone(client.cached(other, now=fixtures.NOW + 2.0))
+        same = replace(ticket.request, request_id="r2")
+        self.assertIsNotNone(client.cached(same, now=fixtures.NOW + 2.0))
 
 
 if __name__ == "__main__":

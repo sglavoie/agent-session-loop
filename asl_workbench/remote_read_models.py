@@ -172,9 +172,10 @@ MAX_CACHED_BODIES = 16
 BODY_TTL_SECONDS = 120.0
 
 #: One held body, identified by what was asked rather than by which request
-#: asked it: plan, run, surface, selector, offset. Two reads of the same window
-#: are the same body, and the second is served without a round trip.
-ReadKey = tuple[str, str, str, str, str, int]
+#: asked it: plan, run, surface, selector, offset and bounds. A run id can
+#: constrain a live-plan read without a run key; bounds distinguish a short
+#: preview from a larger window at the same offset.
+ReadKey = tuple[str, str, str, str, str, int, str, int | None, int | None]
 
 
 # --------------------------------------------------------------------------
@@ -227,6 +228,9 @@ class ReadRequest:
             self.question_id or "",
             self.artifact or self.stream or "",
             int(self.offset or 0),
+            self.run_id or "",
+            self.limit,
+            self.max_bytes,
         )
 
     def target(self) -> dict[str, Any]:
