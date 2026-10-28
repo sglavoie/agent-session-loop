@@ -247,6 +247,49 @@ class EventPersistenceTests(unittest.TestCase):
             durability.replace_text(target, "#!/bin/sh\n", permissions=0o755)
             self.assertEqual(0o755, target.stat().st_mode & 0o777)
 
+    def test_replace_bytes_restricts_reused_staging_file_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "private.json"
+            staging = durability.staging_path(target)
+            staging.write_bytes(b"stale")
+            staging.chmod(0o644)
+            real_fchmod = os.fchmod
+
+            def check_before_write(fd: int, permissions: int) -> None:
+                self.assertEqual(b"stale", staging.read_bytes())
+                real_fchmod(fd, permissions)
+
+            with mock.patch.object(
+                durability.os, "fchmod", side_effect=check_before_write
+            ) as fchmod:
+                durability.replace_bytes(target, b"private", permissions=0o600)
+
+            fchmod.assert_called_once()
+            self.assertEqual(b"private", target.read_bytes())
+            self.assertEqual(0o600, target.stat().st_mode & 0o777)
+
+    def test_replace_bytes_rejects_staging_links_without_touching_their_target(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "state.json"
+            victim = Path(tmp) / "other.json"
+            staging = durability.staging_path(target)
+            target.write_bytes(b"old state")
+            victim.write_bytes(b"unrelated")
+
+            for kind in ("symlink", "hardlink"):
+                with self.subTest(kind=kind):
+                    if kind == "symlink":
+                        staging.symlink_to(victim)
+                    else:
+                        os.link(victim, staging)
+                    with self.assertRaises(OSError):
+                        durability.replace_bytes(target, b"new state")
+                    self.assertEqual(b"old state", target.read_bytes())
+                    self.assertEqual(b"unrelated", victim.read_bytes())
+                    self.assertFalse(staging.exists())
+
     def test_fullsync_uses_device_barrier_on_darwin(self) -> None:
         with (
             mock.patch.object(durability.sys, "platform", "darwin"),

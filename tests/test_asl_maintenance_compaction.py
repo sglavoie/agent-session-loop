@@ -13,6 +13,7 @@ import unittest.mock
 from pathlib import Path
 
 from agent_session_loop import (
+    durability,
     maintenance_bodies,
     maintenance_models,
     maintenance_mutator,
@@ -251,6 +252,25 @@ class CompactionTests(MaintenanceTestBase):
         self.assertEqual(
             gzip.decompress((turn / "stderr.log.gz").read_bytes()), payload
         )
+
+    def test_compression_rejects_a_staging_link_without_touching_its_target(
+        self,
+    ) -> None:
+        source = self.tmp_path / "body.log"
+        target = self.tmp_path / "body.log.gz"
+        victim = self.tmp_path / "unrelated.log"
+        source.write_bytes(b"body")
+        victim.write_bytes(b"unrelated")
+        staging = durability.staging_path(target)
+        staging.symlink_to(victim)
+
+        with self.assertRaises(OSError):
+            maintenance_bodies._stage_compressed(source, target)
+
+        self.assertEqual(b"body", source.read_bytes())
+        self.assertEqual(b"unrelated", victim.read_bytes())
+        self.assertFalse(target.exists())
+        self.assertFalse(staging.exists())
 
 
 class PartialFailureTests(MaintenanceTestBase):

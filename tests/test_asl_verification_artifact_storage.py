@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import tempfile
 import unittest
@@ -14,6 +15,32 @@ from agent_session_loop import (
 
 
 class ArtifactStorageTests(unittest.TestCase):
+    def test_cross_device_spool_rejects_staging_link_without_touching_target(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            spool = directory / "spool"
+            victim = directory / "unrelated"
+            spool.write_bytes(b"spooled")
+            victim.write_bytes(b"unrelated")
+            staging = artifacts.durability.staging_path(directory / "output.gz")
+            staging.symlink_to(victim)
+            cross_device = OSError(errno.EXDEV, "cross-device link")
+
+            with (
+                mock.patch.object(artifacts.os, "replace", side_effect=cross_device),
+                mock.patch.object(artifacts.os, "rename", side_effect=cross_device),
+                self.assertRaises(artifacts.ArtifactError),
+            ):
+                artifacts._promote_spool(
+                    spool, artifact_dir=directory, artifact_name="output"
+                )
+
+            self.assertEqual(b"unrelated", victim.read_bytes())
+            self.assertEqual(b"spooled", spool.read_bytes())
+            self.assertFalse(staging.exists())
+
     def test_sha256_and_counts_are_exact(self) -> None:
         data = b"hello world"
         meta = artifacts.store_stream_output(data, failed=False)

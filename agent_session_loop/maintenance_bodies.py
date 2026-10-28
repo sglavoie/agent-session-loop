@@ -165,7 +165,10 @@ def _stage_compressed(source: Path, target: Path) -> tuple[Path, str, int]:
     digest = hashlib.sha256()
     total = 0
     try:
-        with source.open("rb") as raw, temporary.open("wb") as staged:
+        with (
+            source.open("rb") as raw,
+            durability.open_staging_file(temporary) as staged,
+        ):
             with gzip.GzipFile(
                 filename="", mode="wb", fileobj=staged, mtime=0
             ) as compressed:

@@ -17,10 +17,11 @@ import fcntl
 import hashlib
 import json
 import os
+import stat
 import sys
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 
 def fullsync(fd: int) -> None:
@@ -99,6 +100,30 @@ def sync_directory(path: Path) -> None:
         os.close(directory_fd)
 
 
+def open_staging_file(
+    path: Path, *, mode: int = 0o666, permissions: int | None = None
+) -> BinaryIO:
+    """Open a reusable staging path without following links or blocking on a FIFO."""
+    fd = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+        mode,
+    )
+    try:
+        staged = os.fstat(fd)
+        if not stat.S_ISREG(staged.st_mode) or staged.st_nlink != 1:
+            raise OSError(f"unsafe staging file: {path}")
+        if permissions is not None:
+            # A crashed writer may have left a broader mode on this inode.
+            os.fchmod(fd, permissions)
+        os.ftruncate(fd, 0)
+        return os.fdopen(fd, "wb")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        raise
+
+
 def replace_bytes(
     path: Path,
     payload: bytes,
@@ -120,11 +145,10 @@ def replace_bytes(
     """
     temporary_path = staging_path(path)
     try:
-        fd = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-        with os.fdopen(fd, "wb") as temporary_file:
+        with open_staging_file(
+            temporary_path, mode=mode, permissions=permissions
+        ) as temporary_file:
             temporary_file.write(payload)
-            if permissions is not None:
-                os.fchmod(temporary_file.fileno(), permissions)
             if sync_file:
                 temporary_file.flush()
                 fullsync(temporary_file.fileno())

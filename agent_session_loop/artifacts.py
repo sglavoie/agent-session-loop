@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import errno
 import gzip
 import hashlib
 import os
@@ -322,7 +323,20 @@ def _promote_spool(
     target = directory / f"{stem}.gz"
     tmp_path = durability.staging_path(target)
     try:
-        shutil.move(str(spool_path), str(tmp_path))
+        try:
+            os.replace(spool_path, tmp_path)
+        except OSError as error:
+            if error.errno != errno.EXDEV:
+                raise
+            # A cross-device move must copy into the staged file. In that
+            # branch, shutil.move follows a preexisting staging symlink and
+            # can overwrite an unrelated file instead of the artifact.
+            with (
+                spool_path.open("rb") as source,
+                durability.open_staging_file(tmp_path) as staged,
+            ):
+                shutil.copyfileobj(source, staged)
+            spool_path.unlink()
         os.replace(tmp_path, target)
     except OSError as error:
         _cleanup(tmp_path)
