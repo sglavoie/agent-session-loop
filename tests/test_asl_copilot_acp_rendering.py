@@ -206,6 +206,111 @@ class SubmissionTests(unittest.TestCase):
 class ShutdownTests(unittest.TestCase):
     """The orderly end of a conversation, and the forced one behind it."""
 
+    def test_failed_and_cancelled_turns_terminate_an_agent_ignoring_eof(self) -> None:
+        def refuse(*args: Any) -> None:
+            raise RuntimeError("operator cancelled submission")
+
+        def missing_history(process: _FakeProcess, message: dict[str, Any]):
+            if message.get("method") == "initialize":
+                return [
+                    line(
+                        {
+                            "id": message["id"],
+                            "result": {
+                                "protocolVersion": copilot_acp.PROTOCOL_VERSION,
+                                "agentCapabilities": {"loadSession": True},
+                            },
+                        }
+                    )
+                ]
+            return [
+                line(
+                    {
+                        "id": message["id"],
+                        "error": {"code": -32602, "message": "no such session"},
+                    }
+                )
+            ]
+
+        cases = [
+            ("timeout", lambda process, message: [], {}, "protocol_error", False),
+            (
+                "unsupported protocol",
+                scripted_responder(protocol_version=999),
+                {},
+                "protocol_error",
+                False,
+            ),
+            (
+                "missing conversation",
+                missing_history,
+                {"resume_conversation_id": "missing-session"},
+                "restore_refused",
+                False,
+            ),
+            (
+                "conversation persistence failure",
+                scripted_responder(),
+                {"on_conversation": refuse},
+                "conversation_error",
+                False,
+            ),
+            (
+                "submission cancelled",
+                scripted_responder(),
+                {"before_submit": refuse},
+                "cancelled_before_submission",
+                False,
+            ),
+            (
+                "prompt rejected",
+                scripted_responder(prompt_error={"code": -32603, "message": "quota"}),
+                {},
+                "protocol_error",
+                True,
+            ),
+        ]
+        for name, responder, kwargs, reason, submitted in cases:
+            with self.subTest(failure=name):
+                process = _FakeProcess(responder)
+                process.on_stdin_closed = lambda: None
+                session = build_session(
+                    process, request_timeout=0, shutdown_grace=0, **kwargs
+                )
+
+                # Synchronous replies make the failure and teardown ordering
+                # deterministic, without shutdown() cleaning up for the driver.
+                session._drive()
+
+                self.assertTrue(process.stdin.closed)
+                self.assertTrue(process.terminated)
+                self.assertIsNotNone(process.poll())
+                self.assertTrue(session.turn_finished)
+                self.assertTrue(getattr(session, reason))
+                self.assertEqual(submitted, session.prompt_submitted)
+                if reason in ("conversation_error", "cancelled_before_submission"):
+                    self.assertIsNone(session.protocol_error)
+
+    def test_an_agent_ignoring_eof_and_sigterm_is_killed(self) -> None:
+        process = _FakeProcess(scripted_responder())
+        process.on_stdin_closed = lambda: None
+        session = build_session(process, shutdown_grace=0)
+
+        def kill() -> None:
+            process.returncode = -9
+
+        with (
+            mock.patch.object(process, "terminate") as terminate,
+            mock.patch.object(process, "kill", side_effect=kill, create=True) as killed,
+        ):
+            session._drive()
+
+        terminate.assert_called_once_with()
+        killed.assert_called_once_with()
+        self.assertEqual(-9, process.poll())
+        self.assertEqual(copilot_acp.STOP_REASON_END_TURN, session.stop_reason)
+        self.assertIsNone(session.protocol_error)
+
     def test_a_finished_turn_closes_its_own_stdin(self) -> None:
         process = _FakeProcess(scripted_responder())
 

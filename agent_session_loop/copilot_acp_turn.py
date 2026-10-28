@@ -32,21 +32,15 @@ class _AcpTurnMixin:
             self._submit()
         except _ConversationNotRecorded as error:
             self._abandon_before_submission(conversation_error=str(error))
-            return
         except _SubmissionRefused as error:
             self._abandon_before_submission(submission_refused=str(error))
-            return
         except RestoreRefused as error:
             self._note_restore_refused(str(error))
-            self._turn_finished.set()
-            self._close_stdin()
-            return
         except AcpError as error:
             self._note_protocol_error(str(error))
-            self._turn_finished.set()
-            self._close_stdin()
-            return
         self._turn_finished.set()
+        # A refused or failed handshake can leave the agent alive too. Every
+        # outcome needs the same bounded EOF, terminate, and kill sequence.
         self._end_process()
 
     def _handshake(self) -> None:
@@ -355,7 +349,6 @@ class _AcpTurnMixin:
             if submission_refused is not None:
                 self._submission_refused = submission_refused
         self._turn_finished.set()
-        self._close_stdin()
 
     def _require_session_id(self) -> str:
         with self._state_lock:

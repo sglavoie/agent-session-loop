@@ -158,27 +158,35 @@ class _AcpTransportMixin:
     def _end_process(self) -> None:
         """Close stdin and give the agent a bounded chance to exit.
 
-        Closing stdin is how an ACP agent is asked to shut down; it exits on
-        its own in milliseconds. Terminating after the grace period keeps a
-        wedged one from holding a turn open forever when the turn itself has no
-        timeout.
+        Allow one grace period after EOF and another after SIGTERM. An agent
+        ignoring both must be killed, or a turn with no harness timeout can
+        wait forever. The harness owns the final wait that reaps the process.
         """
         self._close_stdin()
+        if self._wait_for_exit():
+            return
+        with contextlib.suppress(ProcessLookupError):
+            self._process.terminate()
+        if not self._wait_for_exit():
+            with contextlib.suppress(ProcessLookupError):
+                self._process.kill()
+
+    def _wait_for_exit(self) -> bool:
+        """Wait at most one shutdown grace period for the process to exit."""
         deadline = time.monotonic() + self._shutdown_grace
         while time.monotonic() < deadline:
             if self._process.poll() is not None:
-                return
+                return True
             time.sleep(_LIVENESS_POLL_SECONDS)
-        if self._process.poll() is None:
-            self._process.terminate()
+        return self._process.poll() is not None
 
     def shutdown(self) -> None:
         """Release the conversation once the harness process is gone.
 
         Runs on the turn's own thread from the harness ``finally``, so it must
         not wait on anything unbounded: the driver is joined with a bound, and a
-        driver that outlives it is a daemon thread whose only remaining act
-        would be closing an already-closed pipe.
+        driver that outlives it is a daemon thread that finishes the bounded
+        process teardown.
         """
         self._turn_finished.set()
         self._fail_pending("copilot acp session is closed")

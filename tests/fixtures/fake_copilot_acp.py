@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -256,6 +257,9 @@ def _wait_for_cancel() -> None:
 
 
 def main() -> int:
+    ignore_shutdown = os.environ.get("FAKE_ACP_IGNORE_SHUTDOWN") == "1"
+    if ignore_shutdown:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
     # Recorded before anything is read, so a turn that never speaks ACP -- the
     # audit profile's one-shot form -- still says what it was launched with.
     _save()
@@ -387,6 +391,11 @@ def main() -> int:
                 sys.stdout.write("copilot: goodbye")
                 sys.stdout.flush()
                 return 0
+    if ignore_shutdown:
+        # Keep the output pipes open after EOF so only the client's teardown
+        # can finish the turn. SIGTERM is ignored before any reply is sent.
+        while True:
+            signal.pause()
     return 0
 
 

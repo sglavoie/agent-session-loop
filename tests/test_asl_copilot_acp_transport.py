@@ -5,6 +5,8 @@
 # ruff: noqa: F403, F405
 from tests.asl_copilot_acp_support import *
 
+import signal
+
 
 ASL_TEST_LANE = "integration"
 
@@ -71,6 +73,39 @@ class AdapterTransportTests(unittest.TestCase):
             ["$ just test-fast\n", "work", "ing\n"],
             [text for name, text in chunks if name == "stdout"],
         )
+
+    def test_an_agent_ignoring_shutdown_is_killed_without_a_harness_timeout(
+        self,
+    ) -> None:
+        session_type = copilot_acp.CopilotAcpSession
+        sessions = []
+
+        def open_session(**kwargs: Any):
+            session = session_type(**kwargs, shutdown_grace=0.01)
+            sessions.append(session)
+            return session
+
+        for mode in ("success", "future-protocol"):
+            with (
+                self.subTest(mode=mode),
+                mock.patch.dict(os.environ, {"FAKE_ACP_IGNORE_SHUTDOWN": "1"}),
+                mock.patch.object(
+                    copilot_acp, "CopilotAcpSession", side_effect=open_session
+                ),
+            ):
+                # The timeout is a safety bound for a broken implementation;
+                # neither it nor the harness's forced kill should end this run.
+                result = self._run(self._adapter(mode))
+
+                self.assertFalse(result.timed_out)
+                self.assertEqual(-signal.SIGKILL, sessions[-1]._process.poll())
+                if mode == "success":
+                    self.assertEqual(0, result.returncode)
+                    self.assertEqual("working\n", result.last_message)
+                else:
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn("protocol version", result.stderr)
+                    self.assertIsNone(self._recorded()["prompt"])
 
     def test_the_agents_last_unterminated_line_still_reaches_the_log(self) -> None:
         result = self._run(self._adapter("trailing-prose"))
