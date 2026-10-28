@@ -35,6 +35,10 @@ never becomes a row a remote cockpit retains."""
 from __future__ import annotations
 
 import gzip
+import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -193,6 +197,38 @@ class GzipWindowTests(unittest.TestCase):
         self.path.unlink()
         self.assertIsNone(workbench_details.read_log_window(self.path, window))
         self.assertIsNone(workbench_details.read_bounded_text(self.path, max_bytes=1))
+
+
+class SpecialArtifactTests(unittest.TestCase):
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFOs require POSIX")
+    def test_fifo_artifacts_are_refused_without_blocking(self) -> None:
+        code = """
+import json
+import sys
+from pathlib import Path
+from agent_session_loop import workbench_details
+from asl_workbench import details
+path = Path(sys.argv[1])
+print(json.dumps([
+    workbench_details.read_log_window(path, details.Window(max_bytes=10)),
+    workbench_details.read_bounded_text(path, max_bytes=10),
+]))
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            for suffix in (".log", ".gz"):
+                with self.subTest(suffix=suffix):
+                    path = Path(tmp) / f"output{suffix}"
+                    os.mkfifo(path)
+                    result = subprocess.run(
+                        [sys.executable, "-c", code, str(path)],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                        timeout=5,
+                    )
+                    for payload in json.loads(result.stdout):
+                        self.assertTrue(payload["exists"])
+                        self.assertIn("not a regular file", payload["error"])
 
 
 class PaginationTests(unittest.TestCase):

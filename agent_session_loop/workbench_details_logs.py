@@ -1,6 +1,9 @@
 # ruff: noqa: F403, F405
 import gzip
+import os
+import stat
 import zlib
+from typing import BinaryIO
 
 from .workbench_details_models import *
 from .workbench_details_models import _JSONDict
@@ -8,6 +11,18 @@ from .workbench_details_models import _JSONDict
 #: How much decompressed output one read of a gzip stream asks for. A window
 #: is assembled from these, so a read holds at most the window plus one chunk.
 _GZIP_CHUNK_BYTES = 64 * 1024
+
+
+def _open_regular_file(path: Path) -> BinaryIO:
+    """Open an artifact without blocking on a FIFO substituted at its path."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"not a regular file: {path}")
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def is_gzip_artifact(path: Path) -> bool:
@@ -89,7 +104,10 @@ def _read_gzip_slice(
     kept = bytearray()
     size = 0
     try:
-        with gzip.open(path, "rb") as stream:
+        with (
+            _open_regular_file(path) as source,
+            gzip.GzipFile(fileobj=source, mode="rb") as stream,
+        ):
             while chunk := stream.read(_GZIP_CHUNK_BYTES):
                 chunk_start = size
                 size += len(chunk)
@@ -153,18 +171,17 @@ def read_log_window(path: Path, window: Window) -> _JSONDict | None:
     """
     if is_gzip_artifact(path):
         return _read_gzip_window(path, window)
+    size = None
+    read_offset = 0
     try:
-        size = path.stat().st_size
-    except FileNotFoundError:
-        return None
-    except OSError as error:
-        return _window_error(path, error, exists=False, window=window)
-    read_offset = (
-        window.offset if window.offset is not None else max(0, size - window.max_bytes)
-    )
-    read_offset = min(read_offset, size)
-    try:
-        with path.open("rb") as handle:
+        with _open_regular_file(path) as handle:
+            size = os.fstat(handle.fileno()).st_size
+            read_offset = (
+                window.offset
+                if window.offset is not None
+                else max(0, size - window.max_bytes)
+            )
+            read_offset = min(read_offset, size)
             handle.seek(read_offset)
             raw = handle.read(window.max_bytes)
     except FileNotFoundError:
@@ -173,7 +190,7 @@ def read_log_window(path: Path, window: Window) -> _JSONDict | None:
         # payload.
         return None
     except OSError as error:
-        payload = _window_error(path, error, exists=True, window=window)
+        payload = _window_error(path, error, exists=path.exists(), window=window)
         payload["size"] = size
         payload["offset"] = read_offset
         return payload
@@ -213,21 +230,10 @@ def read_bounded_text(path: Path, *, max_bytes: int) -> _JSONDict | None:
             "truncated": len(raw) < size,
             "text": raw.decode("utf-8", errors="replace"),
         }
+    file_size = None
     try:
-        size = path.stat().st_size
-    except FileNotFoundError:
-        return None
-    except OSError as error:
-        return {
-            "path": str(path),
-            "exists": False,
-            "size": None,
-            "error": str(error),
-            "truncated": False,
-            "text": "",
-        }
-    try:
-        with path.open("rb") as handle:
+        with _open_regular_file(path) as handle:
+            file_size = os.fstat(handle.fileno()).st_size
             raw = handle.read(max_bytes)
     except FileNotFoundError:
         # File vanished between ``stat()`` and ``open()`` — surface as a
@@ -237,8 +243,8 @@ def read_bounded_text(path: Path, *, max_bytes: int) -> _JSONDict | None:
     except OSError as error:
         return {
             "path": str(path),
-            "exists": True,
-            "size": size,
+            "exists": path.exists(),
+            "size": file_size,
             "error": str(error),
             "truncated": False,
             "text": "",
@@ -246,8 +252,8 @@ def read_bounded_text(path: Path, *, max_bytes: int) -> _JSONDict | None:
     return {
         "path": str(path),
         "exists": True,
-        "size": size,
-        "truncated": len(raw) < size,
+        "size": file_size,
+        "truncated": len(raw) < file_size,
         "text": raw.decode("utf-8", errors="replace"),
     }
 
