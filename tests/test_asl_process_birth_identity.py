@@ -22,6 +22,7 @@ from agent_session_loop import (
 )
 
 _UTC_BIRTH = "Sun Oct 25 14:30:05 2026"
+_FIFTEEN_MINUTES_LATER = "Sun Oct 25 14:45:05 2026"
 # The same instant as a writer in UTC-4 recorded it before births were pinned.
 _LEGACY_LOCAL_BIRTH = "Sun Oct 25 10:30:05 2026"
 
@@ -119,7 +120,12 @@ class LockIdentityTests(unittest.TestCase):
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     def write_lock(
-        self, *, hostname: str, process_start: str | None, pid: int | None = None
+        self,
+        *,
+        hostname: str,
+        process_start: str | None,
+        pid: int | None = None,
+        process_start_utc: bool | None = None,
     ) -> None:
         payload = {
             "pid": os.getpid() if pid is None else pid,
@@ -129,6 +135,8 @@ class LockIdentityTests(unittest.TestCase):
         }
         if process_start is not None:
             payload["process_start"] = process_start
+        if process_start_utc is not None:
+            payload["process_start_utc"] = process_start_utc
         self.lock_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
 
     def test_a_legacy_local_time_birth_keeps_a_live_lock(self) -> None:
@@ -143,6 +151,36 @@ class LockIdentityTests(unittest.TestCase):
         assert info is not None
         self.assertTrue(info.active)
         self.assertTrue(self.lock_path.exists())
+
+    def test_utc_lock_detects_a_reused_pid_born_fifteen_minutes_later(self) -> None:
+        self.write_lock(
+            hostname=socket.gethostname(),
+            process_start=_UTC_BIRTH,
+            process_start_utc=True,
+        )
+        with mock.patch.object(
+            state_locks.process_tree,
+            "process_birth",
+            return_value=_FIFTEEN_MINUTES_LATER,
+        ):
+            info = state_locks.inspect_lock_info(self.plan_dir, self.state_dir)
+
+        assert info is not None
+        self.assertTrue(info.stale)
+        self.assertIn("pid", info.reason)
+        self.assertTrue(self.lock_path.exists())
+
+    def test_older_lock_keeps_time_zone_tolerance(self) -> None:
+        self.write_lock(hostname=socket.gethostname(), process_start=_UTC_BIRTH)
+        with mock.patch.object(
+            state_locks.process_tree,
+            "process_birth",
+            return_value=_FIFTEEN_MINUTES_LATER,
+        ):
+            info = state_locks.inspect_lock_info(self.plan_dir, self.state_dir)
+
+        assert info is not None
+        self.assertTrue(info.active)
 
     def test_this_process_still_owns_its_lock_after_a_host_rename(self) -> None:
         self.write_lock(hostname="before-dhcp.local", process_start=_UTC_BIRTH)

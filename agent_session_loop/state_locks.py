@@ -154,9 +154,9 @@ def _owner_gone_reason(pid: int, raw: dict[str, Any]) -> str | None:
     A live pid alone is not the owner: after a SIGKILL or a reboot the pid can
     be reused by an unrelated process, which would hold the plan locked
     forever. A recorded ``process_start`` that differs from the live
-    process's is that proof; an unknown start time on either side, or one
-    that differs only by a time-zone offset, proves nothing and leaves the
-    owner alive.
+    process's is that proof. An unknown start time proves nothing. A time-zone
+    offset also proves nothing for a legacy lock written before ps was pinned
+    to UTC; newer locks require an exact match.
     """
     if not state.is_pid_running(pid):
         return f"pid {pid} is not running"
@@ -166,7 +166,14 @@ def _owner_gone_reason(pid: int, raw: dict[str, Any]) -> str | None:
     current = process_tree.process_birth(pid)
     # A start time recorded before births were pinned to UTC can differ from
     # the live one by its writer's time-zone offset alone; that proves nothing.
-    if current is None or process_sampling.birth_may_match(recorded, current):
+    if current is None:
+        return None
+    # New locks and their ps probes both use UTC. Legacy locks did not pin the
+    # writer's zone, so they alone need offset tolerance.
+    if raw.get("process_start_utc") is True:
+        if recorded == current:
+            return None
+    elif process_sampling.birth_may_match(recorded, current):
         return None
     return f"pid {pid} was reused by a process started at {current}"
 
@@ -331,6 +338,7 @@ def acquire_lock(
         # alone cannot tell this runner from a later process that reused its
         # pid. `None` where `ps` reports no start time.
         "process_start": process_tree.process_birth(os.getpid()),
+        "process_start_utc": True,
         # Endpoint this run is already reading wakeups from, so a producer
         # writes to a descriptor this process holds rather than addressing it
         # by pid. `None` leaves that run on its durable queue poll.

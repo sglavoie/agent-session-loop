@@ -440,6 +440,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.assertEqual(os.getpid(), lock_info.pid)
         self.assertEqual(socket.gethostname(), lock_info.raw["hostname"])
         self.assertEqual(4, lock_info.raw["version"])
+        self.assertIs(lock_info.raw["process_start_utc"], True)
 
         persisted = self.persisted_state()
         self.assertEqual(state_abandonment.ABANDONED_REASON, persisted["reason"])

@@ -15,6 +15,7 @@ from unittest import mock
 from agent_session_loop import supervision_liveness
 
 _BIRTH = "Sun Jul 26 17:57:01 2026"
+_FIFTEEN_MINUTES_LATER = "Sun Jul 26 18:12:01 2026"
 _OTHER_BIRTH = "Mon Jul 27 09:12:43 2026"
 
 
@@ -74,6 +75,7 @@ class RecordStorageTests(unittest.TestCase):
         self.assertEqual(self.supervision_id, record.supervision_id)
         self.assertEqual(4242, record.pid)
         self.assertEqual(_BIRTH, record.birth)
+        self.assertTrue(record.birth_utc)
         self.assertEqual("build-box", record.host)
         self.assertEqual(("asl_autopilot.py", "--command", "asl run plan"), record.argv)
         self.assertEqual({"ok": True, "plan_dir": self.plan_dir}, record.command)
@@ -122,6 +124,18 @@ class RecordStorageTests(unittest.TestCase):
         )
         self.assertIsNone(record.birth)
 
+    def test_older_record_without_utc_marker_remains_readable(self) -> None:
+        path = self._write()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.pop("birth_utc")
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        record = supervision_liveness.read_record(
+            self.plan_dir, self.supervision_id, state_dir=self.state_dir
+        )
+        self.assertIsNotNone(record)
+        self.assertFalse(record.birth_utc)
+
     def test_missing_record_reads_as_none(self) -> None:
         self.assertIsNone(
             supervision_liveness.read_record(
@@ -142,6 +156,7 @@ class RecordStorageTests(unittest.TestCase):
             "pid-not-int": json.dumps({**good, "pid": "4242"}),
             "pid-bool": json.dumps({**good, "pid": True}),
             "birth-not-str": json.dumps({**good, "birth": 17}),
+            "birth-utc-not-bool": json.dumps({**good, "birth_utc": "true"}),
             "command-not-object": json.dumps({**good, "command": "asl run"}),
             "argv-not-strings": json.dumps({**good, "argv": [1, 2]}),
             "host-missing": json.dumps({k: v for k, v in good.items() if k != "host"}),
@@ -241,6 +256,24 @@ class ProbeTests(unittest.TestCase):
             supervision_liveness.DEAD,
             supervision_liveness.probe(
                 _record(), run_command=lambda *a, **kw: _ps_result(f"{_OTHER_BIRTH}\n")
+            ),
+        )
+
+    def test_utc_record_detects_reused_pid_with_nearby_birth(self) -> None:
+        self.assertEqual(
+            supervision_liveness.DEAD,
+            supervision_liveness.probe(
+                _record(birth_utc=True),
+                run_command=lambda *a, **kw: _ps_result(f"{_FIFTEEN_MINUTES_LATER}\n"),
+            ),
+        )
+
+    def test_older_record_keeps_time_zone_tolerance(self) -> None:
+        self.assertEqual(
+            supervision_liveness.ALIVE,
+            supervision_liveness.probe(
+                _record(birth_utc=False),
+                run_command=lambda *a, **kw: _ps_result(f"{_FIFTEEN_MINUTES_LATER}\n"),
             ),
         )
 

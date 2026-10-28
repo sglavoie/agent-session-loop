@@ -58,11 +58,15 @@ class LivenessRecord:
     command: dict[str, Any] | None
     plan_dir: str
     started_at: str
+    # Older records predate the UTC-pinned ps environment. Their birth may be
+    # expressed in a local time zone, so only they need offset tolerance.
+    birth_utc: bool = False
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "argv": list(self.argv),
             "birth": self.birth,
+            "birth_utc": self.birth_utc,
             "command": self.command,
             "host": self.host,
             "pid": self.pid,
@@ -125,6 +129,7 @@ def write_record(
         command=dict(command) if command is not None else None,
         plan_dir=str(plan_dir),
         started_at=_utc_now_iso(),
+        birth_utc=True,
     )
     record_path = record_path_for_plan(plan_dir, supervision_id, state_dir)
     record_path.parent.mkdir(parents=True, exist_ok=True)
@@ -167,6 +172,9 @@ def read_record(
     birth = payload.get("birth")
     if birth is not None and not isinstance(birth, str):
         return None
+    birth_utc = payload.get("birth_utc", False)
+    if not isinstance(birth_utc, bool):
+        return None
     command = payload.get("command")
     if command is not None and not isinstance(command, dict):
         return None
@@ -194,6 +202,7 @@ def read_record(
         command=command,
         plan_dir=stored_plan_dir,
         started_at=started_at,
+        birth_utc=birth_utc,
     )
 
 
@@ -276,8 +285,11 @@ def probe(
     birth = _parse_birth(completed.stdout)
     if birth is None or not record.birth:
         return UNVERIFIED
-    # A record written before births were pinned to UTC can disagree by a
-    # time-zone offset without the pid having been reused.
+    # New records use UTC for both samples. Offset tolerance for them would
+    # mistake a reused pid born 15 minutes later for the original helper.
+    if record.birth_utc:
+        return ALIVE if record.birth == birth else DEAD
+    # An older record may disagree only because its writer used a local zone.
     return ALIVE if process_sampling.birth_may_match(record.birth, birth) else DEAD
 
 
