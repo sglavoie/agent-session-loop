@@ -218,6 +218,56 @@ class PruneRecordsTests(unittest.TestCase):
         )
         self.assertTrue(sleeping.exists())
 
+    def test_old_record_for_live_helper_is_preserved(self) -> None:
+        record = self._write(age_seconds=40 * 24 * 60 * 60)
+
+        with mock.patch.object(
+            supervision_liveness, "probe", return_value=supervision_liveness.ALIVE
+        ) as probe:
+            self.assertEqual(
+                0,
+                supervision_liveness.prune_records(
+                    self.plan_dir, state_dir=self.state_dir
+                ),
+            )
+
+        self.assertTrue(record.exists())
+        probe.assert_called_once()
+
+    def test_old_record_with_uncertain_helper_is_preserved(self) -> None:
+        record = self._write(age_seconds=40 * 24 * 60 * 60)
+
+        with mock.patch.object(
+            supervision_liveness,
+            "probe",
+            return_value=supervision_liveness.UNVERIFIED,
+        ):
+            self.assertEqual(
+                0,
+                supervision_liveness.prune_records(
+                    self.plan_dir, state_dir=self.state_dir
+                ),
+            )
+
+        self.assertTrue(record.exists())
+
+    def test_old_malformed_record_is_removed(self) -> None:
+        record = self._write(age_seconds=40 * 24 * 60 * 60)
+        record.write_text("not json", encoding="utf-8")
+        stamp = record.stat().st_mtime - 40 * 24 * 60 * 60
+        os.utime(record, (stamp, stamp))
+
+        with mock.patch.object(supervision_liveness, "probe") as probe:
+            self.assertEqual(
+                1,
+                supervision_liveness.prune_records(
+                    self.plan_dir, state_dir=self.state_dir
+                ),
+            )
+
+        self.assertFalse(record.exists())
+        probe.assert_not_called()
+
     def test_neighbouring_state_files_are_never_touched(self) -> None:
         record = self._write(age_seconds=40 * 24 * 60 * 60)
         neighbour = record.parent / "mailbox.jsonl"

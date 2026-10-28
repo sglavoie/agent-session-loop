@@ -33,8 +33,8 @@ SUPERVISION_LIVENESS_FILE_TEMPLATE = "supervision-liveness-{supervision_id}.json
 SUPERVISION_LIVENESS_GLOB = "supervision-liveness-*.json"
 SUPERVISION_LIVENESS_VERSION = 1
 # Well beyond the 8-day quota sleep a helper can legitimately spend without
-# touching its record: pruning must never delete evidence for a process that is
-# still alive and merely waiting.
+# touching its record. Age makes a record eligible for pruning; a live helper
+# can outlast this interval, so its identity must still be checked.
 SUPERVISION_LIVENESS_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 
 PROBE_TIMEOUT_SECONDS = process_tree.SAMPLE_TIMEOUT_SECONDS
@@ -213,7 +213,13 @@ def prune_records(
     max_age_seconds: float = SUPERVISION_LIVENESS_MAX_AGE_SECONDS,
     now: float | None = None,
 ) -> int:
-    """Best-effort removal of records left behind by long-finished launches."""
+    """Remove old records without discarding usable liveness evidence.
+
+    A record can be older than the retention interval while its helper is
+    alive. Keep both alive and unverified identities: a failed or foreign-host
+    probe cannot prove the helper is gone. Malformed records provide no usable
+    liveness evidence and remain eligible for age-based cleanup.
+    """
     cutoff = (_utc_now().timestamp() if now is None else now) - max_age_seconds
     removed = 0
     try:
@@ -225,6 +231,12 @@ def prune_records(
     for candidate in candidates:
         try:
             if candidate.stat().st_mtime >= cutoff:
+                continue
+            supervision_id = candidate.name.removeprefix(
+                "supervision-liveness-"
+            ).removesuffix(".json")
+            record = read_record(plan_dir, supervision_id, state_dir=state_dir)
+            if record is not None and probe(record) != DEAD:
                 continue
             candidate.unlink()
         except OSError:
