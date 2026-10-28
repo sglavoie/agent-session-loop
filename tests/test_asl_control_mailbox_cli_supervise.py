@@ -7,6 +7,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import threading
 import time
 import unittest
 import uuid
@@ -456,6 +457,13 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
             json.dumps({"version": 99, "next_since": 5}),
             json.dumps(
                 {
+                    "version": True,
+                    "supervision_id": launch,
+                    "next_since": 5,
+                }
+            ),
+            json.dumps(
+                {
                     "version": mailbox_constants.MAILBOX_SUPERVISION_CURSOR_VERSION,
                     "supervision_id": mailbox_validation.new_supervision_id(),
                     "next_since": 5,
@@ -626,6 +634,11 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
             self.state_dir,
         )
         self.assertEqual(0o600, cursor_path.stat().st_mode & 0o777)
+        lock_path = (
+            cursor_path.parent
+            / mailbox_cursors.MAILBOX_SUPERVISION_CURSOR_LOCK_FILE_NAME
+        )
+        self.assertEqual(0o600, lock_path.stat().st_mode & 0o777)
 
     def test_supervision_cursor_preserves_its_first_seen_anchor(self) -> None:
         launch = mailbox_validation.new_supervision_id()
@@ -654,6 +667,61 @@ class MailboxCliTestsPart8(MailboxCliTestsBase):
             ),
         )
         self.assertEqual(2, self.cursor_on_disk(launch))
+
+    def test_overlapping_cursor_writers_cannot_regress_the_saved_sequence(self) -> None:
+        launch = mailbox_validation.new_supervision_id()
+        low_ready = threading.Event()
+        release_low = threading.Event()
+        high_started = threading.Event()
+        high_done = threading.Event()
+        failures: list[BaseException] = []
+        replace_bytes = mailbox_cursors.durability.replace_bytes
+
+        def delayed_replace(path, data, **kwargs):
+            if json.loads(data)["next_since"] == 10:
+                low_ready.set()
+                if not release_low.wait(timeout=5):
+                    raise AssertionError("low writer was never released")
+            return replace_bytes(path, data, **kwargs)
+
+        def write(sequence: int, done: threading.Event | None = None) -> None:
+            try:
+                if done is not None:
+                    high_started.set()
+                mailbox_cursors.write_supervision_cursor(
+                    self.plan_dir,
+                    launch,
+                    sequence,
+                    state_dir=self.state_dir,
+                )
+            except BaseException as error:
+                failures.append(error)
+            finally:
+                if done is not None:
+                    done.set()
+
+        with mock.patch.object(
+            mailbox_cursors.durability, "replace_bytes", side_effect=delayed_replace
+        ):
+            low = threading.Thread(target=write, args=(10,), daemon=True)
+            high = threading.Thread(target=write, args=(20, high_done), daemon=True)
+            try:
+                low.start()
+                self.assertTrue(low_ready.wait(timeout=5))
+                high.start()
+                self.assertTrue(high_started.wait(timeout=5))
+                high_finished_before_release = high_done.wait(timeout=1)
+            finally:
+                release_low.set()
+                low.join(timeout=5)
+                if high.ident is not None:
+                    high.join(timeout=5)
+
+        self.assertFalse(low.is_alive())
+        self.assertFalse(high.is_alive())
+        self.assertEqual([], failures)
+        self.assertEqual(20, self.cursor_on_disk(launch))
+        self.assertFalse(high_finished_before_release)
 
     def test_outbox_supervise_reports_a_dead_helper_as_lost(self) -> None:
         launch = mailbox_validation.new_supervision_id()

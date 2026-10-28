@@ -14,6 +14,9 @@ MAILBOX_SUPERVISION_CURSOR_FILE_TEMPLATE = "mailbox-supervision-{supervision_id}
 MAILBOX_SUPERVISION_CURSOR_GLOB = "mailbox-supervision-*.json"
 
 
+MAILBOX_SUPERVISION_CURSOR_LOCK_FILE_NAME = "mailbox-supervision-cursors.lock"
+
+
 MAILBOX_SUPERVISION_CURSOR_VERSION = 1
 
 

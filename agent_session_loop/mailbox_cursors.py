@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +19,7 @@ from .mailbox_constants import (
     MAILBOX_MAX_INTEGER,
     MAILBOX_SUPERVISION_CURSOR_FILE_TEMPLATE,
     MAILBOX_SUPERVISION_CURSOR_GLOB,
+    MAILBOX_SUPERVISION_CURSOR_LOCK_FILE_NAME,
     MAILBOX_SUPERVISION_CURSOR_MAX_AGE_SECONDS,
     MAILBOX_SUPERVISION_CURSOR_VERSION,
 )
@@ -49,14 +55,30 @@ def supervision_cursor_path_for_plan(
 ) -> Path:
     """Return the cursor path one supervising launch owns for ``plan_dir``.
 
-    One file per launch identity makes cross-supervisor clobbering structurally
-    impossible, so the cursor needs no lock of its own.
+    One file per launch identity separates unrelated helpers. Overlapping
+    polls for the same launch share a lock while merging their cursor values.
     """
     if not _is_uuid(supervision_id):
         raise ValueError("supervision_id must be a UUID")
     return state.plan_state_dir(plan_dir, state_dir) / (
         MAILBOX_SUPERVISION_CURSOR_FILE_TEMPLATE.format(supervision_id=supervision_id)
     )
+
+
+@contextmanager
+def _supervision_cursor_lock(cursor_dir: Path) -> Iterator[None]:
+    """Serialize cursor merges and pruning on a stable inode in this plan."""
+    cursor_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = cursor_dir / MAILBOX_SUPERVISION_CURSOR_LOCK_FILE_NAME
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.fchmod(fd, 0o600)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _read_supervision_cursor_payload(
@@ -83,7 +105,8 @@ def _read_supervision_cursor_payload(
         return None
     if not isinstance(payload, dict):
         return None
-    if payload.get("version") != MAILBOX_SUPERVISION_CURSOR_VERSION:
+    version = payload.get("version")
+    if type(version) is not int or version != MAILBOX_SUPERVISION_CURSOR_VERSION:
         return None
     if payload.get("supervision_id") != supervision_id:
         return None
@@ -161,43 +184,49 @@ def write_supervision_cursor(
     A failed write is swallowed: the worst outcome is one replayed batch.
     """
     _validate_sequence(next_since, field_name="next_since")
-    stored = _read_supervision_cursor_payload(plan_dir, supervision_id, state_dir)
-    stored_first_seen_at = (
-        None if stored is None else _parse_timestamp(stored.get("first_seen_at"))
-    )
-    earliest_first_seen_at = min(
-        (
-            moment
-            for moment in (stored_first_seen_at, first_seen_at)
-            if moment is not None
-        ),
-        default=None,
-    )
-    payload: dict[str, Any] = {
-        "next_since": max(next_since, _cursor_next_since(stored)),
-        "supervision_id": supervision_id,
-        "updated_at": _utc_now_iso(),
-        "version": MAILBOX_SUPERVISION_CURSOR_VERSION,
-    }
-    if earliest_first_seen_at is not None:
-        payload["first_seen_at"] = earliest_first_seen_at.isoformat(
-            timespec="microseconds"
-        )
     cursor_path = supervision_cursor_path_for_plan(
         plan_dir,
         supervision_id,
         state_dir,
     )
     try:
-        cursor_path.parent.mkdir(parents=True, exist_ok=True)
-        # 0o600 like the mailbox and lease: every mailbox state file is private.
-        durability.replace_bytes(
-            cursor_path,
-            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-            + b"\n",
-            mode=0o600,
-            permissions=0o600,
-        )
+        with _supervision_cursor_lock(cursor_path.parent):
+            stored = _read_supervision_cursor_payload(
+                plan_dir, supervision_id, state_dir
+            )
+            stored_first_seen_at = (
+                None
+                if stored is None
+                else _parse_timestamp(stored.get("first_seen_at"))
+            )
+            earliest_first_seen_at = min(
+                (
+                    moment
+                    for moment in (stored_first_seen_at, first_seen_at)
+                    if moment is not None
+                ),
+                default=None,
+            )
+            payload: dict[str, Any] = {
+                "next_since": max(next_since, _cursor_next_since(stored)),
+                "supervision_id": supervision_id,
+                "updated_at": _utc_now_iso(),
+                "version": MAILBOX_SUPERVISION_CURSOR_VERSION,
+            }
+            if earliest_first_seen_at is not None:
+                payload["first_seen_at"] = earliest_first_seen_at.isoformat(
+                    timespec="microseconds"
+                )
+            # 0o600 like the mailbox and lease: every mailbox state file is private.
+            durability.replace_bytes(
+                cursor_path,
+                json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(
+                    "utf-8"
+                )
+                + b"\n",
+                mode=0o600,
+                permissions=0o600,
+            )
     except OSError:
         pass
 
@@ -213,19 +242,18 @@ def prune_supervision_cursors(
     cutoff = (_utc_now().timestamp() if now is None else now) - max_age_seconds
     removed = 0
     try:
-        candidates = sorted(
-            state.plan_state_dir(plan_dir, state_dir).glob(
-                MAILBOX_SUPERVISION_CURSOR_GLOB
-            )
-        )
+        cursor_dir = state.plan_state_dir(plan_dir, state_dir)
+        if not cursor_dir.is_dir():
+            return 0
+        with _supervision_cursor_lock(cursor_dir):
+            for candidate in sorted(cursor_dir.glob(MAILBOX_SUPERVISION_CURSOR_GLOB)):
+                try:
+                    if candidate.stat().st_mtime >= cutoff:
+                        continue
+                    candidate.unlink()
+                except OSError:
+                    continue
+                removed += 1
     except OSError:
-        return 0
-    for candidate in candidates:
-        try:
-            if candidate.stat().st_mtime >= cutoff:
-                continue
-            candidate.unlink()
-        except OSError:
-            continue
-        removed += 1
+        return removed
     return removed
