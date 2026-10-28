@@ -545,9 +545,8 @@ def tail_plan_json(
     tail_records._require_readable_events(events_path)
     batches = follow_events(events_path)
     records = next(batches)
-    run_id = tail_records._latest_run_id(
-        tail_records._read_json_file(state_path), records
-    )
+    state_payload = tail_records._read_json_file(state_path)
+    run_id = tail_records._latest_run_id(state_payload, records)
 
     def emit(batch: list[dict[str, Any]]) -> bool:
         finished = False
@@ -560,7 +559,11 @@ def tail_plan_json(
         return finished
 
     recent = [record for record in records if tail_records._matches_run(record, run_id)]
-    finished = emit(recent[-lines:]) or _has_run_finished(records, run_id)
+    finished = (
+        emit(recent[-lines:])
+        or _has_run_finished(records, run_id)
+        or _state_run_finished(_state_for_run(state_payload, run_id))
+    )
     stop = stop_event or threading.Event()
     while follow and not finished and not stop.is_set():
         if stop.wait(poll_interval):

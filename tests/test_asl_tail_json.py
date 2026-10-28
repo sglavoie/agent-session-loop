@@ -94,6 +94,32 @@ class TailJsonTests(TailFollowerTestCase):
             ["run_started", "turn_started", "run_finished"], self.names(out.getvalue())
         )
 
+    def test_finished_state_ends_follow_without_a_final_event(self) -> None:
+        _append(self.events_path, _record("run_started", "run-live"))
+        self.write_state_payload(
+            self.state_path,
+            {"run_id": "run-live", "run_finished_at": "2026-10-25T00:01:00Z"},
+        )
+        out = io.StringIO()
+        stop = threading.Event()
+        follower = threading.Thread(
+            target=tail.tail_plan_json,
+            args=(self.plan_dir,),
+            kwargs={
+                "state_dir": self.state_dir,
+                "out": out,
+                "poll_interval": 0.01,
+                "stop_event": stop,
+            },
+        )
+        follower.start()
+        self.addCleanup(stop.set)
+
+        follower.join(0.5)
+
+        self.assertFalse(follower.is_alive())
+        self.assertEqual(["run_started"], self.names(out.getvalue()))
+
     def test_next_runs_finished_state_does_not_end_current_follow(self) -> None:
         _append(self.events_path, _record("run_started", "run-live"))
         out = io.StringIO()
