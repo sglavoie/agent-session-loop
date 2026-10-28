@@ -15,6 +15,8 @@ Harness roots are discovered, never invented: ``~/.claude``, ``~/.codex`` and
 Claude profiles join through ``$CLAUDE_CONFIG_DIR`` or the
 ``os.pathsep``-separated ``$ASL_CLAUDE_CONFIG_DIRS``
 (``agent_session_loop.install_verify_common.discover_harness_roots``).
+Roots whose resolved paths leave the selected home are skipped, including
+symlinked harness directories.
 
 Every link is replaced with ``os.replace`` on a temporary sibling, so a running
 supervisor, launchd job or cockpit that execs ``asl`` mid-install sees the old

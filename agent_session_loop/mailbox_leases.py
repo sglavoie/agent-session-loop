@@ -35,6 +35,7 @@ from .mailbox_constants import (
     MAILBOX_LEASE_SUPPORTED_VERSIONS,
 )
 from .mailbox_cursors import lease_path_for_plan
+from .mailbox_files import open_regular_file
 from .mailbox_models import MailboxError, MailboxLease, MailboxLeaseView
 from .mailbox_validation import _is_uuid, _parse_timestamp, _utc_now, _utc_now_iso
 
@@ -148,7 +149,7 @@ def write_lease(
     lease_path = lease_path_for_plan(plan_dir, state_dir)
     try:
         lease_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(lease_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fd = open_regular_file(lease_path, os.O_RDWR | os.O_CREAT, 0o600)
     except OSError as error:
         raise MailboxError(
             ERROR_LEASE_WRITE,
@@ -205,7 +206,7 @@ def read_lease(
     resolved_now = _normalize_now(now)
     lease_path = lease_path_for_plan(plan_dir, state_dir)
     try:
-        fd = os.open(lease_path, os.O_RDONLY)
+        fd = open_regular_file(lease_path, os.O_RDONLY)
     except FileNotFoundError:
         return _invalid_lease_view(lease_path, LEASE_MISSING)
     except OSError as error:

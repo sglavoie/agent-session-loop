@@ -27,6 +27,7 @@ from .mailbox_constants import (
     REJECT_QUESTION_NOT_WAITING,
 )
 from .mailbox_cursors import mailbox_path_for_plan
+from .mailbox_files import open_regular_file
 from .mailbox_models import MailboxError, MailboxMessage, WaitCompletion
 from .mailbox_parsing import _parse_mailbox_bytes
 from .mailbox_validation import _is_uuid
@@ -83,7 +84,9 @@ def append_wait_question(
     mailbox_path = mailbox_path_for_plan(plan_dir, state_dir)
     try:
         mailbox_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(mailbox_path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = open_regular_file(
+            mailbox_path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600
+        )
     except OSError as error:
         raise MailboxError(
             ERROR_MAILBOX_WRITE, str(error), path=mailbox_path
@@ -171,7 +174,7 @@ def finish_wait(
         raise MailboxError(REJECT_INVALID_WAIT_ID)
     mailbox_path = mailbox_path_for_plan(plan_dir, state_dir)
     try:
-        fd = os.open(mailbox_path, os.O_RDWR | os.O_APPEND)
+        fd = open_regular_file(mailbox_path, os.O_RDWR | os.O_APPEND)
     except FileNotFoundError as error:
         raise MailboxError(
             REJECT_QUESTION_NOT_FOUND, question_id, path=mailbox_path

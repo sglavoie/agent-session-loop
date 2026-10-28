@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -26,6 +27,144 @@ from tests.asl_control_mailbox_support import MailboxTestsBase
 
 
 class MailboxTestsPart5(MailboxTestsBase):
+    def test_mailbox_writers_reject_symlinks_and_hard_links(self) -> None:
+        path = self.mailbox_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        target = self.tmp / "other-file"
+        target.write_text("sentinel", encoding="utf-8")
+
+        path.symlink_to(target)
+        with self.assertRaises(mailbox_models.MailboxError) as guidance_error:
+            self.guidance("unsafe")
+        self.assertEqual(
+            mailbox_constants.ERROR_MAILBOX_WRITE, guidance_error.exception.reason
+        )
+        with self.assertRaises(mailbox_models.MailboxError) as wait_error:
+            mailbox_waits.append_wait_question(
+                self.plan_dir,
+                "unsafe",
+                state_dir=self.state_dir,
+                run_id="run-A",
+                session_id="1",
+                turn_index=1,
+                waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_WORKER,
+            )
+        self.assertEqual(
+            mailbox_constants.ERROR_MAILBOX_WRITE, wait_error.exception.reason
+        )
+        self.assertEqual("sentinel", target.read_text(encoding="utf-8"))
+
+        path.unlink()
+        os.link(target, path)
+        with self.assertRaises(mailbox_models.MailboxError) as hardlink_error:
+            self.guidance("unsafe")
+        self.assertEqual(
+            mailbox_constants.ERROR_MAILBOX_WRITE, hardlink_error.exception.reason
+        )
+        self.assertEqual("sentinel", target.read_text(encoding="utf-8"))
+
+    def test_finish_wait_rejects_a_replaced_mailbox_symlink(self) -> None:
+        question, wait = mailbox_waits.append_wait_question(
+            self.plan_dir,
+            "Question?",
+            state_dir=self.state_dir,
+            run_id="run-A",
+            session_id="1",
+            turn_index=1,
+            waiter_origin=mailbox_vocabulary.WAITER_ORIGIN_WORKER,
+        )
+        self.mailbox_path().unlink()
+        target = self.tmp / "other-file"
+        target.write_text("sentinel", encoding="utf-8")
+        self.mailbox_path().symlink_to(target)
+
+        with self.assertRaises(mailbox_models.MailboxError) as error:
+            mailbox_waits.finish_wait(
+                self.plan_dir,
+                question.id,
+                wait.id,
+                reason=mailbox_vocabulary.WAIT_END_REASON_TIMEOUT,
+                state_dir=self.state_dir,
+            )
+        self.assertEqual(mailbox_constants.ERROR_MAILBOX_WRITE, error.exception.reason)
+        self.assertEqual("sentinel", target.read_text(encoding="utf-8"))
+
+    def test_lease_writer_and_readers_reject_symlinks(self) -> None:
+        path = self.lease_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        target = self.tmp / "other-file"
+        target.write_text("sentinel", encoding="utf-8")
+        path.symlink_to(target)
+
+        with self.assertRaises(mailbox_models.MailboxError) as write_error:
+            mailbox_leases.write_lease(
+                self.plan_dir, self.message_id(), state_dir=self.state_dir
+            )
+        self.assertEqual(
+            mailbox_constants.ERROR_LEASE_WRITE, write_error.exception.reason
+        )
+        with self.assertRaises(mailbox_models.MailboxError) as read_error:
+            mailbox_leases.read_lease(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual(
+            mailbox_constants.ERROR_LEASE_READ, read_error.exception.reason
+        )
+        self.assertEqual("sentinel", target.read_text(encoding="utf-8"))
+
+    def test_fifo_mailbox_and_lease_reads_fail_without_blocking(self) -> None:
+        for path, reader, expected in (
+            (self.mailbox_path(), "mailbox", mailbox_constants.ERROR_MAILBOX_READ),
+            (self.lease_path(), "lease", mailbox_constants.ERROR_LEASE_READ),
+        ):
+            with self.subTest(reader=reader):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                os.mkfifo(path)
+                script = (
+                    "import sys; "
+                    "from agent_session_loop import mailbox, mailbox_leases, "
+                    "mailbox_models; "
+                    "reader = mailbox.read_mailbox if sys.argv[1] == 'mailbox' "
+                    "else mailbox_leases.read_lease; "
+                    "\ntry: reader(sys.argv[2], state_dir=sys.argv[3])"
+                    "\nexcept mailbox_models.MailboxError as error: print(error.reason)"
+                )
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        script,
+                        reader,
+                        str(self.plan_dir),
+                        str(self.state_dir),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=True,
+                )
+                self.assertEqual(expected, result.stdout.strip())
+                path.unlink()
+
+    def test_fifo_mailbox_does_not_trap_a_timed_outbox_wait(self) -> None:
+        path = self.mailbox_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(path)
+        script = (
+            "import sys, uuid; "
+            "from agent_session_loop import mailbox_cli_waits, mailbox_models; "
+            "\ntry: mailbox_cli_waits.wait_for_questions("
+            "sys.argv[1], state_dir=sys.argv[2], since=0, timeout=0.1, "
+            "supervisor_id=str(uuid.uuid4()))"
+            "\nexcept mailbox_models.MailboxError as error: print(error.reason)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(self.plan_dir), str(self.state_dir)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=True,
+        )
+        self.assertEqual(mailbox_constants.ERROR_MAILBOX_READ, result.stdout.strip())
+
     def test_reply_timeout_race_is_consistent_across_processes(self) -> None:
         question, wait_start = mailbox_waits.append_wait_question(
             self.plan_dir,

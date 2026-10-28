@@ -25,6 +25,7 @@ from .mailbox_constants import (
     REJECT_DUPLICATE_ID,
 )
 from .mailbox_cursors import mailbox_path_for_plan
+from .mailbox_files import open_regular_file
 from .mailbox_models import MailboxError, MailboxMessage
 from .mailbox_parsing import _parse_mailbox_bytes
 from .mailbox_vocabulary import (
@@ -101,7 +102,7 @@ def _append_record(
     mailbox_path = mailbox_path_for_plan(plan_dir, state_dir)
     try:
         mailbox_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(
+        fd = open_regular_file(
             mailbox_path,
             os.O_RDWR | os.O_CREAT | os.O_APPEND,
             0o600,

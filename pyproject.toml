@@ -447,6 +447,7 @@ module = [
     "agent_session_loop.mailbox_cli_waits",
     "agent_session_loop.mailbox_constants",
     "agent_session_loop.mailbox_cursors",
+    "agent_session_loop.mailbox_files",
     "agent_session_loop.mailbox_leases",
     "agent_session_loop.mailbox_models",
     "agent_session_loop.mailbox_parsing",

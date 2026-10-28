@@ -460,6 +460,31 @@ class InstallLinksTests(unittest.TestCase):
         self.assertEqual(discovery.skipped[0][0], str(outside))
         self.assertFalse((outside / "skills").exists())
 
+    def test_a_harness_root_symlinked_outside_home_is_skipped(self) -> None:
+        outside = self.root / "elsewhere/codex"
+        outside.mkdir(parents=True)
+        (self.home / ".codex").rmdir()
+        (self.home / ".codex").symlink_to(outside, target_is_directory=True)
+
+        discovery = install_links.discover_harness_roots(self.home, NO_EXTRA_ROOTS)
+        changes = self.install()
+
+        self.assertNotIn(".codex", [root.relative for root in discovery.found])
+        self.assertTrue(any(".codex" in path for path, _ in discovery.skipped))
+        self.assertFalse((outside / "skills").exists())
+        self.assertFalse(any(".codex" in change for change in changes))
+
+    def test_a_child_name_starting_with_two_dots_is_inside_home(self) -> None:
+        profile = self.home / "..claude-work"
+        profile.mkdir()
+        env = {"CLAUDE_CONFIG_DIR": str(profile)}
+
+        discovery = install_links.discover_harness_roots(self.home, env)
+        self.install(env=env)
+
+        self.assertIn("..claude-work", [root.relative for root in discovery.found])
+        self.assertTrue((profile / "skills/asl").is_symlink())
+
     def test_prune_leaves_unmanaged_roots_alone(self) -> None:
         stale = self.home / ".claude-personal/skills/gone"
         stale.parent.mkdir(parents=True)

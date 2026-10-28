@@ -31,6 +31,7 @@ from .mailbox_constants import (
     MAILBOX_CHANGE_TOKEN_UNAVAILABLE,
 )
 from .mailbox_cursors import mailbox_path_for_plan
+from .mailbox_files import open_regular_file
 from .mailbox_models import MailboxError, MailboxMessage
 from .mailbox_parsing import _parse_mailbox_bytes
 from .mailbox_snapshot import MailboxView
@@ -152,7 +153,7 @@ def read_mailbox(
     """Read and validate the complete mailbox under a shared lock."""
     mailbox_path = mailbox_path_for_plan(plan_dir, state_dir)
     try:
-        fd = os.open(mailbox_path, os.O_RDONLY)
+        fd = open_regular_file(mailbox_path, os.O_RDONLY)
     except FileNotFoundError:
         return MailboxView(mailbox_path=mailbox_path)
     except OSError as error:

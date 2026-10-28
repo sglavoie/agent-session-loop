@@ -113,14 +113,20 @@ def _relative_to_home(value: str, home: Path) -> str | None:
         candidate = value
     else:
         candidate = os.path.join(home_text, value)
-    for base, path in (
-        (os.path.normpath(home_text), os.path.normpath(candidate)),
-        (os.path.realpath(home_text), os.path.realpath(candidate)),
+    base = os.path.abspath(home_text)
+    path = os.path.abspath(candidate)
+    relative = os.path.relpath(path, base)
+    if relative == "." or relative == ".." or relative.startswith(f"..{os.sep}"):
+        return None
+
+    resolved_relative = os.path.relpath(os.path.realpath(path), os.path.realpath(base))
+    if (
+        resolved_relative == "."
+        or resolved_relative == ".."
+        or resolved_relative.startswith(f"..{os.sep}")
     ):
-        relative = os.path.relpath(path, base)
-        if relative != "." and not relative.startswith(".."):
-            return Path(relative).as_posix()
-    return None
+        return None
+    return Path(relative).as_posix()
 
 
 def discover_harness_roots(

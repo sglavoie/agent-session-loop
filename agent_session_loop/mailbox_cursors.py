@@ -23,6 +23,7 @@ from .mailbox_constants import (
     MAILBOX_SUPERVISION_CURSOR_MAX_AGE_SECONDS,
     MAILBOX_SUPERVISION_CURSOR_VERSION,
 )
+from .mailbox_files import open_regular_file
 from .mailbox_validation import (
     _is_uuid,
     _parse_timestamp,
@@ -70,7 +71,7 @@ def _supervision_cursor_lock(cursor_dir: Path) -> Iterator[None]:
     """Serialize cursor merges and pruning on a stable inode in this plan."""
     cursor_dir.mkdir(parents=True, exist_ok=True)
     lock_path = cursor_dir / MAILBOX_SUPERVISION_CURSOR_LOCK_FILE_NAME
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    fd = open_regular_file(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         os.fchmod(fd, 0o600)
