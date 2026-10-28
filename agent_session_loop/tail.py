@@ -248,7 +248,11 @@ class _TailFollowLoop:
         selected_state = _state_for_run(state_payload, self._run_id)
 
         run_records = tail_records._event_records_for_run(new_records, self._run_id)
-        self._targets.update(tail_logs._discover_targets(run_records, selected_state))
+        # Existing targets hold the file identity and consumed-prefix digest.
+        for key, target in tail_logs._discover_targets(
+            run_records, selected_state
+        ).items():
+            self._targets.setdefault(key, target)
 
         finished = False
         for record in new_records:
@@ -437,7 +441,13 @@ class TailFollower:
         ):
             log_lines, offset = tail_logs._read_log_snapshot(target, final=final)
             lines.extend(log_lines)
-            offsets[tail_logs._target_key(target["path"])] = offset
+            key = tail_logs._target_key(target["path"])
+            offsets[key] = offset
+            if self._initial_log_scope == "active" and key in targets:
+                # Active replay constructs a separate target for the same log.
+                for field in ("_follow_identity", "_follow_prefix_hash"):
+                    if field in target:
+                        targets[key][field] = target[field]
         if lines:
             tail_logs._print_lines(lines[-self._initial_log_lines :], self._out)
         return offsets

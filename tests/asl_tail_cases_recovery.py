@@ -4,6 +4,51 @@ from .asl_tail_support import *
 
 
 class TailFollowerRecoveryTests(TailFollowerTestCase):
+    def test_active_replay_restarts_on_changed_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path, _ = self.setup_tail_files(tmp_dir)
+            log = tmp_dir / "stdout.log"
+            log.write_text("old first\n", encoding="utf-8")
+            self.write_state_payload(
+                state_path,
+                {
+                    "run_id": "run-1",
+                    "active_turn": {
+                        "run_id": "run-1",
+                        "session_id": "1",
+                        "turn_index": 1,
+                        "stdout_path": str(log),
+                    },
+                },
+            )
+            snapshot = tail_logs._read_log_snapshot
+
+            def replace_after_replay(target, *, final=True):
+                result = snapshot(target, final=final)
+                replacement = tmp_dir / "replacement.log"
+                replacement.write_text("new first\nnew second\n", encoding="utf-8")
+                os.replace(replacement, log)
+                return result
+
+            out = io.StringIO()
+            follower = tail.TailFollower(
+                plan_dir,
+                state_dir=state_dir,
+                out=out,
+                include_events=False,
+                initial_log_lines=40,
+                initial_log_scope="active",
+            )
+            with mock.patch.object(
+                tail_logs, "_read_log_snapshot", side_effect=replace_after_replay
+            ):
+                follow_loop = follower._build_loop_from_eof()
+            follow_loop._poll_once()
+            self.assertEqual(out.getvalue().count("| old first\n"), 1)
+            self.assertEqual(out.getvalue().count("| new first\n"), 1)
+            self.assertEqual(out.getvalue().count("| new second\n"), 1)
+
     def test_existing_log_position_restarts_on_changed_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "stdout.log"

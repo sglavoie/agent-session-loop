@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from agent_session_loop import (
+    durability,
     events,
     run_reporting,
     state,
@@ -47,7 +48,7 @@ class TailFollowerTestCase(unittest.TestCase):
         state_path: Path,
         payload: dict[str, object],
     ) -> None:
-        state_path.write_text(json.dumps(payload), encoding="utf-8")
+        durability.write_json_file(state_path, payload)
 
     def append_log_line(self, path: Path, text: str) -> None:
         with path.open("a", encoding="utf-8") as log_file:
