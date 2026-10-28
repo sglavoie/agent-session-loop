@@ -258,6 +258,57 @@ class BaselineCacheTests(unittest.TestCase):
             # Stable across calls for the same directory.
             self.assertEqual(fingerprint, baseline_cache.repository_fingerprint(tmp))
 
+    def test_repository_fingerprint_rejects_failed_git_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            init_git_repo(repo)
+            real_git = baseline_cache._git
+
+            def failed_status(root: Path, *args: str) -> str | None:
+                if args[0] == "status":
+                    return None
+                return real_git(root, *args)
+
+            with (
+                mock.patch.object(baseline_cache, "_git", side_effect=failed_status),
+                self.assertRaisesRegex(plans_errors.PlanError, "git status failed"),
+            ):
+                baseline_cache.repository_fingerprint(repo)
+
+    def test_repository_fingerprint_rejects_failed_status_on_unborn_head(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            git_stdout(repo, "init")
+            real_git = baseline_cache._git
+
+            def failed_status(root: Path, *args: str) -> str | None:
+                if args[0] == "status":
+                    return None
+                return real_git(root, *args)
+
+            with (
+                mock.patch.object(baseline_cache, "_git", side_effect=failed_status),
+                self.assertRaisesRegex(plans_errors.PlanError, "git status failed"),
+            ):
+                baseline_cache.repository_fingerprint(repo)
+
+    def test_repository_fingerprint_rejects_unavailable_git_in_a_checkout(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            init_git_repo(repo)
+            nested = repo / "nested"
+            nested.mkdir()
+
+            with (
+                mock.patch.object(baseline_cache, "_git", return_value=None),
+                self.assertRaisesRegex(plans_errors.PlanError, "git status failed"),
+            ):
+                baseline_cache.repository_fingerprint(nested)
+
     def test_cache_roundtrip_save_and_load(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -320,6 +371,24 @@ class BaselineCacheTests(unittest.TestCase):
             ):
                 path.write_bytes(raw)
                 self.assertEqual(0, len(baseline_cache.BaselineCache.load(path)))
+
+    def test_cache_load_rejects_non_integer_schema_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / baseline_cache.BASELINE_RESULTS_FILENAME
+            for version in (True, 1.0):
+                with self.subTest(version=version):
+                    path.write_text(
+                        json.dumps(
+                            {
+                                "version": version,
+                                "entries": {
+                                    "k": {"key": "k", "recipe": "r", "result": {}}
+                                },
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    self.assertEqual(0, len(baseline_cache.BaselineCache.load(path)))
 
     def test_baseline_results_excluded_from_content_and_readiness_hashes(
         self,
@@ -491,7 +560,6 @@ class BaselineTotalBudgetTests(unittest.TestCase):
             self.assertEqual("skip", skipped.status)
             self.assertFalse(skipped.satisfied)
             self.assertTrue(skipped.total_budget_exceeded)
-
 
     def test_session_ids_restrict_the_run_to_those_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

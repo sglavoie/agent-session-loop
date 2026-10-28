@@ -38,6 +38,7 @@ from typing import Any
 from . import contracts, durability
 from .contracts import VerifyRecipe
 from .git_subprocess import run_git
+from .plans_errors import PlanError
 from .plans_files import canonicalize_path
 
 #: Derived journal filename. Excluded from content/readiness hashes because the
@@ -104,6 +105,10 @@ def _git(root: Path, *args: str) -> str | None:
     return completed.stdout
 
 
+def _has_git_marker(root: Path) -> bool:
+    return any(os.path.lexists(parent / ".git") for parent in (root, *root.parents))
+
+
 def _plan_dir_exclude_pathspec(root: Path, plan_dir: str | Path | None) -> str | None:
     """The pathspec dropping ``plan_dir`` from a status, when it lies inside."""
     if plan_dir is None:
@@ -134,6 +139,8 @@ def repository_fingerprint(cwd: str | Path, plan_dir: str | Path | None = None) 
     A ``plan_dir`` inside the repository is left out of the listing, as the
     registered-workspace capture leaves it out: otherwise writing the baseline
     evidence itself, or any later plan bookkeeping, makes that evidence stale.
+    A failed Git status probe raises :class:`PlanError` so missing evidence
+    cannot produce the same fingerprint as a clean working tree.
     """
     root = canonicalize_path(cwd)
     head = _git(root, "rev-parse", "HEAD")
@@ -142,6 +149,12 @@ def repository_fingerprint(cwd: str | Path, plan_dir: str | Path | None = None) 
     if excluded is not None:
         status_args += ["--", ":(top)", excluded]
     status = _git(root, *status_args)
+    if status is None and (
+        head is not None
+        or (_git(root, "rev-parse", "--is-inside-work-tree") or "").strip() == "true"
+        or _has_git_marker(root)
+    ):
+        raise PlanError(f"cannot fingerprint repository at {root}: git status failed")
     if head is None and status is None:
         return "non-git:" + _sha256("nogit\0" + os.fspath(root))
     digest = hashlib.sha256()
@@ -274,7 +287,11 @@ class BaselineCache:
             # ValueError covers a malformed document and a non-UTF-8 byte alike;
             # an untrustworthy file is treated as an empty cache.
             return cache
-        if not isinstance(data, dict) or data.get("version") != BASELINE_CACHE_VERSION:
+        if (
+            not isinstance(data, dict)
+            or type(data.get("version")) is not int
+            or data["version"] != BASELINE_CACHE_VERSION
+        ):
             return cache
         entries = data.get("entries", {})
         if isinstance(entries, dict):
