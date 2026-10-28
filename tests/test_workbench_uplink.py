@@ -274,6 +274,36 @@ class UploadTests(UplinkCase):
                 assert row is not None
                 self.assertEqual(row["status"], OPERATION_DISPATCHED)
 
+    def test_a_mutation_receipt_must_match_its_request_id(self) -> None:
+        for operation_id, request_id in (
+            ("mismatched-receipt", "submit-another-operation"),
+            ("uncorrelated-receipt", "unrelated-request"),
+        ):
+            with self.subTest(request_id=request_id):
+                self.store.record_operation(
+                    operation_record(operation_id, status=OPERATION_DISPATCHED),
+                    connector_id=CONNECTOR,
+                    received_at=NOW,
+                )
+                receipt = receipt_envelope(
+                    payload={
+                        "outcome": "refused",
+                        "observed_at": NOW + 1,
+                        "detail_code": "forbidden-method",
+                        "operation_id": operation_id,
+                    },
+                    capability="mutate",
+                    connector_id=CONNECTOR,
+                    target_id=TARGET,
+                    sent_at=NOW + 1,
+                    request_id=request_id,
+                )
+                self.uplink.ingest(receipt, now=NOW + 1, subject=CONNECTOR)
+                self.assertEqual(
+                    self.store.operation(operation_id)["status"],
+                    OPERATION_DISPATCHED,
+                )
+
     def test_a_report_settles_the_operation_this_service_submitted(self) -> None:
         self.store.record_operation(
             operation_record("op-1"), connector_id=CONNECTOR, received_at=NOW
@@ -409,6 +439,31 @@ class UploadTests(UplinkCase):
                     "deadline-passed" if outcome == "expired" else None,
                 )
                 self.assertIsNone(self.store.outstanding_operation(PLAN_KEY))
+
+    def test_a_matching_operation_id_in_a_refusal_receipt_is_accepted(self) -> None:
+        operation_id = "op-explicit-receipt"
+        self.store.record_operation(
+            operation_record(operation_id, status=OPERATION_DISPATCHED),
+            connector_id=CONNECTOR,
+            received_at=NOW,
+        )
+        receipt = receipt_envelope(
+            payload={
+                "outcome": "refused",
+                "observed_at": NOW + 1,
+                "detail_code": "forbidden-method",
+                "operation_id": operation_id,
+            },
+            capability="mutate",
+            connector_id=CONNECTOR,
+            target_id=TARGET,
+            sent_at=NOW + 1,
+            request_id=f"submit-{operation_id}",
+        )
+        self.uplink.ingest(receipt, now=NOW + 1, subject=CONNECTOR)
+        self.assertEqual(
+            self.store.operation(operation_id)["status"], OPERATION_REJECTED
+        )
 
 
 class CarriageTests(UplinkCase):

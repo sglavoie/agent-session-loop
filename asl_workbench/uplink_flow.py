@@ -192,11 +192,16 @@ class UplinkFlowMixin(UplinkBodiesMixin):
             RECEIPT_UNCONFIRMED: OPERATION_UNCONFIRMED,
         }.get(str(envelope["payload"]["outcome"]))
         request_id = envelope.get("request_id")
-        if status is None or not isinstance(request_id, str):
+        if (
+            status is None
+            or not isinstance(request_id, str)
+            or not request_id.startswith("submit-")
+        ):
             return
-        operation_id = envelope["payload"].get("operation_id")
-        if not isinstance(operation_id, str):
-            operation_id = request_id.removeprefix("submit-")
+        operation_id = request_id.removeprefix("submit-")
+        claimed_id = envelope["payload"].get("operation_id")
+        if claimed_id is not None and claimed_id != operation_id:
+            return
         row = self.store.operation(operation_id)
         if (
             row is None

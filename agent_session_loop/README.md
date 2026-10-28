@@ -57,10 +57,10 @@ including conflicting reuse of an operation id and uncertain prior outcomes.
 
 Remote operation reports recheck transitions when another upload or recovery
 sweep advances the journal concurrently. Refusal receipts only settle rows that
-are still dispatched and belong to the uploading connector; operation reports
-also require that ownership. Undelivered copies only expire rows that are
-still pending. A stale status read cannot overwrite newer evidence or turn a
-late report into an upload failure.
+are still dispatched, belong to the uploading connector, and match the
+submission request id; operation reports also require that ownership.
+Undelivered copies only expire rows that are still pending. A stale status read
+cannot overwrite newer evidence or turn a late report into an upload failure.
 
 Local reply settlement also preserves a consumption receipt when a reconciliation
 sweep observes the worker reading the reply before the delivery call returns.
