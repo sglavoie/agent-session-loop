@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import signal
+import subprocess
+import sys
 import time
 import unittest
 
@@ -143,6 +146,43 @@ class SteeringTests(unittest.TestCase):
 
 class ShutdownTests(unittest.TestCase):
     """Letting go of the conversation, on both the calm and the wedged path."""
+
+    def test_a_server_ignoring_eof_and_sigterm_is_killed(self) -> None:
+        # Readiness proves the handler is installed before teardown sends any
+        # signal. The real child exercises the case a cooperative fake misses.
+        script = (
+            "import signal, sys, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "print('ready', flush=True)\n"
+            "sys.stdin.read()\n"
+            "time.sleep(60)\n"
+        )
+        with subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        ) as process:
+            try:
+                assert process.stdout is not None
+                self.assertEqual("ready\n", process.stdout.readline())
+                session = codex_app_server.CodexAppServerSession(
+                    process=process,
+                    plan=fixtures.worker_plan(),
+                    prompt=fixtures.PROMPT,
+                    request_timeout=0,
+                    shutdown_grace=0.05,
+                )
+
+                session._drive()
+
+                self.assertEqual("initialize timed out", session.protocol_error)
+                self.assertIsNotNone(session.fallback_reason)
+                self.assertEqual(-signal.SIGKILL, process.wait(timeout=2))
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=fixtures.WAIT_SECONDS)
 
     def test_shutdown_closes_stdin_and_lets_the_server_exit(self) -> None:
         process = fixtures._FakeProcess(fixtures.scripted_responder())

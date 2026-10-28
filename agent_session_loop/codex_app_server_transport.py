@@ -385,16 +385,24 @@ class AppServerTransport:
     def _end_process(self) -> None:
         """Close stdin and give the app-server a bounded chance to exit.
 
-        Closing stdin is how the app-server is asked to shut down; it exits on
-        its own in milliseconds. Terminating after the grace period keeps a
-        wedged one from holding a turn open forever when the turn itself has
-        no timeout.
+        Allow one grace period after EOF and another after SIGTERM. A server
+        ignoring both must be killed, or a turn with no harness timeout can
+        wait forever. The harness owns the final wait that reaps the process.
         """
         self._close_stdin()
+        if self._wait_for_exit():
+            return
+        with contextlib.suppress(ProcessLookupError):
+            self._process.terminate()
+        if not self._wait_for_exit():
+            with contextlib.suppress(ProcessLookupError):
+                self._process.kill()
+
+    def _wait_for_exit(self) -> bool:
+        """Wait at most one shutdown grace period for the process to exit."""
         deadline = time.monotonic() + self._shutdown_grace
         while time.monotonic() < deadline:
             if self._process.poll() is not None:
-                return
+                return True
             time.sleep(_LIVENESS_POLL_SECONDS)
-        if self._process.poll() is None:
-            self._process.terminate()
+        return self._process.poll() is not None

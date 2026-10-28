@@ -94,9 +94,10 @@ same locks across reader, driver, and mailbox threads.
 
 App-server teardown closes stdin and applies the shutdown grace period after
 failed or cancelled handshakes as well as completed turns. A server that ignores
-EOF is then sent SIGTERM. This also covers handshake timeouts, restore refusals,
-and submission cancellations. The existing fallback rules still prevent replay
-after a turn has been dispatched.
+EOF is then sent SIGTERM; if it remains alive for another grace period, SIGKILL
+ends it so a run without a harness timeout cannot wait indefinitely. This also
+covers handshake timeouts, restore refusals, and submission cancellations. The
+existing fallback rules still prevent replay after a turn has been dispatched.
 
 Implementation runs can explicitly authorize an external data directory with
 `--external-write-root /absolute/directory` (repeatable). Admission pins existing,

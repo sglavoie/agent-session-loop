@@ -221,8 +221,8 @@ class CodexAppServerSession(AppServerProtocol):
 
         Runs on the turn's own thread from the harness ``finally``, so it must
         not wait on anything unbounded: the driver is joined with a bound, and
-        a driver that outlives it is a daemon thread whose only remaining act
-        would be closing an already-closed pipe.
+        a driver that outlives it is a daemon thread that finishes the bounded
+        process teardown.
 
         A turn still running at this point is one the harness stopped waiting
         for, so it is interrupted before the pipe is taken away -- bounded by
