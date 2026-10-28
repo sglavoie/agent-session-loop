@@ -111,6 +111,90 @@ class HandshakeTests(unittest.TestCase):
         self.assertEqual("initialize timed out", session.protocol_error)
         self.assertIsNotNone(session.fallback_reason)
 
+    def test_failed_and_cancelled_handshakes_terminate_a_server_ignoring_eof(
+        self,
+    ) -> None:
+        def refuse(*args: Any) -> None:
+            raise RuntimeError("operator cancelled submission")
+
+        cases: list[tuple[str, Any, dict[str, Any], str, bool, bool]] = [
+            (
+                "request timeout",
+                lambda process, message: [],
+                {"request_timeout": 0},
+                "protocol_error",
+                True,
+                False,
+            ),
+            (
+                "sandbox mismatch",
+                fixtures.scripted_responder(applied_sandbox="dangerFullAccess"),
+                {},
+                "protocol_error",
+                True,
+                False,
+            ),
+            (
+                "missing conversation",
+                fixtures.scripted_responder(
+                    resume_error={"code": -32602, "message": "no such thread"}
+                ),
+                {"resume_conversation_id": "thread-77"},
+                "restore_refused",
+                False,
+                False,
+            ),
+            (
+                "conversation persistence failure",
+                fixtures.scripted_responder(),
+                {"on_conversation": refuse},
+                "conversation_error",
+                False,
+                False,
+            ),
+            (
+                "submission cancelled",
+                fixtures.scripted_responder(),
+                {"before_submit": refuse},
+                "cancelled_before_submission",
+                False,
+                False,
+            ),
+            (
+                "turn rejected after dispatch",
+                fixtures.scripted_responder(
+                    turn_error={"code": -32603, "message": "turn refused"}
+                ),
+                {},
+                "protocol_error",
+                False,
+                True,
+            ),
+        ]
+        for name, responder, kwargs, reason, fallback, dispatched in cases:
+            with self.subTest(failure=name):
+                process = fixtures._FakeProcess(responder, exit_on_stdin_close=False)
+                session = codex_app_server.CodexAppServerSession(
+                    process=process,  # type: ignore[arg-type]
+                    plan=fixtures.worker_plan(),
+                    prompt=fixtures.PROMPT,
+                    shutdown_grace=0,
+                    **kwargs,
+                )
+                process.session = session
+
+                # All responses are synchronous and each handshake fails, so
+                # driving directly checks teardown without a scheduling race.
+                session._drive()
+
+                self.assertTrue(process.stdin.closed)
+                self.assertTrue(process.terminated)
+                self.assertIsNotNone(process.poll())
+                self.assertTrue(getattr(session, reason))
+                self.assertEqual(fallback, session.fallback_reason is not None)
+                self.assertEqual(dispatched, session.turn_dispatched)
+                self.assertFalse(session.turn_accepted)
+
 
 class FramingAndCorrelationTests(unittest.TestCase):
     """One byte stream, many messages, answered in whatever order they arrive."""

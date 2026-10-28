@@ -167,21 +167,18 @@ class CodexAppServerSession(AppServerProtocol):
             self._handshake()
         except _ConversationNotRecorded as error:
             self._abandon_before_submission(conversation_error=str(error))
-            return
         except _SubmissionRefused as error:
             self._abandon_before_submission(submission_refused=str(error))
-            return
         except RestoreRefused as error:
             self._note_restore_refused(str(error))
             self._turn_finished.set()
-            self._close_stdin()
-            return
         except AppServerError as error:
             self._note_protocol_error(str(error))
             self._turn_finished.set()
-            self._close_stdin()
-            return
-        self._turn_finished.wait()
+        else:
+            self._turn_finished.wait()
+        # A failed or cancelled handshake can leave the server alive too.
+        # Give every outcome the same EOF grace and termination policy.
         self._end_process()
 
     def steer(

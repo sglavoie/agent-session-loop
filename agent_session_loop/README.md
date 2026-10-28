@@ -92,6 +92,12 @@ primitives from `codex_app_server_transport`. `codex_app_server_types` owns
 shared protocol values. The inheritance chain uses one session object and the
 same locks across reader, driver, and mailbox threads.
 
+App-server teardown closes stdin and applies the shutdown grace period after
+failed or cancelled handshakes as well as completed turns. A server that ignores
+EOF is then sent SIGTERM. This also covers handshake timeouts, restore refusals,
+and submission cancellations. The existing fallback rules still prevent replay
+after a turn has been dispatched.
+
 Implementation runs can explicitly authorize an external data directory with
 `--external-write-root /absolute/directory` (repeatable). Admission pins existing,
 narrow canonical roots; `run_config` retains them for `--resume`. The external

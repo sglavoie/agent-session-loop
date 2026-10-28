@@ -410,7 +410,6 @@ class AppServerProtocol(AppServerTransport):
             if submission_refused is not None:
                 self._submission_refused = submission_refused
         self._turn_finished.set()
-        self._close_stdin()
 
     def _adopt_turn(self, response: Any) -> None:
         turn = response.get("turn") if isinstance(response, Mapping) else None
