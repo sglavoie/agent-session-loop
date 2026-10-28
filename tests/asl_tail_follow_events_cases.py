@@ -1,3 +1,5 @@
+from unittest import mock
+
 from .asl_tail_support import *
 
 
@@ -110,6 +112,38 @@ class FollowEventsTests(unittest.TestCase):
         os.replace(rotated, self.path)
         batch = next(follower)
         self.assertEqual([r["payload"]["session_id"] for r in batch], ["2", "2"])
+
+    def test_rotation_between_stat_and_open_reads_new_file_from_start(self) -> None:
+        self._append(self._record("turn_heartbeat", session_id="1"))
+        follower = tail.follow_events(self.path)
+        next(follower)
+        self._append(self._record("turn_heartbeat", session_id="old"))
+
+        replacement = self.tmp / "events.next"
+        replacement.write_text(
+            self._record("turn_heartbeat", session_id="2")
+            + "\n"
+            + self._record("run_paused", reason="new")
+            + "\n",
+            encoding="utf-8",
+        )
+        original_open = Path.open
+        replaced = False
+
+        def rotate_on_open(path: Path, *args, **kwargs):
+            nonlocal replaced
+            if path == self.path and args and args[0] == "rb" and not replaced:
+                os.replace(replacement, self.path)
+                replaced = True
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", rotate_on_open):
+            batch = next(follower)
+
+        self.assertTrue(replaced)
+        self.assertEqual([r["name"] for r in batch], ["turn_heartbeat", "run_paused"])
+        self.assertEqual(batch[0]["payload"]["session_id"], "2")
+        self.assertEqual(next(follower), [])
 
 
 if __name__ == "__main__":

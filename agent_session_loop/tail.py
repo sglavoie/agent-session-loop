@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 from collections.abc import Iterator
@@ -154,29 +155,27 @@ def follow_events(path: str | Path) -> Iterator[list[dict[str, Any]]]:
     identity: tuple[int, int] | None = None
     while True:
         records: list[dict[str, Any]] = []
+        chunk = b""
         try:
-            stat_result = events_path.stat()
-        except OSError:
-            yield records
-            continue
-        current_identity = (stat_result.st_dev, stat_result.st_ino)
-        if stat_result.st_size < offset or (
-            identity is not None and current_identity != identity
-        ):
-            # Truncation (file shrank) or rotation (new inode): reopen from the
-            # start so a rewritten events file is followed rather than skipped.
-            offset = 0
-            buffer = b""
-        identity = current_identity
-        if stat_result.st_size > offset:
-            try:
-                with events_path.open("rb") as handle:
+            with events_path.open("rb") as handle:
+                stat_result = os.fstat(handle.fileno())
+                current_identity = (stat_result.st_dev, stat_result.st_ino)
+                if stat_result.st_size < offset or (
+                    identity is not None and current_identity != identity
+                ):
+                    # Check the opened file: the path may have rotated since
+                    # the previous read, including just before this open.
+                    offset = 0
+                    buffer = b""
+                identity = current_identity
+                if stat_result.st_size > offset:
                     handle.seek(offset)
                     chunk = handle.read()
                     offset = handle.tell()
-            except OSError:
-                yield records
-                continue
+        except OSError:
+            yield records
+            continue
+        if chunk:
             buffer += chunk
             *complete, buffer = buffer.split(b"\n")
             for raw_line in complete:
