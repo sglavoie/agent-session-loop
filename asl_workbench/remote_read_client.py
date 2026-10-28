@@ -229,7 +229,7 @@ class DetailReadClient:
 
     def sent(
         self, request_id: str, *, now: float, timeout: float | None = None
-    ) -> None:
+    ) -> float | None:
         """Record that the request has left this process.
 
         The deadline is taken from this moment rather than from composition: a
@@ -237,14 +237,18 @@ class DetailReadClient:
         time yet, and starting the clock before it left would time it out for
         somebody else's slowness. Keep the duration chosen for this request
         unless the sender explicitly overrides it.
+
+        Return the deadline the outgoing envelope must carry, or ``None`` if
+        the read has already settled and must no longer be sent.
         """
         with self._lock:
             waiter = self._waiters.get(request_id)
             if waiter is None:
-                return
+                return None
             lifetime = waiter.timeout if timeout is None else self._lifetime(timeout)
             waiter.sent = True
             waiter.expires_at = now + lifetime
+            return waiter.expires_at
 
     def cancel(self, request_id: str, *, now: float) -> ReadAnswer | None:
         """Withdraw one read. A late answer to it is discarded, never held.

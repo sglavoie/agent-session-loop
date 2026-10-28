@@ -29,6 +29,7 @@ from .transport import (
     RECEIPT_EXPIRED,
     RECEIPT_REFUSED,
     RECEIPT_UNCONFIRMED,
+    REQUEST_DETAIL,
     REQUEST_MUTATE,
     VIEW_CATALOG_PAGE,
     VIEW_HEARTBEAT,
@@ -229,6 +230,23 @@ class UplinkFlowMixin(UplinkBodiesMixin):
                         self.discard_body(operation_id)
                 self._undelivered(envelope, now=now, detail_code=DETAIL_DEADLINE_PASSED)
                 continue
+            payload = envelope.get("payload")
+            if (
+                isinstance(payload, Mapping)
+                and payload.get("request") == REQUEST_DETAIL
+            ):
+                request_id = envelope.get("request_id")
+                if not isinstance(request_id, str):
+                    continue
+                deadline = self.reads.sent(request_id, now=now)
+                if deadline is None:
+                    # Cancellation can win after dequeue, when withdrawal can
+                    # no longer remove the frame. Spend this upload on the
+                    # next live request instead.
+                    continue
+                # The connector expires requests and queued answers using the
+                # wire deadline. It must agree with the client's renewed wait.
+                envelope = {**envelope, "sent_at": now, "deadline": deadline}
             # Recorded outside the lock: ``_departed`` writes to the journal,
             # and a database write held across the condition every reader
             # waits on would make one command's departure everybody's pause.
@@ -253,13 +271,7 @@ class UplinkFlowMixin(UplinkBodiesMixin):
         payload = envelope.get("payload")
         if not isinstance(payload, Mapping):
             return True
-        request_id = envelope.get("request_id")
         if payload.get("request") != REQUEST_MUTATE:
-            # A read's deadline starts when it leaves, not when it was
-            # composed: a request that sat waiting for the next upload has not
-            # had its time yet.
-            if isinstance(request_id, str):
-                self.reads.sent(request_id, now=now)
             return True
         operation_id = payload.get("operation_id")
         if not isinstance(operation_id, str):

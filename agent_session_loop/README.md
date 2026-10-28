@@ -5,6 +5,11 @@ page bounds, including when paging from a cached answer. A new run starting
 between pages cannot redirect the remaining event history to that new run.
 Replies received at or after a read's deadline settle as a timeout without
 caching their bodies, even when the periodic expiry sweep has not run yet.
+When a queued read leaves the service, its outgoing deadline is renewed along
+with the client's wait, so the connector uses the same response window. Reads
+whose queue deadline has passed are still discarded. A read cancelled after
+dequeue is skipped before dispatch, leaving that upload free to carry the next
+live request.
 
 `asl outbox supervise` recovers its launch's terminal record even after the
 persisted cursor has advanced past it. If output is interrupted after saving
