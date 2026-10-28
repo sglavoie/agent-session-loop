@@ -183,8 +183,10 @@ selection (exit 1 without output) or a verified process identity mismatch proves
 the helper is gone. After detecting that exit, supervision must successfully
 read the mailbox again before reporting `LOST`, since the helper may have
 published its terminal record during the probe. Transient failures of that
-final read retry within the poll's remaining timeout; an unreadable mailbox at
-the deadline reports `mailbox-read-error` instead of claiming the record is absent.
+final read retry within the poll's remaining timeout. An unreadable mailbox at
+the deadline reports `mailbox-read-error` even if an earlier read succeeded,
+since that earlier snapshot cannot rule out a newly appended question or
+terminal record.
 Liveness record cleanup checks the identity of records older than 30 days and
 keeps any helper that is alive or cannot be verified; age alone does not prove
 that a long-running supervisor has exited.

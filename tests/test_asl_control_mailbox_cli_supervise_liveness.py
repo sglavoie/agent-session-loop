@@ -822,6 +822,30 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
         self.assertEqual("mailbox-read-error", payload["reason"])
         self.assertIn("path", payload["details"])
 
+    def test_outbox_reports_read_error_after_an_earlier_success(self) -> None:
+        empty = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        error = mailbox_models.MailboxError(
+            mailbox_constants.ERROR_MAILBOX_READ,
+            "unavailable after mailbox changed",
+            path=empty.mailbox_path,
+        )
+        with (
+            mock.patch.object(mailbox, "mailbox_change_token", side_effect=[1, 2]),
+            mock.patch.object(mailbox, "read_mailbox", side_effect=[empty, error]),
+            mock.patch.object(mailbox_cli_status, "write_supervisor_lease"),
+            mock.patch.object(time, "monotonic", side_effect=[0.0, 0.0, 1.0]),
+            mock.patch.object(time, "sleep"),
+            self.assertRaises(mailbox_models.MailboxError) as raised,
+        ):
+            mailbox_cli_waits.wait_for_questions(
+                self.plan_dir,
+                state_dir=self.state_dir,
+                since=0,
+                timeout=1,
+                supervisor_id=str(uuid.uuid4()),
+            )
+        self.assertIs(error, raised.exception)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -172,12 +172,11 @@ def wait_for_questions(
             )
 
         if now >= deadline:
-            if last_read_error is not None and (
-                last_successful_view is None or lost_reason is not None
-            ):
-                # A pre-probe snapshot cannot rule out a terminal record
-                # published during exit. Retry the final read within the
-                # budget, then report its error rather than a false LOST.
+            if last_read_error is not None:
+                # An earlier snapshot cannot rule out a question or terminal
+                # record added after it. Retry reads within the budget, then
+                # report the error instead of treating stale data as IDLE or
+                # declaring the helper LOST.
                 raise last_read_error
             next_since = max(
                 since,
