@@ -16,7 +16,9 @@ Claude profiles join through ``$CLAUDE_CONFIG_DIR`` or the
 ``os.pathsep``-separated ``$ASL_CLAUDE_CONFIG_DIRS``
 (``agent_session_loop.install_verify_common.discover_harness_roots``).
 Roots whose resolved paths leave the selected home are skipped, including
-symlinked harness directories.
+symlinked harness directories. Skill and wrapper parent directories must also
+resolve inside that home, so a nested symlink cannot redirect an install or
+prune into another tree.
 
 Every link is replaced with ``os.replace`` on a temporary sibling, so a running
 supervisor, launchd job or cockpit that execs ``asl`` mid-install sees the old
@@ -149,12 +151,26 @@ def conflict(destination: Path) -> str | None:
     return None
 
 
-def link(source: Path, destination: Path, *, dry_run: bool) -> str | None:
+def home_conflict(directory: Path, home: Path) -> str | None:
+    """Refuse an install directory whose existing ancestors escape ``home``."""
+    try:
+        if directory.resolve().is_relative_to(home.resolve()):
+            return None
+    except (OSError, RuntimeError) as error:
+        return f"cannot resolve {directory}: {error}; {RESOLUTION}"
+    return f"{directory} resolves outside {home}; {RESOLUTION}"
+
+
+def link(
+    source: Path, destination: Path, *, dry_run: bool, home: Path | None = None
+) -> str | None:
     """Point ``destination`` at ``source`` atomically; return what changed.
 
     A dry run reports the same change as ``would link``/``would relink``, so
     its output cannot be mistaken for a record of links that were placed.
     """
+    if home is not None and (problem := home_conflict(destination.parent, home)):
+        raise InstallError(problem)
     target = os.fspath(source)
     if destination.is_symlink():
         if os.readlink(destination) == target:
@@ -187,7 +203,13 @@ def link(source: Path, destination: Path, *, dry_run: bool) -> str | None:
     return f"{action}: {destination} -> {target}"
 
 
-def prune(install_root: Path, repo_root: Path, *, dry_run: bool) -> list[str]:
+def prune(
+    install_root: Path,
+    repo_root: Path,
+    *,
+    dry_run: bool,
+    home: Path | None = None,
+) -> list[str]:
     """Remove links into this checkout's skills whose source is gone.
 
     A link counts as into this checkout by where it points, not by how its
@@ -197,6 +219,8 @@ def prune(install_root: Path, repo_root: Path, *, dry_run: bool) -> list[str]:
     still recognized as stale. A source that survives only as cache residue
     (see ``is_leftover``) counts as gone.
     """
+    if home is not None and (problem := home_conflict(install_root, home)):
+        raise InstallError(problem)
     if not install_root.is_dir():
         return []
     skills_root = Path(os.path.realpath(repo_root / "skills"))
@@ -247,7 +271,14 @@ def install(
     # Preflight: one conflict anywhere fails the install before any link,
     # prune or directory has been touched, and every conflict is named at once.
     # A parent in the way blocks every link under it; name it once.
-    problems = list(dict.fromkeys(filter(None, (conflict(dest) for _, dest in links))))
+    problems = list(
+        dict.fromkeys(
+            problem
+            for _, dest in links
+            if (problem := conflict(dest) or home_conflict(dest.parent, home))
+            is not None
+        )
+    )
     if problems:
         raise InstallError(
             "nothing was changed, because these are in the way:\n  "
@@ -256,13 +287,13 @@ def install(
     changes: list[str] = []
     try:
         for source, destination in wrappers:
-            if change := link(source, destination, dry_run=dry_run):
+            if change := link(source, destination, dry_run=dry_run, home=home):
                 changes.append(change)
         for install_root in install_roots:
-            changes.extend(prune(install_root, repo_root, dry_run=dry_run))
+            changes.extend(prune(install_root, repo_root, dry_run=dry_run, home=home))
             for source in sources:
                 destination = install_root / source.name
-                if change := link(source, destination, dry_run=dry_run):
+                if change := link(source, destination, dry_run=dry_run, home=home):
                     changes.append(change)
     except InstallError as error:
         raise InstallError(str(error), changes) from error

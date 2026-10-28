@@ -109,6 +109,11 @@ Turn dispositions retain their entry points in `turn_dispositions.py`, with
 continuation models, redirect settlement, mailbox waits, and failure handling in
 `turn_disposition_*`. The tail keeps its CLI and follower in `tail.py`; its
 `tail_*` siblings own records, control messages, event formatting, and log reads.
+The tail uses state-derived logs and completion only when the state still names
+the run being followed, so a later run cannot add output to the earlier run's
+tail. Log following fingerprints the consumed prefix of an opened file: an
+atomic replacement that preserves that prefix contributes only its new lines,
+while a changed prefix is replayed from the start.
 Process diagnostics keep their public entry points in `process_tree.py`, backed
 by `process_sampling`, `process_recovery`, `process_sweep`, and
 `process_termination`; sampler patches belong on `process_sampling`.

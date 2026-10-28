@@ -4,6 +4,34 @@ from .asl_tail_support import *
 
 
 class TailFollowerRecoveryTests(TailFollowerTestCase):
+    def test_existing_log_position_restarts_on_changed_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "stdout.log"
+            log.write_text("old first\nold second\n", encoding="utf-8")
+            target = {
+                "path": log,
+                "stream": "stdout",
+                "session": "1",
+                "turn_index": 1,
+            }
+            offsets: dict[str, int] = {}
+            tail_logs._set_offsets_to_last_line({str(log): target}, offsets)
+
+            replacement = Path(tmp) / "replacement.log"
+            replacement.write_text(
+                "new first\nnew second\nnew third\n", encoding="utf-8"
+            )
+            os.replace(replacement, log)
+
+            self.assertEqual(
+                [
+                    "stdout session=1 turn=1 | new first",
+                    "stdout session=1 turn=1 | new second",
+                    "stdout session=1 turn=1 | new third",
+                ],
+                tail_logs._read_new_log_text(target, offsets),
+            )
+
     def test_recent_replay_follows_a_line_appended_after_its_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             stdout_log = Path(tmp) / "stdout.log"

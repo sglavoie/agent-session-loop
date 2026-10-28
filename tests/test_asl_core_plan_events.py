@@ -159,6 +159,29 @@ class EventPersistenceTests(unittest.TestCase):
             self.assertEqual(1, len(lines))
             self.assertTrue(lines[0].endswith("asl: harness terminated"))
 
+    def test_a_replaced_log_with_a_changed_prefix_replays_new_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "stdout.log"
+            durability.append_text(log, "old first\nold second\n")
+            target = {
+                "path": log,
+                "stream": "stdout",
+                "session": "1",
+                "turn_index": 1,
+            }
+            offsets: dict[str, int] = {}
+            self.assertEqual(2, len(tail_logs._read_new_log_text(target, offsets)))
+
+            durability.write_text(log, "new first\nnew second\nnew third\n")
+            self.assertEqual(
+                [
+                    "stdout session=1 turn=1 | new first",
+                    "stdout session=1 turn=1 | new second",
+                    "stdout session=1 turn=1 | new third",
+                ],
+                tail_logs._read_new_log_text(target, offsets),
+            )
+
     def test_a_log_line_is_followed_whole_and_a_truncated_log_from_the_start(
         self,
     ) -> None:

@@ -474,6 +474,42 @@ class InstallLinksTests(unittest.TestCase):
         self.assertFalse((outside / "skills").exists())
         self.assertFalse(any(".codex" in change for change in changes))
 
+    def test_nested_skills_symlink_outside_home_blocks_links_and_pruning(self) -> None:
+        outside = self.root / "shared-skills"
+        outside.mkdir()
+        (self.home / ".codex/skills").symlink_to(outside, target_is_directory=True)
+        stale = outside / "gone"
+        stale.symlink_to(self.repo / "skills/gone")
+
+        with self.assertRaises(install_links.InstallError) as raised:
+            self.install()
+
+        self.assertIn(
+            f"{self.home / '.codex/skills'} resolves outside", str(raised.exception)
+        )
+        self.assertEqual(raised.exception.changes, [])
+        self.assertTrue(stale.is_symlink())
+        self.assertFalse((outside / "asl").exists())
+        self.assertFalse((self.home / ".local").exists())
+
+    def test_wrapper_parent_symlink_outside_home_blocks_relink(self) -> None:
+        outside = self.root / "shared-bin"
+        outside.mkdir()
+        (self.home / ".local").mkdir()
+        (self.home / ".local/bin").symlink_to(outside, target_is_directory=True)
+        existing = outside / "asl"
+        existing.symlink_to(self.root / "other-asl")
+
+        with self.assertRaises(install_links.InstallError) as raised:
+            self.install()
+
+        self.assertIn(
+            f"{self.home / '.local/bin'} resolves outside", str(raised.exception)
+        )
+        self.assertEqual(raised.exception.changes, [])
+        self.assertEqual(os.readlink(existing), os.fspath(self.root / "other-asl"))
+        self.assertFalse((self.home / ".claude/skills").exists())
+
     def test_a_child_name_starting_with_two_dots_is_inside_home(self) -> None:
         profile = self.home / "..claude-work"
         profile.mkdir()

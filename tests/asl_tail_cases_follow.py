@@ -6,6 +6,44 @@ class TailFollowerFollowTests(TailFollowerTestCase):
         follower.stop()
         follower.join(1.0)
 
+    def test_following_one_run_ignores_the_next_runs_state_and_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path, events_path = self.setup_tail_files(
+                tmp_dir
+            )
+            self.write_state_payload(state_path, {"run_id": "run-1"})
+            out = io.StringIO()
+            follower = tail.TailFollower(plan_dir, state_dir=state_dir, out=out)
+            loop = follower._build_loop_from_eof()
+
+            next_log = tmp_dir / "next-run.log"
+            next_log.write_text("next run only\n", encoding="utf-8")
+            next_state = {
+                "run_id": "run-2",
+                "active_turn": {
+                    "run_id": "run-2",
+                    "session_id": "2",
+                    "turn_index": 1,
+                    "stdout_path": str(next_log),
+                },
+            }
+            self.write_state_payload(
+                state_path, {**next_state, "run_finished_at": "2026-06-11T12:00:00Z"}
+            )
+            self.assertFalse(loop._poll_once())
+            self.assertNotIn("next run only", out.getvalue())
+
+            events.append_event(
+                events_path,
+                events.Event(
+                    name="run_finished",
+                    payload={"run_id": "run-1", "ok": True},
+                ),
+            )
+            self.assertTrue(loop._poll_once())
+            self.assertNotIn("next run only", out.getvalue())
+
     def test_tail_follower_starts_at_eof_for_existing_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)

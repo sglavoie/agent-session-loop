@@ -43,6 +43,9 @@ Each link is an absolute symlink into this checkout, replaced atomically, so a
 running companion, bridge or supervisor that execs `asl` mid-install never
 finds it missing. An existing symlink (say, one a different checkout
 installed) is retargeted; a real file or directory is never overwritten.
+The wrapper directory and each harness's `skills/` directory must resolve
+inside the selected home. A nested symlink pointing outside it stops the
+install before any links are changed or stale links are pruned.
 `just install-dry-run` shows what would change, including which harness roots
 were found and which startup cards are stale, without touching anything.
 

@@ -130,6 +130,15 @@ def _state_run_finished(state_payload: dict[str, Any] | None) -> bool:
     )
 
 
+def _state_for_run(
+    state_payload: dict[str, Any] | None, run_id: str | None
+) -> dict[str, Any] | None:
+    """Use mutable runner state only while it belongs to the selected run."""
+    if tail_records._state_run_id(state_payload) != run_id:
+        return None
+    return state_payload
+
+
 def follow_events(path: str | Path) -> Iterator[list[dict[str, Any]]]:
     """Incrementally follow appended event records from a JSONL events file.
 
@@ -236,9 +245,10 @@ class _TailFollowLoop:
         new_records = next(self._batches)
         if self._run_id is None:
             self._run_id = tail_records._latest_run_id(state_payload, new_records)
+        selected_state = _state_for_run(state_payload, self._run_id)
 
         run_records = tail_records._event_records_for_run(new_records, self._run_id)
-        self._targets.update(tail_logs._discover_targets(run_records, state_payload))
+        self._targets.update(tail_logs._discover_targets(run_records, selected_state))
 
         finished = False
         for record in new_records:
@@ -257,7 +267,7 @@ class _TailFollowLoop:
                 tail_logs._read_new_log_text(target, self._offsets), self._out
             )
 
-        if finished or _state_run_finished(state_payload):
+        if finished or _state_run_finished(selected_state):
             for target in list(self._targets.values()):
                 tail_logs._print_lines(
                     tail_logs._read_new_log_text(target, self._offsets, final=True),
@@ -370,16 +380,17 @@ class TailFollower:
         records = next(batches)
         state_payload = tail_records._read_json_file(state_path)
         run_id = tail_records._latest_run_id(state_payload, records)
+        selected_state = _state_for_run(state_payload, run_id)
         run_records = tail_records._event_records_for_run(records, run_id)
-        targets = tail_logs._discover_targets(run_records, state_payload)
+        targets = tail_logs._discover_targets(run_records, selected_state)
         offsets: dict[str, int] = {}
         initial_finished = _has_run_finished(records, run_id) or _state_run_finished(
-            state_payload
+            selected_state
         )
         if self._initial_log_lines > 0:
             offsets.update(
                 self._emit_initial_log_replay(
-                    state_payload, targets, final=initial_finished
+                    selected_state, targets, final=initial_finished
                 )
             )
         tail_logs._set_offsets_to_last_line(
@@ -456,17 +467,18 @@ def tail_plan(
     records = next(batches)
     state_payload = tail_records._read_json_file(state_path)
     run_id = tail_records._latest_run_id(state_payload, records)
+    selected_state = _state_for_run(state_payload, run_id)
     targets: dict[str, dict[str, Any]] = {}
     offsets: dict[str, int] = {}
     initial_finished = _has_run_finished(records, run_id) or _state_run_finished(
-        state_payload
+        selected_state
     )
 
     # A line still being written is left for the follow to print whole; only a
     # replay nothing follows prints it as it stands.
     tail_logs._emit_recent(
         records=records,
-        state_payload=state_payload,
+        state_payload=selected_state,
         run_id=run_id,
         lines=lines,
         out=out,
@@ -543,8 +555,12 @@ def tail_plan_json(
     while follow and not finished and not stop.is_set():
         if stop.wait(poll_interval):
             break
-        finished = emit(next(batches)) or _state_run_finished(
-            tail_records._read_json_file(state_path)
+        new_records = next(batches)
+        state_payload = tail_records._read_json_file(state_path)
+        if run_id is None:
+            run_id = tail_records._latest_run_id(state_payload, new_records)
+        finished = emit(new_records) or _state_run_finished(
+            _state_for_run(state_payload, run_id)
         )
 
 

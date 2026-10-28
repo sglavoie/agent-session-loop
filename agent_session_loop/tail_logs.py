@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from . import (
     plans_files,
@@ -95,6 +96,25 @@ def _log_prefix(target: dict[str, Any]) -> str:
     )
 
 
+def _file_identity(log_file: BinaryIO) -> tuple[int, int]:
+    opened = os.fstat(log_file.fileno())
+    return opened.st_dev, opened.st_ino
+
+
+def _hash_prefix(log_file: BinaryIO, length: int) -> tuple[Any, int]:
+    """Fingerprint the consumed prefix before a file is replaced."""
+    digest = hashlib.blake2b(digest_size=16)
+    log_file.seek(0)
+    read = 0
+    while read < length:
+        chunk = log_file.read(min(64 * 1024, length - read))
+        if not chunk:
+            break
+        digest.update(chunk)
+        read += len(chunk)
+    return digest, read
+
+
 def _read_log_snapshot(
     target: dict[str, Any], *, final: bool = True
 ) -> tuple[list[str], int]:
@@ -108,11 +128,17 @@ def _read_log_snapshot(
     if not isinstance(path, Path) or not path.exists():
         return [], 0
     try:
-        data = path.read_bytes()
+        with path.open("rb") as log_file:
+            identity = _file_identity(log_file)
+            data = log_file.read()
     except OSError:
         return [], 0
     if not final:
         data = data[: data.rfind(b"\n") + 1]
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(data)
+    target["_follow_identity"] = identity
+    target["_follow_prefix_hash"] = digest
     text = data.decode("utf-8", "replace")
     prefix = _log_prefix(target)
     return [f"{prefix}{line}" for line in text.splitlines()], len(data)
@@ -124,22 +150,20 @@ def _read_log_lines(target: dict[str, Any], *, final: bool = True) -> list[str]:
     return lines
 
 
-def _last_line_end(path: Path) -> int:
+def _last_line_end(log_file: BinaryIO) -> int:
     """The offset just past a log's last newline, or 0 when it has none.
 
-    Read backwards a chunk at a time, so a long log costs one chunk and not a
-    full read just to find where its last complete line ends.
+    Read backwards a chunk at a time to find the last complete line.
     """
     chunk_bytes = 64 * 1024
-    with path.open("rb") as log_file:
-        end = os.fstat(log_file.fileno()).st_size
-        while end > 0:
-            start = max(0, end - chunk_bytes)
-            log_file.seek(start)
-            newline = log_file.read(end - start).rfind(b"\n")
-            if newline >= 0:
-                return start + newline + 1
-            end = start
+    end = os.fstat(log_file.fileno()).st_size
+    while end > 0:
+        start = max(0, end - chunk_bytes)
+        log_file.seek(start)
+        newline = log_file.read(end - start).rfind(b"\n")
+        if newline >= 0:
+            return start + newline + 1
+        end = start
     return 0
 
 
@@ -158,7 +182,16 @@ def _set_offsets_to_last_line(
             offsets.setdefault(key, 0)
             continue
         try:
-            offsets[key] = _last_line_end(path)
+            with path.open("rb") as log_file:
+                identity = _file_identity(log_file)
+                offset = _last_line_end(log_file)
+                digest, read = _hash_prefix(log_file, offset)
+                if read != offset:
+                    offset = 0
+                    digest = hashlib.blake2b(digest_size=16)
+                offsets[key] = offset
+                target["_follow_identity"] = identity
+                target["_follow_prefix_hash"] = digest
         except OSError:
             offsets.setdefault(key, 0)
 
@@ -176,8 +209,8 @@ def _read_new_log_text(
     its newline arrives; ``final`` flushes a last unterminated line once the
     run is over. A log that shrank below the offset was truncated or
     rewritten and is read again from the start. A log replaced whole by a
-    longer one (the turn's final stdout write) keeps its offset, so only what
-    the replacement added is printed.
+    longer one (the turn's final stdout write) keeps its offset only when the
+    consumed prefix is unchanged. Otherwise it is read from the start.
     """
     path = target["path"]
     key = _target_key(path)
@@ -188,8 +221,23 @@ def _read_new_log_text(
     offset = offsets.get(key, 0)
     try:
         with path.open("rb") as log_file:
+            identity = _file_identity(log_file)
+            old_identity = target.get("_follow_identity")
+            old_digest = target.get("_follow_prefix_hash")
             if os.fstat(log_file.fileno()).st_size < offset:
                 offset = 0
+                digest = hashlib.blake2b(digest_size=16)
+            elif old_identity != identity or old_digest is None:
+                digest, read = _hash_prefix(log_file, offset)
+                if read != offset or (
+                    old_digest is not None
+                    and old_identity != identity
+                    and digest.digest() != old_digest.digest()
+                ):
+                    offset = 0
+                    digest = hashlib.blake2b(digest_size=16)
+            else:
+                digest = old_digest.copy()
             log_file.seek(offset)
             data = log_file.read()
     except OSError:
@@ -198,6 +246,9 @@ def _read_new_log_text(
     if not final:
         data = data[: data.rfind(b"\n") + 1]
     offsets[key] = offset + len(data)
+    digest.update(data)
+    target["_follow_identity"] = identity
+    target["_follow_prefix_hash"] = digest
     if not data:
         return []
     text = data.decode("utf-8", "replace")
