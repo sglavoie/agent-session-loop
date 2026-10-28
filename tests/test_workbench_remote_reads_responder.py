@@ -15,6 +15,7 @@ from asl_workbench.transport import (
     encode_frame,
 )
 from tests import support_workbench_remote_reads as fixtures
+from tests.support import _write_state_payload
 
 ASL_TEST_PORTABLE = True
 
@@ -203,6 +204,43 @@ class PrivacyTests(fixtures.ResponderTestCase):
 
 class RoundTripTests(fixtures.ResponderTestCase):
     """One real read, asked from the far end and answered off this disk."""
+
+    def test_paging_stays_on_the_original_run_after_a_new_run_starts(self) -> None:
+        self.write_events(self.plan, 5)
+        channel = fixtures.LinkChannel()
+        connector = fixtures.make_connector(channel=channel, responder=self.responder)
+        client = fixtures.make_client()
+        first = client.read(
+            request_id="r1",
+            detail="events",
+            plan_key=self.plan_key,
+            limit=2,
+            now=fixtures.NOW,
+        )
+        assert first.envelope is not None
+        channel.carry(first.envelope)
+        answer = self.pump(connector, channel, client)
+        assert answer is not None
+        self.assertEqual(len(answer.entries), 2)
+
+        # An unpinned read would now select the new run's empty event history.
+        _write_state_payload(
+            self.plan,
+            self.state_root,
+            {"run_id": "run-new", "plan_dir": str(self.plan)},
+        )
+        self.assertEqual(self.ask("events")["entries"], [])
+        follow = client.next_page(answer, request_id="r2", now=fixtures.NOW + 1.0)
+        assert follow is not None and follow.envelope is not None
+        channel.carry(follow.envelope)
+        second = self.pump(connector, channel, client, start=1.0)
+        assert second is not None
+        self.assertEqual(len(second.entries), 2)
+        self.assertEqual(second.offset, 2)
+        self.assertEqual(second.next_offset, 4)
+        self.assertTrue(
+            all(row["payload"]["run_id"] == "run-paused" for row in second.entries)
+        )
 
     def test_a_service_reads_a_real_plan_without_anything_touching_disk(self) -> None:
         self.write_events(self.plan, 5)

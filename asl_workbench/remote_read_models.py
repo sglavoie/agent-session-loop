@@ -292,6 +292,12 @@ class ReadAnswer:
     warnings: tuple[str, ...] = ()
     observed_at: float | None = None
     received_at: float = 0.0
+    # Keep paging context with the answer, including when the body is cached.
+    # The responder may select a run for a request that did not name one.
+    run_id: str | None = None
+    question_id: str | None = None
+    limit: int | None = None
+    max_bytes: int | None = None
 
     def __post_init__(self) -> None:
         if self.outcome not in READ_OUTCOMES:

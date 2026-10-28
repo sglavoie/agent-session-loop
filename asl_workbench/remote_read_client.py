@@ -206,7 +206,8 @@ class DetailReadClient:
 
         Composed from the cursor the Mac sent rather than from arithmetic done
         here, which is what keeps local paging and remote paging agreeing about
-        where an artifact stops.
+        where an artifact stops. Keep the selected run and requested selectors
+        and bounds so a later page still reads the same history window.
         """
         if answer.next_offset is None:
             return None
@@ -215,9 +216,13 @@ class DetailReadClient:
             detail=answer.detail,
             plan_key=answer.plan_key,
             run_key=answer.run_key,
+            run_id=answer.run_id,
+            question_id=answer.question_id,
             artifact=answer.artifact,
             stream=answer.stream,
             offset=answer.next_offset,
+            limit=answer.limit,
+            max_bytes=answer.max_bytes,
             now=now,
             timeout=timeout,
         )
@@ -295,6 +300,8 @@ class DetailReadClient:
         outstanding read: an answer to a cancelled read, a duplicate, or a
         frame for a request this process has already timed out. Caching it
         "just in case" is how a body outlives the question that justified it.
+        A deadline reached before the expiry sweep settles as ``timeout`` here
+        without retaining the late body.
         """
         envelope = validate_envelope(
             message, direction=DIRECTION_UP, target_id=self.target_id
@@ -313,6 +320,13 @@ class DetailReadClient:
             waiter = self._waiters.pop(request_id, None)
             if waiter is None:
                 return None
+            if now >= waiter.expires_at:
+                return self._settle(
+                    waiter.request,
+                    OUTCOME_TIMEOUT,
+                    now=now,
+                    note="no answer before the deadline",
+                )
             payload = envelope["payload"]
             if kind == KIND_DETAIL:
                 return self._accept_detail(waiter.request, payload, now=now)
@@ -405,12 +419,17 @@ class DetailReadClient:
         """One detail payload as an answer, held only when it carries material."""
         refusal = payload.get("reason")
         entries = payload.get("entries")
+        target = payload["target"]
         answer = ReadAnswer(
             request_id=request.request_id,
             outcome=OUTCOME_REFUSED if refusal is not None else OUTCOME_ANSWERED,
             detail=str(payload.get("detail", request.detail)),
             plan_key=request.plan_key,
-            run_key=request.run_key,
+            run_key=target.get("run_key") or request.run_key,
+            run_id=target.get("run_id") or request.run_id,
+            question_id=request.question_id,
+            limit=request.limit,
+            max_bytes=request.max_bytes,
             artifact=payload.get("artifact") or request.artifact,
             stream=payload.get("stream") or request.stream,
             complete=str(payload.get("complete", COMPLETENESS_UNKNOWN)),

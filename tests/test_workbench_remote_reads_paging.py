@@ -14,6 +14,56 @@ ASL_TEST_PORTABLE = True
 class PagingTests(unittest.TestCase):
     """The cursor the Mac sent is the cursor the next read uses."""
 
+    def test_follow_up_preserves_requested_selectors_and_bounds(self) -> None:
+        client = fixtures.make_client()
+        first = client.read(
+            request_id="r1",
+            detail="events",
+            plan_key=fixtures.PLAN_KEY,
+            run_key=fixtures.RUN_KEY,
+            run_id="run-original",
+            question_id="question-1",
+            limit=2,
+            max_bytes=1024,
+            now=fixtures.NOW,
+        )
+        answer = client.accept(
+            self.page("r1", next_offset=2, complete="partial"),
+            now=fixtures.NOW + 1.0,
+        )
+        assert answer is not None
+        # Paging from a cached answer must retain the same context too.
+        cached = client.cached(first.request, now=fixtures.NOW + 1.5)
+        assert cached is not None
+        follow = client.next_page(cached, request_id="r2", now=fixtures.NOW + 2.0)
+        assert follow is not None
+        self.assertEqual(follow.request.target(), first.request.target())
+        self.assertEqual(follow.request.limit, 2)
+        self.assertEqual(follow.request.max_bytes, 1024)
+        self.assertEqual(follow.request.offset, 2)
+
+    def test_follow_up_pins_the_run_selected_by_the_responder(self) -> None:
+        client = fixtures.make_client()
+        client.read(
+            request_id="r1",
+            detail="events",
+            plan_key=fixtures.PLAN_KEY,
+            now=fixtures.NOW,
+        )
+        target = {
+            "plan_key": fixtures.PLAN_KEY,
+            "run_key": fixtures.RUN_KEY,
+            "run_id": "run-selected",
+        }
+        answer = client.accept(
+            self.page("r1", target=target, next_offset=2, complete="partial"),
+            now=fixtures.NOW + 1.0,
+        )
+        assert answer is not None
+        follow = client.next_page(answer, request_id="r2", now=fixtures.NOW + 2.0)
+        assert follow is not None
+        self.assertEqual(follow.request.target(), target)
+
     def page(self, request_id: str, **overrides: Any) -> Any:
         from asl_workbench.transport import detail_envelope
 

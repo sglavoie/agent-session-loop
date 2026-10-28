@@ -20,6 +20,40 @@ ASL_TEST_PORTABLE = True
 class DeadlineTests(unittest.TestCase):
     """One slow read is one slow read."""
 
+    def test_a_late_answer_times_out_even_before_the_expiry_sweep(self) -> None:
+        for delay in (5.0, 6.0):
+            with self.subTest(delay=delay):
+                client = fixtures.make_client(timeout=5.0)
+                client.read(
+                    request_id="r1",
+                    detail="logs",
+                    plan_key=fixtures.PLAN_KEY,
+                    now=fixtures.NOW,
+                )
+                client.sent("r1", now=fixtures.NOW + 2.0)
+                answer = client.accept(
+                    fixtures.detail_frame("r1"), now=fixtures.NOW + 2.0 + delay
+                )
+                assert answer is not None
+                self.assertEqual(answer.outcome, remote_reads.OUTCOME_TIMEOUT)
+                self.assertIsNone(answer.content)
+                self.assertEqual(len(client.bodies), 0)
+                self.assertFalse(client.outstanding("r1"))
+                self.assertEqual(client.expire(fixtures.NOW + 10.0), ())
+
+    def test_an_answer_within_the_sent_deadline_is_accepted(self) -> None:
+        client = fixtures.make_client(timeout=5.0)
+        client.read(
+            request_id="r1",
+            detail="logs",
+            plan_key=fixtures.PLAN_KEY,
+            now=fixtures.NOW,
+        )
+        client.sent("r1", now=fixtures.NOW + 2.0)
+        answer = client.accept(fixtures.detail_frame("r1"), now=fixtures.NOW + 6.0)
+        assert answer is not None
+        self.assertTrue(answer.answered)
+
     def test_sending_preserves_each_requests_timeout(self) -> None:
         for timeout in (5.0, 90.0):
             with self.subTest(timeout=timeout):
