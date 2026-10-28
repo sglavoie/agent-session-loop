@@ -129,13 +129,18 @@ def read_supervision_first_seen_at(
 ) -> datetime | None:
     """Return when this launch was first polled, or None when unrecorded.
 
-    None means "no anchor on disk yet", which is also what an older cursor
-    written before the field existed reports, so the caller writes one now.
+    None means "no usable anchor on disk yet", which is also what an older
+    cursor written before the field existed reports, so the caller writes one
+    now. A future anchor cannot measure elapsed grace after the clock moves
+    backward, and would otherwise postpone a lost-helper verdict indefinitely.
     """
     payload = _read_supervision_cursor_payload(plan_dir, supervision_id, state_dir)
     if payload is None:
         return None
-    return _parse_timestamp(payload.get("first_seen_at"))
+    first_seen_at = _parse_timestamp(payload.get("first_seen_at"))
+    if first_seen_at is not None and first_seen_at > _utc_now():
+        return None
+    return first_seen_at
 
 
 def write_supervision_cursor(

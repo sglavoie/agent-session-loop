@@ -11,6 +11,7 @@ import time
 import unittest
 import uuid
 from contextlib import redirect_stdout
+from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 from agent_session_loop import (
@@ -383,6 +384,40 @@ class MailboxCliTestsPart9(MailboxCliTestsBase):
                 launch,
                 state_dir=self.state_dir,
             )
+        )
+
+    def test_future_grace_anchor_is_replaced_after_clock_moves_backward(self) -> None:
+        launch = mailbox_validation.new_supervision_id()
+        mailbox_cursors.write_supervision_cursor(
+            self.plan_dir,
+            launch,
+            0,
+            state_dir=self.state_dir,
+            first_seen_at=datetime.now(UTC) + timedelta(days=1),
+        )
+
+        code, lines = self.supervise_lines(supervision_id=launch)
+
+        self.assertEqual(0, code)
+        self.assertEqual(["IDLE"], lines)
+        anchor = mailbox_cursors.read_supervision_first_seen_at(
+            self.plan_dir,
+            launch,
+            state_dir=self.state_dir,
+        )
+        self.assertIsNotNone(anchor)
+        assert anchor is not None
+        self.assertLessEqual(anchor, datetime.now(UTC))
+
+        self.age_grace_anchor(
+            launch,
+            mailbox_cli_constants.SUPERVISE_LIVENESS_GRACE_SECONDS + 60,
+        )
+        code, lines = self.supervise_lines(supervision_id=launch)
+        self.assertEqual(0, code)
+        self.assertEqual(
+            f"LOST reason={mailbox_cli_constants.SUPERVISE_LOST_HELPER_NEVER_STARTED}",
+            lines[0],
         )
 
     def test_outbox_supervise_stays_idle_when_a_live_run_holds_the_lock(self) -> None:
