@@ -162,7 +162,8 @@ def read_record(
         return None
     if not isinstance(payload, dict):
         return None
-    if payload.get("version") != SUPERVISION_LIVENESS_VERSION:
+    version = payload.get("version")
+    if type(version) is not int or version != SUPERVISION_LIVENESS_VERSION:
         return None
     if payload.get("supervision_id") != supervision_id:
         return None
@@ -300,6 +301,11 @@ def probe(
     # New records use UTC for both samples. Offset tolerance for them would
     # mistake a reused pid born 15 minutes later for the original helper.
     if record.birth_utc:
+        # A damaged stored birth is not evidence that the live pid was reused.
+        # Keep the record available for a later probe instead of declaring the
+        # helper dead because an arbitrary nonempty string differs from ps.
+        if _parse_birth(record.birth) != record.birth:
+            return UNVERIFIED
         return ALIVE if record.birth == birth else DEAD
     # An older record may disagree only because its writer used a local zone.
     return ALIVE if process_sampling.birth_may_match(record.birth, birth) else DEAD

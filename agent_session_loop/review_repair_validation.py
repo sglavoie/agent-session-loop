@@ -136,11 +136,18 @@ def _run_targeted_baselines(
     cwd: Path,
     contracts_by_session: dict[str, Any],
 ) -> dict[str, Any]:
-    """Run baselines for child checks that declare a baseline expectation."""
+    """Run baselines for child checks that declare a baseline expectation.
+
+    ASI-6: only the children's own checks run. Running the whole plan's
+    baselines re-judged completed sessions, whose ``fail`` expectations their
+    own work had already satisfied, so every repair child was withdrawn.
+    """
     collected = baseline.collect_baseline_checks(contracts_by_session)
     if not collected:
         return {"check_count": 0, "checks": [], "unsatisfied": []}
-    run = baseline.run_baseline(plan_dir, cwd)
+    run = baseline.run_baseline(
+        plan_dir, cwd, session_ids=frozenset(contracts_by_session)
+    )
     checks = [
         {
             "session_id": outcome.session_id,

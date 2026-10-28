@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -64,6 +65,7 @@ def run_baseline(
     cache: BaselineCache | None = None,
     now: str | None = None,
     context: VerificationContext | None = None,
+    session_ids: Collection[str] | None = None,
 ) -> BaselineRunResult:
     """Execute the plan's baseline checks and record outcomes into the cache.
 
@@ -75,6 +77,10 @@ def run_baseline(
     fail-closed gate: a check whose execution crosses it records an unsatisfied
     outcome regardless of exit code, so overrun evidence can never make a plan
     loop-ready. Every executed outcome is persisted to ``baseline-results.json``.
+
+    ``session_ids`` restricts the run to those sessions' checks. Without it every
+    session is collected, including completed ones whose ``fail`` expectations
+    their own work has since turned into passes.
     """
     canonical_dir = canonicalize_path(plan_dir)
     verification_context = context or verification_context_from_plan(plan_dir, cwd)
@@ -83,6 +89,8 @@ def run_baseline(
 
     contracts_by_session: dict[str, Any] = {}
     for session in snapshot.sessions:
+        if session_ids is not None and session.id not in session_ids:
+            continue
         contract = contracts.read_completion_contract(canonical_dir, session.id)
         if contract is not None:
             contracts_by_session[session.id] = contract

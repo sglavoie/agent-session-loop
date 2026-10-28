@@ -493,6 +493,36 @@ class BaselineTotalBudgetTests(unittest.TestCase):
             self.assertTrue(skipped.total_budget_exceeded)
 
 
+    def test_session_ids_restrict_the_run_to_those_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            write_plan(
+                plan_dir,
+                ("complete", "pending"),
+                contracts_by_id={
+                    "1": _command_contract('["true"]', session="1"),
+                    "2": _command_contract('["echo", "x"]', session="2", name="cmd2"),
+                },
+            )
+            seen: list[str] = []
+
+            def fake_run_check(check, *, repo_root):
+                seen.append(check.name)
+                return self._pass_result(check, 1.0)
+
+            with mock.patch.object(baseline_run, "run_check", fake_run_check):
+                result = baseline.run_baseline(
+                    plan_dir, repo_root, session_ids=frozenset({"2"})
+                )
+
+            # ASI-6: the completed session's check is never re-judged.
+            self.assertEqual(["cmd2"], seen)
+            self.assertEqual(["2"], [o.session_id for o in result.outcomes])
+
+
 def load_tests(
     loader: unittest.TestLoader, tests: unittest.TestSuite, pattern: str | None
 ) -> unittest.TestSuite:

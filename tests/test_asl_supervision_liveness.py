@@ -152,6 +152,8 @@ class RecordStorageTests(unittest.TestCase):
             "deeply-nested": "[" * 1_000_000,
             "not-an-object": json.dumps([good]),
             "wrong-version": json.dumps({**good, "version": 99}),
+            "boolean-version": json.dumps({**good, "version": True}),
+            "float-version": json.dumps({**good, "version": 1.0}),
             "other-launch": json.dumps({**good, "supervision_id": str(uuid.uuid4())}),
             "pid-not-int": json.dumps({**good, "pid": "4242"}),
             "pid-bool": json.dumps({**good, "pid": True}),
@@ -315,6 +317,15 @@ class ProbeTests(unittest.TestCase):
             supervision_liveness.probe(
                 _record(birth_utc=True),
                 run_command=lambda *a, **kw: _ps_result(f"{_FIFTEEN_MINUTES_LATER}\n"),
+            ),
+        )
+
+    def test_malformed_stored_utc_birth_does_not_prove_pid_reuse(self) -> None:
+        self.assertEqual(
+            supervision_liveness.UNVERIFIED,
+            supervision_liveness.probe(
+                _record(birth="damaged", birth_utc=True),
+                run_command=lambda *a, **kw: _ps_result(f"{_BIRTH}\n"),
             ),
         )
 
