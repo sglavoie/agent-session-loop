@@ -1,7 +1,92 @@
+from unittest import mock
+
 from .asl_tail_support import *
 
 
 class TailFollowerRecoveryTests(TailFollowerTestCase):
+    def test_recent_replay_follows_a_line_appended_after_its_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout_log = Path(tmp) / "stdout.log"
+            stdout_log.write_text("first\n", encoding="utf-8")
+            record = {
+                "name": "turn_started",
+                "payload": {
+                    "run_id": "r",
+                    "session_id": "1",
+                    "turn_index": 1,
+                    "stdout_path": str(stdout_log),
+                },
+            }
+            snapshot = tail_logs._read_log_snapshot
+
+            def append_after_read(target, *, final=True):
+                result = snapshot(target, final=final)
+                self.append_log_line(stdout_log, "second\n")
+                return result
+
+            targets: dict[str, dict[str, object]] = {}
+            offsets: dict[str, int] = {}
+            out = io.StringIO()
+            with mock.patch.object(
+                tail_logs, "_read_log_snapshot", side_effect=append_after_read
+            ):
+                tail_logs._emit_recent(
+                    records=[record],
+                    state_payload=None,
+                    run_id="r",
+                    lines=40,
+                    out=out,
+                    targets=targets,
+                    offsets=offsets,
+                    final=False,
+                )
+            for target in targets.values():
+                tail_logs._print_lines(
+                    tail_logs._read_new_log_text(target, offsets), out
+                )
+            self.assertEqual(out.getvalue().count("| first\n"), 1)
+            self.assertEqual(out.getvalue().count("| second\n"), 1)
+
+    def test_initial_replay_follows_a_line_appended_after_its_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path, _ = self.setup_tail_files(tmp_dir)
+            stdout_log = tmp_dir / "stdout.log"
+            stdout_log.write_text("first\n", encoding="utf-8")
+            turn_payload = {
+                "run_id": "run-1",
+                "session_id": "1",
+                "turn_index": 1,
+                "stdout_path": str(stdout_log),
+            }
+            self.write_state_payload(
+                state_path,
+                {"run_id": "run-1", "active_turn": turn_payload},
+            )
+            snapshot = tail_logs._read_log_snapshot
+
+            def append_after_read(target, *, final=True):
+                result = snapshot(target, final=final)
+                self.append_log_line(stdout_log, "second\n")
+                return result
+
+            out = io.StringIO()
+            follower = tail.TailFollower(
+                plan_dir,
+                state_dir=state_dir,
+                out=out,
+                include_events=False,
+                initial_log_lines=40,
+                initial_log_scope="active",
+            )
+            with mock.patch.object(
+                tail_logs, "_read_log_snapshot", side_effect=append_after_read
+            ):
+                follow_loop = follower._build_loop_from_eof()
+            follow_loop._poll_once()
+            self.assertEqual(out.getvalue().count("| first\n"), 1)
+            self.assertEqual(out.getvalue().count("| second\n"), 1)
+
     def test_tail_follower_initial_active_replay_emits_recent_logs_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)

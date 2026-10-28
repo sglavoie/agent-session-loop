@@ -378,10 +378,15 @@ class TailFollower:
             state_payload
         )
         if self._initial_log_lines > 0:
-            self._emit_initial_log_replay(
-                state_payload, targets, final=initial_finished
+            offsets.update(
+                self._emit_initial_log_replay(
+                    state_payload, targets, final=initial_finished
+                )
             )
-        tail_logs._set_offsets_to_last_line(targets, offsets)
+        tail_logs._set_offsets_to_last_line(
+            {key: target for key, target in targets.items() if key not in offsets},
+            offsets,
+        )
         return _TailFollowLoop(
             state_path=state_path,
             batches=batches,
@@ -401,14 +406,15 @@ class TailFollower:
         targets: dict[str, dict[str, Any]],
         *,
         final: bool,
-    ) -> None:
+    ) -> dict[str, int]:
         if self._initial_log_scope == "active":
             replay_targets = tail_logs._active_targets(state_payload)
         else:
             replay_targets = targets
         if not replay_targets:
-            return
+            return {}
         lines: list[str] = []
+        offsets: dict[str, int] = {}
         for target in sorted(
             replay_targets.values(),
             key=lambda value: (
@@ -419,9 +425,12 @@ class TailFollower:
                 str(value.get("stream")),
             ),
         ):
-            lines.extend(tail_logs._read_log_lines(target, final=final))
+            log_lines, offset = tail_logs._read_log_snapshot(target, final=final)
+            lines.extend(log_lines)
+            offsets[tail_logs._target_key(target["path"])] = offset
         if lines:
             tail_logs._print_lines(lines[-self._initial_log_lines :], self._out)
+        return offsets
 
 
 def tail_plan(

@@ -95,25 +95,33 @@ def _log_prefix(target: dict[str, Any]) -> str:
     )
 
 
-def _read_log_lines(target: dict[str, Any], *, final: bool = True) -> list[str]:
-    """Every line a log holds now, for the replay printed before following it.
+def _read_log_snapshot(
+    target: dict[str, Any], *, final: bool = True
+) -> tuple[list[str], int]:
+    """Replay lines and the offset immediately after the bytes they came from.
 
-    Unless ``final``, an unterminated last line is held back: it is still being
-    written, and the follow that picks up at ``_set_offsets_to_last_line``
-    prints it once, whole, when its newline arrives.
+    Unless ``final``, an unterminated last line is held back for the follow.
+    The offset must come from this read: measuring the file later would skip
+    any complete line appended between the replay and the follow.
     """
     path = target["path"]
     if not isinstance(path, Path) or not path.exists():
-        return []
+        return [], 0
     try:
         data = path.read_bytes()
     except OSError:
-        return []
+        return [], 0
     if not final:
         data = data[: data.rfind(b"\n") + 1]
     text = data.decode("utf-8", "replace")
     prefix = _log_prefix(target)
-    return [f"{prefix}{line}" for line in text.splitlines()]
+    return [f"{prefix}{line}" for line in text.splitlines()], len(data)
+
+
+def _read_log_lines(target: dict[str, Any], *, final: bool = True) -> list[str]:
+    """Every line a log holds now, for a replay without a follow offset."""
+    lines, _ = _read_log_snapshot(target, final=final)
+    return lines
 
 
 def _last_line_end(path: Path) -> int:
@@ -279,7 +287,9 @@ def _emit_recent(
     after: dict[int, list[str]] = {}
     trailing: list[str] = []
     for target in sorted(targets.values(), key=_target_sort_key):
-        log_lines = _read_log_lines(target, final=final)
+        log_lines, offsets[_target_key(target["path"])] = _read_log_snapshot(
+            target, final=final
+        )
         anchor = anchors.get(_target_key(target["path"]))
         if anchor is None:
             trailing.extend(log_lines)
@@ -297,5 +307,3 @@ def _emit_recent(
         _print_lines(activity[-lines:], out)
     else:
         _print_lines(["No activity yet."], out)
-
-    _set_offsets_to_last_line(targets, offsets)
