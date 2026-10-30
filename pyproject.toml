@@ -9,7 +9,7 @@
 # what CI gates on. The mypy counts quoted under [tool.mypy] are measured with
 # this mypy.
 [dependency-groups]
-dev = ["ruff==0.16.9", "mypy==2.3.1"]
+dev = ["ruff==0.17.3", "mypy==2.4.0"]
 
 [tool.ruff]
 line-length = 88
