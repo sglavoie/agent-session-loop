@@ -414,13 +414,13 @@ class _AgentSessionLoopArgumentParser(argparse.ArgumentParser):
             for group in added:
                 self._mutually_exclusive_groups.remove(group)
 
-    def format_usage(self) -> str:
+    def format_usage(self, *args: Any, **kwargs: Any) -> str:
         with self._with_display_groups():
-            return super().format_usage()
+            return super().format_usage(*args, **kwargs)
 
-    def format_help(self) -> str:
+    def format_help(self, *args: Any, **kwargs: Any) -> str:
         with self._with_display_groups():
-            return super().format_help()
+            return super().format_help(*args, **kwargs)
 
     def error(self, message: str) -> NoReturn:
         # A mistyped command already gets argparse's "maybe you meant" hint;

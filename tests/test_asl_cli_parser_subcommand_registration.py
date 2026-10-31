@@ -15,6 +15,7 @@ from agent_session_loop import (
     bridge_protocol,
     cli,
     cli_defaults,
+    cli_parser_support,
     commit_message,
     control_cli,
     control_queue,
@@ -39,6 +40,25 @@ from tests.support import (
 
 class ParserSubcommandRegistrationTests(unittest.TestCase):
     """Subcommand handler registration, import hygiene and control flag parsing."""
+
+    @unittest.skipIf(
+        sys.version_info < (3, 15), "formatter arguments require Python 3.15"
+    )
+    def test_help_and_usage_accept_supplied_formatters(self) -> None:
+        parser = cli_parser_support._AgentSessionLoopArgumentParser(prog="asl")
+        left = parser.add_argument("--left")
+        right = parser.add_argument("--right")
+        parser.show_as_alternatives(left, right)
+
+        for name in ("format_usage", "format_help"):
+            for keyword in (False, True):
+                with self.subTest(method=name, keyword=keyword):
+                    formatter = argparse.HelpFormatter("supplied-formatter", width=1000)
+                    render = getattr(parser, name)
+                    text = render(formatter=formatter) if keyword else render(formatter)
+                    self.assertIn("usage: supplied-formatter ", text)
+                    self.assertIn("[--left LEFT | --right RIGHT]", text)
+                    self.assertEqual([], parser._mutually_exclusive_groups)
 
     def test_parser_uses_custom_program_name_in_help(self) -> None:
         parser = cli.build_parser(prog="asl")
