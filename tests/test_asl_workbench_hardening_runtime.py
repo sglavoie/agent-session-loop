@@ -15,7 +15,13 @@ from contextlib import redirect_stderr, redirect_stdout, suppress
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import plans_files, state, workbench_registry, workbench_server
+from agent_session_loop import (
+    plans_files,
+    state,
+    workbench_details_logs,
+    workbench_registry,
+    workbench_server,
+)
 from tests import support_asl_workbench_static as support_static
 from tests.support import (
     _http_request,
@@ -86,23 +92,22 @@ class WorkbenchHardeningTests(support_static.WorkbenchHardeningCase):
         self._write_state_with_turn(stdout_path=log_path)
         server = self._start_server()
         canonical_log = plans_files.canonicalize_path(log_path)
-        original_open = Path.open
+        original_open = workbench_details_logs._open_regular_file
 
         def race_open(self_path: Path, *args, **kwargs):
             if plans_files.canonicalize_path(self_path) == canonical_log:
-                raise FileNotFoundError(
-                    errno.ENOENT, "vanished", os.fspath(canonical_log)
-                )
+                self_path.unlink()
             return original_open(self_path, *args, **kwargs)
 
         query = urllib.parse.urlencode(
             {"plan_dir": str(self.canonical_plan_dir), "stream": "stdout"}
         )
-        with mock.patch.object(Path, "open", race_open):
+        with mock.patch.object(workbench_details_logs, "_open_regular_file", race_open):
             status, body, _ = _http_request(
                 f"{self._base_url(server)}/api/logs?{query}"
             )
         self.assertEqual(404, status)
+        self.assertFalse(log_path.exists())
         self.assertFalse(body["ok"])
         self.assertEqual("not-found", body["reason"])
 
@@ -126,21 +131,20 @@ class WorkbenchHardeningTests(support_static.WorkbenchHardeningCase):
         )
         server = self._start_server()
         canonical_msg = plans_files.canonicalize_path(last_msg_path)
-        original_open = Path.open
+        original_open = workbench_details_logs._open_regular_file
 
         def race_open(self_path: Path, *args, **kwargs):
             if plans_files.canonicalize_path(self_path) == canonical_msg:
-                raise FileNotFoundError(
-                    errno.ENOENT, "vanished", os.fspath(canonical_msg)
-                )
+                self_path.unlink()
             return original_open(self_path, *args, **kwargs)
 
         query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
-        with mock.patch.object(Path, "open", race_open):
+        with mock.patch.object(workbench_details_logs, "_open_regular_file", race_open):
             status, body, _ = _http_request(
                 f"{self._base_url(server)}/api/last-message?{query}"
             )
         self.assertEqual(404, status)
+        self.assertFalse(last_msg_path.exists())
         self.assertEqual("not-found", body["reason"])
 
     def test_state_endpoint_handles_state_file_disappearing_mid_read(self) -> None:

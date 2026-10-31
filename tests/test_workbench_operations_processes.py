@@ -147,7 +147,9 @@ with journal._locked_journal(path) as (fd, replay):
     truncate = os.ftruncate
     def crash_after_truncate(target, size):
         truncate(target, size)
-        os._exit(73)
+        # Staging files are truncated too; crash only after emptying the journal.
+        if target == fd:
+            os._exit(73)
     with mock.patch.object(os, "ftruncate", side_effect=crash_after_truncate):
         journal._compact_locked(fd, replay, journal_path=path)
 """,
