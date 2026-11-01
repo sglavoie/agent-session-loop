@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_session_loop import (
     harness_codex,
+    harness_compatibility,
+    harness_copilot,
     harnesses,
 )
 
@@ -283,6 +286,45 @@ class AuditAccessProfileTests(unittest.TestCase):
         ):
             self.assertIn(flag, argv)
         self.assertEqual(["/evidence", "/skills"], self._granted_dirs(argv))
+
+    def test_copilot_audits_keep_sync_off_after_remote_flags_are_removed(self) -> None:
+        for version in ("1.0.103", "1.0.105"):
+            with (
+                self.subTest(version=version),
+                mock.patch.object(
+                    harness_compatibility,
+                    "probe_executable",
+                    return_value=harness_compatibility.Probe(
+                        "copilot", "copilot", version, "", "probed"
+                    ),
+                ) as probe,
+            ):
+                argv = self._audit_argv("copilot", (Path("/evidence"),))
+                self.assertIn("--sync-session=off", argv)
+                self.assertNotIn("--no-remote", argv)
+                self.assertNotIn("--no-remote-export", argv)
+                for denied in ("write", "shell", "url"):
+                    self.assertIn(f"--deny-tool={denied}", argv)
+                probe.assert_called_once_with(
+                    "copilot", "copilot", env=None, use_cache=False
+                )
+
+    def test_copilot_unknown_versions_keep_legacy_audit_restrictions(self) -> None:
+        for version in (None, "1.0.80", "1.0.102"):
+            with (
+                self.subTest(version=version),
+                mock.patch.object(
+                    harness_compatibility,
+                    "probe_executable",
+                    return_value=harness_compatibility.Probe(
+                        "copilot", "copilot", version, "", "probed"
+                    ),
+                ),
+            ):
+                self.assertEqual(
+                    ["--no-remote", "--no-remote-export"],
+                    harness_copilot._audit_remote_flags("copilot", None),
+                )
 
     def test_an_audit_invocation_refuses_worker_grants(self) -> None:
         adapter = harnesses.get_adapter("codex")

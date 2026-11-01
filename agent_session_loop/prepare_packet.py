@@ -67,6 +67,7 @@ class ValidationTaskPacket:
 
     def render(self) -> str:
         joined_ids = ", ".join(self.session_ids)
+        repo_field = "repo, " if self.version == PREPARE_VALIDATION_VERSION else ""
         root_label = (
             "workspace" if self.version == PREPARE_VALIDATION_VERSION else "codebase"
         )
@@ -141,6 +142,10 @@ class ValidationTaskPacket:
                     "contract_checked, contract_problems, corrections}."
                 ),
                 (
+                    "- session_id is always a non-empty JSON string, including "
+                    'in dependencies[] (for example "1" or "2.1", never 1).'
+                ),
+                (
                     "- Every sessions[] entry must include spark: {eligible, "
                     "reason}. Set eligible=true only for a small explicit scope "
                     "with settled decisions, sufficient local context, and a clear "
@@ -149,7 +154,7 @@ class ValidationTaskPacket:
                     "uncertainty. reason must be concise and evidence-based."
                 ),
                 (
-                    "- claims[]: {claim, claim_type, location, line, "
+                    f"- claims[]: {{{repo_field}claim, claim_type, location, line, "
                     "to_be_created} with claim_type in "
                     f"{'/'.join(CLAIM_TYPES)} "
                     "(path/signature/field/dependency/behavior/naming/"
@@ -163,16 +168,20 @@ class ValidationTaskPacket:
                     "established."
                 ),
                 (
-                    "- issues[]: {issue_type, summary, session_ref, actual, fix} "
+                    f"- issues[]: {{{repo_field}issue_type, summary, session_ref, "
+                    "actual, fix} "
                     f"with issue_type in: {', '.join(ISSUE_TYPES)}."
                 ),
-                "- details[]: {path, notes[]} — evidence bullets per file.",
                 (
-                    "- patterns[]: {name, location, reason} — at most "
+                    f"- details[]: {{{repo_field}path, notes[]}} "
+                    "— evidence bullets per file."
+                ),
+                (
+                    f"- patterns[]: {{{repo_field}name, location, reason}} — at most "
                     f"{MAX_PATTERNS_PER_SESSION} per session."
                 ),
                 (
-                    "- dependencies[]: {direction: requires|provides, "
+                    f"- dependencies[]: {{{repo_field}direction: requires|provides, "
                     "session_id, description}."
                 ),
                 (
@@ -181,7 +190,8 @@ class ValidationTaskPacket:
                     "## Completion Contract."
                 ),
                 (
-                    "- corrections[]: {expected_text, replacement_text, reason} "
+                    f"- corrections[]: {{{repo_field}expected_text, "
+                    "replacement_text, reason} "
                     "— exact factual text replacements only (wrong paths, "
                     "names, signatures). expected_text must appear exactly "
                     "once in the session instructions. Never propose design "

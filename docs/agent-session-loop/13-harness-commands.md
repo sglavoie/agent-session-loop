@@ -123,7 +123,7 @@ Copilot, whose two access profiles use two different transports:
 
 ```text
 copilot -C <cwd> --add-dir <plan-dir> [--allow-all-tools --allow-all-paths] --no-ask-user --silent [--model <model>] [--effort <effort>] --acp
-copilot -C <cwd> --add-dir <read-root>... --available-tools=<audit tools> --deny-tool=<denied>... --disable-builtin-mcps --no-custom-instructions --no-remote --no-remote-export --disallow-temp-dir --no-ask-user --silent [--model <model>] [--effort <effort>] -p <prompt>
+copilot -C <cwd> --add-dir <read-root>... --available-tools=<audit tools> --deny-tool=<denied>... --disable-builtin-mcps --no-custom-instructions --sync-session=off --disallow-temp-dir --no-ask-user --silent [--model <model>] [--effort <effort>] -p <prompt>
 ```
 
 A worker turn runs over the Agent Client Protocol: `--acp` puts the same binary,
@@ -170,6 +170,14 @@ caller that asks it which conversation it ran on is told that it names none
 rather than handed a silent `None`. Both transports decline a mid-turn steer
 with `unsupported-active-steer` rather than ignoring it; that behavior is
 unchanged.
+
+Copilot 1.0.103 removed `--no-remote` and renamed `--no-remote-export` to
+`--sync-session=off`. ASL probes the executable again when constructing an audit
+turn, using the new spelling from that version onward. Prompt-mode sessions on
+these releases cannot enable incoming remote control; the explicit sync flag
+also prevents history export. Older or unrecognised versions retain both legacy
+restrictions, so an unsupported restriction fails the launch rather than being
+silently omitted. See GitHub's [command reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference).
 
 The ACP session carries the conversation. Its identifier is whatever
 `session/new` returned or whatever `session/load` restored, and it is captured
@@ -402,6 +410,22 @@ workspace, state, helper results, command stdout/stderr, launch ledger, and
 `acceptance.json`; successful workspaces are removed unless `--keep-workspaces`
 was passed. `--report PATH` saves the overall report independently. Progress goes
 to stderr so `--json` stdout remains one JSON document.
+
+Reports also identify the ASL checkout with `source.commit`, `worktree_dirty`,
+and a SHA-256 digest of tracked and non-ignored untracked files. `source_after`
+and `source_unchanged` detect edits made during the suite; a changed checkout
+cannot produce a complete acceptance report. Copilot automatic updates are
+disabled for suite commands. A fresh, uncached version probe after each passed
+sequence must still match the initial version, or the sequence fails and
+`verified_version` stays null.
+
+Before a release or after upgrading a harness, rerun this suite for each harness
+you use, retaining `--report` and `--keep-workspaces` evidence. Require
+`complete: true`, `source_unchanged: true`, and a passed result for every requested
+harness; an exit-0 probe or a skipped harness supplies no acceptance evidence.
+Keep reports with the checkout revision and the patch when `worktree_dirty` is
+true. For example, replace `codex` in the recipe above with `claude` or `copilot`
+to exercise those installed harnesses separately.
 
 `tests/test_asl_live_lifecycle.py` drives the same real ASL commands using a
 deterministic app-server fixture without model use. It belongs to the integration

@@ -18,7 +18,12 @@ from unittest import mock
 from agent_session_loop import harness_compatibility
 from tests import asl_live_lifecycle as lifecycle
 from tests import asl_live_redirect_reporting as entry
-from tests.asl_live_lifecycle_process import MAX_HARNESS_LAUNCHES, REPO_ROOT, Commands
+from tests.asl_live_lifecycle_process import (
+    MAX_HARNESS_LAUNCHES,
+    REPO_ROOT,
+    Commands,
+    source_identity,
+)
 
 ASL_TEST_LANE = "integration"
 
@@ -54,6 +59,58 @@ class LifecycleAcceptanceTests(unittest.TestCase):
             self.assertRaises(TimeoutError),
         ):
             commands.asl("must-not-run", "status", "missing")
+
+    def test_source_identity_tracks_actual_bytes_and_ignores_cache(self) -> None:
+        def git(*args: str) -> None:
+            subprocess.run(
+                ["git", *args], cwd=self.root, check=True, capture_output=True
+            )
+
+        git("init", "-q")
+        git("config", "user.email", "acceptance@example.invalid")
+        git("config", "user.name", "ASL Live Acceptance")
+        (self.root / ".gitignore").write_text(".cache/\n")
+        source = self.root / "source.py"
+        source.write_text("original\n")
+        git("add", ".")
+        git("commit", "-qm", "seed")
+        initial = source_identity(self.root)
+        self.assertFalse(initial["worktree_dirty"])
+        (self.root / ".cache").mkdir()
+        (self.root / ".cache/report.json").write_text("{}\n")
+        self.assertEqual(initial, source_identity(self.root))
+        source.write_text("changed\n")
+        edited = source_identity(self.root)
+        self.assertTrue(edited["worktree_dirty"])
+        self.assertEqual(initial["commit"], edited["commit"])
+        self.assertNotEqual(initial["sha256"], edited["sha256"])
+        untracked = self.root / "new.py"
+        untracked.write_text("one\n")
+        before = source_identity(self.root)
+        untracked.write_text("two\n")
+        self.assertNotEqual(before["sha256"], source_identity(self.root)["sha256"])
+
+    def test_source_changes_cannot_produce_a_complete_report(self) -> None:
+        args = entry.build_parser().parse_args(
+            ["--suite", "lifecycle", "--harness", "codex", "--live", "--json"]
+        )
+        with (
+            mock.patch.object(
+                lifecycle,
+                "source_identity",
+                side_effect=[{"sha256": "a"}, {"sha256": "b"}],
+            ),
+            mock.patch.object(
+                lifecycle, "run_lifecycle", return_value={"status": "passed"}
+            ),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            code = lifecycle.lifecycle_main(args, requested=("codex",), opted_in=True)
+        report = json.loads(output.getvalue())
+        self.assertEqual(1, code)
+        self.assertFalse(report["complete"])
+        self.assertFalse(report["source_unchanged"])
+        self.assertIn("sources changed", report["error"])
 
     def test_timeout_stops_the_owned_child(self) -> None:
         (self.root / "repo").mkdir()
@@ -195,6 +252,40 @@ class LifecycleAcceptanceTests(unittest.TestCase):
         saved = json.loads((artifacts / "acceptance.json").read_text())
         self.assertIn("test failure", saved["detail"])
 
+    def test_updated_harness_cannot_verify_the_pre_update_version(self) -> None:
+        def compatibility(version: str | None) -> SimpleNamespace:
+            return SimpleNamespace(
+                version=version,
+                status="unknown",
+                executable="/not-launched",
+                blocks=False,
+            )
+
+        for version_after in ("1.0.105", None):
+            with (
+                self.subTest(version_after=version_after),
+                mock.patch.object(
+                    harness_compatibility,
+                    "check_harness",
+                    side_effect=[
+                        compatibility("1.0.100"),
+                        compatibility(version_after),
+                    ],
+                ),
+                mock.patch.object(lifecycle, "run_sequence", return_value={}),
+            ):
+                result = lifecycle.run_lifecycle(
+                    "copilot", opted_in=True, deadline=30, keep=False
+                )
+            artifacts = Path(result["artifacts"])
+            self.addCleanup(lifecycle.shutil.rmtree, artifacts)
+            self.assertEqual("failed", result["status"])
+            self.assertIsNone(result["verified_version"])
+            self.assertEqual([], result["checks"])
+            self.assertEqual(version_after, result["version_after"])
+            saved = json.loads((artifacts / "acceptance.json").read_text())
+            self.assertIn("no version is verified", saved["detail"])
+
     def test_complete_workflow_through_real_commands(self) -> None:
         fixture = Path(__file__).parent / "fixtures/fake_lifecycle_codex.py"
         executable = self.root / "codex"
@@ -234,7 +325,11 @@ class LifecycleAcceptanceTests(unittest.TestCase):
         self.assertEqual("passed", result["status"], result["detail"])
         self.assertEqual(0, code)
         self.assertTrue(report["complete"])
+        self.assertTrue(report["source_unchanged"])
+        self.assertEqual(report["source"], report["source_after"])
+        self.assertRegex(report["source"]["commit"], r"^[0-9a-f]{40}$")
         self.assertEqual("0.154.0", result["verified_version"])
+        self.assertEqual("0.154.0", result["version_after"])
         self.assertEqual(list(lifecycle.CHECKS), result["checks"])
         self.assertEqual(1, result["evidence"]["delivery_count"])
         launches = (Path(artifacts) / "harness-launches.jsonl").read_text().splitlines()

@@ -19,7 +19,12 @@ from typing import Any
 
 from agent_session_loop import harness_compatibility, state
 from agent_session_loop.harnesses import HarnessName
-from tests.asl_live_lifecycle_process import HELPER, MAX_HARNESS_LAUNCHES, Commands
+from tests.asl_live_lifecycle_process import (
+    HELPER,
+    MAX_HARNESS_LAUNCHES,
+    Commands,
+    source_identity,
+)
 from tests.asl_live_redirect_workspace import Workspace, disposable_workspace
 
 CHECKS = (
@@ -397,6 +402,7 @@ def run_lifecycle(
     compat = harness_compatibility.check_harness(harness)
     result: dict[str, Any] = {
         "harness": harness,
+        "executable": compat.executable,
         "version": compat.version,
         "compatibility": compat.status,
         "status": "skipped",
@@ -415,6 +421,14 @@ def run_lifecycle(
             try:
                 commands.bound_harness(harness, compat.executable)
                 result["evidence"] = run_sequence(workspace, commands, harness)
+                after = harness_compatibility.check_harness(harness, use_cache=False)
+                result["version_after"] = after.version
+                if after.version is None or after.version != compat.version:
+                    raise RuntimeError(
+                        "harness version changed or became unavailable "
+                        "during acceptance: "
+                        f"{compat.version} -> {after.version}; no version is verified"
+                    )
                 result.update(
                     status="passed",
                     verified_version=compat.version,
@@ -447,6 +461,7 @@ def run_lifecycle(
 def lifecycle_main(
     args: argparse.Namespace, *, requested: tuple[HarnessName, ...], opted_in: bool
 ) -> int:
+    source = source_identity()
     with redirect_stdout(sys.stderr):
         results = []
         for name in requested:
@@ -459,6 +474,8 @@ def lifecycle_main(
             results.append(result)
             if result.get("interrupted"):
                 break
+    source_after = source_identity()
+    unchanged = source == source_after
     report = {
         "schema_version": 1,
         "suite": "lifecycle",
@@ -466,14 +483,21 @@ def lifecycle_main(
         "opted_in": opted_in,
         "model_use": opted_in,
         "deadline_seconds_per_harness": args.deadline,
-        "ok": all(row["status"] != "failed" for row in results),
-        "complete": all(row["status"] == "passed" for row in results),
+        "ok": unchanged and all(row["status"] != "failed" for row in results),
+        "complete": unchanged and all(row["status"] == "passed" for row in results),
+        "source": source,
+        "source_after": source_after,
+        "source_unchanged": unchanged,
         "harnesses": results,
         "verification_note": (
             "Only a passed complete lifecycle verifies its exact installed version; "
             "skipped runs provide no acceptance evidence."
         ),
     }
+    if not unchanged:
+        report["error"] = (
+            "ASL sources changed during acceptance; rerun the final checkout"
+        )
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.report:
         Path(args.report).write_text(rendered)
@@ -487,4 +511,6 @@ def lifecycle_main(
             )
             if row["artifacts"]:
                 print(f"  artifacts: {row['artifacts']}")
+        if not unchanged:
+            print(report["error"], file=sys.stderr)
     return 0 if report["ok"] else 1

@@ -22,6 +22,14 @@ A polish and hardening round after the public release.
 
 ### Fixed
 
+- Copilot preparation and audit turns adapt to the remote-option change in
+  CLI 1.0.103 while retaining their read-only restrictions. Lifecycle acceptance
+  disables Copilot updates, refuses to verify a version that changes during the
+  run, and records the ASL commit and source digests so edits during a check
+  cannot produce a complete report. Validator prompts explicitly require string
+  session ids and include repository aliases in registered entry schemas to
+  avoid unnecessary output-repair turns.
+
 - Workbench: disabled recovery actions show their reason on the card as well
   as in a tooltip. Browser tests now cover stale-lock and verification recovery,
   plus copy-only conversation recovery, across both deployments in Chromium

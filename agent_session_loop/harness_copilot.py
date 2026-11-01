@@ -49,6 +49,30 @@ COPILOT_AUDIT_DENIED_TOOLS = ("write", "shell", "url")
 COPILOT_ALLOW_ALL_TOOLS = "--allow-all-tools"
 
 
+def _audit_remote_flags(executable: str, env: Mapping[str, str] | None) -> list[str]:
+    """Keep audits local across Copilot's 1.0.103 remote-option change.
+
+    Reprobe rather than reuse the executable cache: the npm loader can update
+    its package between turns without changing the loader's file identity.
+    Unknown versions retain the legacy restrictions and fail closed if those
+    flags are unsupported, rather than silently dropping the restrictions.
+    """
+    from . import harness_compatibility
+
+    probe = harness_compatibility.probe_executable(
+        "copilot", executable, env=env, use_cache=False
+    )
+    if probe.version and harness_compatibility.version_key(probe.version) >= (
+        1,
+        0,
+        103,
+    ):
+        # Prompt-mode sessions cannot enable incoming remote control. History
+        # sync is separate and still needs an explicit per-run refusal.
+        return ["--sync-session=off"]
+    return ["--no-remote", "--no-remote-export"]
+
+
 def _decline_active_steer(
     request: guidance_delivery.GuidanceRequest,
 ) -> guidance_delivery.GuidanceOutcome:
@@ -210,8 +234,7 @@ class CopilotAdapter(HarnessAdapter):
                 [
                     "--disable-builtin-mcps",
                     "--no-custom-instructions",
-                    "--no-remote",
-                    "--no-remote-export",
+                    *_audit_remote_flags(self.executable, env),
                     "--disallow-temp-dir",
                 ]
             )

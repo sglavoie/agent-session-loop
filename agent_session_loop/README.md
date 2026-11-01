@@ -1,5 +1,12 @@
 # Agent Session Loop (ASL)
 
+Copilot audit argv adapts to the remote-option change in CLI 1.0.103: newer
+prompt-mode turns use `--sync-session=off`, while earlier or unknown versions
+keep `--no-remote --no-remote-export`. The adapter reprobes before each audit
+because the npm loader can update its package without changing its own file
+identity. Read-only tools, denied write/shell/URL tools, and the other audit
+restrictions apply to both forms.
+
 Remote detail paging retains the selected run, question selector, and requested
 page bounds, including when paging from a cached answer. A new run starting
 between pages cannot redirect the remaining event history to that new run.

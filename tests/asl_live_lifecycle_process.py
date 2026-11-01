@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import signal
@@ -20,6 +21,29 @@ HELPER = REPO_ROOT / "skills/asl/scripts/asl-autopilot.py"
 MAX_HARNESS_LAUNCHES = 6
 
 
+def source_identity(root: Path = REPO_ROOT) -> dict[str, Any]:
+    """Identify the checkout's actual bytes, including uncommitted changes."""
+
+    def git(*args: str) -> bytes:
+        return subprocess.check_output(["git", *args], cwd=root, timeout=10)
+
+    commit = git("rev-parse", "HEAD").decode().strip()
+    dirty = bool(git("status", "--porcelain"))
+    paths = git("ls-files", "-z", "--cached", "--others", "--exclude-standard")
+    digest = hashlib.sha256()
+    for name in sorted(set(paths.split(b"\0")) - {b""}):
+        path = root / os.fsdecode(name)
+        if path.is_symlink():
+            kind, content = b"symlink", os.fsencode(os.readlink(path))
+        elif path.exists():
+            kind, content = b"file", path.read_bytes()
+        else:
+            kind, content = b"deleted", b""
+        digest.update(name + b"\0" + kind + b"\0")
+        digest.update(len(content).to_bytes(8, "big") + content)
+    return {"commit": commit, "worktree_dirty": dirty, "sha256": digest.hexdigest()}
+
+
 class Commands:
     """Keep every call's output, and never leave an owned child spending quota."""
 
@@ -33,6 +57,9 @@ class Commands:
             [str(REPO_ROOT), self.env.get("PYTHONPATH", "")]
         )
         self.env["PATH"] = os.pathsep.join([str(ASL.parent), self.env.get("PATH", "")])
+        # A real Copilot launch can update the npm package between turns.
+        # Keep all launches in this acceptance on the probed installation.
+        self.env["COPILOT_AUTO_UPDATE"] = "false"
 
     def bound_harness(self, harness: str, executable: str) -> None:
         """Cap provider-capable process launches across validators and retries.

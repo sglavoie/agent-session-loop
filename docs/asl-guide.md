@@ -433,6 +433,14 @@ and ordinary discovery; its command orchestration has a deterministic integratio
 test. See [complete plan lifecycle](agent-session-loop/13-harness-commands.md#complete-plan-lifecycle)
 for the evidence required for a pass and the runtime and launch limits.
 
+Repeat this check for each harness you use before a release or after a harness
+upgrade, retaining its report and successful workspace. The report names the
+ASL commit, whether its worktree was dirty, and a source digest before and after
+the check. Require `complete: true` and `source_unchanged: true`; skipped probes
+do not verify a version. Copilot updates are disabled during suite commands,
+and a changed or unavailable harness version at the final probe invalidates the
+sequence. Keep the source patch alongside reports from a dirty checkout.
+
 The recovery spec starts an isolated pair of servers on ephemeral ports for
 each test, using real stale-lock, failed-verification and conversation-recovery
 state. It checks confirmation and cancellation, disabled-action explanations,
