@@ -430,3 +430,57 @@ to exercise those installed harnesses separately.
 `tests/test_asl_live_lifecycle.py` drives the same real ASL commands using a
 deterministic app-server fixture without model use. It belongs to the integration
 lane; the paid suite itself remains outside discovery and the shard lists.
+
+#### Cross-harness review and repair
+
+The same entry point has a separate `review` suite for one ordered
+implementation/reviewer pair. The two harnesses must differ; `--all-harnesses`
+and multiple implementation harnesses are refused for this suite.
+
+```sh
+just test-live-review codex claude             # version probes only
+just test-live-review codex claude --live --keep-workspaces --report /tmp/asl-review.json
+# Equivalent explicit entry point:
+python3 -m tests.asl_live_redirect_acceptance --suite review \
+  --harness codex --review-harness claude --live --keep-workspaces --json
+```
+
+Real `asl prepare` and `asl preflight` validate a two-session disposable
+project: reproduce a legacy summation function with an off-by-one defect, then
+document its public API. The detached supervisor stops after session 1 so the
+suite can independently demonstrate the defect with the frozen product checker.
+On resume, implementation finishes, the second harness reports one structured
+finding, ASL materializes a repair child, the implementation harness repairs it,
+and the reviewer rechecks the result. `--commit-per-session` keeps repositories
+clean for generated-repair preflight; ASL generates and records those commits.
+The reviewer must inspect actual files and report actionable evidence, and may
+not change the repository under review.
+
+A pass requires all of the following: the baseline defect really failed the
+product checker; the first review identified `APP:totals.py`; the generated
+repair ran under the implementation harness and passed the independent product
+check as a runner-owned gate; the second review was all-clear; durable review
+cycles link the repair session to the finding and record its closure; every
+session is verified and complete with no active lock or turn; and the frozen
+requirements, legacy source, README, and verifier remain byte-identical. A final
+independent product check must pass too. Premature all-clear, missing repair,
+changed verifier, or a successful process without this evidence cannot pass.
+The event log supplies turn and cycle evidence across Autopilot relaunches;
+`state.json` represents only the final run.
+
+The pair shares a hard ceiling of ten provider-capable harness launches,
+including preparation validation, commit-message generation, and retries, and
+a total 900-second deadline (`--deadline SECONDS`). Each validator or worker
+turn also has a 240-second timeout. Supervisor audit is disabled. These limits
+bound launch count and runtime, not monetary cost; native model settings apply.
+Without `--live` or `ASL_LIVE_ACCEPTANCE=1`, only the two version probes run.
+Ordinary discovery and CI exercise only the deterministic Codex app-server and
+Claude stream-json fixtures in `tests/test_asl_live_review.py`.
+
+The report records the ordered pair, both exact versions, command logs, durable
+review evidence, source identity before and after, and `complete`. Require
+`complete: true`, `source_unchanged: true`, and `pair.status: passed`. A changed
+or unavailable final version invalidates the whole pair. Skipped probes do not
+verify a version or pair. Failed and interrupted workspaces always remain on
+disk; retain successful ones with `--keep-workspaces` and save the report with
+`--report PATH`. Keep the source patch alongside evidence from a dirty checkout.

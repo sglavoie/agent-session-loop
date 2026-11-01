@@ -14,6 +14,12 @@ A polish and hardening round after the public release.
 
 ### Added
 
+- Opt-in live acceptance of an implementation/reviewer harness pair through
+  preparation, an independently demonstrated defect, a structured review finding,
+  an ASL-generated repair, and a clean re-review. Reports retain harness provenance,
+  runner-owned verification and review-cycle closure across supervisor relaunches,
+  and refuse changed acceptance inputs or versions. The pair shares a ten-launch
+  ceiling; deterministic protocol fixtures cover success and false-pass refusals.
 - Opt-in live acceptance of a complete prepared-plan lifecycle through the real
   CLI and Autopilot supervisor: interrupt with a correction, stop after session 1,
   resume session 2, and require durable receipts and passing verification. The

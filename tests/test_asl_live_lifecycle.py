@@ -207,7 +207,7 @@ class LifecycleAcceptanceTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": native_config}):
             commands = Commands(self.root, deadline=30)
         commands.bound_harness("codex", str(executable))
-        wrapper = str(self.root / "bounded-harness")
+        wrapper = str(self.root / "bounded-codex")
         for _ in range(MAX_HARNESS_LAUNCHES):
             completed = subprocess.run([wrapper, "turn"], env=commands.env, timeout=5)
             self.assertEqual(0, completed.returncode)

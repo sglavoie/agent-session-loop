@@ -433,6 +433,15 @@ and ordinary discovery; its command orchestration has a deterministic integratio
 test. See [complete plan lifecycle](agent-session-loop/13-harness-commands.md#complete-plan-lifecycle)
 for the evidence required for a pass and the runtime and launch limits.
 
+`just test-live-review codex claude` probes an ordered implementation/reviewer
+pair without model use. Add `--live --keep-workspaces --report /tmp/asl-review.json`
+to exercise a seeded defect, an independent finding, an ASL-generated repair,
+and a clean second review through real commands. The pair shares a 900-second
+deadline and a ten-launch ceiling, including validation, per-session commit
+generation, and retries. A pass requires independent product verification,
+unchanged requirements and verifier, durable finding closure, and provenance for
+both roles. See [cross-harness review acceptance](agent-session-loop/13-harness-commands.md#cross-harness-review-and-repair).
+
 Repeat this check for each harness you use before a release or after a harness
 upgrade, retaining its report and successful workspace. The report names the
 ASL commit, whether its worktree was dirty, and a source digest before and after

@@ -47,12 +47,20 @@ def source_identity(root: Path = REPO_ROOT) -> dict[str, Any]:
 class Commands:
     """Keep every call's output, and never leave an owned child spending quota."""
 
-    def __init__(self, root: Path, *, deadline: int) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        deadline: int,
+        max_harness_launches: int = MAX_HARNESS_LAUNCHES,
+    ) -> None:
         self.root = root
         self.until = time.monotonic() + deadline
         self.calls: list[dict[str, Any]] = []
         self.helpers: list[tuple[int, str | None]] = []
+        self.max_harness_launches = max_harness_launches
         self.env = os.environ.copy()
+        self.native_config = self.env.get("XDG_CONFIG_HOME")
         self.env["PYTHONPATH"] = os.pathsep.join(
             [str(REPO_ROOT), self.env.get("PYTHONPATH", "")]
         )
@@ -67,8 +75,7 @@ class Commands:
         Restore the caller's native config environment before exec, so ASL's
         isolated executable override cannot change the provider's credentials.
         """
-        native_config = self.env.get("XDG_CONFIG_HOME")
-        shim = self.root / "bounded-harness.py"
+        shim = self.root / f"bounded-{harness}.py"
         counter = self.root / "harness-launches.jsonl"
         shim.write_text(
             "import fcntl, json, os, sys, time\n"
@@ -77,20 +84,21 @@ class Commands:
             f"    with open({str(counter)!r}, 'a+') as ledger:\n"
             "        fcntl.flock(ledger, fcntl.LOCK_EX)\n"
             "        ledger.seek(0)\n"
-            f"        if len(ledger.readlines()) >= {MAX_HARNESS_LAUNCHES}:\n"
+            f"        if len(ledger.readlines()) >= {self.max_harness_launches}:\n"
             "            sys.exit('live acceptance harness launch budget exhausted')\n"
-            "        ledger.write(json.dumps({'argv': sys.argv[1:], "
+            f"        ledger.write(json.dumps({{'harness': {harness!r}, "
+            "'argv': sys.argv[1:], "
             "'at': time.time()}) + '\\n')\n"
             "        ledger.flush()\n"
             "        os.fsync(ledger.fileno())\n"
-            f"native_config = {native_config!r}\n"
+            f"native_config = {self.native_config!r}\n"
             "if native_config is None:\n"
             "    os.environ.pop('XDG_CONFIG_HOME', None)\n"
             "else:\n"
             "    os.environ['XDG_CONFIG_HOME'] = native_config\n"
             "os.execv(executable, [executable, *sys.argv[1:]])\n"
         )
-        wrapper = self.root / "bounded-harness"
+        wrapper = self.root / f"bounded-{harness}"
         # Shell argv is quoted independently; paths may contain spaces.
         import shlex
 
@@ -100,8 +108,10 @@ class Commands:
         )
         wrapper.chmod(0o700)
         config = self.root / "asl-config/agent-session-loop/harnesses.json"
-        config.parent.mkdir(parents=True)
-        config.write_text(json.dumps({harness: {"executable": str(wrapper)}}))
+        config.parent.mkdir(parents=True, exist_ok=True)
+        configured = json.loads(config.read_text()) if config.exists() else {}
+        configured[harness] = {"executable": str(wrapper)}
+        config.write_text(json.dumps(configured))
         self.env["XDG_CONFIG_HOME"] = str(self.root / "asl-config")
 
     def remaining(self) -> float:
@@ -110,7 +120,14 @@ class Commands:
             raise TimeoutError("lifecycle wall-clock budget exhausted")
         return remaining
 
-    def call(self, label: str, argv: list[str], *, timeout: float = 60) -> dict:
+    def call(
+        self,
+        label: str,
+        argv: list[str],
+        *,
+        timeout: float = 60,
+        expected_returncode: int = 0,
+    ) -> dict:
         limit = min(timeout, self.remaining())
         index = len(self.calls)
         stdout_path = self.root / f"{index:03d}-{label}.stdout"
@@ -146,7 +163,7 @@ class Commands:
             raise RuntimeError(
                 f"{label} returned no JSON; see {stdout_path}"
             ) from error
-        if record["returncode"] or not isinstance(payload, dict):
+        if record["returncode"] != expected_returncode or not isinstance(payload, dict):
             detail = (
                 payload.get("error") or payload.get("reason") or str(payload)
                 if isinstance(payload, dict)

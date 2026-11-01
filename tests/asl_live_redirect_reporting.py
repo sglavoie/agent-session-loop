@@ -125,16 +125,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="print the JSON report")
     parser.add_argument(
         "--suite",
-        choices=("redirect", "lifecycle"),
+        choices=("redirect", "lifecycle", "review"),
         default="redirect",
-        help="exercise harness adapters (default) or the complete ASL command workflow",
+        help="exercise adapters (default), the plan lifecycle, or cross-harness review",
+    )
+    parser.add_argument(
+        "--review-harness",
+        type=_harness_name,
+        metavar="NAME",
+        help="independent reviewer for --suite review (must differ from --harness)",
     )
     parser.add_argument(
         "--deadline",
         type=int,
         default=900,
         metavar="SECONDS",
-        help="total wall-clock budget per harness for lifecycle (default: 900)",
+        help="total budget per lifecycle harness or review pair (default: 900 seconds)",
     )
     parser.add_argument(
         "--report", metavar="PATH", help="write the JSON report to PATH"
@@ -161,6 +167,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     opted_in = live_opt_in(flag=bool(args.live))
     if args.deadline <= 0:
         parser.error("--deadline must be a positive integer")
+    if args.suite == "review":
+        if args.all_harnesses or len(requested) != 1 or args.review_harness is None:
+            parser.error("--suite review requires one --harness and --review-harness")
+        if requested[0] == args.review_harness:
+            parser.error("--review-harness must differ from --harness")
+        from .asl_live_review import review_main
+
+        return review_main(args, harness=requested[0], opted_in=opted_in)
+    if args.review_harness is not None:
+        parser.error("--review-harness requires --suite review")
     if args.suite == "lifecycle":
         from .asl_live_lifecycle import lifecycle_main
 

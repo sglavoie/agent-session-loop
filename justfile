@@ -56,6 +56,12 @@ test-all:
 test-live-lifecycle harness="codex" *ARGS:
     python3 -m tests.asl_live_redirect_acceptance --suite lifecycle --harness {{harness}} {{ARGS}}
 
+# Opt-in implementation -> independent review -> repair -> clean re-review.
+# Example: just test-live-review codex claude --live --keep-workspaces --report /tmp/asl-review.json
+[doc("Probe or explicitly accept one real implementation/reviewer harness pair")]
+test-live-review harness="codex" reviewer="claude" *ARGS:
+    python3 -m tests.asl_live_redirect_acceptance --suite review --harness {{harness}} --review-harness {{reviewer}} {{ARGS}}
+
 # Development-only: the harness lives in tests/workbench_browser and is no
 # dependency of either Workbench deployment. Needs Node and npm; the first run
 # installs the pinned Playwright and its Chromium and WebKit engines. npm ci
