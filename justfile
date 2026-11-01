@@ -80,6 +80,8 @@ test-browser:
 # to. They repeat in isolation and under load with the others, and they are kept
 # out of the budget phase, which measures CLI latency and has nothing to say
 # about a deadline a test pins against its own injected clock.
+# Failed/interrupted runs keep complete logs in .cache/reliability-stress/;
+# the scheduled macOS workflow uploads them alongside failed suite shards.
 [doc("Repeat the load-, calendar- and fault-sensitive scenarios under stress")]
 reliability-stress reps="10" shards="4":
     scripts/reliability-stress.sh {{ reps }} {{ shards }}

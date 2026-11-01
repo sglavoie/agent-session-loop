@@ -434,7 +434,9 @@ No recovery test starts a harness or executes a copied command.
 
 `just reliability-stress [reps] [shards]` re-runs the load- and calendar-sensitive
 scenarios in isolation, then across a spread of timezone offsets, then as
-concurrent shards while the full suite saturates the machine. The scenarios
+concurrent shards while the full suite saturates the machine. Its fault lane
+also repeats remote restart and settlement recovery, concurrent supervision
+cursor writes, and log replacement or append during replay. The scenarios
 synchronize on run state and pin their own clock, so neither contention nor the
 passage of the calendar may change their outcome. The full suite runs there only
 as load and does not gate the recipe — its outcome is reported, but `just
@@ -446,3 +448,11 @@ asserted separately, only when `ASL_E2E_TIME_BUDGETS=1` is set, so a slow or bus
 machine reports a slow machine instead of a spurious correctness failure. The
 final phase of `just reliability-stress` sets that variable once the rest of the
 run has finished and the machine is quiet.
+
+`reliability-stress.yml` runs the default stress gate daily on macOS and accepts
+manual dispatches. Failed and interrupted local runs retain complete phase logs
+under `.cache/reliability-stress/run.*/`, including the final budget checks.
+A failed background load suite also retains its logs while remaining advisory.
+Successful runs otherwise remove their phase logs. The workflow uploads retained
+stress logs and failed shard logs even when only the advisory suite failed;
+artifacts are kept for 14 days.

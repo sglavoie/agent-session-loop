@@ -51,6 +51,10 @@ date_scenarios=(
 # correction must be stranded rather than re-decided. Contention is the only
 # condition under which most of these can fail at all, which is why they are
 # repeated here rather than trusted from a single unloaded pass.
+# Remote recovery also has to retain settlements across queue pressure and a
+# dropped link. Cursor writers and replay/follow transitions cover the other
+# boundaries recently hardened: concurrent publication must not move a cursor
+# backward, and replacing or appending a log during replay must not lose text.
 fault_scenarios=(
     tests.test_asl_redirect_adversarial.SlowStorageTests
     tests.test_asl_redirect_adversarial.BlockedPipeTests
@@ -64,9 +68,18 @@ fault_scenarios=(
     tests.test_asl_redirect_control_live.LiveWorkerTerminationTests
     tests.test_asl_redirect_continuation_journal.SerializationTests
     tests.test_asl_redirect_continuation_settle.SettleRedirectedTurnTests
+    tests.test_workbench_remote_actions_restart.RestartSettlementTests
+    tests.test_workbench_remote_actions_restart.RestartTests
+    tests.test_workbench_remote_actions_lane.LostResponseTests
+    tests.test_asl_control_mailbox_cli_supervise.MailboxCliTestsPart8.test_overlapping_cursor_writers_cannot_regress_the_saved_sequence
+    tests.asl_tail_cases_recovery.TailFollowerRecoveryTests.test_active_replay_restarts_on_changed_replacement
+    tests.asl_tail_cases_recovery.TailFollowerRecoveryTests.test_recent_replay_follows_a_line_appended_after_its_read
+    tests.asl_tail_cases_recovery.TailFollowerRecoveryTests.test_initial_replay_follows_a_line_appended_after_its_read
 )
 
-log_dir="$(mktemp -d)"
+mkdir -p .cache/reliability-stress
+log_dir="$(mktemp -d "$PWD/.cache/reliability-stress/run.XXXXXX")"
+keep_logs=0
 suite_pid=""
 shard_pids=()
 
@@ -80,15 +93,22 @@ kill_tree() {
 }
 
 # An interrupted or failed run must not leave the load suite or a stress shard
-# running against a deleted log directory. The pid variables are cleared once
-# each job is reaped, so a recycled pid is never signalled.
+# running against a deleted log directory. Failed and interrupted runs retain
+# their complete logs for inspection and CI upload. The pid variables are
+# cleared once each job is reaped, so a recycled pid is never signalled.
 cleanup() {
+    local status=$?
     trap - EXIT INT TERM
     local pid
     for pid in $suite_pid ${shard_pids[@]+"${shard_pids[@]}"}; do
         kill_tree "$pid"
     done
-    rm -rf "$log_dir"
+    if [ "$status" -ne 0 ] || [ "$keep_logs" -ne 0 ]; then
+        echo "reliability-stress: logs retained at $log_dir"
+    else
+        rm -rf "$log_dir"
+    fi
+    exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -162,6 +182,7 @@ if [ "${#failed_logs[@]}" -ne 0 ]; then
     exit 1
 fi
 if [ "$suite_status" -ne 0 ]; then
+    keep_logs=1
     echo "-- background load suite exited $suite_status (reported, not gated):"
     tail -n 40 "$log_dir/suite.log"
     echo "-- gate on it with: just test-all"
@@ -173,6 +194,11 @@ fi
 # the fault scenarios assert against injected clocks and bounded waits, so a
 # wall-clock reading of them would measure the test's own patience.
 echo "== end-to-end time budgets (quiet machine) =="
-ASL_E2E_TIME_BUDGETS=1 python3 -m unittest "${scenarios[@]}"
+budget_status=0
+ASL_E2E_TIME_BUDGETS=1 python3 -m unittest "${scenarios[@]}" > "$log_dir/budgets.log" 2>&1 || budget_status=$?
+cat "$log_dir/budgets.log"
+if [ "$budget_status" -ne 0 ]; then
+    exit "$budget_status"
+fi
 
 echo "reliability-stress: ok"

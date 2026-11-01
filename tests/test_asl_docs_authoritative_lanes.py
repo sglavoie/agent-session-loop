@@ -66,7 +66,7 @@ class AuthoritativeLaneDocsTests(unittest.TestCase):
         self.assertIn("tests/run_suite.py", self.docs)
 
     def test_the_stress_fault_lane_is_real_and_stays_out_of_the_budgets(self) -> None:
-        """The fault list must name live classes and never be timed.
+        """The fault list must name live classes or methods and never be timed.
 
         Three things can rot independently here: a renamed test class leaves a
         dotted name nothing resolves, a new fault group lands in the module but
@@ -84,8 +84,11 @@ class AuthoritativeLaneDocsTests(unittest.TestCase):
         names = recipe.split("fault_scenarios=(", 1)[1].split(")", 1)[0].split()
         self.assertIn("tests.test_asl_redirect_adversarial.SlowStorageTests", names)
         defined: dict[str, set[str]] = {}
+        loader = unittest.TestLoader()
         for name in names:
             module_name, class_name = name.rsplit(".", 1)
+            if class_name.startswith("test_"):
+                module_name, class_name = module_name.rsplit(".", 1)
             if module_name not in defined:
                 path = REPO_ROOT / Path(*module_name.split(".")).with_suffix(".py")
                 tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -93,6 +96,8 @@ class AuthoritativeLaneDocsTests(unittest.TestCase):
                     node.name for node in tree.body if isinstance(node, ast.ClassDef)
                 }
             self.assertIn(class_name, defined[module_name], name)
+            self.assertGreater(loader.loadTestsFromName(name).countTestCases(), 0, name)
+        self.assertEqual([], loader.errors)
         adversarial = "tests.test_asl_redirect_adversarial"
         # The three groups held back assert against fixed records and injected
         # state rather than against a race, so repeating them under load would
