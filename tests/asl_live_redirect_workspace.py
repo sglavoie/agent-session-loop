@@ -23,7 +23,9 @@ def _git(repo: Path, *args: str) -> None:
 
 
 @contextmanager
-def disposable_workspace(label: str, *, keep: bool = False) -> Iterator[Workspace]:
+def disposable_workspace(
+    label: str, *, keep: bool = False, announce: bool = True
+) -> Iterator[Workspace]:
     """Create a throwaway git repository and tear it down afterwards.
 
     A real repository rather than a bare directory: every harness ASL launches
@@ -49,9 +51,9 @@ def disposable_workspace(label: str, *, keep: bool = False) -> Iterator[Workspac
         _git(repo, "commit", "-q", "-m", "seed")
         yield Workspace(root=root, repo=repo, plan_dir=plan_dir, state_dir=state_dir)
     finally:
-        if keep:
+        if keep and announce:
             print(f"  workspace retained: {root}")
-        else:
+        elif not keep:
             shutil.rmtree(root, ignore_errors=True)
 
 

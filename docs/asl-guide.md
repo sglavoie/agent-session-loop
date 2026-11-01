@@ -423,6 +423,16 @@ dependency of either Workbench deployment. It needs Node and npm; it runs
 `npm ci` whenever `package-lock.json` is newer than the installed tree, then
 installs the pinned Chromium and WebKit engines before the tests.
 
+`just test-live-lifecycle codex` probes the installed version without model use.
+Add `--live --report /tmp/asl-lifecycle.json` to opt in to a disposable project's
+real prepare → preflight → supervised run → correction → session-budget stop →
+resume → verified completion. Each harness has a total deadline (900 seconds by
+default) and a six-launch ceiling, including validator repairs and retries.
+Failures retain their full workspace and logs. This paid check stays outside CI
+and ordinary discovery; its command orchestration has a deterministic integration
+test. See [complete plan lifecycle](agent-session-loop/13-harness-commands.md#complete-plan-lifecycle)
+for the evidence required for a pass and the runtime and launch limits.
+
 The recovery spec starts an isolated pair of servers on ephemeral ports for
 each test, using real stale-lock, failed-verification and conversation-recovery
 state. It checks confirmation and cancellation, disabled-action explanations,

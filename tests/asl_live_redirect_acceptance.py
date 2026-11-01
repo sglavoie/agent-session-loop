@@ -10,4 +10,14 @@ from .asl_live_redirect_support import *
 from .asl_live_redirect_workspace import *
 
 if __name__ == "__main__":
+    # tests.__init__ shields ordinary tests from paid CLIs with PATH stubs.
+    # This explicit acceptance entry point must probe and launch the real CLI.
+    # Keep custom PATH fixtures intact; remove only our repository's stubs.
+    from tests import HARNESS_STUBS
+
+    os.environ["PATH"] = os.pathsep.join(
+        entry
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if Path(entry).resolve() != Path(HARNESS_STUBS).resolve()
+    )
     raise SystemExit(main())

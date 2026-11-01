@@ -357,3 +357,52 @@ What ASL does about missing history is decided by the run loop, not the harness:
 `conversation-recovery-required` classifies as `requires_user` with
 `user_action: inspect` and zero retries, which is pinned deterministically
 alongside the opt-in tests.
+
+#### Complete plan lifecycle
+
+The same opt-in entry point also exercises the operator commands, starting with
+Codex as the initial acceptance target:
+
+```sh
+just test-live-lifecycle codex                  # version probe only; no model use
+just test-live-lifecycle codex --live --report /tmp/asl-lifecycle.json
+# Equivalent, with retained successful artifacts and a shorter total budget:
+python3 -m tests.asl_live_redirect_acceptance --suite lifecycle \
+  --harness codex --live --deadline 600 --keep-workspaces --json
+```
+
+It creates a disposable Git repository and a two-session plan with an explicit
+repository registry. Real `asl prepare` validation and baselines must mark the
+plan loop-ready, and a separate `asl preflight` must pass. The detached Autopilot
+helper launches prepare's run command; the test polls its launch-scoped
+`asl outbox supervise` cursor. When session 1 writes its seed and starts a
+long-running tool, `asl control redirect` interrupts it and supplies a correction.
+The successor acknowledges that correction, writes one receipt, and completes
+session 1. The first supervision stops at `--max-sessions 1`; a new supervision
+resumes the same plan with `--resume` to complete session 2.
+
+A pass requires the interrupted turn and its verified successor, one completed
+and one pending session at the stop, a different finished run after resume,
+passing runner-owned verification for both sessions, no active run lock, the
+unchanged seed and verifier, the final expected file, and exactly one journal
+delivery and correction receipt. A submission acknowledgement alone cannot pass.
+
+Each harness has a 900-second total deadline by default (`--deadline SECONDS`)
+and a hard ceiling of six provider-capable harness process launches, including
+validator repairs and supervisor retries. Version probes do not consume that
+ceiling. Each validator or implementation turn also has a 240-second timeout.
+Audit, review, and commit generation are disabled for this fixture. These bound
+runtime and launch count, not a monetary charge; the harness keeps its native
+model settings. Ordinary tests and CI never opt in or spend provider quota.
+
+The JSON report records the exact installed version, command timings, durable
+run and redirect evidence, and `complete`. A skipped probe has `complete: false`
+and no verified version. Failed or interrupted sequences always retain their
+workspace, state, helper results, command stdout/stderr, launch ledger, and
+`acceptance.json`; successful workspaces are removed unless `--keep-workspaces`
+was passed. `--report PATH` saves the overall report independently. Progress goes
+to stderr so `--json` stdout remains one JSON document.
+
+`tests/test_asl_live_lifecycle.py` drives the same real ASL commands using a
+deterministic app-server fixture without model use. It belongs to the integration
+lane; the paid suite itself remains outside discovery and the shard lists.

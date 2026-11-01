@@ -124,6 +124,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--json", action="store_true", help="print the JSON report")
     parser.add_argument(
+        "--suite",
+        choices=("redirect", "lifecycle"),
+        default="redirect",
+        help="exercise harness adapters (default) or the complete ASL command workflow",
+    )
+    parser.add_argument(
+        "--deadline",
+        type=int,
+        default=900,
+        metavar="SECONDS",
+        help="total wall-clock budget per harness for lifecycle (default: 900)",
+    )
+    parser.add_argument(
         "--report", metavar="PATH", help="write the JSON report to PATH"
     )
     parser.add_argument(
@@ -146,6 +159,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("choose --all-harnesses or at least one --harness")
         return 2
     opted_in = live_opt_in(flag=bool(args.live))
+    if args.deadline <= 0:
+        parser.error("--deadline must be a positive integer")
+    if args.suite == "lifecycle":
+        from .asl_live_lifecycle import lifecycle_main
+
+        return lifecycle_main(args, requested=requested, opted_in=opted_in)
     started = time.monotonic()
     acceptances = [
         run_harness_acceptance(

@@ -50,6 +50,12 @@ test-portable:
 test-all:
     python3 -m tests.run_suite --all
 
+# Opt-in real command workflow. Without --live, probes versions only.
+# Example: just test-live-lifecycle codex --live --report /tmp/asl-live.json
+[doc("Probe or explicitly run the prepared-plan lifecycle against one real harness")]
+test-live-lifecycle harness="codex" *ARGS:
+    python3 -m tests.asl_live_redirect_acceptance --suite lifecycle --harness {{harness}} {{ARGS}}
+
 # Development-only: the harness lives in tests/workbench_browser and is no
 # dependency of either Workbench deployment. Needs Node and npm; the first run
 # installs the pinned Playwright and its Chromium and WebKit engines. npm ci

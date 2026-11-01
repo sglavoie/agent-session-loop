@@ -12,6 +12,14 @@ version, move the Unreleased entries under it, and date it.
 
 A polish and hardening round after the public release.
 
+### Added
+
+- Opt-in live acceptance of a complete prepared-plan lifecycle through the real
+  CLI and Autopilot supervisor: interrupt with a correction, stop after session 1,
+  resume session 2, and require durable receipts and passing verification. The
+  suite bounds runtime and harness launches and retains failure artifacts;
+  ordinary CI exercises its command flow with a deterministic protocol fixture.
+
 ### Fixed
 
 - Workbench: disabled recovery actions show their reason on the card as well
