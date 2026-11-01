@@ -355,6 +355,15 @@ export function applyActionAvailability(root) {
       const enabledTitle = node.getAttribute("data-enabled-title") || "";
       if (node.title !== enabledTitle) node.title = enabledTitle;
     }
+    // Recovery cards need an explanation readable on a phone as well as a
+    // tooltip. Keep it in the same pass so a later capability read or an
+    // in-flight submission cannot leave an old reason on the card.
+    const reason = node.parentElement?.querySelector("[data-operation-reason]");
+    if (reason) {
+      const text = availability.reason || "";
+      if (reason.textContent !== text) reason.textContent = text;
+      reason.hidden = !text;
+    }
   });
 }
 

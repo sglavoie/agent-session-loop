@@ -423,6 +423,15 @@ dependency of either Workbench deployment. It needs Node and npm; it runs
 `npm ci` whenever `package-lock.json` is newer than the installed tree, then
 installs the pinned Chromium and WebKit engines before the tests.
 
+The recovery spec starts an isolated pair of servers on ephemeral ports for
+each test, using real stale-lock, failed-verification and conversation-recovery
+state. It checks confirmation and cancellation, disabled-action explanations,
+copied commands and retained corrections. A local unlock actually clears the
+fixture's lock; a remote submission stays queued and is shown as unconfirmed
+after reload. Conversation recovery stays inspect-and-copy only, and the remote
+provider's refusal of the harness-file-dependent detail is checked explicitly.
+No recovery test starts a harness or executes a copied command.
+
 `just reliability-stress [reps] [shards]` re-runs the load- and calendar-sensitive
 scenarios in isolation, then across a spread of timezone offsets, then as
 concurrent shards while the full suite saturates the machine. The scenarios

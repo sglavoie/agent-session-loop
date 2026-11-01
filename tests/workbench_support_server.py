@@ -110,7 +110,11 @@ class _ShellFixtureHandler(workbench_server.WorkbenchRequestHandler):
 
 
 def start_remote_shell_server(
-    corpus: ShellCorpus, *, host: str = "127.0.0.1", port: int = 0
+    corpus: ShellCorpus,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    catalog_entries: list[dict[str, Any]] | None = None,
 ) -> tuple[ShellFixtureServer, threading.Thread, WorkbenchStore]:
     """The Pi's deployment: the remote provider over a seeded observation store.
 
@@ -124,7 +128,11 @@ def start_remote_shell_server(
         policy=ObservationPolicy(),
         created_at=SHELL_FROZEN_NOW,
     )
-    seed_shell_store(store, shell_catalog_entries(corpus), corpus=corpus)
+    seed_shell_store(
+        store,
+        shell_catalog_entries(corpus) if catalog_entries is None else catalog_entries,
+        corpus=corpus,
+    )
     responder = workbench_remote_reads.AslDetailResponder(
         plan_roots=corpus.plan_roots,
         state_dir=corpus.state_dir,
@@ -210,6 +218,8 @@ def start_shell_deployments(
     token: str = "shell-fixture-token",
     local_port: int = 0,
     remote_port: int = 0,
+    corpus: ShellCorpus | None = None,
+    catalog_entries: list[dict[str, Any]] | None = None,
 ) -> ShellDeployments:
     """Seed one plan corpus and serve it through both providers at once.
 
@@ -221,14 +231,18 @@ def start_shell_deployments(
     Ports default to ``0`` so the Python suite never collides with a port some
     other process took. The browser harness passes real ones instead, because
     Playwright has to write the URLs into its config before anything binds.
+
+    Recovery tests can supply a modified ``corpus`` and its projected
+    ``catalog_entries`` before either server starts. Entries follow
+    ``SHELL_PLAN_NAMES`` order, as the standard snapshot seeder expects.
     """
 
-    corpus = seed_shell_plans(root)
+    corpus = seed_shell_plans(root) if corpus is None else corpus
     local_server, local_thread = start_local_shell_server(
         corpus, host=host, port=local_port, token=token
     )
     remote_server, remote_thread, store = start_remote_shell_server(
-        corpus, host=host, port=remote_port
+        corpus, host=host, port=remote_port, catalog_entries=catalog_entries
     )
     remote = ShellDeployment(
         mode="remote",

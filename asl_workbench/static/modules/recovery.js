@@ -456,6 +456,11 @@ export function createRecoveryActionCard(action, primary) {
   button.textContent = recoveryActionButtonLabel(action, target);
   const name = recoveryCardAction(action);
   if (name) {
+    const reason = document.createElement("p");
+    reason.className = "wb-recovery__action-description";
+    reason.setAttribute("data-operation-reason", "");
+    reason.hidden = true;
+    text.appendChild(reason);
     button.setAttribute("data-operation-action", name);
     // The card's own verdict is written as a reason rather than as `disabled`,
     // so the availability pass keeps it instead of re-enabling a card the

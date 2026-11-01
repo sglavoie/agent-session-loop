@@ -272,18 +272,16 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         origin=models.ORIGIN_WORKBENCH,
         owner=models.OWNER_PORTABLE,
         authority=models.AUTHORITY_ASL,
-        # One of the boundaries is now asserted: a recovery card that acts is
-        # the same action as the controls bar, so it is shut by the same
-        # capability pass rather than refused after the press. The cards
-        # themselves are still only reached by the smoke checklist -- the shell
-        # fixture's plans diagnose to a card that navigates, so no browser test
-        # here can put a mutating card on screen.
+        # Isolated stale-lock and failed-verification fixtures reach both
+        # navigation and mutation cards, including confirmation, capability
+        # reasons, copied commands and refresh after a real local unlock or a
+        # remote submission that has only been queued.
         regression_coverage=(
             models._DOCS_TESTS,
             *models._RECOVERY_TESTS,
             models._INTERACTION_TESTS,
+            models._RECOVERY_BROWSER_TESTS,
         ),
-        coverage_gap=models.GAP_WORKBENCH_BROWSER,
     ),
     models.Capability(
         key=f"{models.SURFACE_WORKBENCH_BROWSER}:archive-browser",
@@ -334,8 +332,11 @@ CAPABILITIES: tuple[models.Capability, ...] = (
         origin=models.ORIGIN_WORKBENCH,
         owner=models.OWNER_PORTABLE,
         authority=models.AUTHORITY_ASL,
-        regression_coverage=(models._DOCS_TESTS, models._SERVER_RECOVERY_TESTS),
-        coverage_gap=models.GAP_WORKBENCH_BROWSER,
+        regression_coverage=(
+            models._DOCS_TESTS,
+            models._SERVER_RECOVERY_TESTS,
+            models._RECOVERY_BROWSER_TESTS,
+        ),
     ),
     models.Capability(
         key=f"{models.SURFACE_WORKBENCH_BROWSER}:session-preferences",

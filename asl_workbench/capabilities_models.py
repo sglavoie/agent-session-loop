@@ -308,6 +308,10 @@ _OVERVIEW_BROWSER_TESTS = "scripts:tests/workbench_browser/overview.spec.js"
 #: from a request.
 _INTERACTION_TESTS = "scripts:tests/test_workbench_interactions.py"
 _INTERACTION_BROWSER_TESTS = "scripts:tests/workbench_browser/interactions.spec.js"
+#: Recovery diagnoses over isolated on-disk failures: real local unlocks,
+#: queued remote operations, copy-only conversation decisions and retained
+#: corrections, at desktop and phone widths in Chromium and WebKit.
+_RECOVERY_BROWSER_TESTS = "scripts:tests/workbench_browser/recovery.spec.js"
 #: The whole application at once: one plan corpus, the real observation source,
 #: a connector over a link that can be made to fail, the Pi's store, and the
 #: remote provider behind a loopback socket, with launch children replaced by an

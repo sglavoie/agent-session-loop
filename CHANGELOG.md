@@ -14,6 +14,10 @@ A polish and hardening round after the public release.
 
 ### Fixed
 
+- Workbench: disabled recovery actions show their reason on the card as well
+  as in a tooltip. Browser tests now cover stale-lock and verification recovery,
+  plus copy-only conversation recovery, across both deployments in Chromium
+  and desktop and mobile WebKit.
 - Workbench: replaying an older request, reusing its id for a conflicting action,
   or submitting an unrelated action no longer supersedes uncertain operations.
   Those records remain open to late confirmation; only a new operation in the
