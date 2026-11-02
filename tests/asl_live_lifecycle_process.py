@@ -69,7 +69,9 @@ class Commands:
         # Keep all launches in this acceptance on the probed installation.
         self.env["COPILOT_AUTO_UPDATE"] = "false"
 
-    def bound_harness(self, harness: str, executable: str) -> None:
+    def bound_harness(
+        self, harness: str, executable: str, *, track_processes: bool = False
+    ) -> None:
         """Cap provider-capable process launches across validators and retries.
 
         Restore the caller's native config environment before exec, so ASL's
@@ -81,6 +83,14 @@ class Commands:
             "import fcntl, json, os, sys, time\n"
             f"executable = {executable!r}\n"
             "if sys.argv[1:] != ['--version']:\n"
+            "    identity = {}\n"
+            f"    if {track_processes!r}:\n"
+            "        from agent_session_loop import process_tree\n"
+            "        birth = process_tree.process_birth(os.getpid())\n"
+            "        if birth is None:\n"
+            "            sys.exit('live acceptance process identity unavailable')\n"
+            "        identity = {'pid': os.getpid(), 'pgid': os.getpgrp(), "
+            "'birth': birth}\n"
             f"    with open({str(counter)!r}, 'a+') as ledger:\n"
             "        fcntl.flock(ledger, fcntl.LOCK_EX)\n"
             "        ledger.seek(0)\n"
@@ -88,7 +98,7 @@ class Commands:
             "            sys.exit('live acceptance harness launch budget exhausted')\n"
             f"        ledger.write(json.dumps({{'harness': {harness!r}, "
             "'argv': sys.argv[1:], "
-            "'at': time.time()}) + '\\n')\n"
+            "'at': time.time(), **identity}) + '\\n')\n"
             "        ledger.flush()\n"
             "        os.fsync(ledger.fileno())\n"
             f"native_config = {self.native_config!r}\n"

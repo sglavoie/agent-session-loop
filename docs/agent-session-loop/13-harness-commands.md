@@ -484,3 +484,69 @@ or unavailable final version invalidates the whole pair. Skipped probes do not
 verify a version or pair. Failed and interrupted workspaces always remain on
 disk; retain successful ones with `--keep-workspaces` and save the report with
 `--report PATH`. Keep the source patch alongside evidence from a dirty checkout.
+
+#### Crash recovery
+
+The `recovery` suite exercises an abrupt runner death rather than a controlled
+session-budget stop. Codex is the initial acceptance target; repeat for each
+installed harness you actually use.
+
+```sh
+just test-live-recovery codex                 # version probe only; no model use
+just test-live-recovery codex --live --keep-workspaces --report /tmp/asl-recovery.json
+# Equivalent explicit entry point:
+python3 -m tests.asl_live_redirect_acceptance --suite recovery \
+  --harness codex --live --keep-workspaces --json
+```
+
+Real `asl prepare` and `asl preflight` validate a disposable two-session project.
+Session 1 writes a nonce and one append-only receipt, then passes runner-owned
+verification. Session 2 writes a checkpoint and starts a blocking tool whose
+marker records its own PID and the nonce. The suite samples the live runner's
+process tree and requires that tool PID to be a descendant before sending
+SIGKILL to the owned runner alone. A reaped child handle with exit code `-9`,
+unfinished durable state, and the original stale lock prove an actual crash.
+
+SIGKILL gives the runner no chance to stop its children. The acceptance driver
+therefore performs an explicit operator stop of the previously sampled processes,
+checking each PID's birth identity before signalling. It requires positive
+termination confirmation before recovery; an empty or failed process sample
+cannot pass. This proves recovery after operator cleanup, not automatic orphan
+cleanup by a dead runner. `asl unlock` must remove the real stale lock without
+`--force`; no state or lock is fabricated or edited by the suite.
+
+A plain `asl run --resume` must pause with `conversation-recovery-required`
+because the crashed turn's native conversation is unconfirmed, without launching
+another provider-capable process. The next command explicitly authorizes
+`asl run --resume --fresh-conversation`. This recovers from retained files;
+it does not claim to restore the lost native conversation or the agent's memory.
+Session 2 must finish with runner-owned verification and an independent final
+product check. The requirements, verifier, README, pre-crash edits, and completed
+session 1 handoff must remain byte-identical. The durable event log must show
+exactly one session 1 attempt, the interrupted session 2 attempt, and its verified
+successor in a new run. Both sessions must be complete, with no active turn,
+verification, finalization, lock file, or surviving tracked predecessor process.
+The bounded launch shim also records each provider-capable process's PID, birth
+identity, and process group before exec. A final independent termination probe
+must confirm every recorded harness process and group stopped, including the
+resumed worker and preparation validators.
+
+Each harness shares one 900-second default deadline (`--deadline SECONDS`) and
+six provider-capable launches across preparation, both sessions, recovery, and
+any retries; individual validator and worker turns have a 240-second timeout.
+Audit, review, and commit generation are disabled. These ceilings bound runtime
+and launch count, not monetary cost. Without `--live` or
+`ASL_LIVE_ACCEPTANCE=1`, only a version probe runs. CI uses a deterministic Codex
+app-server fixture with a real blocking child in `tests/test_asl_live_recovery.py`,
+without provider calls; the paid suite stays outside ordinary discovery.
+
+The JSON report retains command argv and stdout/stderr paths, pre-crash state,
+stale-lock evidence, process samples and termination confirmations, the expected
+conversation refusal, recovered state, the full event sequence, and independent
+verification. `crash-processes.json`, `before-crash.json`, `stale-lock.json`, and
+`acceptance.json` live beside the retained workspace and harness launch ledger.
+Failures and interruptions always retain artifacts; successful workspaces are
+removed unless `--keep-workspaces` is supplied. Save the overall report with
+`--report PATH` and require `complete: true`, `source_unchanged: true`, and a
+passed result for every requested harness. Source edits or a changed/unavailable
+final harness version invalidate acceptance; skipped probes verify nothing.

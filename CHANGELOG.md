@@ -14,6 +14,12 @@ A polish and hardening round after the public release.
 
 ### Added
 
+- Opt-in live crash-recovery acceptance: SIGKILL the runner during a real
+  session 2 tool after verified session 1 work, explicitly stop sampled
+  predecessors, unlock the stale lock without force, and authorize a fresh
+  conversation after the expected plain-resume refusal. Reports require
+  preserved edits, no replay of completed work, independent verification, and
+  process termination evidence; deterministic protocol fixtures run in CI.
 - Opt-in live acceptance of an implementation/reviewer harness pair through
   preparation, an independently demonstrated defect, a structured review finding,
   an ASL-generated repair, and a clean re-review. Reports retain harness provenance,

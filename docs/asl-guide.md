@@ -450,6 +450,19 @@ do not verify a version. Copilot updates are disabled during suite commands,
 and a changed or unavailable harness version at the final probe invalidates the
 sequence. Keep the source patch alongside reports from a dirty checkout.
 
+`just test-live-recovery codex` probes without model use. Add
+`--live --keep-workspaces --report /tmp/asl-recovery.json` to kill the runner
+during session 2 after session 1 has passed verification, explicitly stop its
+sampled descendants, unlock the stale lock without force, and recover through
+the real run commands. The suite requires a plain resume to pause for the
+unconfirmed conversation without launching a worker, then explicitly authorizes
+`--fresh-conversation` to finish from the retained files. It checks that session 1
+was never replayed, partial edits and frozen inputs stayed byte-identical, the
+independent checker passed, and no tracked predecessor or lock remains.
+This opt-in check shares the lifecycle suite's six-launch ceiling and
+900-second default deadline; deterministic integration tests cover the command
+flow in CI. See [crash recovery](agent-session-loop/13-harness-commands.md#crash-recovery).
+
 The recovery spec starts an isolated pair of servers on ephemeral ports for
 each test, using real stale-lock, failed-verification and conversation-recovery
 state. It checks confirmation and cancellation, disabled-action explanations,
@@ -457,7 +470,7 @@ copied commands and retained corrections. A local unlock actually clears the
 fixture's lock; a remote submission stays queued and is shown as unconfirmed
 after reload. Conversation recovery stays inspect-and-copy only, and the remote
 provider's refusal of the harness-file-dependent detail is checked explicitly.
-No recovery test starts a harness or executes a copied command.
+No browser recovery test starts a harness or executes a copied command.
 
 `just reliability-stress [reps] [shards]` re-runs the load- and calendar-sensitive
 scenarios in isolation, then across a spread of timezone offsets, then as

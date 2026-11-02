@@ -62,6 +62,11 @@ test-live-lifecycle harness="codex" *ARGS:
 test-live-review harness="codex" reviewer="claude" *ARGS:
     python3 -m tests.asl_live_redirect_acceptance --suite review --harness {{harness}} --review-harness {{reviewer}} {{ARGS}}
 
+# Opt-in runner crash, stale-lock recovery, and independently verified resume.
+[doc("Probe or explicitly accept crash recovery against one real harness")]
+test-live-recovery harness="codex" *ARGS:
+    python3 -m tests.asl_live_redirect_acceptance --suite recovery --harness {{harness}} {{ARGS}}
+
 # Development-only: the harness lives in tests/workbench_browser and is no
 # dependency of either Workbench deployment. Needs Node and npm; the first run
 # installs the pinned Playwright and its Chromium and WebKit engines. npm ci

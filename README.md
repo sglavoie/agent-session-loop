@@ -141,6 +141,13 @@ and the full suite on macOS, plus `just test-browser` when the Workbench shell
 or its browser harness changes. See [Testing in the ASL guide](docs/asl-guide.md#testing)
 for what each recipe covers.
 
+`just test-live-recovery codex` probes the installed version without model use.
+Add `--live --keep-workspaces --report /tmp/asl-recovery.json` to exercise a
+runner crash during session 2, explicit predecessor cleanup, stale-lock unlock,
+and verified recovery from retained files with a fresh conversation. See
+[crash-recovery acceptance](docs/agent-session-loop/13-harness-commands.md#crash-recovery)
+for its pass criteria and limits. Ordinary CI uses a deterministic harness fixture.
+
 ### Linting
 
 ```bash

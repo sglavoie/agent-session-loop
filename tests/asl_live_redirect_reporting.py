@@ -125,9 +125,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="print the JSON report")
     parser.add_argument(
         "--suite",
-        choices=("redirect", "lifecycle", "review"),
+        choices=("redirect", "lifecycle", "review", "recovery"),
         default="redirect",
-        help="exercise adapters (default), the plan lifecycle, or cross-harness review",
+        help="exercise adapters (default), lifecycle, review, or crash recovery",
     )
     parser.add_argument(
         "--review-harness",
@@ -181,6 +181,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .asl_live_lifecycle import lifecycle_main
 
         return lifecycle_main(args, requested=requested, opted_in=opted_in)
+    if args.suite == "recovery":
+        from .asl_live_recovery import recovery_main
+
+        return recovery_main(args, requested=requested, opted_in=opted_in)
     started = time.monotonic()
     acceptances = [
         run_harness_acceptance(
