@@ -356,9 +356,9 @@ over `agent_session_loop/`'s sources, runs `just test-all`, `just lint`,
 `just reliability-stress`, and `just verify-asl-install` on this side, compares
 the canonical corpus in `tests/fixtures/agent_mux_contract/` against the vendored
 copy byte for byte, installs both halves in the order above, restarts the real
-daemon, and drives a real Kitty smoke. It then writes a deterministic JSON
+daemon, and drives a real tmux smoke. It then writes a deterministic JSON
 evidence record — both revisions, the artifact hashes, the contract set ID, the
-manifest SHA-256, the OS/Kitty/harness versions, and every command with its
+manifest SHA-256, the OS/tmux/harness versions, and every command with its
 result and duration — signed with `ssh-keygen -Y sign` under the namespace
 `agentmux-asl-release`, and tags both repositories with the same pair ID.
 

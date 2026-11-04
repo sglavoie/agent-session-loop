@@ -178,10 +178,6 @@
           "minimum": 0,
           "type": "integer"
         },
-        "kitty_window_id": {
-          "minimum": 1,
-          "type": "integer"
-        },
         "last_heartbeat_at": {
           "format": "timestamp",
           "type": "string"

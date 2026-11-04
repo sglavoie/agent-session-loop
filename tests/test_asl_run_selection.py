@@ -37,7 +37,7 @@ from agent_session_loop import (
     run_selection,
 )
 from agent_session_loop.run_errors import RunError
-from tests.support import assert_no_runner_import, patched_env
+from tests.support import assert_no_runner_import
 
 ASL_TEST_PORTABLE = True
 
@@ -306,13 +306,6 @@ class RunSwitchTests(unittest.TestCase):
         self.assertEqual(
             "harness-default", run_selection._approval_mode(_args(unsafe_bypass=False))
         )
-
-    def test_only_a_positive_integer_environment_value_counts(self) -> None:
-        for raw, expected in (("7", 7), ("0", None), ("-1", None), ("x", None)):
-            with self.subTest(raw=raw), patched_env(KITTY_WINDOW_ID=raw):
-                self.assertEqual(expected, run_selection._kitty_window_id_from_env())
-        with patched_env(KITTY_WINDOW_ID=None):
-            self.assertIsNone(run_selection._kitty_window_id_from_env())
 
 
 class MailboxActivationTests(unittest.TestCase):

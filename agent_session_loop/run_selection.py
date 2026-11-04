@@ -63,7 +63,6 @@ Six invariants survive the move and are load-bearing:
 from __future__ import annotations
 
 import argparse
-import os
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -421,23 +420,6 @@ def _harness_preflight_failure(
 # ---------------------------------------------------------------------------
 # Environment knobs
 # ---------------------------------------------------------------------------
-
-
-def _positive_int_env(name: str) -> int | None:
-    raw = os.environ.get(name)
-    if raw is None:
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        return None
-    if value <= 0:
-        return None
-    return value
-
-
-def _kitty_window_id_from_env() -> int | None:
-    return _positive_int_env("KITTY_WINDOW_ID")
 
 
 # ---------------------------------------------------------------------------

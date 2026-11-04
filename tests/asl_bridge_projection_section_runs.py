@@ -165,7 +165,7 @@ class RunsProjectionTests(unittest.TestCase):
                 row["activity_label"],
             )
             self.assertEqual("claude", row["harness"])
-            self.assertEqual({"kitty_window_id": 17}, row["window"])
+            self.assertNotIn("window", row)
             self.assertEqual("agent-question", row["pause_reason"])
 
     def test_row_identity_is_stable_across_repeated_projections(self) -> None:

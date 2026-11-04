@@ -38,7 +38,6 @@ def _projection_section(
         "workspace_root",
         "registry_digest",
         "harness",
-        "kitty_window_id",
         "phase",
         "session_id",
         "turn_index",

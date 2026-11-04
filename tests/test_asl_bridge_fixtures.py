@@ -65,7 +65,6 @@ ROW_KEYS = frozenset(
         "urgency_group",
         "urgency_rank",
         "warnings",
-        "window",
         "workspace_root",
     }
 )

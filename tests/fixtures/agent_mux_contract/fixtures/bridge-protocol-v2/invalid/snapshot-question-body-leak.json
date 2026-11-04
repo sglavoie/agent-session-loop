@@ -66,9 +66,6 @@
           "urgency_group": "needs-action",
           "urgency_rank": 10,
           "warnings": [],
-          "window": {
-            "kitty_window_id": 17
-          },
           "workspace_root": null
         }
       ],

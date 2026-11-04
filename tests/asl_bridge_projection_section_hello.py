@@ -49,7 +49,6 @@ class _Corpus:
                 "pause_message": PAUSE_MESSAGE,
                 "run_id": "20260619T140000Z-1",
                 "harness": "claude",
-                "kitty_window_id": 17,
                 "run_started_at": "2026-06-19T14:00:00+00:00",
                 "turns": [
                     {

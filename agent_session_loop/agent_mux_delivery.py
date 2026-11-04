@@ -173,8 +173,6 @@ def build_loop_payload(
         hook_payload["source_event_id"] = f"{payload.get('run_id')}:{int(sequence)}"
     if emitted_at is not None:
         hook_payload["emitted_time"] = str(int(emitted_at.timestamp()))
-    if payload.get("kitty_window_id") is not None:
-        hook_payload["kitty_window_id"] = payload.get("kitty_window_id")
     if payload.get("run_started_at") is not None:
         hook_payload["run_started_at"] = payload.get("run_started_at")
     if payload.get("run_finished_at") is not None:

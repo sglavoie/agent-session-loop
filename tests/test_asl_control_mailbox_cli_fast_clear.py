@@ -25,9 +25,6 @@ from agent_session_loop import (
     state,
 )
 from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
-from tests.support import (
-    patched_env,
-)
 
 
 class MailboxCliTestsPart3(MailboxCliTestsBase):
@@ -212,7 +209,6 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
         )
 
         with (
-            patched_env(KITTY_WINDOW_ID="42"),
             mock.patch.object(
                 agent_mux_delivery,
                 "notify",
@@ -238,7 +234,6 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
             ),
             payload["state_path"],
         )
-        self.assertEqual(42, payload["kitty_window_id"])
         self.assertEqual(agent_mux_delivery.MAILBOX_REPLY_REASON, kwargs["reason"])
         self.assertEqual(question.id, kwargs["extra"]["question_id"])
         self.assertEqual(
@@ -285,7 +280,6 @@ class MailboxCliTestsPart3(MailboxCliTestsBase):
         )
 
         with (
-            patched_env(KITTY_WINDOW_ID="42"),
             mock.patch.object(
                 agent_mux_delivery,
                 "notify",

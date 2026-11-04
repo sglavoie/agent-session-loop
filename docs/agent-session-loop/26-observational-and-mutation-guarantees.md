@@ -250,7 +250,7 @@ fails unless each discovered test runs exactly once. Individual modules run dire
 `just test-portable` is a third lane cut for CI rather than for a developer. It
 runs `PORTABLE_MODULES`, the subset of `FAST_MODULES` that spawns no external
 process at all — no `git`, no shell script, no launchd domain, no harness
-executable, no Kitty. Membership is that mechanical rule rather than a judgement
+executable, no terminal. Membership is that mechanical rule rather than a judgement
 call, and a module opts in by hand with `ASL_TEST_PORTABLE = True`, so
 `tests/run_suite.py` derives it as a strict subset of `FAST_MODULES`: a module renamed or dropped from the fast lane
 cannot keep the portable lane green by running a name `unittest` would refuse to
@@ -361,7 +361,7 @@ a stale ASL says nothing about the pair. The result is a deterministic JSON
 evidence record: both source revisions, a SHA-256 of `bin/.local/bin/agent-session-loop`
 and an ordered digest over `agent_session_loop/`'s sources, the contract-set ID,
 a SHA-256 of `tests/fixtures/agent_mux_contract/manifest.json`, the
-OS/Kitty/harness versions, and every command with its exit code and duration.
+OS/tmux/harness versions, and every command with its exit code and duration.
 It is signed with `ssh-keygen -Y sign` under the namespace
 `agentmux-asl-release` and both repositories are tagged with the same pair ID.
 

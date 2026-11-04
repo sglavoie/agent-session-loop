@@ -104,7 +104,6 @@ class ExportTestBase(unittest.TestCase):
                 "workspace_root": str(self.tmp_path),
                 "registry_digest": "d" * 64,
                 "harness": "claude",
-                "kitty_window_id": 12,
                 "phase": agent_mux_projection.PHASE_PAUSED,
                 "session_id": "s1",
                 "turn_index": 3,

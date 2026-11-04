@@ -1,11 +1,10 @@
 {
   "case": "live-turn",
-  "description": "A run inside its fourth turn, bound to a Kitty window, with a live process.",
+  "description": "A run inside its fourth turn, with a live process.",
   "document": {
     "contract_set_id": "asl-amx-1.0000000000000000",
     "finished_at": null,
     "harness": "claude",
-    "kitty_window_id": 17,
     "lifecycle_source_sequence": 41,
     "phase": "turn",
     "plan_dir": "/fixtures/plans/plan-alpha",

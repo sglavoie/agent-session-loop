@@ -273,7 +273,6 @@ def _initial_payload(
         mailbox_activation=dict(mailbox_activation),
         plan_dir=str(snapshot.plan_dir),
         cwd=str(cwd),
-        kitty_window_id=run_selection._kitty_window_id_from_env(),
         harness=args.harness,
         spark=spark,
         **model_effort,

@@ -52,7 +52,7 @@ from .operations import OperationError, assert_body_free
 #: exactly, and ``tests/test_workbench_store_*.py`` checks it against the Pi
 #: checkout when one is reachable: a divergence here would silently mark every
 #: existing connector incompatible on the first deploy.
-SUPPORTED_CONTRACT_SET_IDS: tuple[str, ...] = ("asl-amx-1.85ec3041b9f03f47",)
+SUPPORTED_CONTRACT_SET_IDS: tuple[str, ...] = ("asl-amx-1.d0c0c70abf623b3e",)
 
 # -- Vocabularies -----------------------------------------------------------
 

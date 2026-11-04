@@ -254,7 +254,6 @@ def project_row(
     )
     if question is not None and question["context_kind"] == CONTEXT_KIND_WAITING:
         session_id = question["session_id"]
-    window_id = _bounded_int(runner_state.get("kitty_window_id"))
 
     return {
         "row_id": row_id(plan_dir, summary.run_id),
@@ -272,7 +271,6 @@ def project_row(
         "workspace_root": _bounded_path(summary.workspace_root),
         "registry_digest": _bounded_id(summary.registry_digest),
         "repository_count": summary.repository_count,
-        "window": {"kitty_window_id": window_id} if window_id is not None else None,
         "run_started_at": _bounded_text(runner_state.get("run_started_at")),
         "run_finished_at": _bounded_text(runner_state.get("run_finished_at")),
         "last_activity_at": _bounded_text(summary.last_activity_at),

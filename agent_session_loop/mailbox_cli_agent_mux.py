@@ -19,15 +19,6 @@ from . import (
 )
 
 
-def _kitty_window_id() -> int | None:
-    raw = os.environ.get("KITTY_WINDOW_ID")
-    try:
-        value = int(raw) if raw is not None else 0
-    except ValueError:
-        return None
-    return value if value > 0 else None
-
-
 def notify_agent_mux_mailbox_reply(
     context: cli_common.PlanCommandContext,
     args: argparse.Namespace,
@@ -61,9 +52,6 @@ def notify_agent_mux_mailbox_reply(
             "state_path": context.status.get("state_path"),
             "harness": harness,
         }
-        kitty_window_id = _kitty_window_id()
-        if kitty_window_id is not None:
-            payload["kitty_window_id"] = kitty_window_id
         return agent_mux_delivery.notify(
             agent_mux_delivery.MAILBOX_REPLY_EVENT,
             payload,
@@ -136,9 +124,6 @@ def notify_agent_mux_mailbox_resolution(
             "state_path": context.status.get("state_path"),
             "harness": harness,
         }
-        kitty_window_id = _kitty_window_id()
-        if kitty_window_id is not None:
-            payload["kitty_window_id"] = kitty_window_id
         return agent_mux_delivery.notify(
             agent_mux_delivery.MAILBOX_RESOLUTION_EVENT,
             payload,
@@ -192,9 +177,6 @@ def notify_agent_mux_mailbox_question(
             "state_path": context.status.get("state_path"),
             "harness": harness,
         }
-        kitty_window_id = _kitty_window_id()
-        if kitty_window_id is not None:
-            payload["kitty_window_id"] = kitty_window_id
         latest = projection.latest_question
         return agent_mux_delivery.notify(
             agent_mux_delivery.MAILBOX_QUESTION_EVENT,

@@ -26,7 +26,6 @@ from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
 from tests.support import (
     _write_lock_file,
     _write_state_payload,
-    patched_env,
 )
 
 
@@ -270,7 +269,6 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
         )
 
         with (
-            patched_env(KITTY_WINDOW_ID="42"),
             mock.patch.object(
                 agent_mux_delivery,
                 "notify",
@@ -295,7 +293,6 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
             event_name,
         )
         self.assertEqual("run-live", payload["run_id"])
-        self.assertEqual(42, payload["kitty_window_id"])
         self.assertEqual(
             agent_mux_delivery.MAILBOX_RESOLUTION_REASON,
             kwargs["reason"],
@@ -436,7 +433,6 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
         )
 
         with (
-            patched_env(KITTY_WINDOW_ID="42"),
             mock.patch.object(
                 agent_mux_delivery,
                 "notify",
@@ -458,7 +454,6 @@ class MailboxCliTestsPart2(MailboxCliTestsBase):
             event_name,
         )
         self.assertEqual("run-live", hook_payload["run_id"])
-        self.assertEqual(42, hook_payload["kitty_window_id"])
         self.assertEqual(
             agent_mux_delivery.MAILBOX_QUESTION_REASON,
             kwargs["reason"],

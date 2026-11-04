@@ -8,7 +8,6 @@
     "emitted_time": "1782230462",
     "event": "AgentSessionLoopTurnStarted",
     "harness": "claude",
-    "kitty_window_id": 17,
     "last_message_path": "/fixtures/state/8f14e45fceea167a/turns/4/last.txt",
     "phase": "turn",
     "plan_dir": "/fixtures/plans/plan-alpha",

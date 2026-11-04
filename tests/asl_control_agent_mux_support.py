@@ -58,5 +58,4 @@ class AgentMuxNotificationIntegrationTestsBase(unittest.TestCase):
             "run_started_at": "2026-06-11T12:00:00Z",
             "run_finished_at": "2026-06-11T12:00:03Z",
             "state_path": str(tmp_dir / "state.json"),
-            "kitty_window_id": 42,
         }

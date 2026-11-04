@@ -5,7 +5,6 @@
     "contract_set_id": "asl-amx-1.0000000000000000",
     "finished_at": "2026-06-19T16:12:04+00:00",
     "harness": "claude",
-    "kitty_window_id": 17,
     "lifecycle_source_sequence": 96,
     "phase": "paused",
     "plan_dir": "/fixtures/plans/plan-alpha",

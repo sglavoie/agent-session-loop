@@ -34,7 +34,6 @@ def _base_payload(**overrides: Any) -> dict[str, Any]:
         "plan_dir": "/fixtures/plans/plan-alpha",
         "workspace_root": "/fixtures/workspaces/alpha",
         "registry_digest": "3398ee413bd2a03b",
-        "kitty_window_id": 17,
         "run_started_at": RUN_STARTED_AT,
         "harness": "claude",
         "turns": [],

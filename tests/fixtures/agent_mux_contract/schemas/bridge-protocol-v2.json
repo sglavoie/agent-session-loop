@@ -1377,9 +1377,6 @@
           "maxItems": 8,
           "type": "array"
         },
-        "window": {
-          "$ref": "#/definitions/Window"
-        },
         "workspace_root": {
           "format": "canonical-path",
           "type": [
@@ -1413,7 +1410,6 @@
         "urgency_group",
         "urgency_rank",
         "warnings",
-        "window",
         "workspace_root"
       ],
       "type": "object"
@@ -1542,23 +1538,6 @@
         "warnings"
       ],
       "type": "object"
-    },
-    "Window": {
-      "additionalProperties": false,
-      "description": "The projected Kitty binding of one run.",
-      "properties": {
-        "kitty_window_id": {
-          "minimum": 1,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "kitty_window_id"
-      ],
-      "type": [
-        "object",
-        "null"
-      ]
     },
     "WorkbenchLink": {
       "additionalProperties": false,

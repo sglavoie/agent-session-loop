@@ -7,7 +7,7 @@ Frames for `asl_workbench.transport`: the Workbench's own five envelopes —
 **This directory is deliberately not under `tests/fixtures/agent_mux_contract/`.**
 The AgentMux contract-set identity is a digest over every `.json` file in that
 tree, so a transport fixture placed there would move
-`asl-amx-1.85ec3041b9f03f47` and mark every deployed connector incompatible.
+`asl-amx-1.d0c0c70abf623b3e` and mark every deployed connector incompatible.
 The two schemas are separate because the two protocols are separate: AgentMux's
 bridge carries ASL's projection, and this transport is a second application
 riding the same wire. `tests/test_asl_bridge_fixtures.py` guards the identity;

@@ -62,13 +62,6 @@
             "null"
           ]
         },
-        "kitty_window_id": {
-          "minimum": 1,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
         "lifecycle_source_sequence": {
           "minimum": 0,
           "type": "integer"
@@ -144,7 +137,6 @@
         "contract_set_id",
         "finished_at",
         "harness",
-        "kitty_window_id",
         "lifecycle_source_sequence",
         "phase",
         "plan_dir",

@@ -17,7 +17,6 @@ from agent_session_loop import (
     commit_settlement,
     readiness_gate,
     run_persistence,
-    run_selection,
     run_termination,
     turn_execution_protocols,
 )
@@ -29,15 +28,6 @@ from tests.support import (
 
 
 class AgentMuxNotificationIntegrationTests(AgentMuxNotificationIntegrationTestsBase):
-    def test_kitty_window_id_from_env_accepts_positive_int(self) -> None:
-        with patched_env(KITTY_WINDOW_ID="42"):
-            self.assertEqual(42, run_selection._kitty_window_id_from_env())
-
-    def test_kitty_window_id_from_env_ignores_missing_or_invalid_values(self) -> None:
-        for raw in (None, "", "0", "-7", "not-an-int"):
-            with self.subTest(raw=raw), patched_env(KITTY_WINDOW_ID=raw):
-                self.assertIsNone(run_selection._kitty_window_id_from_env())
-
     def test_wait_lifecycle_delivery_constants_and_phases(self) -> None:
         self.assertEqual(
             "AgentSessionLoopWaitStarted", agent_mux_delivery.WAIT_START_EVENT
@@ -169,7 +159,6 @@ class AgentMuxNotificationIntegrationTests(AgentMuxNotificationIntegrationTestsB
             self.assertEqual("turn_started", hook_payload["reason"])
             self.assertEqual("claude", hook_payload["harness"])
             self.assertEqual(payload["state_path"], hook_payload["state_path"])
-            self.assertEqual(42, hook_payload["kitty_window_id"])
             self.assertEqual(2, hook_payload["turn_index"])
             self.assertEqual("2.1", hook_payload["session"])
             self.assertEqual("2.1", hook_payload["session_id"])
@@ -231,10 +220,8 @@ class AgentMuxNotificationIntegrationTests(AgentMuxNotificationIntegrationTestsB
             self.assertEqual("run_started", start_payload["reason"])
             self.assertEqual("codex", start_payload["harness"])
             self.assertEqual(payload["state_path"], start_payload["state_path"])
-            self.assertEqual(42, start_payload["kitty_window_id"])
             self.assertEqual("turn_started", turn_payload["reason"])
             self.assertEqual("claude", turn_payload["harness"])
-            self.assertEqual(42, turn_payload["kitty_window_id"])
             self.assertEqual(1, turn_payload["turn_index"])
             self.assertEqual(1, turn_payload["session"])
 
@@ -287,7 +274,6 @@ class AgentMuxNotificationIntegrationTests(AgentMuxNotificationIntegrationTestsB
                     "plan_dir": payload["plan_dir"],
                     "cwd": payload["cwd"],
                     "state_path": payload["state_path"],
-                    "kitty_window_id": 42,
                     "harness": "codex",
                     "phase": "finished",
                     "run_started_at": "2026-06-11T12:00:00Z",
