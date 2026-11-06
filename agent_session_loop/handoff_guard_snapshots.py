@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
@@ -67,6 +68,7 @@ def _legacy_unobserved_repositories(
     exempt_roots: Sequence[Path],
     provenance_roots: Sequence[Path],
     limit: int = repository_intent.INTENT_REPORT_LIMIT,
+    turn_started_ns: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Name every repository this turn reached that the snapshot never saw.
 
@@ -88,6 +90,17 @@ def _legacy_unobserved_repositories(
     trees, the document the plan was split from, non-Git paths, and system
     paths. Whatever survives that and is not the bound repository is reported
     through ``unavailable``, the guard's existing fail-closed lane.
+
+    **Named is not written**, as in the external-write lane. A repository the
+    turn reached only by naming regular files that already existed and were
+    last modified before ``turn_started_ns`` is not reported: the hand-off that
+    explains a file is untracked because the global ``~/.gitignore`` -- a
+    symlink into a dotfiles checkout -- ignores it has read that repository,
+    not written it. The exemption is deliberately narrow. A directory never
+    qualifies, because its mtime does not move when a file beneath it is
+    edited; a path that no longer exists never qualifies, because a deletion
+    is a write; and without a turn start nothing qualifies, so a caller that
+    cannot bound the turn keeps the old fail-closed behaviour.
     """
     candidates: list[repository_intent.IntentCandidate] = []
     for path in artifact_paths:
@@ -106,7 +119,12 @@ def _legacy_unobserved_repositories(
         exempt_roots=exempt_roots,
         provenance_roots=provenance_roots,
     )
-    unobserved = [root for root in intent.git_roots if root != intent.bound_git_root]
+    unobserved = [
+        root
+        for root in intent.git_roots
+        if root != intent.bound_git_root
+        and not _named_but_not_written(intent, root, turn_started_ns)
+    ]
     reported, omitted = workspaces.bounded_repository_rows(unobserved, limit=limit)
     observed = (
         repository_intent.redact_credentials(str(intent.bound_git_root))
@@ -128,3 +146,28 @@ def _legacy_unobserved_repositories(
             "omitted_repositories": omitted,
         }
     return payload
+
+
+def _named_but_not_written(
+    intent: repository_intent.RepositoryIntent,
+    git_root: Path,
+    turn_started_ns: int | None,
+) -> bool:
+    """Whether every path naming ``git_root`` is a file untouched this turn."""
+    if turn_started_ns is None:
+        return False
+    named = [
+        candidate.resolved
+        for candidate in intent.candidates
+        if candidate.git_root == git_root and candidate.resolved is not None
+    ]
+    if not named:
+        return False
+    for path in named:
+        try:
+            info = path.lstat()
+        except OSError:
+            return False
+        if not stat.S_ISREG(info.st_mode) or info.st_mtime_ns >= turn_started_ns:
+            return False
+    return True

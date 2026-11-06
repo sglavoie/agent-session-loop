@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import time
+
 from .support_asl_repository_evidence_base import (
     Any,
     Path,
@@ -58,6 +61,57 @@ class LegacyUnobservedRepositoryTests(unittest.TestCase):
         entry = unobserved[self._canonical(self.other_root)]
         self.assertEqual("repository-not-observed", entry["reason"])
         self.assertEqual(self._canonical(self.repo_root), entry["observed_repository"])
+
+    def _old_file(self, path: Path) -> Path:
+        path.write_text("old\n", encoding="utf-8")
+        os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+        return path
+
+    def test_a_symlinked_file_read_before_the_turn_is_named_not_written(
+        self,
+    ) -> None:
+        # A global ~/.gitignore symlinked into a dotfiles checkout: the hand-off
+        # cites it to explain an untracked file, and nothing in that checkout
+        # moved during the turn.
+        target = self._old_file(self.other_root / "gitignore")
+        link = Path(self._tmp.name) / "home-gitignore"
+        link.symlink_to(target)
+
+        self.assertEqual(
+            {},
+            self._unobserved(
+                f"The global {link} ignores the zip.\n", turn_started_ns=time.time_ns()
+            ),
+        )
+
+    def test_a_file_modified_during_the_turn_is_still_unobserved(self) -> None:
+        started = time.time_ns()
+        (self.other_root / "README.md").write_text("edited\n", encoding="utf-8")
+
+        unobserved = self._unobserved(
+            f"Edited {self.other_root / 'README.md'}.\n", turn_started_ns=started
+        )
+        self.assertIn(self._canonical(self.other_root), unobserved)
+
+    def test_a_named_directory_or_missing_path_is_never_exempt(self) -> None:
+        started = time.time_ns()
+        os.utime(self.other_root, ns=(1_000_000_000, 1_000_000_000))
+        self.assertIn(
+            self._canonical(self.other_root),
+            self._unobserved(f"Looked in {self.other_root}.\n", turn_started_ns=started),
+        )
+        self.assertIn(
+            self._canonical(self.other_root),
+            self._unobserved(
+                f"Removed {self.other_root / 'gone.txt'}.\n", turn_started_ns=started
+            ),
+        )
+
+    def test_without_a_turn_start_an_old_file_still_fails_closed(self) -> None:
+        old = self._old_file(self.other_root / "notes.md")
+        self.assertIn(
+            self._canonical(self.other_root), self._unobserved(f"Read {old}.\n")
+        )
 
     def test_the_fingerprinted_repository_is_never_reported_unobserved(self) -> None:
         # The one repository the snapshot does look at is exactly the one this

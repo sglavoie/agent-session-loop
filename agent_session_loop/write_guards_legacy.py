@@ -89,6 +89,7 @@ def _enforce_legacy_implementation_write_guard(
             provenance_roots=preflight_footprint.plan_provenance_exempt_roots(
                 before.plan_dir
             ),
+            turn_started_ns=turn_started_ns,
         ),
         external_writes=external_write_evidence._turn_external_write_evidence(
             plan_dir=before.plan_dir,
