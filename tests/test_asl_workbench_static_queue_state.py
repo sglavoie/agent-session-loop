@@ -8,6 +8,7 @@ from agent_session_loop import (
     workbench_server,
     workbench_summary_model,
 )
+from asl_workbench.static_sources import read_static_source
 from tests import support_asl_workbench_static as support_static
 from tests.support import (
     _http_request_raw,
@@ -323,7 +324,9 @@ class WorkbenchStaticQueueStateTests(support_static.WorkbenchStaticCase):
             decoded,
         )
 
-        css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+        css = read_static_source(workbench_server.STATIC_DIR / "styles.css").decode(
+            "utf-8"
+        )
         label = css.split(".wb-row__label {", 1)[1].split("}", 1)[0]
         self.assertIn("-webkit-line-clamp: 2;", label)
         self.assertNotIn("white-space: nowrap;", label)
@@ -348,7 +351,9 @@ class WorkbenchStaticQueueStateTests(support_static.WorkbenchStaticCase):
         self.assertIn(
             'stateName !== "available" && !hasDraft ? "true" : "false"', decoded
         )
-        css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+        css = read_static_source(workbench_server.STATIC_DIR / "styles.css").decode(
+            "utf-8"
+        )
         self.assertIn('.wb-redirect[data-collapsed="true"] .wb-redirect__form', css)
 
     def test_queue_meta_repeats_the_time_only_when_stale(self) -> None:

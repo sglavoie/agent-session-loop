@@ -10,6 +10,7 @@ from agent_session_loop import (
     workbench_server,
     workbench_summary_model,
 )
+from asl_workbench.static_sources import read_static_source
 from tests import support_asl_workbench_static as support_static
 from tests.support import (
     _http_request_raw,
@@ -149,7 +150,7 @@ class WorkbenchStaticInteractionTests(support_static.WorkbenchStaticCase):
         # "unlock") and the scroll targets must reference DOM ids that
         # exist in the HTML shell.
         index_path = workbench_server.STATIC_DIR / "index.html"
-        html = index_path.read_text(encoding="utf-8")
+        html = read_static_source(index_path).decode("utf-8")
         for dom_id in (
             "wb-reply-panel",
             "wb-reply-text",

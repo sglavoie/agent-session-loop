@@ -71,10 +71,9 @@ SCRIPT_ROOTS = (
 #: The scripts table's anchor, named the same way as ``TABLE_ANCHORS``.
 SCRIPTS_TABLE_ANCHOR = "asl_autopilot"
 
-#: The two override tables. An overrides table has no name key -- mypy rejects
-#: one as an unrecognized option -- so each is named by an anchor module that
-#: only that table may list. The anchors are load-bearing: swap a table's
-#: contract and the lookup below stops finding it.
+#: Extraction registries in config/typing classify each product module once.
+#: Anchors bind each named registry to its original non-shrinking floor; mypy
+#: itself enables the same strict codes for both entire product packages.
 BOUNDARY_TABLE = "boundary"
 CHECKED_TABLE = "checked"
 TABLE_ANCHORS = {
@@ -85,7 +84,7 @@ TABLE_ANCHORS = {
 #: The package modules that meet the boundary contract: clean under all nine
 #: codes and clean under the linter below. This set is a floor: every module
 #: that becomes clean adds to it, and nothing may leave it. A module removed
-#: from ``pyproject.toml`` fails here rather than silently rejoining the
+#: from the extraction registry fails here rather than silently rejoining the
 #: untyped baseline.
 
 

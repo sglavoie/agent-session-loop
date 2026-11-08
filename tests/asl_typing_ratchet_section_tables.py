@@ -78,26 +78,44 @@ def enabling_overrides() -> list[dict[str, Any]]:
     return [override for override in overrides if "enable_error_code" in override]
 
 
-def ratcheted_override(table: str) -> dict[str, Any]:
-    """The named override table that re-enables codes under ``table``'s contract.
-
-    The tables are unnamed in TOML, so each is resolved by the anchor module
-    only it may list. Resolving by name rather than by position keeps the
-    guarantee the old "exactly one table" assertion gave: a floor set and the
-    linter each address one unambiguous table.
-    """
-    anchor = TABLE_ANCHORS[table]
+def package_override() -> dict[str, Any]:
+    """The shared strict mypy policy for both product packages."""
     matching = [
         override
         for override in enabling_overrides()
-        if anchor in override.get("module", [])
+        if "agent_session_loop.*" in override.get("module", [])
     ]
     if len(matching) != 1:
+        raise AssertionError("expected exactly one product-package mypy override")
+    expected = {
+        "agent_session_loop",
+        "agent_session_loop.*",
+        "asl_workbench",
+        "asl_workbench.*",
+    }
+    if set(matching[0]["module"]) != expected:
         raise AssertionError(
-            f"expected exactly one enable_error_code override table listing "
-            f"{anchor} (the {table} table), found {len(matching)}"
+            "the product mypy policy must cover both complete packages"
         )
     return matching[0]
+
+
+def ratcheted_override(table: str) -> dict[str, Any]:
+    """Join a named extraction registry with the actual strict mypy policy."""
+    modules: list[str] = []
+    for path in sorted((REPO_ROOT / "config" / "typing").glob("*.toml")):
+        registry = tomllib.loads(path.read_text(encoding="utf-8"))
+        if registry["table"] not in REQUIRED_MODULES:
+            raise AssertionError(f"unknown extraction table: {path}")
+        if registry["module"] != sorted(registry["module"]):
+            raise AssertionError(f"unsorted extraction registry: {path}")
+        if registry["table"] == table:
+            modules.extend(registry["module"])
+    if len(modules) != len(set(modules)):
+        raise AssertionError(f"duplicate module in {table} registry")
+    if TABLE_ANCHORS[table] not in modules:
+        raise AssertionError(f"missing anchor in {table} registry")
+    return {**package_override(), "module": sorted(modules)}
 
 
 def scripts_override() -> dict[str, Any]:
@@ -309,12 +327,10 @@ class RatchetedModuleListTests(unittest.TestCase):
     def test_both_named_tables_resolve_and_nothing_else_enables_codes(self) -> None:
         """Named lookup only stays unambiguous while there are no other tables.
 
-        A third ``enable_error_code`` table would be a contract nobody wrote
-        down: the linter would skip it and no floor set would guard it.
+        Product packages share one strict policy; scripts retain their own.
+        Extraction classifications are checked separately against their floors.
         """
-        resolved = [ratcheted_override(table) for table in REQUIRED_MODULES]
-        resolved.append(scripts_override())
-
+        resolved = [package_override(), scripts_override()]
         self.assertEqual(len(enabling_overrides()), len(resolved))
 
     def test_the_two_tables_are_disjoint(self) -> None:

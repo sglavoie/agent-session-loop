@@ -8,6 +8,7 @@ import unittest
 from agent_session_loop import (
     workbench_server,
 )
+from asl_workbench.static_sources import read_static_source
 from tests import support_asl_workbench_static as support_static
 from tests.support import (
     _http_request_raw,
@@ -63,7 +64,9 @@ class WorkbenchStaticQueueViewTests(support_static.WorkbenchStaticCase):
         )
         self.assertIn("copyRecoveryCommand(copy, artifact.path);", decoded)
 
-        css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+        css = read_static_source(workbench_server.STATIC_DIR / "styles.css").decode(
+            "utf-8"
+        )
         self.assertIn(
             ".wb-recovery:has(#wb-reply-panel:not([hidden]) "
             "#wb-reply-form:not([hidden]))",
@@ -113,13 +116,17 @@ class WorkbenchStaticQueueViewTests(support_static.WorkbenchStaticCase):
         self.assertIn("wireDetailNav();", decoded)
         self.assertIn("    syncDetailNav();\n  }\n}", decoded)
 
-        css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+        css = read_static_source(workbench_server.STATIC_DIR / "styles.css").decode(
+            "utf-8"
+        )
         bar = css.split(".wb-detail-nav {", 1)[1].split("}", 1)[0]
         self.assertIn("position: sticky;", bar)
         self.assertIn("top: var(--wb-header-height, 0px);", bar)
 
     def test_status_badge_does_not_wrap(self) -> None:
-        css = (workbench_server.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+        css = read_static_source(workbench_server.STATIC_DIR / "styles.css").decode(
+            "utf-8"
+        )
         badge = css.split(".wb-badge {", 1)[1].split("}", 1)[0]
         self.assertIn("white-space: nowrap;", badge)
 

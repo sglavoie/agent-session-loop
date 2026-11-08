@@ -13,6 +13,7 @@ from agent_session_loop import (
 from tests.asl_docs_support import (
     ASL_SKILL,
     ASL_SKILL_ON_DEMAND_REFERENCES,
+    read_asl_package_guide,
     read_asl_reference,
     read_asl_skill_bundle,
 )
@@ -249,9 +250,7 @@ class SkillContractDocsTests(unittest.TestCase):
 
     def test_docs_describe_the_automatic_registry_migration(self) -> None:
         docs = read_asl_reference()
-        readme = (REPO_ROOT / "agent_session_loop/README.md").read_text(
-            encoding="utf-8"
-        )
+        readme = read_asl_package_guide()
 
         for text in (docs, readme):
             self.assertNotIn("**Reads repositories:**", text)

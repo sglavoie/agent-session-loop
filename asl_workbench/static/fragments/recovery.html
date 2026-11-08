@@ -1,0 +1,223 @@
+      <section
+        class="wb-panel wb-redirect"
+        id="wb-redirect-panel"
+        data-available="unknown"
+      >
+        <div class="wb-redirect__head">
+          <h2 class="wb-panel__title">Urgent correction</h2>
+          <span
+            class="wb-redirect__availability"
+            id="wb-redirect-availability"
+            data-state="unknown"
+          >
+            checking…
+          </span>
+        </div>
+        <p class="wb-redirect__hint">
+          Submitting <strong>interrupts the in-flight turn now</strong> and
+          <strong>resumes the saved conversation</strong> with this correction
+          placed first. The session stays pending and the interrupted attempt
+          earns no completion. The draft lives in this tab only: it is never
+          written to disk or to browser storage, it is cleared only once the
+          correction is durably recorded, and it is kept when a submission
+          fails.
+        </p>
+        <p class="wb-redirect__target" id="wb-redirect-target"></p>
+        <form id="wb-redirect-form" class="wb-redirect__form" autocomplete="off">
+          <label for="wb-redirect-text" class="wb-redirect__label">
+            correction <abbr title="required">*</abbr>
+          </label>
+          <textarea
+            id="wb-redirect-text"
+            name="redirect_text"
+            rows="5"
+            required
+            aria-required="true"
+            autocomplete="off"
+            spellcheck="true"
+          ></textarea>
+          <p class="wb-redirect__operation" id="wb-redirect-operation"></p>
+          <p
+            id="wb-redirect-form-errors"
+            class="wb-form__errors"
+            role="alert"
+            hidden
+          ></p>
+          <div class="wb-redirect__conflict" id="wb-redirect-conflict" hidden>
+            <p
+              class="wb-redirect__conflict-message"
+              id="wb-redirect-conflict-message"
+              role="alert"
+            ></p>
+            <button
+              class="wb-button wb-button--ghost"
+              id="wb-redirect-new-identity"
+              type="button"
+              data-action="redirect-new-identity"
+              title="Keeps this draft and gives it a new operation id. Nothing is sent until you submit again, and the correction already in the journal is untouched."
+            >
+              keep this draft and send it as a new correction
+            </button>
+          </div>
+          <div class="wb-redirect__actions">
+            <button
+              class="wb-button wb-button--danger"
+              type="submit"
+              id="wb-redirect-submit"
+              data-action="redirect-submit"
+              title="Interrupts the in-flight turn now, then resumes the saved conversation with this correction first. Confirms before submitting."
+            >
+              interrupt turn &amp; resume with this correction
+            </button>
+            <button
+              class="wb-button wb-button--ghost"
+              id="wb-redirect-clear"
+              type="button"
+              data-action="redirect-clear"
+            >
+              discard draft
+            </button>
+          </div>
+        </form>
+        <div class="wb-redirect__group" id="wb-redirect-unresolved-section" hidden>
+          <h3 class="wb-redirect__group-title">Unresolved after reconnect</h3>
+          <p
+            class="wb-redirect__reconcile-hint"
+            id="wb-redirect-reconcile-hint"
+          ></p>
+          <ul class="wb-redirect__unresolved" id="wb-redirect-unresolved"></ul>
+        </div>
+        <div class="wb-redirect__group" id="wb-redirect-progress-section" hidden>
+          <h3 class="wb-redirect__group-title">Progress</h3>
+          <ul class="wb-redirect__phases" id="wb-redirect-phases"></ul>
+          <ul class="wb-redirect__operations" id="wb-redirect-operations"></ul>
+          <p
+            class="wb-redirect__truncated"
+            id="wb-redirect-truncated"
+            hidden
+          ></p>
+        </div>
+      </section>
+
+      <!--
+        Work this tab sent and nobody has confirmed finished. Hidden when
+        there is none, which is the ordinary case. The ids survive a reload
+        because they are the only part of a mutation a reload cannot
+        reconstruct; no draft and no message is kept with them.
+      -->
+      <section
+        class="wb-panel wb-operations"
+        id="wb-operations-panel"
+        aria-label="Unconfirmed operations"
+        hidden
+      >
+        <h2 class="wb-panel__title">Unconfirmed operations</h2>
+        <p class="wb-operations__hint">
+          Recorded and not yet confirmed as run. Retrying the same control
+          reuses the operation id below, so a retry is the same request rather
+          than a second one.
+        </p>
+        <ul class="wb-operations__list" id="wb-operations-list"></ul>
+      </section>
+
+      <section class="wb-panel" id="wb-controls-panel">
+        <h2 class="wb-panel__title">Controls</h2>
+        <div
+          id="wb-controls-feedback"
+          class="wb-controls__feedback"
+          role="status"
+          aria-live="polite"
+          hidden
+        ></div>
+        <div class="wb-controls" id="wb-controls">
+          <button
+            class="wb-button wb-button--primary"
+            id="wb-control-launch"
+            type="button"
+            data-action="launch"
+            data-operation-action="launch"
+          >
+            launch
+          </button>
+          <button
+            class="wb-button"
+            id="wb-control-stop"
+            type="button"
+            data-action="stop"
+            data-operation-action="stop"
+          >
+            stop after current
+          </button>
+          <label class="wb-control__abort">
+            abort grace (s)
+            <input
+              id="wb-control-abort-grace"
+              type="number"
+              min="1"
+              max="86400"
+              step="1"
+              value="120"
+            />
+            <button
+              class="wb-button wb-button--danger"
+              id="wb-control-abort"
+              type="button"
+              data-action="abort"
+              data-operation-action="abort"
+              data-enabled-title="Ends the in-flight turn after the grace window, then leaves the session pending. Confirms first."
+              title="Ends the in-flight turn after the grace window, then leaves the session pending. Confirms first."
+            >
+              abort turn
+            </button>
+          </label>
+          <label class="wb-control__harness">
+            future harness
+            <select id="wb-control-harness" data-action="harness-select">
+              <option value="">(no change)</option>
+              <option value="codex">codex</option>
+              <option value="claude">claude</option>
+              <option value="copilot">copilot</option>
+            </select>
+            <button
+              class="wb-button"
+              id="wb-control-harness-apply"
+              type="button"
+              data-action="harness-apply"
+              data-operation-action="harness"
+            >
+              apply
+            </button>
+          </label>
+          <button
+            class="wb-button"
+            id="wb-control-pin"
+            type="button"
+            data-action="pin"
+          >
+            pin
+          </button>
+          <button
+            class="wb-button wb-button--danger"
+            id="wb-control-unlock"
+            type="button"
+            data-action="unlock"
+            data-operation-action="unlock"
+            data-enabled-title="Removes the operational lock. Confirms first."
+            title="Removes the operational lock. Confirms first."
+          >
+            unlock stale
+          </button>
+          <button
+            class="wb-button wb-button--danger"
+            id="wb-control-archive"
+            type="button"
+            data-action="archive-plan"
+            data-operation-action="archive-plan"
+            data-enabled-title="Archives the plan directory and ASL state. Restorable. Confirms first."
+            title="Archives the plan directory and ASL state. Restorable. Confirms first."
+          >
+            archive plan
+          </button>
+        </div>
+      </section>
+

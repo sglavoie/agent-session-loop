@@ -1,0 +1,152 @@
+    <main class="wb-archive" id="wb-archive" hidden aria-label="Archived plans">
+      <div class="wb-archive__head">
+        <button
+          class="wb-button wb-button--ghost"
+          id="wb-archive-back"
+          type="button"
+        >
+          &larr; queue
+        </button>
+        <h1 class="wb-archive__title">Archive</h1>
+        <button
+          class="wb-button wb-button--ghost"
+          id="wb-archive-refresh"
+          type="button"
+        >
+          refresh
+        </button>
+      </div>
+
+      <section class="wb-panel wb-archive__settings">
+        <h2 class="wb-panel__title">Retention</h2>
+        <p class="wb-archive__hint">
+          Archived plans past the retention window are flagged as cleanup
+          candidates and kept. Nothing is emptied by browsing; permanently
+          emptying an entry takes an explicit, confirmed purge.
+        </p>
+        <div class="wb-archive__retention">
+          <label>
+            <span class="wb-controls-bar__label">retention (days)</span>
+            <input
+              type="number"
+              id="wb-archive-retention"
+              name="archive_retention_days"
+              min="1"
+              value="30"
+            />
+          </label>
+          <button
+            class="wb-button wb-button--primary"
+            id="wb-archive-retention-save"
+            type="button"
+            data-action="archive-retention-save"
+            data-operation-action="archive-settings"
+          >
+            save retention
+          </button>
+        </div>
+        <p id="wb-archive-cleanup" class="wb-archive__cleanup" hidden></p>
+        <div
+          id="wb-archive-feedback"
+          class="wb-archive__feedback"
+          role="status"
+          hidden
+        ></div>
+      </section>
+
+      <section
+        id="wb-archive-warnings"
+        class="wb-warnings wb-archive__warnings"
+        aria-live="polite"
+        hidden
+      ></section>
+
+      <!--
+        The expired-archive review. A typed count proves the operator meant to
+        press the button; it proves nothing about whether they know which
+        plans are behind the number. Purging an entry retention has marked
+        opens this first and names every one of them.
+      -->
+      <section
+        class="wb-panel wb-archive-review"
+        id="wb-archive-review"
+        aria-label="Review expired archive entries"
+        hidden
+      >
+        <h2 class="wb-panel__title">Review expired entries</h2>
+        <p class="wb-archive-review__message" id="wb-archive-review-message"></p>
+        <ul
+          class="wb-archive-review__list"
+          id="wb-archive-review-list"
+        ></ul>
+        <div class="wb-archive-review__actions">
+          <button
+            class="wb-button wb-button--danger"
+            id="wb-archive-review-ack"
+            type="button"
+            data-action="archive-review-ack"
+          >
+            I have reviewed these — continue
+          </button>
+          <button
+            class="wb-button wb-button--ghost"
+            id="wb-archive-review-cancel"
+            type="button"
+            data-action="archive-review-cancel"
+          >
+            cancel
+          </button>
+        </div>
+      </section>
+
+      <section class="wb-panel">
+        <div class="wb-archive__bulk" id="wb-archive-bulk">
+          <span id="wb-archive-count">0 entries selected</span>
+          <button
+            class="wb-button wb-button--ghost"
+            id="wb-archive-select-all"
+            type="button"
+            data-action="archive-select-all"
+          >
+            select all
+          </button>
+          <button
+            class="wb-button wb-button--ghost"
+            id="wb-archive-select-candidates"
+            type="button"
+            data-action="archive-select-candidates"
+          >
+            select candidates
+          </button>
+          <button
+            class="wb-button wb-button--primary"
+            id="wb-archive-restore-selected"
+            type="button"
+            data-action="archive-restore-selected"
+            data-operation-action="archive-restore"
+          >
+            restore selected
+          </button>
+          <button
+            class="wb-button wb-button--danger"
+            id="wb-archive-purge-selected"
+            type="button"
+            data-action="archive-purge-selected"
+            data-operation-action="archive-purge"
+          >
+            purge selected
+          </button>
+          <button
+            class="wb-button wb-button--ghost"
+            id="wb-archive-clear"
+            type="button"
+          >
+            clear selection
+          </button>
+        </div>
+        <ul class="wb-archive-list" id="wb-archive-entries">
+          <li class="wb-empty">no archived plans</li>
+        </ul>
+      </section>
+    </main>
+

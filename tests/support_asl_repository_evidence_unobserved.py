@@ -98,7 +98,9 @@ class LegacyUnobservedRepositoryTests(unittest.TestCase):
         os.utime(self.other_root, ns=(1_000_000_000, 1_000_000_000))
         self.assertIn(
             self._canonical(self.other_root),
-            self._unobserved(f"Looked in {self.other_root}.\n", turn_started_ns=started),
+            self._unobserved(
+                f"Looked in {self.other_root}.\n", turn_started_ns=started
+            ),
         )
         self.assertIn(
             self._canonical(self.other_root),

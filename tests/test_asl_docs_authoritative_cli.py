@@ -20,7 +20,7 @@ from agent_session_loop import (
     run_inputs,
     state_locks,
 )
-from tests.asl_docs_support import ASL_GUIDE, read_asl_reference
+from tests.asl_docs_support import ASL_GUIDE, read_asl_package_guide, read_asl_reference
 from tests.support import (
     REPO_ROOT,
 )
@@ -216,9 +216,7 @@ class AuthoritativeCliDocsTests(unittest.TestCase):
         )
 
     def test_registry_migration_follow_up_order_is_documented(self) -> None:
-        agent_readme = (REPO_ROOT / "agent_session_loop" / "README.md").read_text(
-            encoding="utf-8"
-        )
+        agent_readme = read_asl_package_guide()
         for text in (self.docs, agent_readme):
             rebind = text.index(
                 "asl prepare PLAN_DIR --resume --rebind-workspace --cwd WORKSPACE_ROOT"
@@ -247,9 +245,7 @@ class AuthoritativeCliDocsTests(unittest.TestCase):
     def test_multi_repository_docs_include_executable_four_repo_example(
         self,
     ) -> None:
-        agent_readme = (REPO_ROOT / "agent_session_loop" / "README.md").read_text(
-            encoding="utf-8"
-        )
+        agent_readme = read_asl_package_guide()
         for text in (self.guide, agent_readme, self.docs):
             self.assertIn("workspace root", text.lower())
             self.assertIn("Alias:path", text)

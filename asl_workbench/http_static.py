@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import Mapping
 from pathlib import Path
 
 from . import http_auth as auth
 from . import http_messages as messages
+from .static_sources import read_static_source
 
 # ---------------------------------------------------------------------------
 # Static assets
@@ -153,15 +155,21 @@ class StaticBundle:
             "Content-Security-Policy": csp,
         }
         etag: str | None = None
+        composed = path.suffix in {".html", ".css"}
+        body = self._read(path) if composed else None
         if use_etag:
-            stat_result = self._stat(path)
-            etag = compute_etag(stat_result)
+            etag = (
+                f'"{hashlib.sha256(body).hexdigest()}"'
+                if body is not None
+                else compute_etag(self._stat(path))
+            )
             presented = parse_etag_list(request.header("if-none-match") or "")
             if etag and etag in presented:
                 return messages.Response(
                     status=304, headers={**headers, "ETag": etag}, content_type=None
                 )
-        body = self._read(path)
+        if body is None:
+            body = self._read(path)
         if etag is not None:
             headers["ETag"] = etag
         return messages.Response(
@@ -184,10 +192,9 @@ class StaticBundle:
                 500, "os-error", str(error), details={"path": str(path)}
             ) from error
 
-    @staticmethod
-    def _read(path: Path) -> bytes:
+    def _read(self, path: Path) -> bytes:
         try:
-            return path.read_bytes()
+            return read_static_source(path, root=self.root)
         except FileNotFoundError:
             raise auth.HttpRefusal(
                 404,

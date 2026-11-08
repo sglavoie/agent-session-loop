@@ -1,0 +1,239 @@
+    <header class="wb-header">
+      <div class="wb-header__title">
+        <span class="wb-header__brand">ASL</span>
+        <span class="wb-header__subtitle">Workbench</span>
+      </div>
+      <div class="wb-header__meta">
+        <span
+          class="wb-refresh"
+          id="wb-refresh-status"
+          role="status"
+          aria-live="polite"
+        ><span id="wb-refresh-routine" aria-hidden="true">idle</span><span
+            id="wb-refresh-error"
+          ></span></span>
+        <button
+          class="wb-button wb-button--ghost"
+          id="wb-refresh-now"
+          type="button"
+          title="Fetch now"
+        >
+          refresh
+        </button>
+      </div>
+    </header>
+
+    <nav class="wb-filters" id="wb-filters" aria-label="Plan filters">
+      <button
+        class="wb-chip"
+        type="button"
+        data-filter="all"
+        aria-pressed="true"
+      >
+        all <span class="wb-chip__count" data-count="all">0</span>
+      </button>
+      <button class="wb-chip" type="button" data-filter="running" aria-pressed="false">
+        running <span class="wb-chip__count" data-count="running">0</span>
+      </button>
+      <button class="wb-chip" type="button" data-filter="paused" aria-pressed="false">
+        paused <span class="wb-chip__count" data-count="paused">0</span>
+      </button>
+      <button class="wb-chip" type="button" data-filter="failed" aria-pressed="false">
+        failed <span class="wb-chip__count" data-count="failed">0</span>
+      </button>
+      <button class="wb-chip" type="button" data-filter="stale" aria-pressed="false">
+        stale <span class="wb-chip__count" data-count="stale">0</span>
+      </button>
+      <button class="wb-chip" type="button" data-filter="ready" aria-pressed="false">
+        ready <span class="wb-chip__count" data-count="ready">0</span>
+      </button>
+      <button class="wb-chip" type="button" data-filter="complete" aria-pressed="false">
+        complete <span class="wb-chip__count" data-count="complete">0</span>
+      </button>
+      <button class="wb-chip" type="button" data-filter="recent" aria-pressed="false">
+        recent <span class="wb-chip__count" data-count="recent">0</span>
+      </button>
+    </nav>
+
+    <div
+      class="wb-controls-bar"
+      id="wb-controls-bar"
+      role="group"
+      aria-label="Queue controls"
+    >
+      <label class="wb-controls-bar__search">
+        <span class="wb-controls-bar__label">search</span>
+        <input
+          type="search"
+          id="wb-search"
+          name="search"
+          placeholder="label, path, state, harness, run id…"
+          autocomplete="off"
+          spellcheck="false"
+          aria-label="search plans"
+        />
+      </label>
+      <button
+        class="wb-button wb-button--ghost"
+        id="wb-search-clear"
+        type="button"
+        hidden
+      >
+        clear
+      </button>
+      <label class="wb-controls-bar__sort">
+        <span class="wb-controls-bar__label">sort</span>
+        <select id="wb-sort" name="sort" aria-label="sort mode">
+          <option value="urgency">urgency</option>
+          <option value="recent">last activity</option>
+          <option value="label">label</option>
+          <option value="path">plan path</option>
+          <option value="oldest">oldest activity</option>
+        </select>
+      </label>
+      <label class="wb-controls-bar__facet">
+        <span class="wb-controls-bar__label">project</span>
+        <select id="wb-project-filter" name="project" aria-label="project filter">
+          <option value="">all projects</option>
+        </select>
+      </label>
+      <label class="wb-controls-bar__facet">
+        <span class="wb-controls-bar__label">harness</span>
+        <select id="wb-harness-filter" name="harness" aria-label="harness filter">
+          <option value="">all harnesses</option>
+        </select>
+      </label>
+      <label class="wb-controls-bar__completed">
+        <input type="checkbox" id="wb-show-completed" />
+        <span>show completed</span>
+      </label>
+      <button
+        class="wb-button wb-button--ghost"
+        id="wb-older-toggle"
+        type="button"
+        aria-pressed="false"
+        title="Show work that has not moved in the last eight hours"
+      >
+        show older (0)
+      </button>
+      <button
+        class="wb-button wb-button--ghost"
+        id="wb-cleanup-toggle"
+        type="button"
+        aria-pressed="false"
+        title="Review and bulk-archive stale plans"
+      >
+        cleanup
+      </button>
+      <a
+        class="wb-button wb-button--ghost"
+        id="wb-archive-open"
+        href="#archive"
+        data-action="open-archive"
+        title="View archived plans"
+      >
+        archive
+      </a>
+    </div>
+
+    <div
+      class="wb-cleanup-bar"
+      id="wb-cleanup-bar"
+      role="group"
+      aria-label="Cleanup controls"
+      hidden
+    >
+      <label class="wb-cleanup-bar__threshold">
+        <span class="wb-controls-bar__label">stale after (days)</span>
+        <input
+          type="number"
+          id="wb-cleanup-threshold"
+          name="cleanup_threshold"
+          min="0"
+          value="30"
+        />
+      </label>
+      <button
+        class="wb-button wb-button--ghost"
+        id="wb-cleanup-select-candidates"
+        type="button"
+      >
+        select candidates
+      </button>
+      <button
+        class="wb-button wb-button--ghost"
+        id="wb-cleanup-select-visible"
+        type="button"
+      >
+        select visible
+      </button>
+      <button
+        class="wb-button wb-button--ghost"
+        id="wb-cleanup-clear"
+        type="button"
+      >
+        clear selection
+      </button>
+      <div class="wb-cleanup-bar__review" id="wb-cleanup-review">
+        <span id="wb-cleanup-count">0 plans selected</span>
+        <button
+          class="wb-button wb-button--danger"
+          id="wb-cleanup-archive"
+          type="button"
+          data-action="bulk-archive"
+          data-operation-action="archive-plans"
+        >
+          archive selected
+        </button>
+      </div>
+      <div
+        id="wb-cleanup-feedback"
+        class="wb-cleanup-bar__feedback"
+        role="status"
+        hidden
+      ></div>
+    </div>
+
+    <section
+      class="wb-cleanup-review"
+      id="wb-cleanup-review-panel"
+      aria-label="Review selected plans"
+      hidden
+    >
+      <div class="wb-cleanup-review__head">
+        <div>
+          <h2>Review plans to archive</h2>
+          <p id="wb-cleanup-review-summary"></p>
+        </div>
+        <button class="wb-button wb-button--ghost" id="wb-cleanup-review-cancel" type="button">cancel</button>
+      </div>
+      <ul id="wb-cleanup-review-list" class="wb-cleanup-review__list"></ul>
+      <div class="wb-cleanup-review__actions">
+        <button class="wb-button wb-button--danger" id="wb-cleanup-review-confirm" type="button">archive reviewed plans</button>
+      </div>
+    </section>
+
+    <section
+      id="wb-warnings"
+      class="wb-warnings"
+      aria-live="polite"
+      hidden
+    ></section>
+
+    <!-- What the observation behind this page could not see. Separate from
+         wb-warnings, which is about the plans; this is about the page. -->
+    <section
+      id="wb-observation"
+      class="wb-observation"
+      aria-live="polite"
+      data-count="0"
+      hidden
+    ></section>
+
+    <section
+      id="wb-queue-meta"
+      class="wb-queue-meta"
+      aria-live="polite"
+      hidden
+    ></section>
+

@@ -1,0 +1,191 @@
+      <div class="wb-detail__head">
+        <button
+          class="wb-button wb-button--ghost"
+          id="wb-detail-back"
+          type="button"
+        >
+          &larr; queue
+        </button>
+        <div class="wb-detail__head-text">
+          <h1 class="wb-detail__label" id="wb-detail-label" tabindex="-1">(loading)</h1>
+          <p class="wb-detail__path" id="wb-detail-path"></p>
+          <p class="wb-detail__path" id="wb-detail-workspace"></p>
+          <p class="wb-detail__meta">
+            <span class="wb-badge" id="wb-detail-state" data-state="unknown">
+              unknown
+            </span>
+            <span id="wb-detail-action-hint" class="wb-detail__action-hint"></span>
+          </p>
+          <p class="wb-detail__hint" id="wb-detail-hint"></p>
+        </div>
+      </div>
+
+      <nav class="wb-detail-nav" id="wb-detail-nav" aria-label="Jump to section">
+        <button type="button" data-nav-target="wb-recovery-panel">recovery</button>
+        <button type="button" data-nav-target="wb-redirect-panel">correction</button>
+        <button type="button" data-nav-target="wb-operations-panel">unconfirmed</button>
+        <button type="button" data-nav-target="wb-controls-panel">controls</button>
+        <button type="button" data-nav-target="wb-profile-panel">profile</button>
+        <button type="button" data-nav-target="wb-sessions-panel">sessions</button>
+        <button type="button" data-nav-target="wb-active-panel">turn</button>
+        <button type="button" data-nav-target="wb-verification-panel">verification</button>
+        <button type="button" data-nav-target="wb-events-panel">events</button>
+        <button type="button" data-nav-target="wb-logs-panel">logs</button>
+        <button type="button" data-nav-target="wb-progress-panel">journal</button>
+        <button type="button" data-nav-target="wb-artifacts-panel">artifacts</button>
+      </nav>
+
+      <section
+        class="wb-panel wb-recovery"
+        id="wb-recovery-panel"
+        data-severity="none"
+      >
+        <div class="wb-recovery__head">
+          <div class="wb-recovery__head-text">
+            <h2 class="wb-panel__title">Recovery Center</h2>
+            <p class="wb-recovery__title" id="wb-recovery-title">loading</p>
+          </div>
+          <span
+            class="wb-recovery__kind"
+            id="wb-recovery-kind"
+            data-kind="none"
+          >
+            none
+          </span>
+        </div>
+        <p class="wb-recovery__summary" id="wb-recovery-summary">
+          loading recovery diagnosis…
+        </p>
+        <div
+          class="wb-recovery__actions"
+          id="wb-recovery-primary-action"
+          hidden
+        ></div>
+        <div
+          class="wb-recovery__group wb-recovery__reply wb-reply"
+          id="wb-reply-panel"
+          hidden
+        >
+          <h3 class="wb-recovery__group-title">Reply</h3>
+          <p class="wb-reply__hint" id="wb-reply-hint">
+            The runner is paused waiting on a clarifying answer. Submit returns
+            the answer verbatim to <code>asl run --reply</code>; the draft is
+            never persisted to disk or browser storage.
+          </p>
+          <details class="wb-reply__context" id="wb-reply-prompt-details">
+            <summary>resolver prompt</summary>
+            <pre id="wb-reply-prompt" class="wb-reply__prompt"></pre>
+          </details>
+          <!-- Open from the start: on a reply pause the last message is
+               usually the question being answered. -->
+          <details class="wb-reply__context" id="wb-reply-last-details" open>
+            <summary>last message</summary>
+            <pre id="wb-reply-last-message" class="wb-reply__last"></pre>
+          </details>
+          <form
+            id="wb-reply-form"
+            class="wb-reply__form"
+            autocomplete="off"
+            novalidate
+          >
+            <label for="wb-reply-text" class="wb-reply__label">
+              answer <abbr title="required">*</abbr>
+            </label>
+            <textarea
+              id="wb-reply-text"
+              name="reply_text"
+              rows="6"
+              required
+              aria-required="true"
+              autocomplete="off"
+              spellcheck="true"
+            ></textarea>
+            <p
+              id="wb-reply-form-errors"
+              class="wb-form__errors"
+              role="alert"
+              hidden
+            ></p>
+            <p
+              id="wb-reply-submit-status"
+              class="wb-controls__feedback wb-reply__status"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></p>
+            <div class="wb-reply__actions">
+              <button
+                class="wb-button wb-button--primary"
+                type="submit"
+                data-action="reply-submit"
+                data-operation-action="reply"
+              >
+                submit reply
+              </button>
+              <button
+                class="wb-button wb-button--ghost"
+                id="wb-reply-clear"
+                type="button"
+                data-action="reply-clear"
+              >
+                clear
+              </button>
+            </div>
+          </form>
+        </div>
+        <div
+          class="wb-recovery__group wb-recovery__conversation wb-conversation"
+          id="wb-conversation-recovery"
+          hidden
+        >
+          <h3 class="wb-recovery__group-title">Conversation recovery</h3>
+          <p class="wb-conversation__hint">
+            This pause hands a decision to a person. The Workbench reports it
+            and never performs it — authorizing a fresh conversation discards
+            the agent's saved context, so it is typed deliberately into a
+            terminal rather than clicked here.
+          </p>
+          <ul class="wb-conversation__facts" id="wb-conversation-facts"></ul>
+          <p
+            class="wb-conversation__note"
+            id="wb-conversation-note"
+            hidden
+          ></p>
+          <ul
+            class="wb-recovery__commands"
+            id="wb-conversation-commands"
+          ></ul>
+          <h4 class="wb-conversation__retained-title">
+            Corrections a fresh start still carries
+          </h4>
+          <ul
+            class="wb-conversation__retained"
+            id="wb-conversation-retained"
+          ></ul>
+        </div>
+        <div
+          class="wb-recovery__group"
+          id="wb-recovery-evidence-section"
+          hidden
+        >
+          <h3 class="wb-recovery__group-title">Evidence</h3>
+          <ul class="wb-recovery__evidence" id="wb-recovery-evidence"></ul>
+        </div>
+        <div
+          class="wb-recovery__group"
+          id="wb-recovery-commands-section"
+          hidden
+        >
+          <h3 class="wb-recovery__group-title">Commands</h3>
+          <ul class="wb-recovery__commands" id="wb-recovery-commands"></ul>
+        </div>
+        <div
+          class="wb-recovery__group"
+          id="wb-recovery-artifacts-section"
+          hidden
+        >
+          <h3 class="wb-recovery__group-title">Related artifacts</h3>
+          <ul class="wb-recovery__artifacts" id="wb-recovery-artifacts"></ul>
+        </div>
+      </section>
+

@@ -8,6 +8,7 @@ import unittest
 from agent_session_loop import (
     runner,
 )
+from tests.asl_docs_support import read_asl_package_guide
 from tests.support import (
     REPO_ROOT,
 )
@@ -40,7 +41,7 @@ _RUNNER_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_])runner\.([A-Za-z_][A-Za-z0-9_
 #: of the 226 aliases named as retired at the point they are said to be retired.
 _HISTORICAL_RUNNER_MENTIONS: dict[str, frozenset[str]] = {
     "agent_session_loop/AGENTS.md": frozenset({"X"}),
-    "agent_session_loop/README.md": frozenset({"X", "mailbox"}),
+    "docs/asl-implementation-architecture.md": frozenset({"X", "mailbox"}),
     "agent_session_loop/runner.py": frozenset({"X"}),
     "tests/test_asl_docs_runner_facade.py": frozenset({"X", "mailbox"}),
     "tests/test_asl_run_loop.py": frozenset({"_x"}),
@@ -385,9 +386,7 @@ class RunnerFacadeDocsTests(unittest.TestCase):
                 )
 
     def _normalized_readme(self) -> str:
-        readme = (REPO_ROOT / "agent_session_loop" / "README.md").read_text(
-            encoding="utf-8"
-        )
+        readme = read_asl_package_guide()
         return " ".join(readme.split())
 
     def test_readme_describes_the_runner_as_a_facade(self) -> None:

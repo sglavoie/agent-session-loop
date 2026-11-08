@@ -17,6 +17,7 @@ from agent_session_loop import (
 from tests.asl_docs_support import (
     ASL_GUIDE,
     ASL_SKILL_SUPERVISOR_AUDIT,
+    read_asl_package_guide,
     read_asl_reference,
 )
 from tests.support import (
@@ -39,9 +40,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.docs = read_asl_reference()
         cls.guide = (REPO_ROOT / ASL_GUIDE).read_text(encoding="utf-8")
-        cls.package_readme = (REPO_ROOT / "agent_session_loop" / "README.md").read_text(
-            encoding="utf-8"
-        )
+        cls.package_readme = read_asl_package_guide()
         cls.asl_skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(
             encoding="utf-8"
         )

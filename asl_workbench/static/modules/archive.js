@@ -13,16 +13,9 @@
  * number mean something.
  */
 
-import { OUTCOME_PENDING, OUTCOME_RESULT, apiRequest, describeError } from "./api.js";
+import { apiRequest, describeError } from "./api.js";
 import { applyChipPressedState } from "./filters.js";
-import {
-  HELD_MESSAGE,
-  applyActionAvailability,
-  captureFocus,
-  holdOperation,
-  releaseOperation,
-  runMutation,
-} from "./operations.js";
+import { applyActionAvailability } from "./operations.js";
 import { setField } from "./panels.js";
 import {
   persistFilter,
@@ -33,12 +26,16 @@ import {
 } from "./prefs.js";
 import { displayName, formatLastActivity } from "./preview.js";
 import { refresh, setRefreshStatus } from "./queue.js";
-import {
-  hydrateQueueControls,
-  updateSearchClearVisibility,
-} from "./queue_controls.js";
+import { hydrateQueueControls, updateSearchClearVisibility } from "./queue_controls.js";
 import { navigateToQueue, syncFilterHash } from "./router.js";
 import { state } from "./state.js";
+import {
+  handleArchiveRestore,
+  handleArchiveRestoreSelected,
+  handleArchivePurge,
+  handleRetentionSave,
+} from "./archive_mutations.js";
+import { closeArchiveReview, handleArchiveReviewAck } from "./archive_review.js";
 
 export function wireArchiveControls() {
   const back = document.getElementById("wb-archive-back");
@@ -396,337 +393,6 @@ function setBlockedWhenEmpty(node, count) {
   }
 }
 
-export function requestArchiveRestore(archiveId) {
-  // Shared single-entry restore used by both row-level and bulk restore, so
-  // the endpoint, the payload shape, and the classification of the answer stay
-  // aligned. It returns the classified answer rather than an envelope: a
-  // restore the far side only recorded is not a restored plan. Its callers
-  // hold "archive-restore" for as long as they poll, so it submits within it.
-  return runMutation({
-    action: "archive-restore",
-    path: "/api/archive/restore",
-    body: { archive_id: archiveId },
-    subject: "restore of " + archiveId,
-    withinHold: true,
-    feedback: showArchiveFeedback,
-  });
-}
-
-async function settledArchiveAnswer(answer) {
-  if (!answer || answer.outcome !== OUTCOME_PENDING) return answer?.outcome === OUTCOME_RESULT;
-  const id = answer.operation?.id;
-  if (!id) return false;
-  try {
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      await new Promise((resolve) => window.setTimeout(resolve, 1000));
-      const receipt = await apiRequest("/api/archive?operation_id=" + encodeURIComponent(id));
-      const status = receipt?.operation?.status;
-      if (status === "consumed") return true;
-      if (["rejected", "expired", "superseded", "unconfirmed", "cancelled"].includes(status)) {
-        showArchiveFeedback("error", "operation " + id + " is " + status);
-        return false;
-      }
-    }
-  } catch (error) {
-    showArchiveFeedback("warning", "operation " + id + " is unconfirmed: " + describeError(error));
-    return false;
-  }
-  showArchiveFeedback("warning", "operation " + id + " is still pending; check its receipt before retrying");
-  return false;
-}
-
-/* Every restore button stays shut until the receipt settles, not just while
- * the request is out: `settledArchiveAnswer` polls for up to forty seconds,
- * and a second click in that window would start a second loop with new
- * operation ids. */
-function holdRestores() {
-  if (holdOperation("archive-restore")) return true;
-  showArchiveFeedback("error", HELD_MESSAGE);
-  return false;
-}
-
-export async function handleArchiveRestore(archiveId) {
-  if (!archiveId) return;
-  if (!holdRestores()) return;
-  showArchiveFeedback("", "");
-  let restored = false;
-  try {
-    const answer = await requestArchiveRestore(archiveId);
-    restored = await settledArchiveAnswer(answer);
-  } finally {
-    releaseOperation("archive-restore");
-  }
-  if (restored) {
-    showArchiveFeedback("info", "restored " + archiveId);
-    loadArchiveView();
-  }
-}
-
-export async function handleArchiveRestoreSelected() {
-  // Copy selected IDs at click time and restore one at a time. An uncertain
-  // receipt stops the batch so the operator can inspect it before retrying.
-  const ids = Array.from(state.archiveSelection).filter(Boolean);
-  if (ids.length === 0) return;
-  const restoreFocus = captureFocus();
-  const confirmed = window.confirm(
-    "Restore " + ids.length + " selected archived plan(s)?"
-  );
-  restoreFocus();
-  if (!confirmed) return;
-  if (!holdRestores()) return;
-  showArchiveFeedback("", "");
-  let restored = 0;
-  let failed = 0;
-  try {
-    for (const id of ids) {
-      const answer = await requestArchiveRestore(id);
-      if (await settledArchiveAnswer(answer)) {
-        restored += 1;
-        state.archiveSelection.delete(id);
-      } else {
-        failed += 1;
-        break;
-      }
-    }
-  } finally {
-    releaseOperation("archive-restore");
-  }
-  const parts = ["restored " + restored];
-  if (failed) parts.push("stopped at the first unconfirmed or failed entry");
-  showArchiveFeedback(
-    failed > 0 ? "warning" : "info",
-    parts.join(", ")
-  );
-  loadArchiveView();
-}
-
-/* The entries in a selection that retention has marked and the operator has
- * not yet looked at. Empty is the ordinary case: an entry still inside
- * retention is one the operator chose by name. */
-export function unreviewedExpiredIds(ids) {
-  const byId = new Map();
-  state.archiveEntries.forEach((entry) => {
-    if (entry && entry.archive_id) byId.set(String(entry.archive_id), entry);
-  });
-  return ids.filter((id) => {
-    const entry = byId.get(String(id));
-    if (!entry) return false;
-    if (entry.cleanup_state !== "eligible") return false;
-    return !state.archiveReviewed.has(String(id));
-  });
-}
-
-/* The control that opened the purge review, so closing it can hand the
- * keyboard back there rather than dropping it on the document body. */
-let reviewOpener = null;
-
-function rememberReviewOpener() {
-  const active = document.activeElement;
-  if (!active || active === document.body) {
-    reviewOpener = null;
-    return;
-  }
-  const row = active.closest ? active.closest("[data-archive-id]") : null;
-  reviewOpener = {
-    element: active,
-    archiveId: row ? row.getAttribute("data-archive-id") : null,
-  };
-}
-
-function focusable(node) {
-  return (
-    !!node &&
-    typeof node.focus === "function" &&
-    document.body.contains(node) &&
-    node.disabled !== true &&
-    !node.closest("[hidden]")
-  );
-}
-
-/* Back to the opener; if a re-render replaced it, to the same row's purge
- * button; failing both, to the bulk purge control. */
-function restoreReviewOpener() {
-  const opener = reviewOpener;
-  reviewOpener = null;
-  const candidates = [];
-  if (opener) {
-    candidates.push(opener.element);
-    if (opener.archiveId) {
-      const list = document.getElementById("wb-archive-entries");
-      const rows = list ? list.querySelectorAll("[data-archive-id]") : [];
-      rows.forEach((row) => {
-        if (row.getAttribute("data-archive-id") === opener.archiveId) {
-          candidates.push(row.querySelector('[data-action="archive-purge"]'));
-        }
-      });
-    }
-  }
-  candidates.push(document.getElementById("wb-archive-purge-selected"));
-  const target = candidates.find(focusable);
-  if (target) target.focus();
-}
-
-/* Name every expired entry this purge would empty, and hold the request until
- * the operator says they have read it. Nothing is sent from here. */
-export function openArchiveReview(ids, expired) {
-  const panel = document.getElementById("wb-archive-review");
-  const list = document.getElementById("wb-archive-review-list");
-  const message = document.getElementById("wb-archive-review-message");
-  if (!panel || !list || !message) return;
-  rememberReviewOpener();
-  state.archiveReviewPending = ids.slice();
-  message.textContent =
-    expired.length +
-    (expired.length === 1 ? " entry is" : " entries are") +
-    " past retention. Purging empties them permanently and there is no undo. Read the list, then confirm you have reviewed it — the typed count still follows.";
-  list.textContent = "";
-  const byId = new Map();
-  state.archiveEntries.forEach((entry) => {
-    if (entry && entry.archive_id) byId.set(String(entry.archive_id), entry);
-  });
-  expired.forEach((id) => {
-    const entry = byId.get(String(id)) || {};
-    const li = document.createElement("li");
-    li.className = "wb-archive-review__row";
-    li.setAttribute("data-archive-id", String(id));
-    const label = document.createElement("span");
-    label.className = "wb-archive-review__label";
-    label.textContent =
-      entry.summary || displayName(entry.original_plan_dir) || String(id);
-    li.appendChild(label);
-    const path = document.createElement("span");
-    path.className = "wb-archive-review__path";
-    path.textContent = entry.original_plan_dir || "";
-    if (entry.original_plan_dir) li.appendChild(path);
-    const expires = document.createElement("span");
-    expires.className = "wb-archive-review__expires";
-    expires.textContent = "expired: " + formatLastActivity(entry.expires_at);
-    li.appendChild(expires);
-    list.appendChild(li);
-  });
-  panel.hidden = false;
-  const ack = document.getElementById("wb-archive-review-ack");
-  if (ack && typeof ack.focus === "function") ack.focus();
-}
-
-export function closeArchiveReview() {
-  const panel = document.getElementById("wb-archive-review");
-  const wasOpen = !!panel && !panel.hidden;
-  if (panel) panel.hidden = true;
-  state.archiveReviewPending = null;
-  // Hiding the panel takes the focused acknowledge or cancel button with it;
-  // the cleanup review hands the keyboard back the same way.
-  if (wasOpen) restoreReviewOpener();
-}
-
-export async function handleArchiveReviewAck() {
-  const ids = Array.isArray(state.archiveReviewPending)
-    ? state.archiveReviewPending.slice()
-    : [];
-  unreviewedExpiredIds(ids).forEach((id) =>
-    state.archiveReviewed.add(String(id))
-  );
-  closeArchiveReview();
-  if (ids.length === 0) return;
-  await handleArchivePurge(ids);
-}
-
-export async function handleArchivePurge(archiveIds) {
-  const ids = Array.isArray(archiveIds) ? archiveIds.filter(Boolean) : [];
-  if (ids.length === 0) return;
-  const expired = unreviewedExpiredIds(ids);
-  if (expired.length > 0) {
-    // Nothing is asked and nothing is sent until the list has been seen. This
-    // is the step that separates "I typed 12" from "I know which twelve".
-    showArchiveFeedback(
-      "warning",
-      "review the " +
-        expired.length +
-        " expired " +
-        (expired.length === 1 ? "entry" : "entries") +
-        " before purging"
-    );
-    openArchiveReview(ids, expired);
-    return;
-  }
-  const restoreFocus = captureFocus();
-  const typed = window.prompt(
-    "Permanently purge " +
-      ids.length +
-      " archived plan(s)? This cannot be undone. Type the number of entries to confirm:",
-    ""
-  );
-  restoreFocus();
-  if (typed === null) return;
-  const typedCount = (typed || "").trim();
-  const confirmCount = Number(typedCount);
-  if (!/^\d+$/.test(typedCount) || confirmCount !== ids.length) {
-    showArchiveFeedback(
-      "error",
-      "confirmation count must equal " + ids.length
-    );
-    return;
-  }
-  showArchiveFeedback("", "");
-  const remote = state.capabilities?.mode === "remote";
-  let removed = 0;
-  for (const id of (remote ? ids : [null])) {
-    const answer = await runMutation({
-      action: "archive-purge",
-      path: "/api/archive/delete",
-      body: remote
-        ? { archive_ids: [id], confirm_count: 1 }
-        : { archive_ids: ids, confirm_count: confirmCount },
-      subject: "the purge",
-      feedback: showArchiveFeedback,
-    });
-    if (!(await settledArchiveAnswer(answer))) {
-      showArchiveFeedback("warning", "purged " + removed + "; stopped at an unconfirmed or failed entry. Check its receipt before retrying.");
-      break;
-    }
-    const completed = remote ? [id] : ids;
-    completed.forEach((done) => {
-      state.archiveSelection.delete(done);
-      state.archiveReviewed.delete(String(done));
-    });
-    removed += remote ? 1 : (answer.payload?.removed_count || 0);
-  }
-  if (removed === ids.length) showArchiveFeedback("info", "purged " + removed);
-  loadArchiveView();
-}
-
-export async function handleRetentionSave() {
-  const input = document.getElementById("wb-archive-retention");
-  if (!input) return;
-  const days = parseInt((input.value || "").trim(), 10);
-  if (!Number.isFinite(days) || days < 1) {
-    showArchiveFeedback(
-      "error",
-      "retention must be a positive number of days"
-    );
-    return;
-  }
-  showArchiveFeedback("", "");
-  const answer = await runMutation({
-    action: "archive-settings",
-    path: "/api/archive/settings",
-    body: { archive_retention_days: days },
-    subject: "the retention change",
-    feedback: showArchiveFeedback,
-  });
-  if (await settledArchiveAnswer(answer)) {
-    state.archiveRetentionDays =
-      typeof answer.payload.archive_retention_days === "number"
-        ? answer.payload.archive_retention_days
-        : days;
-    showArchiveFeedback(
-      "info",
-      "retention set to " + state.archiveRetentionDays + " days"
-    );
-    loadArchiveView();
-  }
-}
-
 export function showArchiveFeedback(kind, message) {
   const el = document.getElementById("wb-archive-feedback");
   if (!el) return;
@@ -785,3 +451,17 @@ export function wireEmptyStateActions() {
     });
   }
 }
+
+export {
+  requestArchiveRestore,
+  handleArchiveRestore,
+  handleArchiveRestoreSelected,
+  handleArchivePurge,
+  handleRetentionSave,
+} from "./archive_mutations.js";
+export {
+  unreviewedExpiredIds,
+  openArchiveReview,
+  closeArchiveReview,
+  handleArchiveReviewAck,
+} from "./archive_review.js";

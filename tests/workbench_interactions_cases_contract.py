@@ -1,3 +1,5 @@
+from asl_workbench.static_sources import read_static_source
+
 from .workbench_interactions_support import *
 
 
@@ -10,7 +12,7 @@ class InteractionContractTests(unittest.TestCase):
         # A button wired to a name nothing answers for is a button that cannot
         # be greyed out, cannot be guarded against a second click, and leaves
         # no receipt. It would look identical to a working one.
-        markup = INDEX_HTML.read_text(encoding="utf-8")
+        markup = read_static_source(INDEX_HTML).decode("utf-8")
         declared = _declared_actions()
         used = set(re.findall(r'data-operation-action="([^"]+)"', markup))
         self.assertTrue(used, "index.html must mark its mutating controls")
@@ -63,7 +65,7 @@ class InteractionContractTests(unittest.TestCase):
         sources = {
             path.name: path.read_text(encoding="utf-8")
             for path in sorted(MODULES_ROOT.glob("*.js"))
-            if path.name not in {"api.js", "operations.js"}
+            if path.name not in {"api.js", "operation_mutations.js"}
         }
         corpus = "\n".join(sources.values())
         guarded_specs = "\n".join(
@@ -105,13 +107,13 @@ class InteractionContractTests(unittest.TestCase):
         # 202 from an unreachable link. A module calling it directly would be a
         # module deciding for itself what an answer means.
         for path in sorted(MODULES_ROOT.glob("*.js")):
-            if path.name in {"api.js", "operations.js"}:
+            if path.name in {"api.js", "operation_mutations.js"}:
                 continue
             with self.subTest(module=path.name):
                 self.assertNotIn(
                     "\n  submit,\n",
                     path.read_text(encoding="utf-8"),
-                    "only operations.js may classify a submission",
+                    "only operation_mutations.js may classify a submission",
                 )
 
     def test_a_recovery_card_that_acts_is_the_same_action_as_the_bar(
@@ -121,7 +123,7 @@ class InteractionContractTests(unittest.TestCase):
         # A door that skipped the availability pass would be a button offered
         # to someone who has just been told something went wrong, refused only
         # after they pressed it -- the worst place to make that mistake.
-        source = _module_source("recovery.js")
+        source = _module_source("recovery.js") + _module_source("recovery_render.js")
         declared = _declared_actions()
         table = re.search(
             r"const RECOVERY_CARD_ACTIONS = \{(.*?)\n\};", source, re.DOTALL
@@ -139,7 +141,7 @@ class InteractionContractTests(unittest.TestCase):
         # directions, and this is where they are reconciled: the id is written
         # down because a reload cannot reconstruct it, and nothing else is,
         # because a reload losing the words is the point.
-        source = OPERATIONS_MODULE.read_text(encoding="utf-8")
+        source = _module_source("operation_receipts.js")
         receipt = re.search(r"const receipt = \{(.*?)\n  \};", source, re.DOTALL)
         self.assertIsNotNone(receipt, "rememberReceipt must build one flat record")
         assert receipt is not None
@@ -153,7 +155,7 @@ class InteractionContractTests(unittest.TestCase):
     def test_receipts_are_the_only_thing_written_to_session_storage_here(
         self,
     ) -> None:
-        source = OPERATIONS_MODULE.read_text(encoding="utf-8")
+        source = _module_source("operation_receipts.js")
         keys = set(re.findall(r"sessionStorage\.setItem\(\s*([A-Z_]+)", source))
         self.assertEqual({"OPERATION_RECEIPTS_STORAGE_KEY"}, keys)
         self.assertNotIn("localStorage", source)
@@ -181,7 +183,7 @@ class InteractionContractTests(unittest.TestCase):
         # panels are asserted as markup rather than as behaviour because the
         # browser suite cannot run everywhere and an absent panel would make
         # every recovery assertion below vacuously pass there.
-        markup = INDEX_HTML.read_text(encoding="utf-8")
+        markup = read_static_source(INDEX_HTML).decode("utf-8")
         for element_id in (
             "wb-operations-panel",
             "wb-operations-list",

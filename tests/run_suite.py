@@ -56,13 +56,10 @@ Usage:
 
 from __future__ import annotations
 
-import argparse
-import ast
-import collections
+import argparse as argparse
 import concurrent.futures
 import contextlib
 import json
-import math
 import os
 import re
 import shlex
@@ -71,134 +68,102 @@ import subprocess
 import sys
 import threading
 import time
-import unittest
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-TESTS_DIR = REPO_ROOT / "tests"
+from tests.run_suite_options import (
+    DEFAULT_SHARD_TIMEOUT as DEFAULT_SHARD_TIMEOUT,
+)
+from tests.run_suite_options import (
+    FAILED_OUTPUT_LINES as FAILED_OUTPUT_LINES,
+)
+from tests.run_suite_options import (
+    TIMEOUT_ENV as TIMEOUT_ENV,
+)
+from tests.run_suite_options import (
+    VERBOSE_ENV as VERBOSE_ENV,
+)
+from tests.run_suite_options import (
+    _env_timeout as _env_timeout,
+)
+from tests.run_suite_options import (
+    parse_args as parse_args,
+)
+from tests.run_suite_options import (
+    parse_slice as parse_slice,
+)
+from tests.run_suite_options import (
+    shard_timeout as shard_timeout,
+)
+from tests.run_suite_registry import (
+    FAST_MODULES as FAST_MODULES,
+)
+from tests.run_suite_registry import (
+    INTEGRATION_MODULES as INTEGRATION_MODULES,
+)
+from tests.run_suite_registry import (
+    LANE_MARKER as LANE_MARKER,
+)
+from tests.run_suite_registry import (
+    PORTABLE_MARKER as PORTABLE_MARKER,
+)
+from tests.run_suite_registry import (
+    PORTABLE_MODULES as PORTABLE_MODULES,
+)
+from tests.run_suite_registry import (
+    REPO_ROOT as REPO_ROOT,
+)
+from tests.run_suite_registry import (
+    SCRIPT_SUITES as SCRIPT_SUITES,
+)
+from tests.run_suite_registry import (
+    SHARDS_MARKER as SHARDS_MARKER,
+)
+from tests.run_suite_registry import (
+    TESTS_DIR as TESTS_DIR,
+)
+from tests.run_suite_registry import (
+    LaneError as LaneError,
+)
+from tests.run_suite_registry import (
+    _defining_modules as _defining_modules,
+)
+from tests.run_suite_registry import (
+    _derive_lanes as _derive_lanes,
+)
+from tests.run_suite_registry import (
+    _discovered_test_ids as _discovered_test_ids,
+)
+from tests.run_suite_registry import (
+    _marker_statement as _marker_statement,
+)
+from tests.run_suite_registry import (
+    _module_path as _module_path,
+)
+from tests.run_suite_registry import (
+    _modules_for as _modules_for,
+)
+from tests.run_suite_registry import (
+    _read_markers as _read_markers,
+)
+from tests.run_suite_registry import (
+    _registered_test_ids as _registered_test_ids,
+)
+from tests.run_suite_registry import (
+    _test_ids as _test_ids,
+)
+from tests.run_suite_registry import (
+    check_registration as check_registration,
+)
+
 TIMINGS_PATH = REPO_ROOT / ".cache" / "run_suite_timings.json"
 LOGS_DIR = REPO_ROOT / ".cache" / "run_suite_logs"
 REGISTRATION_SHARD = "run_suite registration"
 
-TIMEOUT_ENV = "ASL_TEST_SHARD_TIMEOUT"
-VERBOSE_ENV = "ASL_TEST_VERBOSE"
-DEFAULT_SHARD_TIMEOUT = 900.0
-#: How much of a failed shard's output is shown without ``--verbose``.
-FAILED_OUTPUT_LINES = 200
 #: How long a killed shard's pipes get to drain before its output is taken as is.
 _DRAIN_SECONDS = 10.0
 
-LANE_MARKER = "ASL_TEST_LANE"
-PORTABLE_MARKER = "ASL_TEST_PORTABLE"
-SHARDS_MARKER = "ASL_TEST_SHARDS"
-_MARKERS = (LANE_MARKER, PORTABLE_MARKER, SHARDS_MARKER)
-_LANES = ("fast", "integration")
-
 _RAN_PATTERN = re.compile(r"^Ran (\d+) tests?", re.MULTILINE)
-
-
-class LaneError(Exception):
-    """A test module declares its lane in a way the driver cannot honor."""
-
-
-def _module_path(module: str) -> Path:
-    return REPO_ROOT / Path(*module.split(".")).with_suffix(".py")
-
-
-def _marker_statement(lines: list[str], start: int) -> ast.stmt | None:
-    """The statement that begins on ``lines[start]``, parsed on its own.
-
-    Parsing every test module whole costs most of a second, which every import
-    of this module would pay; a marker is one short statement, so only it is
-    parsed, growing a line at a time until it is complete.
-    """
-    for end in range(start + 1, min(len(lines), start + 40) + 1):
-        try:
-            body = ast.parse("".join(lines[start:end])).body
-        except SyntaxError:
-            continue
-        return body[0] if len(body) == 1 else None
-    return None
-
-
-def _read_markers(path: Path) -> dict[str, Any]:
-    """The ``ASL_TEST_*`` literals a module assigns at top level."""
-    text = path.read_text(encoding="utf-8")
-    if "ASL_TEST_" not in text:
-        return {}
-    lines = text.splitlines(keepends=True)
-    found: dict[str, Any] = {}
-    for start, line in enumerate(lines):
-        if not line.startswith("ASL_TEST_"):
-            continue
-        node = _marker_statement(lines, start)
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            target, value = node.targets[0], node.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            target, value = node.target, node.value
-        else:
-            raise LaneError(f"{path.name}:{start + 1}: unreadable lane marker")
-        if not isinstance(target, ast.Name) or target.id not in _MARKERS:
-            raise LaneError(f"{path.name}:{start + 1}: unknown lane marker")
-        try:
-            found[target.id] = ast.literal_eval(value)
-        except ValueError as error:
-            raise LaneError(f"{path.name}: {target.id} is not a literal") from error
-    return found
-
-
-def _derive_lanes() -> dict[str, tuple[str, ...]]:
-    lanes: dict[str, list[str]] = {"fast": [], "integration": [], "portable": []}
-    for path in sorted(TESTS_DIR.glob("test*.py")):
-        module = f"tests.{path.stem}"
-        markers = _read_markers(path)
-        lane = markers.get(LANE_MARKER, "fast")
-        portable = markers.get(PORTABLE_MARKER, False)
-        shards = markers.get(SHARDS_MARKER, (module,))
-        if lane not in _LANES:
-            raise LaneError(f"{path.name}: {LANE_MARKER} must be one of {_LANES}")
-        if not isinstance(portable, bool) or (portable and lane != "fast"):
-            raise LaneError(f"{path.name}: {PORTABLE_MARKER} is a fast-lane flag")
-        if not isinstance(shards, tuple) or not all(isinstance(s, str) for s in shards):
-            raise LaneError(f"{path.name}: {SHARDS_MARKER} must be a tuple of names")
-        for shard in shards:
-            if shard == module:
-                continue
-            if shard.startswith("tests.test") or not _module_path(shard).is_file():
-                # A discoverable module is already its own shard; naming it
-                # again would run its tests twice.
-                raise LaneError(
-                    f"{path.name}: {SHARDS_MARKER} names {shard}, which is not "
-                    "an undiscoverable section module in tests/"
-                )
-        lanes[lane].extend(shards)
-        if portable:
-            lanes["portable"].extend(shards)
-    counts = collections.Counter(lanes["fast"] + lanes["integration"])
-    if repeated := sorted(name for name, count in counts.items() if count > 1):
-        raise LaneError(f"shards claimed twice: {', '.join(repeated)}")
-    return {name: tuple(modules) for name, modules in lanes.items()}
-
-
-_LANE_MODULES = _derive_lanes()
-FAST_MODULES = _LANE_MODULES["fast"]
-INTEGRATION_MODULES = _LANE_MODULES["integration"]
-PORTABLE_MODULES = _LANE_MODULES["portable"]
-
-# Standalone helper-script suites (not part of the tests package).
-SCRIPT_SUITES = tuple(
-    path.relative_to(REPO_ROOT).as_posix()
-    for path in sorted(REPO_ROOT.glob("skills/*/scripts/test_*.py"))
-)
-
-
-def _modules_for(mode: str) -> tuple[str, ...]:
-    if mode == "portable":
-        return PORTABLE_MODULES
-    if mode == "fast":
-        return FAST_MODULES
-    return INTEGRATION_MODULES + FAST_MODULES
 
 
 def _load_timings() -> dict[str, float]:
@@ -233,20 +198,6 @@ def _record_timings(results: list[dict[str, Any]]) -> None:
         os.replace(staging, TIMINGS_PATH)
     except OSError as error:
         print(f"note: shard timings not recorded: {error}")
-
-
-def parse_slice(value: str) -> tuple[int, int]:
-    """``"2/4"`` as ``(2, 4)``: the second of four slices, counted from one."""
-    index, sep, count = value.partition("/")
-    try:
-        parsed = (int(index), int(count))
-    except ValueError:
-        parsed = (0, 0)
-    if not sep or not 1 <= parsed[0] <= parsed[1]:
-        raise argparse.ArgumentTypeError(
-            f"expected K/N with 1 <= K <= N, not {value!r}"
-        )
-    return parsed
 
 
 def _shard_commands(
@@ -435,175 +386,8 @@ def failure_report(
     return "\n".join(parts)
 
 
-def shard_timeout(raw: str) -> float:
-    """``--shard-timeout``: a finite, non-negative number of seconds (0 disables).
-
-    A negative timeout would otherwise reach ``communicate`` as an instant
-    expiry and kill every shard on start.
-    """
-    try:
-        seconds = float(raw)
-    except ValueError:
-        seconds = math.nan
-    if not seconds >= 0 or math.isinf(seconds):
-        raise argparse.ArgumentTypeError(
-            f"must be a finite, non-negative number of seconds (0 disables), "
-            f"not {raw!r}"
-        )
-    return seconds
-
-
-def _env_timeout() -> float:
-    raw = os.environ.get(TIMEOUT_ENV, "").strip()
-    if not raw:
-        return DEFAULT_SHARD_TIMEOUT
-    try:
-        return shard_timeout(raw)
-    except argparse.ArgumentTypeError as error:
-        raise SystemExit(f"{TIMEOUT_ENV} {error}") from error
-
-
-def _test_ids(suite: Any) -> set[str]:
-    ids: set[str] = set()
-    pending: list[Any] = [suite]
-    while pending:
-        case = pending.pop()
-        if isinstance(case, unittest.TestSuite):
-            pending.extend(case)
-            continue
-        ids.add(case.id())
-    return ids
-
-
-def _discovered_test_ids() -> set[str]:
-    """Every test broad discovery finds.
-
-    Test ids, not counts or module names, are what answer "does some shard run
-    this test". A count reads a module-level ``SkipTest`` (``Ran 0 tests``) as
-    an unregistered module, and a module name stops matching once a facade
-    star-imports its ``*_cases_*`` or ``*_section_*`` helpers: the classes it
-    runs report the helper as their ``__module__``. Ids are the same whichever
-    module a class is reached through.
-    """
-    loader = unittest.TestLoader()
-    suite = loader.discover(str(TESTS_DIR), top_level_dir=str(REPO_ROOT))
-    if loader.errors:
-        raise SystemExit("test discovery failed:\n" + "\n".join(loader.errors))
-    return _test_ids(suite)
-
-
-def _registered_test_ids(modules: set[str]) -> dict[str, set[str]]:
-    """The test ids each shard module runs, keyed by module name."""
-    loader = unittest.TestLoader()
-    registered = {name: _test_ids(loader.loadTestsFromName(name)) for name in modules}
-    if loader.errors:
-        raise SystemExit(
-            "loading run_suite modules failed:\n" + "\n".join(loader.errors)
-        )
-    return registered
-
-
-def _defining_modules(ids: set[str]) -> list[str]:
-    return sorted({test_id.rsplit(".", 2)[0] for test_id in ids})
-
-
-def check_registration() -> int:
-    """Fail unless the fast and integration shards run each test exactly once."""
-    discovered = _discovered_test_ids()
-    registered = _registered_test_ids(set(FAST_MODULES) | set(INTEGRATION_MODULES))
-    owners: dict[str, list[str]] = collections.defaultdict(list)
-    for name, ids in registered.items():
-        for test_id in ids:
-            owners[test_id].append(name)
-    problems = []
-    if unregistered := discovered - owners.keys():
-        problems.append(
-            f"discovery finds tests in {', '.join(_defining_modules(unregistered))} "
-            f"that no run_suite shard runs; a facade's {SHARDS_MARKER} leaves "
-            "them out"
-        )
-    twice = [sorted(names) for names in owners.values() if len(names) > 1]
-    if twice:
-        pairs = sorted({" and ".join(names) for names in twice})
-        problems.append(
-            f"{len(twice)} tests run in more than one shard ({'; '.join(pairs)}); "
-            f"a facade that re-exports them needs {SHARDS_MARKER}"
-        )
-    empty = sorted(name for name, ids in registered.items() if not ids & discovered)
-    if empty:
-        problems.append(
-            f"run_suite shards {', '.join(empty)} hold no test broad discovery "
-            f"finds; mark a helper-only module with {SHARDS_MARKER} = ()"
-        )
-    for problem in problems:
-        print(f"FAIL: {problem}")
-    return 1 if problems else 0
-
-
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--fast", action="store_true", help="run only the fast-lane modules"
-    )
-    group.add_argument(
-        "--portable",
-        action="store_true",
-        help="run only the modules that need no external process",
-    )
-    group.add_argument(
-        "--all",
-        action="store_true",
-        help="run every test module plus helper-script suites (default)",
-    )
-    group.add_argument(
-        "--check-registration",
-        action="store_true",
-        help="only check that the shards run every discovered test exactly once",
-    )
-    parser.add_argument(
-        "--jobs",
-        type=int,
-        # Half the cores, not all of them: a shard is not a single process. The
-        # loop tests each spawn `agent_session_loop run`, which spawns a fake
-        # harness of its own, so one shard per core oversubscribes the machine
-        # several times over. Under that load the loop tests race their own
-        # subprocess timeouts and process-group enumeration, which reads as
-        # flaky tests rather than as the overload it is. Half rounded up, not
-        # down: a three-core CI runner would otherwise run every shard serially.
-        default=max(1, ((os.cpu_count() or 4) + 1) // 2),
-        help="maximum parallel shard processes (default: half the CPU count)",
-    )
-    parser.add_argument(
-        "--shard-timeout",
-        type=shard_timeout,
-        default=None,
-        metavar="SECONDS",
-        help=(
-            f"kill a shard's process group after this long (default: "
-            f"${TIMEOUT_ENV} or {DEFAULT_SHARD_TIMEOUT:g}; 0 disables)"
-        ),
-    )
-    parser.add_argument(
-        "--slice",
-        type=parse_slice,
-        default=(1, 1),
-        metavar="K/N",
-        help="run only the K-th of N disjoint slices of the shards (default: 1/1)",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        default=os.environ.get(VERBOSE_ENV, "") not in ("", "0"),
-        help=(
-            f"print a failed shard's whole output, not its last "
-            f"{FAILED_OUTPUT_LINES} lines (also ${VERBOSE_ENV}=1)"
-        ),
-    )
-    args = parser.parse_args(argv)
+    args = parse_args(argv, __doc__)
     if args.check_registration:
         return check_registration()
     mode = "portable" if args.portable else "fast" if args.fast else "all"

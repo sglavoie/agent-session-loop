@@ -9,8 +9,9 @@ grows: a new module lands untyped, a tenth code joins the list to keep the
 gate green, and the extraction program's typed boundaries stop being a
 boundary at all.
 
-These tests are that ratchet. ``pyproject.toml`` carries *two*
-``enable_error_code`` override tables, under two contracts:
+These tests are that ratchet. ``config/typing/*.toml`` classifies product
+modules under two extraction contracts; ``pyproject.toml`` applies the same
+strict mypy policy to both complete packages:
 
 * **Boundary** -- mypy codes *and* the linter below: annotated public
   signatures, parameterized containers, no ``type: ignore``, no import of the
@@ -20,16 +21,15 @@ These tests are that ratchet. ``pyproject.toml`` carries *two*
 * **Checked** -- the same nine mypy codes and nothing else. Where a module
   lands when it is clean under mypy but cannot meet the extraction rules.
 
-Neither table can name itself: mypy rejects an extra key in an overrides table
-as an unrecognized option, so each is looked up by an anchor module only that
-table may list (see ``TABLE_ANCHORS``).
+Each registry names its table explicitly. Anchor modules still pin each
+classification to its original floor (see ``TABLE_ANCHORS``).
 
 Together the tests assert seven things a future session cannot quietly undo:
 
 * the repository-wide ``disable_error_code`` list may only *shrink*, and no
-  per-module override -- in either table -- may add a suppression of its own;
-* both tables re-enable all nine codes, list only modules that exist, and stay
-  sorted and disjoint;
+  per-module override may add a suppression of its own;
+* the shared product policy re-enables all nine codes; both extraction lists
+  name only modules that exist and stay sorted and disjoint;
 * each table's module list may only *grow*, measured against its own floor set
   (``REQUIRED_RATCHETED_MODULES``, ``REQUIRED_CHECKED_MODULES``);
 * every module in the package appears on exactly one of the two tables, so a
@@ -37,7 +37,7 @@ Together the tests assert seven things a future session cannot quietly undo:
   the floors only stop listed modules from leaving;
 * every module on the **Boundary** table keeps its durable-boundary payloads
   typed under the linter rules above;
-* a third, **Scripts** table lists every skill script under its bare module
+* a separate mypy **Scripts** table lists every skill script under its bare module
   name and re-enables the six codes the scripts are clean under;
 * the files that carry an inline ``# mypy: disable-error-code`` comment, and
   the codes each disables, may only *shrink*.

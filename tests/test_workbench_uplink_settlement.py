@@ -8,7 +8,7 @@ from typing import Any
 from unittest import mock
 
 from asl_workbench.remote_reads import ReadAnswer
-from tests.test_workbench_uplink import NOW, PLAN_KEY, UplinkCase, answer, heartbeat
+from tests.workbench_uplink_support import NOW, PLAN_KEY, UplinkCase, answer, heartbeat
 
 ASL_TEST_PORTABLE = True
 

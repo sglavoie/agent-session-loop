@@ -48,7 +48,15 @@ def read_asl_skill_bundle() -> str:
     return "\n".join((REPO_ROOT / path).read_text(encoding="utf-8") for path in paths)
 
 
+def read_asl_package_guide() -> str:
+    """Read the package entry point and its implementation architecture reference."""
+    paths = ("agent_session_loop/README.md", "docs/asl-implementation-architecture.md")
+    return "\n".join((REPO_ROOT / path).read_text(encoding="utf-8") for path in paths)
+
+
 def read_repo_text(relative: str) -> str:
+    if relative == "agent_session_loop/README.md":
+        return read_asl_package_guide()
     if relative == ASL_REFERENCE:
         return read_asl_reference()
     return (REPO_ROOT / relative).read_text(encoding="utf-8")
