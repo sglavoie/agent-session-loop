@@ -2,6 +2,7 @@
 name: session-expand
 description: Validate and expand split session files against the actual codebase. Verifies file paths, signatures, assumptions, completion contracts, and manifest readiness. Sequential-by-design - no parallel safety analysis. Takes a plan directory or single session file path.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
+disable-model-invocation: true
 ---
 
 # Session Expand

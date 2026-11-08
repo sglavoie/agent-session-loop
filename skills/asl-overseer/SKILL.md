@@ -2,6 +2,7 @@
 name: asl-overseer
 description: Watch the ASL runs you are authorized to watch, across every project that opted in, for as long as you are invoked. Observes with `asl overseer scan` and `watch`, collects bounded context with `inspect`, reuses recorded human decisions with `decide`, and changes something only through the guarded `asl overseer act`. Reply, guidance, verify, commit and resume are the whole operational scope; application-code repairs stay with the worker. Escalates anything a human already decided, or has not, as a real question with no timed default. Invoke it when you want a fleet of runs watched and unblocked; it does not enroll projects, does not run plans, and stops when you stop it.
 allowed-tools: Bash, Read, Grep, Glob
+disable-model-invocation: true
 ---
 
 # ASL Overseer

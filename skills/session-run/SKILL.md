@@ -2,6 +2,7 @@
 name: session-run
 description: Execute the next pending session from a split plan directory. Sequential by design - accepts only a plan directory path plus internal `--runner-managed`; explicit session targeting and parallel worker mode are not supported. Delegates authoritative status, readiness, and verification checks to `asl` scripts; `asl run` invokes this skill with `--runner-managed` so Python owns postflight enforcement. Companion to session-split and session-expand.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
+disable-model-invocation: true
 ---
 
 # Session Run

@@ -2,6 +2,7 @@
 name: plan-preflight-iterate
 description: Guided Q&A repair of a split plan directory driven by `asl preflight --json` findings and their machine-readable repair hints. Asks targeted questions, applies edits, reruns preflight, and marks the plan loop-ready only after all checks are green.
 allowed-tools: AskUserQuestion, Bash, Read, Edit, Write, Glob, Grep
+disable-model-invocation: true
 ---
 
 # Plan Preflight Iterate

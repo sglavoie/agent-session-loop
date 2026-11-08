@@ -2,6 +2,7 @@
 name: plan-ideal
 description: Envision the optimal, unconstrained version of a plan. Read-only alias for `plan-iterate --ideal-only` — researches the codebase once and describes what the ideal implementation would look like without modifying the plan file.
 allowed-tools: Read, Glob, Grep, Bash
+disable-model-invocation: true
 ---
 
 # Plan Ideal

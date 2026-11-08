@@ -2,6 +2,7 @@
 name: session-resplit
 description: Split one pending session in an existing split plan into nested serial child sessions while preserving plan metadata, locks, archives, and rerun guidance.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
+disable-model-invocation: true
 ---
 
 # Session Resplit
