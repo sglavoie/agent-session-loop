@@ -109,6 +109,7 @@ module = [
     "asl_workbench.staging_rehearsal_models",
     "asl_workbench.staging_rehearsal_native",
     "asl_workbench.static_sources",
+    "asl_workbench.store",
     "asl_workbench.store_base",
     "asl_workbench.store_columns",
     "asl_workbench.store_ingest_catalog",

@@ -87,6 +87,8 @@ REQUIRED_MEMBERS: frozenset[str] = frozenset(
         f"{PACKAGE_DIRECTORY}/runtime.py",
         f"{PACKAGE_DIRECTORY}/server.py",
         f"{PACKAGE_DIRECTORY}/http.py",
+        # Updaters installed before the store split still require this path.
+        f"{PACKAGE_DIRECTORY}/store.py",
         f"{PACKAGE_DIRECTORY}/store_workbench.py",
         f"{STATIC_DIRECTORY}/index.html",
     }

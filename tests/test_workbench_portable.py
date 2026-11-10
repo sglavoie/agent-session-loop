@@ -148,6 +148,36 @@ class ArtifactBoundaryTest(unittest.TestCase):
         members = lifecycle.check_artifact(artifact())
         self.assertLessEqual(lifecycle.REQUIRED_MEMBERS, set(members))
 
+    def test_the_artifact_satisfies_the_pre_split_updaters_required_members(
+        self,
+    ) -> None:
+        # Frozen from the deployed updater, not derived from today's constant:
+        # the outgoing release validates the package before the new one runs.
+        required = {
+            "asl_workbench/__init__.py",
+            "asl_workbench/lifecycle.py",
+            "asl_workbench/runtime.py",
+            "asl_workbench/server.py",
+            "asl_workbench/http.py",
+            "asl_workbench/store.py",
+            "asl_workbench/static/index.html",
+        }
+        self.assertLessEqual(required, set(lifecycle.check_artifact(artifact())))
+
+    def test_the_legacy_store_entry_point_opens_the_current_schema(self) -> None:
+        from asl_workbench import store
+        from asl_workbench.observation import ObservationPolicy
+        from asl_workbench.store_workbench import WorkbenchStore
+
+        self.assertIs(WorkbenchStore, store.WorkbenchStore)
+        with store.WorkbenchStore.open(
+            ":memory:", policy=ObservationPolicy(), created_at=STAMP
+        ) as database:
+            self.assertTrue(database.healthy())
+            self.assertEqual(
+                store.SCHEMA_VERSION, store.schema_version(database.connection)
+            )
+
     def test_the_artifact_carries_the_browser_assets(self) -> None:
         members = lifecycle.check_artifact(artifact())
         prefix = f"{lifecycle.STATIC_DIRECTORY}/"
@@ -259,11 +289,15 @@ class ArtifactBoundaryTest(unittest.TestCase):
         self.assertIn("bound", str(caught.exception))
 
     def test_an_artifact_missing_an_entry_point_is_refused(self) -> None:
-        members = working_tree_members()
-        del members[f"{lifecycle.PACKAGE_DIRECTORY}/runtime.py"]
-        with self.assertRaises(lifecycle.LifecycleError) as caught:
-            lifecycle.check_artifact(lifecycle.normalize(members, timestamp=STAMP))
-        self.assertIn("entry points", str(caught.exception))
+        for entry_point in ("runtime.py", "store.py", "store_workbench.py"):
+            with self.subTest(entry_point=entry_point):
+                members = working_tree_members()
+                del members[f"{lifecycle.PACKAGE_DIRECTORY}/{entry_point}"]
+                with self.assertRaises(lifecycle.LifecycleError) as caught:
+                    lifecycle.check_artifact(
+                        lifecycle.normalize(members, timestamp=STAMP)
+                    )
+                self.assertIn("entry points", str(caught.exception))
 
     def test_packing_the_same_content_twice_gives_the_same_bytes(self) -> None:
         # What makes a digest a pin. If the bytes moved with the packer, an
