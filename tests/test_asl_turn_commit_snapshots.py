@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 from agent_session_loop import (
+    clock,
     plans_content_hash,
     plans_models,
     plans_payloads,
@@ -82,6 +84,40 @@ class CommittedTurnImmutabilityTests(unittest.TestCase):
         self.assertTrue(payload["turns"][0]["committed"])
         self.assertNotIn("committed", turn_payload)
         self.assertEqual(dict(committed), payload["turns"][0])
+
+    def _commit_with_payload(
+        self, turn_payload: dict[str, Any], payload: dict[str, Any]
+    ) -> Any:
+        payload["turns"] = [turn_payload]
+        return turn_execution_commit.commit_turn(
+            event_path=self.tmp_path / "events.jsonl",
+            payload=payload,
+            persistence=run_persistence._RunPersistence(write_state=False),
+            progress=run_reporting._ProgressReporter(enabled=False),
+            turn_payload=turn_payload,
+            live_turn=dict(turn_payload),
+            accepted=self.snapshot,
+            plan_cache=plans_snapshot.PlanSnapshotCache(),
+            paths={"result": self.tmp_path / "result.json"},
+        ).record
+
+    def test_total_duration_is_measured_at_publication(self) -> None:
+        started = clock.utc_now() - timedelta(seconds=100)
+        turn_payload = {"turn_index": 1, "session": "3", "total_duration_seconds": 40.0}
+        committed = self._commit_with_payload(
+            turn_payload, {"run_id": "run-1", "run_started_at": started.isoformat()}
+        )
+        self.assertGreaterEqual(committed["total_duration_seconds"], 100.0)
+        self.assertEqual(40.0, committed["execution_total_duration_seconds"])
+        self.assertEqual(40.0, turn_payload["total_duration_seconds"])
+
+    def test_total_duration_is_kept_without_a_run_start(self) -> None:
+        committed = self._commit_with_payload(
+            {"turn_index": 1, "session": "3", "total_duration_seconds": 40.0},
+            {"run_id": "run-1"},
+        )
+        self.assertEqual(40.0, committed["total_duration_seconds"])
+        self.assertNotIn("execution_total_duration_seconds", committed)
 
     def test_committed_turn_carries_the_accepted_snapshot(self) -> None:
         committed, _payload = self._commit(

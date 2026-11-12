@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from . import (
+    clock,
     durability,
     events,
     harnesses,
@@ -237,6 +238,7 @@ def commit_turn(
     """
     published = publication_snapshot(plan_cache, accepted)
     committed = dict(turn_payload)
+    refresh_total_duration(committed, payload)
     committed["after"] = plans_payloads.snapshot_payload(published)
     committed["committed"] = True
     with persistence.lock:
@@ -247,6 +249,29 @@ def commit_turn(
     progress.turn_finished(committed)
     turn_execution_protocols.notify_turn_finished(payload, live_turn, persistence)
     return TurnCommit(published=published, record=MappingProxyType(committed))
+
+
+def refresh_total_duration(
+    committed: MutableMapping[str, Any], payload: Mapping[str, Any]
+) -> None:
+    """Measure the run's cumulative duration when the turn is published.
+
+    The executor stamps ``total_duration_seconds`` when the harness exits, but
+    verification, commit processing and ledger updates run after that and
+    before ``turn_finished`` is published, so the harness-exit figure undercounts
+    the run. The cumulative total is re-measured here, at publication, and the
+    harness-exit figure is kept as ``execution_total_duration_seconds``. A run
+    without a parseable ``run_started_at`` keeps whatever the executor recorded.
+    """
+    run_started_at = clock.parse_datetime(payload.get("run_started_at"))
+    if run_started_at is None:
+        return
+    harness_total = committed.get("total_duration_seconds")
+    if harness_total is not None:
+        committed["execution_total_duration_seconds"] = harness_total
+    committed["total_duration_seconds"] = clock.duration_seconds(
+        run_started_at, clock.utc_now()
+    )
 
 
 def reopened_snapshot_identity(snapshot: Mapping[str, Any]) -> dict[str, Any]:
