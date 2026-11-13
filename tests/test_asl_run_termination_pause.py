@@ -80,6 +80,56 @@ class PauseWriteTests(_TerminationCase):
         self.assertNotIn("blocked startup", entry["message"])
         self.assertNotIn("details.dirty_repositories", entry["message"])
 
+    def test_continuation_remediation_inspects_only_the_refused_repository(
+        self,
+    ) -> None:
+        # ASI-164's shape: session 19 had committed and session 20 had run and
+        # retained work before the continuation gate refused one named
+        # repository. The remediation must say the run had started, must not
+        # present the dirt as predating it, and must inspect that repository
+        # rather than every registered checkout or the workspace parent.
+        [entry] = run_termination._pause_remediation(
+            {
+                "session": 20,
+                "commit_preflight_phase": "continuation",
+                "commit_repositories": [
+                    {"alias": "agentmux", "resolved_root": "/ws/agentmux"},
+                    {"alias": "tt", "resolved_root": "/ws/tt"},
+                ],
+                "refused_repository": {
+                    "alias": "agentmux",
+                    "resolved_root": "/ws/agentmux",
+                },
+            },
+            reason="commit-preflight",
+            plan_dir="/plans/demo",
+            cwd="/ws",
+        )
+        message = entry["message"]
+        self.assertIn("blocked continuation", message)
+        self.assertIn("The run had already started", message)
+        self.assertIn("earlier turn of this run retained", message)
+        self.assertNotIn("may predate the run", message)
+        self.assertIn("refused repository agentmux", message)
+        self.assertIn("git -C /ws/agentmux status --short", message)
+        self.assertNotIn("/ws/tt", message)
+        self.assertNotIn("git -C /ws status", message)
+        self.assertNotIn("details.dirty_repositories", message)
+
+    def test_startup_remediation_keeps_the_predating_reading(self) -> None:
+        [entry] = run_termination._pause_remediation(
+            {
+                "commit_preflight_phase": "startup",
+                "refused_repository": {"alias": "app", "resolved_root": "/ws/app"},
+            },
+            reason="commit-preflight",
+            plan_dir="/plans/demo",
+            cwd="/ws",
+        )
+        self.assertIn("blocked startup", entry["message"])
+        self.assertIn("may predate the run", entry["message"])
+        self.assertIn("git -C /ws/app status --short", entry["message"])
+
     def test_a_pause_run_writes_the_block_and_appends_the_event(self) -> None:
         run_termination._pause_run(
             self.event_path,

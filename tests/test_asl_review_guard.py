@@ -262,6 +262,61 @@ class WorktreeGateTests(unittest.TestCase):
             ),
         )
 
+    def test_a_workspace_refusal_names_the_refused_checkout(self) -> None:
+        # The pause this refusal raises used to point at the workspace parent
+        # and at a details field it never populated, so the refusal itself has
+        # to carry which checkout it was about (ASI-164).
+        from agent_session_loop import plans_registry, workspaces
+        from tests.support_git import (
+            init_multi_repo_workspace,
+            write_multi_repo_plan,
+        )
+
+        workspace = self.root / "workspace"
+        specs = (
+            ("app", "projects/app", "git@github.com:example/app.git"),
+            ("docs", "projects/docs", "git@github.com:example/docs.git"),
+        )
+        repos = init_multi_repo_workspace(workspace, specs)
+        plan = self.root / "plan"
+        write_multi_repo_plan(plan, ("pending",), specs=specs)
+        resolved = workspaces.resolve_workspace(
+            workspace, plans_registry.read_repository_registry(plan)
+        )
+        context = verification_models.VerificationContext(
+            root=resolved.root, workspace=resolved
+        )
+        (repos["docs"] / "dirty.txt").write_text("x\n", encoding="utf-8")
+
+        with self.assertRaises(review_guard_commit.CommitPreflightRefusal) as caught:
+            review_guard._validate_commit_preflight(
+                workspace,
+                verification_context=context,
+                needed_aliases=frozenset({"app", "docs"}),
+                clean_aliases=frozenset({"docs"}),
+            )
+
+        self.assertIsInstance(caught.exception, RunError)
+        self.assertEqual("docs", caught.exception.alias)
+        details = review_guard.commit_preflight_pause_details(context, caught.exception)
+        self.assertEqual(
+            {"alias": "docs", "resolved_root": str(repos["docs"].resolve())},
+            {
+                **details["refused_repository"],
+                "resolved_root": str(
+                    Path(details["refused_repository"]["resolved_root"]).resolve()
+                ),
+            },
+        )
+        self.assertEqual(
+            ["app", "docs"], [row["alias"] for row in details["commit_repositories"]]
+        )
+        # A refusal that named no checkout adds nothing it cannot back.
+        self.assertNotIn(
+            "refused_repository",
+            review_guard.commit_preflight_pause_details(context, RunError("x")),
+        )
+
 
 class PorcelainParsingTests(unittest.TestCase):
     """NUL-framed porcelain names every dirty path, including a rename source."""

@@ -78,6 +78,11 @@ Common pause reasons:
   path by path; anything it does not name is the second. It remains distinct
   from `commit-failed` below, which is a durable group that could not be
   reconstructed rather than a tree that was never clean to start with.
+  `pause_details.commit_preflight_phase` says whether the gate refused
+  `startup` or a `continuation` after turns had already run, and
+  `refused_repository` names the alias and root the gate refused when it
+  refused one registered checkout, so the remediation inspects that checkout
+  rather than every entry in `commit_repositories`.
 - `commit-failed`: a durable commit group could not be reconstructed. An
   unreadable ledger is the one commit failure that still pauses, because
   continuing would risk committing work twice or losing the record of what

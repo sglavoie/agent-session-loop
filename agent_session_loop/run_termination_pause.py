@@ -138,8 +138,31 @@ def _runtime_reason_remediation(
             message = message.replace(
                 "blocked startup or continuation", f"blocked {phase}", 1
             )
+        if phase == "continuation":
+            # The run had already executed turns, so the dirt is as likely to
+            # be work a paused or refused turn of this run retained as anything
+            # that predates it (ASI-164).
+            message = message.replace(
+                "The changes may predate the run or come from an earlier turn.",
+                "The run had already started, so the changes may be work an "
+                "earlier turn of this run retained (a paused or refused turn "
+                "keeps its changes) or another writer's, not only changes "
+                "that predate the run.",
+                1,
+            )
+        refused = (details or {}).get("refused_repository")
         repositories = (details or {}).get("commit_repositories")
-        if isinstance(repositories, list):
+        if isinstance(refused, Mapping) and isinstance(
+            refused.get("resolved_root"), str
+        ):
+            command = shlex.join(
+                ["git", "-C", refused["resolved_root"], "status", "--short"]
+            )
+            message += (
+                f" The gate refused repository {refused.get('alias')}; inspect "
+                f"it with `{command}`."
+            )
+        elif isinstance(repositories, list):
             commands = [
                 "`"
                 + shlex.join(["git", "-C", row["resolved_root"], "status", "--short"])

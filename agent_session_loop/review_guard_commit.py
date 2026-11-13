@@ -9,11 +9,32 @@ from . import repository_evidence, review_guard_git, verification_models
 from .run_errors import RunError
 
 
+class CommitPreflightRefusal(RunError):
+    """The commit gate refused one named registered checkout.
+
+    The message already names the repository, but only as prose. Carrying the
+    alias and the root it resolved to lets the pause name the checkout to
+    inspect instead of every checkout the workspace registers (ASI-164).
+    """
+
+    def __init__(self, message: str, *, alias: str, resolved_root: Path) -> None:
+        super().__init__(message)
+        self.alias = alias
+        self.resolved_root = resolved_root
+
+
 def commit_preflight_pause_details(
     context: verification_models.VerificationContext,
+    refusal: BaseException | None = None,
 ) -> dict[str, Any]:
-    """Name actual commit checkouts without claiming which one is dirty."""
-    return {
+    """Name actual commit checkouts, and the refused one when the gate knows it.
+
+    ``commit_repositories`` lists every checkout the run may commit, without
+    claiming which one is dirty. ``refused_repository`` is added only when the
+    refusal itself named a checkout, so the remediation can point at exactly
+    that repository rather than at the workspace parent or at all of them.
+    """
+    details: dict[str, Any] = {
         "commit_repositories": (
             [{"alias": ".", "resolved_root": str(context.root)}]
             if context.workspace is None
@@ -23,6 +44,12 @@ def commit_preflight_pause_details(
             ]
         )
     }
+    if isinstance(refusal, CommitPreflightRefusal):
+        details["refused_repository"] = {
+            "alias": refusal.alias,
+            "resolved_root": str(refusal.resolved_root),
+        }
+    return details
 
 
 def _validate_commit_preflight(
@@ -56,8 +83,10 @@ def _validate_commit_preflight(
         try:
             clean = review_guard_git._git_status_is_clean(repository.root)
         except RunError as error:
-            raise RunError(
-                f"could not inspect repository {repository.alias}: {error}"
+            raise CommitPreflightRefusal(
+                f"could not inspect repository {repository.alias}: {error}",
+                alias=repository.alias,
+                resolved_root=repository.root,
             ) from error
         clean_required = clean_aliases is None or repository.alias in clean_aliases
         if needed_aliases is not None and clean_required:
@@ -72,9 +101,11 @@ def _validate_commit_preflight(
                 try:
                     review_guard_git._validate_clean_git_status(linked)
                 except RunError as error:
-                    raise RunError(
+                    raise CommitPreflightRefusal(
                         f"needed repository {repository.alias} linked tree {linked}: "
-                        f"{error}"
+                        f"{error}",
+                        alias=repository.alias,
+                        resolved_root=linked,
                     ) from error
         repositories.append(
             {
@@ -86,8 +117,10 @@ def _validate_commit_preflight(
             }
         )
         if not clean and clean_required:
-            raise RunError(
+            raise CommitPreflightRefusal(
                 "git status --porcelain must be empty before auto-commit "
-                f"in repository {repository.alias}"
+                f"in repository {repository.alias}",
+                alias=repository.alias,
+                resolved_root=repository.root,
             )
     return {"repositories": repositories}

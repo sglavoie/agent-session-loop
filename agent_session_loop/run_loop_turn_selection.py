@@ -362,7 +362,7 @@ def _select_turn_harness(frame: RunFrame) -> RunResult | LoopSignal | None:
                 details={
                     **frame.session_details,
                     **review_guard.commit_preflight_pause_details(
-                        frame.ctx.verification_context
+                        frame.ctx.verification_context, frame.refusal
                     ),
                     "commit_preflight_phase": "continuation",
                 },
