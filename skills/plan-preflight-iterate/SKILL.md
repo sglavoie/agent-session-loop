@@ -11,7 +11,7 @@ disable-model-invocation: true
 
 Repair a split plan directory through an interactive Q&A loop driven by `asl preflight --json` output. Each red and yellow finding carries a stable `repair_hints` entry — `check_id`, `severity_hint`, `fix_category`, `message`, and `question_template` — produced by `agent_session_loop.preflight`. This skill turns those hints into targeted user questions, applies the resulting edits to session and manifest files, reruns preflight to confirm progress, and only marks the plan `loop-ready` once every check is green.
 
-Use this skill before `asl run` whenever preflight is not green. The companion skills are `session-split` (creates the plan directory), `session-expand` (annotates session files), and `session-run` (executes one session). This skill sits between split/expand and run, taking the plan from "not loop-ready" to "loop-ready".
+Use this skill before `asl run` whenever preflight is not green. The plan directory comes from `asl prepare` (or the by-hand `session-split` then `session-expand` route), and `asl run` executes it once it is loop-ready. This skill sits between the two, taking the plan from "not loop-ready" to "loop-ready"; after a repair that needs fresh validation evidence, rerun `asl prepare --resume <plan-dir>`.
 
 ## Input
 

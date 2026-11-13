@@ -1,6 +1,6 @@
 ---
 name: asl
-description: Autonomously supervise an `asl run` invocation end to end. Give it the exact `asl run ...` command and it starts or attaches to the run, polls structured status, surfaces pauses that need a human answer, and drives the run to completion. Companion to session-split, session-expand, and session-run.
+description: Autonomously supervise an `asl run` invocation end to end. Give it the exact `asl run ...` command and it starts or attaches to the run, polls structured status, surfaces pauses that need a human answer, and drives the run to completion. Takes the `asl run` command that `asl prepare` printed; the runner invokes session-run once per session.
 allowed-tools: Bash, Read
 ---
 

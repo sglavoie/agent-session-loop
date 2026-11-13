@@ -374,6 +374,9 @@ A polish and hardening round after the public release.
   or the by-hand `session-split` route), defers the session-heading grammar to
   the parser, and drops repeated rules. `session-split` and `session-expand`
   describe themselves as the by-hand alternative to `asl prepare`.
+  `session-run`, `asl`, `plan-preflight-iterate` and `session-resplit` follow:
+  `asl prepare` then `asl run` is the default path, and invoking `session-run`
+  once per conversation is described as manual mode.
 
 ### Removed
 

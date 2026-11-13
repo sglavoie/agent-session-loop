@@ -1,6 +1,6 @@
 ---
 name: session-run
-description: Execute the next pending session from a split plan directory. Sequential by design - accepts only a plan directory path plus internal `--runner-managed`; explicit session targeting and parallel worker mode are not supported. Delegates authoritative status, readiness, and verification checks to `asl` scripts; `asl run` invokes this skill with `--runner-managed` so Python owns postflight enforcement. Companion to session-split and session-expand.
+description: Execute the next pending session from a split plan directory. Sequential by design - accepts only a plan directory path plus internal `--runner-managed`; explicit session targeting and parallel worker mode are not supported. Delegates authoritative status, readiness, and verification checks to `asl` scripts; `asl run` invokes this skill with `--runner-managed` so Python owns postflight enforcement. Normally reached through `asl run` on a plan from `asl prepare` (or the by-hand session-split and session-expand route); a direct invocation is manual mode.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 disable-model-invocation: true
 ---
@@ -9,7 +9,7 @@ disable-model-invocation: true
 
 ## Purpose
 
-Execute one session from a split plan directory, then stop. Sequential by design: it always implements the first session with status `pending` reported by `asl status`. There is no explicit-session mode, no direct-session-file mode, and no parallel worker mode — one session per invocation, and the user paces the plan by invoking this skill once per conversation.
+Execute one session from a split plan directory, then stop. Sequential by design: it always implements the first session with status `pending` reported by `asl status`. There is no explicit-session mode, no direct-session-file mode, and no parallel worker mode — one session per invocation. The default path is `asl run`, which invokes this skill once per session with `--runner-managed` and enforces verification, handoff revert, and readiness refresh in Python. A direct invocation is manual mode: the user paces the plan by invoking this skill once per conversation, and the skill runs the readiness gate and Completion Contract itself.
 
 `asl run` invokes this skill with a trailing `--runner-managed` marker; that is the only mode switch. The single **shared execution path** below runs in both modes — the compact **Mode deviations** table near the end is the only place behavior differs after input parsing. In runner-managed mode the Python runner already holds the plan lock, ran the readiness gate, and will run verification, handoff revert, derived-ledger sync, and readiness refresh after this skill returns; the skill only implements the session and writes its handoff.
 

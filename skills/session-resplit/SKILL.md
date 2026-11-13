@@ -13,7 +13,7 @@ Replace one pending session in an existing split plan with nested child sessions
 
 Sequential by design: generated children are serial work units with parseable completion contracts. This skill neither reads nor emits parallel scheduling metadata; legacy `parallel-validation.md` files and any `## Parallel Metadata` blocks left on disk are ignored.
 
-Companion to `session-split` (creates the plan), `session-expand` (verifies facts, writes `session-<ID>.expand.md`), and `session-run` (executes one pending session at a time). This skill rewrites one pending parent into nested pending children, then tells the user to rerun `session-expand`.
+Plan maintenance for a directory produced by `asl prepare` (or the by-hand `session-split` then `session-expand` route) and executed by `asl run`, which invokes `session-run` once per pending session. This skill rewrites one pending parent into nested pending children, then tells the user to rerun `session-expand` so the children are validated and readiness can be re-marked before the run resumes.
 
 Unlike `session-run` (serial-only, directory auto-advance), this skill is plan maintenance, so it keeps targeted parent selection (`--session <ID>`, direct `session-<ID>.md` paths) — those let an operator pick which pending parent to rewrite without changing the serial execution contract.
 
