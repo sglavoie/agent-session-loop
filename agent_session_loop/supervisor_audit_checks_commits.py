@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from . import commit_groups, events
+from . import supervisor_audit_evidence_commits as audit_evidence_commits
 from . import supervisor_audit_evidence_constants as audit_evidence_constants
 from . import supervisor_audit_evidence_failures as audit_evidence_failures
 from . import supervisor_audit_evidence_helpers as audit_evidence_helpers
@@ -15,6 +16,53 @@ from .supervisor_audit_vocabulary import (
     MUTATION_ARTIFACT_NAME,
     WORKSPACE_CHANGE_ARTIFACT_NAME,
 )
+
+
+def _external_change_keys(guard: Mapping[str, Any]) -> set[str]:
+    """The ``changed`` keys a guard filed as a permitted concurrent writer's.
+
+    ``--allow-external-changes`` names repositories someone else may change
+    during the run, and the guard records their content changes under
+    ``external_changes`` -- keyed exactly as ``changed`` is -- with an unknown
+    writer. A head move there is evidence that something happened in the
+    repository, not that the worker did it, so no check that asks what the
+    *worker* committed may count it (ASI-166).
+    """
+    return {
+        str(key)
+        for key in audit_evidence_helpers._mapping(guard.get("external_changes"))
+    }
+
+
+def _guard_caught_repositories(context: _CheckContext) -> set[tuple[str, str]]:
+    """Every ``(turn, repository alias)`` a turn's own write guard refused.
+
+    A guard that recorded a violation for a repository reverted the session and
+    paused the run on it, so a head move the audit derived for that turn and
+    repository is the caught write itself as the guard observed it, not a
+    commit that slipped past. Whether the catch held is ``scope-escape``'s
+    question, which also accounts for any later commit that could have carried
+    the write forward; reporting the derived move here as a guard gap convicted
+    the very guard that stopped it (ASI-117).
+    """
+    caught: set[tuple[str, str]] = set()
+    for turn in context.turns:
+        result = audit_evidence_helpers._mapping(turn.get("result"))
+        guard = audit_evidence_helpers._mapping(result.get("workspace_write_guard"))
+        if not guard or guard.get("passed") is True:
+            continue
+        for raw in audit_evidence_helpers._sequence(guard.get("violations")):
+            violation = audit_evidence_helpers._mapping(raw)
+            alias = violation.get("alias")
+            repository = violation.get("repository")
+            if not isinstance(alias, str) or not alias:
+                if not isinstance(repository, str) or not repository:
+                    continue
+                alias = audit_evidence_commits._declared_repository_alias(
+                    guard, repository
+                )
+            caught.add((str(turn.get("name")), alias))
+    return caught
 
 
 def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
@@ -50,6 +98,8 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
         for attempt in attempts
         if attempt.get("origin") != audit_evidence_constants.OBSERVED_COMMIT_ORIGIN
     ]
+    caught = _guard_caught_repositories(context)
+    held: list[str] = []
     repair_commit_mode = commits.get("repair_commit_mode")
     if ran and not commits.get("commit_mode") and repair_commit_mode != "per-child":
         contradictions.append(
@@ -67,6 +117,12 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
             continue
         alias = result.get("repository_alias")
         if scopes.get("available") and alias and str(alias) not in writable:
+            if (
+                attempt.get("origin") == audit_evidence_constants.OBSERVED_COMMIT_ORIGIN
+                and (str(attempt.get("name")), str(alias)) in caught
+            ):
+                held.append(f"{attempt.get('name')} in {alias}")
+                continue
             contradictions.append(
                 f"{attempt.get('name')} committed to {alias}, which no session "
                 "declares as writable"
@@ -74,11 +130,20 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
 
     guarded = 0
     head_moves = 0
+    external_head_moves = 0
     history_rewrites = 0
     unguarded: list[str] = []
     for turn in context.turns:
         result = audit_evidence_helpers._mapping(turn.get("result"))
-        if result.get("available") is False or turn.get("anomalous") is True:
+        if result.get("available") is False:
+            continue
+        guard = audit_evidence_helpers._mapping(result.get("workspace_write_guard"))
+        # A turn the loop refused may have stopped before its guard ran, so it
+        # is not required to carry one. One that did carry a guard recorded
+        # what moved during it all the same, and skipping it left a run whose
+        # only implementation turn was refused reading as one that recorded no
+        # guard result at all.
+        if turn.get("anomalous") is True and not guard:
             continue
         # Registered workspaces guard review turns as well. Legacy runs have a
         # separate read-only review guard, but every implementation turn must
@@ -90,19 +155,31 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
             continue
         if isinstance(turn.get("directory"), str):
             references.append(turn["directory"])
-        guard = audit_evidence_helpers._mapping(result.get("workspace_write_guard"))
         if not guard:
             unguarded.append(str(turn.get("name")))
             continue
         guarded += 1
-        for raw_changes in audit_evidence_helpers._mapping(
+        external = _external_change_keys(guard)
+        for key, raw_changes in audit_evidence_helpers._mapping(
             guard.get("changed")
-        ).values():
+        ).items():
             changes = audit_evidence_helpers._mapping(raw_changes)
             if changes.get("head_changed") is not True:
                 continue
-            head_moves += 1
             transition = audit_evidence_helpers._mapping(changes.get("head_transition"))
+            # A continuation carries the session's baseline heads across turns,
+            # so `head_changed` can describe an earlier turn's move while this
+            # turn's own measured transition is `unchanged` (ASI-158). The
+            # transition is what this turn did, and it moved nothing.
+            if transition.get("relation") == "unchanged" and transition.get(
+                "before"
+            ) == transition.get("after"):
+                continue
+            alias = audit_evidence_commits._declared_repository_alias(guard, str(key))
+            if str(key) in external:
+                external_head_moves += 1
+            elif (str(turn.get("name")), alias) not in caught:
+                head_moves += 1
             if not transition:
                 contradictions.append(
                     f"{turn.get('name')} changed HEAD without recording its "
@@ -151,11 +228,24 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
             "judge its mutation guards by",
             evidence,
         )
+    notes: list[str] = []
+    if held:
+        notes.append(
+            "the guard refused the out-of-scope HEAD move(s) it observed "
+            f"({_names(held)}), whose containment scope-escape judges"
+        )
+    if external_head_moves:
+        notes.append(
+            f"{external_head_moves} HEAD move(s) in repositories declared for "
+            "external changes were recorded with an unknown writer and are not "
+            "counted as the worker's"
+        )
     return _Verdict(
         "pass",
-        f"{guarded} guarded turn(s), {len(attempts)} commit attempt(s), "
-        f"{head_moves} worker HEAD move(s), and {history_rewrites} history "
-        "rewrite(s) stayed inside the run's declared write scope",
+        f"{guarded} guarded turn(s), {len(attempts) - len(held)} commit "
+        f"attempt(s), {head_moves} worker HEAD move(s), and {history_rewrites} "
+        "history rewrite(s) stayed inside the run's declared write scope"
+        + (f"; {'; '.join(notes)}" if notes else ""),
         evidence,
     )
 
@@ -175,9 +265,16 @@ def _worker_commits_added(guard: Mapping[str, Any]) -> list[str] | None:
     overstate one of them.
     """
     added: list[str] = []
-    for raw_changes in audit_evidence_helpers._mapping(guard.get("changed")).values():
+    external = _external_change_keys(guard)
+    for key, raw_changes in audit_evidence_helpers._mapping(
+        guard.get("changed")
+    ).items():
         changes = audit_evidence_helpers._mapping(raw_changes)
         if changes.get("head_changed") is not True:
+            continue
+        # A repository declared for external changes moved under a writer the
+        # guard cannot name, so its commits are not the refused turn's (ASI-166).
+        if str(key) in external:
             continue
         transition = audit_evidence_helpers._mapping(changes.get("head_transition"))
         count = transition.get("commits_added")

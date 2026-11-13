@@ -112,6 +112,129 @@ class CommitObservabilityTests(RunHistoryFixture, unittest.TestCase):
                 "committed to", self._mutation_guard_verdict(history).detail or ""
             )
 
+    def _other_repository_moved_on_a_refused_turn(
+        self, tmp: str, guard_changes: dict[str, Any]
+    ) -> dict[str, DeterministicResult]:
+        """A refused turn during which an undeclared repository's HEAD moved.
+
+        This is the multi-repository shape the incidents were recorded in: the
+        session declared only ``app``, and another registered checkout gained
+        a commit while it ran. The turn is refused (``anomalous``), as a turn
+        the run paused on is.
+        """
+        history = self._worker_committed(tmp)
+        turn_dir = history[3] / "turn-0001-01"
+        result_path = turn_dir / state.RESULT_FILE_NAME
+        result = json.loads(result_path.read_text())
+        guard = result["workspace_write_guard"]
+        guard["changed"] = {"other": guard["changed"]["app"]}
+        guard["authorized_aliases"] = []
+        guard.update(guard_changes)
+        self._write_result(turn_dir, result)
+        payload = copy.deepcopy(self._bundle(history).payload)
+        [turn] = payload["turns"]
+        turn["anomalous"] = True
+        turn["rejected"] = True
+        return {
+            r.check: r
+            for r in supervisor_audit_checks.run_deterministic_checks(payload)
+        }
+
+    def test_an_external_head_move_on_a_refused_turn_is_not_the_workers(
+        self,
+    ) -> None:
+        # The guard filed the move under external_changes: someone else may
+        # change that repository during the run. Neither the guard lane nor the
+        # refused-turn lane may then read it as a commit the worker made, and a
+        # refused turn's guard record still counts as guard evidence rather than
+        # leaving the run reading as unguarded (ASI-166 / ASI-117).
+        with tempfile.TemporaryDirectory() as tmp:
+            results = self._other_repository_moved_on_a_refused_turn(
+                tmp, {"external_changes": {"other": ["other:file.txt"]}}
+            )
+
+            mutation = results["mutation-commit-guards"]
+            self.assertEqual("pass", mutation.status, mutation.detail)
+            self.assertIn("1 guarded turn(s), 0 commit attempt(s)", mutation.detail)
+            self.assertIn("0 worker HEAD move(s)", mutation.detail)
+            self.assertIn("unknown writer", mutation.detail)
+            after = results["commit-after-verification"]
+            self.assertEqual("pass", after.status, after.detail)
+
+    def test_a_head_move_the_guard_refused_is_not_a_guard_gap(self) -> None:
+        # The guard recorded the move as a violation, reverted the session and
+        # paused the run: that is the guard holding, and whether the catch held
+        # is scope-escape's to judge. Reading the derived move as a commit that
+        # slipped past convicted the guard that stopped it (ASI-117).
+        with tempfile.TemporaryDirectory() as tmp:
+            results = self._other_repository_moved_on_a_refused_turn(
+                tmp,
+                {
+                    "passed": False,
+                    "violations": [
+                        {
+                            "kind": "outside-read-scope",
+                            "repository": "other",
+                            "alias": None,
+                            "qualified_paths": [],
+                        }
+                    ],
+                },
+            )
+
+            mutation = results["mutation-commit-guards"]
+            self.assertEqual("pass", mutation.status, mutation.detail)
+            self.assertIn("guard refused", mutation.detail)
+            self.assertIn("turn-0001-01 in other", mutation.detail)
+
+    def test_a_refused_continuation_turn_that_moved_nothing_is_not_a_head_move(
+        self,
+    ) -> None:
+        # A continuation keeps the session's baseline heads, so a later refused
+        # turn can carry `head_changed` from an earlier turn's move while its own
+        # measured transition is `unchanged`. That turn moved nothing.
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._worker_committed(
+                tmp,
+                head_changed=True,
+                head_before=self.HEAD_BEFORE,
+                head_after=self.HEAD_AFTER,
+                head_transition={
+                    "before": self.HEAD_AFTER,
+                    "after": self.HEAD_AFTER,
+                    "relation": "unchanged",
+                    "commits_added": 0,
+                    "commits_removed": 0,
+                    "history_rewrite": False,
+                },
+            )
+            payload = copy.deepcopy(self._bundle(history).payload)
+            payload["turns"][0]["anomalous"] = True
+            results = {
+                r.check: r
+                for r in supervisor_audit_checks.run_deterministic_checks(payload)
+            }
+
+            mutation = results["mutation-commit-guards"]
+            self.assertEqual("pass", mutation.status, mutation.detail)
+            self.assertIn("0 worker HEAD move(s)", mutation.detail)
+
+    def test_an_uncaught_head_move_outside_scope_is_still_a_guard_gap(
+        self,
+    ) -> None:
+        # The same move with a guard that neither caught it nor filed it as
+        # external is exactly the gap this check exists to report.
+        with tempfile.TemporaryDirectory() as tmp:
+            results = self._other_repository_moved_on_a_refused_turn(tmp, {})
+
+            mutation = results["mutation-commit-guards"]
+            self.assertEqual("fail", mutation.status)
+            self.assertIn(
+                "turn-0001-01 committed to other, which no session declares as "
+                "writable",
+                mutation.detail,
+            )
+
     def test_a_projected_commit_takes_its_range_from_one_transition(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             # A continuation merge leaves the entry's own heads on the session
